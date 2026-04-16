@@ -15,9 +15,7 @@ use tokio::time::timeout;
 
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Error;
-use crate::message::{
-    BranchableSyncRequest, DocSyncRequest, MetaData, PushLogBroadcast, PushLogRequest,
-};
+use crate::message::{BranchableSyncRequest, DocSyncRequest, PushLogBroadcast, PushLogRequest};
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::NoOpCollectionStorage;
 use crate::sync::head_provider::NoOpHeadProvider;
@@ -509,10 +507,7 @@ impl P2PTransport for NoopTransport {
 fn doc_sync_event(peer_id: PeerId) -> TransportEvent<()> {
     TransportEvent::DocSyncRequest {
         peer_id,
-        request: DocSyncRequest {
-            metadata: MetaData::new(),
-            doc_ids: vec!["doc1".to_string()],
-        },
+        request: DocSyncRequest::new(vec!["doc1".to_string()]),
         token: None,
     }
 }
@@ -520,10 +515,7 @@ fn doc_sync_event(peer_id: PeerId) -> TransportEvent<()> {
 fn branchable_sync_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
     TransportEvent::BranchableSyncRequest {
         peer_id,
-        request: BranchableSyncRequest {
-            metadata: MetaData::new(),
-            collection_id: collection_id.to_string(),
-        },
+        request: BranchableSyncRequest::new(collection_id.to_string()),
         token: None,
     }
 }

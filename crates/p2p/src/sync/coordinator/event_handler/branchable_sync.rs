@@ -87,7 +87,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 &peer_id,
                 token,
                 BranchableSyncReply::success(
-                    &request.metadata.message_id,
+                    &request.message_id,
                     &request.collection_id,
                     heads,
                 ),

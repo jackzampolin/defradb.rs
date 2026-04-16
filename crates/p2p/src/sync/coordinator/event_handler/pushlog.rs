@@ -35,7 +35,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 "Rejecting PushLog request from unauthorized peer"
             );
             let reply = PushLogReply::error(
-                &request.metadata.message_id,
+                &request.message_id,
                 &format!(
                     "access denied: not authorized for collection {}",
                     request.collection_id
@@ -73,7 +73,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     error = %e,
                     "Failed to parse CID from PushLog request - sending error response"
                 );
-                let reply = PushLogReply::error(&request.metadata.message_id, &error_msg);
+                let reply = PushLogReply::error(&request.message_id, &error_msg);
                 if let Err(send_err) = self
                     .runtime
                     .transport
@@ -115,8 +115,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         let reply = match &process_result {
-            Ok(()) => PushLogReply::success(&request.metadata.message_id),
-            Err(e) => PushLogReply::error(&request.metadata.message_id, &e.to_string()),
+            Ok(()) => PushLogReply::success(&request.message_id),
+            Err(e) => PushLogReply::error(&request.message_id, &e.to_string()),
         };
 
         if let Err(e) = self
@@ -154,7 +154,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             peer_id = %peer_id,
             doc_id = %request.doc_id,
             collection_id = %request.collection_id,
-            message_id = %request.metadata.message_id,
+            message_id = %request.message_id,
             "Received PushLog request via two-stream protocol (Go compatibility)"
         );
 
@@ -181,7 +181,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 "Rejecting two-stream request from unauthorized peer"
             );
             let mut reply = PushLogReply::error(
-                &request.metadata.message_id,
+                &request.message_id,
                 &format!(
                     "access denied: not authorized for collection {}",
                     request.collection_id
@@ -208,7 +208,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     error = %e,
                     "Failed to parse CID from two-stream request - sending error response"
                 );
-                let mut reply = PushLogReply::error(&request.metadata.message_id, &error_msg);
+                let mut reply = PushLogReply::error(&request.message_id, &error_msg);
                 if let Err(sign_err) = sign_with_transport(&self.runtime.transport, &mut reply) {
                     tracing::error!(error = %sign_err, "Failed to sign invalid CID response");
                 }
@@ -231,8 +231,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .await;
 
         let mut reply = match &process_result {
-            Ok(()) => PushLogReply::success(&request.metadata.message_id),
-            Err(e) => PushLogReply::error(&request.metadata.message_id, &e.to_string()),
+            Ok(()) => PushLogReply::success(&request.message_id),
+            Err(e) => PushLogReply::error(&request.message_id, &e.to_string()),
         };
 
         if let Err(e) = sign_with_transport(&self.runtime.transport, &mut reply) {

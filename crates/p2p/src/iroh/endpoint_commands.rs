@@ -138,7 +138,7 @@ pub(super) async fn handle_command(
             let pending_pushlog_replies = pending_pushlog_replies.clone();
             let task = tokio::spawn(async move {
                 let result = async move {
-                    let message_id = request.metadata.message_id.clone();
+                    let message_id = request.message_id.clone();
                     let (reply_tx, reply_rx) = oneshot::channel();
                     pending_pushlog_replies
                         .lock()

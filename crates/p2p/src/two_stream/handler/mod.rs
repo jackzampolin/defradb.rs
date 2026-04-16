@@ -123,11 +123,11 @@ impl TwoStreamHandler {
 
     /// Create a success reply for a request.
     pub fn success_reply(request: &PushLogRequest) -> PushLogReply {
-        PushLogReply::success(&request.metadata.message_id)
+        PushLogReply::success(&request.message_id)
     }
 
     /// Create an error reply for a request.
     pub fn error_reply(request: &PushLogRequest, error: &str) -> PushLogReply {
-        PushLogReply::error(&request.metadata.message_id, error)
+        PushLogReply::error(&request.message_id, error)
     }
 }

@@ -7,18 +7,47 @@ use sha2::{Digest, Sha256};
 use acp::ReplicatedDocActorRelationships;
 
 use super::cbor::{nullable_bytes, optional_bytes};
-use super::metadata::MetaData;
 use super::traits::Message;
 use crate::protocol::MESSAGE_VERSION;
 
 /// PushLog request message for sending resource updates to peer nodes.
 ///
 /// This is the primary message type for CRDT synchronization between nodes.
+///
+/// Note: We don't use `#[serde(flatten)]` because serde_cbor produces
+/// indefinite-length maps when flatten is used (CBOR major type 0xbf).
+/// Go's fxamacker/cbor produces definite-length maps, causing signature
+/// verification to fail. Instead, we duplicate the fields for wire compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushLogRequest {
-    /// Message metadata.
-    #[serde(flatten)]
-    pub metadata: MetaData,
+    /// DefraDB message version.
+    #[serde(rename = "Version")]
+    pub version: String,
+
+    /// Unique message identifier. Responses use the same ID as the request.
+    #[serde(rename = "MessageID")]
+    pub message_id: String,
+
+    /// ID of the sender (PeerID when using libp2p).
+    #[serde(rename = "SenderID")]
+    pub sender_id: String,
+
+    /// Public key of the node that created the message.
+    #[serde(rename = "Pubkey", with = "nullable_bytes")]
+    pub pubkey: Vec<u8>,
+
+    /// Signature for message authentication.
+    #[serde(
+        rename = "Signature",
+        skip_serializing_if = "Option::is_none",
+        default,
+        with = "optional_bytes"
+    )]
+    pub signature: Option<Vec<u8>>,
+
+    /// Error message if something went wrong.
+    #[serde(rename = "ErrMessage", skip_serializing_if = "Option::is_none")]
+    pub err_message: Option<String>,
 
     /// Document ID being updated.
     #[serde(rename = "DocID")]
@@ -69,7 +98,12 @@ impl PushLogRequest {
         block: Bytes,
     ) -> Self {
         Self {
-            metadata: MetaData::new(),
+            version: crate::protocol::MESSAGE_VERSION.to_string(),
+            message_id: String::new(),
+            sender_id: String::new(),
+            pubkey: Vec::new(),
+            signature: None,
+            err_message: None,
             doc_id,
             cid,
             collection_id,
@@ -83,47 +117,47 @@ impl PushLogRequest {
 
 impl Message for PushLogRequest {
     fn version(&self) -> &str {
-        &self.metadata.version
+        &self.version
     }
 
     fn set_version(&mut self, version: String) {
-        self.metadata.version = version;
+        self.version = version;
     }
 
     fn message_id(&self) -> &str {
-        &self.metadata.message_id
+        &self.message_id
     }
 
     fn set_message_id(&mut self, id: String) {
-        self.metadata.message_id = id;
+        self.message_id = id;
     }
 
     fn sender_id(&self) -> &str {
-        &self.metadata.sender_id
+        &self.sender_id
     }
 
     fn set_sender_id(&mut self, id: String) {
-        self.metadata.sender_id = id;
+        self.sender_id = id;
     }
 
     fn pubkey(&self) -> &[u8] {
-        &self.metadata.pubkey
+        &self.pubkey
     }
 
     fn set_pubkey(&mut self, pubkey: Vec<u8>) {
-        self.metadata.pubkey = pubkey;
+        self.pubkey = pubkey;
     }
 
     fn signature(&self) -> Option<&[u8]> {
-        self.metadata.signature.as_deref()
+        self.signature.as_deref()
     }
 
     fn set_signature(&mut self, signature: Option<Vec<u8>>) {
-        self.metadata.signature = signature;
+        self.signature = signature;
     }
 
     fn err_message(&self) -> Option<&str> {
-        self.metadata.err_message.as_deref()
+        self.err_message.as_deref()
     }
 }
 

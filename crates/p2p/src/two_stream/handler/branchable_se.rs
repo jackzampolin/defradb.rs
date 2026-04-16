@@ -17,7 +17,7 @@ impl TwoStreamHandler {
         peer_id: PeerId,
         request: BranchableSyncRequest,
     ) -> Result<()> {
-        let message_id = request.metadata.message_id.clone();
+        let message_id = request.message_id.clone();
 
         let mut stream = self
             .control
@@ -86,7 +86,7 @@ impl TwoStreamHandler {
         peer_id: PeerId,
         request: PushSEArtifactsRequest,
     ) -> Result<()> {
-        let message_id = request.metadata.message_id.clone();
+        let message_id = request.message_id.clone();
         let artifacts_count = request.artifacts.len();
 
         let mut stream = self
