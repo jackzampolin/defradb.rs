@@ -552,12 +552,28 @@ pub(super) async fn handle_subscribe(
                                 }
                             }
                             Err(e) => {
+                                let payload_info =
+                                    crate::message::PushLogBroadcast::inspect_gossip_payload(
+                                        &msg.content,
+                                    );
+                                let sender_peer_id = endpoint_id_to_peer_id(&msg.delivered_from);
+                                let sample = crate::sync::GossipDecodeFailureSample {
+                                    transport: crate::sync::GossipTransport::Iroh,
+                                    peer_id: sender_peer_id.to_string(),
+                                    topic: topic_str_clone.clone(),
+                                    message_size: msg.content.len(),
+                                    error: e.clone(),
+                                    payload_prefix_hex: payload_info.payload_prefix_hex,
+                                    payload_shape_hint: payload_info.payload_shape_hint,
+                                    occurrences: 0,
+                                };
                                 // Exponential-backoff sampling: warn on the
                                 // 1st, 2nd, 4th, 8th... occurrence; remainder
                                 // at debug. Counter is process-global and
                                 // surfaced via SyncDiagnostics (issue #858).
-                                let count = crate::sync::record_gossip_decode_failure();
-                                let sender_peer_id = endpoint_id_to_peer_id(&msg.delivered_from);
+                                let count = crate::sync::record_gossip_decode_failure_sample(
+                                    sample.clone(),
+                                );
                                 if count == 1 || count.is_power_of_two() {
                                     warn!(
                                         peer_id = %sender_peer_id,
@@ -565,6 +581,8 @@ pub(super) async fn handle_subscribe(
                                         message_size = msg.content.len(),
                                         total_failures = count,
                                         error = %e,
+                                        payload_prefix = %sample.payload_prefix_hex,
+                                        payload_shape = %sample.payload_shape_hint,
                                         "Failed to decode Iroh gossip message as PushLogBroadcast or PushLogRequest"
                                     );
                                 } else {
@@ -574,6 +592,8 @@ pub(super) async fn handle_subscribe(
                                         message_size = msg.content.len(),
                                         total_failures = count,
                                         error = %e,
+                                        payload_prefix = %sample.payload_prefix_hex,
+                                        payload_shape = %sample.payload_shape_hint,
                                         "Failed to decode Iroh gossip message"
                                     );
                                 }

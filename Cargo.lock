@@ -8828,6 +8828,7 @@ dependencies = [
  "crypto",
  "defra-core",
  "futures",
+ "hex",
  "identity",
  "iroh",
  "iroh-bitswap",

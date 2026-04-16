@@ -289,6 +289,82 @@ pub enum PushLogGossipPayloadEncoding {
     CborBroadcast,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PushLogGossipPayloadDebugInfo {
+    pub payload_prefix_hex: String,
+    pub payload_shape_hint: String,
+}
+
+const GOSSIP_PAYLOAD_PREFIX_BYTES: usize = 24;
+const GOSSIP_TEXT_PREFIX_CHARS: usize = 48;
+
+fn truncated_text_prefix(text: &str) -> String {
+    let mut prefix = String::new();
+    let mut chars = text.chars();
+    for _ in 0..GOSSIP_TEXT_PREFIX_CHARS {
+        match chars.next() {
+            Some(ch) => prefix.push(ch),
+            None => return prefix,
+        }
+    }
+    if chars.next().is_some() {
+        prefix.push_str("...");
+    }
+    prefix
+}
+
+fn describe_cbor_value(value: &serde_cbor::Value) -> String {
+    match value {
+        serde_cbor::Value::Map(entries) => {
+            let keys: Vec<String> = entries
+                .iter()
+                .filter_map(|(key, _)| match key {
+                    serde_cbor::Value::Text(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .take(10)
+                .collect();
+            if keys.is_empty() {
+                format!("cbor_map(len={})", entries.len())
+            } else {
+                format!("cbor_map(keys=[{}])", keys.join(","))
+            }
+        }
+        serde_cbor::Value::Array(items) => format!("cbor_array(len={})", items.len()),
+        serde_cbor::Value::Bytes(bytes) => format!("cbor_bytes(len={})", bytes.len()),
+        serde_cbor::Value::Text(text) => {
+            format!("cbor_text(prefix={:?})", truncated_text_prefix(text))
+        }
+        serde_cbor::Value::Tag(tag, _) => format!("cbor_tag({tag})"),
+        serde_cbor::Value::Bool(value) => format!("cbor_bool({value})"),
+        serde_cbor::Value::Null => "cbor_null".to_string(),
+        serde_cbor::Value::Integer(_) => "cbor_integer".to_string(),
+        serde_cbor::Value::Float(_) => "cbor_float".to_string(),
+        _ => "cbor_scalar".to_string(),
+    }
+}
+
+fn describe_gossip_payload_shape(payload: &[u8]) -> String {
+    if payload.is_empty() {
+        return "empty".to_string();
+    }
+
+    if let Ok(value) = serde_cbor::from_slice::<serde_cbor::Value>(payload) {
+        return describe_cbor_value(&value);
+    }
+
+    if payload
+        .iter()
+        .all(|byte| byte.is_ascii_graphic() || byte.is_ascii_whitespace())
+    {
+        if let Ok(text) = std::str::from_utf8(payload) {
+            return format!("utf8_text(prefix={:?})", truncated_text_prefix(text));
+        }
+    }
+
+    format!("opaque_binary(first_byte=0x{:02x})", payload[0])
+}
+
 impl PushLogBroadcast {
     /// Create a new PushLogBroadcast.
     pub fn new(
@@ -357,5 +433,51 @@ impl PushLogBroadcast {
                     .map(|broadcast| (broadcast, PushLogGossipPayloadEncoding::CborBroadcast))
             })
             .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn inspect_gossip_payload(payload: &[u8]) -> PushLogGossipPayloadDebugInfo {
+        PushLogGossipPayloadDebugInfo {
+            payload_prefix_hex: hex::encode(
+                &payload[..payload.len().min(GOSSIP_PAYLOAD_PREFIX_BYTES)],
+            ),
+            payload_shape_hint: describe_gossip_payload_shape(payload),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspect_gossip_payload_identifies_cbor_request_shape() {
+        let payload = serde_cbor::to_vec(&PushLogRequest::new(
+            "doc-1".to_string(),
+            Bytes::from_static(&[1, 2, 3]),
+            "collection-1".to_string(),
+            "creator-1".to_string(),
+            Bytes::from_static(&[4, 5, 6]),
+        ))
+        .expect("request should encode");
+
+        let info = PushLogBroadcast::inspect_gossip_payload(&payload);
+        assert!(info.payload_shape_hint.starts_with("cbor_map("));
+        assert!(info.payload_shape_hint.contains("DocID"));
+        assert!(info.payload_shape_hint.contains("CollectionID"));
+        assert!(!info.payload_prefix_hex.is_empty());
+    }
+
+    #[test]
+    fn inspect_gossip_payload_identifies_utf8_text_shape() {
+        let info = PushLogBroadcast::inspect_gossip_payload(b"hello from some other producer");
+        assert!(info.payload_shape_hint.starts_with("utf8_text("));
+        assert!(!info.payload_prefix_hex.is_empty());
+    }
+
+    #[test]
+    fn inspect_gossip_payload_identifies_opaque_binary_shape() {
+        let info = PushLogBroadcast::inspect_gossip_payload(&[0xff, 0x00, 0x01, 0x02]);
+        assert_eq!(info.payload_shape_hint, "opaque_binary(first_byte=0xff)");
+        assert_eq!(info.payload_prefix_hex, "ff000102");
     }
 }

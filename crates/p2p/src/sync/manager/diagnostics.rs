@@ -9,7 +9,15 @@
 //! because the libp2p and iroh gossip paths run in the transport layer and do
 //! not have direct access to a `SyncManager`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::VecDeque,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        LazyLock,
+    },
+};
+
+use parking_lot::Mutex;
 
 /// Process-global counter of gossip payload decode failures.
 ///
@@ -18,6 +26,43 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// `SyncDiagnostics::snapshot()` so tests see the same number across all
 /// managers in the process.
 static GOSSIP_DECODE_FAILURES: AtomicU64 = AtomicU64::new(0);
+static RECENT_GOSSIP_DECODE_FAILURES: LazyLock<Mutex<VecDeque<GossipDecodeFailureSample>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(GOSSIP_DECODE_FAILURE_SAMPLE_LIMIT)));
+
+const GOSSIP_DECODE_FAILURE_SAMPLE_LIMIT: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GossipTransport {
+    Iroh,
+    Libp2p,
+}
+
+impl GossipTransport {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Iroh => "iroh",
+            Self::Libp2p => "libp2p",
+        }
+    }
+}
+
+impl std::fmt::Display for GossipTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GossipDecodeFailureSample {
+    pub transport: GossipTransport,
+    pub peer_id: String,
+    pub topic: String,
+    pub message_size: usize,
+    pub error: String,
+    pub payload_prefix_hex: String,
+    pub payload_shape_hint: String,
+    pub occurrences: u64,
+}
 
 /// Record a gossip payload decode failure and return the new total count.
 ///
@@ -30,6 +75,36 @@ static GOSSIP_DECODE_FAILURES: AtomicU64 = AtomicU64::new(0);
 /// rather than synthesizing failures.
 pub(crate) fn record_gossip_decode_failure() -> u64 {
     GOSSIP_DECODE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// Record a gossip payload decode failure and retain a deduplicated sample.
+pub(crate) fn record_gossip_decode_failure_sample(mut sample: GossipDecodeFailureSample) -> u64 {
+    let total = record_gossip_decode_failure();
+    let mut recent = RECENT_GOSSIP_DECODE_FAILURES.lock();
+
+    if let Some(index) = recent.iter().position(|existing| {
+        existing.transport == sample.transport
+            && existing.peer_id == sample.peer_id
+            && existing.topic == sample.topic
+            && existing.payload_prefix_hex == sample.payload_prefix_hex
+            && existing.payload_shape_hint == sample.payload_shape_hint
+    }) {
+        let mut existing = recent
+            .remove(index)
+            .expect("matched gossip decode failure sample should exist");
+        existing.message_size = sample.message_size;
+        existing.error = sample.error;
+        existing.occurrences += 1;
+        recent.push_back(existing);
+    } else {
+        sample.occurrences = 1;
+        recent.push_back(sample);
+        while recent.len() > GOSSIP_DECODE_FAILURE_SAMPLE_LIMIT {
+            recent.pop_front();
+        }
+    }
+
+    total
 }
 
 #[derive(Debug, Default)]
@@ -50,6 +125,9 @@ pub struct SyncDiagnosticsSnapshot {
     pub pending_dag_expired: u64,
     /// Process-global; see [`record_gossip_decode_failure`].
     pub gossip_decode_failures: u64,
+    /// Process-global recent samples captured by
+    /// [`record_gossip_decode_failure_sample`].
+    pub recent_gossip_decode_failures: Vec<GossipDecodeFailureSample>,
 }
 
 impl SyncDiagnostics {
@@ -61,6 +139,11 @@ impl SyncDiagnostics {
             pending_dag_resolved: self.pending_dag_resolved.load(Ordering::Relaxed),
             pending_dag_expired: self.pending_dag_expired.load(Ordering::Relaxed),
             gossip_decode_failures: GOSSIP_DECODE_FAILURES.load(Ordering::Relaxed),
+            recent_gossip_decode_failures: RECENT_GOSSIP_DECODE_FAILURES
+                .lock()
+                .iter()
+                .cloned()
+                .collect(),
         }
     }
 
@@ -126,6 +209,32 @@ mod tests {
         let second = record_gossip_decode_failure();
         assert_eq!(second, first + 1);
         assert!(SyncDiagnostics::default().snapshot().gossip_decode_failures >= second);
+    }
+
+    #[test]
+    fn record_gossip_decode_failure_sample_surfaces_recent_metadata() {
+        let topic = format!("topic-{}", uuid::Uuid::new_v4());
+        let prefix = format!("deadbeef-{}", uuid::Uuid::new_v4());
+        let sample = GossipDecodeFailureSample {
+            transport: GossipTransport::Iroh,
+            peer_id: "peer-123".to_string(),
+            topic: topic.clone(),
+            message_size: 128,
+            error: "Hit the end of buffer".to_string(),
+            payload_prefix_hex: prefix.clone(),
+            payload_shape_hint: "cbor_map(keys=[Unexpected])".to_string(),
+            occurrences: 0,
+        };
+
+        let total = record_gossip_decode_failure_sample(sample);
+        let snapshot = SyncDiagnostics::default().snapshot();
+        assert!(snapshot.gossip_decode_failures >= total);
+        assert!(snapshot.recent_gossip_decode_failures.iter().any(|entry| {
+            entry.transport == GossipTransport::Iroh
+                && entry.topic == topic
+                && entry.payload_prefix_hex == prefix
+                && entry.occurrences >= 1
+        }));
     }
 
     #[test]
