@@ -438,4 +438,3 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
         Ok(result)
     }
 }
-

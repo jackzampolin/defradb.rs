@@ -407,5 +407,4 @@ impl<S: Store> DB<S> {
     pub fn current_txn_id(&self) -> u64 {
         self.txn_id_counter.load(Ordering::SeqCst)
     }
-
 }
