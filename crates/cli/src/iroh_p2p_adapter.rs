@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use blockstore::Blockstore;
 
 use defra_http::router::{P2PError, P2POperations, P2PResult, ReplicatorInfo};
-use p2p::iroh::{format_public_listen_addrs, parse_public_peer_addr, IrohTransport};
+use p2p::iroh::{
+    best_shareable_public_addr, format_public_listen_addrs, parse_public_peer_addr, IrohTransport,
+};
 use p2p::sync::IrohSyncCoordinator;
 use p2p::topics::DefraTopic;
 use p2p::P2PTransport;
@@ -66,6 +68,14 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             .listen_addresses()
             .await
             .map(|addrs| format_public_listen_addrs(self.transport.local_peer_id(), &addrs))
+            .map_err(|e| P2PError::Transport(e.to_string()))
+    }
+
+    async fn shareable_address(&self) -> P2PResult<Option<String>> {
+        self.transport
+            .listen_addresses()
+            .await
+            .map(|addrs| best_shareable_public_addr(self.transport.local_peer_id(), &addrs))
             .map_err(|e| P2PError::Transport(e.to_string()))
     }
 

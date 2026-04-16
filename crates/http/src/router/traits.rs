@@ -56,6 +56,17 @@ pub trait P2POperations: Send + Sync {
     /// Get listening addresses.
     async fn listen_addresses(&self) -> P2PResult<Vec<String>>;
 
+    /// Get the single best address to share with another node, if available.
+    ///
+    /// This is a stronger contract than `listen_addresses()`: callers should not
+    /// need to guess which returned address is meant for remote sharing.
+    ///
+    /// Transports that do not have a clear shareable-address concept may return
+    /// `Ok(None)`.
+    async fn shareable_address(&self) -> P2PResult<Option<String>> {
+        Ok(None)
+    }
+
     /// Get connected peers.
     async fn connected_peers(&self) -> P2PResult<Vec<String>>;
 
