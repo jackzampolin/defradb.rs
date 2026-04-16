@@ -178,28 +178,6 @@ fn extract_public_peer_id(addr: &str) -> Result<String> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::extract_public_peer_id;
-
-    #[test]
-    fn extract_public_peer_id_accepts_libp2p_multiaddr() {
-        let peer_id = "12D3KooWM111111111111111111111111111111111111111111111";
-        let addr = format!("/ip4/127.0.0.1/tcp/9000/p2p/{peer_id}");
-
-        assert_eq!(extract_public_peer_id(&addr).unwrap(), peer_id);
-    }
-
-    #[cfg(feature = "iroh")]
-    #[test]
-    fn extract_public_peer_id_accepts_iroh_public_addr() {
-        let peer_id = "ae58ff8833241ac82d6ff7611046ed67b5072d142c588d0063e942d9a75502b6";
-        let addr = format!("127.0.0.1:9000/p2p/{peer_id}");
-
-        assert_eq!(extract_public_peer_id(&addr).unwrap(), peer_id);
-    }
-}
-
 impl P2pReplicatorDeleteArgs {
     /// Execute the replicator delete command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
@@ -219,5 +197,27 @@ impl P2pReplicatorDeleteArgs {
             self.collection.join(", ")
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_public_peer_id;
+
+    #[test]
+    fn extract_public_peer_id_accepts_libp2p_multiaddr() {
+        let peer_id = "12D3KooWM111111111111111111111111111111111111111111111";
+        let addr = format!("/ip4/127.0.0.1/tcp/9000/p2p/{peer_id}");
+
+        assert_eq!(extract_public_peer_id(&addr).unwrap(), peer_id);
+    }
+
+    #[cfg(feature = "iroh")]
+    #[test]
+    fn extract_public_peer_id_accepts_iroh_public_addr() {
+        let peer_id = "ae58ff8833241ac82d6ff7611046ed67b5072d142c588d0063e942d9a75502b6";
+        let addr = format!("127.0.0.1:9000/p2p/{peer_id}");
+
+        assert_eq!(extract_public_peer_id(&addr).unwrap(), peer_id);
     }
 }

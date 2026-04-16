@@ -169,11 +169,7 @@ async fn show_current_worktree(depth: usize, filter: Option<&str>) -> Result<()>
         }
 
         let total = total_pass + total_fail + total_skip;
-        let pass_rate = if total > 0 {
-            total_pass * 100 / total
-        } else {
-            100
-        };
+        let pass_rate = (total_pass * 100).checked_div(total).unwrap_or(100);
 
         // Pre-pad rate text before coloring (ANSI codes break {:>N} alignment)
         let rate_str = if total == 0 {
@@ -237,11 +233,7 @@ async fn show_current_worktree(depth: usize, filter: Option<&str>) -> Result<()>
     }
 
     let grand_total = grand_pass + grand_fail + grand_skip;
-    let pass_rate = if grand_total > 0 {
-        grand_pass * 100 / grand_total
-    } else {
-        100
-    };
+    let pass_rate = (grand_pass * 100).checked_div(grand_total).unwrap_or(100);
 
     // Pre-pad rate text before coloring (ANSI codes break {:>N} alignment)
     let rate_str = if pass_rate == 100 {
@@ -319,16 +311,8 @@ async fn show_all_worktrees() -> Result<()> {
             }
 
             let total = total_pass + total_fail + total_skip;
-            let pass_pct = if total > 0 {
-                total_pass * 100 / total
-            } else {
-                0
-            };
-            let fail_pct = if total > 0 {
-                total_fail * 100 / total
-            } else {
-                0
-            };
+            let pass_pct = (total_pass * 100).checked_div(total).unwrap_or(0);
+            let fail_pct = (total_fail * 100).checked_div(total).unwrap_or(0);
 
             println!(
                 "  Tests: {} passed ({}%), {} failed ({}%), {} skipped ({} total, {} packages)",

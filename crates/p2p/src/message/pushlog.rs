@@ -323,8 +323,8 @@ fn describe_cbor_value(value: &serde_cbor::Value) -> String {
     match value {
         serde_cbor::Value::Map(entries) => {
             let keys: Vec<String> = entries
-                .iter()
-                .filter_map(|(key, _)| match key {
+                .keys()
+                .filter_map(|key| match key {
                     serde_cbor::Value::Text(text) => Some(text.clone()),
                     _ => None,
                 })
