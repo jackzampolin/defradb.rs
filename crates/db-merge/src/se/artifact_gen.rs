@@ -51,7 +51,12 @@ pub fn generate_field_artifact(
             &value_bytes,
         )
         .map_err(|e| storage::corekv::Error::Other(e.to_string()))?,
-        _ => unreachable!(),
+        _ => {
+            return Err(storage::corekv::Error::Other(format!(
+                "unsupported encrypted index type: {:?}",
+                enc_idx.index_type
+            )))
+        }
     };
 
     Ok(Artifact::new(
