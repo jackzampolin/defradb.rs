@@ -65,93 +65,6 @@ async fn test_counter_increment() {
 }
 
 #[tokio::test]
-async fn test_counter_idempotency() {
-    let store = MemoryStore::new();
-    let counter = Counter::new(
-        "v1".to_string(),
-        b"doc1",
-        "count".to_string(),
-        true,
-        NumericKind::Int64,
-    )
-    .unwrap();
-
-    let ctx = Context {
-        doc_id: DocId::new_unchecked("doc1"),
-        schema_version: "v1".to_string(),
-        is_create: false,
-    };
-
-    let mut txn = store.new_txn(false).await.unwrap();
-
-    // Apply same delta twice
-    let delta = CounterDelta::new_int64(
-        b"doc1".to_vec(),
-        "count".to_string(),
-        10,
-        12345,
-        "v1".to_string(),
-        5,
-    )
-    .unwrap();
-
-    counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-    counter.merge(&mut *txn, &ctx, &delta).await.unwrap(); // Should be ignored
-
-    // Should still be 5 (not 10)
-    let value_bytes = counter.value(&*txn).await.unwrap();
-    let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
-    assert_eq!(value, 5);
-
-    txn.commit().await.unwrap();
-}
-
-#[tokio::test]
-async fn test_counter_clear_nonce_removes_replay_marker() {
-    let store = MemoryStore::new();
-    let counter = Counter::new(
-        "v1".to_string(),
-        b"doc1",
-        "count".to_string(),
-        true,
-        NumericKind::Int64,
-    )
-    .unwrap();
-
-    let ctx = Context {
-        doc_id: DocId::new_unchecked("doc1"),
-        schema_version: "v1".to_string(),
-        is_create: false,
-    };
-
-    let mut txn = store.new_txn(false).await.unwrap();
-
-    let delta = CounterDelta::new_int64(
-        b"doc1".to_vec(),
-        "count".to_string(),
-        1,
-        1,
-        "v1".to_string(),
-        1,
-    )
-    .unwrap();
-    counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-
-    let replay_within_window = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-    assert!(matches!(
-        replay_within_window,
-        MergeResult::SkippedAlreadyApplied { nonce: 1 }
-    ));
-
-    assert!(counter.clear_nonce(&mut *txn, 1).await.unwrap());
-    assert!(!counter.clear_nonce(&mut *txn, 1).await.unwrap());
-
-    let value_bytes = counter.value(&*txn).await.unwrap();
-    let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
-    assert_eq!(value, 1);
-}
-
-#[tokio::test]
 async fn test_counter_decrement_not_allowed() {
     let store = MemoryStore::new();
     let counter = Counter::new(
@@ -568,48 +481,6 @@ async fn test_counter_merge_result_applied() {
 }
 
 #[tokio::test]
-async fn test_counter_merge_result_skipped_already_applied() {
-    let store = MemoryStore::new();
-    let counter = Counter::new(
-        "v1".to_string(),
-        b"doc1",
-        "count".to_string(),
-        true,
-        NumericKind::Int64,
-    )
-    .unwrap();
-
-    let ctx = Context {
-        doc_id: DocId::new_unchecked("doc1"),
-        schema_version: "v1".to_string(),
-        is_create: false,
-    };
-
-    let mut txn = store.new_txn(false).await.unwrap();
-
-    let delta = CounterDelta::new_int64(
-        b"doc1".to_vec(),
-        "count".to_string(),
-        10,
-        12345,
-        "v1".to_string(),
-        5,
-    )
-    .unwrap();
-
-    // First merge should apply
-    let result1 = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-    assert!(matches!(result1, MergeResult::Applied));
-
-    // Second merge with same nonce should be skipped
-    let result2 = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-    assert!(matches!(
-        result2,
-        MergeResult::SkippedAlreadyApplied { nonce: 12345 }
-    ));
-}
-
-#[tokio::test]
 async fn test_counter_wrong_delta_type() {
     let store = MemoryStore::new();
     let counter = Counter::new(
@@ -760,4 +631,76 @@ fn test_counter_delta_validation_rejects_empty_values() {
         .unwrap_err()
         .to_string()
         .contains("schema_version_id"));
+}
+
+// Regression guard for issue #847.
+//
+// Go DefraDB's Counter.Merge (internal/core/crdt/counter.go:154-161) ignores
+// the Nonce field entirely — Nonce exists only to make the signed DAG block's
+// CID unique at delta-creation time. Every delta that reaches Merge is applied.
+//
+// The Rust implementation previously short-circuited merge when it saw a nonce
+// marker it had stored on a prior successful apply (counter.rs:389). That
+// diverges from Go: when the same CounterDelta reaches both implementations
+// twice (retransmit, DAG resync, crash recovery replay), Go advances the value
+// by 2x the increment and Rust stays at 1x. Two nodes observing identical
+// network traffic therefore disagree on the counter value — a CRDT convergence
+// violation.
+//
+// Fix: remove the nonce idempotency check so counter merge matches Go's
+// "apply every delta" semantics. Block-CID deduplication at the blockstore
+// layer is the correct place to enforce "do not process the same block twice".
+//
+// This test fails on the pre-fix code (final value 5, not 10) and passes
+// after the check is removed.
+#[tokio::test]
+async fn regression_847_counter_applies_delta_each_merge() {
+    let store = MemoryStore::new();
+    let counter = Counter::new(
+        "v1".to_string(),
+        b"doc1",
+        "count".to_string(),
+        true,
+        NumericKind::Int64,
+    )
+    .unwrap();
+
+    let ctx = Context {
+        doc_id: DocId::new_unchecked("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    let delta = CounterDelta::new_int64(
+        b"doc1".to_vec(),
+        "count".to_string(),
+        10,
+        12345,
+        "v1".to_string(),
+        5,
+    )
+    .unwrap();
+
+    // Same delta delivered twice (e.g., retransmit or DAG resync).
+    let r1 = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+    let r2 = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+
+    assert_eq!(r1, MergeResult::Applied);
+    assert_eq!(
+        r2,
+        MergeResult::Applied,
+        "bug #847: second merge of an identical CounterDelta must be applied \
+         (matching Go). If this fails with SkippedAlreadyApplied, the nonce \
+         idempotency check has been reintroduced."
+    );
+
+    let value_bytes = counter.value(&*txn).await.unwrap();
+    let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
+    assert_eq!(
+        value, 10,
+        "bug #847: two increments of 5 should produce 10, not 5 — Rust was \
+         silently skipping the second merge due to the nonce marker."
+    );
 }

@@ -433,10 +433,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 }
 
 async fn finalize_linked_field_blocks<S: Store, B: blockstore::Blockstore + Send + Sync>(
-    db: &Arc<DB<S>>,
+    _db: &Arc<DB<S>>,
     blockstore: &Arc<B>,
     cids: &[Cid],
-    fallback_collection_id: Option<&str>,
+    _fallback_collection_id: Option<&str>,
 ) -> Result<(), MergeError> {
     if cids.is_empty() {
         return Ok(());
@@ -447,84 +447,6 @@ async fn finalize_linked_field_blocks<S: Store, B: blockstore::Blockstore + Send
         .await
         .map_err(|e| MergeError::Storage(e.to_string()))?;
 
-    for cid in cids {
-        cleanup_counter_nonce_for_cid(db, blockstore, cid, fallback_collection_id).await?;
-    }
-
     Ok(())
 }
 
-async fn cleanup_counter_nonce_for_cid<S: Store, B: blockstore::Blockstore + Send + Sync>(
-    db: &Arc<DB<S>>,
-    blockstore: &Arc<B>,
-    cid: &Cid,
-    fallback_collection_id: Option<&str>,
-) -> Result<(), MergeError> {
-    let Some(block_data) = blockstore
-        .get(cid)
-        .await
-        .map_err(|e| MergeError::Storage(e.to_string()))?
-    else {
-        return Ok(());
-    };
-
-    let block =
-        Block::from_dag_cbor(&block_data).map_err(|e| MergeError::BlockDecode(e.to_string()))?;
-
-    let payload = match &block.delta {
-        CrdtDelta::Counter(payload) => payload,
-        _ => return Ok(()),
-    };
-
-    let collection = db
-        .find_collection_by_id(&payload.schema_version_id)?
-        .or(fallback_collection_id.and_then(|cid| db.find_collection_by_id(cid).ok().flatten()))
-        .ok_or_else(|| {
-            MergeError::MissingMetadata(format!(
-                "Collection not found for schema_version_id: {}",
-                payload.schema_version_id
-            ))
-        })?;
-
-    let field = collection
-        .schema()
-        .field_by_name(&payload.field_name)
-        .ok_or_else(|| {
-            MergeError::MissingMetadata(format!(
-                "Field '{}' not found in collection",
-                payload.field_name
-            ))
-        })?;
-
-    let numeric_kind = match &field.kind {
-        FieldKind::Scalar(ScalarKind::Int) => NumericKind::Int64,
-        FieldKind::Scalar(ScalarKind::Float32 | ScalarKind::Float64) => NumericKind::Float64,
-        other => {
-            return Err(MergeError::UnsupportedDelta(format!(
-                "Counter field '{}' has unsupported kind during cleanup: {:?}",
-                payload.field_name, other
-            )))
-        }
-    };
-
-    let counter = Counter::new(
-        payload.schema_version_id.clone(),
-        &payload.doc_id,
-        payload.field_name.clone(),
-        field.crdt_type.allows_decrement(),
-        numeric_kind,
-    )
-    .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
-
-    let txn = db.new_txn(false).await?;
-    {
-        let mut datastore = txn.datastore()?;
-        counter
-            .clear_nonce(&mut datastore, payload.nonce)
-            .await
-            .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
-    }
-    txn.force_commit().await?;
-
-    Ok(())
-}
