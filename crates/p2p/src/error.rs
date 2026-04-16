@@ -6,6 +6,9 @@ use thiserror::Error;
 /// Result type for P2P operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Error text used when the coordinator rejects a request due to peer backpressure.
+pub const RATE_LIMITED_MESSAGE: &str = "rate limited: too many requests, retry later";
+
 /// P2P error types.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -341,6 +344,11 @@ impl Error {
             } if collection_id == "rate-limited"
         )
     }
+}
+
+/// Returns true when a peer reply carries the coordinator's explicit rate-limit signal.
+pub fn is_rate_limited_message(message: &str) -> bool {
+    message == RATE_LIMITED_MESSAGE
 }
 
 /// Convert a blockstore CID verification error into its P2P counterpart.
