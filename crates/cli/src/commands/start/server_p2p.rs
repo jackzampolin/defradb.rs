@@ -594,7 +594,6 @@ impl Node {
 
         let retry_store = store.clone();
         let retry_pusher = doc_pusher.clone();
-        let retry_transport = transport.clone();
         let retry_loop_task = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;

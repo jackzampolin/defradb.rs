@@ -149,13 +149,14 @@ pub(super) async fn try_fetch_from_provider(
 ) -> bool {
     // Per-provider CAR failures log at debug — the caller aggregates per-DAG
     // outcomes into a single WARN via BitswapComplete (see issue #858).
-    let endpoint_id = match parse_endpoint_id(provider) {
-        Ok(id) => id,
-        Err(e) => {
-            debug!(provider = %provider, error = %e, "CAR fetch: invalid provider peer ID");
-            return false;
-        }
-    };
+    if let Err(error) = parse_endpoint_id(provider) {
+        debug!(
+            provider = %provider,
+            error = %error,
+            "CAR fetch: invalid provider peer ID"
+        );
+        return false;
+    }
 
     let connection = match connect_with_direct_addr_fallback(
         endpoint,
