@@ -136,7 +136,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         self.blockstore
                             .is_merged(&cid)
                             .await
-                            .map_err(|e| Error::BlockstoreError(e.to_string()))
+                            .map_err(Error::from_blockstore)
                     })
                     .await
                 {
@@ -197,7 +197,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 self.blockstore
                     .is_merged(cid)
                     .await
-                    .map_err(|e| Error::BlockstoreError(e.to_string()))
+                    .map_err(Error::from_blockstore)
             })
             .await
         {
@@ -248,7 +248,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 self.blockstore
                     .put(cid, &msg.block)
                     .await
-                    .map_err(|e| Error::BlockstoreError(e.to_string()))
+                    .map_err(Error::from_blockstore)
             })
             .await
         {
@@ -316,12 +316,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 return Err(Error::ChannelSend);
             }
 
-            match self
-                .retry_retriable_pushlog_op(cid, "retry_pending_dags_waiting_on", || {
-                    self.retry_pending_dags_waiting_on(cid)
-                })
-                .await
-            {
+            // Not wrapped in retry_retriable_pushlog_op: the inner blockstore
+            // reads already propagate typed `BlockstoreTxnConflict` via
+            // `Error::from_blockstore`, and those are the only retriable errors
+            // surfaced here. DAG-traversal failures (missing links, bitswap
+            // timeouts, channel-send) are terminal in this context, so an outer
+            // retry would not make progress.
+            match self.retry_pending_dags_waiting_on(cid).await {
                 Ok(completed_roots) => {
                     if !completed_roots.is_empty() {
                         tracing::info!(
