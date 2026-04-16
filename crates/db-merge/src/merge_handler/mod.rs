@@ -1048,7 +1048,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn counter_merge_marks_cid_merged_and_clears_nonce_marker() {
+    async fn counter_merge_marks_cid_merged() {
         let (handler, blockstore) = make_handler_with_counter_schema().await;
         let mut doc = Document::new();
         doc.generate_and_set_doc_id().unwrap();
@@ -1089,29 +1089,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outcome, MergeOutcome::Merged);
+        // The blockstore merged-set is the single source of CRDT idempotency
+        // (see #847). The counter merge path no longer keeps per-delta nonce
+        // markers, so there is nothing else to assert here.
         assert!(blockstore.is_merged(&cid).await.unwrap());
-
-        let counter = crdt::Counter::new(
-            payload.schema_version_id.clone(),
-            &payload.doc_id,
-            payload.field_name.clone(),
-            true,
-            crdt::NumericKind::Int64,
-        )
-        .unwrap();
-
-        let txn = handler.db.new_txn(true).await.unwrap();
-        let mut datastore = txn.datastore().unwrap();
-        let removed = counter
-            .clear_nonce(&mut datastore, payload.nonce)
-            .await
-            .unwrap();
-        let _ = txn.discard();
-
-        assert!(
-            !removed,
-            "nonce marker should be removed once the CID is finalized as merged"
-        );
     }
 
     #[tokio::test]

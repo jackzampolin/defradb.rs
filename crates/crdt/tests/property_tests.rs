@@ -522,8 +522,12 @@ mod counter_properties {
             });
         }
 
+        // Counter merge is unconditional — idempotency is the blockstore's
+        // job via is_merged(cid), not the CRDT's (#847). Property: applying
+        // a delta twice through counter.merge() must apply twice. This
+        // matches Go's counter.Merge behaviour.
         #[test]
-        fn test_counter_idempotence(
+        fn test_counter_double_apply_accumulates(
             increment in -1000i64..1000i64,
             nonce in 0..10000i64
         ) {
@@ -549,12 +553,13 @@ mod counter_properties {
                 let mut txn = store.new_txn(false).await.unwrap();
 
                 counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-                let val1 = counter.value(&*txn).await.ok();
+                let val1 = counter.value(&*txn).await.ok().map(|b| i64::from_be_bytes(b.try_into().unwrap()));
 
                 counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-                let val2 = counter.value(&*txn).await.ok();
+                let val2 = counter.value(&*txn).await.ok().map(|b| i64::from_be_bytes(b.try_into().unwrap()));
 
-                assert_eq!(val1, val2);
+                assert_eq!(val1, Some(increment.wrapping_mul(1)));
+                assert_eq!(val2, Some(increment.wrapping_mul(2)));
             });
         }
 
@@ -869,8 +874,12 @@ mod counter_properties {
         assert_eq!(value, 50);
     }
 
+    // Regression guard for #847. Counter merge must NOT dedupe by nonce —
+    // replaying the same delta accumulates, matching Go's counter.Merge
+    // which also ignores the delta nonce. The blockstore's is_merged(cid)
+    // filter is the single source of CRDT idempotency.
     #[tokio::test]
-    async fn test_counter_nonce_replay_protection() {
+    async fn test_counter_replayed_delta_accumulates() {
         let ctx = Context {
             doc_id: DocId::new_unchecked("doc1"),
             schema_version: "v1".to_string(),
@@ -904,7 +913,7 @@ mod counter_properties {
 
         let value_bytes = counter.value(&*txn).await.unwrap();
         let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
-        assert_eq!(value, 100);
+        assert_eq!(value, 1000);
     }
 
     #[tokio::test]
@@ -1004,15 +1013,17 @@ mod float64_counter_properties {
             });
         }
 
+        // Float64 variant of test_counter_double_apply_accumulates (#847).
+        // Counter merge is unconditional; the blockstore dedups by CID.
         #[test]
-        fn test_float64_counter_idempotence(
+        fn test_float64_counter_double_apply_accumulates(
             increment in -1000.0f64..1000.0f64,
             nonce in 0..10000i64
         ) {
             prop_assume!(increment.is_finite());
 
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
+            let (val1, val2) = rt.block_on(async {
                 let ctx = Context {
                     doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
@@ -1033,13 +1044,16 @@ mod float64_counter_properties {
                 let mut txn = store.new_txn(false).await.unwrap();
 
                 counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-                let val1 = counter.value(&*txn).await.ok();
+                let val1 = counter.value(&*txn).await.ok().map(|b| f64::from_be_bytes(b.try_into().unwrap()));
 
                 counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-                let val2 = counter.value(&*txn).await.ok();
+                let val2 = counter.value(&*txn).await.ok().map(|b| f64::from_be_bytes(b.try_into().unwrap()));
 
-                assert_eq!(val1, val2);
+                (val1, val2)
             });
+
+            prop_assert_eq!(val1, Some(increment));
+            prop_assert_eq!(val2, Some(increment + increment));
         }
     }
 

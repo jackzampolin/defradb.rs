@@ -283,11 +283,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
                 txn.force_commit().await?;
 
-                self.best_effort_finalize_linked_field_blocks(
-                    &state.linked_field_cids,
-                    metadata.collection_id,
-                )
-                .await;
+                self.best_effort_finalize_linked_field_blocks(&state.linked_field_cids)
+                    .await;
 
                 {
                     let mut merged = self.merged_composites.lock().unwrap_or_else(|e| {
@@ -602,7 +599,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         })
                         .push(PendingFieldBlockFinalization {
                             cids: state.linked_field_cids.clone(),
-                            fallback_collection_id: metadata.collection_id.map(ToOwned::to_owned),
                         });
                 }
 
