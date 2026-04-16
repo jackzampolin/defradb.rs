@@ -139,18 +139,19 @@ impl<S: Store> P2PHost<S> {
                     message_id, topic, propagation_source
                 );
 
-                // Decode the message payload.
-                // Rust-to-Rust sends PushLogBroadcast (no MetaData).
-                // Go-to-Rust sends PushLogRequest (with MetaData).
-                // Try PushLogBroadcast first, then fall back to PushLogRequest.
-                let broadcast =
-                    serde_cbor::from_slice::<PushLogBroadcast>(&message.data).or_else(|_| {
-                        serde_cbor::from_slice::<PushLogRequest>(&message.data)
-                            .map(|req| PushLogBroadcast::from_request(&req))
-                    });
-
-                match broadcast {
-                    Ok(broadcast) => {
+                match PushLogBroadcast::decode_gossip_payload(&message.data) {
+                    Ok((broadcast, encoding)) => {
+                        if encoding != crate::message::PushLogGossipPayloadEncoding::CborBroadcast
+                            && encoding != crate::message::PushLogGossipPayloadEncoding::CborRequest
+                        {
+                            debug!(
+                                peer_id = %propagation_source,
+                                topic = %topic,
+                                message_size = message.data.len(),
+                                ?encoding,
+                                "Decoded libp2p gossip payload via compatibility fallback"
+                            );
+                        }
                         if self
                             .event_tx
                             .send(HostEvent::GossipMessage {

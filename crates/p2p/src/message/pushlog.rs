@@ -281,6 +281,14 @@ pub struct PushLogBroadcast {
     pub acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
 }
 
+/// Encoding variant accepted when decoding gossip payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushLogGossipPayloadEncoding {
+    PostcardBroadcast,
+    CborRequest,
+    CborBroadcast,
+}
+
 impl PushLogBroadcast {
     /// Create a new PushLogBroadcast.
     pub fn new(
@@ -324,5 +332,30 @@ impl PushLogBroadcast {
         );
         request.acp_actor_relationships = self.acp_actor_relationships.clone();
         request
+    }
+
+    /// Decode a gossip payload using the set of encodings accepted across P2P transports.
+    ///
+    /// We prefer the native Iroh wire encoding first, then fall back to request-shaped
+    /// payloads and the legacy CBOR variants accepted by libp2p.
+    pub fn decode_gossip_payload(
+        payload: &[u8],
+    ) -> Result<(Self, PushLogGossipPayloadEncoding), String> {
+        if let Ok(broadcast) = postcard::from_bytes::<Self>(payload) {
+            return Ok((broadcast, PushLogGossipPayloadEncoding::PostcardBroadcast));
+        }
+
+        serde_cbor::from_slice::<PushLogRequest>(payload)
+            .map(|request| {
+                (
+                    Self::from_request(&request),
+                    PushLogGossipPayloadEncoding::CborRequest,
+                )
+            })
+            .or_else(|_| {
+                serde_cbor::from_slice::<Self>(payload)
+                    .map(|broadcast| (broadcast, PushLogGossipPayloadEncoding::CborBroadcast))
+            })
+            .map_err(|error| error.to_string())
     }
 }

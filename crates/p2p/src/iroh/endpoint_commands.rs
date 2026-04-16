@@ -523,10 +523,19 @@ pub(super) async fn handle_subscribe(
             match result {
                 Ok(event) => match event {
                     iroh_gossip::api::Event::Received(msg) => {
-                        match postcard::from_bytes::<crate::message::PushLogBroadcast>(&msg.content)
+                        match crate::message::PushLogBroadcast::decode_gossip_payload(&msg.content)
                         {
-                            Ok(broadcast) => {
+                            Ok((broadcast, encoding)) => {
                                 let sender_peer_id = endpoint_id_to_peer_id(&msg.delivered_from);
+                                if encoding != crate::message::PushLogGossipPayloadEncoding::PostcardBroadcast {
+                                    debug!(
+                                        peer_id = %sender_peer_id,
+                                        topic = %topic_str_clone,
+                                        message_size = msg.content.len(),
+                                        ?encoding,
+                                        "Decoded Iroh gossip message via compatibility fallback"
+                                    );
+                                }
                                 let msg_id = MessageId::new(uuid::Uuid::new_v4().to_string());
                                 if event_tx
                                     .send(TransportEvent::GossipMessage {
@@ -556,8 +565,7 @@ pub(super) async fn handle_subscribe(
                                         message_size = msg.content.len(),
                                         total_failures = count,
                                         error = %e,
-                                        "Failed to decode gossip message \
-                                         (version skew or malformed sender?)"
+                                        "Failed to decode Iroh gossip message as PushLogBroadcast or PushLogRequest"
                                     );
                                 } else {
                                     debug!(
@@ -566,7 +574,7 @@ pub(super) async fn handle_subscribe(
                                         message_size = msg.content.len(),
                                         total_failures = count,
                                         error = %e,
-                                        "Failed to decode gossip message"
+                                        "Failed to decode Iroh gossip message"
                                     );
                                 }
                             }
