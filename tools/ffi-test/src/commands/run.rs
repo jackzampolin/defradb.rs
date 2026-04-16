@@ -136,11 +136,9 @@ async fn run_multiple_packages(
         match result {
             Ok(result) => {
                 // Calculate pass rate
-                let pass_rate = if result.summary.total > 0 {
-                    result.summary.passed * 100 / result.summary.total
-                } else {
-                    100
-                };
+                let pass_rate = (result.summary.passed * 100)
+                    .checked_div(result.summary.total)
+                    .unwrap_or(100);
 
                 // Format the rate with color
                 let rate_str = if pass_rate == 100 {
@@ -214,11 +212,9 @@ async fn run_multiple_packages(
 
     // Print totals
     println!("{}", "─".repeat(84));
-    let grand_pass_rate = if grand_total.total > 0 {
-        grand_total.passed * 100 / grand_total.total
-    } else {
-        100
-    };
+    let grand_pass_rate = (grand_total.passed * 100)
+        .checked_div(grand_total.total)
+        .unwrap_or(100);
 
     let grand_rate_str = if grand_pass_rate == 100 {
         format!("{}%", grand_pass_rate).green().bold()

@@ -72,9 +72,10 @@ pub fn parse_public_peer_addr(addr: &str) -> Result<(PeerId, Vec<PeerAddr>)> {
 
 /// Render raw iroh endpoint listen addresses into stable, connectable public strings.
 ///
-/// The returned list prefers directly dialable addresses first so existing callers can
-/// connect with the first entry. A bare endpoint ID is still included last as a stable
-/// identity-only reference.
+/// The returned list keeps direct addresses first for compatibility with
+/// existing callers that treat the first entry as a multiaddr-like dial
+/// address. Endpoint tickets are included after direct addresses, followed by
+/// a bare endpoint ID as a stable identity-only reference.
 pub fn format_public_listen_addrs(peer_id: &PeerId, raw_addrs: &[PeerAddr]) -> Vec<String> {
     let mut direct = Vec::new();
     let mut tickets = Vec::new();
@@ -113,6 +114,20 @@ pub fn format_public_listen_addrs(peer_id: &PeerId, raw_addrs: &[PeerAddr]) -> V
     }
 
     formatted
+}
+
+/// Select the best public iroh address to share with another node.
+///
+/// This prefers endpoint tickets, then direct connectable addresses, and skips
+/// the bare endpoint ID fallback because callers asked for a concrete address
+/// rather than an identity-only hint.
+pub fn best_shareable_public_addr(peer_id: &PeerId, raw_addrs: &[PeerAddr]) -> Option<String> {
+    let formatted = format_public_listen_addrs(peer_id, raw_addrs);
+    formatted
+        .iter()
+        .find(|addr| is_ticket_string(addr))
+        .cloned()
+        .or_else(|| formatted.into_iter().find(|addr| addr.contains("/p2p/")))
 }
 
 /// Build an [`EndpointAddr`] from a peer id and a list of dial hints.
@@ -205,12 +220,13 @@ mod tests {
     }
 
     #[test]
-    fn format_public_addresses_keeps_legacy_id_and_ticket() {
+    fn format_public_addresses_preserve_direct_first_for_legacy_callers() {
         let peer_id = PeerId::new(endpoint_id().to_string());
         let ticket = EndpointTicket::from(
             EndpointAddr::new(endpoint_id()).with_ip_addr("127.0.0.1:9999".parse().unwrap()),
         )
         .to_string();
+        let direct = format!("127.0.0.1:9999/p2p/{peer_id}");
         let formatted = format_public_listen_addrs(
             &peer_id,
             &[
@@ -220,8 +236,68 @@ mod tests {
             ],
         );
 
-        assert_eq!(formatted[0], format!("127.0.0.1:9999/p2p/{peer_id}"));
+        assert_eq!(formatted[0], direct);
+        assert!(formatted.contains(&direct));
         assert!(formatted.contains(&ticket));
         assert!(formatted.contains(&peer_id.to_string()));
+    }
+
+    #[test]
+    fn format_public_addresses_without_ticket_still_return_direct_addrs() {
+        let peer_id = PeerId::new(endpoint_id().to_string());
+        let direct = format!("127.0.0.1:9999/p2p/{peer_id}");
+
+        let formatted =
+            format_public_listen_addrs(&peer_id, &[PeerAddr::new("127.0.0.1:9999".to_string())]);
+
+        assert_eq!(formatted, vec![direct, peer_id.to_string()]);
+    }
+
+    #[test]
+    fn best_shareable_public_addr_prefers_ticket() {
+        let peer_id = PeerId::new(endpoint_id().to_string());
+        let ticket = EndpointTicket::from(
+            EndpointAddr::new(endpoint_id()).with_ip_addr("127.0.0.1:9999".parse().unwrap()),
+        )
+        .to_string();
+
+        let selected = best_shareable_public_addr(
+            &peer_id,
+            &[
+                PeerAddr::new(format!("iroh://{}", peer_id)),
+                PeerAddr::new("127.0.0.1:9999".to_string()),
+                PeerAddr::new(ticket.clone()),
+            ],
+        );
+
+        assert_eq!(selected, Some(ticket));
+    }
+
+    #[test]
+    fn best_shareable_public_addr_falls_back_to_direct_addr() {
+        let peer_id = PeerId::new(endpoint_id().to_string());
+
+        let selected = best_shareable_public_addr(
+            &peer_id,
+            &[
+                PeerAddr::new(format!("iroh://{}", peer_id)),
+                PeerAddr::new("127.0.0.1:9999".to_string()),
+            ],
+        );
+
+        assert_eq!(
+            selected,
+            Some(format!("127.0.0.1:9999/p2p/{}", peer_id.as_str()))
+        );
+    }
+
+    #[test]
+    fn best_shareable_public_addr_skips_identity_only_fallback() {
+        let peer_id = PeerId::new(endpoint_id().to_string());
+
+        let selected =
+            best_shareable_public_addr(&peer_id, &[PeerAddr::new(format!("iroh://{}", peer_id))]);
+
+        assert_eq!(selected, None);
     }
 }

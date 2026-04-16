@@ -122,6 +122,10 @@ mod tests {
             RoutePermission::Required(NodePermission::P2pPeerInfo)
         );
         assert_eq!(
+            route_permission("/api/v0/p2p/shareable-address", &Method::GET),
+            RoutePermission::Required(NodePermission::P2pPeerInfo)
+        );
+        assert_eq!(
             route_permission("/api/v0/p2p/replicators", &Method::GET),
             RoutePermission::Required(NodePermission::P2pReplicatorList)
         );

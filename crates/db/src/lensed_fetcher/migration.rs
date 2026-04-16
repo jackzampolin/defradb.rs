@@ -66,7 +66,8 @@ impl<S: Store> LensedDocFetcher<S> {
 
         let mut full_history: HashMap<String, CollectionHistoryLink> = HashMap::new();
 
-        // Add each version to the history
+        // First pass: build links with `previous` and `transform` from each
+        // version's stored `previous_version` pointer.
         for version in versions {
             let mut link = CollectionHistoryLink::new(&version.version_id, &version.collection_id);
 
@@ -79,6 +80,28 @@ impl<S: Store> LensedDocFetcher<S> {
             }
 
             full_history.insert(version.version_id.clone(), link);
+        }
+
+        // Second pass: backfill `next` so the targeted-history walk can
+        // traverse forward from older versions. Without this, a node whose
+        // collection sits at v1 cannot find a path to a doc that arrived at
+        // v2 — the previous-only graph is unreachable from v1.
+        // Mirrors the equivalent pass in `lensed_auto_commit_fetcher`.
+        let reverse_links: Vec<(String, String)> = full_history
+            .values()
+            .flat_map(|link| {
+                link.previous
+                    .iter()
+                    .map(|prev_id| (prev_id.clone(), link.version_id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (parent_id, child_id) in reverse_links {
+            if let Some(parent_link) = full_history.get_mut(&parent_id) {
+                if !parent_link.next.contains(&child_id) {
+                    parent_link.next.push(child_id);
+                }
+            }
         }
 
         build_targeted_history(&full_history, target_version_id)

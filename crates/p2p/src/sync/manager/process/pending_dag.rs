@@ -286,7 +286,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     error = %e,
                     "Failed to load root block from blockstore"
                 );
-                return Err(Error::BlockstoreError(e.to_string()));
+                return Err(Error::from_blockstore(e));
             }
         };
 

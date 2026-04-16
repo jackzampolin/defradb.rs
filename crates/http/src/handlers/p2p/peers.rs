@@ -17,6 +17,12 @@ use crate::validation::validate_multiaddr;
 /// endpoint tickets, raw endpoint ids, or `<endpoint-id>@<host>:<port>`.
 pub type P2pInfoResponse = Vec<String>;
 
+/// Response for the single best shareable P2P address.
+#[derive(Debug, Clone, Serialize)]
+pub struct ShareableAddressResponse {
+    pub address: Option<String>,
+}
+
 /// Response for listing peers.
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerInfo {
@@ -62,6 +68,23 @@ pub async fn get_info(
         .collect();
 
     Ok(Json(full_addrs))
+}
+
+/// Get the single best shareable P2P address, if available.
+///
+/// GET /api/v0/p2p/shareable-address
+///
+/// Requires `P2pPeerInfo` permission when NAC is enabled.
+pub async fn get_shareable_address(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<ShareableAddressResponse>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pPeerInfo).await?;
+
+    let p2p = state.require_p2p()?;
+    let address = p2p.shareable_address().await.map_err(map_p2p_internal)?;
+
+    Ok(Json(ShareableAddressResponse { address }))
 }
 
 /// List connected peers.
@@ -178,5 +201,14 @@ mod tests {
         assert!(json.contains("/ip4/127.0.0.1/tcp/9000"));
         // Verify it's an array, not an object
         assert!(json.starts_with('['));
+    }
+
+    #[test]
+    fn test_shareable_address_response_serialize() {
+        let response = ShareableAddressResponse {
+            address: Some("endpoint-ticket".to_string()),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(json, r#"{"address":"endpoint-ticket"}"#);
     }
 }

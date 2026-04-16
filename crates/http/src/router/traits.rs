@@ -56,11 +56,31 @@ pub trait P2POperations: Send + Sync {
     /// Get listening addresses.
     async fn listen_addresses(&self) -> P2PResult<Vec<String>>;
 
+    /// Get the single best address to share with another node, if available.
+    ///
+    /// This is a stronger contract than `listen_addresses()`: callers should not
+    /// need to guess which returned address is meant for remote sharing.
+    ///
+    /// Transports that do not have a clear shareable-address concept may return
+    /// `Ok(None)`.
+    async fn shareable_address(&self) -> P2PResult<Option<String>> {
+        Ok(None)
+    }
+
     /// Get connected peers.
     async fn connected_peers(&self) -> P2PResult<Vec<String>>;
 
     /// Connect to a peer at the given address.
     async fn connect_peer(&self, addr: &str) -> P2PResult<()>;
+
+    /// Notify the transport that local network conditions may have changed.
+    ///
+    /// Some transports, such as iroh, use this to refresh relay/direct
+    /// connectivity after interface changes. Transports that do not require
+    /// explicit handling may treat this as a no-op.
+    async fn notify_network_change(&self) -> P2PResult<()> {
+        Ok(())
+    }
 
     /// Get all replicators.
     async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>>;
