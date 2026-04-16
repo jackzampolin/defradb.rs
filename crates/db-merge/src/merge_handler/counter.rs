@@ -368,7 +368,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 )
                 .map_err(|e| MergeError::MergeFailed(e.to_string()))
             }
-            _ => unreachable!(),
+            other => Err(MergeError::UnsupportedDelta(format!(
+                "unsupported NumericKind {:?} for counter delta",
+                other
+            ))),
         }
     }
 
@@ -427,7 +430,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     None
                 }
             }
-            _ => unreachable!(),
+            other => {
+                tracing::warn!(kind = ?other, "unsupported NumericKind in counter value decode");
+                None
+            }
         }
     }
 }

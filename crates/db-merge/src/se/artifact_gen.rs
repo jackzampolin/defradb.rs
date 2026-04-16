@@ -42,7 +42,7 @@ pub fn generate_field_artifact(
     let identity_bytes = identity_pubkey.unwrap_or(&[]);
 
     // Generate tag based on index type
-    let tag = match enc_idx.index_type {
+    let tag = match &enc_idx.index_type {
         EncryptedIndexType::Equality => generate_equality_tag(
             enc_key,
             identity_bytes,
@@ -51,7 +51,12 @@ pub fn generate_field_artifact(
             &value_bytes,
         )
         .map_err(|e| storage::corekv::Error::Other(e.to_string()))?,
-        _ => unreachable!(),
+        other => {
+            return Err(storage::corekv::Error::Other(format!(
+                "unsupported EncryptedIndexType: {:?}",
+                other
+            )));
+        }
     };
 
     Ok(Artifact::new(

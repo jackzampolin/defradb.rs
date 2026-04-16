@@ -416,7 +416,10 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     .await
             }
             CrdtDelta::CollectionSet(_) => Ok(MergeOutcome::terminal_skip("collection set delta")),
-            _ => unreachable!(),
+            other => Err(MergeError::UnsupportedDelta(format!(
+                "unhandled CrdtDelta variant in batch dispatch: {:?}",
+                other
+            ))),
         }
     }
 }
