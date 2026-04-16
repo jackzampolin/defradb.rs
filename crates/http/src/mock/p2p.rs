@@ -95,6 +95,10 @@ impl P2POperations for MockP2POperations {
         Ok(())
     }
 
+    async fn notify_network_change(&self) -> P2PResult<()> {
+        Ok(())
+    }
+
     async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
         Ok(self.replicators.read().unwrap().clone())
     }
@@ -203,6 +207,10 @@ impl P2POperations for FailingMockP2POperations {
     }
 
     async fn connect_peer(&self, _addr: &str) -> P2PResult<()> {
+        Err(P2PError::Internal(self.error.clone()))
+    }
+
+    async fn notify_network_change(&self) -> P2PResult<()> {
         Err(P2PError::Internal(self.error.clone()))
     }
 

@@ -72,9 +72,10 @@ pub fn parse_public_peer_addr(addr: &str) -> Result<(PeerId, Vec<PeerAddr>)> {
 
 /// Render raw iroh endpoint listen addresses into stable, connectable public strings.
 ///
-/// The returned list prefers directly dialable addresses first so existing callers can
-/// connect with the first entry. A bare endpoint ID is still included last as a stable
-/// identity-only reference.
+/// The returned list prefers endpoint tickets first because they carry the
+/// most complete dial hints and stay valid across interface churn. Direct
+/// addresses are included after tickets, followed by a bare endpoint ID as a
+/// stable identity-only reference.
 pub fn format_public_listen_addrs(peer_id: &PeerId, raw_addrs: &[PeerAddr]) -> Vec<String> {
     let mut direct = Vec::new();
     let mut tickets = Vec::new();
@@ -102,10 +103,10 @@ pub fn format_public_listen_addrs(peer_id: &PeerId, raw_addrs: &[PeerAddr]) -> V
         }
     }
 
-    let mut formatted = direct;
-    for ticket in tickets {
-        if !formatted.contains(&ticket) {
-            formatted.push(ticket);
+    let mut formatted = tickets;
+    for addr in direct {
+        if !formatted.contains(&addr) {
+            formatted.push(addr);
         }
     }
     if !formatted.contains(&peer_id.to_string()) {
@@ -205,12 +206,13 @@ mod tests {
     }
 
     #[test]
-    fn format_public_addresses_keeps_legacy_id_and_ticket() {
+    fn format_public_addresses_prefers_ticket_before_direct_addrs() {
         let peer_id = PeerId::new(endpoint_id().to_string());
         let ticket = EndpointTicket::from(
             EndpointAddr::new(endpoint_id()).with_ip_addr("127.0.0.1:9999".parse().unwrap()),
         )
         .to_string();
+        let direct = format!("127.0.0.1:9999/p2p/{peer_id}");
         let formatted = format_public_listen_addrs(
             &peer_id,
             &[
@@ -220,8 +222,19 @@ mod tests {
             ],
         );
 
-        assert_eq!(formatted[0], format!("127.0.0.1:9999/p2p/{peer_id}"));
-        assert!(formatted.contains(&ticket));
+        assert_eq!(formatted[0], ticket);
+        assert!(formatted.contains(&direct));
         assert!(formatted.contains(&peer_id.to_string()));
+    }
+
+    #[test]
+    fn format_public_addresses_without_ticket_still_return_direct_addrs() {
+        let peer_id = PeerId::new(endpoint_id().to_string());
+        let direct = format!("127.0.0.1:9999/p2p/{peer_id}");
+
+        let formatted =
+            format_public_listen_addrs(&peer_id, &[PeerAddr::new("127.0.0.1:9999".to_string())]);
+
+        assert_eq!(formatted, vec![direct, peer_id.to_string()]);
     }
 }

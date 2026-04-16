@@ -111,6 +111,13 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         Ok(())
     }
 
+    async fn notify_network_change(&self) -> P2PResult<()> {
+        self.transport
+            .network_change()
+            .await
+            .map_err(|e| P2PError::Transport(e.to_string()))
+    }
+
     async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
         let p2p_infos = self
             .transport

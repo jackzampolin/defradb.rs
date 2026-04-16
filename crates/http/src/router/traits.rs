@@ -62,6 +62,15 @@ pub trait P2POperations: Send + Sync {
     /// Connect to a peer at the given address.
     async fn connect_peer(&self, addr: &str) -> P2PResult<()>;
 
+    /// Notify the transport that local network conditions may have changed.
+    ///
+    /// Some transports, such as iroh, use this to refresh relay/direct
+    /// connectivity after interface changes. Transports that do not require
+    /// explicit handling may treat this as a no-op.
+    async fn notify_network_change(&self) -> P2PResult<()> {
+        Ok(())
+    }
+
     /// Get all replicators.
     async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>>;
 
