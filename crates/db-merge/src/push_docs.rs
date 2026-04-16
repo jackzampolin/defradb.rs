@@ -179,6 +179,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
 
             if !requests.is_empty() {
                 let push_h = handle.clone();
+                let total_blocks = requests.len();
                 let permit = replay_semaphore
                     .clone()
                     .acquire_owned()
@@ -186,25 +187,45 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                     .map_err(|_| "replay semaphore closed before scheduling push".to_string())?;
                 push_handles.push(tokio::spawn(async move {
                     let _permit = permit;
+                    let mut completed_blocks = 0usize;
                     for req in requests {
                         let cid = req.cid.clone();
                         match push_h.send_two_stream_request(peer_id, req).await {
                             Ok(reply) if reply.err_message.is_some() => {
                                 tracing::warn!(
                                     peer_id = %peer_id,
+                                    completed_blocks,
+                                    total_blocks,
                                     cid_len = cid.len(),
                                     error = %reply.err_message.as_deref().unwrap_or("unknown pushlog error"),
-                                    "Existing document replay PushLog was rejected"
+                                    "Existing document replay PushLog was rejected; stopping replay for this document"
                                 );
+                                break;
                             }
-                            Ok(_) => {}
+                            Ok(_) => {
+                                completed_blocks += 1;
+                            }
                             Err(e) => {
-                                tracing::warn!(
-                                    peer_id = %peer_id,
-                                    cid_len = cid.len(),
-                                    error = %e,
-                                    "Existing document replay PushLog failed"
-                                );
+                                if e.is_connection_like() {
+                                    tracing::debug!(
+                                        peer_id = %peer_id,
+                                        completed_blocks,
+                                        total_blocks,
+                                        cid_len = cid.len(),
+                                        error = %e,
+                                        "Existing document replay stopped because the connection became unavailable"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        peer_id = %peer_id,
+                                        completed_blocks,
+                                        total_blocks,
+                                        cid_len = cid.len(),
+                                        error = %e,
+                                        "Existing document replay PushLog failed; stopping replay for this document"
+                                    );
+                                }
+                                break;
                             }
                         }
                     }

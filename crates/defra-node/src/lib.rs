@@ -883,16 +883,9 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                 }
 
                 let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
-                let connected = match transport.connected_peers().await {
-                    Ok(peers) => peers,
-                    Err(error) => {
-                        tracing::debug!(error = %error, "failed to load connected peers for retry");
-                        continue;
-                    }
-                };
-                if !connected.contains(&peer_id) {
-                    continue;
-                }
+                // Iroh request-response can reconnect on demand, so don't
+                // suppress retries based on the peer-map's current
+                // connected_peers snapshot.
 
                 let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
                     Ok(docs) => docs,

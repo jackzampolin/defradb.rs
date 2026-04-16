@@ -10,42 +10,6 @@ use blockstore::Blockstore;
 
 use crate::error::{Error, Result};
 
-/// Find missing blocks by extracting links from the block data (one level).
-///
-/// This parses the block's IPLD structure and checks which linked CIDs
-/// are not present in the blockstore.
-pub async fn find_missing_links<B: Blockstore>(
-    blockstore: &B,
-    block_data: &[u8],
-) -> Result<Vec<Cid>> {
-    extract_references(blockstore, block_data).await
-}
-
-/// Extract IPLD references from block data and check which are missing.
-async fn extract_references<B: Blockstore>(blockstore: &B, block_data: &[u8]) -> Result<Vec<Cid>> {
-    let refs = extract_ipld_links(block_data)?;
-
-    let mut missing = Vec::new();
-    for link_cid in refs {
-        match blockstore.has(&link_cid).await {
-            Ok(true) => {}
-            Ok(false) => {
-                missing.push(link_cid);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    cid = %link_cid,
-                    error = %e,
-                    "Failed to check if block exists, treating as missing"
-                );
-                missing.push(link_cid);
-            }
-        }
-    }
-
-    Ok(missing)
-}
-
 /// Parse IPLD block data and return all referenced CIDs.
 fn extract_ipld_links(block_data: &[u8]) -> Result<Vec<Cid>> {
     use libipld::multihash::{Code, MultihashDigest};

@@ -594,7 +594,6 @@ impl Node {
 
         let retry_store = store.clone();
         let retry_pusher = doc_pusher.clone();
-        let retry_transport = transport.clone();
         let retry_loop_task = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -612,10 +611,8 @@ impl Node {
                         continue;
                     }
                     let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
-                    let connected = retry_transport.connected_peers().await.unwrap_or_default();
-                    if !connected.iter().any(|p| p.as_str() == peer_id.as_str()) {
-                        continue;
-                    }
+                    // Iroh request-response can reconnect on demand, so don't
+                    // gate retries on the peer-map snapshot.
                     let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
                         Ok(d) => d,
                         Err(_) => continue,

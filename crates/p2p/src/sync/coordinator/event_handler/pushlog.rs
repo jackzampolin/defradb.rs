@@ -254,11 +254,19 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 .send_pushlog_response(token, reply)
                 .await
             {
-                tracing::warn!(
-                    peer_id = %peer_id,
-                    error = %e,
-                    "Failed to send two-stream response via token"
-                );
+                if e.is_connection_like() {
+                    tracing::debug!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Peer disconnected before the two-stream response could be sent via token"
+                    );
+                } else {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Failed to send two-stream response via token"
+                    );
+                }
             }
         } else if let Err(e) = self
             .runtime
@@ -266,11 +274,19 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .send_two_stream_response(peer_id, reply)
             .await
         {
-            tracing::warn!(
-                peer_id = %peer_id,
-                error = %e,
-                "Failed to send two-stream response"
-            );
+            if e.is_connection_like() {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    error = %e,
+                    "Peer disconnected before the fallback two-stream response could be sent"
+                );
+            } else {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    error = %e,
+                    "Failed to send two-stream response"
+                );
+            }
         }
     }
 }
