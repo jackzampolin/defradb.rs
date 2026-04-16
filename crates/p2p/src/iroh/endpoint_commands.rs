@@ -563,7 +563,7 @@ pub(super) async fn handle_subscribe(
                                     topic: topic_str_clone.clone(),
                                     message_size: msg.content.len(),
                                     error: e.clone(),
-                                    payload_prefix_hex: payload_info.payload_prefix_hex,
+                                    payload_fingerprint: payload_info.payload_fingerprint,
                                     payload_shape_hint: payload_info.payload_shape_hint,
                                     occurrences: 0,
                                 };
@@ -581,7 +581,7 @@ pub(super) async fn handle_subscribe(
                                         message_size = msg.content.len(),
                                         total_failures = count,
                                         error = %e,
-                                        payload_prefix = %sample.payload_prefix_hex,
+                                        payload_fingerprint = %sample.payload_fingerprint,
                                         payload_shape = %sample.payload_shape_hint,
                                         "Failed to decode Iroh gossip message as PushLogBroadcast or PushLogRequest"
                                     );
@@ -592,7 +592,7 @@ pub(super) async fn handle_subscribe(
                                         message_size = msg.content.len(),
                                         total_failures = count,
                                         error = %e,
-                                        payload_prefix = %sample.payload_prefix_hex,
+                                        payload_fingerprint = %sample.payload_fingerprint,
                                         payload_shape = %sample.payload_shape_hint,
                                         "Failed to decode Iroh gossip message"
                                     );

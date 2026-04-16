@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use acp::ReplicatedDocActorRelationships;
 
@@ -291,12 +292,12 @@ pub enum PushLogGossipPayloadEncoding {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PushLogGossipPayloadDebugInfo {
-    pub payload_prefix_hex: String,
+    pub payload_fingerprint: String,
     pub payload_shape_hint: String,
 }
 
-const GOSSIP_PAYLOAD_PREFIX_BYTES: usize = 24;
 const GOSSIP_TEXT_PREFIX_CHARS: usize = 48;
+const GOSSIP_PAYLOAD_FINGERPRINT_BYTES: usize = 8;
 
 fn truncated_text_prefix(text: &str) -> String {
     let mut prefix = String::new();
@@ -436,10 +437,9 @@ impl PushLogBroadcast {
     }
 
     pub(crate) fn inspect_gossip_payload(payload: &[u8]) -> PushLogGossipPayloadDebugInfo {
+        let digest = Sha256::digest(payload);
         PushLogGossipPayloadDebugInfo {
-            payload_prefix_hex: hex::encode(
-                &payload[..payload.len().min(GOSSIP_PAYLOAD_PREFIX_BYTES)],
-            ),
+            payload_fingerprint: hex::encode(&digest[..GOSSIP_PAYLOAD_FINGERPRINT_BYTES]),
             payload_shape_hint: describe_gossip_payload_shape(payload),
         }
     }
@@ -464,20 +464,26 @@ mod tests {
         assert!(info.payload_shape_hint.starts_with("cbor_map("));
         assert!(info.payload_shape_hint.contains("DocID"));
         assert!(info.payload_shape_hint.contains("CollectionID"));
-        assert!(!info.payload_prefix_hex.is_empty());
+        assert_eq!(
+            info.payload_fingerprint.len(),
+            GOSSIP_PAYLOAD_FINGERPRINT_BYTES * 2
+        );
     }
 
     #[test]
     fn inspect_gossip_payload_identifies_utf8_text_shape() {
         let info = PushLogBroadcast::inspect_gossip_payload(b"hello from some other producer");
         assert!(info.payload_shape_hint.starts_with("utf8_text("));
-        assert!(!info.payload_prefix_hex.is_empty());
+        assert_eq!(
+            info.payload_fingerprint.len(),
+            GOSSIP_PAYLOAD_FINGERPRINT_BYTES * 2
+        );
     }
 
     #[test]
     fn inspect_gossip_payload_identifies_opaque_binary_shape() {
         let info = PushLogBroadcast::inspect_gossip_payload(&[0xff, 0x00, 0x01, 0x02]);
         assert_eq!(info.payload_shape_hint, "opaque_binary(first_byte=0xff)");
-        assert_eq!(info.payload_prefix_hex, "ff000102");
+        assert_eq!(info.payload_fingerprint, "0c252d844a815f83");
     }
 }

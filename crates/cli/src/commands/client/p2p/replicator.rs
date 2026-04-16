@@ -121,15 +121,8 @@ async fn build_explicit_replay_capabilities(
     let source_peer_id = local_info
         .first()
         .ok_or_else(|| Error::Server("local node has no P2P listen address".to_string()))
-        .and_then(|addr| {
-            p2p::parse_multiaddr_with_peer_id(addr)
-                .map(|parsed| parsed.peer_id.to_string())
-                .map_err(|e| Error::Server(e.to_string()))
-        })?;
-    let target_peer_id = p2p::parse_multiaddr_with_peer_id(address)
-        .map_err(|e| Error::Server(e.to_string()))?
-        .peer_id
-        .to_string();
+        .and_then(|addr| extract_public_peer_id(addr.as_str()))?;
+    let target_peer_id = extract_public_peer_id(address)?;
     let identity = raw_identity_from_key_bytes("replicator identity", identity_key_bytes)?;
     let collections_by_name = client.collection_versions().await?;
 
@@ -160,6 +153,51 @@ async fn build_explicit_replay_capabilities(
             })
         })
         .collect()
+}
+
+fn extract_public_peer_id(addr: &str) -> Result<String> {
+    if let Ok(parsed) = p2p::parse_multiaddr_with_peer_id(addr) {
+        return Ok(parsed.peer_id.to_string());
+    }
+
+    #[cfg(feature = "iroh")]
+    {
+        return p2p::iroh::parse_public_peer_addr(addr)
+            .map(|(peer_id, _)| peer_id.to_string())
+            .map_err(|e| Error::Server(e.to_string()));
+    }
+
+    #[cfg(not(feature = "iroh"))]
+    {
+        Err(Error::Server(
+            p2p::parse_multiaddr_with_peer_id(addr)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "invalid peer address".to_string()),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_public_peer_id;
+
+    #[test]
+    fn extract_public_peer_id_accepts_libp2p_multiaddr() {
+        let peer_id = "12D3KooWM111111111111111111111111111111111111111111111";
+        let addr = format!("/ip4/127.0.0.1/tcp/9000/p2p/{peer_id}");
+
+        assert_eq!(extract_public_peer_id(&addr).unwrap(), peer_id);
+    }
+
+    #[cfg(feature = "iroh")]
+    #[test]
+    fn extract_public_peer_id_accepts_iroh_public_addr() {
+        let peer_id = "ae58ff8833241ac82d6ff7611046ed67b5072d142c588d0063e942d9a75502b6";
+        let addr = format!("127.0.0.1:9000/p2p/{peer_id}");
+
+        assert_eq!(extract_public_peer_id(&addr).unwrap(), peer_id);
+    }
 }
 
 impl P2pReplicatorDeleteArgs {

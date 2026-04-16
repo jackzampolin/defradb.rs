@@ -180,7 +180,7 @@ impl<S: Store> P2PHost<S> {
                             topic: topic.clone(),
                             message_size: message.data.len(),
                             error: e.clone(),
-                            payload_prefix_hex: payload_info.payload_prefix_hex,
+                            payload_fingerprint: payload_info.payload_fingerprint,
                             payload_shape_hint: payload_info.payload_shape_hint,
                             occurrences: 0,
                         };
@@ -197,7 +197,7 @@ impl<S: Store> P2PHost<S> {
                                 message_size = message.data.len(),
                                 total_failures = count,
                                 error = %e,
-                                payload_prefix = %sample.payload_prefix_hex,
+                                payload_fingerprint = %sample.payload_fingerprint,
                                 payload_shape = %sample.payload_shape_hint,
                                 "Failed to decode gossipsub message as PushLogBroadcast or PushLogRequest"
                             );
@@ -208,7 +208,7 @@ impl<S: Store> P2PHost<S> {
                                 message_size = message.data.len(),
                                 total_failures = count,
                                 error = %e,
-                                payload_prefix = %sample.payload_prefix_hex,
+                                payload_fingerprint = %sample.payload_fingerprint,
                                 payload_shape = %sample.payload_shape_hint,
                                 "Failed to decode gossipsub message"
                             );

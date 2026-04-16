@@ -72,10 +72,10 @@ pub fn parse_public_peer_addr(addr: &str) -> Result<(PeerId, Vec<PeerAddr>)> {
 
 /// Render raw iroh endpoint listen addresses into stable, connectable public strings.
 ///
-/// The returned list prefers endpoint tickets first because they carry the
-/// most complete dial hints and stay valid across interface churn. Direct
-/// addresses are included after tickets, followed by a bare endpoint ID as a
-/// stable identity-only reference.
+/// The returned list keeps direct addresses first for compatibility with
+/// existing callers that treat the first entry as a multiaddr-like dial
+/// address. Endpoint tickets are included after direct addresses, followed by
+/// a bare endpoint ID as a stable identity-only reference.
 pub fn format_public_listen_addrs(peer_id: &PeerId, raw_addrs: &[PeerAddr]) -> Vec<String> {
     let mut direct = Vec::new();
     let mut tickets = Vec::new();
@@ -103,10 +103,10 @@ pub fn format_public_listen_addrs(peer_id: &PeerId, raw_addrs: &[PeerAddr]) -> V
         }
     }
 
-    let mut formatted = tickets;
-    for addr in direct {
-        if !formatted.contains(&addr) {
-            formatted.push(addr);
+    let mut formatted = direct;
+    for ticket in tickets {
+        if !formatted.contains(&ticket) {
+            formatted.push(ticket);
         }
     }
     if !formatted.contains(&peer_id.to_string()) {
@@ -122,9 +122,12 @@ pub fn format_public_listen_addrs(peer_id: &PeerId, raw_addrs: &[PeerAddr]) -> V
 /// the bare endpoint ID fallback because callers asked for a concrete address
 /// rather than an identity-only hint.
 pub fn best_shareable_public_addr(peer_id: &PeerId, raw_addrs: &[PeerAddr]) -> Option<String> {
-    format_public_listen_addrs(peer_id, raw_addrs)
-        .into_iter()
-        .find(|addr| is_ticket_string(addr) || addr.contains("/p2p/"))
+    let formatted = format_public_listen_addrs(peer_id, raw_addrs);
+    formatted
+        .iter()
+        .find(|addr| is_ticket_string(addr))
+        .cloned()
+        .or_else(|| formatted.into_iter().find(|addr| addr.contains("/p2p/")))
 }
 
 /// Build an [`EndpointAddr`] from a peer id and a list of dial hints.
@@ -217,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn format_public_addresses_prefers_ticket_before_direct_addrs() {
+    fn format_public_addresses_preserve_direct_first_for_legacy_callers() {
         let peer_id = PeerId::new(endpoint_id().to_string());
         let ticket = EndpointTicket::from(
             EndpointAddr::new(endpoint_id()).with_ip_addr("127.0.0.1:9999".parse().unwrap()),
@@ -233,8 +236,9 @@ mod tests {
             ],
         );
 
-        assert_eq!(formatted[0], ticket);
+        assert_eq!(formatted[0], direct);
         assert!(formatted.contains(&direct));
+        assert!(formatted.contains(&ticket));
         assert!(formatted.contains(&peer_id.to_string()));
     }
 

@@ -59,7 +59,7 @@ pub struct GossipDecodeFailureSample {
     pub topic: String,
     pub message_size: usize,
     pub error: String,
-    pub payload_prefix_hex: String,
+    pub payload_fingerprint: String,
     pub payload_shape_hint: String,
     pub occurrences: u64,
 }
@@ -86,7 +86,7 @@ pub(crate) fn record_gossip_decode_failure_sample(mut sample: GossipDecodeFailur
         existing.transport == sample.transport
             && existing.peer_id == sample.peer_id
             && existing.topic == sample.topic
-            && existing.payload_prefix_hex == sample.payload_prefix_hex
+            && existing.payload_fingerprint == sample.payload_fingerprint
             && existing.payload_shape_hint == sample.payload_shape_hint
     }) {
         let mut existing = recent
@@ -221,7 +221,7 @@ mod tests {
             topic: topic.clone(),
             message_size: 128,
             error: "Hit the end of buffer".to_string(),
-            payload_prefix_hex: prefix.clone(),
+            payload_fingerprint: prefix.clone(),
             payload_shape_hint: "cbor_map(keys=[Unexpected])".to_string(),
             occurrences: 0,
         };
@@ -232,7 +232,7 @@ mod tests {
         assert!(snapshot.recent_gossip_decode_failures.iter().any(|entry| {
             entry.transport == GossipTransport::Iroh
                 && entry.topic == topic
-                && entry.payload_prefix_hex == prefix
+                && entry.payload_fingerprint == prefix
                 && entry.occurrences >= 1
         }));
     }

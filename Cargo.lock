@@ -8846,6 +8846,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_cbor",
+ "sha2 0.10.9",
  "storage",
  "thiserror 2.0.18",
  "tokio",
