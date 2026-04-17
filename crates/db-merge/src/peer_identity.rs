@@ -14,7 +14,8 @@
 //! - Ed25519 (most common for libp2p)
 //! - secp256k1 (used by some networks)
 
-use crypto::{create_did_key, KeyType};
+use crypto::keys::PublicKey as _;
+use crypto::{create_did_key, KeyType, Secp256k1PublicKey};
 use identity::Did;
 use libp2p::identity::PublicKey;
 use libp2p::PeerId;
@@ -84,33 +85,43 @@ pub fn peer_id_to_did(peer_id: &PeerId) -> Result<Did, PeerIdentityError> {
 ///
 /// The corresponding DID, or an error if the key type is unsupported.
 pub fn public_key_to_did(public_key: &PublicKey) -> Result<Did, PeerIdentityError> {
-    let (key_type, key_bytes) = match public_key.key_type() {
+    let did_string = match public_key.key_type() {
         libp2p::identity::KeyType::Ed25519 => {
             let encoded = public_key.encode_protobuf();
-            // Ed25519 protobuf encoding: type (1 byte) + length (1 byte) + key (32 bytes)
-            // We need just the raw 32-byte key
+            // libp2p protobuf PublicKey for Ed25519:
+            //   0x08 0x01       (field 1, KeyType = Ed25519)
+            //   0x12 0x20       (field 2, Data length 32)
+            //   <32 raw bytes>
             if encoded.len() < 36 {
                 return Err(PeerIdentityError::KeyExtraction(
                     "Ed25519 key too short".to_string(),
                 ));
             }
-            (KeyType::Ed25519, encoded[4..36].to_vec())
+            create_did_key(KeyType::Ed25519, &encoded[4..36])
+                .map_err(|e| PeerIdentityError::DidCreation(e.to_string()))?
         }
         libp2p::identity::KeyType::Secp256k1 => {
+            // Go's defradb/crypto/keys.go:276-282 derives the secp256k1 DID
+            // from the uncompressed SEC1 public key (65 bytes, 0x04 prefix).
+            // libp2p hands us the compressed 33-byte form via protobuf, so
+            // route through crypto::Secp256k1PublicKey which decompresses
+            // the point and reuses the same createDIDKey encoding Go uses.
             let encoded = public_key.encode_protobuf();
-            // secp256k1 protobuf encoding varies, extract the key portion
-            // The format is: type varint + data
-            if encoded.len() < 35 {
+            // libp2p protobuf PublicKey for secp256k1:
+            //   0x08 0x02       (field 1, KeyType = Secp256k1)
+            //   0x12 0x21       (field 2, Data length 33)
+            //   <33 compressed SEC1 bytes>
+            if encoded.len() < 37 {
                 return Err(PeerIdentityError::KeyExtraction(
                     "secp256k1 key too short".to_string(),
                 ));
             }
-            // For secp256k1, we need uncompressed format (65 bytes) for DID
-            // libp2p uses compressed format (33 bytes), need to expand
-            // For now, return error - this needs proper implementation
-            return Err(PeerIdentityError::UnsupportedKeyType(
-                "secp256k1 DID conversion requires uncompressed key expansion".to_string(),
-            ));
+            let compressed = &encoded[4..37];
+            let crypto_key = Secp256k1PublicKey::from_bytes(compressed)
+                .map_err(|e| PeerIdentityError::KeyExtraction(e.to_string()))?;
+            crypto_key
+                .did()
+                .map_err(|e| PeerIdentityError::DidCreation(e.to_string()))?
         }
         other => {
             return Err(PeerIdentityError::UnsupportedKeyType(format!(
@@ -119,9 +130,6 @@ pub fn public_key_to_did(public_key: &PublicKey) -> Result<Did, PeerIdentityErro
             )));
         }
     };
-
-    let did_string = create_did_key(key_type, &key_bytes)
-        .map_err(|e| PeerIdentityError::DidCreation(e.to_string()))?;
 
     Did::new(did_string).map_err(PeerIdentityError::DidParse)
 }
@@ -150,6 +158,61 @@ pub fn create_peer_to_did_mapper() -> impl Fn(&str) -> Option<Did> + Send + Sync
 mod tests {
     use super::*;
     use libp2p::identity::Keypair;
+
+    // Go's defradb/crypto/keys.go:276-282 derives the secp256k1 DID from
+    // the uncompressed SEC1 public key. `crypto::Secp256k1PublicKey::did`
+    // already does the equivalent. Peer-identity conversion must produce
+    // the same DID starting from libp2p's compressed key so Rust and Go
+    // agree on the DID for the same peer.
+    #[test]
+    fn test_secp256k1_peer_to_did_matches_crypto_did() {
+        let libp2p_keypair = Keypair::generate_secp256k1();
+        let libp2p_pk = libp2p_keypair.public();
+        let peer_id = PeerId::from_public_key(&libp2p_pk);
+
+        let did_from_peer_id =
+            peer_id_to_did(&peer_id).expect("secp256k1 peer_id must convert to did");
+        let did_from_public_key =
+            public_key_to_did(&libp2p_pk).expect("secp256k1 public key must convert to did");
+
+        assert_eq!(
+            did_from_peer_id, did_from_public_key,
+            "peer_id and public_key conversions must agree"
+        );
+        assert!(
+            did_from_peer_id.as_str().starts_with("did:key:z"),
+            "secp256k1 DID must start with did:key:z, got {}",
+            did_from_peer_id.as_str()
+        );
+
+        // Sanity: parsing the DID back must round-trip to a secp256k1
+        // key type with uncompressed SEC1 bytes (65 bytes starting 0x04).
+        let (kt, bytes) =
+            crypto::parse_did_key(did_from_peer_id.as_str()).expect("DID must round-trip");
+        assert_eq!(kt, crypto::KeyType::Secp256k1);
+        assert_eq!(bytes.len(), 65);
+        assert_eq!(bytes[0], 0x04);
+    }
+
+    #[test]
+    fn test_secp256k1_peer_to_did_is_deterministic() {
+        let libp2p_keypair = Keypair::generate_secp256k1();
+        let peer_id = PeerId::from_public_key(&libp2p_keypair.public());
+
+        let did1 = peer_id_to_did(&peer_id).unwrap();
+        let did2 = peer_id_to_did(&peer_id).unwrap();
+        assert_eq!(did1, did2);
+    }
+
+    #[test]
+    fn test_secp256k1_mapper_function() {
+        let libp2p_keypair = Keypair::generate_secp256k1();
+        let peer_id = PeerId::from_public_key(&libp2p_keypair.public());
+
+        let mapper = create_peer_to_did_mapper();
+        let did = mapper(&peer_id.to_string()).expect("secp256k1 peer must map to DID");
+        assert!(did.as_str().starts_with("did:key:z"));
+    }
 
     #[test]
     fn test_ed25519_peer_to_did() {
