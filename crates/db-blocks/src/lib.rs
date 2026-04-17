@@ -59,6 +59,20 @@ pub(crate) fn compute_signature(
         return Ok(None);
     }
 
+    // Go's internal/core/block/signing.go:74-79 rejects any key type other
+    // than secp256k1 or Ed25519 with ErrUnsupportedKeyForSigning. Produce
+    // the same error so a Rust node never emits a signed block that a Go
+    // node would refuse to verify (signature.go:186-193).
+    if matches!(
+        signer.key_type,
+        defra_core::signing::SigningKeyType::Secp256r1
+    ) {
+        return Err(format!(
+            "unsupported key type for block signing: {} (only secp256k1 and ed25519 are supported, matching Go)",
+            signer.key_type
+        ));
+    }
+
     // Serialize the block (without signature) to get the bytes to sign
     let block_bytes = block
         .to_dag_cbor()
@@ -82,14 +96,6 @@ pub(crate) fn compute_signature(
                 let private_key =
                     crypto::Secp256k1PrivateKey::from_bytes(&signer.private_key_bytes)
                         .map_err(|e| format!("Failed to load secp256k1 private key: {}", e))?;
-                private_key
-                    .sign(&block_bytes)
-                    .map_err(|e| format!("Failed to sign block: {}", e))?
-            }
-            defra_core::signing::SigningKeyType::Secp256r1 => {
-                let private_key =
-                    crypto::Secp256r1PrivateKey::from_bytes(&signer.private_key_bytes)
-                        .map_err(|e| format!("Failed to load secp256r1 private key: {}", e))?;
                 private_key
                     .sign(&block_bytes)
                     .map_err(|e| format!("Failed to sign block: {}", e))?
