@@ -59,18 +59,21 @@ pub(crate) fn compute_signature(
         return Ok(None);
     }
 
-    // Go's internal/core/block/signing.go:74-79 rejects any key type other
-    // than secp256k1 or Ed25519 with ErrUnsupportedKeyForSigning. Produce
-    // the same error so a Rust node never emits a signed block that a Go
-    // node would refuse to verify (signature.go:186-193).
-    if matches!(
-        signer.key_type,
-        defra_core::signing::SigningKeyType::Secp256r1
-    ) {
-        return Err(format!(
-            "unsupported key type for block signing: {} (only secp256k1 and ed25519 are supported, matching Go)",
-            signer.key_type
-        ));
+    // Only secp256k1, Ed25519, and BLS are supported for block signing.
+    // secp256k1 and Ed25519 match Go's internal/core/block/signing.go:74-79
+    // and signature.go:186-193. BLS is a Rust-specific extension wired
+    // through a remote signer (Orbis ring); the local-signing match below
+    // still rejects local BLS with a clearer error.
+    match signer.key_type {
+        defra_core::signing::SigningKeyType::Secp256k1
+        | defra_core::signing::SigningKeyType::Ed25519
+        | defra_core::signing::SigningKeyType::Bls => {}
+        other => {
+            return Err(format!(
+                "unsupported key type for signing. KeyType: {}",
+                other
+            ));
+        }
     }
 
     // Serialize the block (without signature) to get the bytes to sign
