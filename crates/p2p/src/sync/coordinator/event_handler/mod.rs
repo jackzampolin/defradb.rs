@@ -66,6 +66,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     fn handle_peer_subscribed(&self, peer_id: PeerId, topic: String) {
         tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer subscribed to topic");
+        // iroh gossip neighbors can appear before the coordinator has observed a
+        // direct PeerConnected event. Treat an authenticated subscription event
+        // as proof that the peer is live so subsequent access checks use a
+        // consistent view of peer connectivity.
+        self.access.peer_state.peer_connected(peer_id.as_str());
         self.access
             .peer_state
             .peer_subscribed(peer_id.as_str(), topic);

@@ -23,6 +23,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             "Received GossipSub message"
         );
 
+        // Gossip delivery already identifies the sending peer at the transport
+        // layer. Record that authenticated liveness before checking access so
+        // iroh gossip messages don't race ahead of PeerConnected bookkeeping.
+        self.access
+            .peer_state
+            .peer_connected(propagation_source.as_str());
+
         // Access control check
         if let Err(e) = self
             .check_access_str(propagation_source.as_str(), &message.collection_id)

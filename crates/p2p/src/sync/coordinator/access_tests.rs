@@ -730,6 +730,68 @@ async fn pushlog_connected_peer_is_not_marked_explicit_replicator() {
 }
 
 #[tokio::test]
+async fn gossip_controlled_mode_allows_authenticated_sender_without_prior_peer_connected() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state.clone());
+
+    coordinator
+        .handle_transport_event(gossip_event(peer.clone(), "collection1"))
+        .await
+        .unwrap();
+
+    assert!(
+        peer_state.is_connected(peer.as_str()),
+        "authenticated gossip sender should be tracked as connected before access checks"
+    );
+
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+            assert!(
+                !is_explicit_replicator,
+                "authenticated gossip sender must not gain explicit replicator trust"
+            );
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn peer_subscribed_event_marks_peer_connected() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state.clone());
+
+    coordinator
+        .handle_transport_event(TransportEvent::PeerSubscribed {
+            peer_id: peer.clone(),
+            topic: "collection1".to_string(),
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        peer_state.is_connected(peer.as_str()),
+        "peer subscription should establish connected state for access checks"
+    );
+    assert_eq!(
+        peer_state.peers_for_collection("collection1"),
+        vec![peer.as_str().to_string()]
+    );
+}
+
+#[tokio::test]
 async fn pushlog_registered_replicator_is_marked_explicit_replicator() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
