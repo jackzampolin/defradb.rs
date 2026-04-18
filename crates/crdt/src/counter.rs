@@ -385,6 +385,11 @@ impl Counter {
     /// must be seeded from the document value to ensure correct accumulation.
     ///
     /// Returns true if seeding was performed, false if already initialized.
+    ///
+    /// NOTE: per #847, counter merge is unconditional and there is no nonce
+    /// tracking. Any future seed variant (e.g. Float32 once added by #848)
+    /// MUST NOT call a `mark_nonce(..)` helper — that would leak dead markers
+    /// into the datastore and reintroduce the dedup contract this PR removes.
     pub async fn seed_if_uninitialized_int64(
         &self,
         rw: &mut dyn ReaderWriter,
