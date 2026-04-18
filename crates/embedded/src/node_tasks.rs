@@ -54,13 +54,18 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
                 _ => {}
             }
 
+            let transport_event = p2p::convert_host_event(event);
+            if transport_event_requires_inline_ordering(&transport_event) {
+                if let Err(error) = coordinator.handle_transport_event(transport_event).await {
+                    tracing::error!(error = %error, "error handling libp2p event");
+                }
+                continue;
+            }
+
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             let coordinator = coordinator.clone();
             tokio::spawn(async move {
-                if let Err(error) = coordinator
-                    .handle_transport_event(p2p::convert_host_event(event))
-                    .await
-                {
+                if let Err(error) = coordinator.handle_transport_event(transport_event).await {
                     tracing::error!(error = %error, "error handling libp2p event");
                 }
                 drop(permit);
@@ -102,6 +107,13 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
                 _ => {}
             }
 
+            if transport_event_requires_inline_ordering(&event) {
+                if let Err(error) = coordinator.handle_transport_event(event).await {
+                    tracing::error!(error = %error, "error handling iroh event");
+                }
+                continue;
+            }
+
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             let coordinator = coordinator.clone();
             tokio::spawn(async move {
@@ -112,6 +124,18 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
             });
         }
     })
+}
+
+fn transport_event_requires_inline_ordering<ResponseToken>(
+    event: &p2p::TransportEvent<ResponseToken>,
+) -> bool {
+    matches!(
+        event,
+        p2p::TransportEvent::PeerConnected(_)
+            | p2p::TransportEvent::PeerDisconnected(_)
+            | p2p::TransportEvent::PeerSubscribed { .. }
+            | p2p::TransportEvent::PeerUnsubscribed { .. }
+    )
 }
 
 pub(crate) fn spawn_replication_loop<B, T, S>(
@@ -372,4 +396,65 @@ pub(crate) fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transport_event_requires_inline_ordering;
+
+    #[test]
+    fn transport_control_plane_events_preserve_ordering() {
+        let peer = p2p::transport::PeerId::new("peer".to_string());
+        let topic = "topic".to_string();
+
+        assert!(transport_event_requires_inline_ordering(
+            &p2p::TransportEvent::<()>::PeerConnected(peer.clone())
+        ));
+        assert!(transport_event_requires_inline_ordering(
+            &p2p::TransportEvent::<()>::PeerDisconnected(peer.clone())
+        ));
+        assert!(transport_event_requires_inline_ordering(
+            &p2p::TransportEvent::<()>::PeerSubscribed {
+                peer_id: peer.clone(),
+                topic: topic.clone(),
+            }
+        ));
+        assert!(transport_event_requires_inline_ordering(
+            &p2p::TransportEvent::<()>::PeerUnsubscribed {
+                peer_id: peer,
+                topic,
+            }
+        ));
+    }
+
+    #[test]
+    fn transport_data_plane_events_remain_parallelizable() {
+        let peer = p2p::transport::PeerId::new("peer".to_string());
+        let cid = cid::Cid::try_from("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku")
+            .expect("valid cid");
+        let message = p2p::message::PushLogBroadcast {
+            cid: cid.to_bytes().into(),
+            creator: "creator".to_string(),
+            doc_id: "doc".to_string(),
+            collection_id: "collection".to_string(),
+            block: bytes::Bytes::from_static(b"block"),
+            acp_actor_relationships: None,
+        };
+
+        assert!(!transport_event_requires_inline_ordering(
+            &p2p::TransportEvent::<()>::GossipMessage {
+                propagation_source: peer.clone(),
+                message_id: p2p::transport::MessageId::new("msg".to_string()),
+                topic: "topic".to_string(),
+                message,
+            }
+        ));
+        assert!(!transport_event_requires_inline_ordering(
+            &p2p::TransportEvent::<()>::BitswapBlockReceived {
+                query_id: p2p::QueryId(1),
+                cid,
+                data: vec![1, 2, 3],
+            }
+        ));
+    }
 }
