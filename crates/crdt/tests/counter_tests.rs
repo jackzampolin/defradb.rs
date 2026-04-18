@@ -826,12 +826,10 @@ async fn test_counter_float32_accumulation_uses_f32_precision() {
 
     let mut txn = store.new_txn(false).await.unwrap();
 
-    let d1 = CounterDelta::new_float32(
-        b"doc1".to_vec(), "score".into(), 1, 1, "v1".into(), 1.1f32,
-    ).unwrap();
-    let d2 = CounterDelta::new_float32(
-        b"doc1".to_vec(), "score".into(), 2, 2, "v1".into(), 2.2f32,
-    ).unwrap();
+    let d1 = CounterDelta::new_float32(b"doc1".to_vec(), "score".into(), 1, 1, "v1".into(), 1.1f32)
+        .unwrap();
+    let d2 = CounterDelta::new_float32(b"doc1".to_vec(), "score".into(), 2, 2, "v1".into(), 2.2f32)
+        .unwrap();
 
     counter.merge(&mut *txn, &ctx, &d1).await.unwrap();
     counter.merge(&mut *txn, &ctx, &d2).await.unwrap();
