@@ -1,13 +1,20 @@
 //! Tests for the wire message types module.
 
+use acp::{ReplicatedActorRelationship, ReplicatedDocActorRelationships};
 use bytes::Bytes;
-use p2p::message::{Message, MetaData, PushLogBroadcast, PushLogReply, PushLogRequest};
+use p2p::message::{
+    Message, MetaData, PushLogBroadcast, PushLogGossipPayloadEncoding, PushLogReply, PushLogRequest,
+};
 use p2p::protocol::MESSAGE_VERSION;
 
 fn encode_with_ciborium<T: serde::Serialize>(value: &T) -> Vec<u8> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes).expect("failed to encode with ciborium");
     bytes
+}
+
+fn encode_with_postcard<T: serde::Serialize>(value: &T) -> Vec<u8> {
+    postcard::to_allocvec(value).expect("failed to encode with postcard")
 }
 
 fn decode_with_ciborium<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> T {
@@ -17,6 +24,17 @@ fn decode_with_ciborium<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> T {
 fn has_text_key(map: &[(ciborium::Value, ciborium::Value)], key: &str) -> bool {
     map.iter()
         .any(|(candidate, _)| candidate == &ciborium::Value::Text(key.to_string()))
+}
+
+fn sample_actor_relationships() -> ReplicatedDocActorRelationships {
+    ReplicatedDocActorRelationships {
+        policy_id: "policy-1".to_string(),
+        resource_name: "documents".to_string(),
+        relationships: vec![ReplicatedActorRelationship {
+            relation: "reader".to_string(),
+            actor: "did:key:z6Mkexample".to_string(),
+        }],
+    }
 }
 
 #[test]
@@ -381,4 +399,61 @@ fn test_pushlog_broadcast_to_request() {
     assert_eq!(request.block, broadcast.block);
     // Request should have default metadata
     assert_eq!(request.metadata.version, MESSAGE_VERSION);
+}
+
+#[test]
+fn test_decode_gossip_payload_from_postcard_broadcast() {
+    let broadcast = PushLogBroadcast::new(
+        "doc-postcard-broadcast".to_string(),
+        Bytes::from(vec![1, 2, 3, 4]),
+        "collection-postcard-broadcast".to_string(),
+        "creator-postcard-broadcast".to_string(),
+        Bytes::from(vec![5, 6, 7, 8]),
+        Some(sample_actor_relationships()),
+    );
+
+    let encoded = encode_with_postcard(&broadcast);
+    let (decoded, encoding) =
+        PushLogBroadcast::decode_gossip_payload(&encoded).expect("decode failed");
+
+    assert_eq!(encoding, PushLogGossipPayloadEncoding::PostcardBroadcast);
+    assert_eq!(decoded, broadcast);
+}
+
+#[test]
+fn test_decode_gossip_payload_from_cbor_broadcast() {
+    let broadcast = PushLogBroadcast::new(
+        "doc-cbor-broadcast".to_string(),
+        Bytes::from(vec![10, 20, 30]),
+        "collection-cbor-broadcast".to_string(),
+        "creator-cbor-broadcast".to_string(),
+        Bytes::from(vec![40, 50, 60]),
+        None,
+    );
+
+    let encoded = encode_with_ciborium(&broadcast);
+    let (decoded, encoding) =
+        PushLogBroadcast::decode_gossip_payload(&encoded).expect("decode failed");
+
+    assert_eq!(encoding, PushLogGossipPayloadEncoding::CborBroadcast);
+    assert_eq!(decoded, broadcast);
+}
+
+#[test]
+fn test_decode_gossip_payload_from_cbor_request() {
+    let mut request = PushLogRequest::new(
+        "doc-cbor-request".to_string(),
+        Bytes::from(vec![11, 22, 33]),
+        "collection-cbor-request".to_string(),
+        "creator-cbor-request".to_string(),
+        Bytes::from(vec![44, 55, 66]),
+    );
+    request.acp_actor_relationships = Some(sample_actor_relationships());
+
+    let encoded = encode_with_ciborium(&request);
+    let (decoded, encoding) =
+        PushLogBroadcast::decode_gossip_payload(&encoded).expect("decode failed");
+
+    assert_eq!(encoding, PushLogGossipPayloadEncoding::CborRequest);
+    assert_eq!(decoded, PushLogBroadcast::from_request(&request));
 }

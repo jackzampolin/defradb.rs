@@ -19,6 +19,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         self.query_to_root.write().insert(query_id, root_cid);
     }
 
+    /// Remove and return the root CID associated with a Bitswap query.
+    pub fn take_query_root(&self, query_id: QueryId) -> Option<Cid> {
+        self.query_to_root.write().remove(&query_id)
+    }
+
     /// Handle Bitswap query completion.
     ///
     /// Called when a Bitswap sync completes (success or failure).

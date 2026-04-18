@@ -523,10 +523,19 @@ pub(super) async fn handle_subscribe(
             match result {
                 Ok(event) => match event {
                     iroh_gossip::api::Event::Received(msg) => {
-                        match postcard::from_bytes::<crate::message::PushLogBroadcast>(&msg.content)
+                        match crate::message::PushLogBroadcast::decode_gossip_payload(&msg.content)
                         {
-                            Ok(broadcast) => {
+                            Ok((broadcast, encoding)) => {
                                 let sender_peer_id = endpoint_id_to_peer_id(&msg.delivered_from);
+                                if encoding != crate::message::PushLogGossipPayloadEncoding::PostcardBroadcast {
+                                    debug!(
+                                        peer_id = %sender_peer_id,
+                                        topic = %topic_str_clone,
+                                        message_size = msg.content.len(),
+                                        ?encoding,
+                                        "Decoded Iroh gossip message via compatibility fallback"
+                                    );
+                                }
                                 let msg_id = MessageId::new(uuid::Uuid::new_v4().to_string());
                                 if event_tx
                                     .send(TransportEvent::GossipMessage {
@@ -543,23 +552,49 @@ pub(super) async fn handle_subscribe(
                                 }
                             }
                             Err(e) => {
+                                let payload_info =
+                                    crate::message::PushLogBroadcast::inspect_gossip_payload(
+                                        &msg.content,
+                                    );
+                                let sender_peer_id = endpoint_id_to_peer_id(&msg.delivered_from);
+                                let sample = crate::sync::GossipDecodeFailureSample {
+                                    transport: crate::sync::GossipTransport::Iroh,
+                                    peer_id: sender_peer_id.to_string(),
+                                    topic: topic_str_clone.clone(),
+                                    message_size: msg.content.len(),
+                                    error: e.clone(),
+                                    payload_fingerprint: payload_info.payload_fingerprint,
+                                    payload_shape_hint: payload_info.payload_shape_hint,
+                                    occurrences: 0,
+                                };
                                 // Exponential-backoff sampling: warn on the
                                 // 1st, 2nd, 4th, 8th... occurrence; remainder
                                 // at debug. Counter is process-global and
                                 // surfaced via SyncDiagnostics (issue #858).
-                                let count = crate::sync::record_gossip_decode_failure();
+                                let count = crate::sync::record_gossip_decode_failure_sample(
+                                    sample.clone(),
+                                );
                                 if count == 1 || count.is_power_of_two() {
                                     warn!(
+                                        peer_id = %sender_peer_id,
+                                        topic = %topic_str_clone,
+                                        message_size = msg.content.len(),
                                         total_failures = count,
                                         error = %e,
-                                        "Failed to decode gossip message \
-                                         (version skew or malformed sender?)"
+                                        payload_fingerprint = %sample.payload_fingerprint,
+                                        payload_shape = %sample.payload_shape_hint,
+                                        "Failed to decode Iroh gossip message as PushLogBroadcast or PushLogRequest"
                                     );
                                 } else {
                                     debug!(
+                                        peer_id = %sender_peer_id,
+                                        topic = %topic_str_clone,
+                                        message_size = msg.content.len(),
                                         total_failures = count,
                                         error = %e,
-                                        "Failed to decode gossip message"
+                                        payload_fingerprint = %sample.payload_fingerprint,
+                                        payload_shape = %sample.payload_shape_hint,
+                                        "Failed to decode Iroh gossip message"
                                     );
                                 }
                             }

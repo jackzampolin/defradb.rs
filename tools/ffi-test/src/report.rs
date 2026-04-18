@@ -95,7 +95,7 @@ async fn enforce_retention(branch: &str, package: &str) -> Result<()> {
     }
 
     // Sort by timestamp, newest first
-    reports.sort_by(|a, b| b.1.cmp(&a.1));
+    reports.sort_by_key(|r| std::cmp::Reverse(r.1));
 
     // Delete oldest reports beyond retention count
     for (path, _) in reports.into_iter().skip(REPORT_RETENTION_COUNT) {
@@ -226,7 +226,7 @@ pub async fn load_for_diff(branch: &str, package: &str, count: usize) -> Result<
     }
 
     // Sort by timestamp, newest first
-    reports_with_ts.sort_by(|a, b| b.1.cmp(&a.1));
+    reports_with_ts.sort_by_key(|r| std::cmp::Reverse(r.1));
 
     Ok(reports_with_ts
         .into_iter()

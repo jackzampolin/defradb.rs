@@ -9,6 +9,14 @@ use db_blocks::BlockResult;
 
 pub(crate) const BROADCAST_MAX_RETRIES: u32 = 10;
 
+fn is_expected_fire_and_forget_failure(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("insufficientpeers")
+        || lower.contains("channel send error")
+        || lower.contains("channel receive error")
+        || p2p::error::Error::is_connection_loss_reason(&lower)
+}
+
 pub(crate) fn broadcast_retry_delay_ms(
     err_str: &str,
     connected_peers: usize,
@@ -36,10 +44,17 @@ async fn connected_peer_count<B: Blockstore + 'static, T: P2PTransport>(
 /// Log broadcast failures at error level for observability in fire-and-forget paths.
 pub(crate) fn log_broadcast_failure(status: &BroadcastStatus) {
     if let BroadcastStatus::Failed(err) = status {
-        tracing::error!(
-            error = %err,
-            "Fire-and-forget broadcast failed — document committed locally but NOT replicated"
-        );
+        if is_expected_fire_and_forget_failure(err) {
+            tracing::warn!(
+                error = %err,
+                "Fire-and-forget broadcast could not reach peers; document committed locally but was not replicated"
+            );
+        } else {
+            tracing::error!(
+                error = %err,
+                "Fire-and-forget broadcast failed — document committed locally but NOT replicated"
+            );
+        }
     }
 }
 

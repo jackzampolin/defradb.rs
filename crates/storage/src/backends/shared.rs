@@ -107,6 +107,7 @@ impl CallbackManager {
             + self.on_discard_async.lock().len()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn counts(&self) -> CallbackCounts {
         CallbackCounts {
             on_success: self.on_success.lock().len(),

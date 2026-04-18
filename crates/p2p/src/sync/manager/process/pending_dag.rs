@@ -13,6 +13,15 @@ use crate::sync::manager::pending::{PendingDag, MAX_PENDING_DAGS, PENDING_DAG_TT
 
 use super::SyncManager;
 
+#[derive(Debug, Clone)]
+pub struct PendingDagFetchFailure {
+    pub doc_id: String,
+    pub collection_id: String,
+    pub source_peer: Option<String>,
+    pub missing_count: usize,
+    pub fetch_failures: u32,
+}
+
 impl<B: Blockstore + 'static> SyncManager<B> {
     /// Get the pending DAGs count (for testing/monitoring).
     pub fn pending_dag_count(&self) -> usize {
@@ -50,6 +59,34 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .read()
             .get(root_cid)
             .and_then(|dag| dag.source_peer.clone())
+    }
+
+    /// Record a provider-exhaustion failure for a pending DAG and return a
+    /// snapshot suitable for rate-limited logging.
+    pub fn record_pending_dag_fetch_failure(
+        &self,
+        root_cid: &Cid,
+        error: &str,
+    ) -> Option<PendingDagFetchFailure> {
+        let mut pending = self.pending_dags.write();
+        let dag = pending.get_mut(root_cid)?;
+        dag.fetch_failures = dag.fetch_failures.saturating_add(1);
+        dag.last_fetch_error = Some(error.to_string());
+        Some(PendingDagFetchFailure {
+            doc_id: dag.doc_id.clone(),
+            collection_id: dag.collection_id.clone(),
+            source_peer: dag.source_peer.clone(),
+            missing_count: dag.missing.len(),
+            fetch_failures: dag.fetch_failures,
+        })
+    }
+
+    /// Clear the remembered fetch-failure state for a pending DAG.
+    pub fn clear_pending_dag_fetch_failures(&self, root_cid: &Cid) {
+        if let Some(dag) = self.pending_dags.write().get_mut(root_cid) {
+            dag.fetch_failures = 0;
+            dag.last_fetch_error = None;
+        }
     }
 
     /// Retry pending DAGs that were waiting on `cid`.
@@ -118,22 +155,26 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         if !self.insert_pending_dag(
             root_cid,
             PendingDag {
-                doc_id,
+                doc_id: doc_id.clone(),
                 // DocSync protocol doesn't include collection_id or creator.
                 // The merge handler will extract these from the block data.
                 collection_id: String::new(),
                 creator: String::new(),
                 missing: std::iter::once(root_cid).collect(),
-                source_peer: Some(source_peer),
+                source_peer: Some(source_peer.clone()),
                 is_explicit_replicator: false,
                 explicit_replay_authorization: None,
                 acp_actor_relationships: None,
                 inserted_at: Instant::now(),
                 attempts: 0,
+                fetch_failures: 0,
+                last_fetch_error: None,
             },
         ) {
             tracing::warn!(
                 cid = %root_cid,
+                doc_id = %doc_id,
+                source_peer = %source_peer,
                 max = MAX_PENDING_DAGS,
                 "Pending DAGs at capacity, dropping DocSync registration"
             );
@@ -161,19 +202,23 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             root_cid,
             PendingDag {
                 doc_id: String::new(),
-                collection_id,
+                collection_id: collection_id.clone(),
                 creator: String::new(),
                 missing: std::iter::once(root_cid).collect(),
-                source_peer: Some(source_peer),
+                source_peer: Some(source_peer.clone()),
                 is_explicit_replicator: false,
                 explicit_replay_authorization: None,
                 acp_actor_relationships: None,
                 inserted_at: Instant::now(),
                 attempts: 0,
+                fetch_failures: 0,
+                last_fetch_error: None,
             },
         ) {
             tracing::warn!(
                 cid = %root_cid,
+                collection_id = %collection_id,
+                source_peer = %source_peer,
                 max = MAX_PENDING_DAGS,
                 "Pending DAGs at capacity, dropping branchable DAG registration"
             );
@@ -213,7 +258,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             tracing::warn!(
                 root_cid = %root_cid,
                 doc_id = %info.doc_id,
+                collection_id = %info.collection_id,
+                source_peer = ?info.source_peer,
+                missing_count = info.missing.len(),
                 attempts = info.attempts,
+                fetch_failures = info.fetch_failures,
+                last_fetch_error = ?info.last_fetch_error,
                 age_secs = info.inserted_at.elapsed().as_secs(),
                 "Pending DAG expired (TTL exceeded), dropping"
             );
@@ -236,7 +286,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     error = %e,
                     "Failed to load root block from blockstore"
                 );
-                return Err(Error::BlockstoreError(e.to_string()));
+                return Err(Error::from_blockstore(e));
             }
         };
 

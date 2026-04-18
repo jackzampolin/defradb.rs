@@ -51,11 +51,11 @@ pub fn generate_field_artifact(
             &value_bytes,
         )
         .map_err(|e| storage::corekv::Error::Other(e.to_string()))?,
-        other => {
+        _ => {
             return Err(storage::corekv::Error::Other(format!(
-                "unsupported EncryptedIndexType: {:?}",
-                other
-            )));
+                "unsupported encrypted index type: {:?}",
+                enc_idx.index_type
+            )))
         }
     };
 
