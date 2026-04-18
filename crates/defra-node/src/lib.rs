@@ -795,6 +795,19 @@ impl NodeBuilder {
     ) {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
         while let Some(event) = events.recv().await {
+            if transport_event_requires_inline_ordering(&event) {
+                if let Err(e) = coordinator.handle_transport_event(event).await {
+                    if e.is_rate_limited() {
+                        tracing::debug!(error = %e, "P2P rate-limited");
+                    } else if e.is_retriable() {
+                        tracing::warn!(error = %e, "P2P transport event failed after retries");
+                    } else {
+                        tracing::error!(error = %e, "P2P event handler error");
+                    }
+                }
+                continue;
+            }
+
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             let coord = coordinator.clone();
             tokio::spawn(async move {
@@ -810,6 +823,18 @@ impl NodeBuilder {
                 drop(permit);
             });
         }
+    }
+
+    fn transport_event_requires_inline_ordering<ResponseToken>(
+        event: &p2p::TransportEvent<ResponseToken>,
+    ) -> bool {
+        matches!(
+            event,
+            p2p::TransportEvent::PeerConnected(_)
+                | p2p::TransportEvent::PeerDisconnected(_)
+                | p2p::TransportEvent::PeerSubscribed { .. }
+                | p2p::TransportEvent::PeerUnsubscribed { .. }
+        )
     }
 }
 

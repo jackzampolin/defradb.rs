@@ -13,6 +13,18 @@ use p2p::P2PTransport;
 
 type WireDocumentAcp = Option<Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>>;
 
+fn transport_event_requires_inline_ordering<ResponseToken>(
+    event: &p2p::TransportEvent<ResponseToken>,
+) -> bool {
+    matches!(
+        event,
+        p2p::TransportEvent::PeerConnected(_)
+            | p2p::TransportEvent::PeerDisconnected(_)
+            | p2p::TransportEvent::PeerSubscribed { .. }
+            | p2p::TransportEvent::PeerUnsubscribed { .. }
+    )
+}
+
 pub(super) struct P2PSetup {
     pub(super) host_handle: Option<p2p::P2PHostHandle>,
     pub(super) p2p_tasks: Option<P2PTasks>,
@@ -228,10 +240,20 @@ impl Node {
                     _ => {}
                 }
 
+                let transport_event = p2p::convert_host_event(event);
+                if transport_event_requires_inline_ordering(&transport_event) {
+                    if let Err(e) = coordinator_for_events
+                        .handle_transport_event(transport_event)
+                        .await
+                    {
+                        error!("Failed to handle host event: {}", e);
+                    }
+                    continue;
+                }
+
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
                 let coord = coordinator_for_events.clone();
                 tokio::spawn(async move {
-                    let transport_event = p2p::convert_host_event(event);
                     if let Err(e) = coord.handle_transport_event(transport_event).await {
                         error!("Failed to handle host event: {}", e);
                     }
@@ -537,6 +559,13 @@ impl Node {
                         ));
                     }
                     _ => {}
+                }
+
+                if transport_event_requires_inline_ordering(&event) {
+                    if let Err(e) = coordinator_for_events.handle_transport_event(event).await {
+                        error!("Failed to handle iroh event: {}", e);
+                    }
+                    continue;
                 }
 
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
