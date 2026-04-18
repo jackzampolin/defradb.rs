@@ -13,18 +13,6 @@ use p2p::P2PTransport;
 
 type WireDocumentAcp = Option<Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>>;
 
-fn transport_event_requires_inline_ordering<ResponseToken>(
-    event: &p2p::TransportEvent<ResponseToken>,
-) -> bool {
-    matches!(
-        event,
-        p2p::TransportEvent::PeerConnected(_)
-            | p2p::TransportEvent::PeerDisconnected(_)
-            | p2p::TransportEvent::PeerSubscribed { .. }
-            | p2p::TransportEvent::PeerUnsubscribed { .. }
-    )
-}
-
 pub(super) struct P2PSetup {
     pub(super) host_handle: Option<p2p::P2PHostHandle>,
     pub(super) p2p_tasks: Option<P2PTasks>,
@@ -241,7 +229,7 @@ impl Node {
                 }
 
                 let transport_event = p2p::convert_host_event(event);
-                if transport_event_requires_inline_ordering(&transport_event) {
+                if transport_event.requires_inline_ordering() {
                     if let Err(e) = coordinator_for_events
                         .handle_transport_event(transport_event)
                         .await
@@ -561,7 +549,7 @@ impl Node {
                     _ => {}
                 }
 
-                if transport_event_requires_inline_ordering(&event) {
+                if event.requires_inline_ordering() {
                     if let Err(e) = coordinator_for_events.handle_transport_event(event).await {
                         error!("Failed to handle iroh event: {}", e);
                     }

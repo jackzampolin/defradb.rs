@@ -196,6 +196,20 @@ pub enum TransportEvent<ResponseToken> {
     Listening(PeerAddr),
 }
 
+impl<ResponseToken> TransportEvent<ResponseToken> {
+    /// Returns true when this event mutates peer/subscription state that must
+    /// be observed before later data-plane events from the same transport.
+    pub fn requires_inline_ordering(&self) -> bool {
+        matches!(
+            self,
+            Self::PeerConnected(_)
+                | Self::PeerDisconnected(_)
+                | Self::PeerSubscribed { .. }
+                | Self::PeerUnsubscribed { .. }
+        )
+    }
+}
+
 /// Trait abstracting the P2P transport layer.
 ///
 /// The sync coordinator is generic over this trait, allowing different transport
@@ -323,4 +337,62 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
     // ---- Lifecycle ----
 
     async fn shutdown(&self) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use cid::Cid;
+
+    use super::{MessageId, PeerId, TransportEvent};
+    use crate::message::PushLogBroadcast;
+    use crate::QueryId;
+
+    #[test]
+    fn control_plane_events_require_inline_ordering() {
+        let peer = PeerId::new("peer".to_string());
+        let topic = "topic".to_string();
+
+        assert!(TransportEvent::<()>::PeerConnected(peer.clone()).requires_inline_ordering());
+        assert!(TransportEvent::<()>::PeerDisconnected(peer.clone()).requires_inline_ordering());
+        assert!(TransportEvent::<()>::PeerSubscribed {
+            peer_id: peer.clone(),
+            topic: topic.clone(),
+        }
+        .requires_inline_ordering());
+        assert!(TransportEvent::<()>::PeerUnsubscribed {
+            peer_id: peer,
+            topic,
+        }
+        .requires_inline_ordering());
+    }
+
+    #[test]
+    fn data_plane_events_do_not_require_inline_ordering() {
+        let peer = PeerId::new("peer".to_string());
+        let cid =
+            Cid::try_from("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku").unwrap();
+        let message = PushLogBroadcast {
+            doc_id: "doc".to_string(),
+            cid: cid.to_bytes().into(),
+            collection_id: "collection".to_string(),
+            creator: "creator".to_string(),
+            block: Bytes::from_static(b"block"),
+            acp_actor_relationships: None,
+        };
+
+        assert!(!TransportEvent::<()>::GossipMessage {
+            propagation_source: peer.clone(),
+            message_id: MessageId::new("msg".to_string()),
+            topic: "topic".to_string(),
+            message,
+        }
+        .requires_inline_ordering());
+        assert!(!TransportEvent::<()>::BitswapBlockReceived {
+            query_id: QueryId(1),
+            cid,
+            data: vec![1, 2, 3],
+        }
+        .requires_inline_ordering());
+    }
 }
