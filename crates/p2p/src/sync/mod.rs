@@ -30,11 +30,11 @@ pub use coordinator::{
 };
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, SyncPlan};
 pub use head_provider::{DocumentHeadProvider, NoOpHeadProvider};
-pub(crate) use manager::record_gossip_decode_failure;
+pub(crate) use manager::record_gossip_decode_failure_sample;
 pub use manager::{
-    SyncConfig, SyncDiagnostics, SyncDiagnosticsSnapshot, SyncEvent, SyncManager,
-    DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
-    DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RATE,
+    GossipDecodeFailureSample, GossipTransport, SyncConfig, SyncDiagnostics,
+    SyncDiagnosticsSnapshot, SyncEvent, SyncManager, DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
+    DEFAULT_MAX_CONCURRENT_PUSH_TASKS, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RATE,
 };
 pub use merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
 pub use peer_state::{PeerStateTracker, PeerStats};

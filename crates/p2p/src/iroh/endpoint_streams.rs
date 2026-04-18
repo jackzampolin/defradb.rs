@@ -33,7 +33,20 @@ pub(super) async fn handle_incoming(
         Ok(accepting) => match accepting.await {
             Ok(conn) => conn,
             Err(e) => {
-                warn!("Failed to complete connection handshake: {}", e);
+                let error_msg = e.to_string();
+                if crate::error::Error::is_connection_loss_reason(&error_msg) {
+                    debug!(
+                        remote_addr = ?remote_addr,
+                        error = %error_msg,
+                        "Incoming connection handshake ended before completion"
+                    );
+                } else {
+                    warn!(
+                        remote_addr = ?remote_addr,
+                        error = %error_msg,
+                        "Failed to complete connection handshake"
+                    );
+                }
                 return;
             }
         },

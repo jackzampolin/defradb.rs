@@ -8,6 +8,7 @@ use super::super::SyncCoordinator;
 use crate::error::Result;
 use crate::message::BranchableSyncReply;
 use crate::signing::sign_with_transport;
+use crate::sync::manager::links::find_all_missing_links;
 use crate::transport::{P2PTransport, PeerId};
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
@@ -129,18 +130,44 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             match Cid::try_from(head_bytes.as_slice()) {
                 Ok(cid) => {
                     tracing::trace!(cid = %cid, "Parsed collection head CID");
-                    match self.manager.blockstore().has(&cid).await {
-                        Ok(true) => {
-                            tracing::debug!(cid = %cid, "Already have block");
-                        }
-                        Ok(false) => {
-                            tracing::debug!(cid = %cid, "Need to fetch block");
-                            cids_to_fetch.push(cid);
-                        }
+                    // Having the head block locally does NOT imply we have its
+                    // ancestors. The head can land via gossip for a single
+                    // commit while earlier collection commits (other docs)
+                    // remain missing. Walk the local DAG and skip the fetch
+                    // only when no descendants are missing.
+                    let needs_fetch = match self.manager.blockstore().has(&cid).await {
+                        Ok(true) => match self.manager.blockstore().get(&cid).await {
+                            Ok(Some(data)) => {
+                                match find_all_missing_links(
+                                    self.manager.blockstore().as_ref(),
+                                    &data,
+                                )
+                                .await
+                                {
+                                    Ok(missing) => !missing.is_empty(),
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            cid = %cid,
+                                            error = %e,
+                                            "Failed to walk DAG; falling back to fetch"
+                                        );
+                                        true
+                                    }
+                                }
+                            }
+                            _ => true,
+                        },
+                        Ok(false) => true,
                         Err(e) => {
                             tracing::warn!(cid = %cid, error = %e, "Error checking block");
-                            cids_to_fetch.push(cid);
+                            true
                         }
+                    };
+                    if needs_fetch {
+                        tracing::debug!(cid = %cid, "Need to fetch DAG");
+                        cids_to_fetch.push(cid);
+                    } else {
+                        tracing::debug!(cid = %cid, "Already have block and full DAG");
                     }
                 }
                 Err(e) => {

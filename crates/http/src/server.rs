@@ -213,6 +213,7 @@ impl Server {
     ///
     /// When P2P operations are configured, the server enables additional endpoints:
     /// - `GET /api/v0/p2p/info` - Get P2P node info (peer ID, addresses)
+    /// - `GET /api/v0/p2p/shareable-address` - Get the single best shareable P2P address
     /// - `GET /api/v0/p2p/peers` - List connected peers
     /// - `POST /api/v0/p2p/peers` - Connect to a peer
     /// - And other P2P management endpoints

@@ -138,47 +138,45 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 "Bitswap fetch completed"
             );
             self.manager.clear_pending_dag_fetch_failures(&root_cid);
-        } else {
-            if let Some(ref err) = error {
-                if let Some(snapshot) = self
-                    .manager
-                    .record_pending_dag_fetch_failure(&root_cid, err)
-                {
-                    let sampled_warn =
-                        snapshot.fetch_failures == 1 || snapshot.fetch_failures.is_power_of_two();
-                    if sampled_warn {
-                        tracing::warn!(
-                            query_id = query_id.0,
-                            root_cid = %root_cid,
-                            doc_id = %snapshot.doc_id,
-                            collection_id = %snapshot.collection_id,
-                            source_peer = ?snapshot.source_peer,
-                            missing_count = snapshot.missing_count,
-                            fetch_failures = snapshot.fetch_failures,
-                            error = %err,
-                            "Bitswap fetch failed after exhausting providers; pending DAG remains unresolved"
-                        );
-                    } else {
-                        tracing::debug!(
-                            query_id = query_id.0,
-                            root_cid = %root_cid,
-                            doc_id = %snapshot.doc_id,
-                            collection_id = %snapshot.collection_id,
-                            source_peer = ?snapshot.source_peer,
-                            missing_count = snapshot.missing_count,
-                            fetch_failures = snapshot.fetch_failures,
-                            error = %err,
-                            "Bitswap fetch failed after exhausting providers; pending DAG remains unresolved"
-                        );
-                    }
+        } else if let Some(ref err) = error {
+            if let Some(snapshot) = self
+                .manager
+                .record_pending_dag_fetch_failure(&root_cid, err)
+            {
+                let sampled_warn =
+                    snapshot.fetch_failures == 1 || snapshot.fetch_failures.is_power_of_two();
+                if sampled_warn {
+                    tracing::warn!(
+                        query_id = query_id.0,
+                        root_cid = %root_cid,
+                        doc_id = %snapshot.doc_id,
+                        collection_id = %snapshot.collection_id,
+                        source_peer = ?snapshot.source_peer,
+                        missing_count = snapshot.missing_count,
+                        fetch_failures = snapshot.fetch_failures,
+                        error = %err,
+                        "Bitswap fetch failed after exhausting providers; pending DAG remains unresolved"
+                    );
                 } else {
                     tracing::debug!(
                         query_id = query_id.0,
                         root_cid = %root_cid,
+                        doc_id = %snapshot.doc_id,
+                        collection_id = %snapshot.collection_id,
+                        source_peer = ?snapshot.source_peer,
+                        missing_count = snapshot.missing_count,
+                        fetch_failures = snapshot.fetch_failures,
                         error = %err,
-                        "Bitswap fetch failed after exhausting providers for unknown pending DAG"
+                        "Bitswap fetch failed after exhausting providers; pending DAG remains unresolved"
                     );
                 }
+            } else {
+                tracing::debug!(
+                    query_id = query_id.0,
+                    root_cid = %root_cid,
+                    error = %err,
+                    "Bitswap fetch failed after exhausting providers for unknown pending DAG"
+                );
             }
         }
 
