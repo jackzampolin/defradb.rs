@@ -29,6 +29,7 @@ use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, TransportEvent
 use crate::QueryId;
 use crate::ReplicatorInfo;
 use async_trait::async_trait;
+use parking_lot::RwLock;
 
 use super::{
     SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState,
@@ -202,6 +203,7 @@ impl Blockstore for ConflictOnceBlockstore {
 struct NoopTransport {
     peer_id: PeerId,
     pubkey: Vec<u8>,
+    replicators: Arc<RwLock<std::collections::HashMap<String, Vec<String>>>>,
 }
 
 impl NoopTransport {
@@ -209,6 +211,7 @@ impl NoopTransport {
         Self {
             peer_id: PeerId::new("local-peer".to_string()),
             pubkey: vec![1, 2, 3],
+            replicators: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -388,30 +391,59 @@ impl P2PTransport for NoopTransport {
 
     async fn create_replicator(
         &self,
-        _peer_id: &PeerId,
-        _collections: Vec<String>,
+        peer_id: &PeerId,
+        collections: Vec<String>,
     ) -> crate::Result<()> {
+        self.replicators
+            .write()
+            .insert(peer_id.to_string(), collections);
         Ok(())
     }
 
-    async fn delete_replicator(&self, _peer_id: &PeerId) -> crate::Result<()> {
+    async fn delete_replicator(&self, peer_id: &PeerId) -> crate::Result<()> {
+        self.replicators.write().remove(peer_id.as_str());
         Ok(())
     }
 
     async fn list_replicators(&self) -> crate::Result<Vec<ReplicatorInfo>> {
-        Ok(Vec::new())
+        Ok(self
+            .replicators
+            .read()
+            .iter()
+            .map(|(peer_id, collections)| {
+                ReplicatorInfo::from_raw(peer_id.clone(), collections.clone(), Vec::new())
+            })
+            .collect())
     }
 
-    async fn get_replicator(&self, _peer_id: &PeerId) -> crate::Result<Option<ReplicatorInfo>> {
-        Ok(None)
+    async fn get_replicator(&self, peer_id: &PeerId) -> crate::Result<Option<ReplicatorInfo>> {
+        Ok(self
+            .replicators
+            .read()
+            .get(peer_id.as_str())
+            .cloned()
+            .map(|collections| {
+                ReplicatorInfo::from_raw(peer_id.to_string(), collections, Vec::new())
+            }))
     }
 
     async fn remove_replicator_collections(
         &self,
-        _peer_id: &PeerId,
-        _collections: Vec<String>,
+        peer_id: &PeerId,
+        collections: Vec<String>,
     ) -> crate::Result<bool> {
-        Ok(false)
+        let mut replicators = self.replicators.write();
+        let Some(existing) = replicators.get_mut(peer_id.as_str()) else {
+            return Ok(false);
+        };
+
+        existing.retain(|collection| !collections.contains(collection));
+        let fully_deleted = existing.is_empty();
+        if fully_deleted {
+            replicators.remove(peer_id.as_str());
+        }
+
+        Ok(fully_deleted)
     }
 
     async fn shutdown(&self) -> crate::Result<()> {
@@ -758,6 +790,55 @@ async fn pushlog_registered_replicator_is_marked_explicit_replicator() {
         }
         other => panic!("expected BlockReceived, got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn create_replicator_updates_access_registry_for_gossip() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let peer = random_peer_id();
+    coordinator
+        .create_replicator(&peer, vec!["collection1".to_string()], false)
+        .await
+        .unwrap();
+
+    let result = coordinator
+        .handle_transport_event(gossip_event(peer, "collection1"))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "create_replicator should authorize collection access immediately, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn delete_replicator_revokes_access_for_gossip() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let peer = random_peer_id();
+    coordinator
+        .create_replicator(&peer, vec!["collection1".to_string()], false)
+        .await
+        .unwrap();
+    coordinator.delete_replicator(&peer).await.unwrap();
+
+    let result = coordinator
+        .handle_transport_event(gossip_event(peer, "collection1"))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "delete_replicator should revoke collection access, got {:?}",
+        result
+    );
 }
 
 #[tokio::test]
