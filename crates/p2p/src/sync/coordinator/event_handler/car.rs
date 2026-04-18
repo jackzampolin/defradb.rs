@@ -17,7 +17,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         request: CarFetchRequest,
         token: Option<T::ResponseToken>,
     ) -> Result<()> {
-        self.check_peer_is_replicator(&peer_id)?;
+        self.check_peer_is_replicator(&peer_id).await?;
 
         tracing::debug!(
             root_cid = %request.root_cid,

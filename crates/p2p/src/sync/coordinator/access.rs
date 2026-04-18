@@ -8,6 +8,26 @@ use crate::error::{Error, Result};
 use crate::transport::{P2PTransport, PeerId};
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
+    async fn transport_reports_connected_peer(&self, peer_id_str: &str) -> bool {
+        match self.runtime.transport.connected_peers().await {
+            Ok(peers) => {
+                let is_connected = peers.iter().any(|peer| peer.as_str() == peer_id_str);
+                if is_connected {
+                    self.access.peer_state.peer_connected(peer_id_str);
+                }
+                is_connected
+            }
+            Err(error) => {
+                tracing::debug!(
+                    peer_id = %peer_id_str,
+                    error = %error,
+                    "Failed to read transport-connected peers during access check"
+                );
+                false
+            }
+        }
+    }
+
     /// Check if a peer (by string ID) has access to sync a collection.
     ///
     /// Returns `Ok(())` if access is granted, or `Err(Error::AccessDenied)` if denied.
@@ -70,6 +90,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return Ok(());
         }
 
+        // The transport is the source of truth for active connections. PeerState is a
+        // best-effort cache populated by transport events and can lag during bootstrap
+        // or if a runtime wires a stale coordinator view. On a cache miss, consult the
+        // transport directly and backfill PeerState so later checks stay hot.
+        if self.transport_reports_connected_peer(peer_id_str).await {
+            return Ok(());
+        }
+
         tracing::warn!(
             peer_id = %peer_id_str,
             collection_id = %collection_id,
@@ -94,7 +122,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Used by handlers (e.g. DocSync) that lack collection context.
     /// In Open mode, all peers are allowed. In Controlled mode, the peer
     /// must be a connected peer or a replicator for at least one collection.
-    pub(super) fn check_peer_is_replicator(&self, peer_id: &PeerId) -> Result<()> {
+    pub(super) async fn check_peer_is_replicator(&self, peer_id: &PeerId) -> Result<()> {
         if self.access.access_mode.is_open() {
             return Ok(());
         }
@@ -104,6 +132,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         if self.access.peer_state.is_connected(peer_id.as_str()) {
+            return Ok(());
+        }
+
+        if self.transport_reports_connected_peer(peer_id.as_str()).await {
             return Ok(());
         }
 

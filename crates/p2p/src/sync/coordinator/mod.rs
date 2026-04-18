@@ -18,29 +18,23 @@
 //! T: P2PTransport (network)
 //! ```
 //!
-//! # Security Model: Two-Level Access Control
+//! # Security Model: Go-Compatible Ingress + Merge-Time ACP
 //!
-//! The P2P sync layer implements **collection-level** access control only.
-//! **Document-level** ACP is the responsibility of the database merge layer.
+//! Rust follows the Go DefraDB mental model:
 //!
-//! ## Collection-Level (P2P Layer)
+//! - **Replicator registration** expresses outbound replay intent and explicit
+//!   replay trust. It controls what we push and which peers are treated as
+//!   explicit replicators.
+//! - **Inbound PushLog/Gossip acceptance** is broader. Transport-authenticated
+//!   peers may deliver updates even if the receiver has not registered them as
+//!   local replicators for that collection.
+//! - **Document-level ACP** remains the authoritative policy boundary for whether
+//!   replicated document content is actually mergeable/readable locally.
 //!
-//! - Enforced via `check_access()` before processing any sync message
-//! - A peer must be registered as a replicator for a collection
-//! - Unauthorized peers cannot push documents to collections they don't replicate
-//!
-//! ## Document-Level (Database Merge Layer)
-//!
-//! - The P2P layer provides creator/doc_id/collection_id in `SyncEvent::BlockReceived`
-//! - The database merge handler should:
-//!   1. Identify the creator's DID (from the signed block or peer mapping)
-//!   2. Check if the creator has UPDATE permission on the document
-//!   3. If permission denied, log and skip the merge (don't crash)
-//!
-//! This two-level model allows:
-//! - Fast collection-level filtering at the network layer
-//! - Fine-grained document-level checks at the merge layer
-//! - CRDT convergence (eventually consistent merge, possibly with rejected updates)
+//! Collection-scoped access checks are still used for protocols that ask the
+//! receiver to actively serve or enumerate state (for example DocSync,
+//! BranchableSync, CAR fetch). They are intentionally not the primary ingress
+//! gate for passive PushLog/Gossip delivery, matching Go.
 
 mod access;
 mod accessors;

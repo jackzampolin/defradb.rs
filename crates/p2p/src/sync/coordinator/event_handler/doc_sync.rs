@@ -50,7 +50,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         request: crate::message::DocSyncRequest,
         token: Option<T::ResponseToken>,
     ) -> Result<()> {
-        self.check_peer_is_replicator(&peer_id)?;
+        self.check_peer_is_replicator(&peer_id).await?;
 
         if request.doc_ids.len() > MAX_DOC_IDS {
             tracing::warn!(
