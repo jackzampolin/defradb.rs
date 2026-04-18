@@ -842,6 +842,42 @@ async fn delete_replicator_revokes_access_for_gossip() {
 }
 
 #[tokio::test]
+async fn create_replicator_update_replaces_old_collection_access() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let peer = random_peer_id();
+    coordinator
+        .create_replicator(&peer, vec!["collection_a".to_string()], false)
+        .await
+        .unwrap();
+    coordinator
+        .create_replicator(&peer, vec!["collection_b".to_string()], false)
+        .await
+        .unwrap();
+
+    let old_collection_result = coordinator
+        .handle_transport_event(gossip_event(peer.clone(), "collection_a"))
+        .await;
+    let new_collection_result = coordinator
+        .handle_transport_event(gossip_event(peer, "collection_b"))
+        .await;
+
+    assert!(
+        matches!(&old_collection_result, Err(Error::AccessDenied { .. })),
+        "updating a replicator must revoke stale collection access, got {:?}",
+        old_collection_result
+    );
+    assert!(
+        !matches!(&new_collection_result, Err(Error::AccessDenied { .. })),
+        "updating a replicator must authorize the new collection immediately, got {:?}",
+        new_collection_result
+    );
+}
+
+#[tokio::test]
 async fn two_stream_connected_peer_is_not_marked_explicit_replicator() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
