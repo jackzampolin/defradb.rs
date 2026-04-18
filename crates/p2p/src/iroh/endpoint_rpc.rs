@@ -2,7 +2,7 @@
 
 use iroh::{Endpoint, EndpointAddr};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::message::CarFetchRequest;
 use crate::transport::{PeerId, TransportEvent};
@@ -17,6 +17,49 @@ use super::protocols;
 /// Longer than the fire-and-forget timeout (5 s) because the remote peer
 /// needs time to process the request before replying.
 pub(super) const REQUEST_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn endpoint_addr(
+    endpoint_id: iroh::EndpointId,
+    direct_addr: Option<std::net::SocketAddr>,
+) -> EndpointAddr {
+    let mut addr = EndpointAddr::from(endpoint_id);
+    if let Some(sa) = direct_addr {
+        addr = addr.with_ip_addr(sa);
+    }
+    addr
+}
+
+async fn connect_with_direct_addr_fallback(
+    endpoint: &Endpoint,
+    peer_id: &PeerId,
+    alpn: &[u8],
+    direct_addr: Option<std::net::SocketAddr>,
+) -> crate::error::Result<iroh::endpoint::Connection> {
+    let endpoint_id = parse_endpoint_id(peer_id)?;
+
+    if let Some(sa) = direct_addr {
+        match endpoint
+            .connect(endpoint_addr(endpoint_id, Some(sa)), alpn)
+            .await
+        {
+            Ok(connection) => return Ok(connection),
+            Err(error) => {
+                debug!(
+                    peer_id = %peer_id,
+                    direct_addr = %sa,
+                    alpn = %String::from_utf8_lossy(alpn),
+                    error = %error,
+                    "Direct iroh dial failed, retrying without cached direct address"
+                );
+            }
+        }
+    }
+
+    endpoint
+        .connect(endpoint_addr(endpoint_id, None), alpn)
+        .await
+        .map_err(|e| crate::error::Error::Dial(e.to_string()))
+}
 
 /// Send a request and wait for a response (bidirectional stream).
 ///
@@ -33,16 +76,8 @@ where
     Req: serde::Serialize,
     Resp: serde::de::DeserializeOwned,
 {
-    let endpoint_id = parse_endpoint_id(peer_id)?;
-    let mut addr = EndpointAddr::from(endpoint_id);
-    if let Some(sa) = direct_addr {
-        addr = addr.with_ip_addr(sa);
-    }
-
-    let connection = endpoint
-        .connect(addr, alpn)
-        .await
-        .map_err(|e| crate::error::Error::Dial(e.to_string()))?;
+    let connection =
+        connect_with_direct_addr_fallback(endpoint, peer_id, alpn, direct_addr).await?;
 
     let (mut send, mut recv) = connection
         .open_bi()
@@ -82,16 +117,8 @@ pub(super) async fn handle_fire_and_forget<T: serde::Serialize>(
     msg: &T,
     direct_addr: Option<std::net::SocketAddr>,
 ) -> crate::error::Result<()> {
-    let endpoint_id = parse_endpoint_id(peer_id)?;
-    let mut addr = EndpointAddr::from(endpoint_id);
-    if let Some(sa) = direct_addr {
-        addr = addr.with_ip_addr(sa);
-    }
-
-    let connection = endpoint
-        .connect(addr, alpn)
-        .await
-        .map_err(|e| crate::error::Error::Dial(e.to_string()))?;
+    let connection =
+        connect_with_direct_addr_fallback(endpoint, peer_id, alpn, direct_addr).await?;
 
     let (mut send, mut recv) = connection
         .open_bi()
@@ -120,22 +147,28 @@ pub(super) async fn try_fetch_from_provider(
     direct_addr: Option<std::net::SocketAddr>,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> bool {
-    let endpoint_id = match parse_endpoint_id(provider) {
-        Ok(id) => id,
-        Err(e) => {
-            warn!(provider = %provider, error = %e, "CAR fetch: invalid provider peer ID");
-            return false;
-        }
-    };
-
-    let mut addr = EndpointAddr::from(endpoint_id);
-    if let Some(sa) = direct_addr {
-        addr = addr.with_ip_addr(sa);
+    // Per-provider CAR failures log at debug — the caller aggregates per-DAG
+    // outcomes into a single WARN via BitswapComplete (see issue #858).
+    if let Err(error) = parse_endpoint_id(provider) {
+        debug!(
+            provider = %provider,
+            error = %error,
+            "CAR fetch: invalid provider peer ID"
+        );
+        return false;
     }
-    let connection = match endpoint.connect(addr, protocols::ALPN_CAR).await {
+
+    let connection = match connect_with_direct_addr_fallback(
+        endpoint,
+        provider,
+        protocols::ALPN_CAR,
+        direct_addr,
+    )
+    .await
+    {
         Ok(conn) => conn,
         Err(e) => {
-            warn!(
+            debug!(
                 provider = %provider,
                 root = %request.root_cid,
                 recursive = request.recursive,
@@ -150,7 +183,7 @@ pub(super) async fn try_fetch_from_provider(
     let (mut send, mut recv) = match connection.open_bi().await {
         Ok(streams) => streams,
         Err(e) => {
-            warn!(
+            debug!(
                 provider = %provider,
                 root = %request.root_cid,
                 error = %e,
@@ -161,7 +194,7 @@ pub(super) async fn try_fetch_from_provider(
     };
 
     if let Err(e) = protocols::write_message(&mut send, &request).await {
-        warn!(
+        debug!(
             provider = %provider,
             root = %request.root_cid,
             error = %e,
@@ -171,7 +204,7 @@ pub(super) async fn try_fetch_from_provider(
     }
     let _ = send.finish();
 
-    info!(
+    debug!(
         provider = %provider,
         root = %request.root_cid,
         recursive = request.recursive,
@@ -182,7 +215,7 @@ pub(super) async fn try_fetch_from_provider(
     let car_data = match recv.read_to_end(64 * 1024 * 1024).await {
         Ok(data) => data,
         Err(e) => {
-            warn!(
+            debug!(
                 provider = %provider,
                 root = %request.root_cid,
                 error = %e,
@@ -193,13 +226,31 @@ pub(super) async fn try_fetch_from_provider(
     };
 
     if car_data.is_empty() {
-        warn!(
+        debug!(
             provider = %provider,
             root = %request.root_cid,
             "CAR fetch: empty response"
         );
+        // Surface the empty response to the coordinator so it can increment
+        // the car_empty_responses diagnostic. Still counts as a provider
+        // failure for the aggregation in handle_block_sync (issue #858).
+        let _ = event_tx
+            .send(TransportEvent::CarFetchResponse {
+                peer_id: provider.clone(),
+                root_cid: request.root_cid,
+                car_data: Vec::new(),
+            })
+            .await;
         return false;
     }
+
+    // Distinguish a header-only CAR (server's "no blocks" signal) from a
+    // usable fetch. The coordinator still needs the bytes so it can count
+    // car_empty_responses, but the aggregation in `handle_block_sync` must
+    // treat a header-only response as a provider miss — otherwise the final
+    // "none returned usable blocks" WARN is suppressed when every provider
+    // replies empty (issue #858 review round 3).
+    let has_blocks = crate::sync::car::car_has_any_block(&car_data);
 
     debug!(
         provider = %provider,
@@ -207,6 +258,7 @@ pub(super) async fn try_fetch_from_provider(
         recursive = request.recursive,
         requested_count = request.wanted_cids.len(),
         car_bytes = car_data.len(),
+        has_blocks,
         "CAR fetch: response received"
     );
 
@@ -222,7 +274,7 @@ pub(super) async fn try_fetch_from_provider(
         warn!("Event channel closed, cannot emit CarFetchResponse");
         return false;
     }
-    true
+    has_blocks
 }
 
 /// CAR-based block sync: fetch blocks from providers concurrently.
@@ -270,6 +322,12 @@ pub(super) async fn handle_block_sync(
     }
 
     let mut any_success = false;
+    let provider_count = providers.len();
+    let kind = if missing.is_empty() {
+        "full-dag"
+    } else {
+        "selective"
+    };
 
     for task in tasks {
         match task.await {
@@ -284,15 +342,20 @@ pub(super) async fn handle_block_sync(
         }
     }
 
+    let error = if any_success {
+        None
+    } else {
+        Some(format!(
+            "{} CAR fetch failed: {} provider(s) tried, none returned usable blocks (root={})",
+            kind, provider_count, root
+        ))
+    };
+
     if event_tx
         .send(TransportEvent::BitswapComplete {
             query_id,
             success: any_success,
-            error: if any_success {
-                None
-            } else {
-                Some("all providers failed".to_string())
-            },
+            error,
         })
         .await
         .is_err()

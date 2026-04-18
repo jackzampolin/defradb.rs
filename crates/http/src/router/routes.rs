@@ -115,6 +115,10 @@ pub fn create_router_with_state(state: AppState) -> Router {
     // P2P routes
     let p2p_routes = Router::new()
         .route("/info", get(handlers::p2p::get_info))
+        .route(
+            "/shareable-address",
+            get(handlers::p2p::get_shareable_address),
+        )
         .route("/active-peers", get(handlers::p2p::active_peers)) // Go-compatible
         .route("/connect", post(handlers::p2p::connect)) // Go-compatible
         .route("/peers", get(handlers::p2p::list_peers))

@@ -3,10 +3,11 @@
 //! Verifies that DocSync and BranchableSync handlers enforce access checks
 //! in Controlled mode before processing requests.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use blockstore::DefraBlockstore;
+use blockstore::{Blockstore, DefraBlockstore, Error as BlockstoreError};
 use cid::multihash::{Code, MultihashDigest};
 use cid::Cid;
 use storage::backends::MemoryStore;
@@ -14,7 +15,9 @@ use tokio::time::timeout;
 
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Error;
-use crate::message::{BranchableSyncRequest, DocSyncRequest, MetaData, PushLogRequest};
+use crate::message::{
+    BranchableSyncRequest, DocSyncRequest, MetaData, PushLogBroadcast, PushLogRequest,
+};
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::NoOpCollectionStorage;
 use crate::sync::head_provider::NoOpHeadProvider;
@@ -48,6 +51,29 @@ fn create_test_coordinator(
     let broadcaster = Broadcaster::new(transport.clone());
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    create_test_coordinator_with_blockstore(
+        access_mode,
+        replicators,
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore,
+    )
+}
+
+fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
+    access_mode: AccessMode,
+    replicators: Arc<ReplicatorRegistry>,
+    peer_state: Arc<PeerStateTracker>,
+    transport: NoopTransport,
+    local_peer_id: String,
+    broadcaster: Broadcaster<NoopTransport>,
+    blockstore: Arc<B>,
+) -> (
+    SyncCoordinator<B, NoopTransport>,
+    tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
+) {
     let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), SyncConfig::default());
 
     let coordinator = SyncCoordinator {
@@ -81,6 +107,95 @@ fn create_test_coordinator(
     };
 
     (coordinator, events)
+}
+
+struct ConflictOnceBlockstore {
+    inner: TestBlockstore,
+    remaining_put_conflicts: AtomicUsize,
+    put_attempts: AtomicUsize,
+}
+
+impl ConflictOnceBlockstore {
+    fn new() -> Self {
+        let store = Arc::new(MemoryStore::new());
+        Self {
+            inner: DefraBlockstore::new(store, true),
+            remaining_put_conflicts: AtomicUsize::new(1),
+            put_attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn put_attempts(&self) -> usize {
+        self.put_attempts.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Blockstore for ConflictOnceBlockstore {
+    async fn get(&self, cid: &Cid) -> blockstore::Result<Option<bytes::Bytes>> {
+        self.inner.get(cid).await
+    }
+
+    async fn put(&self, cid: &Cid, data: &[u8]) -> blockstore::Result<()> {
+        self.put_attempts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .remaining_put_conflicts
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                if remaining > 0 {
+                    Some(remaining - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+        {
+            return Err(BlockstoreError::Storage(
+                storage::corekv::Error::TxnConflict,
+            ));
+        }
+
+        self.inner.put(cid, data).await
+    }
+
+    async fn put_many(&self, blocks: &[(&Cid, &[u8])]) -> blockstore::Result<()> {
+        self.inner.put_many(blocks).await
+    }
+
+    async fn has(&self, cid: &Cid) -> blockstore::Result<bool> {
+        self.inner.has(cid).await
+    }
+
+    async fn delete(&self, cid: &Cid) -> blockstore::Result<()> {
+        self.inner.delete(cid).await
+    }
+
+    async fn get_size(&self, cid: &Cid) -> blockstore::Result<Option<usize>> {
+        self.inner.get_size(cid).await
+    }
+
+    async fn all_cids(&self) -> blockstore::Result<Vec<Cid>> {
+        self.inner.all_cids().await
+    }
+
+    fn hash_on_read(&self, enabled: bool) {
+        self.inner.hash_on_read(enabled);
+    }
+
+    async fn is_merged(&self, cid: &Cid) -> blockstore::Result<bool> {
+        self.inner.is_merged(cid).await
+    }
+
+    async fn mark_as_merged(&self, cid: &Cid) -> blockstore::Result<()> {
+        self.inner.mark_as_merged(cid).await
+    }
+
+    async fn mark_batch_as_merged(&self, cids: &[Cid]) -> blockstore::Result<()> {
+        self.inner.mark_batch_as_merged(cids).await
+    }
+
+    async fn get_unmerged(&self) -> blockstore::Result<Vec<Cid>> {
+        self.inner.get_unmerged().await
+    }
 }
 
 #[derive(Clone)]
@@ -351,6 +466,15 @@ fn pushlog_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
         peer_id,
         request: pushlog_request(collection_id),
         token: (),
+    }
+}
+
+fn gossip_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
+    TransportEvent::GossipMessage {
+        propagation_source: peer_id,
+        message_id: MessageId::new("gossip".to_string()),
+        topic: collection_id.to_string(),
+        message: PushLogBroadcast::from_request(&pushlog_request(collection_id)),
     }
 }
 
@@ -695,5 +819,73 @@ async fn two_stream_authenticated_explicit_replicator_is_marked_explicit_replica
             );
         }
         other => panic!("expected BlockReceived, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn pushlog_retries_transient_transaction_conflicts_without_sync_error() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let blockstore = Arc::new(ConflictOnceBlockstore::new());
+
+    let (coordinator, mut events) = create_test_coordinator_with_blockstore(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore.clone(),
+    );
+
+    let peer = random_peer_id();
+    coordinator
+        .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
+        .await
+        .unwrap();
+
+    assert_eq!(blockstore.put_attempts(), 2);
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived { sender_peer, .. } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+        }
+        other => panic!("expected BlockReceived after retry, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let blockstore = Arc::new(ConflictOnceBlockstore::new());
+
+    let (coordinator, mut events) = create_test_coordinator_with_blockstore(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore.clone(),
+    );
+
+    let peer = random_peer_id();
+    coordinator
+        .handle_transport_event(gossip_event(peer.clone(), "collection1"))
+        .await
+        .unwrap();
+
+    assert_eq!(blockstore.put_attempts(), 2);
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived { sender_peer, .. } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+        }
+        other => panic!("expected BlockReceived after gossip retry, got {:?}", other),
     }
 }

@@ -504,6 +504,125 @@ async fn test_pending_dag_completes_when_missing_block_arrives_via_pushlog() {
 }
 
 #[tokio::test]
+async fn test_diagnostics_counters_track_pending_dag_lifecycle() {
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (manager, mut events) =
+        SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+
+    let diag = manager.diagnostics();
+    assert_eq!(diag.snapshot().missing_link_retries, 0);
+    assert_eq!(diag.snapshot().pending_dag_resolved, 0);
+
+    let (field_cid, field_block) = create_lww_block("name");
+    let (composite_cid, composite_block) =
+        create_composite_block(vec![DAGLink::new("name", field_cid)]);
+
+    manager
+        .process_pushlog(
+            &PushLogBroadcast::new(
+                "doc123".into(),
+                Bytes::from(composite_cid.to_bytes()),
+                "collection1".into(),
+                "creator1".into(),
+                Bytes::from(composite_block),
+                None,
+            ),
+            Some("peer-1"),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Drain DagNeedsFetch so the channel isn't full.
+    let _ = events.try_recv().expect("DagNeedsFetch event");
+
+    // Three retry rounds while the field block is still missing.
+    for _ in 0..3 {
+        assert!(!manager.retry_pending_dag(&composite_cid).await.unwrap());
+    }
+    let snap = diag.snapshot();
+    assert_eq!(snap.missing_link_retries, 3);
+    assert_eq!(snap.pending_dag_resolved, 0);
+
+    // Field arrives via PushLog. process_pushlog calls retry for the
+    // composite internally, so both counters advance.
+    manager
+        .process_pushlog(
+            &PushLogBroadcast::new(
+                "doc123".into(),
+                Bytes::from(field_cid.to_bytes()),
+                "collection1".into(),
+                "creator1".into(),
+                Bytes::from(field_block),
+                None,
+            ),
+            Some("peer-1"),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Drain BlockReceived (field) and DagReady (composite).
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("event")
+            .expect("channel open");
+    }
+
+    let snap = diag.snapshot();
+    assert_eq!(
+        snap.missing_link_retries, 4,
+        "one more retry on field arrival"
+    );
+    assert_eq!(snap.pending_dag_resolved, 1, "composite DAG resolved once");
+    assert_eq!(snap.pending_dag_expired, 0, "never expired within test");
+}
+
+#[tokio::test]
+async fn test_pending_dag_attempts_increment_per_retry() {
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (manager, mut events) =
+        SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+
+    let (field_cid, _field_block) = create_lww_block("name");
+    let (composite_cid, composite_block) =
+        create_composite_block(vec![DAGLink::new("name", field_cid)]);
+
+    let composite_msg = PushLogBroadcast::new(
+        "doc123".to_string(),
+        Bytes::from(composite_cid.to_bytes()),
+        "collection1".to_string(),
+        "creator1".to_string(),
+        Bytes::from(composite_block),
+        None,
+    );
+
+    manager
+        .process_pushlog(&composite_msg, Some("peer-1"), false, None)
+        .await
+        .unwrap();
+
+    // drain the DagNeedsFetch event so the channel isn't blocked.
+    let _ = events.try_recv().expect("pending DAG event");
+    assert_eq!(manager.pending_dag_count(), 1);
+    assert_eq!(manager.pending_dag_attempts(&composite_cid), 0);
+
+    assert!(!manager.retry_pending_dag(&composite_cid).await.unwrap());
+    assert_eq!(manager.pending_dag_attempts(&composite_cid), 1);
+
+    assert!(!manager.retry_pending_dag(&composite_cid).await.unwrap());
+    assert_eq!(manager.pending_dag_attempts(&composite_cid), 2);
+
+    // Unknown CIDs report 0 attempts (not panic).
+    assert_eq!(manager.pending_dag_attempts(&test_cid()), 0);
+}
+
+#[tokio::test]
 async fn test_blockstore_accessor() {
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));

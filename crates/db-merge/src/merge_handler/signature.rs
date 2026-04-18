@@ -23,7 +23,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let sig_cid = match &block.signature {
             Some(sig_cid) => sig_cid,
             None => {
-                tracing::warn!(
+                // Unsigned blocks are the default in Go-compatible deployments;
+                // warning per block produced hundreds of noisy lines per
+                // replicated document (issue #858). Keep at debug.
+                tracing::debug!(
                     cid = %cid,
                     "P2P block has no signature — cannot verify authenticity"
                 );

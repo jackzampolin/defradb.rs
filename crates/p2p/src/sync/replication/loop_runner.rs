@@ -74,8 +74,17 @@ impl ReplicationLoop {
             let mut should_break = false;
             for result in &results {
                 match result {
-                    ReplicationResult::Merged { cid, doc_id, .. } => {
-                        tracing::info!(cid = %cid, doc_id = %doc_id, "Block merged successfully");
+                    ReplicationResult::Merged {
+                        cid,
+                        doc_id,
+                        collection_id,
+                    } => {
+                        tracing::info!(
+                            cid = %cid,
+                            doc_id = %doc_id,
+                            collection_id = %collection_id,
+                            "Block merged successfully"
+                        );
                     }
                     ReplicationResult::MergedButBroadcastFailed {
                         cid,

@@ -100,15 +100,17 @@ pub(super) async fn handle_command(
             reply_msg,
             reply,
         } => {
-            let result = async {
-                protocols::write_message(&mut send_stream, &reply_msg).await?;
-                send_stream.finish().map_err(|e| {
-                    crate::error::Error::Transport(format!("failed to finish stream: {}", e))
-                })?;
-                Ok(())
-            }
-            .await;
-            let _ = reply.send(result);
+            tokio::spawn(async move {
+                let result = async {
+                    protocols::write_message(&mut send_stream, &reply_msg).await?;
+                    send_stream.finish().map_err(|e| {
+                        crate::error::Error::Transport(format!("failed to finish stream: {}", e))
+                    })?;
+                    Ok(())
+                }
+                .await;
+                let _ = reply.send(result);
+            });
         }
         IrohCommand::SendTwoStreamRequest {
             peer_id,
@@ -116,15 +118,18 @@ pub(super) async fn handle_command(
             reply,
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
-            let result = handle_request_response(
-                endpoint,
-                &peer_id,
-                protocols::ALPN_TWOSTREAM,
-                &request,
-                direct_addr,
-            )
-            .await;
-            let _ = reply.send(result);
+            let endpoint = endpoint.clone();
+            tokio::spawn(async move {
+                let result = handle_request_response(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_TWOSTREAM,
+                    &request,
+                    direct_addr,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
         }
         IrohCommand::SendTwoStreamResponse {
             peer_id,
@@ -132,15 +137,18 @@ pub(super) async fn handle_command(
             reply,
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
-            let result = handle_fire_and_forget(
-                endpoint,
-                &peer_id,
-                protocols::ALPN_TWOSTREAM,
-                &reply_msg,
-                direct_addr,
-            )
-            .await;
-            let _ = reply.send(result);
+            let endpoint = endpoint.clone();
+            tokio::spawn(async move {
+                let result = handle_fire_and_forget(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_TWOSTREAM,
+                    &reply_msg,
+                    direct_addr,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
         }
         IrohCommand::SendDocSyncRequest {
             peer_id,
@@ -148,29 +156,33 @@ pub(super) async fn handle_command(
             reply,
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
-            let result: crate::error::Result<crate::message::DocSyncReply> =
-                handle_request_response(
-                    endpoint,
-                    &peer_id,
-                    protocols::ALPN_DOCSYNC,
-                    &request,
-                    direct_addr,
-                )
-                .await;
-            match result {
-                Ok(doc_reply) => {
-                    let _ = event_tx
-                        .send(TransportEvent::DocSyncReply {
-                            peer_id,
-                            reply: doc_reply,
-                        })
-                        .await;
-                    let _ = reply.send(Ok(()));
+            let endpoint = endpoint.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                let result: crate::error::Result<crate::message::DocSyncReply> =
+                    handle_request_response(
+                        &endpoint,
+                        &peer_id,
+                        protocols::ALPN_DOCSYNC,
+                        &request,
+                        direct_addr,
+                    )
+                    .await;
+                match result {
+                    Ok(doc_reply) => {
+                        let _ = event_tx
+                            .send(TransportEvent::DocSyncReply {
+                                peer_id,
+                                reply: doc_reply,
+                            })
+                            .await;
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
                 }
-                Err(e) => {
-                    let _ = reply.send(Err(e));
-                }
-            }
+            });
         }
         IrohCommand::SendBranchableSyncRequest {
             peer_id,
@@ -178,29 +190,33 @@ pub(super) async fn handle_command(
             reply,
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
-            let result: crate::error::Result<crate::message::BranchableSyncReply> =
-                handle_request_response(
-                    endpoint,
-                    &peer_id,
-                    protocols::ALPN_BRANCHABLE,
-                    &request,
-                    direct_addr,
-                )
-                .await;
-            match result {
-                Ok(br_reply) => {
-                    let _ = event_tx
-                        .send(TransportEvent::BranchableSyncReply {
-                            peer_id,
-                            reply: br_reply,
-                        })
-                        .await;
-                    let _ = reply.send(Ok(()));
+            let endpoint = endpoint.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                let result: crate::error::Result<crate::message::BranchableSyncReply> =
+                    handle_request_response(
+                        &endpoint,
+                        &peer_id,
+                        protocols::ALPN_BRANCHABLE,
+                        &request,
+                        direct_addr,
+                    )
+                    .await;
+                match result {
+                    Ok(br_reply) => {
+                        let _ = event_tx
+                            .send(TransportEvent::BranchableSyncReply {
+                                peer_id,
+                                reply: br_reply,
+                            })
+                            .await;
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
                 }
-                Err(e) => {
-                    let _ = reply.send(Err(e));
-                }
-            }
+            });
         }
         IrohCommand::SendDocSyncResponse {
             peer_id,
@@ -208,15 +224,18 @@ pub(super) async fn handle_command(
             reply,
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
-            let result = handle_fire_and_forget(
-                endpoint,
-                &peer_id,
-                protocols::ALPN_DOCSYNC_RESP,
-                &reply_msg,
-                direct_addr,
-            )
-            .await;
-            let _ = reply.send(result);
+            let endpoint = endpoint.clone();
+            tokio::spawn(async move {
+                let result = handle_fire_and_forget(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_DOCSYNC_RESP,
+                    &reply_msg,
+                    direct_addr,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
         }
         IrohCommand::SendBranchableSyncResponse {
             peer_id,
@@ -224,45 +243,52 @@ pub(super) async fn handle_command(
             reply,
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
-            let result = handle_fire_and_forget(
-                endpoint,
-                &peer_id,
-                protocols::ALPN_BRANCHABLE_RESP,
-                &reply_msg,
-                direct_addr,
-            )
-            .await;
-            let _ = reply.send(result);
+            let endpoint = endpoint.clone();
+            tokio::spawn(async move {
+                let result = handle_fire_and_forget(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_BRANCHABLE_RESP,
+                    &reply_msg,
+                    direct_addr,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
         }
         IrohCommand::SendDocSyncResponseToken {
             mut send_stream,
             reply_msg,
             reply,
         } => {
-            let result = async {
-                protocols::write_message(&mut send_stream, &reply_msg).await?;
-                send_stream.finish().map_err(|e| {
-                    crate::error::Error::Transport(format!("failed to finish stream: {}", e))
-                })?;
-                Ok(())
-            }
-            .await;
-            let _ = reply.send(result);
+            tokio::spawn(async move {
+                let result = async {
+                    protocols::write_message(&mut send_stream, &reply_msg).await?;
+                    send_stream.finish().map_err(|e| {
+                        crate::error::Error::Transport(format!("failed to finish stream: {}", e))
+                    })?;
+                    Ok(())
+                }
+                .await;
+                let _ = reply.send(result);
+            });
         }
         IrohCommand::SendBranchableSyncResponseToken {
             mut send_stream,
             reply_msg,
             reply,
         } => {
-            let result = async {
-                protocols::write_message(&mut send_stream, &reply_msg).await?;
-                send_stream.finish().map_err(|e| {
-                    crate::error::Error::Transport(format!("failed to finish stream: {}", e))
-                })?;
-                Ok(())
-            }
-            .await;
-            let _ = reply.send(result);
+            tokio::spawn(async move {
+                let result = async {
+                    protocols::write_message(&mut send_stream, &reply_msg).await?;
+                    send_stream.finish().map_err(|e| {
+                        crate::error::Error::Transport(format!("failed to finish stream: {}", e))
+                    })?;
+                    Ok(())
+                }
+                .await;
+                let _ = reply.send(result);
+            });
         }
         IrohCommand::SendCarRequest {
             peer_id,
@@ -271,15 +297,18 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let request = CarFetchRequest::full_dag(root_cid);
-            let result = handle_fire_and_forget(
-                endpoint,
-                &peer_id,
-                protocols::ALPN_CAR,
-                &request,
-                direct_addr,
-            )
-            .await;
-            let _ = reply.send(result);
+            let endpoint = endpoint.clone();
+            tokio::spawn(async move {
+                let result = handle_fire_and_forget(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_CAR,
+                    &request,
+                    direct_addr,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
         }
         IrohCommand::SendCarResponse {
             peer_id,
@@ -287,15 +316,18 @@ pub(super) async fn handle_command(
             reply,
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
-            let result = handle_fire_and_forget(
-                endpoint,
-                &peer_id,
-                protocols::ALPN_CAR_RESP,
-                &car_data,
-                direct_addr,
-            )
-            .await;
-            let _ = reply.send(result);
+            let endpoint = endpoint.clone();
+            tokio::spawn(async move {
+                let result = handle_fire_and_forget(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_CAR_RESP,
+                    &car_data,
+                    direct_addr,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
         }
         IrohCommand::SendSEArtifacts {
             peer_id,
@@ -303,15 +335,18 @@ pub(super) async fn handle_command(
             reply,
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
-            let result = handle_fire_and_forget(
-                endpoint,
-                &peer_id,
-                protocols::ALPN_SE,
-                &request,
-                direct_addr,
-            )
-            .await;
-            let _ = reply.send(result);
+            let endpoint = endpoint.clone();
+            tokio::spawn(async move {
+                let result = handle_fire_and_forget(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_SE,
+                    &request,
+                    direct_addr,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
         }
         IrohCommand::SyncBlocks {
             root,
@@ -488,10 +523,19 @@ pub(super) async fn handle_subscribe(
             match result {
                 Ok(event) => match event {
                     iroh_gossip::api::Event::Received(msg) => {
-                        match postcard::from_bytes::<crate::message::PushLogBroadcast>(&msg.content)
+                        match crate::message::PushLogBroadcast::decode_gossip_payload(&msg.content)
                         {
-                            Ok(broadcast) => {
+                            Ok((broadcast, encoding)) => {
                                 let sender_peer_id = endpoint_id_to_peer_id(&msg.delivered_from);
+                                if encoding != crate::message::PushLogGossipPayloadEncoding::PostcardBroadcast {
+                                    debug!(
+                                        peer_id = %sender_peer_id,
+                                        topic = %topic_str_clone,
+                                        message_size = msg.content.len(),
+                                        ?encoding,
+                                        "Decoded Iroh gossip message via compatibility fallback"
+                                    );
+                                }
                                 let msg_id = MessageId::new(uuid::Uuid::new_v4().to_string());
                                 if event_tx
                                     .send(TransportEvent::GossipMessage {
@@ -508,7 +552,51 @@ pub(super) async fn handle_subscribe(
                                 }
                             }
                             Err(e) => {
-                                warn!("Failed to decode gossip message: {}", e);
+                                let payload_info =
+                                    crate::message::PushLogBroadcast::inspect_gossip_payload(
+                                        &msg.content,
+                                    );
+                                let sender_peer_id = endpoint_id_to_peer_id(&msg.delivered_from);
+                                let sample = crate::sync::GossipDecodeFailureSample {
+                                    transport: crate::sync::GossipTransport::Iroh,
+                                    peer_id: sender_peer_id.to_string(),
+                                    topic: topic_str_clone.clone(),
+                                    message_size: msg.content.len(),
+                                    error: e.clone(),
+                                    payload_fingerprint: payload_info.payload_fingerprint,
+                                    payload_shape_hint: payload_info.payload_shape_hint,
+                                    occurrences: 0,
+                                };
+                                // Exponential-backoff sampling: warn on the
+                                // 1st, 2nd, 4th, 8th... occurrence; remainder
+                                // at debug. Counter is process-global and
+                                // surfaced via SyncDiagnostics (issue #858).
+                                let count = crate::sync::record_gossip_decode_failure_sample(
+                                    sample.clone(),
+                                );
+                                if count == 1 || count.is_power_of_two() {
+                                    warn!(
+                                        peer_id = %sender_peer_id,
+                                        topic = %topic_str_clone,
+                                        message_size = msg.content.len(),
+                                        total_failures = count,
+                                        error = %e,
+                                        payload_fingerprint = %sample.payload_fingerprint,
+                                        payload_shape = %sample.payload_shape_hint,
+                                        "Failed to decode Iroh gossip message as PushLogBroadcast or PushLogRequest"
+                                    );
+                                } else {
+                                    debug!(
+                                        peer_id = %sender_peer_id,
+                                        topic = %topic_str_clone,
+                                        message_size = msg.content.len(),
+                                        total_failures = count,
+                                        error = %e,
+                                        payload_fingerprint = %sample.payload_fingerprint,
+                                        payload_shape = %sample.payload_shape_hint,
+                                        "Failed to decode Iroh gossip message"
+                                    );
+                                }
                             }
                         }
                     }

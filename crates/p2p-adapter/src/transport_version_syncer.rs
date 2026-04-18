@@ -6,7 +6,7 @@ use blockstore::Blockstore;
 use p2p::transport::PeerId;
 use p2p::P2PTransport;
 
-use crate::{P2PError, P2PResult};
+use crate::{P2PError, P2PErrorExt as _, P2PResult};
 
 /// Trait for syncing collection versions via a generic transport.
 #[async_trait]

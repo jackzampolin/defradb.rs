@@ -108,22 +108,18 @@ pub fn filter_to_index_scan(
         }
 
         match cond.op {
-            FilterOp::Eq => {
-                if !has_eq {
-                    if let ConditionValue::Single(v) = &cond.value {
-                        has_eq = true;
-                        eq_value = Some(v.clone());
-                        eq_json_path = cond.json_path.clone();
-                    }
+            FilterOp::Eq if !has_eq => {
+                if let ConditionValue::Single(v) = &cond.value {
+                    has_eq = true;
+                    eq_value = Some(v.clone());
+                    eq_json_path = cond.json_path.clone();
                 }
             }
-            FilterOp::In => {
-                if !has_in {
-                    if let ConditionValue::Multiple(vs) = &cond.value {
-                        has_in = true;
-                        in_values = Some(vs.clone());
-                        in_json_path = cond.json_path.clone();
-                    }
+            FilterOp::In if !has_in => {
+                if let ConditionValue::Multiple(vs) = &cond.value {
+                    has_in = true;
+                    in_values = Some(vs.clone());
+                    in_json_path = cond.json_path.clone();
                 }
             }
             FilterOp::Gt => {

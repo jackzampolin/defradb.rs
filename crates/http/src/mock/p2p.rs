@@ -80,6 +80,10 @@ impl P2POperations for MockP2POperations {
         Ok(self.addresses.clone())
     }
 
+    async fn shareable_address(&self) -> P2PResult<Option<String>> {
+        Ok(self.addresses.first().cloned())
+    }
+
     async fn connected_peers(&self) -> P2PResult<Vec<String>> {
         Ok(self.peers.read().unwrap().clone())
     }
@@ -92,6 +96,10 @@ impl P2POperations for MockP2POperations {
             format!("peer-{}", addr.len())
         };
         self.peers.write().unwrap().push(peer_id);
+        Ok(())
+    }
+
+    async fn notify_network_change(&self) -> P2PResult<()> {
         Ok(())
     }
 
@@ -198,11 +206,19 @@ impl P2POperations for FailingMockP2POperations {
         Err(P2PError::Internal(self.error.clone()))
     }
 
+    async fn shareable_address(&self) -> P2PResult<Option<String>> {
+        Err(P2PError::Internal(self.error.clone()))
+    }
+
     async fn connected_peers(&self) -> P2PResult<Vec<String>> {
         Err(P2PError::Internal(self.error.clone()))
     }
 
     async fn connect_peer(&self, _addr: &str) -> P2PResult<()> {
+        Err(P2PError::Internal(self.error.clone()))
+    }
+
+    async fn notify_network_change(&self) -> P2PResult<()> {
         Err(P2PError::Internal(self.error.clone()))
     }
 

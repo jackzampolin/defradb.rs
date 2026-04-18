@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use blockstore::Blockstore;
 use p2p::P2PHostHandle;
 
-use crate::{P2PError, P2PResult, VersionSyncer};
+use crate::{libp2p::VersionSyncer, P2PError, P2PErrorExt as _, P2PResult};
 
 /// Database-backed version syncer that fetches schema blocks via Bitswap.
 pub struct DbVersionSyncer<S: storage::corekv::Store, B: Blockstore> {

@@ -172,6 +172,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
             if !requests.is_empty() {
                 let t = transport.clone();
                 let pid = peer_id.clone();
+                let total_blocks = requests.len();
                 let permit = replay_semaphore
                     .clone()
                     .acquire_owned()
@@ -179,25 +180,45 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
                     .map_err(|_| "replay semaphore closed before scheduling push".to_string())?;
                 push_handles.push(tokio::spawn(async move {
                     let _permit = permit;
+                    let mut completed_blocks = 0usize;
                     for req in requests {
                         let cid = req.cid.clone();
                         match t.send_two_stream_request(&pid, req).await {
                             Ok(reply) if reply.err_message.is_some() => {
                                 tracing::warn!(
                                     peer_id = %pid,
+                                    completed_blocks,
+                                    total_blocks,
                                     cid_len = cid.len(),
                                     error = %reply.err_message.as_deref().unwrap_or("unknown pushlog error"),
-                                    "Existing document replay PushLog was rejected"
+                                    "Existing document replay PushLog was rejected; stopping replay for this document"
                                 );
+                                break;
                             }
-                            Ok(_) => {}
+                            Ok(_) => {
+                                completed_blocks += 1;
+                            }
                             Err(e) => {
-                                tracing::warn!(
-                                    peer_id = %pid,
-                                    cid_len = cid.len(),
-                                    error = %e,
-                                    "Existing document replay PushLog failed"
-                                );
+                                if e.is_connection_like() {
+                                    tracing::debug!(
+                                        peer_id = %pid,
+                                        completed_blocks,
+                                        total_blocks,
+                                        cid_len = cid.len(),
+                                        error = %e,
+                                        "Existing document replay stopped because the connection became unavailable"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        peer_id = %pid,
+                                        completed_blocks,
+                                        total_blocks,
+                                        cid_len = cid.len(),
+                                        error = %e,
+                                        "Existing document replay PushLog failed; stopping replay for this document"
+                                    );
+                                }
+                                break;
                             }
                         }
                     }
@@ -370,7 +391,7 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
         .await
         .map_err(|e| format!("headstore iterator: {}", e))?;
 
-    let mut any_failed = false;
+    let mut successful_blocks = 0usize;
     while let Some(pair) = iter
         .next()
         .await
@@ -403,21 +424,37 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
             );
 
             if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
-                any_failed = true;
-                continue;
+                return Err(format!(
+                    "failed to sign replay block after {successful_blocks} successful block(s)"
+                ));
             }
 
             match transport.send_two_stream_request(peer_id, request).await {
-                Ok(reply) if reply.err_message.is_some() => any_failed = true,
-                Ok(_) => {}
-                Err(_) => any_failed = true,
+                Ok(reply) if reply.err_message.is_some() => {
+                    return Err(format!(
+                        "peer rejected replay after {successful_blocks} successful block(s): {}",
+                        reply
+                            .err_message
+                            .as_deref()
+                            .unwrap_or("unknown pushlog error")
+                    ));
+                }
+                Ok(_) => {
+                    successful_blocks += 1;
+                }
+                Err(error) => {
+                    let prefix = if error.is_connection_like() {
+                        "transport became unavailable"
+                    } else {
+                        "replay push failed"
+                    };
+                    return Err(format!(
+                        "{prefix} after {successful_blocks} successful block(s): {error}"
+                    ));
+                }
             }
         }
     }
 
-    if any_failed {
-        Err("some pushes failed".to_string())
-    } else {
-        Ok(())
-    }
+    Ok(())
 }

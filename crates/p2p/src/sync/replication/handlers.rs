@@ -358,7 +358,7 @@ where
 
     // Collect CIDs to mark as merged
     let mut merged_cids = Vec::new();
-    for (block, result) in merge_blocks.iter().zip(batch_results.into_iter()) {
+    for (block, result) in merge_blocks.iter().zip(batch_results) {
         match result {
             Ok(MergeOutcome::Merged) => {
                 merged_cids.push(block.cid);

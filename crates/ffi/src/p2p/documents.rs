@@ -8,6 +8,7 @@ use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::try_ffi;
 use crate::types::FfiResult;
+use defra_http::router::P2pDocumentRequest;
 
 use super::{into_ffi_ok, into_ffi_result, parse_doc_ids_json, FfiP2PError};
 
@@ -40,7 +41,7 @@ pub unsafe extern "C" fn p2p_add_documents(
 
         let docs = doc_ids
             .into_iter()
-            .map(|doc_id| embedded::P2pDocumentRequest {
+            .map(|doc_id| P2pDocumentRequest {
                 collection: String::new(),
                 doc_id,
             })
@@ -97,7 +98,7 @@ pub unsafe extern "C" fn p2p_delete_documents(
 
         let docs = doc_ids
             .into_iter()
-            .map(|doc_id| embedded::P2pDocumentRequest {
+            .map(|doc_id| P2pDocumentRequest {
                 collection: String::new(),
                 doc_id,
             })

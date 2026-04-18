@@ -4,16 +4,14 @@ use anyhow::{anyhow, Result};
 use p2p::sync::SyncConfig;
 use p2p::topics::DefraTopic;
 
-use crate::libp2p_adapter::P2PAdapter;
-use crate::libp2p_doc_pusher::DbDocPusher;
 use crate::node::{EmbeddedBlockstore, EmbeddedMergeHandler, WireDocumentAcpCallback};
 use crate::node_recovery::{restore_libp2p_documents, restore_libp2p_replicators};
 use crate::node_tasks::{
     spawn_failure_recorder, spawn_libp2p_event_handler, spawn_libp2p_retry_loop,
     spawn_replication_loop,
 };
-use crate::version_syncer::DbVersionSyncer;
-use crate::{Libp2pConfig, ManagedP2PSystem, P2POperations, TransportKind};
+use crate::{Libp2pConfig, ManagedP2PSystem, TransportKind};
+use defra_p2p_adapter::{DbDocPusher, DbVersionSyncer, DocPusher, P2PAdapter};
 
 pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     pub system: Arc<ManagedP2PSystem>,
@@ -137,7 +135,7 @@ where
 
     let doc_pusher_impl = Arc::new(DbDocPusher::new(database.clone()));
     let doc_pusher_for_acp = doc_pusher_impl.clone();
-    let doc_pusher: Arc<dyn crate::DocPusher> = doc_pusher_impl;
+    let doc_pusher: Arc<dyn DocPusher> = doc_pusher_impl;
     let version_syncer = Some(DbVersionSyncer::new_arc(
         blockstore.clone(),
         replication.merge_handler_inner.clone(),
@@ -162,7 +160,7 @@ where
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let system = Arc::new(ManagedP2PSystem::new(
         TransportKind::Libp2p,
-        Arc::new(adapter) as Arc<dyn P2POperations>,
+        Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
         crate::node::ShutdownHandle::libp2p(
             handle.clone(),
             vec![
@@ -197,16 +195,16 @@ pub(crate) async fn setup_iroh<S>(
 where
     S: storage::corekv::Store + 'static,
 {
-    use crate::transport_doc_pusher::DbTransportDocPusher;
-    use crate::transport_version_syncer::DbTransportVersionSyncer;
-    use crate::IrohP2PAdapter;
-    use p2p::sync::PushFailure;
+    use defra_p2p_adapter::{
+        DbTransportDocPusher, DbTransportVersionSyncer, IrohP2PAdapter, TransportDocPusher,
+    };
     use storage::stores::Peerstore;
 
     use crate::node_recovery::{restore_iroh_documents, restore_iroh_replicators};
     use crate::node_tasks::{spawn_iroh_event_handler, spawn_iroh_retry_loop};
 
-    let secret_key = load_or_generate_iroh_secret_key(config.secret_key_path.as_deref()).await?;
+    let secret_key =
+        p2p::iroh::load_or_generate_secret_key(config.secret_key_path.as_deref()).await?;
     let iroh_config = p2p::iroh::IrohEndpointConfig {
         secret_key: secret_key.clone(),
         relay_mode: config.relay_mode.clone(),
@@ -265,7 +263,7 @@ where
         transport.clone(),
     ));
     let doc_pusher_for_acp = doc_pusher_impl.clone();
-    let doc_pusher: Arc<dyn crate::TransportDocPusher> = doc_pusher_impl;
+    let doc_pusher: Arc<dyn TransportDocPusher> = doc_pusher_impl;
     let version_syncer = Some(DbTransportVersionSyncer::new_arc(
         blockstore.clone(),
         replication.merge_handler_inner.clone(),
@@ -291,7 +289,7 @@ where
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let system = Arc::new(ManagedP2PSystem::new(
         TransportKind::Iroh,
-        Arc::new(adapter) as Arc<dyn P2POperations>,
+        Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
         crate::node::ShutdownHandle::iroh(
             transport.clone(),
             vec![
@@ -314,45 +312,4 @@ where
             broadcast_mutator_for_acp.set_document_acp(acp);
         })),
     })
-}
-
-#[cfg(feature = "iroh")]
-pub(crate) async fn load_or_generate_iroh_secret_key(
-    path: Option<&std::path::Path>,
-) -> Result<iroh_net::SecretKey> {
-    use anyhow::Context;
-
-    match path {
-        Some(path) if path.exists() => {
-            let bytes = tokio::fs::read(path)
-                .await
-                .with_context(|| format!("failed to read iroh secret key '{}'", path.display()))?;
-            let array: [u8; 32] = bytes
-                .try_into()
-                .map_err(|_| anyhow!("iroh secret key file must contain exactly 32 bytes"))?;
-            Ok(iroh_net::SecretKey::from_bytes(&array))
-        }
-        Some(path) => {
-            let key = iroh_net::SecretKey::generate(&mut rand::rng());
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.with_context(|| {
-                    format!("failed to create iroh key directory '{}'", parent.display())
-                })?;
-            }
-            tokio::fs::write(path, key.to_bytes())
-                .await
-                .with_context(|| format!("failed to write iroh secret key '{}'", path.display()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                    .await
-                    .with_context(|| {
-                        format!("failed to set permissions on '{}'", path.display())
-                    })?;
-            }
-            Ok(key)
-        }
-        None => Ok(iroh_net::SecretKey::generate(&mut rand::rng())),
-    }
 }
