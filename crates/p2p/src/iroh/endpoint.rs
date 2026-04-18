@@ -5,6 +5,7 @@
 //! - Gossip events from iroh-gossip
 //! - Commands from the `IrohTransport` facade
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use iroh::{Endpoint, EndpointId};
