@@ -83,7 +83,7 @@ impl Node {
 
         let blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
         let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-        let (handle, mut events, host_task) = Self::start_p2p(
+        let (handle, mut events, replicator_registry, host_task) = Self::start_p2p(
             config,
             bitswap_store,
             peer_keypair,
@@ -103,7 +103,7 @@ impl Node {
             sync_blockstore,
             Self::sync_config(config),
             Self::access_mode(config),
-            Arc::new(p2p::ReplicatorRegistry::new()),
+            replicator_registry,
             collection_store,
             head_provider,
         )
@@ -435,7 +435,7 @@ impl Node {
             Arc::new(db_merge::create_head_provider(database.clone()));
 
         let iroh_secret_key = Self::iroh_secret_key(peer_keypair.as_ref())?;
-        let (command_tx, mut iroh_events, host_task) =
+        let (command_tx, mut iroh_events, replicator_registry, host_task) =
             p2p::iroh::spawn_endpoint(p2p::iroh::IrohEndpointConfig {
                 secret_key: iroh_secret_key.clone(),
                 relay_mode: Self::iroh_relay_mode(config)?,
@@ -457,7 +457,7 @@ impl Node {
             sync_blockstore,
             Self::sync_config(config),
             Self::access_mode(config),
-            Arc::new(p2p::ReplicatorRegistry::new()),
+            replicator_registry,
             collection_store,
             head_provider,
         )

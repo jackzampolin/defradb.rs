@@ -817,6 +817,52 @@ async fn create_replicator_updates_access_registry_for_gossip() {
 }
 
 #[tokio::test]
+async fn gossip_access_falls_back_to_transport_replicator_state() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let peer = random_peer_id();
+    transport
+        .create_replicator(&peer, vec!["collection1".to_string()])
+        .await
+        .unwrap();
+
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(
+        AccessMode::Controlled,
+        replicators.clone(),
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore,
+    );
+
+    assert!(
+        !replicators.is_replicator("collection1", peer.as_str()),
+        "test setup requires the coordinator registry to start empty"
+    );
+
+    let result = coordinator
+        .handle_transport_event(gossip_event(peer.clone(), "collection1"))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "transport replicator state should authorize gossip on registry miss, got {:?}",
+        result
+    );
+    assert!(
+        replicators.is_replicator("collection1", peer.as_str()),
+        "successful fallback should backfill the coordinator registry"
+    );
+}
+
+#[tokio::test]
 async fn delete_replicator_revokes_access_for_gossip() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());

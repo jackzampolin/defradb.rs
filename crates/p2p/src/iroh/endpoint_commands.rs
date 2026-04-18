@@ -10,8 +10,8 @@ use iroh_gossip::proto::TopicId;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::bitswap::ReplicatorRegistry;
 use crate::message::CarFetchRequest;
-use crate::replicator::ReplicatorInfo;
 use crate::transport::{MessageId, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
 
@@ -34,7 +34,7 @@ pub(super) async fn handle_command(
     gossip: &Gossip,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
     subscriptions: &mut HashMap<String, TopicSubscription>,
-    replicators: &mut HashMap<String, ReplicatorInfo>,
+    replicators: &Arc<ReplicatorRegistry>,
     active_syncs: &mut HashMap<u64, ActiveSync>,
     next_query_id: &mut u64,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
@@ -387,38 +387,27 @@ pub(super) async fn handle_command(
             collections,
             reply,
         } => {
-            let info = ReplicatorInfo::from_raw(peer_id.to_string(), collections, Vec::new());
-            replicators.insert(peer_id.to_string(), info);
+            replicators.set_peer_collections(peer_id.as_str(), &collections);
             let _ = reply.send(Ok(()));
         }
         IrohCommand::DeleteReplicator { peer_id, reply } => {
-            replicators.remove(peer_id.as_str());
+            replicators.remove_peer(peer_id.as_str());
             let _ = reply.send(Ok(()));
         }
         IrohCommand::ListReplicators { reply } => {
-            let list: Vec<ReplicatorInfo> = replicators.values().cloned().collect();
-            let _ = reply.send(Ok(list));
+            let _ = reply.send(Ok(replicators.list_replicator_info()));
         }
         IrohCommand::GetReplicator { peer_id, reply } => {
-            let info = replicators.get(peer_id.as_str()).cloned();
-            let _ = reply.send(Ok(info));
+            let _ = reply.send(Ok(replicators.get_replicator_info(peer_id.as_str())));
         }
         IrohCommand::RemoveReplicatorCollections {
             peer_id,
             collections,
             reply,
         } => {
-            if let Some(info) = replicators.get_mut(peer_id.as_str()) {
-                info.collections.retain(|c| !collections.contains(c));
-                if info.collections.is_empty() {
-                    replicators.remove(peer_id.as_str());
-                    let _ = reply.send(Ok(true));
-                } else {
-                    let _ = reply.send(Ok(false));
-                }
-            } else {
-                let _ = reply.send(Ok(false));
-            }
+            let _ = reply.send(Ok(
+                replicators.remove_peer_collections(peer_id.as_str(), &collections)
+            ));
         }
         IrohCommand::Shutdown { reply } => {
             let _ = reply.send(Ok(()));

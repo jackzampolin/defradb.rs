@@ -5,7 +5,6 @@
 //! - Gossip events from iroh-gossip
 //! - Commands from the `IrohTransport` facade
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use iroh::{Endpoint, EndpointId};
@@ -14,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::replicator::ReplicatorInfo;
+use crate::bitswap::ReplicatorRegistry;
 use crate::transport::{PeerAddr, PeerId, TransportEvent};
 
 use super::command::IrohCommand;
@@ -45,6 +44,7 @@ pub async fn spawn_endpoint(
 ) -> crate::error::Result<(
     mpsc::Sender<IrohCommand>,
     mpsc::Receiver<TransportEvent<iroh::endpoint::SendStream>>,
+    Arc<ReplicatorRegistry>,
     JoinHandle<()>,
 )> {
     let mut alpns: Vec<Vec<u8>> = protocols::ALL_ALPNS.iter().map(|a| a.to_vec()).collect();
@@ -66,10 +66,17 @@ pub async fn spawn_endpoint(
 
     let (command_tx, command_rx) = mpsc::channel::<IrohCommand>(256);
     let (event_tx, event_rx) = mpsc::channel::<TransportEvent<iroh::endpoint::SendStream>>(256);
+    let replicators = Arc::new(ReplicatorRegistry::new());
 
-    let task = tokio::spawn(run_event_loop(endpoint, gossip, command_rx, event_tx));
+    let task = tokio::spawn(run_event_loop(
+        endpoint,
+        gossip,
+        command_rx,
+        event_tx,
+        replicators.clone(),
+    ));
 
-    Ok((command_tx, event_rx, task))
+    Ok((command_tx, event_rx, replicators, task))
 }
 
 /// Main event loop processing incoming connections, gossip, and commands.
@@ -78,10 +85,11 @@ async fn run_event_loop(
     gossip: Gossip,
     mut command_rx: mpsc::Receiver<IrohCommand>,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
+    replicators: Arc<ReplicatorRegistry>,
 ) {
     let peer_map = Arc::new(parking_lot::Mutex::new(PeerMap::new()));
-    let mut subscriptions: HashMap<String, TopicSubscription> = HashMap::new();
-    let mut replicators: HashMap<String, ReplicatorInfo> = HashMap::new();
+    let mut subscriptions: std::collections::HashMap<String, TopicSubscription> =
+        std::collections::HashMap::new();
     let mut active_syncs: HashMap<u64, ActiveSync> = HashMap::new();
     let mut next_query_id: u64 = 1;
 
@@ -118,7 +126,7 @@ async fn run_event_loop(
                     &gossip,
                     &peer_map,
                     &mut subscriptions,
-                    &mut replicators,
+                    &replicators,
                     &mut active_syncs,
                     &mut next_query_id,
                     &event_tx,

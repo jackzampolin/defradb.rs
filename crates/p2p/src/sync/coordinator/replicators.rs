@@ -232,11 +232,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     }
 
     fn register_replicator_access(&self, peer_id: &PeerId, collections: &[String]) {
-        self.access.replicators.remove_peer(peer_id.as_str());
-        for collection_id in collections {
-            self.access
-                .replicators
-                .add_replicator(collection_id, peer_id.as_str());
-        }
+        self.access
+            .replicators
+            .set_peer_collections(peer_id.as_str(), collections);
     }
 }

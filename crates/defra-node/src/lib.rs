@@ -662,9 +662,10 @@ impl NodeBuilder {
             bind_port: Some(config.port),
             bind_addr: config.bind_addr,
         };
-        let (command_tx, iroh_events, endpoint_task) = p2p::iroh::spawn_endpoint(iroh_config)
-            .await
-            .map_err(|e| anyhow::anyhow!("IROH endpoint spawn failed: {}", e))?;
+        let (command_tx, iroh_events, replicator_registry, endpoint_task) =
+            p2p::iroh::spawn_endpoint(iroh_config)
+                .await
+                .map_err(|e| anyhow::anyhow!("IROH endpoint spawn failed: {}", e))?;
 
         // 3. Create IROH transport facade
         let transport = p2p::iroh::IrohTransport::new(command_tx, secret_key);
@@ -684,11 +685,12 @@ impl NodeBuilder {
             rate_limit_rate: config.rate_limit_rate,
             ..Default::default()
         };
-        let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_collection_store(
+        let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_access_control(
             transport.clone(),
             sync_blockstore.clone(),
             sync_config,
             p2p::AccessMode::Controlled,
+            replicator_registry,
             collection_store,
         )
         .await

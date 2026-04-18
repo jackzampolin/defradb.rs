@@ -47,6 +47,20 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return Ok(());
         }
 
+        // Treat the transport's replicator state as the source of truth on a cache miss.
+        // Most runtime entrypoints now share one registry instance between transport and
+        // coordinator, but this fallback preserves authorization if a caller still wires
+        // separate state or if a stale in-memory view survives during bootstrap.
+        let peer_id = PeerId::new(peer_id_str.to_string());
+        if let Ok(Some(info)) = self.runtime.transport.get_replicator(&peer_id).await {
+            if info.collections.iter().any(|id| id == collection_id) {
+                self.access
+                    .replicators
+                    .add_replicator(collection_id, peer_id_str);
+                return Ok(());
+            }
+        }
+
         // Accept messages from any connected peer. Connected peers are already
         // authenticated via transport-level crypto. The replicator registry
         // controls what WE push; it should not gate what we ACCEPT from
