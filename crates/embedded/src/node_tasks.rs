@@ -54,13 +54,18 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
                 _ => {}
             }
 
+            let transport_event = p2p::convert_host_event(event);
+            if transport_event.requires_inline_ordering() {
+                if let Err(error) = coordinator.handle_transport_event(transport_event).await {
+                    tracing::error!(error = %error, "error handling libp2p event");
+                }
+                continue;
+            }
+
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             let coordinator = coordinator.clone();
             tokio::spawn(async move {
-                if let Err(error) = coordinator
-                    .handle_transport_event(p2p::convert_host_event(event))
-                    .await
-                {
+                if let Err(error) = coordinator.handle_transport_event(transport_event).await {
                     tracing::error!(error = %error, "error handling libp2p event");
                 }
                 drop(permit);
@@ -100,6 +105,13 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
                     ));
                 }
                 _ => {}
+            }
+
+            if event.requires_inline_ordering() {
+                if let Err(error) = coordinator.handle_transport_event(event).await {
+                    tracing::error!(error = %error, "error handling iroh event");
+                }
+                continue;
             }
 
             let permit = semaphore.clone().acquire_owned().await.unwrap();

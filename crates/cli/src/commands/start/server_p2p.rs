@@ -228,10 +228,20 @@ impl Node {
                     _ => {}
                 }
 
+                let transport_event = p2p::convert_host_event(event);
+                if transport_event.requires_inline_ordering() {
+                    if let Err(e) = coordinator_for_events
+                        .handle_transport_event(transport_event)
+                        .await
+                    {
+                        error!("Failed to handle host event: {}", e);
+                    }
+                    continue;
+                }
+
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
                 let coord = coordinator_for_events.clone();
                 tokio::spawn(async move {
-                    let transport_event = p2p::convert_host_event(event);
                     if let Err(e) = coord.handle_transport_event(transport_event).await {
                         error!("Failed to handle host event: {}", e);
                     }
@@ -537,6 +547,13 @@ impl Node {
                         ));
                     }
                     _ => {}
+                }
+
+                if event.requires_inline_ordering() {
+                    if let Err(e) = coordinator_for_events.handle_transport_event(event).await {
+                        error!("Failed to handle iroh event: {}", e);
+                    }
+                    continue;
                 }
 
                 let permit = semaphore.clone().acquire_owned().await.unwrap();

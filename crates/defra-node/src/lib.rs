@@ -795,6 +795,19 @@ impl NodeBuilder {
     ) {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
         while let Some(event) = events.recv().await {
+            if event.requires_inline_ordering() {
+                if let Err(e) = coordinator.handle_transport_event(event).await {
+                    if e.is_rate_limited() {
+                        tracing::debug!(error = %e, "P2P rate-limited");
+                    } else if e.is_retriable() {
+                        tracing::warn!(error = %e, "P2P transport event failed after retries");
+                    } else {
+                        tracing::error!(error = %e, "P2P event handler error");
+                    }
+                }
+                continue;
+            }
+
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             let coord = coordinator.clone();
             tokio::spawn(async move {
