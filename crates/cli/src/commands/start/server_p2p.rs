@@ -396,6 +396,7 @@ impl Node {
         Ok(P2PSetup {
             host_handle: Some(handle),
             p2p_tasks: Some(P2PTasks {
+                coordinator: coordinator.shutdown_handle(),
                 host_task,
                 replication_task,
                 event_handler_task,
@@ -705,6 +706,7 @@ impl Node {
         Ok(P2PSetup {
             host_handle: None,
             p2p_tasks: Some(P2PTasks {
+                coordinator: coordinator.shutdown_handle(),
                 host_task,
                 replication_task,
                 event_handler_task,

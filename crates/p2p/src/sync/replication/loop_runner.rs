@@ -122,6 +122,12 @@ impl ReplicationLoop {
                         should_break = true;
                         break;
                     }
+                    ReplicationResult::DagFetchStarted { root_cid } => {
+                        tracing::debug!(
+                            cid = %root_cid,
+                            "Poll-based DAG fetch started for missing blocks"
+                        );
+                    }
                     ReplicationResult::BitswapFetchStarted { root_cid, query_id } => {
                         tracing::debug!(
                             cid = %root_cid,

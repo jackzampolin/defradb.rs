@@ -3,7 +3,7 @@
 //! CARv1 (Content ARchive) packs a set of IPLD blocks with their CIDs into a
 //! single byte stream, enabling single-round-trip DAG transfer over P2P.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use blockstore::Blockstore;
 use bytes::Bytes;
@@ -126,14 +126,45 @@ pub async fn collect_dag_blocks<B: Blockstore>(
     let mut outcome = CarCollectOutcome::default();
     let mut visited = HashSet::new();
     let mut total_bytes: usize = 0;
-    collect_recursive(
-        blockstore,
-        root_cid,
-        &mut outcome,
-        &mut visited,
-        &mut total_bytes,
-    )
-    .await?;
+    let mut queue = VecDeque::from([*root_cid]);
+
+    while let Some(cid) = queue.pop_front() {
+        if !visited.insert(cid) {
+            continue;
+        }
+
+        if outcome.blocks.len() >= CAR_MAX_BLOCKS {
+            outcome.truncated_by_blocks = true;
+            break;
+        }
+
+        let data = match blockstore.get(&cid).await {
+            Ok(Some(d)) => d,
+            Ok(None) => continue,
+            Err(e) => {
+                return Err(Error::BlockstoreError(format!(
+                    "failed to get block {}: {}",
+                    cid, e
+                )));
+            }
+        };
+
+        if total_bytes + data.len() > CAR_MAX_BYTES {
+            outcome.truncated_by_bytes = true;
+            break;
+        }
+        total_bytes += data.len();
+
+        let refs = extract_links(&data);
+        outcome.blocks.push((cid, data));
+
+        for child_cid in refs {
+            if !visited.contains(&child_cid) {
+                queue.push_back(child_cid);
+            }
+        }
+    }
+
     Ok(outcome)
 }
 
@@ -176,53 +207,6 @@ pub async fn collect_exact_blocks<B: Blockstore>(
     }
 
     Ok(outcome)
-}
-
-fn collect_recursive<'a, B: Blockstore + 'a>(
-    blockstore: &'a B,
-    cid: &'a Cid,
-    outcome: &'a mut CarCollectOutcome,
-    visited: &'a mut HashSet<Cid>,
-    total_bytes: &'a mut usize,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
-    Box::pin(async move {
-        if !visited.insert(*cid) {
-            return Ok(());
-        }
-
-        // Enforce limits before fetching each block.
-        if outcome.blocks.len() >= CAR_MAX_BLOCKS {
-            outcome.truncated_by_blocks = true;
-            return Ok(());
-        }
-
-        let data = match blockstore.get(cid).await {
-            Ok(Some(d)) => d,
-            Ok(None) => return Ok(()),
-            Err(e) => {
-                return Err(Error::BlockstoreError(format!(
-                    "failed to get block {}: {}",
-                    cid, e
-                )));
-            }
-        };
-
-        if *total_bytes + data.len() > CAR_MAX_BYTES {
-            outcome.truncated_by_bytes = true;
-            return Ok(());
-        }
-        *total_bytes += data.len();
-
-        // Extract child links
-        let refs = extract_links(&data);
-        outcome.blocks.push((*cid, data));
-
-        for child_cid in refs {
-            collect_recursive(blockstore, &child_cid, outcome, visited, total_bytes).await?;
-        }
-
-        Ok(())
-    })
 }
 
 /// Extract CID links from a DAG-CBOR block.
@@ -458,6 +442,33 @@ mod tests {
         assert_eq!(collected.blocks.len(), 1);
         assert_eq!(collected.blocks[0].0, root_cid);
         assert_eq!(collected.blocks[0].1, root_data);
+        assert!(!collected.truncated());
+    }
+
+    #[tokio::test]
+    async fn collect_dag_blocks_handles_deep_chains_iteratively() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true);
+
+        let mut next: Option<Cid> = None;
+        let mut root_cid: Option<Cid> = None;
+        let depth = 5_000usize;
+
+        for idx in (0..depth).rev() {
+            let data = match next {
+                Some(child) => encode_ipld(ipld!({ "idx": idx as i64, "next": child })),
+                None => encode_ipld(ipld!({ "idx": idx as i64 })),
+            };
+            let cid = make_cid(&data);
+            blockstore.put(&cid, &data).await.unwrap();
+            next = Some(cid);
+            root_cid = Some(cid);
+        }
+
+        let root_cid = root_cid.expect("deep chain root");
+        let collected = collect_dag_blocks(&blockstore, &root_cid).await.unwrap();
+
+        assert_eq!(collected.blocks.len(), depth);
         assert!(!collected.truncated());
     }
 }

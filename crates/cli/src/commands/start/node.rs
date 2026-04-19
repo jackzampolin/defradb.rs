@@ -17,6 +17,8 @@ use storage::backends::RocksDbStoreOptions;
 
 /// Tracks spawned P2P background tasks for graceful shutdown.
 pub(super) struct P2PTasks {
+    /// Coordinator-owned background replication shutdown.
+    pub coordinator: p2p::sync::SyncShutdownHandle,
     /// P2P host event loop task
     pub host_task: JoinHandle<()>,
     /// Replication loop task (processes incoming blocks)

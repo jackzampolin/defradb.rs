@@ -17,6 +17,13 @@ use crate::transport::{P2PTransport, PeerId};
 
 const SELECTIVE_FETCH_BATCH_SIZE: usize = 2048;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchBatchOutcome {
+    Complete,
+    Partial,
+    NoProgress,
+}
+
 /// Fetch an entire DAG rooted at `root_cid`.
 ///
 /// Strategy: try CAR fetch first (one round-trip), then selective block fetch
@@ -39,8 +46,24 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
         "Starting DAG fetch (CAR-first, selective block fallback)"
     );
 
+    let car_missing_watch = match blockstore.get(&root_cid).await {
+        Ok(Some(root_data)) => find_all_missing_links(blockstore.as_ref(), &root_data)
+            .await
+            .ok()
+            .filter(|missing| !missing.is_empty()),
+        _ => None,
+    };
+
     // Try CAR fetch first
-    if try_car_fetch(&transport, &blockstore, &root_cid, &source_peer).await {
+    if try_car_fetch(
+        &transport,
+        &blockstore,
+        &root_cid,
+        &source_peer,
+        car_missing_watch.as_deref(),
+    )
+    .await
+    {
         if let Ok(Some(root_data)) = blockstore.get(&root_cid).await {
             let missing = find_all_missing_links(blockstore.as_ref(), &root_data)
                 .await
@@ -70,15 +93,17 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
     }
 
     // Fallback fetch: fetch the root block first so we can enumerate missing links.
-    if !poll_fetch_blocks(
+    if !matches!(
+        poll_fetch_blocks(
         &root_cid,
         std::slice::from_ref(&root_cid),
         &transport,
         &blockstore,
         &source_peer,
     )
-    .await
-    {
+    .await,
+        FetchBatchOutcome::Complete
+    ) {
         warn!(root_cid = %root_cid, "Failed to fetch root block");
         return;
     }
@@ -112,18 +137,31 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
             "Fetching missing DAG blocks via selective block fetch"
         );
 
-        let mut any_batch_failed = false;
+        let mut made_progress = false;
         for batch in missing.chunks(SELECTIVE_FETCH_BATCH_SIZE) {
-            if !poll_fetch_blocks(&root_cid, batch, &transport, &blockstore, &source_peer).await {
-                any_batch_failed = true;
-                warn!(
-                    root_cid = %root_cid,
-                    requested_count = batch.len(),
-                    "Timeout fetching selective block batch (30s)"
-                );
+            match poll_fetch_blocks(&root_cid, batch, &transport, &blockstore, &source_peer).await
+            {
+                FetchBatchOutcome::Complete => {
+                    made_progress = true;
+                }
+                FetchBatchOutcome::Partial => {
+                    made_progress = true;
+                    debug!(
+                        root_cid = %root_cid,
+                        requested_count = batch.len(),
+                        "Selective block batch made partial progress; continuing DAG walk"
+                    );
+                }
+                FetchBatchOutcome::NoProgress => {
+                    warn!(
+                        root_cid = %root_cid,
+                        requested_count = batch.len(),
+                        "Timeout fetching selective block batch (30s)"
+                    );
+                }
             }
         }
-        if any_batch_failed {
+        if !made_progress {
             break;
         }
     }
@@ -167,6 +205,7 @@ async fn try_car_fetch<B: Blockstore, T: P2PTransport>(
     blockstore: &Arc<B>,
     root_cid: &Cid,
     source_peer: &PeerId,
+    watch_missing: Option<&[Cid]>,
 ) -> bool {
     if let Err(e) = transport.send_car_request(source_peer, *root_cid).await {
         debug!(root_cid = %root_cid, error = %e, "CAR request failed, will use selective block fetch");
@@ -176,7 +215,17 @@ async fn try_car_fetch<B: Blockstore, T: P2PTransport>(
     let timeout = Duration::from_secs(10);
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
-        if let Ok(true) = blockstore.has(root_cid).await {
+        if let Some(missing) = watch_missing {
+            let mut remaining = 0usize;
+            for cid in missing {
+                if !matches!(blockstore.has(cid).await, Ok(true)) {
+                    remaining += 1;
+                }
+            }
+            if remaining < missing.len() {
+                return true;
+            }
+        } else if let Ok(true) = blockstore.has(root_cid).await {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -193,7 +242,7 @@ async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
     transport: &T,
     blockstore: &Arc<B>,
     source_peer: &PeerId,
-) -> bool {
+) -> FetchBatchOutcome {
     let mut missing = Vec::new();
     for cid in cids {
         if matches!(blockstore.has(cid).await, Ok(true)) {
@@ -203,7 +252,7 @@ async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
     }
 
     if missing.is_empty() {
-        return true;
+        return FetchBatchOutcome::Complete;
     }
 
     if let Err(e) = transport
@@ -216,7 +265,7 @@ async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
             error = %e,
             "selective block fetch failed"
         );
-        return false;
+        return FetchBatchOutcome::NoProgress;
     }
 
     let timeout = Duration::from_secs(30);
@@ -229,12 +278,15 @@ async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
             }
         }
         if remaining == 0 {
-            return true;
+            return FetchBatchOutcome::Complete;
+        }
+        if remaining < missing.len() {
+            return FetchBatchOutcome::Partial;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    false
+    FetchBatchOutcome::NoProgress
 }
 
 #[cfg(test)]
@@ -276,6 +328,7 @@ mod tests {
         blockstore: Arc<DefraBlockstore<MemoryStore>>,
         root_cid: Cid,
         root_data: Vec<u8>,
+        car_blocks: Arc<HashMap<Cid, Vec<u8>>>,
         selective_blocks: Arc<HashMap<Cid, Vec<u8>>>,
         car_requests: Arc<AtomicUsize>,
         sync_batches: Arc<Mutex<Vec<Vec<Cid>>>>,
@@ -286,6 +339,7 @@ mod tests {
             blockstore: Arc<DefraBlockstore<MemoryStore>>,
             root_cid: Cid,
             root_data: Vec<u8>,
+            car_blocks: HashMap<Cid, Vec<u8>>,
             selective_blocks: HashMap<Cid, Vec<u8>>,
         ) -> Self {
             Self {
@@ -294,6 +348,7 @@ mod tests {
                 blockstore,
                 root_cid,
                 root_data,
+                car_blocks: Arc::new(car_blocks),
                 selective_blocks: Arc::new(selective_blocks),
                 car_requests: Arc::new(AtomicUsize::new(0)),
                 sync_batches: Arc::new(Mutex::new(Vec::new())),
@@ -436,6 +491,12 @@ mod tests {
                 .put(&self.root_cid, &self.root_data)
                 .await
                 .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
+            for (cid, data) in self.car_blocks.iter() {
+                self.blockstore
+                    .put(cid, data)
+                    .await
+                    .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
+            }
             Ok(())
         }
 
@@ -546,8 +607,13 @@ mod tests {
             (child_one_cid, child_one_data.clone()),
             (child_two_cid, child_two_data.clone()),
         ]);
-        let transport =
-            TestTransport::new(blockstore.clone(), root_cid, root_data, selective_blocks);
+        let transport = TestTransport::new(
+            blockstore.clone(),
+            root_cid,
+            root_data,
+            HashMap::new(),
+            selective_blocks,
+        );
 
         let (event_tx, mut event_rx) = mpsc::channel(1);
         let source_peer = PeerId::new("remote-peer".to_string());
@@ -578,5 +644,113 @@ mod tests {
 
         let requested: HashSet<_> = batches[0].iter().copied().collect();
         assert_eq!(requested, HashSet::from([child_one_cid, child_two_cid]));
+    }
+
+    #[tokio::test]
+    async fn poll_fetch_dag_does_not_treat_preexisting_root_as_car_success() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+        let child_data = encode_ipld(ipld!({ "value": 1 }));
+        let child_cid = make_cid(&child_data);
+        let root_data = encode_ipld(ipld!({ "child": child_cid }));
+        let root_cid = make_cid(&root_data);
+
+        blockstore.put(&root_cid, &root_data).await.unwrap();
+
+        let transport = TestTransport::new(
+            blockstore.clone(),
+            root_cid,
+            root_data,
+            HashMap::from([(child_cid, child_data.clone())]),
+            HashMap::new(),
+        );
+
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let source_peer = PeerId::new("remote-peer".to_string());
+
+        poll_fetch_dag(
+            transport.clone(),
+            blockstore.clone(),
+            event_tx,
+            root_cid,
+            "doc-id".to_string(),
+            "collection-id".to_string(),
+            "schema-version-id".to_string(),
+            source_peer,
+        )
+        .await;
+
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(SyncEvent::DagReady { root_cid: ready_cid, .. }) if ready_cid == root_cid
+        ));
+        assert!(matches!(blockstore.has(&child_cid).await, Ok(true)));
+        assert_eq!(transport.car_request_count(), 1);
+        assert!(transport.sync_batches().is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_fetch_dag_continues_after_partial_selective_batch_progress() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+        let leaf_one_data = encode_ipld(ipld!({ "value": 1 }));
+        let leaf_one_cid = make_cid(&leaf_one_data);
+        let leaf_two_data = encode_ipld(ipld!({ "value": 2 }));
+        let leaf_two_cid = make_cid(&leaf_two_data);
+
+        let mid_one_data = encode_ipld(ipld!({ "child": leaf_one_cid }));
+        let mid_one_cid = make_cid(&mid_one_data);
+        let mid_two_data = encode_ipld(ipld!({ "child": leaf_two_cid }));
+        let mid_two_cid = make_cid(&mid_two_data);
+
+        let root_data = encode_ipld(ipld!({ "children": [mid_one_cid, mid_two_cid] }));
+        let root_cid = make_cid(&root_data);
+
+        let selective_blocks = HashMap::from([
+            (mid_one_cid, mid_one_data.clone()),
+            (mid_two_cid, mid_two_data.clone()),
+            (leaf_one_cid, leaf_one_data.clone()),
+            (leaf_two_cid, leaf_two_data.clone()),
+        ]);
+        let transport = TestTransport::new(
+            blockstore.clone(),
+            root_cid,
+            root_data,
+            HashMap::new(),
+            selective_blocks,
+        );
+
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let source_peer = PeerId::new("remote-peer".to_string());
+
+        poll_fetch_dag(
+            transport.clone(),
+            blockstore.clone(),
+            event_tx,
+            root_cid,
+            "doc-id".to_string(),
+            "collection-id".to_string(),
+            "schema-version-id".to_string(),
+            source_peer,
+        )
+        .await;
+
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(SyncEvent::DagReady { root_cid: ready_cid, .. }) if ready_cid == root_cid
+        ));
+
+        let batches = transport.sync_batches();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(
+            batches[0].iter().copied().collect::<HashSet<_>>(),
+            HashSet::from([mid_one_cid, mid_two_cid])
+        );
+        assert_eq!(
+            batches[1].iter().copied().collect::<HashSet<_>>(),
+            HashSet::from([leaf_one_cid, leaf_two_cid])
+        );
     }
 }

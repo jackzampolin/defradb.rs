@@ -31,7 +31,7 @@ pub use result::ReplicationResult;
 
 #[cfg(test)]
 mod tests {
-    use super::handlers::handle_block_received;
+    use super::handlers::{handle_block_received, process_event};
     use super::*;
     use crate::bitswap::AccessMode;
     use crate::error::Result as P2PResult;
@@ -42,7 +42,7 @@ mod tests {
     use crate::sync::manager::SyncEvent;
     use crate::sync::merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
     use crate::topics::DefraTopic;
-    use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId};
+    use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, TransportEvent};
     use crate::QueryId;
     use crate::ReplicatorInfo;
     use async_trait::async_trait;
@@ -110,6 +110,248 @@ mod tests {
                 peer_id: PeerId::new("local-peer".to_string()),
                 pubkey: vec![1, 2, 3],
             }
+        }
+    }
+
+    #[derive(Clone)]
+    struct PollFetchTransport {
+        peer_id: PeerId,
+        pubkey: Vec<u8>,
+        blockstore: Arc<DefraBlockstore<MemoryStore>>,
+        child_cid: Cid,
+        child_data: Vec<u8>,
+        sync_blocks_calls: Arc<AtomicUsize>,
+    }
+
+    impl PollFetchTransport {
+        fn new(
+            blockstore: Arc<DefraBlockstore<MemoryStore>>,
+            child_cid: Cid,
+            child_data: Vec<u8>,
+        ) -> Self {
+            Self {
+                peer_id: PeerId::new("local-peer".to_string()),
+                pubkey: vec![1, 2, 3],
+                blockstore,
+                child_cid,
+                child_data,
+                sync_blocks_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn sync_blocks_calls(&self) -> usize {
+            self.sync_blocks_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl P2PTransport for PollFetchTransport {
+        type ResponseToken = ();
+
+        fn local_peer_id(&self) -> &PeerId {
+            &self.peer_id
+        }
+
+        fn local_public_key_proto(&self) -> &[u8] {
+            &self.pubkey
+        }
+
+        fn sign(&self, _data: &[u8]) -> P2PResult<Vec<u8>> {
+            Ok(vec![0])
+        }
+
+        async fn dial(&self, _peer_id: &PeerId, _addrs: Vec<PeerAddr>) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn listen(&self, _addr: PeerAddr) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn connected_peers(&self) -> P2PResult<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
+        async fn listen_addresses(&self) -> P2PResult<Vec<PeerAddr>> {
+            Ok(Vec::new())
+        }
+
+        async fn poll_until_connected(
+            &self,
+            _peer_id: &PeerId,
+            _timeout: Duration,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn peer_addresses(&self) -> P2PResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn topic_peers(&self, _topic: DefraTopic) -> P2PResult<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
+        async fn subscribe(&self, _topic: DefraTopic) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn unsubscribe(&self, _topic: DefraTopic) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn publish(
+            &self,
+            _topic: DefraTopic,
+            _msg: PushLogBroadcast,
+        ) -> P2PResult<MessageId> {
+            Ok(MessageId::new("noop".to_string()))
+        }
+
+        async fn send_pushlog_response(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: PushLogReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_two_stream_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: PushLogRequest,
+        ) -> P2PResult<PushLogReply> {
+            Ok(PushLogReply::success("noop"))
+        }
+
+        async fn send_two_stream_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: PushLogReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: DocSyncRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: DocSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: BranchableSyncRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: BranchableSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_car_request(&self, _peer_id: &PeerId, _root_cid: Cid) -> P2PResult<()> {
+            self.blockstore
+                .put(&self.child_cid, &self.child_data)
+                .await
+                .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn send_car_response(&self, _peer_id: &PeerId, _car_data: Vec<u8>) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_car_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _car_data: Vec<u8>,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: DocSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: BranchableSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_se_artifacts(
+            &self,
+            _peer_id: &PeerId,
+            _req: PushSEArtifactsRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn sync_blocks(
+            &self,
+            _root: Cid,
+            _providers: Vec<PeerId>,
+            _missing: Vec<Cid>,
+        ) -> P2PResult<QueryId> {
+            self.sync_blocks_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(QueryId(1))
+        }
+
+        async fn cancel_sync(&self, _query_id: QueryId) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn create_replicator(
+            &self,
+            _peer_id: &PeerId,
+            _collections: Vec<String>,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn delete_replicator(&self, _peer_id: &PeerId) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn list_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_replicator(&self, _peer_id: &PeerId) -> P2PResult<Option<ReplicatorInfo>> {
+            Ok(None)
+        }
+
+        async fn remove_replicator_collections(
+            &self,
+            _peer_id: &PeerId,
+            _collections: Vec<String>,
+        ) -> P2PResult<bool> {
+            Ok(false)
+        }
+
+        async fn shutdown(&self) -> P2PResult<()> {
+            Ok(())
         }
     }
 
@@ -613,6 +855,117 @@ mod tests {
             blockstore.is_merged(&cid).await.unwrap(),
             "successful replay should mark the CID as merged"
         );
+    }
+
+    #[tokio::test]
+    async fn test_pushlog_dag_needs_fetch_uses_poll_fetcher_when_sender_known() {
+        use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+        let child_block = Block::new(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                doc_id: b"doc1".to_vec(),
+                field_name: "name".to_string(),
+                priority: 1,
+                schema_version_id: "schema1".to_string(),
+                data: b"value".to_vec(),
+            }),
+            vec![],
+            vec![],
+        );
+        let child_data = child_block.to_dag_cbor().unwrap();
+        let child_cid = child_block.generate_cid().unwrap();
+
+        let root_block = Block::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                doc_id: b"doc1".to_vec(),
+                schema_version_id: "schema1".to_string(),
+                priority: 1,
+                status: 1,
+            }),
+            vec![],
+            vec![DAGLink::new("name", child_cid)],
+        );
+        let root_data = root_block.to_dag_cbor().unwrap();
+        let root_cid = root_block.generate_cid().unwrap();
+
+        blockstore.put(&root_cid, &root_data).await.unwrap();
+
+        let transport = PollFetchTransport::new(blockstore.clone(), child_cid, child_data);
+        let transport_handle = transport.clone();
+        let (coordinator, mut events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                transport,
+                blockstore.clone(),
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            )
+            .await
+            .unwrap();
+
+        coordinator
+            .handle_transport_event(TransportEvent::TwoStreamRequest {
+                peer_id: PeerId::new("source-peer".to_string()),
+                request: PushLogRequest::new(
+                    "doc1".to_string(),
+                    bytes::Bytes::from(root_cid.to_bytes()),
+                    "col1".to_string(),
+                    "creator-1".to_string(),
+                    bytes::Bytes::from(root_data),
+                ),
+                token: None,
+                is_explicit_replicator: false,
+                explicit_replay_authorization: None,
+            })
+            .await
+            .unwrap();
+
+        let dag_needs_fetch = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("DagNeedsFetch should arrive")
+            .expect("event should be present");
+
+        assert_eq!(coordinator.pending_dag_count(), 1);
+
+        let result = process_event(
+            &coordinator,
+            dag_needs_fetch,
+            &TestMergeHandler::new(true, false),
+            &ReplicationConfig::default(),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            ReplicationResult::DagFetchStarted { root_cid: cid } if cid == root_cid
+        ));
+
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("DagReady should arrive")
+            .expect("event should be present");
+
+        assert!(matches!(&event, SyncEvent::DagReady { root_cid: cid, .. } if *cid == root_cid));
+        assert_eq!(transport_handle.sync_blocks_calls(), 0);
+        assert!(blockstore.has(&child_cid).await.unwrap());
+
+        let merge_result = process_event(
+            &coordinator,
+            event,
+            &TestMergeHandler::new(true, false),
+            &ReplicationConfig::default(),
+        )
+        .await;
+
+        assert!(matches!(
+            merge_result,
+            ReplicationResult::Merged { cid, .. } if cid == root_cid
+        ));
+        assert_eq!(coordinator.pending_dag_count(), 0);
     }
 
     #[tokio::test]

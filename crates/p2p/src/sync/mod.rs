@@ -26,7 +26,7 @@ pub use collection_store::{NoOpCollectionStorage, P2PCollectionStorage, P2PColle
 pub use coordinator::IrohSyncCoordinator;
 pub use coordinator::{
     CreateReplicatorResult, Libp2pSyncCoordinator, LoadReplicatorsResult, PushFailure,
-    SyncCoordinator,
+    SyncCoordinator, SyncShutdownHandle,
 };
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, SyncPlan};
 pub use head_provider::{DocumentHeadProvider, NoOpHeadProvider};

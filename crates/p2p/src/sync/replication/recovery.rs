@@ -117,6 +117,12 @@ where
                     "Failed to recover block - manual intervention may be required"
                 );
             }
+            ReplicationResult::DagFetchStarted { root_cid } => {
+                tracing::warn!(
+                    cid = %root_cid,
+                    "Unexpected DagFetchStarted during recovery - block may have missing links"
+                );
+            }
             ReplicationResult::BitswapFetchStarted { root_cid, .. } => {
                 // Unexpected during recovery - blocks should already be in blockstore
                 tracing::warn!(

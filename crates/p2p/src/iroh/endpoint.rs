@@ -10,11 +10,12 @@ use std::sync::Arc;
 
 use iroh::{Endpoint, EndpointId};
 use iroh_gossip::net::Gossip;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::bitswap::ReplicatorRegistry;
+use crate::message::PushLogReply;
 use crate::transport::{PeerAddr, PeerId, TransportEvent};
 
 use super::command::IrohCommand;
@@ -89,6 +90,10 @@ async fn run_event_loop(
     replicators: Arc<ReplicatorRegistry>,
 ) {
     let peer_map = Arc::new(parking_lot::Mutex::new(PeerMap::new()));
+    let pending_pushlog_replies = Arc::new(parking_lot::Mutex::new(HashMap::<
+        String,
+        oneshot::Sender<PushLogReply>,
+    >::new()));
     let mut subscriptions: std::collections::HashMap<String, TopicSubscription> =
         std::collections::HashMap::new();
     let mut active_syncs: HashMap<u64, ActiveSync> = HashMap::new();
@@ -113,6 +118,7 @@ async fn run_event_loop(
                             incoming,
                             &gossip,
                             &peer_map,
+                            &pending_pushlog_replies,
                             &subscriptions,
                             &event_tx,
                         ).await;
@@ -126,6 +132,7 @@ async fn run_event_loop(
                     &endpoint,
                     &gossip,
                     &peer_map,
+                    &pending_pushlog_replies,
                     &mut subscriptions,
                     &replicators,
                     &mut active_syncs,

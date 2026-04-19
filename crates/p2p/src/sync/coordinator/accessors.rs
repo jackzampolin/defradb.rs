@@ -5,7 +5,7 @@ use std::sync::Arc;
 use acp::{DocumentACP, ReplicatedDocActorRelationships};
 use blockstore::Blockstore;
 
-use super::SyncCoordinator;
+use super::{SyncCoordinator, SyncShutdownHandle};
 use crate::bitswap::ReplicatorRegistry;
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::manager::SyncManager;
@@ -41,6 +41,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Get the transport reference.
     pub fn transport(&self) -> &T {
         &self.runtime.transport
+    }
+
+    /// Get the shutdown handle for coordinator-owned background tasks.
+    pub fn background_shutdown_handle(&self) -> SyncShutdownHandle {
+        self.runtime.shutdown.clone()
     }
 
     /// Get the sync manager reference.

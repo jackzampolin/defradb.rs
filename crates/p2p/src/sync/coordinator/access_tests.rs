@@ -22,6 +22,7 @@ use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::NoOpCollectionStorage;
 use crate::sync::head_provider::NoOpHeadProvider;
 use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
+use crate::sync::SyncShutdownHandle;
 use crate::sync::peer_state::PeerStateTracker;
 use crate::sync::rate_limiter::PeerRateLimiter;
 use crate::topics::DefraTopic;
@@ -47,6 +48,23 @@ fn create_test_coordinator(
     SyncCoordinator<TestBlockstore, NoopTransport>,
     tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
 ) {
+    create_test_coordinator_with_rate_limiter(
+        access_mode,
+        replicators,
+        peer_state,
+        Arc::new(PeerRateLimiter::default()),
+    )
+}
+
+fn create_test_coordinator_with_rate_limiter(
+    access_mode: AccessMode,
+    replicators: Arc<ReplicatorRegistry>,
+    peer_state: Arc<PeerStateTracker>,
+    rate_limiter: Arc<PeerRateLimiter>,
+) -> (
+    SyncCoordinator<TestBlockstore, NoopTransport>,
+    tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
+) {
     let transport = NoopTransport::new();
     let local_peer_id = transport.local_peer_id().to_string();
     let broadcaster = Broadcaster::new(transport.clone());
@@ -60,6 +78,7 @@ fn create_test_coordinator(
         local_peer_id,
         broadcaster,
         blockstore,
+        rate_limiter,
     )
 }
 
@@ -71,6 +90,7 @@ fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
     local_peer_id: String,
     broadcaster: Broadcaster<NoopTransport>,
     blockstore: Arc<B>,
+    rate_limiter: Arc<PeerRateLimiter>,
 ) -> (
     SyncCoordinator<B, NoopTransport>,
     tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
@@ -88,7 +108,8 @@ fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
             push_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
             )),
-            rate_limiter: Arc::new(PeerRateLimiter::default()),
+            rate_limiter,
+            shutdown: SyncShutdownHandle::new(),
         },
         manager,
         access: SyncAccessState {
@@ -739,6 +760,7 @@ async fn gossip_access_falls_back_to_transport_connected_peer_state() {
         local_peer_id,
         broadcaster,
         blockstore,
+        Arc::new(PeerRateLimiter::default()),
     );
 
     assert!(
@@ -918,6 +940,7 @@ async fn gossip_access_falls_back_to_transport_replicator_state() {
         local_peer_id,
         broadcaster,
         blockstore,
+        Arc::new(PeerRateLimiter::default()),
     );
 
     assert!(
@@ -1093,6 +1116,54 @@ async fn two_stream_authenticated_explicit_replicator_is_marked_explicit_replica
 }
 
 #[tokio::test]
+async fn two_stream_bypasses_gossip_rate_limiter_for_authenticated_sync() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, mut events) = create_test_coordinator_with_rate_limiter(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        Arc::new(PeerRateLimiter::new(0, 0.0)),
+    );
+
+    let peer = random_peer_id();
+    coordinator
+        .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
+        .await
+        .unwrap();
+
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived { sender_peer, .. } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn gossip_remains_rate_limited_when_bucket_is_empty() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator_with_rate_limiter(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        Arc::new(PeerRateLimiter::new(0, 0.0)),
+    );
+
+    let peer = random_peer_id();
+    let result = coordinator
+        .handle_transport_event(gossip_event(peer, "collection1"))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "gossip should still be rate limited, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
 async fn pushlog_retries_transient_transaction_conflicts_without_sync_error() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
@@ -1109,6 +1180,7 @@ async fn pushlog_retries_transient_transaction_conflicts_without_sync_error() {
         local_peer_id,
         broadcaster,
         blockstore.clone(),
+        Arc::new(PeerRateLimiter::default()),
     );
 
     let peer = random_peer_id();
@@ -1143,6 +1215,7 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
         local_peer_id,
         broadcaster,
         blockstore.clone(),
+        Arc::new(PeerRateLimiter::default()),
     );
 
     let peer = random_peer_id();

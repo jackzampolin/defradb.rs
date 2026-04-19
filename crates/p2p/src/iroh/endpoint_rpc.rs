@@ -137,6 +137,56 @@ pub(super) async fn handle_fire_and_forget<T: serde::Serialize>(
     Ok(())
 }
 
+/// Send a CAR request and emit the response as a transport event.
+///
+/// Unlike generic fire-and-forget messages, CAR requests expect the peer to
+/// stream raw CAR bytes back on the same bidirectional stream. We must consume
+/// that response here; otherwise the remote writer sees a broken stream and the
+/// caller never receives a `CarFetchResponse`.
+pub(super) async fn handle_car_request_response(
+    endpoint: &Endpoint,
+    peer_id: &PeerId,
+    root_cid: cid::Cid,
+    direct_addr: Option<std::net::SocketAddr>,
+    event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
+) -> crate::error::Result<()> {
+    let connection =
+        connect_with_direct_addr_fallback(endpoint, peer_id, protocols::ALPN_CAR, direct_addr)
+            .await?;
+
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|e| crate::error::Error::Transport(e.to_string()))?;
+
+    let request = CarFetchRequest::full_dag(root_cid);
+    protocols::write_message(&mut send, &request).await?;
+    send.finish()
+        .map_err(|e| crate::error::Error::Transport(e.to_string()))?;
+
+    let car_data = tokio::time::timeout(
+        REQUEST_RESPONSE_TIMEOUT,
+        recv.read_to_end(protocols::MAX_CAR_SIZE),
+    )
+    .await
+    .map_err(|_| crate::error::Error::ResponseTimeout)?
+    .map_err(|e| crate::error::Error::Transport(e.to_string()))?;
+
+    if event_tx
+        .send(TransportEvent::CarFetchResponse {
+            peer_id: peer_id.clone(),
+            root_cid,
+            car_data,
+        })
+        .await
+        .is_err()
+    {
+        warn!("Event channel closed, cannot emit CarFetchResponse");
+    }
+
+    Ok(())
+}
+
 /// Try to fetch CAR blocks from a single provider.
 ///
 /// Returns `true` if the fetch succeeded and a `CarFetchResponse` was emitted.

@@ -86,6 +86,7 @@ struct P2PLifecycle {
 #[cfg(feature = "p2p")]
 struct P2PLifecycleInner {
     transport: p2p::iroh::IrohTransport,
+    coordinator: p2p::sync::SyncShutdownHandle,
     endpoint_task: tokio::task::JoinHandle<()>,
     replication_task: tokio::task::JoinHandle<()>,
     event_handler_task: tokio::task::JoinHandle<()>,
@@ -116,16 +117,30 @@ impl P2PLifecycle {
 #[cfg(feature = "p2p")]
 impl P2PLifecycleInner {
     async fn shutdown(self) {
-        abort_background_task("iroh retry loop", self.retry_loop_task).await;
+        let Self {
+            transport,
+            coordinator,
+            endpoint_task,
+            replication_task,
+            event_handler_task,
+            failure_recorder_task,
+            retry_loop_task,
+        } = self;
 
-        if let Err(error) = self.transport.shutdown().await {
+        abort_background_task("iroh retry loop", retry_loop_task).await;
+        coordinator.shutdown().await;
+
+        if let Err(error) = transport.shutdown().await {
             tracing::debug!(%error, "Iroh transport shutdown returned an error");
         }
 
-        await_endpoint_task(self.endpoint_task).await;
-        abort_background_task("iroh event handler", self.event_handler_task).await;
-        abort_background_task("iroh replication loop", self.replication_task).await;
-        abort_background_task("iroh failure recorder", self.failure_recorder_task).await;
+        drop(transport);
+        drop(coordinator);
+
+        await_background_task("iroh event handler", event_handler_task).await;
+        await_background_task("iroh replication loop", replication_task).await;
+        abort_background_task("iroh failure recorder", failure_recorder_task).await;
+        await_endpoint_task(endpoint_task).await;
     }
 }
 
@@ -161,6 +176,25 @@ async fn abort_background_task(task_name: &'static str, task: tokio::task::JoinH
                 task = task_name,
                 "P2P background task did not stop after abort"
             );
+        }
+    }
+}
+
+#[cfg(feature = "p2p")]
+async fn await_background_task(task_name: &'static str, mut task: tokio::task::JoinHandle<()>) {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if error.is_cancelled() => {}
+        Ok(Err(error)) => {
+            tracing::debug!(task = task_name, %error, "P2P background task failed during shutdown");
+        }
+        Err(_) => {
+            tracing::debug!(
+                task = task_name,
+                "P2P background task did not stop after graceful shutdown; aborting"
+            );
+            task.abort();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
         }
     }
 }
@@ -762,7 +796,7 @@ impl NodeBuilder {
         let ops: Arc<dyn defra_http::P2POperations> =
             Arc::new(defra_p2p_adapter::IrohP2PAdapter::with_full_context(
                 transport.clone(),
-                coordinator,
+                coordinator.clone(),
                 doc_pusher,
                 event_bus,
                 version_syncer,
@@ -772,6 +806,7 @@ impl NodeBuilder {
             ops,
             lifecycle: Some(P2PLifecycle::new(P2PLifecycleInner {
                 transport,
+                coordinator: coordinator.shutdown_handle(),
                 endpoint_task,
                 replication_task,
                 event_handler_task,

@@ -135,7 +135,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return Ok(());
         }
 
-        if self.transport_reports_connected_peer(peer_id.as_str()).await {
+        if self
+            .transport_reports_connected_peer(peer_id.as_str())
+            .await
+        {
             return Ok(());
         }
 

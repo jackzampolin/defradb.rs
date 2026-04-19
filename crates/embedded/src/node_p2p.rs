@@ -163,6 +163,7 @@ where
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
         crate::node::ShutdownHandle::libp2p(
             handle.clone(),
+            coordinator.shutdown_handle(),
             vec![
                 host_event_task.abort_handle(),
                 replication_task.abort_handle(),
@@ -293,6 +294,7 @@ where
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
         crate::node::ShutdownHandle::iroh(
             transport.clone(),
+            coordinator.shutdown_handle(),
             vec![
                 endpoint_task.abort_handle(),
                 event_handler_task.abort_handle(),

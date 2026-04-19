@@ -1,8 +1,10 @@
 use std::collections::HashSet;
+use std::str::FromStr;
 
 use acp::DocumentACP;
 use cid::Cid;
-use storage::corekv::Reader;
+use storage::corekv::{IterOptions, Reader};
+use storage::keys::headstore::{HeadstoreDocKey, HeadstorePriorityKey};
 
 use db::Collection;
 
@@ -133,9 +135,170 @@ pub(crate) async fn load_push_dag_blocks<R: Reader + ?Sized, E: Reader + ?Sized>
     ordered
 }
 
+pub(crate) async fn load_latest_composite_head_cids<R: Reader + ?Sized, B: Reader + ?Sized>(
+    head_reader: &R,
+    block_reader: &B,
+    doc_id: &str,
+) -> Vec<Cid> {
+    let mut cids = Vec::new();
+    let mut max_priority: Option<u64> = None;
+
+    if let Ok(mut iter) = head_reader
+        .iterator(IterOptions::new().with_prefix(HeadstorePriorityKey::document_prefix(doc_id)))
+        .await
+    {
+        let cid_offset = HeadstorePriorityKey::cid_offset(doc_id);
+        while let Ok(Some(pair)) = iter.next().await {
+            let cid_bytes = match pair.key.get(cid_offset..) {
+                Some(bytes) => bytes,
+                None => continue,
+            };
+            let Ok(cid) = Cid::try_from(cid_bytes) else {
+                continue;
+            };
+            let Ok(Some(block_bytes)) = block_reader.get(&cid.to_bytes()).await else {
+                continue;
+            };
+            let Ok(block) = defra_core::Block::from_dag_cbor(&block_bytes) else {
+                continue;
+            };
+            if !matches!(block.delta, defra_core::CrdtDelta::Composite(_)) {
+                continue;
+            }
+
+            let priority = block.delta.priority();
+            match max_priority {
+                Some(current) if priority < current => {}
+                Some(current) if priority == current => cids.push(cid),
+                _ => {
+                    max_priority = Some(priority);
+                    cids.clear();
+                    cids.push(cid);
+                }
+            }
+        }
+        let _ = iter.close().await;
+    }
+
+    if !cids.is_empty() {
+        return cids;
+    }
+
+    if let Ok(mut iter) = head_reader
+        .iterator(IterOptions::new().with_prefix(HeadstoreDocKey::field_prefix(doc_id, "C")))
+        .await
+    {
+        while let Ok(Some(pair)) = iter.next().await {
+            let key_str = String::from_utf8_lossy(&pair.key);
+            let parts: Vec<&str> = key_str.split('/').collect();
+            if parts.len() < 5 {
+                continue;
+            }
+            let Ok(cid) = Cid::from_str(parts[4]) else {
+                continue;
+            };
+            cids.push(cid);
+        }
+        let _ = iter.close().await;
+    }
+
+    cids
+}
+
 fn extract_block_links(block_data: &[u8]) -> Vec<Cid> {
     defra_core::Block::from_dag_cbor(block_data)
         .ok()
         .and_then(|block| defra_core::collect_block_links(&block).ok())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use db::DB;
+    use defra_core::{block::generate_cid_from_bytes, Block, CompositeDeltaPayload, CrdtDelta};
+    use std::sync::Arc;
+    use storage::backends::MemoryStore;
+    use storage::corekv::Key;
+    use storage::keys::headstore::{HeadstoreDocKey, HeadstorePriorityKey};
+
+    #[tokio::test]
+    async fn latest_composite_head_selection_prefers_highest_priority_index() {
+        let store = Arc::new(MemoryStore::new());
+        let db = Arc::new(DB::from_arc(store).unwrap());
+        let doc_id = "bae-test-latest-head";
+        let first = Block::new_with_options(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                doc_id: doc_id.as_bytes().to_vec(),
+                schema_version_id: "schema-v1".to_string(),
+                priority: 1,
+                status: 1,
+            }),
+            vec![],
+            vec![],
+            None,
+            None,
+        );
+        let first_bytes = first.to_dag_cbor().unwrap();
+        let first_cid = generate_cid_from_bytes(&first_bytes).unwrap();
+
+        let second = Block::new_with_options(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                doc_id: doc_id.as_bytes().to_vec(),
+                schema_version_id: "schema-v1".to_string(),
+                priority: 2,
+                status: 1,
+            }),
+            vec![],
+            vec![],
+            None,
+            None,
+        );
+        let second_bytes = second.to_dag_cbor().unwrap();
+        let second_cid = generate_cid_from_bytes(&second_bytes).unwrap();
+
+        let txn = db.new_txn(false).await.unwrap();
+        txn.blockstore()
+            .unwrap()
+            .set(&first_cid.to_bytes(), &first_bytes)
+            .await
+            .unwrap();
+        txn.blockstore()
+            .unwrap()
+            .set(&second_cid.to_bytes(), &second_bytes)
+            .await
+            .unwrap();
+        txn.headstore()
+            .unwrap()
+            .set(&HeadstoreDocKey::new(doc_id, "C", first_cid).bytes(), &[])
+            .await
+            .unwrap();
+        txn.headstore()
+            .unwrap()
+            .set(&HeadstoreDocKey::new(doc_id, "C", second_cid).bytes(), &[])
+            .await
+            .unwrap();
+        txn.headstore()
+            .unwrap()
+            .set(&HeadstorePriorityKey::new(doc_id, 1, first_cid).bytes(), &[])
+            .await
+            .unwrap();
+        txn.headstore()
+            .unwrap()
+            .set(&HeadstorePriorityKey::new(doc_id, 2, second_cid).bytes(), &[])
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        let txn = db.new_txn(true).await.unwrap();
+        let heads = load_latest_composite_head_cids(
+            &txn.headstore().unwrap(),
+            &txn.blockstore().unwrap(),
+            doc_id,
+        )
+        .await;
+
+        assert_eq!(heads, vec![second_cid]);
+        assert_ne!(heads, vec![first_cid]);
+    }
 }

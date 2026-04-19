@@ -6,12 +6,13 @@ use std::sync::Arc;
 use bytes::Bytes;
 use iroh::Endpoint;
 use iroh_gossip::net::Gossip;
+use tokio::sync::oneshot;
 use iroh_gossip::proto::TopicId;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::bitswap::ReplicatorRegistry;
-use crate::message::CarFetchRequest;
+use crate::message::PushLogReply;
 use crate::transport::{MessageId, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
 
@@ -20,7 +21,10 @@ use super::command::IrohCommand;
 use super::endpoint::{
     join_peer_to_subscriptions, peer_direct_addr, ActiveSync, TopicSubscription,
 };
-use super::endpoint_rpc::{handle_block_sync, handle_fire_and_forget, handle_request_response};
+use super::endpoint_rpc::{
+    handle_block_sync, handle_car_request_response, handle_fire_and_forget,
+    handle_request_response,
+};
 use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
 use super::protocols;
 
@@ -33,6 +37,7 @@ pub(super) async fn handle_command(
     endpoint: &Endpoint,
     gossip: &Gossip,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    pending_pushlog_replies: &Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
     subscriptions: &mut HashMap<String, TopicSubscription>,
     replicators: &Arc<ReplicatorRegistry>,
     active_syncs: &mut HashMap<u64, ActiveSync>,
@@ -45,8 +50,16 @@ pub(super) async fn handle_command(
             addrs,
             reply,
         } => {
-            let result =
-                handle_dial(endpoint, peer_map, subscriptions, &peer_id, addrs, event_tx).await;
+            let result = handle_dial(
+                endpoint,
+                peer_map,
+                pending_pushlog_replies,
+                subscriptions,
+                &peer_id,
+                addrs,
+                event_tx,
+            )
+            .await;
             let _ = reply.send(result);
         }
         IrohCommand::Listen { addr: _, reply } => {
@@ -119,14 +132,47 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
+            let pending_pushlog_replies = pending_pushlog_replies.clone();
             tokio::spawn(async move {
-                let result = handle_request_response(
-                    &endpoint,
-                    &peer_id,
-                    protocols::ALPN_TWOSTREAM,
-                    &request,
-                    direct_addr,
-                )
+                let result = async move {
+                    let message_id = request.metadata.message_id.clone();
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    pending_pushlog_replies
+                        .lock()
+                        .insert(message_id.clone(), reply_tx);
+
+                    if let Err(error) = handle_fire_and_forget(
+                        &endpoint,
+                        &peer_id,
+                        protocols::ALPN_TWOSTREAM,
+                        &request,
+                        direct_addr,
+                    )
+                    .await
+                    {
+                        pending_pushlog_replies.lock().remove(&message_id);
+                        return Err(error);
+                    }
+
+                    match tokio::time::timeout(
+                        super::endpoint_rpc::REQUEST_RESPONSE_TIMEOUT,
+                        reply_rx,
+                    )
+                    .await
+                    {
+                        Ok(Ok(reply_msg)) => Ok(reply_msg),
+                        Ok(Err(_)) => {
+                            pending_pushlog_replies.lock().remove(&message_id);
+                            Err(crate::error::Error::Transport(
+                                "response channel closed".into(),
+                            ))
+                        }
+                        Err(_) => {
+                            pending_pushlog_replies.lock().remove(&message_id);
+                            Err(crate::error::Error::ResponseTimeout)
+                        }
+                    }
+                }
                 .await;
                 let _ = reply.send(result);
             });
@@ -296,15 +342,15 @@ pub(super) async fn handle_command(
             reply,
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
-            let request = CarFetchRequest::full_dag(root_cid);
             let endpoint = endpoint.clone();
+            let event_tx = event_tx.clone();
             tokio::spawn(async move {
-                let result = handle_fire_and_forget(
+                let result = handle_car_request_response(
                     &endpoint,
                     &peer_id,
-                    protocols::ALPN_CAR,
-                    &request,
+                    root_cid,
                     direct_addr,
+                    &event_tx,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -423,6 +469,7 @@ pub(super) async fn handle_command(
 async fn handle_dial(
     endpoint: &Endpoint,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    pending_pushlog_replies: &Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
     subscriptions: &HashMap<String, TopicSubscription>,
     peer_id: &PeerId,
     addrs: Vec<PeerAddr>,
@@ -463,6 +510,7 @@ async fn handle_dial(
     // Keep connection alive by spawning a handler for incoming streams.
     let event_tx = event_tx.clone();
     let peer_map = Arc::clone(peer_map);
+    let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
     tokio::spawn(async move {
         super::endpoint_streams::handle_connection_streams_from_dial(
             connection,
@@ -470,6 +518,7 @@ async fn handle_dial(
             conn_alpn,
             event_tx,
             peer_map,
+            pending_pushlog_replies,
         )
         .await;
     });

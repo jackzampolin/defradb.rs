@@ -6,9 +6,11 @@ use std::sync::Arc;
 use iroh::endpoint::Connection;
 use iroh::EndpointId;
 use iroh_gossip::net::Gossip;
+use tokio::sync::oneshot;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::message::PushLogReply;
 use crate::transport::{PeerId, TransportEvent};
 
 use super::endpoint::{join_peer_to_subscriptions, TopicSubscription};
@@ -20,6 +22,7 @@ pub(super) async fn handle_incoming(
     incoming: iroh::endpoint::Incoming,
     gossip: &Gossip,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    pending_pushlog_replies: &Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
     subscriptions: &HashMap<String, TopicSubscription>,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
@@ -90,8 +93,17 @@ pub(super) async fn handle_incoming(
     // Spawn handler for this connection's streams
     let event_tx = event_tx.clone();
     let peer_map = Arc::clone(peer_map);
+    let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
     tokio::spawn(async move {
-        handle_connection_streams(connection, remote_id, conn_alpn, event_tx, peer_map).await;
+        handle_connection_streams(
+            connection,
+            remote_id,
+            conn_alpn,
+            event_tx,
+            peer_map,
+            pending_pushlog_replies,
+        )
+        .await;
     });
 }
 
@@ -104,6 +116,7 @@ async fn handle_connection_streams(
     alpn: Vec<u8>,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
     peer_map: Arc<parking_lot::Mutex<PeerMap>>,
+    pending_pushlog_replies: Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
 ) {
     let peer_id = endpoint_id_to_peer_id(&remote_id);
 
@@ -111,8 +124,18 @@ async fn handle_connection_streams(
         let peer_id = peer_id.clone();
         let event_tx = event_tx.clone();
         let alpn = alpn.clone();
+        let pending_pushlog_replies = pending_pushlog_replies.clone();
         tokio::spawn(async move {
-            if let Err(e) = dispatch_stream(&alpn, &peer_id, send, &mut recv, &event_tx).await {
+            if let Err(e) = dispatch_stream(
+                &alpn,
+                &peer_id,
+                send,
+                &mut recv,
+                &event_tx,
+                &pending_pushlog_replies,
+            )
+            .await
+            {
                 debug!("Stream error from {}: {}", peer_id, e);
             }
         });
@@ -138,8 +161,17 @@ pub(super) async fn handle_connection_streams_from_dial(
     alpn: Vec<u8>,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
     peer_map: Arc<parking_lot::Mutex<PeerMap>>,
+    pending_pushlog_replies: Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
 ) {
-    handle_connection_streams(connection, remote_id, alpn, event_tx, peer_map).await;
+    handle_connection_streams(
+        connection,
+        remote_id,
+        alpn,
+        event_tx,
+        peer_map,
+        pending_pushlog_replies,
+    )
+    .await;
 }
 
 /// Dispatch a stream based on the connection ALPN.
@@ -149,6 +181,7 @@ async fn dispatch_stream(
     send: iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
+    pending_pushlog_replies: &Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
 ) -> crate::error::Result<()> {
     match alpn {
         x if x == protocols::ALPN_PUSHLOG => {
@@ -167,8 +200,17 @@ async fn dispatch_stream(
             }
         }
         x if x == protocols::ALPN_TWOSTREAM => {
-            let request: crate::message::PushLogRequest =
-                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
+            let payload = protocols::read_message_bytes(recv, protocols::MAX_MESSAGE_SIZE).await?;
+            if let Ok(reply) = serde_cbor::from_slice::<PushLogReply>(&payload) {
+                let sender = pending_pushlog_replies.lock().remove(&reply.message_id);
+                if let Some(sender) = sender {
+                    let _ = sender.send(reply);
+                    return Ok(());
+                }
+            }
+
+            let request: crate::message::PushLogRequest = serde_cbor::from_slice(&payload)
+                .map_err(|e| crate::error::Error::Codec(e.to_string()))?;
             if event_tx
                 .send(TransportEvent::TwoStreamRequest {
                     peer_id: peer_id.clone(),

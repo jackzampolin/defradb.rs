@@ -46,11 +46,11 @@ pub enum SyncEvent {
     /// Failed to process a sync request.
     SyncError { cid: Cid, error: String },
 
-    /// DAG has missing blocks that need to be fetched via Bitswap.
+    /// DAG has missing blocks that need to be fetched.
     ///
     /// The coordinator should:
-    /// 1. Call host.bitswap_sync() with the missing CIDs
-    /// 2. Register the QueryId with manager.register_query()
+    /// 1. Prefer a source-peer DAG fetch when the announcing peer is known
+    /// 2. Fall back to transport block sync when only provider hints are available
     DagNeedsFetch {
         /// Root CID of the DAG being synced
         root_cid: Cid,

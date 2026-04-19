@@ -18,6 +18,10 @@ pub(super) async fn handle_dag_needs_fetch<B, T>(
     root_cid: Cid,
     missing: Vec<Cid>,
     providers: Vec<String>,
+    doc_id: String,
+    collection_id: String,
+    creator: String,
+    sender_peer: Option<String>,
 ) -> ReplicationResult
 where
     B: Blockstore + 'static,
@@ -29,6 +33,35 @@ where
         provider_count = providers.len(),
         "Initiating Bitswap fetch for missing blocks"
     );
+
+    if let Some(source_peer) = sender_peer {
+        tracing::debug!(
+            cid = %root_cid,
+            source_peer = %source_peer,
+            "Using poll-based DAG fetcher for push-driven DAG recovery"
+        );
+
+        let transport = coordinator.transport().clone();
+        let blockstore = coordinator.blockstore().clone();
+        let event_tx = coordinator.manager().event_sender();
+        let source_peer = crate::transport::PeerId::new(source_peer);
+
+        coordinator.spawn_background_task("pushlog_fetch_dag", async move {
+            crate::sync::coordinator::dag_fetcher::poll_fetch_dag(
+                transport,
+                blockstore,
+                event_tx,
+                root_cid,
+                doc_id,
+                collection_id,
+                creator,
+                source_peer,
+            )
+            .await;
+        });
+
+        return ReplicationResult::DagFetchStarted { root_cid };
+    }
 
     // Convert string peer IDs to transport PeerIds.
     // If the provider list is empty, fall back to all connected transport peers.
@@ -320,6 +353,10 @@ where
             explicit_replay_authorization,
         ) = event_to_merge_metadata(event);
 
+        if matches!(event, SyncEvent::DagReady { .. }) {
+            coordinator.clear_pending_dag(&cid);
+        }
+
         match coordinator.blockstore().get(&cid).await {
             Ok(Some(data)) => {
                 merge_blocks.push(MergeBlock {
@@ -483,8 +520,24 @@ where
             root_cid,
             missing,
             providers,
+            doc_id,
+            collection_id,
+            creator,
+            sender_peer,
             ..
-        } => handle_dag_needs_fetch(coordinator, root_cid, missing, providers).await,
+        } => {
+            handle_dag_needs_fetch(
+                coordinator,
+                root_cid,
+                missing,
+                providers,
+                doc_id,
+                collection_id,
+                creator,
+                sender_peer,
+            )
+            .await
+        }
         SyncEvent::DagReady {
             root_cid,
             doc_id,
@@ -495,6 +548,7 @@ where
             explicit_replay_authorization,
             acp_actor_relationships,
         } => {
+            coordinator.clear_pending_dag(&root_cid);
             // DAG is complete after Bitswap fetch - process as block received
             tracing::info!(
                 cid = %root_cid,
