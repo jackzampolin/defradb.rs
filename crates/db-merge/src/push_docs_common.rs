@@ -280,12 +280,18 @@ mod tests {
             .unwrap();
         txn.headstore()
             .unwrap()
-            .set(&HeadstorePriorityKey::new(doc_id, 1, first_cid).bytes(), &[])
+            .set(
+                &HeadstorePriorityKey::new(doc_id, 1, first_cid).bytes(),
+                &[],
+            )
             .await
             .unwrap();
         txn.headstore()
             .unwrap()
-            .set(&HeadstorePriorityKey::new(doc_id, 2, second_cid).bytes(), &[])
+            .set(
+                &HeadstorePriorityKey::new(doc_id, 2, second_cid).bytes(),
+                &[],
+            )
             .await
             .unwrap();
         txn.commit().await.unwrap();

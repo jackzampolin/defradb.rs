@@ -6,9 +6,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use iroh::Endpoint;
 use iroh_gossip::net::Gossip;
-use tokio::sync::oneshot;
 use iroh_gossip::proto::TopicId;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
 use crate::bitswap::ReplicatorRegistry;
@@ -22,8 +22,7 @@ use super::endpoint::{
     join_peer_to_subscriptions, peer_direct_addr, ActiveSync, TopicSubscription,
 };
 use super::endpoint_rpc::{
-    handle_block_sync, handle_car_request_response, handle_fire_and_forget,
-    handle_request_response,
+    handle_block_sync, handle_car_request_response, handle_fire_and_forget, handle_request_response,
 };
 use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
 use super::protocols;
@@ -37,7 +36,9 @@ pub(super) async fn handle_command(
     endpoint: &Endpoint,
     gossip: &Gossip,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
-    pending_pushlog_replies: &Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
+    pending_pushlog_replies: &Arc<
+        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
+    >,
     subscriptions: &mut HashMap<String, TopicSubscription>,
     replicators: &Arc<ReplicatorRegistry>,
     active_syncs: &mut HashMap<u64, ActiveSync>,
@@ -469,7 +470,9 @@ pub(super) async fn handle_command(
 async fn handle_dial(
     endpoint: &Endpoint,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
-    pending_pushlog_replies: &Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
+    pending_pushlog_replies: &Arc<
+        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
+    >,
     subscriptions: &HashMap<String, TopicSubscription>,
     peer_id: &PeerId,
     addrs: Vec<PeerAddr>,

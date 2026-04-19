@@ -114,7 +114,8 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
             let creator =
                 resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id).await;
             let mut doc_blocks = Vec::new();
-            for head_cid in load_latest_composite_head_cids(&headstore, &blockstore_view, doc_id).await
+            for head_cid in
+                load_latest_composite_head_cids(&headstore, &blockstore_view, doc_id).await
             {
                 let block_key = head_cid.to_bytes();
                 let block_data = match blockstore_view.get(&block_key).await {

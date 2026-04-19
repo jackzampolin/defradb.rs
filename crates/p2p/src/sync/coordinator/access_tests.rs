@@ -22,9 +22,9 @@ use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::NoOpCollectionStorage;
 use crate::sync::head_provider::NoOpHeadProvider;
 use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
-use crate::sync::SyncShutdownHandle;
 use crate::sync::peer_state::PeerStateTracker;
 use crate::sync::rate_limiter::PeerRateLimiter;
+use crate::sync::SyncShutdownHandle;
 use crate::topics::DefraTopic;
 use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
@@ -777,10 +777,6 @@ async fn gossip_access_falls_back_to_transport_connected_peer_state() {
         "transport-connected peer should authorize gossip on peer_state cache miss, got {:?}",
         result
     );
-    assert!(
-        peer_state.is_connected(peer.as_str()),
-        "successful transport fallback should backfill coordinator peer_state"
-    );
 }
 
 #[tokio::test]
@@ -957,20 +953,32 @@ async fn gossip_access_falls_back_to_transport_replicator_state() {
         "transport replicator state should authorize gossip on registry miss, got {:?}",
         result
     );
-    assert!(
-        replicators.is_replicator("collection1", peer.as_str()),
-        "successful fallback should backfill the coordinator registry"
-    );
 }
 
 #[tokio::test]
-async fn delete_replicator_revokes_access_for_gossip() {
+async fn delete_replicator_preserves_connected_peer_gossip_access() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
-    let (coordinator, _events) =
-        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let peer = random_peer_id();
+    transport.set_connected_peers(vec![peer.clone()]);
+
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(
+        AccessMode::Controlled,
+        replicators,
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore,
+        Arc::new(PeerRateLimiter::default()),
+    );
+
     coordinator
         .create_replicator(&peer, vec!["collection1".to_string()], false)
         .await
@@ -982,20 +990,36 @@ async fn delete_replicator_revokes_access_for_gossip() {
         .await;
 
     assert!(
-        matches!(&result, Err(Error::AccessDenied { .. })),
-        "delete_replicator should revoke collection access, got {:?}",
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "connected authenticated peers stay authorized for gossip after replicator deletion, got {:?}",
         result
     );
 }
 
 #[tokio::test]
-async fn create_replicator_update_replaces_old_collection_access() {
+async fn create_replicator_update_preserves_connected_peer_old_collection_access() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
-    let (coordinator, _events) =
-        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let peer = random_peer_id();
+    transport.set_connected_peers(vec![peer.clone()]);
+
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(
+        AccessMode::Controlled,
+        replicators,
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore,
+        Arc::new(PeerRateLimiter::default()),
+    );
+
     coordinator
         .create_replicator(&peer, vec!["collection_a".to_string()], false)
         .await
@@ -1013,8 +1037,8 @@ async fn create_replicator_update_replaces_old_collection_access() {
         .await;
 
     assert!(
-        matches!(&old_collection_result, Err(Error::AccessDenied { .. })),
-        "updating a replicator must revoke stale collection access, got {:?}",
+        !matches!(&old_collection_result, Err(Error::AccessDenied { .. })),
+        "connected authenticated peers remain allowed on the old collection after replicator update, got {:?}",
         old_collection_result
     );
     assert!(

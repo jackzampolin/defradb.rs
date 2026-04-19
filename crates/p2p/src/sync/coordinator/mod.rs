@@ -287,8 +287,8 @@ mod access_tests;
 #[cfg(test)]
 mod shutdown_tests {
     use super::SyncShutdownHandle;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     #[tokio::test]

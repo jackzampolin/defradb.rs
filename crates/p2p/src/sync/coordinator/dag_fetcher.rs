@@ -95,13 +95,13 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
     // Fallback fetch: fetch the root block first so we can enumerate missing links.
     if !matches!(
         poll_fetch_blocks(
-        &root_cid,
-        std::slice::from_ref(&root_cid),
-        &transport,
-        &blockstore,
-        &source_peer,
-    )
-    .await,
+            &root_cid,
+            std::slice::from_ref(&root_cid),
+            &transport,
+            &blockstore,
+            &source_peer,
+        )
+        .await,
         FetchBatchOutcome::Complete
     ) {
         warn!(root_cid = %root_cid, "Failed to fetch root block");
@@ -139,8 +139,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
 
         let mut made_progress = false;
         for batch in missing.chunks(SELECTIVE_FETCH_BATCH_SIZE) {
-            match poll_fetch_blocks(&root_cid, batch, &transport, &blockstore, &source_peer).await
-            {
+            match poll_fetch_blocks(&root_cid, batch, &transport, &blockstore, &source_peer).await {
                 FetchBatchOutcome::Complete => {
                     made_progress = true;
                 }

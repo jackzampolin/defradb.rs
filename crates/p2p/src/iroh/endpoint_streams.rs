@@ -6,8 +6,8 @@ use std::sync::Arc;
 use iroh::endpoint::Connection;
 use iroh::EndpointId;
 use iroh_gossip::net::Gossip;
-use tokio::sync::oneshot;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
 use crate::message::PushLogReply;
@@ -22,7 +22,9 @@ pub(super) async fn handle_incoming(
     incoming: iroh::endpoint::Incoming,
     gossip: &Gossip,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
-    pending_pushlog_replies: &Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
+    pending_pushlog_replies: &Arc<
+        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
+    >,
     subscriptions: &HashMap<String, TopicSubscription>,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
@@ -116,7 +118,9 @@ async fn handle_connection_streams(
     alpn: Vec<u8>,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
     peer_map: Arc<parking_lot::Mutex<PeerMap>>,
-    pending_pushlog_replies: Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
+    pending_pushlog_replies: Arc<
+        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
+    >,
 ) {
     let peer_id = endpoint_id_to_peer_id(&remote_id);
 
@@ -161,7 +165,9 @@ pub(super) async fn handle_connection_streams_from_dial(
     alpn: Vec<u8>,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
     peer_map: Arc<parking_lot::Mutex<PeerMap>>,
-    pending_pushlog_replies: Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
+    pending_pushlog_replies: Arc<
+        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
+    >,
 ) {
     handle_connection_streams(
         connection,
@@ -181,7 +187,9 @@ async fn dispatch_stream(
     send: iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
-    pending_pushlog_replies: &Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
+    pending_pushlog_replies: &Arc<
+        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
+    >,
 ) -> crate::error::Result<()> {
     match alpn {
         x if x == protocols::ALPN_PUSHLOG => {
