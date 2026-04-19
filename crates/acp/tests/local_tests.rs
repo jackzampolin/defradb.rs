@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use acp::{
     DocumentACP, DocumentPermission, Error, Identity, LocalDocumentACP, MemoryAcpStore,
-    DELETER_RELATION, OWNER_RELATION, READER_RELATION, UPDATER_RELATION,
+    ReplicatedActorRelationship, DELETER_RELATION, OWNER_RELATION, READER_RELATION,
+    UPDATER_RELATION,
 };
 use identity::Did;
 
@@ -248,6 +249,74 @@ async fn test_add_reader_grants_read_only() {
             "policy1",
             "users",
             "doc1"
+        )
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn test_replicated_relationship_snapshot_round_trip() {
+    let acp = create_acp();
+    let owner = test_did();
+    let reader = test_did2();
+
+    acp.register_doc_object(&owner, "policy1", "users", "doc1")
+        .await
+        .unwrap();
+    acp.add_actor_relationship(
+        &owner,
+        &reader,
+        "policy1",
+        "users",
+        "doc1",
+        READER_RELATION,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let exported = acp
+        .export_actor_relationships("policy1", "users", "doc1")
+        .await
+        .unwrap();
+    assert_eq!(exported.len(), 1);
+    assert_eq!(
+        exported[0],
+        ReplicatedActorRelationship {
+            relation: READER_RELATION.to_string(),
+            actor: reader.to_string(),
+        }
+    );
+
+    acp.replace_actor_relationships(
+        "policy1",
+        "users",
+        "doc1",
+        &[ReplicatedActorRelationship {
+            relation: UPDATER_RELATION.to_string(),
+            actor: reader.to_string(),
+        }],
+    )
+    .await
+    .unwrap();
+
+    assert!(acp
+        .check_doc_access(
+            &Identity::Authenticated(reader.clone()),
+            DocumentPermission::Update,
+            "policy1",
+            "users",
+            "doc1",
+        )
+        .await
+        .unwrap());
+    assert!(acp
+        .check_doc_access(
+            &Identity::Authenticated(reader),
+            DocumentPermission::Read,
+            "policy1",
+            "users",
+            "doc1",
         )
         .await
         .unwrap());
