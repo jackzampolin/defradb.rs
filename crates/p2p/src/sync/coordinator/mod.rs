@@ -138,6 +138,10 @@ impl SyncShutdownHandle {
             std::mem::take(&mut *tasks)
         };
 
+        for handle in &handles {
+            handle.abort();
+        }
+
         let started = tokio::time::Instant::now();
 
         for handle in &mut handles {
@@ -151,7 +155,7 @@ impl SyncShutdownHandle {
                 Err(_) => {
                     tracing::debug!(
                         timeout_ms = timeout.as_millis() as u64,
-                        "Coordinator background task exceeded graceful shutdown window; aborting"
+                        "Coordinator background task exceeded shutdown drain window after abort"
                     );
                     break;
                 }

@@ -99,8 +99,6 @@ pub(super) async fn handle_incoming(
     let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
     let spawned_tasks_for_connection = Arc::clone(spawned_tasks);
     let task = tokio::spawn(async move {
-    let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
-    let task = tokio::spawn(async move {
         handle_connection_streams(
             connection,
             remote_id,
@@ -128,9 +126,6 @@ async fn handle_connection_streams(
         parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
     >,
     spawned_tasks: &SpawnedTasks,
-    pending_pushlog_replies: Arc<
-        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
-    >,
 ) {
     let peer_id = endpoint_id_to_peer_id(&remote_id);
 
@@ -138,8 +133,6 @@ async fn handle_connection_streams(
         let peer_id = peer_id.clone();
         let event_tx = event_tx.clone();
         let alpn = alpn.clone();
-        let pending_pushlog_replies = pending_pushlog_replies.clone();
-        let task = tokio::spawn(async move {
         let pending_pushlog_replies = pending_pushlog_replies.clone();
         let task = tokio::spawn(async move {
             if let Err(e) = dispatch_stream(
@@ -181,16 +174,6 @@ pub(super) async fn handle_connection_streams_from_dial(
     pending_pushlog_replies: Arc<
         parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
     >,
-) {
-    handle_connection_streams(
-        connection,
-        remote_id,
-        alpn,
-        event_tx,
-        peer_map,
-        pending_pushlog_replies,
-    )
-    .await;
     spawned_tasks: &SpawnedTasks,
 ) {
     handle_connection_streams(
@@ -199,8 +182,8 @@ pub(super) async fn handle_connection_streams_from_dial(
         alpn,
         event_tx,
         peer_map,
-        spawned_tasks,
         pending_pushlog_replies,
+        spawned_tasks,
     )
     .await;
 }

@@ -117,6 +117,7 @@ impl P2PLifecycle {
 #[cfg(feature = "p2p")]
 impl P2PLifecycleInner {
     async fn shutdown(self) {
+        let shutdown_started = std::time::Instant::now();
         let Self {
             transport,
             coordinator,
@@ -127,20 +128,60 @@ impl P2PLifecycleInner {
             retry_loop_task,
         } = self;
 
+        let retry_started = std::time::Instant::now();
         abort_background_task("iroh retry loop", retry_loop_task).await;
-        coordinator.shutdown().await;
+        tracing::warn!(
+            elapsed_ms = retry_started.elapsed().as_millis(),
+            "P2P shutdown: retry loop stopped"
+        );
 
+        let coordinator_started = std::time::Instant::now();
+        coordinator.shutdown().await;
+        tracing::warn!(
+            elapsed_ms = coordinator_started.elapsed().as_millis(),
+            "P2P shutdown: coordinator stopped"
+        );
+
+        let transport_started = std::time::Instant::now();
         if let Err(error) = transport.shutdown().await {
             tracing::debug!(%error, "Iroh transport shutdown returned an error");
         }
+        tracing::warn!(
+            elapsed_ms = transport_started.elapsed().as_millis(),
+            "P2P shutdown: transport stop requested"
+        );
 
         drop(transport);
         drop(coordinator);
 
+        let event_handler_started = std::time::Instant::now();
         await_background_task("iroh event handler", event_handler_task).await;
-        await_background_task("iroh replication loop", replication_task).await;
+        tracing::warn!(
+            elapsed_ms = event_handler_started.elapsed().as_millis(),
+            "P2P shutdown: event handler stopped"
+        );
+
+        let replication_started = std::time::Instant::now();
+        abort_background_task("iroh replication loop", replication_task).await;
+        tracing::warn!(
+            elapsed_ms = replication_started.elapsed().as_millis(),
+            "P2P shutdown: replication loop stopped"
+        );
+
+        let failure_started = std::time::Instant::now();
         abort_background_task("iroh failure recorder", failure_recorder_task).await;
+        tracing::warn!(
+            elapsed_ms = failure_started.elapsed().as_millis(),
+            "P2P shutdown: failure recorder stopped"
+        );
+
+        let endpoint_started = std::time::Instant::now();
         await_endpoint_task(endpoint_task).await;
+        tracing::warn!(
+            elapsed_ms = endpoint_started.elapsed().as_millis(),
+            total_elapsed_ms = shutdown_started.elapsed().as_millis(),
+            "P2P shutdown: endpoint task stopped"
+        );
     }
 }
 

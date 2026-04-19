@@ -138,6 +138,7 @@ async fn run_event_loop(
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
     replicators: Arc<ReplicatorRegistry>,
 ) {
+    let shutdown_started = std::time::Instant::now();
     let peer_map = Arc::new(parking_lot::Mutex::new(PeerMap::new()));
     let pending_pushlog_replies = Arc::new(parking_lot::Mutex::new(HashMap::<
         String,
@@ -200,18 +201,47 @@ async fn run_event_loop(
     }
 
     // Clean up
+    let subscriptions_started = std::time::Instant::now();
     for (_, sub) in subscriptions.drain() {
         sub.reader_task.abort();
     }
+    warn!(
+        elapsed_ms = subscriptions_started.elapsed().as_millis(),
+        "Iroh endpoint shutdown: subscriptions aborted"
+    );
+
+    let syncs_started = std::time::Instant::now();
     for (_, sync) in active_syncs.drain() {
         sync.abort_handle.abort();
     }
+    warn!(
+        elapsed_ms = syncs_started.elapsed().as_millis(),
+        "Iroh endpoint shutdown: active syncs aborted"
+    );
+
+    let tracked_started = std::time::Instant::now();
     shutdown_tracked_tasks(spawned_tasks).await;
+    warn!(
+        elapsed_ms = tracked_started.elapsed().as_millis(),
+        "Iroh endpoint shutdown: tracked spawned tasks drained"
+    );
+
+    let gossip_started = std::time::Instant::now();
     if let Err(error) = gossip.shutdown().await {
         debug!(%error, "Iroh gossip shutdown failed");
     }
+    warn!(
+        elapsed_ms = gossip_started.elapsed().as_millis(),
+        "Iroh endpoint shutdown: gossip stopped"
+    );
+
+    let close_started = std::time::Instant::now();
     endpoint.close().await;
-    info!("Iroh endpoint shut down");
+    warn!(
+        close_elapsed_ms = close_started.elapsed().as_millis(),
+        total_elapsed_ms = shutdown_started.elapsed().as_millis(),
+        "Iroh endpoint shut down"
+    );
 }
 
 /// Join a newly connected peer into all active gossip topic subscriptions.

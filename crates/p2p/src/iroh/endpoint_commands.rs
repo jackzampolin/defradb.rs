@@ -472,6 +472,7 @@ pub(super) async fn handle_command(
             ));
         }
         IrohCommand::Shutdown { reply } => {
+            tracing::warn!("Iroh endpoint received shutdown command");
             let _ = reply.send(Ok(()));
             return true;
         }
@@ -531,8 +532,6 @@ async fn handle_dial(
     let peer_map = Arc::clone(peer_map);
     let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
     let spawned_tasks_for_connection = Arc::clone(spawned_tasks);
-    let task = tokio::spawn(async move {
-    let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
     let task = tokio::spawn(async move {
         super::endpoint_streams::handle_connection_streams_from_dial(
             connection,

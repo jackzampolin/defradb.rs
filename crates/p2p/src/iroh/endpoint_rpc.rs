@@ -340,7 +340,7 @@ pub(super) async fn handle_block_sync(
     missing: Vec<cid::Cid>,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
-    use tokio::task::JoinHandle;
+    use tokio::task::JoinSet;
 
     if !missing.is_empty() {
         debug!(
@@ -351,7 +351,7 @@ pub(super) async fn handle_block_sync(
         );
     }
 
-    let mut tasks: Vec<JoinHandle<bool>> = Vec::with_capacity(providers.len());
+    let mut tasks: JoinSet<bool> = JoinSet::new();
 
     let request = if missing.is_empty() {
         CarFetchRequest::full_dag(root)
@@ -365,10 +365,10 @@ pub(super) async fn handle_block_sync(
         let event_tx = event_tx.clone();
         let provider = provider.clone();
         let request = request.clone();
-        tasks.push(tokio::spawn(async move {
+        tasks.spawn(async move {
             let direct_addr = super::endpoint::peer_direct_addr(&peer_map, &provider);
             try_fetch_from_provider(&endpoint, &provider, request, direct_addr, &event_tx).await
-        }));
+        });
     }
 
     let mut any_success = false;
@@ -379,10 +379,11 @@ pub(super) async fn handle_block_sync(
         "selective"
     };
 
-    for task in tasks {
-        match task.await {
+    while let Some(task) = tasks.join_next().await {
+        match task {
             Ok(true) => {
                 any_success = true;
+                tasks.abort_all();
                 break;
             }
             Ok(false) => {}
