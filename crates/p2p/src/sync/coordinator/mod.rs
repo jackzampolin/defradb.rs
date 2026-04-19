@@ -88,7 +88,7 @@ struct SyncShutdownState {
     background_tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
-const BACKGROUND_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const BACKGROUND_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Shared shutdown state for coordinator-owned background replication work.
 #[derive(Clone)]
@@ -138,10 +138,6 @@ impl SyncShutdownHandle {
             std::mem::take(&mut *tasks)
         };
 
-        for handle in &handles {
-            handle.abort();
-        }
-
         let started = tokio::time::Instant::now();
 
         for handle in &mut handles {
@@ -155,7 +151,7 @@ impl SyncShutdownHandle {
                 Err(_) => {
                     tracing::debug!(
                         timeout_ms = timeout.as_millis() as u64,
-                        "Coordinator background task exceeded shutdown drain window after abort"
+                        "Coordinator background task exceeded shutdown drain window; aborting remaining tasks"
                     );
                     break;
                 }

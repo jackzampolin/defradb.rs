@@ -12,7 +12,7 @@ use iroh::{Endpoint, EndpointId};
 use iroh_gossip::net::Gossip;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::bitswap::ReplicatorRegistry;
 use crate::message::PushLogReply;
@@ -54,7 +54,10 @@ async fn shutdown_tracked_tasks(spawned_tasks: SpawnedTasks) {
         return;
     }
 
-    debug!(task_count = tasks.len(), "Aborting tracked Iroh spawned tasks during shutdown");
+    debug!(
+        task_count = tasks.len(),
+        "Aborting tracked Iroh spawned tasks during shutdown"
+    );
     for task in &tasks {
         task.abort();
     }
