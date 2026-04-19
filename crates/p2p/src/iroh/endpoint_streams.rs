@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 use crate::message::PushLogReply;
 use crate::transport::{PeerId, TransportEvent};
 
-use super::endpoint::{join_peer_to_subscriptions, TopicSubscription};
+use super::endpoint::{join_peer_to_subscriptions, track_task, SpawnedTasks, TopicSubscription};
 use super::peer_map::{endpoint_id_to_peer_id, PeerMap};
 use super::protocols;
 
@@ -26,6 +26,7 @@ pub(super) async fn handle_incoming(
         parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
     >,
     subscriptions: &HashMap<String, TopicSubscription>,
+    spawned_tasks: &SpawnedTasks,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
     let remote_addr = match incoming.remote_addr() {
@@ -96,7 +97,10 @@ pub(super) async fn handle_incoming(
     let event_tx = event_tx.clone();
     let peer_map = Arc::clone(peer_map);
     let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
-    tokio::spawn(async move {
+    let spawned_tasks_for_connection = Arc::clone(spawned_tasks);
+    let task = tokio::spawn(async move {
+    let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
+    let task = tokio::spawn(async move {
         handle_connection_streams(
             connection,
             remote_id,
@@ -104,9 +108,11 @@ pub(super) async fn handle_incoming(
             event_tx,
             peer_map,
             pending_pushlog_replies,
+            &spawned_tasks_for_connection,
         )
         .await;
     });
+    track_task(spawned_tasks, task);
 }
 
 /// Process streams on an accepted connection, dispatching by ALPN.
@@ -121,6 +127,10 @@ async fn handle_connection_streams(
     pending_pushlog_replies: Arc<
         parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
     >,
+    spawned_tasks: &SpawnedTasks,
+    pending_pushlog_replies: Arc<
+        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
+    >,
 ) {
     let peer_id = endpoint_id_to_peer_id(&remote_id);
 
@@ -129,7 +139,9 @@ async fn handle_connection_streams(
         let event_tx = event_tx.clone();
         let alpn = alpn.clone();
         let pending_pushlog_replies = pending_pushlog_replies.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
+        let pending_pushlog_replies = pending_pushlog_replies.clone();
+        let task = tokio::spawn(async move {
             if let Err(e) = dispatch_stream(
                 &alpn,
                 &peer_id,
@@ -143,6 +155,7 @@ async fn handle_connection_streams(
                 debug!("Stream error from {}: {}", peer_id, e);
             }
         });
+        track_task(spawned_tasks, task);
     }
 
     let fully_disconnected = peer_map.lock().decrement_connections(&remote_id);
@@ -175,6 +188,18 @@ pub(super) async fn handle_connection_streams_from_dial(
         alpn,
         event_tx,
         peer_map,
+        pending_pushlog_replies,
+    )
+    .await;
+    spawned_tasks: &SpawnedTasks,
+) {
+    handle_connection_streams(
+        connection,
+        remote_id,
+        alpn,
+        event_tx,
+        peer_map,
+        spawned_tasks,
         pending_pushlog_replies,
     )
     .await;

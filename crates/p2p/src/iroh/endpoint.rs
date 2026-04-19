@@ -38,6 +38,55 @@ pub(super) struct ActiveSync {
     pub(super) abort_handle: tokio::task::AbortHandle,
 }
 
+pub(super) type SpawnedTasks = Arc<parking_lot::Mutex<Vec<JoinHandle<()>>>>;
+
+pub(super) fn track_task(spawned_tasks: &SpawnedTasks, task: JoinHandle<()>) {
+    spawned_tasks.lock().push(task);
+}
+
+async fn shutdown_tracked_tasks(spawned_tasks: SpawnedTasks) {
+    let mut tasks = {
+        let mut guard = spawned_tasks.lock();
+        std::mem::take(&mut *guard)
+    };
+
+    if tasks.is_empty() {
+        return;
+    }
+
+    debug!(task_count = tasks.len(), "Aborting tracked Iroh spawned tasks during shutdown");
+    for task in &tasks {
+        task.abort();
+    }
+
+    let shutdown_start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(5);
+    while let Some(task) = tasks.pop() {
+        let remaining = timeout.saturating_sub(shutdown_start.elapsed());
+        if remaining.is_zero() {
+            warn!(
+                remaining_tasks = tasks.len() + 1,
+                "Timed out draining tracked Iroh spawned tasks during shutdown"
+            );
+            break;
+        }
+        match tokio::time::timeout(remaining, task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if error.is_cancelled() => {}
+            Ok(Err(error)) => {
+                debug!(%error, "Tracked Iroh spawned task failed during shutdown");
+            }
+            Err(_) => {
+                warn!(
+                    remaining_tasks = tasks.len() + 1,
+                    "Timed out waiting for tracked Iroh spawned task during shutdown"
+                );
+                break;
+            }
+        }
+    }
+}
+
 /// Spawn the iroh endpoint background task.
 ///
 /// Returns the command sender, event receiver, and background task handle.
@@ -97,6 +146,7 @@ async fn run_event_loop(
     let mut subscriptions: std::collections::HashMap<String, TopicSubscription> =
         std::collections::HashMap::new();
     let mut active_syncs: HashMap<u64, ActiveSync> = HashMap::new();
+    let spawned_tasks: SpawnedTasks = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let mut next_query_id: u64 = 1;
 
     // Emit Listening event with our endpoint address
@@ -120,6 +170,7 @@ async fn run_event_loop(
                             &peer_map,
                             &pending_pushlog_replies,
                             &subscriptions,
+                            &spawned_tasks,
                             &event_tx,
                         ).await;
                     }
@@ -136,6 +187,7 @@ async fn run_event_loop(
                     &mut subscriptions,
                     &replicators,
                     &mut active_syncs,
+                    &spawned_tasks,
                     &mut next_query_id,
                     &event_tx,
                 ).await;
@@ -154,6 +206,7 @@ async fn run_event_loop(
     for (_, sync) in active_syncs.drain() {
         sync.abort_handle.abort();
     }
+    shutdown_tracked_tasks(spawned_tasks).await;
     if let Err(error) = gossip.shutdown().await {
         debug!(%error, "Iroh gossip shutdown failed");
     }

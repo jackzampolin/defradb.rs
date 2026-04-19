@@ -19,7 +19,8 @@ use crate::QueryId;
 use super::addr::{endpoint_addr_from_parts, endpoint_ticket_string};
 use super::command::IrohCommand;
 use super::endpoint::{
-    join_peer_to_subscriptions, peer_direct_addr, ActiveSync, TopicSubscription,
+    join_peer_to_subscriptions, peer_direct_addr, track_task, ActiveSync, SpawnedTasks,
+    TopicSubscription,
 };
 use super::endpoint_rpc::{
     handle_block_sync, handle_car_request_response, handle_fire_and_forget, handle_request_response,
@@ -42,6 +43,7 @@ pub(super) async fn handle_command(
     subscriptions: &mut HashMap<String, TopicSubscription>,
     replicators: &Arc<ReplicatorRegistry>,
     active_syncs: &mut HashMap<u64, ActiveSync>,
+    spawned_tasks: &SpawnedTasks,
     next_query_id: &mut u64,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> bool {
@@ -56,6 +58,7 @@ pub(super) async fn handle_command(
                 peer_map,
                 pending_pushlog_replies,
                 subscriptions,
+                spawned_tasks,
                 &peer_id,
                 addrs,
                 event_tx,
@@ -114,7 +117,7 @@ pub(super) async fn handle_command(
             reply_msg,
             reply,
         } => {
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = async {
                     protocols::write_message(&mut send_stream, &reply_msg).await?;
                     send_stream.finish().map_err(|e| {
@@ -125,6 +128,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendTwoStreamRequest {
             peer_id,
@@ -134,7 +138,7 @@ pub(super) async fn handle_command(
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
             let pending_pushlog_replies = pending_pushlog_replies.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = async move {
                     let message_id = request.metadata.message_id.clone();
                     let (reply_tx, reply_rx) = oneshot::channel();
@@ -177,6 +181,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendTwoStreamResponse {
             peer_id,
@@ -185,7 +190,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
                     &peer_id,
@@ -196,6 +201,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendDocSyncRequest {
             peer_id,
@@ -205,7 +211,7 @@ pub(super) async fn handle_command(
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
             let event_tx = event_tx.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result: crate::error::Result<crate::message::DocSyncReply> =
                     handle_request_response(
                         &endpoint,
@@ -230,6 +236,7 @@ pub(super) async fn handle_command(
                     }
                 }
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendBranchableSyncRequest {
             peer_id,
@@ -239,7 +246,7 @@ pub(super) async fn handle_command(
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
             let event_tx = event_tx.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result: crate::error::Result<crate::message::BranchableSyncReply> =
                     handle_request_response(
                         &endpoint,
@@ -264,6 +271,7 @@ pub(super) async fn handle_command(
                     }
                 }
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendDocSyncResponse {
             peer_id,
@@ -272,7 +280,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
                     &peer_id,
@@ -283,6 +291,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendBranchableSyncResponse {
             peer_id,
@@ -291,7 +300,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
                     &peer_id,
@@ -302,13 +311,14 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendDocSyncResponseToken {
             mut send_stream,
             reply_msg,
             reply,
         } => {
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = async {
                     protocols::write_message(&mut send_stream, &reply_msg).await?;
                     send_stream.finish().map_err(|e| {
@@ -319,13 +329,14 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendBranchableSyncResponseToken {
             mut send_stream,
             reply_msg,
             reply,
         } => {
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = async {
                     protocols::write_message(&mut send_stream, &reply_msg).await?;
                     send_stream.finish().map_err(|e| {
@@ -336,6 +347,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendCarRequest {
             peer_id,
@@ -345,7 +357,7 @@ pub(super) async fn handle_command(
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
             let event_tx = event_tx.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = handle_car_request_response(
                     &endpoint,
                     &peer_id,
@@ -356,6 +368,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendCarResponse {
             peer_id,
@@ -364,7 +377,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
                     &peer_id,
@@ -375,6 +388,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendSEArtifacts {
             peer_id,
@@ -383,7 +397,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
                     &peer_id,
@@ -394,6 +408,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SyncBlocks {
             root,
@@ -474,6 +489,7 @@ async fn handle_dial(
         parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
     >,
     subscriptions: &HashMap<String, TopicSubscription>,
+    spawned_tasks: &SpawnedTasks,
     peer_id: &PeerId,
     addrs: Vec<PeerAddr>,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
@@ -514,7 +530,10 @@ async fn handle_dial(
     let event_tx = event_tx.clone();
     let peer_map = Arc::clone(peer_map);
     let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
-    tokio::spawn(async move {
+    let spawned_tasks_for_connection = Arc::clone(spawned_tasks);
+    let task = tokio::spawn(async move {
+    let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
+    let task = tokio::spawn(async move {
         super::endpoint_streams::handle_connection_streams_from_dial(
             connection,
             endpoint_id,
@@ -522,9 +541,11 @@ async fn handle_dial(
             event_tx,
             peer_map,
             pending_pushlog_replies,
+            &spawned_tasks_for_connection,
         )
         .await;
     });
+    track_task(spawned_tasks, task);
 
     Ok(())
 }
