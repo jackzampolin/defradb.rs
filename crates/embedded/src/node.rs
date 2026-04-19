@@ -115,10 +115,13 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
             return;
         }
 
+        tracing::info!("embedded node shutdown: begin");
+
         // 1. P2P first — stops inbound/outbound traffic and awaits the
         //    transport's graceful close path (iroh Endpoint::close /
         //    libp2p Host::shutdown).
         if let Some(p2p) = &self.p2p {
+            tracing::info!("embedded node shutdown: stopping p2p");
             p2p.shutdown().await;
         }
 
@@ -126,12 +129,14 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
         //    Log but don't propagate errors: shutdown should complete
         //    even if the store close returns an I/O error, so embedders
         //    can't be blocked from exiting by a closing store.
+        tracing::info!("embedded node shutdown: closing database");
         if let Err(error) = self.database.close().await {
             tracing::warn!(error = %error, "EmbeddedNode::shutdown: database close returned an error");
         }
 
         self.shutdown_finished.store(true, Ordering::SeqCst);
         self.shutdown_notify.notify_waiters();
+        tracing::info!("embedded node shutdown: complete");
     }
 
     /// Returns true if [`EmbeddedNode::shutdown`] has been initiated.
@@ -257,11 +262,13 @@ pub struct ShutdownHandle {
 enum ShutdownKind {
     Libp2p {
         handle: Box<p2p::P2PHostHandle>,
+        coordinator: p2p::sync::SyncShutdownHandle,
         aborts: Vec<tokio::task::AbortHandle>,
     },
     #[cfg(feature = "iroh")]
     Iroh {
         transport: p2p::iroh::IrohTransport,
+        coordinator: p2p::sync::SyncShutdownHandle,
         aborts: Vec<tokio::task::AbortHandle>,
     },
 }
@@ -269,11 +276,13 @@ enum ShutdownKind {
 impl ShutdownHandle {
     pub(crate) fn libp2p(
         handle: p2p::P2PHostHandle,
+        coordinator: p2p::sync::SyncShutdownHandle,
         aborts: Vec<tokio::task::AbortHandle>,
     ) -> Self {
         Self {
             inner: ShutdownKind::Libp2p {
                 handle: Box::new(handle),
+                coordinator,
                 aborts,
             },
         }
@@ -282,23 +291,38 @@ impl ShutdownHandle {
     #[cfg(feature = "iroh")]
     pub(crate) fn iroh(
         transport: p2p::iroh::IrohTransport,
+        coordinator: p2p::sync::SyncShutdownHandle,
         aborts: Vec<tokio::task::AbortHandle>,
     ) -> Self {
         Self {
-            inner: ShutdownKind::Iroh { transport, aborts },
+            inner: ShutdownKind::Iroh {
+                transport,
+                coordinator,
+                aborts,
+            },
         }
     }
 
     pub async fn shutdown(&self) {
         match &self.inner {
-            ShutdownKind::Libp2p { handle, aborts } => {
+            ShutdownKind::Libp2p {
+                handle,
+                coordinator,
+                aborts,
+            } => {
+                coordinator.shutdown().await;
                 for abort in aborts {
                     abort.abort();
                 }
                 let _ = handle.shutdown().await;
             }
             #[cfg(feature = "iroh")]
-            ShutdownKind::Iroh { transport, aborts } => {
+            ShutdownKind::Iroh {
+                transport,
+                coordinator,
+                aborts,
+            } => {
+                coordinator.shutdown().await;
                 let _ = transport.shutdown().await;
                 for abort in aborts {
                     abort.abort();

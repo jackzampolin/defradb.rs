@@ -150,6 +150,8 @@ impl Node {
         if let Some(tasks) = self.p2p_tasks.take() {
             info!("Stopping P2P background tasks...");
 
+            tasks.coordinator.shutdown().await;
+
             // Abort all tasks - they will stop when the channel closes
             tasks.replication_task.abort();
             tasks.host_task.abort();

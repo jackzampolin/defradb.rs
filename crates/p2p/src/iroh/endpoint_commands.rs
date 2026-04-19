@@ -8,19 +8,23 @@ use iroh::Endpoint;
 use iroh_gossip::net::Gossip;
 use iroh_gossip::proto::TopicId;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-use crate::message::CarFetchRequest;
-use crate::replicator::ReplicatorInfo;
+use crate::bitswap::ReplicatorRegistry;
+use crate::message::PushLogReply;
 use crate::transport::{MessageId, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
 
 use super::addr::{endpoint_addr_from_parts, endpoint_ticket_string};
 use super::command::IrohCommand;
 use super::endpoint::{
-    join_peer_to_subscriptions, peer_direct_addr, ActiveSync, TopicSubscription,
+    join_peer_to_subscriptions, peer_direct_addr, track_task, ActiveSync, SpawnedTasks,
+    TopicSubscription,
 };
-use super::endpoint_rpc::{handle_block_sync, handle_fire_and_forget, handle_request_response};
+use super::endpoint_rpc::{
+    handle_block_sync, handle_car_request_response, handle_fire_and_forget, handle_request_response,
+};
 use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
 use super::protocols;
 
@@ -33,9 +37,13 @@ pub(super) async fn handle_command(
     endpoint: &Endpoint,
     gossip: &Gossip,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    pending_pushlog_replies: &Arc<
+        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
+    >,
     subscriptions: &mut HashMap<String, TopicSubscription>,
-    replicators: &mut HashMap<String, ReplicatorInfo>,
+    replicators: &Arc<ReplicatorRegistry>,
     active_syncs: &mut HashMap<u64, ActiveSync>,
+    spawned_tasks: &SpawnedTasks,
     next_query_id: &mut u64,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> bool {
@@ -45,8 +53,17 @@ pub(super) async fn handle_command(
             addrs,
             reply,
         } => {
-            let result =
-                handle_dial(endpoint, peer_map, subscriptions, &peer_id, addrs, event_tx).await;
+            let result = handle_dial(
+                endpoint,
+                peer_map,
+                pending_pushlog_replies,
+                subscriptions,
+                spawned_tasks,
+                &peer_id,
+                addrs,
+                event_tx,
+            )
+            .await;
             let _ = reply.send(result);
         }
         IrohCommand::Listen { addr: _, reply } => {
@@ -100,7 +117,7 @@ pub(super) async fn handle_command(
             reply_msg,
             reply,
         } => {
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = async {
                     protocols::write_message(&mut send_stream, &reply_msg).await?;
                     send_stream.finish().map_err(|e| {
@@ -111,6 +128,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendTwoStreamRequest {
             peer_id,
@@ -119,17 +137,51 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
-                let result = handle_request_response(
-                    &endpoint,
-                    &peer_id,
-                    protocols::ALPN_TWOSTREAM,
-                    &request,
-                    direct_addr,
-                )
+            let pending_pushlog_replies = pending_pushlog_replies.clone();
+            let task = tokio::spawn(async move {
+                let result = async move {
+                    let message_id = request.metadata.message_id.clone();
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    pending_pushlog_replies
+                        .lock()
+                        .insert(message_id.clone(), reply_tx);
+
+                    if let Err(error) = handle_fire_and_forget(
+                        &endpoint,
+                        &peer_id,
+                        protocols::ALPN_TWOSTREAM,
+                        &request,
+                        direct_addr,
+                    )
+                    .await
+                    {
+                        pending_pushlog_replies.lock().remove(&message_id);
+                        return Err(error);
+                    }
+
+                    match tokio::time::timeout(
+                        super::endpoint_rpc::REQUEST_RESPONSE_TIMEOUT,
+                        reply_rx,
+                    )
+                    .await
+                    {
+                        Ok(Ok(reply_msg)) => Ok(reply_msg),
+                        Ok(Err(_)) => {
+                            pending_pushlog_replies.lock().remove(&message_id);
+                            Err(crate::error::Error::Transport(
+                                "response channel closed".into(),
+                            ))
+                        }
+                        Err(_) => {
+                            pending_pushlog_replies.lock().remove(&message_id);
+                            Err(crate::error::Error::ResponseTimeout)
+                        }
+                    }
+                }
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendTwoStreamResponse {
             peer_id,
@@ -138,7 +190,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
                     &peer_id,
@@ -149,6 +201,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendDocSyncRequest {
             peer_id,
@@ -158,7 +211,7 @@ pub(super) async fn handle_command(
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
             let event_tx = event_tx.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result: crate::error::Result<crate::message::DocSyncReply> =
                     handle_request_response(
                         &endpoint,
@@ -183,6 +236,7 @@ pub(super) async fn handle_command(
                     }
                 }
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendBranchableSyncRequest {
             peer_id,
@@ -192,7 +246,7 @@ pub(super) async fn handle_command(
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
             let event_tx = event_tx.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result: crate::error::Result<crate::message::BranchableSyncReply> =
                     handle_request_response(
                         &endpoint,
@@ -217,6 +271,7 @@ pub(super) async fn handle_command(
                     }
                 }
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendDocSyncResponse {
             peer_id,
@@ -225,7 +280,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
                     &peer_id,
@@ -236,6 +291,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendBranchableSyncResponse {
             peer_id,
@@ -244,7 +300,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
                     &peer_id,
@@ -255,13 +311,14 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendDocSyncResponseToken {
             mut send_stream,
             reply_msg,
             reply,
         } => {
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = async {
                     protocols::write_message(&mut send_stream, &reply_msg).await?;
                     send_stream.finish().map_err(|e| {
@@ -272,13 +329,14 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendBranchableSyncResponseToken {
             mut send_stream,
             reply_msg,
             reply,
         } => {
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = async {
                     protocols::write_message(&mut send_stream, &reply_msg).await?;
                     send_stream.finish().map_err(|e| {
@@ -289,6 +347,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendCarRequest {
             peer_id,
@@ -296,19 +355,20 @@ pub(super) async fn handle_command(
             reply,
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
-            let request = CarFetchRequest::full_dag(root_cid);
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
-                let result = handle_fire_and_forget(
+            let event_tx = event_tx.clone();
+            let task = tokio::spawn(async move {
+                let result = handle_car_request_response(
                     &endpoint,
                     &peer_id,
-                    protocols::ALPN_CAR,
-                    &request,
+                    root_cid,
                     direct_addr,
+                    &event_tx,
                 )
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendCarResponse {
             peer_id,
@@ -317,7 +377,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
                     &peer_id,
@@ -328,6 +388,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SendSEArtifacts {
             peer_id,
@@ -336,7 +397,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
                     &peer_id,
@@ -347,6 +408,7 @@ pub(super) async fn handle_command(
                 .await;
                 let _ = reply.send(result);
             });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::SyncBlocks {
             root,
@@ -387,40 +449,30 @@ pub(super) async fn handle_command(
             collections,
             reply,
         } => {
-            let info = ReplicatorInfo::from_raw(peer_id.to_string(), collections, Vec::new());
-            replicators.insert(peer_id.to_string(), info);
+            replicators.set_peer_collections(peer_id.as_str(), &collections);
             let _ = reply.send(Ok(()));
         }
         IrohCommand::DeleteReplicator { peer_id, reply } => {
-            replicators.remove(peer_id.as_str());
+            replicators.remove_peer(peer_id.as_str());
             let _ = reply.send(Ok(()));
         }
         IrohCommand::ListReplicators { reply } => {
-            let list: Vec<ReplicatorInfo> = replicators.values().cloned().collect();
-            let _ = reply.send(Ok(list));
+            let _ = reply.send(Ok(replicators.list_replicator_info()));
         }
         IrohCommand::GetReplicator { peer_id, reply } => {
-            let info = replicators.get(peer_id.as_str()).cloned();
-            let _ = reply.send(Ok(info));
+            let _ = reply.send(Ok(replicators.get_replicator_info(peer_id.as_str())));
         }
         IrohCommand::RemoveReplicatorCollections {
             peer_id,
             collections,
             reply,
         } => {
-            if let Some(info) = replicators.get_mut(peer_id.as_str()) {
-                info.collections.retain(|c| !collections.contains(c));
-                if info.collections.is_empty() {
-                    replicators.remove(peer_id.as_str());
-                    let _ = reply.send(Ok(true));
-                } else {
-                    let _ = reply.send(Ok(false));
-                }
-            } else {
-                let _ = reply.send(Ok(false));
-            }
+            let _ = reply.send(Ok(
+                replicators.remove_peer_collections(peer_id.as_str(), &collections)
+            ));
         }
         IrohCommand::Shutdown { reply } => {
+            tracing::warn!("Iroh endpoint received shutdown command");
             let _ = reply.send(Ok(()));
             return true;
         }
@@ -434,7 +486,11 @@ pub(super) async fn handle_command(
 async fn handle_dial(
     endpoint: &Endpoint,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    pending_pushlog_replies: &Arc<
+        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
+    >,
     subscriptions: &HashMap<String, TopicSubscription>,
+    spawned_tasks: &SpawnedTasks,
     peer_id: &PeerId,
     addrs: Vec<PeerAddr>,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
@@ -474,16 +530,21 @@ async fn handle_dial(
     // Keep connection alive by spawning a handler for incoming streams.
     let event_tx = event_tx.clone();
     let peer_map = Arc::clone(peer_map);
-    tokio::spawn(async move {
+    let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
+    let spawned_tasks_for_connection = Arc::clone(spawned_tasks);
+    let task = tokio::spawn(async move {
         super::endpoint_streams::handle_connection_streams_from_dial(
             connection,
             endpoint_id,
             conn_alpn,
             event_tx,
             peer_map,
+            pending_pushlog_replies,
+            &spawned_tasks_for_connection,
         )
         .await;
     });
+    track_task(spawned_tasks, task);
 
     Ok(())
 }

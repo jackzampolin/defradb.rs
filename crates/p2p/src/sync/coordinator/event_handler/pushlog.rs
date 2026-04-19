@@ -24,39 +24,6 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             "Received PushLog request"
         );
 
-        // Access control check
-        if let Err(e) = self
-            .check_access_str(peer_id.as_str(), &request.collection_id)
-            .await
-        {
-            tracing::warn!(
-                peer_id = %peer_id,
-                collection_id = %request.collection_id,
-                doc_id = %request.doc_id,
-                "Rejecting PushLog request from unauthorized peer"
-            );
-            let reply = PushLogReply::error(
-                &request.metadata.message_id,
-                &format!(
-                    "access denied: not authorized for collection {}",
-                    request.collection_id
-                ),
-            );
-            if let Err(send_err) = self
-                .runtime
-                .transport
-                .send_pushlog_response(token, reply)
-                .await
-            {
-                tracing::warn!(
-                    peer_id = %peer_id,
-                    error = %send_err,
-                    "Failed to send access denied response"
-                );
-            }
-            return Err(e);
-        }
-
         let is_explicit_replicator =
             self.is_registered_replicator(peer_id.as_str(), &request.collection_id);
 
@@ -159,31 +126,6 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             "Received PushLog request via two-stream protocol (Go compatibility)"
         );
 
-        // Access control check
-        if let Err(e) = self
-            .check_access_str(peer_id.as_str(), &request.collection_id)
-            .await
-        {
-            tracing::warn!(
-                peer_id = %peer_id,
-                collection_id = %request.collection_id,
-                doc_id = %request.doc_id,
-                "Rejecting two-stream request from unauthorized peer"
-            );
-            let mut reply = PushLogReply::error(
-                &request.metadata.message_id,
-                &format!(
-                    "access denied: not authorized for collection {}",
-                    request.collection_id
-                ),
-            );
-            if let Err(sign_err) = sign_with_transport(&self.runtime.transport, &mut reply) {
-                tracing::error!(error = %sign_err, "Failed to sign access denied response");
-            }
-            self.send_two_stream_reply(&peer_id, reply, token).await;
-            return Err(e);
-        }
-
         // Parse CID
         let cid = match Cid::try_from(request.cid.as_ref()) {
             Ok(cid) => {
@@ -245,30 +187,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         &self,
         peer_id: &PeerId,
         reply: PushLogReply,
-        token: Option<T::ResponseToken>,
+        _token: Option<T::ResponseToken>,
     ) {
-        if let Some(token) = token {
-            if let Err(e) = self
-                .runtime
-                .transport
-                .send_pushlog_response(token, reply)
-                .await
-            {
-                if e.is_connection_like() {
-                    tracing::debug!(
-                        peer_id = %peer_id,
-                        error = %e,
-                        "Peer disconnected before the two-stream response could be sent via token"
-                    );
-                } else {
-                    tracing::warn!(
-                        peer_id = %peer_id,
-                        error = %e,
-                        "Failed to send two-stream response via token"
-                    );
-                }
-            }
-        } else if let Err(e) = self
+        if let Err(e) = self
             .runtime
             .transport
             .send_two_stream_response(peer_id, reply)

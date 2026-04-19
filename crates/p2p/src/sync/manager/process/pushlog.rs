@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::message::PushLogBroadcast;
 use crate::sync::manager::events::SyncEvent;
 use crate::sync::manager::links::find_all_missing_links;
-use crate::sync::manager::pending::{PendingDag, MAX_PENDING_DAGS, PENDING_DAG_TTL};
+use crate::sync::manager::pending::{PendingDag, MAX_PENDING_DAGS};
 use crate::ExplicitReplayAuthorization;
 
 use super::SyncManager;
@@ -149,6 +149,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                                 cid,
                                 doc_id: msg.doc_id.clone(),
                                 collection_id: msg.collection_id.clone(),
+                                creator: msg.creator.clone(),
                                 acp_actor_relationships: msg.acp_actor_relationships.clone(),
                             })
                             .await
@@ -210,6 +211,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         cid: *cid,
                         doc_id: msg.doc_id.clone(),
                         collection_id: msg.collection_id.clone(),
+                        creator: msg.creator.clone(),
                         acp_actor_relationships: msg.acp_actor_relationships.clone(),
                     })
                     .await
@@ -360,34 +362,23 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
             // Track this DAG as pending (enforces TTL eviction and capacity limit).
             {
-                let inserted = {
-                    let mut pending = self.pending_dags.write();
-                    let now = Instant::now();
-                    pending.retain(|_, v| now.duration_since(v.inserted_at) < PENDING_DAG_TTL);
-                    if pending.len() < MAX_PENDING_DAGS {
-                        pending.insert(
-                            *cid,
-                            PendingDag {
-                                doc_id: msg.doc_id.clone(),
-                                collection_id: msg.collection_id.clone(),
-                                creator: msg.creator.clone(),
-                                missing: missing.iter().cloned().collect(),
-                                source_peer: sender_peer.map(str::to_owned),
-                                is_explicit_replicator,
-                                explicit_replay_authorization: explicit_replay_authorization
-                                    .clone(),
-                                acp_actor_relationships: msg.acp_actor_relationships.clone(),
-                                inserted_at: now,
-                                attempts: 0,
-                                fetch_failures: 0,
-                                last_fetch_error: None,
-                            },
-                        );
-                        true
-                    } else {
-                        false
-                    }
-                };
+                let inserted = self.insert_pending_dag(
+                    *cid,
+                    PendingDag {
+                        doc_id: msg.doc_id.clone(),
+                        collection_id: msg.collection_id.clone(),
+                        creator: msg.creator.clone(),
+                        missing: missing.iter().cloned().collect(),
+                        source_peer: sender_peer.map(str::to_owned),
+                        is_explicit_replicator,
+                        explicit_replay_authorization: explicit_replay_authorization.clone(),
+                        acp_actor_relationships: msg.acp_actor_relationships.clone(),
+                        inserted_at: Instant::now(),
+                        attempts: 0,
+                        fetch_failures: 0,
+                        last_fetch_error: None,
+                    },
+                );
                 if !inserted {
                     tracing::warn!(
                         cid = %cid,

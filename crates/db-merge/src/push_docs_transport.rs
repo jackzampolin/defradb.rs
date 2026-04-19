@@ -1,4 +1,3 @@
-use std::str::FromStr;
 use std::sync::Arc;
 
 use acp::DocumentACP;
@@ -9,7 +8,8 @@ use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
 
 use crate::push_docs_common::{
-    load_push_dag_blocks, resolve_push_creator, MAX_CONCURRENT_REPLAY_TASKS,
+    load_latest_composite_head_cids, load_push_dag_blocks, resolve_push_creator,
+    MAX_CONCURRENT_REPLAY_TASKS,
 };
 use db::database::DB;
 
@@ -113,30 +113,10 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
         for doc_id in &doc_ids {
             let creator =
                 resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id).await;
-            let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
-            let opts = IterOptions::new().with_prefix(prefix);
-            let mut iter = headstore
-                .iterator(opts)
-                .await
-                .map_err(|e| format!("failed to iterate headstore: {}", e))?;
-
             let mut doc_blocks = Vec::new();
-
-            while let Some(pair) = iter
-                .next()
-                .await
-                .map_err(|e| format!("headstore iteration error: {}", e))?
+            for head_cid in
+                load_latest_composite_head_cids(&headstore, &blockstore_view, doc_id).await
             {
-                let key_str = String::from_utf8_lossy(&pair.key);
-                let parts: Vec<&str> = key_str.split('/').collect();
-                if parts.len() < 5 {
-                    continue;
-                }
-                let head_cid = match cid::Cid::from_str(parts[4]) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-
                 let block_key = head_cid.to_bytes();
                 let block_data = match blockstore_view.get(&block_key).await {
                     Ok(Some(data)) => data,
@@ -148,10 +128,6 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
                         .await,
                 );
             }
-
-            iter.close()
-                .await
-                .map_err(|e| format!("headstore close error: {}", e))?;
 
             let mut requests = Vec::new();
             for (block_cid, block_data) in doc_blocks {
@@ -384,29 +360,8 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
         .await
         .map_err(|e| format!("encstore txn: {}", e))?;
 
-    let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
-    let opts = IterOptions::new().with_prefix(prefix);
-    let mut iter = head_txn
-        .iterator(opts)
-        .await
-        .map_err(|e| format!("headstore iterator: {}", e))?;
-
     let mut successful_blocks = 0usize;
-    while let Some(pair) = iter
-        .next()
-        .await
-        .map_err(|e| format!("headstore iteration: {}", e))?
-    {
-        let key_str = String::from_utf8_lossy(&pair.key);
-        let parts: Vec<&str> = key_str.split('/').collect();
-        if parts.len() < 5 {
-            continue;
-        }
-        let head_cid = match cid::Cid::from_str(parts[4]) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
+    for head_cid in load_latest_composite_head_cids(&*head_txn, &*block_txn, doc_id).await {
         let block_data = match block_txn.get(&head_cid.to_bytes()).await {
             Ok(Some(data)) => data,
             _ => continue,
@@ -455,6 +410,5 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
             }
         }
     }
-
     Ok(())
 }

@@ -61,7 +61,7 @@ where
         }
     };
 
-    let (host, handle, event_rx, _replicator_registry) =
+    let (host, handle, event_rx, replicator_registry) =
         p2p::P2PHost::with_keypair_and_config_and_identity(
             p2p_keypair,
             bitswap_store,
@@ -102,7 +102,7 @@ where
         blockstore.clone(),
         sync_config,
         p2p::bitswap::AccessMode::Controlled,
-        Arc::new(p2p::ReplicatorRegistry::new()),
+        replicator_registry,
         collection_store,
         head_provider,
     )
@@ -163,6 +163,7 @@ where
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
         crate::node::ShutdownHandle::libp2p(
             handle.clone(),
+            coordinator.shutdown_handle(),
             vec![
                 host_event_task.abort_handle(),
                 replication_task.abort_handle(),
@@ -212,9 +213,10 @@ where
         bind_port: config.bind_port,
         bind_addr: config.bind_addr,
     };
-    let (command_tx, event_rx, endpoint_task) = p2p::iroh::spawn_endpoint(iroh_config)
-        .await
-        .map_err(|error| anyhow!("failed to spawn iroh endpoint: {error}"))?;
+    let (command_tx, event_rx, replicator_registry, endpoint_task) =
+        p2p::iroh::spawn_endpoint(iroh_config)
+            .await
+            .map_err(|error| anyhow!("failed to spawn iroh endpoint: {error}"))?;
 
     let transport = p2p::iroh::IrohTransport::new(command_tx, secret_key);
     let blockstore = Arc::new(EmbeddedBlockstore::new(store.clone(), true));
@@ -227,7 +229,7 @@ where
         blockstore.clone(),
         sync_config,
         p2p::bitswap::AccessMode::Controlled,
-        Arc::new(p2p::ReplicatorRegistry::new()),
+        replicator_registry,
         collection_store,
         head_provider,
     )
@@ -292,6 +294,7 @@ where
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
         crate::node::ShutdownHandle::iroh(
             transport.clone(),
+            coordinator.shutdown_handle(),
             vec![
                 endpoint_task.abort_handle(),
                 event_handler_task.abort_handle(),

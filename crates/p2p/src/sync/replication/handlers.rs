@@ -12,23 +12,70 @@ use crate::sync::manager::SyncEvent;
 use crate::sync::merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
 use crate::transport::P2PTransport;
 
-/// Handle a DagNeedsFetch event by initiating a Bitswap sync.
-pub(super) async fn handle_dag_needs_fetch<B, T>(
-    coordinator: &SyncCoordinator<B, T>,
+pub(super) struct DagFetchRequest {
     root_cid: Cid,
     missing: Vec<Cid>,
     providers: Vec<String>,
+    doc_id: String,
+    collection_id: String,
+    creator: String,
+    sender_peer: Option<String>,
+}
+
+/// Handle a DagNeedsFetch event by initiating a Bitswap sync.
+pub(super) async fn handle_dag_needs_fetch<B, T>(
+    coordinator: &SyncCoordinator<B, T>,
+    request: DagFetchRequest,
 ) -> ReplicationResult
 where
     B: Blockstore + 'static,
     T: P2PTransport,
 {
+    let DagFetchRequest {
+        root_cid,
+        missing,
+        providers,
+        doc_id,
+        collection_id,
+        creator,
+        sender_peer,
+    } = request;
+
     tracing::debug!(
         cid = %root_cid,
         missing_count = missing.len(),
         provider_count = providers.len(),
         "Initiating Bitswap fetch for missing blocks"
     );
+
+    if let Some(source_peer) = sender_peer {
+        tracing::debug!(
+            cid = %root_cid,
+            source_peer = %source_peer,
+            "Using poll-based DAG fetcher for push-driven DAG recovery"
+        );
+
+        let transport = coordinator.transport().clone();
+        let blockstore = coordinator.blockstore().clone();
+        let event_tx = coordinator.manager().event_sender();
+        let source_peer = crate::transport::PeerId::new(source_peer);
+
+        coordinator.spawn_background_task("pushlog_fetch_dag", async move {
+            crate::sync::coordinator::dag_fetcher::poll_fetch_dag(
+                transport,
+                blockstore,
+                event_tx,
+                root_cid,
+                doc_id,
+                collection_id,
+                creator,
+                source_peer,
+            )
+            .await;
+        });
+
+        return ReplicationResult::DagFetchStarted { root_cid };
+    }
 
     // Convert string peer IDs to transport PeerIds.
     // If the provider list is empty, fall back to all connected transport peers.
@@ -105,6 +152,7 @@ where
     let doc_id_for_result = metadata.doc_id.unwrap_or("").to_string();
     let collection_id_for_result = metadata.collection_id.unwrap_or("").to_string();
     let collection_id_for_broadcast = metadata.collection_id.unwrap_or("");
+    let effective_creator = metadata.effective_creator().map(str::to_string);
 
     // Delegate merge to handler
     match handler.handle_block(&cid, &block_data, metadata).await {
@@ -170,7 +218,11 @@ where
             }
 
             if let Err(error) = coordinator
-                .apply_replicated_actor_relationships(&doc_id_for_result, acp_actor_relationships)
+                .apply_replicated_actor_relationships(
+                    &doc_id_for_result,
+                    effective_creator.as_deref(),
+                    acp_actor_relationships,
+                )
                 .await
             {
                 return ReplicationResult::Failed {
@@ -196,6 +248,7 @@ where
                 if let Err(error) = coordinator
                     .apply_replicated_actor_relationships(
                         &doc_id_for_result,
+                        effective_creator.as_deref(),
                         acp_actor_relationships,
                     )
                     .await
@@ -319,6 +372,10 @@ where
             is_explicit_replicator,
             explicit_replay_authorization,
         ) = event_to_merge_metadata(event);
+
+        if matches!(event, SyncEvent::DagReady { .. }) {
+            coordinator.clear_pending_dag(&cid);
+        }
 
         match coordinator.blockstore().get(&cid).await {
             Ok(Some(data)) => {
@@ -458,10 +515,15 @@ where
             cid,
             doc_id,
             collection_id,
+            creator,
             acp_actor_relationships,
         } => {
             if let Err(error) = coordinator
-                .apply_replicated_actor_relationships(&doc_id, acp_actor_relationships.as_ref())
+                .apply_replicated_actor_relationships(
+                    &doc_id,
+                    Some(&creator),
+                    acp_actor_relationships.as_ref(),
+                )
                 .await
             {
                 ReplicationResult::Failed {
@@ -483,8 +545,26 @@ where
             root_cid,
             missing,
             providers,
+            doc_id,
+            collection_id,
+            creator,
+            sender_peer,
             ..
-        } => handle_dag_needs_fetch(coordinator, root_cid, missing, providers).await,
+        } => {
+            handle_dag_needs_fetch(
+                coordinator,
+                DagFetchRequest {
+                    root_cid,
+                    missing,
+                    providers,
+                    doc_id,
+                    collection_id,
+                    creator,
+                    sender_peer,
+                },
+            )
+            .await
+        }
         SyncEvent::DagReady {
             root_cid,
             doc_id,
@@ -495,6 +575,7 @@ where
             explicit_replay_authorization,
             acp_actor_relationships,
         } => {
+            coordinator.clear_pending_dag(&root_cid);
             // DAG is complete after Bitswap fetch - process as block received
             tracing::info!(
                 cid = %root_cid,

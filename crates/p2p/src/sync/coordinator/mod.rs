@@ -18,29 +18,23 @@
 //! T: P2PTransport (network)
 //! ```
 //!
-//! # Security Model: Two-Level Access Control
+//! # Security Model: Go-Compatible Ingress + Merge-Time ACP
 //!
-//! The P2P sync layer implements **collection-level** access control only.
-//! **Document-level** ACP is the responsibility of the database merge layer.
+//! Rust follows the Go DefraDB mental model:
 //!
-//! ## Collection-Level (P2P Layer)
+//! - **Replicator registration** expresses outbound replay intent and explicit
+//!   replay trust. It controls what we push and which peers are treated as
+//!   explicit replicators.
+//! - **Inbound PushLog/Gossip acceptance** is broader. Transport-authenticated
+//!   peers may deliver updates even if the receiver has not registered them as
+//!   local replicators for that collection.
+//! - **Document-level ACP** remains the authoritative policy boundary for whether
+//!   replicated document content is actually mergeable/readable locally.
 //!
-//! - Enforced via `check_access()` before processing any sync message
-//! - A peer must be registered as a replicator for a collection
-//! - Unauthorized peers cannot push documents to collections they don't replicate
-//!
-//! ## Document-Level (Database Merge Layer)
-//!
-//! - The P2P layer provides creator/doc_id/collection_id in `SyncEvent::BlockReceived`
-//! - The database merge handler should:
-//!   1. Identify the creator's DID (from the signed block or peer mapping)
-//!   2. Check if the creator has UPDATE permission on the document
-//!   3. If permission denied, log and skip the merge (don't crash)
-//!
-//! This two-level model allows:
-//! - Fast collection-level filtering at the network layer
-//! - Fine-grained document-level checks at the merge layer
-//! - CRDT convergence (eventually consistent merge, possibly with rejected updates)
+//! Collection-scoped access checks are still used for protocols that ask the
+//! receiver to actively serve or enumerate state (for example DocSync,
+//! BranchableSync, CAR fetch). They are intentionally not the primary ingress
+//! gate for passive PushLog/Gossip delivery, matching Go.
 
 mod access;
 mod accessors;
@@ -54,10 +48,15 @@ mod subscriptions;
 
 pub use result_types::{CreateReplicatorResult, LoadReplicatorsResult};
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use acp::DocumentACP;
 use blockstore::Blockstore;
+use cid::Cid;
+use parking_lot::Mutex;
+use tokio::task::JoinHandle;
 
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::transport::P2PTransport;
@@ -84,6 +83,89 @@ pub struct PushFailure {
     pub collection_id: String,
 }
 
+struct SyncShutdownState {
+    is_shutting_down: AtomicBool,
+    background_tasks: Mutex<Vec<JoinHandle<()>>>,
+}
+
+const BACKGROUND_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Shared shutdown state for coordinator-owned background replication work.
+#[derive(Clone)]
+pub struct SyncShutdownHandle {
+    inner: Arc<SyncShutdownState>,
+}
+
+impl SyncShutdownHandle {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(SyncShutdownState {
+                is_shutting_down: AtomicBool::new(false),
+                background_tasks: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    fn begin_shutdown(&self) -> bool {
+        !self.inner.is_shutting_down.swap(true, Ordering::AcqRel)
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.inner.is_shutting_down.load(Ordering::Acquire)
+    }
+
+    pub async fn shutdown(&self) {
+        if !self.begin_shutdown() {
+            return;
+        }
+
+        self.drain_background_tasks(BACKGROUND_TASK_SHUTDOWN_TIMEOUT)
+            .await;
+    }
+
+    fn register_task(&self, handle: JoinHandle<()>) {
+        let mut tasks = self.inner.background_tasks.lock();
+        if self.is_shutting_down() {
+            handle.abort();
+        } else {
+            tasks.push(handle);
+        }
+    }
+
+    async fn drain_background_tasks(&self, timeout: Duration) {
+        let mut handles = {
+            let mut tasks = self.inner.background_tasks.lock();
+            std::mem::take(&mut *tasks)
+        };
+
+        let started = tokio::time::Instant::now();
+
+        for handle in &mut handles {
+            let elapsed = started.elapsed();
+            let Some(remaining) = timeout.checked_sub(elapsed) else {
+                break;
+            };
+
+            match tokio::time::timeout(remaining, handle).await {
+                Ok(Ok(())) | Ok(Err(_)) => {}
+                Err(_) => {
+                    tracing::debug!(
+                        timeout_ms = timeout.as_millis() as u64,
+                        "Coordinator background task exceeded shutdown drain window; aborting remaining tasks"
+                    );
+                    break;
+                }
+            }
+        }
+
+        for handle in handles {
+            if !handle.is_finished() {
+                handle.abort();
+            }
+        }
+    }
+}
+
 /// Runtime services and async limits used by coordinator handlers.
 pub(super) struct SyncRuntime<T: P2PTransport> {
     /// Transport for sending responses and managing connections.
@@ -103,6 +185,9 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
 
     /// Per-peer rate limiter applied at event dispatch to throttle abusive peers.
     pub(super) rate_limiter: Arc<PeerRateLimiter>,
+
+    /// Shutdown state for coordinator-owned background tasks.
+    pub(super) shutdown: SyncShutdownHandle,
 }
 
 /// Access control and peer identity state for the coordinator.
@@ -153,6 +238,40 @@ pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
     pub(super) document_acp: std::sync::OnceLock<Arc<dyn DocumentACP>>,
 }
 
+impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
+    pub(crate) fn clear_pending_dag(&self, root_cid: &Cid) -> bool {
+        self.manager.clear_pending_dag(root_cid)
+    }
+
+    pub fn shutdown_handle(&self) -> SyncShutdownHandle {
+        self.runtime.shutdown.clone()
+    }
+
+    pub async fn shutdown(&self) {
+        self.runtime.dag_fetch_semaphore.close();
+        self.runtime.push_semaphore.close();
+        self.runtime.shutdown.shutdown().await;
+    }
+
+    pub(crate) fn spawn_background_task<F>(&self, task_name: &'static str, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        if self.runtime.shutdown.is_shutting_down() {
+            tracing::debug!(task = task_name, "Skipping background task during shutdown");
+            return;
+        }
+
+        let handle = tokio::spawn(future);
+        self.runtime.shutdown.register_task(handle);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_dag_count(&self) -> usize {
+        self.manager.pending_dag_count()
+    }
+}
+
 /// Type alias for SyncCoordinator using the libp2p transport.
 pub type Libp2pSyncCoordinator<B> =
     SyncCoordinator<B, crate::host::libp2p_transport::Libp2pTransport>;
@@ -163,3 +282,51 @@ pub type IrohSyncCoordinator<B> = SyncCoordinator<B, crate::iroh::IrohTransport>
 
 #[cfg(test)]
 mod access_tests;
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::SyncShutdownHandle;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn shutdown_waits_for_in_flight_background_task_completion() {
+        let shutdown = SyncShutdownHandle::new();
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_for_task = Arc::clone(&completed);
+
+        shutdown.register_task(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            completed_for_task.store(true, Ordering::SeqCst);
+        }));
+
+        shutdown.shutdown().await;
+
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "shutdown should allow in-flight background tasks to finish"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_uses_single_global_budget_for_background_tasks() {
+        let shutdown = SyncShutdownHandle::new();
+
+        for _ in 0..3 {
+            shutdown.register_task(tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }));
+        }
+
+        let started = tokio::time::Instant::now();
+        shutdown.shutdown().await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(7),
+            "shutdown should use one shared deadline, got {:?}",
+            elapsed
+        );
+    }
+}

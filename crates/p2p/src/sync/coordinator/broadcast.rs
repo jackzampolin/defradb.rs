@@ -17,6 +17,11 @@ use crate::transport::{P2PTransport, PeerId};
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     async fn list_replicators_for_push(&self) -> Option<Vec<crate::replicator::ReplicatorInfo>> {
+        if self.runtime.shutdown.is_shutting_down() {
+            tracing::debug!("Skipping replicator push because coordinator is shutting down");
+            return None;
+        }
+
         match self.runtime.transport.list_replicators().await {
             Ok(replicators) => Some(replicators),
             Err(e) => {
@@ -190,8 +195,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let doc_id_owned = doc_id.to_string();
             let collection_id_owned = collection_id.to_string();
             let semaphore = self.runtime.push_semaphore.clone();
-            tokio::spawn(async move {
-                let _permit = semaphore.acquire().await;
+            self.spawn_background_task("push_dag_to_replicators", async move {
+                let Ok(_permit) = semaphore.acquire().await else {
+                    return;
+                };
                 let any_failed =
                     Self::send_ordered_pushlogs_via_transport(&transport, &peer_id, requests).await;
                 if any_failed {
@@ -264,8 +271,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let collection_id_owned = collection_id.to_string();
             let semaphore = self.runtime.push_semaphore.clone();
             let peer_id_clone = peer_id.clone();
-            tokio::spawn(async move {
-                let _permit = semaphore.acquire().await;
+            self.spawn_background_task("push_to_replicators", async move {
+                let Ok(_permit) = semaphore.acquire().await else {
+                    return;
+                };
                 if let Err(e) = transport
                     .send_two_stream_request(&peer_id_clone, request)
                     .await

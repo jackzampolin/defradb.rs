@@ -522,6 +522,10 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             .load_document_head_blocks(doc_id)
             .await
             .map_err(P2PError::Internal)?;
+        let creator_did = pusher
+            .load_doc_creator_did(collection_name, doc_id)
+            .await
+            .map_err(P2PError::Internal)?;
         let acp_actor_relationships = pusher
             .load_doc_actor_relationships(collection_name, doc_id)
             .await
@@ -534,7 +538,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                     &block,
                     doc_id,
                     &collection_id,
-                    None,
+                    creator_did.as_deref(),
                     acp_actor_relationships.clone(),
                 )
                 .await

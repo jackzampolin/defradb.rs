@@ -110,6 +110,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(max_dag_fetches)),
                     push_semaphore: Arc::new(tokio::sync::Semaphore::new(max_push_tasks)),
                     rate_limiter: Arc::new(PeerRateLimiter::new(rate_limit_burst, rate_limit_rate)),
+                    shutdown: super::SyncShutdownHandle::new(),
                 },
                 manager,
                 access: SyncAccessState {

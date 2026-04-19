@@ -12,28 +12,28 @@ use crate::Result;
 /// Links are returned in traversal order (not sorted).
 pub fn extract_links(ipld: &Ipld) -> Result<Vec<cid::Cid>> {
     let mut links = Vec::new();
-    extract_links_recursive(ipld, &mut links)?;
-    Ok(links)
-}
+    let mut stack = vec![ipld];
 
-fn extract_links_recursive(ipld: &Ipld, links: &mut Vec<cid::Cid>) -> Result<()> {
-    match ipld {
-        Ipld::Link(cid) => {
-            links.push(cid_from_libipld(cid)?);
-        }
-        Ipld::List(items) => {
-            for item in items {
-                extract_links_recursive(item, links)?;
+    while let Some(current) = stack.pop() {
+        match current {
+            Ipld::Link(cid) => {
+                links.push(cid_from_libipld(cid)?);
             }
-        }
-        Ipld::Map(map) => {
-            for value in map.values() {
-                extract_links_recursive(value, links)?;
+            Ipld::List(items) => {
+                for item in items.iter().rev() {
+                    stack.push(item);
+                }
             }
+            Ipld::Map(map) => {
+                let mut values: Vec<&Ipld> = map.values().collect();
+                values.reverse();
+                stack.extend(values);
+            }
+            _ => {}
         }
-        _ => {}
     }
-    Ok(())
+
+    Ok(links)
 }
 
 /// Visitor trait for traversing IPLD structures.
@@ -67,26 +67,31 @@ pub trait IpldVisitor {
 /// Calls visitor methods for each node in the tree. If the visitor's `visit`
 /// method returns `false`, children of that node are skipped.
 pub fn walk_ipld<V: IpldVisitor>(ipld: &Ipld, visitor: &mut V) -> Result<()> {
-    if !visitor.visit(ipld) {
-        return Ok(());
+    let mut stack = vec![ipld];
+
+    while let Some(current) = stack.pop() {
+        if !visitor.visit(current) {
+            continue;
+        }
+
+        match current {
+            Ipld::Link(cid) => {
+                visitor.visit_link(&cid_from_libipld(cid)?);
+            }
+            Ipld::List(items) => {
+                for item in items.iter().rev() {
+                    stack.push(item);
+                }
+            }
+            Ipld::Map(map) => {
+                let mut values: Vec<&Ipld> = map.values().collect();
+                values.reverse();
+                stack.extend(values);
+            }
+            _ => {}
+        }
     }
 
-    match ipld {
-        Ipld::Link(cid) => {
-            visitor.visit_link(&cid_from_libipld(cid)?);
-        }
-        Ipld::List(items) => {
-            for item in items {
-                walk_ipld(item, visitor)?;
-            }
-        }
-        Ipld::Map(map) => {
-            for value in map.values() {
-                walk_ipld(value, visitor)?;
-            }
-        }
-        _ => {}
-    }
     Ok(())
 }
 

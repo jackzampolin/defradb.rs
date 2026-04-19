@@ -137,6 +137,56 @@ pub(super) async fn handle_fire_and_forget<T: serde::Serialize>(
     Ok(())
 }
 
+/// Send a CAR request and emit the response as a transport event.
+///
+/// Unlike generic fire-and-forget messages, CAR requests expect the peer to
+/// stream raw CAR bytes back on the same bidirectional stream. We must consume
+/// that response here; otherwise the remote writer sees a broken stream and the
+/// caller never receives a `CarFetchResponse`.
+pub(super) async fn handle_car_request_response(
+    endpoint: &Endpoint,
+    peer_id: &PeerId,
+    root_cid: cid::Cid,
+    direct_addr: Option<std::net::SocketAddr>,
+    event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
+) -> crate::error::Result<()> {
+    let connection =
+        connect_with_direct_addr_fallback(endpoint, peer_id, protocols::ALPN_CAR, direct_addr)
+            .await?;
+
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|e| crate::error::Error::Transport(e.to_string()))?;
+
+    let request = CarFetchRequest::full_dag(root_cid);
+    protocols::write_message(&mut send, &request).await?;
+    send.finish()
+        .map_err(|e| crate::error::Error::Transport(e.to_string()))?;
+
+    let car_data = tokio::time::timeout(
+        REQUEST_RESPONSE_TIMEOUT,
+        recv.read_to_end(protocols::MAX_CAR_SIZE),
+    )
+    .await
+    .map_err(|_| crate::error::Error::ResponseTimeout)?
+    .map_err(|e| crate::error::Error::Transport(e.to_string()))?;
+
+    if event_tx
+        .send(TransportEvent::CarFetchResponse {
+            peer_id: peer_id.clone(),
+            root_cid,
+            car_data,
+        })
+        .await
+        .is_err()
+    {
+        warn!("Event channel closed, cannot emit CarFetchResponse");
+    }
+
+    Ok(())
+}
+
 /// Try to fetch CAR blocks from a single provider.
 ///
 /// Returns `true` if the fetch succeeded and a `CarFetchResponse` was emitted.
@@ -290,7 +340,7 @@ pub(super) async fn handle_block_sync(
     missing: Vec<cid::Cid>,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
-    use tokio::task::JoinHandle;
+    use tokio::task::JoinSet;
 
     if !missing.is_empty() {
         debug!(
@@ -301,7 +351,7 @@ pub(super) async fn handle_block_sync(
         );
     }
 
-    let mut tasks: Vec<JoinHandle<bool>> = Vec::with_capacity(providers.len());
+    let mut tasks: JoinSet<bool> = JoinSet::new();
 
     let request = if missing.is_empty() {
         CarFetchRequest::full_dag(root)
@@ -315,10 +365,10 @@ pub(super) async fn handle_block_sync(
         let event_tx = event_tx.clone();
         let provider = provider.clone();
         let request = request.clone();
-        tasks.push(tokio::spawn(async move {
+        tasks.spawn(async move {
             let direct_addr = super::endpoint::peer_direct_addr(&peer_map, &provider);
             try_fetch_from_provider(&endpoint, &provider, request, direct_addr, &event_tx).await
-        }));
+        });
     }
 
     let mut any_success = false;
@@ -329,10 +379,11 @@ pub(super) async fn handle_block_sync(
         "selective"
     };
 
-    for task in tasks {
-        match task.await {
+    while let Some(task) = tasks.join_next().await {
+        match task {
             Ok(true) => {
                 any_success = true;
+                tasks.abort_all();
                 break;
             }
             Ok(false) => {}

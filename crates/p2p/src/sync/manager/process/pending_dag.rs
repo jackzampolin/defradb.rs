@@ -118,7 +118,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Expired entries (older than `PENDING_DAG_TTL`) are removed before checking
     /// the capacity. If the map is still at `MAX_PENDING_DAGS` after eviction the
     /// new entry is silently dropped and `false` is returned so callers can log.
-    fn insert_pending_dag(&self, root_cid: Cid, dag: PendingDag) -> bool {
+    pub(super) fn insert_pending_dag(&self, root_cid: Cid, dag: PendingDag) -> bool {
         let mut pending = self.pending_dags.write();
         let now = Instant::now();
 
@@ -131,6 +131,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         pending.insert(root_cid, dag);
         true
+    }
+
+    /// Remove a pending DAG entry once another fetch path has completed it.
+    pub fn clear_pending_dag(&self, root_cid: &Cid) -> bool {
+        self.pending_dags.write().remove(root_cid).is_some()
     }
 
     /// Register a pending DAG for DocSync.

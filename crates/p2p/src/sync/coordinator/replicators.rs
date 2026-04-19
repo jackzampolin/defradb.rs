@@ -21,6 +21,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .create_replicator(peer_id, collections.clone())
             .await?;
 
+        self.register_replicator_access(peer_id, &collections);
+
         let mut result = CreateReplicatorResult {
             subscribed: Vec::new(),
             failed_subscriptions: Vec::new(),
@@ -72,6 +74,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         };
 
         self.runtime.transport.delete_replicator(peer_id).await?;
+        self.access.replicators.remove_peer(peer_id.as_str());
         tracing::info!(peer_id = %peer_id, "Deleted replicator");
 
         self.unsubscribe_orphaned_collections(&removed_collections)
@@ -93,6 +96,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             };
 
             self.runtime.transport.delete_replicator(peer_id).await?;
+            self.access.replicators.remove_peer(peer_id.as_str());
             tracing::info!(peer_id = %peer_id, "Deleted replicator (empty collections = delete all)");
 
             self.unsubscribe_orphaned_collections(&removed_collections)
@@ -106,6 +110,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .transport
             .remove_replicator_collections(peer_id, collections.clone())
             .await?;
+
+        for collection_id in &collections {
+            self.access
+                .replicators
+                .remove_replicator(collection_id, peer_id.as_str());
+        }
 
         if fully_deleted {
             tracing::info!(
@@ -219,5 +229,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         result
+    }
+
+    fn register_replicator_access(&self, peer_id: &PeerId, collections: &[String]) {
+        self.access
+            .replicators
+            .set_peer_collections(peer_id.as_str(), collections);
     }
 }

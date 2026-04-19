@@ -363,7 +363,21 @@ impl P2PTransport for IrohTransport {
     }
 
     async fn shutdown(&self) -> Result<()> {
-        self.send_command(|reply| IrohCommand::Shutdown { reply })
+        let send_started = std::time::Instant::now();
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(IrohCommand::Shutdown { reply: tx })
             .await
+            .map_err(|_| Error::ChannelSend)?;
+        let send_elapsed = send_started.elapsed();
+
+        let reply_started = std::time::Instant::now();
+        let result = rx.await.map_err(|_| Error::ChannelReceive)?;
+        tracing::warn!(
+            send_elapsed_ms = send_elapsed.as_millis(),
+            reply_elapsed_ms = reply_started.elapsed().as_millis(),
+            "Iroh transport shutdown command completed"
+        );
+        result
     }
 }

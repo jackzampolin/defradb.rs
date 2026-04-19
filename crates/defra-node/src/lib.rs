@@ -86,6 +86,7 @@ struct P2PLifecycle {
 #[cfg(feature = "p2p")]
 struct P2PLifecycleInner {
     transport: p2p::iroh::IrohTransport,
+    coordinator: p2p::sync::SyncShutdownHandle,
     endpoint_task: tokio::task::JoinHandle<()>,
     replication_task: tokio::task::JoinHandle<()>,
     event_handler_task: tokio::task::JoinHandle<()>,
@@ -116,16 +117,71 @@ impl P2PLifecycle {
 #[cfg(feature = "p2p")]
 impl P2PLifecycleInner {
     async fn shutdown(self) {
-        abort_background_task("iroh retry loop", self.retry_loop_task).await;
+        let shutdown_started = std::time::Instant::now();
+        let Self {
+            transport,
+            coordinator,
+            endpoint_task,
+            replication_task,
+            event_handler_task,
+            failure_recorder_task,
+            retry_loop_task,
+        } = self;
 
-        if let Err(error) = self.transport.shutdown().await {
+        let retry_started = std::time::Instant::now();
+        abort_background_task("iroh retry loop", retry_loop_task).await;
+        tracing::warn!(
+            elapsed_ms = retry_started.elapsed().as_millis(),
+            "P2P shutdown: retry loop stopped"
+        );
+
+        let coordinator_started = std::time::Instant::now();
+        coordinator.shutdown().await;
+        tracing::warn!(
+            elapsed_ms = coordinator_started.elapsed().as_millis(),
+            "P2P shutdown: coordinator stopped"
+        );
+
+        let transport_started = std::time::Instant::now();
+        if let Err(error) = transport.shutdown().await {
             tracing::debug!(%error, "Iroh transport shutdown returned an error");
         }
+        tracing::warn!(
+            elapsed_ms = transport_started.elapsed().as_millis(),
+            "P2P shutdown: transport stop requested"
+        );
 
-        await_endpoint_task(self.endpoint_task).await;
-        abort_background_task("iroh event handler", self.event_handler_task).await;
-        abort_background_task("iroh replication loop", self.replication_task).await;
-        abort_background_task("iroh failure recorder", self.failure_recorder_task).await;
+        drop(transport);
+        drop(coordinator);
+
+        let event_handler_started = std::time::Instant::now();
+        await_background_task("iroh event handler", event_handler_task).await;
+        tracing::warn!(
+            elapsed_ms = event_handler_started.elapsed().as_millis(),
+            "P2P shutdown: event handler stopped"
+        );
+
+        let replication_started = std::time::Instant::now();
+        abort_background_task("iroh replication loop", replication_task).await;
+        tracing::warn!(
+            elapsed_ms = replication_started.elapsed().as_millis(),
+            "P2P shutdown: replication loop stopped"
+        );
+
+        let failure_started = std::time::Instant::now();
+        abort_background_task("iroh failure recorder", failure_recorder_task).await;
+        tracing::warn!(
+            elapsed_ms = failure_started.elapsed().as_millis(),
+            "P2P shutdown: failure recorder stopped"
+        );
+
+        let endpoint_started = std::time::Instant::now();
+        await_endpoint_task(endpoint_task).await;
+        tracing::warn!(
+            elapsed_ms = endpoint_started.elapsed().as_millis(),
+            total_elapsed_ms = shutdown_started.elapsed().as_millis(),
+            "P2P shutdown: endpoint task stopped"
+        );
     }
 }
 
@@ -161,6 +217,25 @@ async fn abort_background_task(task_name: &'static str, task: tokio::task::JoinH
                 task = task_name,
                 "P2P background task did not stop after abort"
             );
+        }
+    }
+}
+
+#[cfg(feature = "p2p")]
+async fn await_background_task(task_name: &'static str, mut task: tokio::task::JoinHandle<()>) {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if error.is_cancelled() => {}
+        Ok(Err(error)) => {
+            tracing::debug!(task = task_name, %error, "P2P background task failed during shutdown");
+        }
+        Err(_) => {
+            tracing::debug!(
+                task = task_name,
+                "P2P background task did not stop after graceful shutdown; aborting"
+            );
+            task.abort();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
         }
     }
 }
@@ -662,9 +737,10 @@ impl NodeBuilder {
             bind_port: Some(config.port),
             bind_addr: config.bind_addr,
         };
-        let (command_tx, iroh_events, endpoint_task) = p2p::iroh::spawn_endpoint(iroh_config)
-            .await
-            .map_err(|e| anyhow::anyhow!("IROH endpoint spawn failed: {}", e))?;
+        let (command_tx, iroh_events, replicator_registry, endpoint_task) =
+            p2p::iroh::spawn_endpoint(iroh_config)
+                .await
+                .map_err(|e| anyhow::anyhow!("IROH endpoint spawn failed: {}", e))?;
 
         // 3. Create IROH transport facade
         let transport = p2p::iroh::IrohTransport::new(command_tx, secret_key);
@@ -684,11 +760,12 @@ impl NodeBuilder {
             rate_limit_rate: config.rate_limit_rate,
             ..Default::default()
         };
-        let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_collection_store(
+        let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_access_control(
             transport.clone(),
             sync_blockstore.clone(),
             sync_config,
             p2p::AccessMode::Controlled,
+            replicator_registry,
             collection_store,
         )
         .await
@@ -760,7 +837,7 @@ impl NodeBuilder {
         let ops: Arc<dyn defra_http::P2POperations> =
             Arc::new(defra_p2p_adapter::IrohP2PAdapter::with_full_context(
                 transport.clone(),
-                coordinator,
+                coordinator.clone(),
                 doc_pusher,
                 event_bus,
                 version_syncer,
@@ -770,6 +847,7 @@ impl NodeBuilder {
             ops,
             lifecycle: Some(P2PLifecycle::new(P2PLifecycleInner {
                 transport,
+                coordinator: coordinator.shutdown_handle(),
                 endpoint_task,
                 replication_task,
                 event_handler_task,

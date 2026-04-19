@@ -138,7 +138,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
 
         match kind {
             BroadcastKind::DagPush => {
-                sync.push_dag_to_replicators_with_creator(
+                sync.push_to_replicators_with_creator(
                     &cid,
                     &block,
                     &doc_id,
