@@ -149,6 +149,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                                 cid,
                                 doc_id: msg.doc_id.clone(),
                                 collection_id: msg.collection_id.clone(),
+                                creator: msg.creator.clone(),
                                 acp_actor_relationships: msg.acp_actor_relationships.clone(),
                             })
                             .await
@@ -210,6 +211,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         cid: *cid,
                         doc_id: msg.doc_id.clone(),
                         collection_id: msg.collection_id.clone(),
+                        creator: msg.creator.clone(),
                         acp_actor_relationships: msg.acp_actor_relationships.clone(),
                     })
                     .await

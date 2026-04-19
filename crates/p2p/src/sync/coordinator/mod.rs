@@ -140,13 +140,12 @@ impl SyncShutdownHandle {
 
         let started = tokio::time::Instant::now();
 
-        for idx in 0..handles.len() {
+        for handle in &mut handles {
             let elapsed = started.elapsed();
             let Some(remaining) = timeout.checked_sub(elapsed) else {
                 break;
             };
 
-            let handle = &mut handles[idx];
             match tokio::time::timeout(remaining, handle).await {
                 Ok(Ok(())) | Ok(Err(_)) => {}
                 Err(_) => {

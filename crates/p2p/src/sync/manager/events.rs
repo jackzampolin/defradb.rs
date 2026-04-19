@@ -40,6 +40,7 @@ pub enum SyncEvent {
         cid: Cid,
         doc_id: String,
         collection_id: String,
+        creator: String,
         acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
     },
 

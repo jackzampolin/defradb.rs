@@ -579,6 +579,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             P2PError::not_found(format!("collection '{collection_name}' not found"))
         })?;
         let head_blocks = pusher.load_document_head_blocks(doc_id).await?;
+        let creator_did = pusher.load_doc_creator_did(collection_name, doc_id).await?;
         let acp_actor_relationships = pusher
             .load_doc_actor_relationships(collection_name, doc_id)
             .await?;
@@ -590,7 +591,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                     &block,
                     doc_id,
                     &collection_id,
-                    None,
+                    creator_did.as_deref(),
                     acp_actor_relationships.clone(),
                 )
                 .await

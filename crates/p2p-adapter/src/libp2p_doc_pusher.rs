@@ -52,6 +52,12 @@ pub trait DocPusher: Send + Sync {
         collection_name: &str,
         doc_id: &str,
     ) -> P2PResult<Option<ReplicatedDocActorRelationships>>;
+
+    async fn load_doc_creator_did(
+        &self,
+        collection_name: &str,
+        doc_id: &str,
+    ) -> P2PResult<Option<String>>;
 }
 
 /// Database-backed `DocPusher` implementation.
@@ -255,6 +261,37 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             resource_name: policy.resource_name.clone(),
             relationships,
         }))
+    }
+
+    async fn load_doc_creator_did(
+        &self,
+        collection_name: &str,
+        doc_id: &str,
+    ) -> P2PResult<Option<String>> {
+        let Some(acp) = self.document_acp.get() else {
+            return Ok(None);
+        };
+        let collection = match self.db.get_collection(collection_name) {
+            Ok(Some(collection)) => collection,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                return Err(P2PError::internal(format!(
+                    "failed to load collection for ACP creator resolution: {error}"
+                )));
+            }
+        };
+        let Some(policy) = collection.schema().policy.as_ref() else {
+            return Ok(None);
+        };
+
+        let owner = acp
+            .get_doc_owner(&policy.id, &policy.resource_name, doc_id)
+            .await
+            .map_err(|error| {
+                P2PError::internal(format!("failed to resolve ACP owner DID: {error}"))
+            })?;
+
+        Ok(owner.map(|did| did.to_string()))
     }
 }
 
