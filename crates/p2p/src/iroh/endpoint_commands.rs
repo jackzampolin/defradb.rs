@@ -483,6 +483,7 @@ pub(super) async fn handle_command(
 /// Dial a peer by EndpointId.
 ///
 /// Keeps the connection alive by spawning a stream handler task.
+#[allow(clippy::too_many_arguments)]
 async fn handle_dial(
     endpoint: &Endpoint,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
