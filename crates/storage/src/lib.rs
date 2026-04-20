@@ -121,6 +121,9 @@ pub use backends::{FjallStore, FjallStoreOptions};
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 pub use backends::{RocksDbStore, RocksDbStoreOptions};
 
+#[cfg(all(feature = "lark", not(target_arch = "wasm32")))]
+pub use backends::{LarkStore, LarkStoreOptions};
+
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
 pub use backends::LevelDbStore;
 

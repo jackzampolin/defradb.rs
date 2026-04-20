@@ -35,6 +35,8 @@ pub enum FfiStore {
     Fjall(storage::FjallStore),
     #[cfg(feature = "rocksdb")]
     RocksDb(storage::RocksDbStore),
+    #[cfg(feature = "lark")]
+    Lark(storage::LarkStore),
 }
 
 impl storage::corekv::private::Sealed for FfiStore {}
@@ -49,6 +51,8 @@ impl storage::Store for FfiStore {
             FfiStore::Fjall(s) => s.new_txn(readonly).await,
             #[cfg(feature = "rocksdb")]
             FfiStore::RocksDb(s) => s.new_txn(readonly).await,
+            #[cfg(feature = "lark")]
+            FfiStore::Lark(s) => s.new_txn(readonly).await,
         }
     }
 
@@ -60,6 +64,8 @@ impl storage::Store for FfiStore {
             FfiStore::Fjall(s) => s.close().await,
             #[cfg(feature = "rocksdb")]
             FfiStore::RocksDb(s) => s.close().await,
+            #[cfg(feature = "lark")]
+            FfiStore::Lark(s) => s.close().await,
         }
     }
 }

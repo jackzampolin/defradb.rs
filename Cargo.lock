@@ -4705,7 +4705,7 @@ dependencies = [
  "flume",
  "log",
  "lsm-tree",
- "lz4_flex",
+ "lz4_flex 0.13.0",
  "tempfile",
  "xxhash-rust",
 ]
@@ -6753,6 +6753,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lark-kv"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-skiplist",
+ "lru 0.16.4",
+ "lz4_flex 0.11.6",
+ "parking_lot 0.12.5",
+ "rustix 0.38.44",
+ "snap",
+ "thiserror 1.0.69",
+ "tracing",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "lazy-regex"
 version = "3.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7544,7 +7559,7 @@ dependencies = [
  "enum_dispatch",
  "interval-heap",
  "log",
- "lz4_flex",
+ "lz4_flex 0.13.0",
  "quick_cache",
  "rustc-hash",
  "self_cell",
@@ -7562,6 +7577,15 @@ checksum = "6bd8c0d6c6ed0cd30b3652886bb8711dc4bb01d637a68105a3d5158039b418e6"
 dependencies = [
  "cc",
  "libc",
+]
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash",
 ]
 
 [[package]]
@@ -11969,6 +11993,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "js-sys",
+ "lark-kv",
  "parking_lot 0.12.5",
  "proptest",
  "redb",

@@ -107,7 +107,8 @@ version = "0.9"
 optional = true
 
 [features]
-default = ["rocksdb", "redb"]
+default = ["lark", "rocksdb", "redb"]
+lark = ["storage/lark"]
 redb = ["storage/redb"]
 fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]

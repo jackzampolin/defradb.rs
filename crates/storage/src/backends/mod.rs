@@ -61,6 +61,10 @@ pub mod fjall;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 pub mod rocksdb;
 
+// Lark backend - pure Rust LSM-tree (native only)
+#[cfg(all(feature = "lark", not(target_arch = "wasm32")))]
+pub mod lark;
+
 // LevelDB backend - pure Rust, WASM only (rusty-leveldb uses Rc internally, not Send/Sync)
 // On native platforms, use redb instead for full concurrency support.
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
@@ -88,6 +92,9 @@ pub use fjall::{FjallStore, FjallStoreOptions};
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 pub use rocksdb::{RocksDbStore, RocksDbStoreOptions};
+
+#[cfg(all(feature = "lark", not(target_arch = "wasm32")))]
+pub use lark::{LarkStore, LarkStoreOptions};
 
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
 pub use leveldb::LevelDbStore;

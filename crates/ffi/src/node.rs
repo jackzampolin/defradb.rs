@@ -82,7 +82,7 @@ fn resolve_store(
     let path = unsafe { c_str_to_string(options.db_path) }
         .ok_or_else(|| "db_path is not valid UTF-8".to_string())?;
     let effective_backend = if backend_name.is_empty() {
-        "redb"
+        "lark"
     } else {
         &backend_name
     };
@@ -112,9 +112,22 @@ fn resolve_store(
         "rocksdb" => {
             return Err("rocksdb backend not enabled. Rebuild with --features rocksdb".to_string());
         }
+        #[cfg(feature = "lark")]
+        "lark" => {
+            let opts = storage::LarkStoreOptions::from_env();
+            Arc::new(FfiStore::Lark(
+                storage::LarkStore::open_with_options(&path, opts).map_err(|error| {
+                    format!("failed to open lark store at '{}': {}", path, error)
+                })?,
+            ))
+        }
+        #[cfg(not(feature = "lark"))]
+        "lark" => {
+            return Err("lark backend not enabled. Rebuild with --features lark".to_string());
+        }
         other => {
             return Err(format!(
-                "unknown datastore backend '{}'. Supported: redb, fjall, rocksdb, memory",
+                "unknown datastore backend '{}'. Supported: lark, redb, fjall, rocksdb, memory",
                 other
             ));
         }

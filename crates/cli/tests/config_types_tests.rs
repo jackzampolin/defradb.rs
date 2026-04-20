@@ -112,6 +112,10 @@ fn test_datastore_type_from_str_valid() {
         "badger".parse::<DatastoreType>().unwrap(),
         DatastoreType::Redb
     );
+    assert_eq!(
+        "lark".parse::<DatastoreType>().unwrap(),
+        DatastoreType::Lark
+    );
 }
 
 #[test]
@@ -126,6 +130,7 @@ fn test_datastore_type_from_str_invalid() {
 #[test]
 fn test_datastore_type_display_roundtrip() {
     for store in [
+        DatastoreType::Lark,
         DatastoreType::RocksDb,
         DatastoreType::Redb,
         DatastoreType::Memory,

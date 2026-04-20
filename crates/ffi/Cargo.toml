@@ -12,7 +12,8 @@ description = "FFI bindings for DefraDB Rust implementation"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["redb", "rocksdb"]
+default = ["lark", "redb", "rocksdb"]
+lark = ["storage/lark"]
 redb = ["storage/redb"]
 fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
