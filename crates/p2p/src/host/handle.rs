@@ -277,6 +277,20 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Subscribe to an arbitrary topic string (for pubsub_rpc response
+    /// sub-topics that aren't enumerated in [`DefraTopic`]).
+    pub async fn subscribe_raw(&self, topic: String) -> Result<bool> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SubscribeRaw {
+                topic,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Publish a message to a GossipSub topic.
     ///
     /// Returns the message ID on success.

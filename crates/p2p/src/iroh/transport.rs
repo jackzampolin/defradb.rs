@@ -152,6 +152,10 @@ impl P2PTransport for IrohTransport {
             .await
     }
 
+    // publish_raw / subscribe_raw / register_pubsub_rpc_topic inherit the
+    // default implementations (not-supported / no-op). Iroh nodes use the
+    // two-stream path for DocSync/BranchableSync (#828).
+
     async fn send_pushlog_response(
         &self,
         send_stream: Self::ResponseToken,

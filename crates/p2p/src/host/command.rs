@@ -68,6 +68,14 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<bool>>,
     },
 
+    /// Subscribe to an arbitrary topic string without the [`DefraTopic`]
+    /// wrapper. Used for dynamic pubsub_rpc response sub-topics whose names
+    /// embed a runtime peer ID.
+    SubscribeRaw {
+        topic: String,
+        response: oneshot::Sender<Result<bool>>,
+    },
+
     /// Publish a message to a GossipSub topic.
     Publish {
         topic: DefraTopic,

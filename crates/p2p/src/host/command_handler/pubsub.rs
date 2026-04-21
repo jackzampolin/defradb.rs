@@ -42,6 +42,22 @@ impl<S: Store> P2PHost<S> {
         }
     }
 
+    pub(super) fn handle_subscribe_raw(
+        &mut self,
+        topic: String,
+        response: tokio::sync::oneshot::Sender<Result<bool>>,
+    ) {
+        let ident_topic = libp2p::gossipsub::IdentTopic::new(&topic);
+        let result = self
+            .swarm
+            .behaviour_mut()
+            .subscribe(&ident_topic)
+            .map_err(|e| Error::GossipSubSubscription(e.to_string()));
+        if response.send(result).is_err() {
+            debug!(topic = %topic, "SubscribeRaw command response dropped - caller cancelled");
+        }
+    }
+
     pub(super) fn handle_publish(
         &mut self,
         topic: DefraTopic,
