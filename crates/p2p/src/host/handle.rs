@@ -318,6 +318,25 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Register a topic as `pubsub_rpc`-owned.
+    ///
+    /// Incoming messages on this topic (and its `<topic>/<peer>/_response`
+    /// sub-topics) will be delivered to the consumer as
+    /// [`super::event::HostEvent::GossipRawMessage`] instead of the default
+    /// PushLog-broadcast decoding. Safe to call multiple times with the
+    /// same topic; the host stores a set, not a list.
+    pub async fn register_pubsub_rpc_topic(&self, topic: String) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::RegisterPubsubRpcTopic {
+                topic,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)
+    }
+
     /// Get list of subscribed topics.
     pub async fn subscribed_topics(&self) -> Result<Vec<String>> {
         let (response_tx, response_rx) = oneshot::channel();

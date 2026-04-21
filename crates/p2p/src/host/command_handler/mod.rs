@@ -70,6 +70,9 @@ impl<S: Store> P2PHost<S> {
             } => {
                 self.handle_publish_raw(topic, data, response);
             }
+            HostCommand::RegisterPubsubRpcTopic { topic, response } => {
+                self.handle_register_pubsub_rpc_topic(topic, response);
+            }
             HostCommand::SubscribedTopics { response } => {
                 self.handle_subscribed_topics(response);
             }

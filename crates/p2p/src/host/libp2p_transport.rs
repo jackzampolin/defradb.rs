@@ -312,6 +312,17 @@ pub fn convert_host_event(event: crate::host::HostEvent) -> TransportEvent<Respo
             topic,
             message,
         },
+        HostEvent::GossipRawMessage {
+            propagation_source,
+            message_id,
+            topic,
+            data,
+        } => TransportEvent::GossipRawMessage {
+            propagation_source: PeerId::from(propagation_source),
+            message_id: MessageId::from(message_id),
+            topic,
+            data,
+        },
         HostEvent::PeerSubscribed { peer_id, topic } => TransportEvent::PeerSubscribed {
             peer_id: PeerId::from(peer_id),
             topic,

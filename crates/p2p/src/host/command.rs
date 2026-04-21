@@ -89,6 +89,19 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<gossipsub::MessageId>>,
     },
 
+    /// Register a topic as owned by the `pubsub_rpc` layer.
+    ///
+    /// Incoming gossipsub messages on registered topics skip the default
+    /// PushLog-broadcast decoder and are forwarded verbatim via
+    /// [`super::event::HostEvent::GossipRawMessage`]. Idempotent: registering
+    /// the same topic twice is a no-op. The coordinator is expected to
+    /// register both the base topic (e.g. `"doc-sync"`) and its own
+    /// `<base>/<self>/_response` sub-topic so replies correlate back.
+    RegisterPubsubRpcTopic {
+        topic: String,
+        response: oneshot::Sender<()>,
+    },
+
     /// Get subscribed topics.
     SubscribedTopics {
         response: oneshot::Sender<Vec<String>>,

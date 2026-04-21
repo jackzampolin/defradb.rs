@@ -132,6 +132,16 @@ pub enum TransportEvent<ResponseToken> {
         topic: String,
         message: PushLogBroadcast,
     },
+    /// Raw gossipsub message on a topic registered as `pubsub_rpc`-owned
+    /// (#828). The payload is an opaque CBOR-encoded DocSync/Branchable
+    /// request or an `InternalResponse` envelope; the coordinator feeds
+    /// it into a `pubsub_rpc::TopicHandler` for decoding.
+    GossipRawMessage {
+        propagation_source: PeerId,
+        message_id: MessageId,
+        topic: String,
+        data: Vec<u8>,
+    },
     PeerSubscribed {
         peer_id: PeerId,
         topic: String,

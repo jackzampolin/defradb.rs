@@ -139,6 +139,41 @@ impl<S: Store> P2PHost<S> {
                     message_id, topic, propagation_source
                 );
 
+                // Topics registered via HostCommand::RegisterPubsubRpcTopic
+                // skip the PushLog decoder — their payloads are opaque CBOR
+                // handled by pubsub_rpc::TopicHandler in the coordinator
+                // (#828). Response sub-topics follow the pattern
+                // `<base>/<peer>/_response`; match them by suffix so the
+                // coordinator doesn't need to register every response
+                // sub-topic explicitly.
+                if self.pubsub_rpc_topics.contains(&topic)
+                    || (topic.ends_with("/_response")
+                        && self
+                            .pubsub_rpc_topics
+                            .iter()
+                            .any(|base| topic.starts_with(&format!("{base}/"))))
+                {
+                    if self
+                        .event_tx
+                        .send(HostEvent::GossipRawMessage {
+                            propagation_source,
+                            message_id: message_id.clone(),
+                            topic: topic.clone(),
+                            data: message.data,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        error!(
+                            peer_id = %propagation_source,
+                            message_id = ?message_id,
+                            topic = %topic,
+                            "Failed to send GossipRawMessage event - receiver dropped"
+                        );
+                    }
+                    return;
+                }
+
                 match PushLogBroadcast::decode_gossip_payload(&message.data) {
                     Ok((broadcast, encoding)) => {
                         if encoding != crate::message::PushLogGossipPayloadEncoding::CborBroadcast

@@ -7,7 +7,7 @@ mod protocols;
 mod swarm;
 mod two_stream;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -104,6 +104,11 @@ pub struct P2PHost<S: Store> {
     pub(super) node_identity: Option<Arc<identity::RawIdentity>>,
     /// Verified peer DEFRA DIDs keyed by peer ID.
     pub(super) peer_identities: HashMap<PeerId, identity::Did>,
+    /// Topics whose incoming gossipsub messages bypass the PushLog decoder
+    /// and flow through `HostEvent::GossipRawMessage` instead. Populated
+    /// by `HostCommand::RegisterPubsubRpcTopic` when the coordinator wires
+    /// up a `pubsub_rpc::TopicHandler` (#828).
+    pub(super) pubsub_rpc_topics: HashSet<String>,
 }
 
 impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
@@ -349,6 +354,7 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
             peer_addrs: HashMap::new(),
             node_identity,
             peer_identities: HashMap::new(),
+            pubsub_rpc_topics: HashSet::new(),
         };
 
         Ok((host, handle, event_rx, replicators))

@@ -79,6 +79,18 @@ impl<S: Store> P2PHost<S> {
         }
     }
 
+    pub(super) fn handle_register_pubsub_rpc_topic(
+        &mut self,
+        topic: String,
+        response: tokio::sync::oneshot::Sender<()>,
+    ) {
+        self.pubsub_rpc_topics.insert(topic);
+        // Acknowledge the registration. The caller uses the oneshot to
+        // know the command has been processed; no result value is needed
+        // because insertion is infallible.
+        let _ = response.send(());
+    }
+
     pub(super) fn handle_subscribed_topics(
         &self,
         response: tokio::sync::oneshot::Sender<Vec<String>>,
