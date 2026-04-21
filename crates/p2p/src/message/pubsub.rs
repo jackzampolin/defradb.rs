@@ -1,4 +1,5 @@
-//! Wire-format structs for DocSync and BranchableSync over pubsub_rpc.
+//! Wire-format structs for DocSync and BranchableSync over
+//! [`crate::pubsub_rpc`].
 //!
 //! These mirror Go's type layouts byte-for-byte so a Rust node's
 //! `doc-sync` / `sync-branchable` traffic is decodable by a Go peer and
@@ -10,8 +11,14 @@
 //! - No `MetaData` fields. Authentication for these protocols comes from
 //!   the pubsub layer (`MessageAuthenticity::Signed` on the gossipsub
 //!   behaviour), not from an in-message signature envelope.
-//! - Byte arrays use `serde_bytes` so serde_cbor emits CBOR major-type-2
+//! - Byte arrays use `serde_bytes` so the encoder emits CBOR major-type-2
 //!   rather than CBOR arrays of integers.
+//! - Encoding is ciborium-backed (declaration-order keys, definite-length
+//!   maps) to match Go's `cbor.Marshal` (fxamacker/cbor v2, default opts).
+//!
+//! Kept out of the `pubsub_rpc` primitive so the primitive stays
+//! transport-only; these types are DefraDB-specific message shapes that
+//! happen to ride on top of it.
 //!
 //! References:
 //! - Go DocSync: `defradb/internal/db/p2p/sync_doc.go:40-54`
@@ -31,7 +38,10 @@ pub const MAX_DOC_IDS: usize = 1000;
 /// DocSync request published on the `doc-sync` topic.
 ///
 /// Go: `docSyncRequest{ DocIDs []string \`json:"docIDs"\` }`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Deserialization enforces [`MAX_DOC_IDS`] so a malicious peer cannot force
+/// an unbounded allocation by sending an oversized `docIDs` array.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DocSyncRequest {
     #[serde(rename = "docIDs")]
     pub doc_ids: Vec<String>,
@@ -43,8 +53,84 @@ impl DocSyncRequest {
     }
 }
 
+impl<'de> Deserialize<'de> for DocSyncRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{Error, MapAccess, Visitor};
+        use std::fmt;
+
+        struct DocSyncRequestVisitor;
+        impl<'de> Visitor<'de> for DocSyncRequestVisitor {
+            type Value = DocSyncRequest;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a docSyncRequest map with a `docIDs` field")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut doc_ids: Option<Vec<String>> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "docIDs" {
+                        if doc_ids.is_some() {
+                            return Err(Error::duplicate_field("docIDs"));
+                        }
+                        // Enforce MAX_DOC_IDS by streaming into a capacity-capped vec.
+                        let seq = map.next_value::<BoundedStringVec>()?;
+                        doc_ids = Some(seq.0);
+                    } else {
+                        let _: serde::de::IgnoredAny = map.next_value()?;
+                    }
+                }
+                Ok(DocSyncRequest {
+                    doc_ids: doc_ids.unwrap_or_default(),
+                })
+            }
+        }
+
+        deserializer.deserialize_map(DocSyncRequestVisitor)
+    }
+}
+
+struct BoundedStringVec(Vec<String>);
+
+impl<'de> Deserialize<'de> for BoundedStringVec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{Error, SeqAccess, Visitor};
+        use std::fmt;
+
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = BoundedStringVec;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a sequence of at most {MAX_DOC_IDS} strings")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let hint = seq.size_hint().unwrap_or(0);
+                if hint > MAX_DOC_IDS {
+                    return Err(Error::custom(format!(
+                        "docIDs exceeds MAX_DOC_IDS ({hint} > {MAX_DOC_IDS})"
+                    )));
+                }
+                let mut out = Vec::with_capacity(hint.min(MAX_DOC_IDS));
+                while let Some(s) = seq.next_element::<String>()? {
+                    if out.len() >= MAX_DOC_IDS {
+                        return Err(Error::custom(format!(
+                            "docIDs exceeds MAX_DOC_IDS (>{MAX_DOC_IDS})"
+                        )));
+                    }
+                    out.push(s);
+                }
+                Ok(BoundedStringVec(out))
+            }
+        }
+
+        deserializer.deserialize_seq(V)
+    }
+}
+
 /// DocSync reply published on the `doc-sync/<caller>/_response` sub-topic
-/// (wrapped in an [`super::InternalResponse`] envelope).
+/// (wrapped in an [`crate::pubsub_rpc::InternalResponse`] envelope).
 ///
 /// Go: `docSyncReply{ Results []docSyncItem \`json:"results"\`; Sender string \`json:"sender"\` }`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -85,7 +171,7 @@ impl BranchableSyncRequest {
     }
 }
 
-/// BranchableCollection sync reply wrapped in an [`super::InternalResponse`].
+/// BranchableCollection sync reply wrapped in an [`crate::pubsub_rpc::InternalResponse`].
 ///
 /// Go: `syncBranchableCollectionReply{
 ///     CollectionID string  \`json:"collectionID"\`;
@@ -157,7 +243,7 @@ mod tests {
     #[test]
     fn doc_sync_request_uses_lowercase_docids_key() {
         let req = DocSyncRequest::new(vec!["docA".into(), "docB".into()]);
-        let bytes = serde_cbor::to_vec(&req).expect("encode");
+        let bytes = encode(&req);
         assert!(
             find_text(&bytes, "docIDs").is_some(),
             "wire key must be `docIDs` (Go JSON tag), not PascalCase"
@@ -177,7 +263,7 @@ mod tests {
             }],
             sender: "12D3KooW".into(),
         };
-        let bytes = serde_cbor::to_vec(&reply).expect("encode");
+        let bytes = encode(&reply);
         for k in ["results", "sender", "docID", "heads"] {
             assert!(
                 find_text(&bytes, k).is_some(),
@@ -195,7 +281,7 @@ mod tests {
     #[test]
     fn branchable_sync_request_uses_lowercase_collection_id() {
         let req = BranchableSyncRequest::new("col-1".into());
-        let bytes = serde_cbor::to_vec(&req).expect("encode");
+        let bytes = encode(&req);
         assert!(find_text(&bytes, "collectionID").is_some());
         assert!(find_text(&bytes, "CollectionID").is_none());
     }
@@ -207,7 +293,7 @@ mod tests {
             heads: vec![bin("0102")],
             sender: "peer".into(),
         };
-        let bytes = serde_cbor::to_vec(&reply).expect("encode");
+        let bytes = encode(&reply);
         for k in ["collectionID", "heads", "sender"] {
             assert!(find_text(&bytes, k).is_some(), "missing wire key `{k}`");
         }
@@ -220,7 +306,7 @@ mod tests {
             heads: vec![bin("deadbeef")],
             sender: "".into(),
         };
-        let bytes = serde_cbor::to_vec(&reply).expect("encode");
+        let bytes = encode(&reply);
         // CBOR byte-string with length 4 is 0x44 0xde 0xad 0xbe 0xef.
         // CBOR array-of-ints would be 0x84 0x18 0xde 0x18 0xad ...
         // Check that the raw head bytes appear consecutively somewhere.
@@ -240,9 +326,53 @@ mod tests {
             }],
             sender: "peerA".into(),
         };
-        let bytes = serde_cbor::to_vec(&original).expect("encode");
-        let decoded: DocSyncReply = serde_cbor::from_slice(&bytes).expect("decode");
+        let bytes = encode(&original);
+        let decoded: DocSyncReply = ciborium::from_reader(bytes.as_slice()).expect("decode");
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn doc_sync_request_rejects_oversized_doc_ids() {
+        // Build a docSyncRequest with MAX_DOC_IDS + 1 entries using a raw
+        // serde-transparent wrapper (bypassing DocSyncRequest::new so the
+        // oversized payload can be serialized on the wire).
+        #[derive(serde::Serialize)]
+        struct Raw {
+            #[serde(rename = "docIDs")]
+            doc_ids: Vec<String>,
+        }
+        let raw = Raw {
+            doc_ids: (0..=MAX_DOC_IDS).map(|i| format!("doc-{i}")).collect(),
+        };
+        let bytes = encode(&raw);
+        let err = ciborium::from_reader::<DocSyncRequest, _>(bytes.as_slice())
+            .expect_err("must reject oversized payload");
+        assert!(
+            err.to_string().contains("MAX_DOC_IDS"),
+            "error should mention limit, got: {err}"
+        );
+    }
+
+    #[test]
+    fn doc_sync_request_accepts_boundary_doc_ids() {
+        #[derive(serde::Serialize)]
+        struct Raw {
+            #[serde(rename = "docIDs")]
+            doc_ids: Vec<String>,
+        }
+        let raw = Raw {
+            doc_ids: (0..MAX_DOC_IDS).map(|i| format!("doc-{i}")).collect(),
+        };
+        let bytes = encode(&raw);
+        let decoded: DocSyncRequest =
+            ciborium::from_reader(bytes.as_slice()).expect("exactly MAX_DOC_IDS must decode");
+        assert_eq!(decoded.doc_ids.len(), MAX_DOC_IDS);
+    }
+
+    fn encode<T: serde::Serialize>(v: &T) -> Vec<u8> {
+        let mut out = Vec::new();
+        ciborium::into_writer(v, &mut out).expect("encode");
+        out
     }
 
     fn find_text(haystack: &[u8], needle: &str) -> Option<usize> {

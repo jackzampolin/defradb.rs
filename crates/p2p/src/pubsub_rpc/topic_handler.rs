@@ -18,11 +18,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cid::Cid;
 use libp2p::PeerId;
+use tracing::debug;
 
 use super::correlator::{Correlator, PreparedPublish, PublishOptions};
 use super::envelope::InternalResponse;
 use super::id::derive_request_id;
-use super::topic::{response_topic, strip_response_topic};
+use super::topic::{response_topic, response_topic_suffix, strip_response_topic_with_suffix};
 
 /// User-supplied callback invoked for each incoming request on the base
 /// topic. Produces the raw reply bytes or an error string that will be
@@ -75,15 +76,26 @@ pub enum DeliveryOutcome {
     Ignored,
 }
 
+struct Shared {
+    base_topic: String,
+    self_peer: PeerId,
+    /// Pre-formatted `/{self_peer}/_response` suffix for hot-path topic
+    /// matching. Avoids re-allocating per delivered message.
+    self_response_suffix: String,
+    /// Pre-formatted `{base_topic}/{self_peer}/_response` — the topic to
+    /// subscribe to for responses addressed to us.
+    self_response_topic: String,
+    correlator: Correlator,
+    handler: Arc<dyn MessageHandler>,
+}
+
 /// A pubsub_rpc topic handler.
 ///
 /// Clone-safe: the inner state is shared via `Arc`. Use the same instance
 /// across the publish path and the deliver path.
+#[derive(Clone)]
 pub struct TopicHandler {
-    base_topic: String,
-    self_peer: PeerId,
-    correlator: Correlator,
-    handler: Arc<dyn MessageHandler>,
+    inner: Arc<Shared>,
 }
 
 impl TopicHandler {
@@ -93,40 +105,52 @@ impl TopicHandler {
         self_peer: PeerId,
         handler: Arc<dyn MessageHandler>,
     ) -> Self {
+        let base_topic = base_topic.into();
+        let self_response_suffix = response_topic_suffix(&self_peer);
+        let self_response_topic = format!("{base_topic}{self_response_suffix}");
         Self {
-            base_topic: base_topic.into(),
-            self_peer,
-            correlator: Correlator::new(),
-            handler,
+            inner: Arc::new(Shared {
+                base_topic,
+                self_peer,
+                self_response_suffix,
+                self_response_topic,
+                correlator: Correlator::new(),
+                handler,
+            }),
         }
     }
 
     /// Base topic (e.g. `"doc-sync"`).
     pub fn base_topic(&self) -> &str {
-        &self.base_topic
+        &self.inner.base_topic
     }
 
     /// The `<base>/<self>/_response` sub-topic the caller should be
     /// subscribed to in order to receive replies.
-    pub fn self_response_topic(&self) -> String {
-        response_topic(&self.base_topic, &self.self_peer)
+    pub fn self_response_topic(&self) -> &str {
+        &self.inner.self_response_topic
     }
 
-    /// Package an outgoing publish: derive the request ID, register it with
-    /// the correlator, and hand back the bytes for the caller to publish on
-    /// the base topic along with a receiver for incoming responses.
+    /// Package an outgoing publish that expects responses.
     pub fn prepare_publish(&self, data: Vec<u8>, opts: PublishOptions) -> PreparedPublish {
-        self.correlator.publish(data, opts)
+        self.inner.correlator.publish(data, opts)
     }
 
-    /// Cancel correlation for a request-in-flight (e.g. on context expiry).
+    /// Publish-and-forget variant matching Go's `WithIgnoreResponse(true)`.
+    /// Returns the request ID so the caller can log/correlate out-of-band.
+    pub fn publish_fire_and_forget(&self, data: &[u8]) -> Cid {
+        self.inner.correlator.publish_fire_and_forget(data)
+    }
+
+    /// Cancel correlation for a request-in-flight. Normally unneeded —
+    /// [`PreparedPublish`] auto-cancels on drop.
     pub fn cancel(&self, id: &Cid) {
-        self.correlator.cancel(id);
+        self.inner.correlator.cancel(id);
     }
 
     /// Number of in-flight requests awaiting responses. Test/metric helper.
     pub fn in_flight(&self) -> usize {
-        self.correlator.in_flight()
+        self.inner.correlator.in_flight()
     }
 
     /// Dispatch an incoming gossipsub message on `topic` from `from`.
@@ -146,59 +170,60 @@ impl TopicHandler {
         from: PeerId,
         data: Vec<u8>,
     ) -> DeliveryOutcome {
-        if topic == self.base_topic {
+        if topic == self.inner.base_topic {
             // Ignore our own requests echoed back by the pubsub mesh.
-            if from == self.self_peer {
+            if from == self.inner.self_peer {
                 return DeliveryOutcome::Ignored;
             }
             let request_id = derive_request_id(&data);
-            let (reply_bytes, err) = match self.handler.handle(from, data).await {
+            let (reply_bytes, err) = match self.inner.handler.handle(from, data).await {
                 Ok(bytes) => (bytes, String::new()),
                 Err(e) => (Vec::new(), e),
             };
             let envelope = InternalResponse {
                 id: request_id.to_string(),
-                from: Vec::new(), // filled in by recipient from gossipsub source
-                data: reply_bytes,
                 err,
+                data: reply_bytes,
+                from: Vec::new(), // filled in by recipient from gossipsub source
             };
             match envelope.to_cbor() {
                 Ok(bytes) => DeliveryOutcome::Respond(OutgoingResponse {
-                    topic: response_topic(&self.base_topic, &from),
+                    topic: response_topic(&self.inner.base_topic, &from),
                     bytes,
                 }),
-                Err(_) => DeliveryOutcome::Ignored,
+                Err(e) => {
+                    debug!(
+                        base_topic = %self.inner.base_topic,
+                        caller = %from,
+                        error = %e,
+                        "pubsub_rpc: failed to encode response envelope"
+                    );
+                    DeliveryOutcome::Ignored
+                }
             }
-        } else if strip_response_topic(topic, &self.self_peer) == Some(self.base_topic.as_str()) {
-            let Ok(envelope) = InternalResponse::from_cbor(&data) else {
-                return DeliveryOutcome::Ignored;
+        } else if strip_response_topic_with_suffix(topic, &self.inner.self_response_suffix)
+            == Some(self.inner.base_topic.as_str())
+        {
+            let envelope = match InternalResponse::from_cbor(&data) {
+                Ok(e) => e,
+                Err(e) => {
+                    debug!(
+                        base_topic = %self.inner.base_topic,
+                        from = %from,
+                        error = %e,
+                        payload_size = data.len(),
+                        "pubsub_rpc: failed to decode response envelope"
+                    );
+                    return DeliveryOutcome::Ignored;
+                }
             };
-            if self.correlator.deliver(from, envelope) {
+            if self.inner.correlator.deliver(from, envelope) {
                 DeliveryOutcome::Forwarded
             } else {
                 DeliveryOutcome::Ignored
             }
         } else {
             DeliveryOutcome::Ignored
-        }
-    }
-
-    /// Subscribe sender the correlator-facing channel adapter would use;
-    /// primarily exposed for tests that want to drive the correlator without
-    /// going through `prepare_publish`.
-    #[cfg(test)]
-    fn correlator(&self) -> &Correlator {
-        &self.correlator
-    }
-}
-
-impl Clone for TopicHandler {
-    fn clone(&self) -> Self {
-        Self {
-            base_topic: self.base_topic.clone(),
-            self_peer: self.self_peer,
-            correlator: self.correlator.clone(),
-            handler: Arc::clone(&self.handler),
         }
     }
 }
@@ -243,11 +268,9 @@ mod tests {
             })),
         );
 
-        // 1. Alice prepares and "publishes" on doc-sync.
-        let prep = alice_topic.prepare_publish(b"hello".to_vec(), PublishOptions::default());
+        let mut prep = alice_topic.prepare_publish(b"hello".to_vec(), PublishOptions::default());
         assert_eq!(alice_topic.in_flight(), 1);
 
-        // 2. Bob receives the request from Alice.
         let outcome = bob_topic
             .deliver_gossip_message("doc-sync", alice, prep.data.clone())
             .await;
@@ -258,19 +281,16 @@ mod tests {
         };
         assert_eq!(
             response.topic,
-            response_topic("doc-sync", &alice),
+            super::super::topic::response_topic("doc-sync", &alice),
             "bob must reply on alice's response sub-topic"
         );
 
-        // 3. Alice receives the response envelope on her response sub-topic.
         let ret = alice_topic
-            .deliver_gossip_message(&alice_topic.self_response_topic(), bob, response.bytes)
+            .deliver_gossip_message(alice_topic.self_response_topic(), bob, response.bytes)
             .await;
         assert!(matches!(ret, DeliveryOutcome::Forwarded));
 
-        // 4. Alice's receiver yields the response with bob's identity.
-        let mut rx = prep.responses;
-        let got = rx.recv().await.expect("response arrives");
+        let got = prep.responses.recv().await.expect("response arrives");
         assert_eq!(got.from, bob);
         assert_eq!(got.data, b"hello");
         assert_eq!(got.id, prep.id);
@@ -296,9 +316,6 @@ mod tests {
 
     #[tokio::test]
     async fn response_for_other_peer_is_ignored() {
-        // Alice only cares about responses on <base>/<alice>/_response; a
-        // reply destined for bob's response topic must not pollute her
-        // correlator state.
         let alice = a_peer();
         let bob = a_peer();
         let t = TopicHandler::new(
@@ -308,7 +325,7 @@ mod tests {
                 Ok::<Vec<u8>, String>(Vec::new())
             })),
         );
-        let not_my_topic = response_topic("doc-sync", &bob);
+        let not_my_topic = super::super::topic::response_topic("doc-sync", &bob);
         let outcome = t
             .deliver_gossip_message(&not_my_topic, bob, b"x".to_vec())
             .await;
@@ -335,7 +352,7 @@ mod tests {
             })),
         );
 
-        let prep = alice_topic.prepare_publish(b"req".to_vec(), PublishOptions::default());
+        let mut prep = alice_topic.prepare_publish(b"req".to_vec(), PublishOptions::default());
         let resp = match bob_topic
             .deliver_gossip_message("doc-sync", alice, prep.data.clone())
             .await
@@ -344,11 +361,10 @@ mod tests {
             other => panic!("expected Respond, got {other:?}"),
         };
         alice_topic
-            .deliver_gossip_message(&alice_topic.self_response_topic(), bob, resp.bytes)
+            .deliver_gossip_message(alice_topic.self_response_topic(), bob, resp.bytes)
             .await;
 
-        let mut rx = prep.responses;
-        let got = rx.recv().await.expect("response");
+        let got = prep.responses.recv().await.expect("response");
         assert_eq!(got.err.as_deref(), Some("unknown doc"));
         assert!(got.data.is_empty());
     }
@@ -370,7 +386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multi_response_collects_until_cancelled() {
+    async fn multi_response_collects_until_dropped() {
         let alice = a_peer();
         let bob = a_peer();
         let carol = a_peer();
@@ -383,24 +399,23 @@ mod tests {
             })),
         );
 
-        let prep = alice_topic.prepare_publish(
+        let mut prep = alice_topic.prepare_publish(
             b"multi".to_vec(),
             PublishOptions {
                 multi_response: true,
                 ..Default::default()
             },
         );
-        // Simulate envelopes arriving from two peers.
         let make_envelope = |id: &Cid, data: &[u8]| {
             let env = InternalResponse {
                 id: id.to_string(),
-                from: Vec::new(),
-                data: data.to_vec(),
                 err: String::new(),
+                data: data.to_vec(),
+                from: Vec::new(),
             };
             env.to_cbor().expect("encode")
         };
-        let rt = alice_topic.self_response_topic();
+        let rt = alice_topic.self_response_topic().to_string();
         assert!(matches!(
             alice_topic
                 .deliver_gossip_message(&rt, bob, make_envelope(&prep.id, b"from-bob"))
@@ -414,7 +429,7 @@ mod tests {
             DeliveryOutcome::Forwarded
         ));
 
-        let mut rx: mpsc::UnboundedReceiver<PubsubResponse> = prep.responses;
+        let rx: &mut mpsc::Receiver<PubsubResponse> = &mut prep.responses;
         let first = rx.recv().await.expect("first");
         let second = rx.recv().await.expect("second");
         assert_eq!(
@@ -428,10 +443,10 @@ mod tests {
         assert_eq!(
             alice_topic.in_flight(),
             1,
-            "multi-response stays open until cancelled"
+            "multi-response stays open until dropped"
         );
 
-        alice_topic.cancel(&prep.id);
+        drop(prep);
         assert_eq!(alice_topic.in_flight(), 0);
     }
 
@@ -445,16 +460,15 @@ mod tests {
                 Ok::<Vec<u8>, String>(Vec::new())
             })),
         );
-        // Envelope for a request we never sent.
         let envelope = InternalResponse {
             id: derive_request_id(b"never").to_string(),
-            from: Vec::new(),
-            data: Vec::new(),
             err: String::new(),
+            data: Vec::new(),
+            from: Vec::new(),
         };
         let outcome = t
             .deliver_gossip_message(
-                &t.self_response_topic(),
+                t.self_response_topic(),
                 a_peer(),
                 envelope.to_cbor().unwrap(),
             )
@@ -462,18 +476,19 @@ mod tests {
         assert!(matches!(outcome, DeliveryOutcome::Ignored));
     }
 
-    // Direct access to the inner correlator is only allowed in tests; sanity
-    // check that it matches the public in_flight accessor.
     #[tokio::test]
-    async fn correlator_accessor_matches_in_flight() {
+    async fn malformed_response_envelope_is_ignored() {
+        let alice = a_peer();
         let t = TopicHandler::new(
             "doc-sync",
-            a_peer(),
+            alice,
             Arc::new(FnHandler(|_: PeerId, _: Vec<u8>| async {
                 Ok::<Vec<u8>, String>(Vec::new())
             })),
         );
-        assert_eq!(t.in_flight(), 0);
-        assert_eq!(t.correlator().in_flight(), t.in_flight());
+        let outcome = t
+            .deliver_gossip_message(t.self_response_topic(), a_peer(), vec![0xff, 0xff, 0xff])
+            .await;
+        assert!(matches!(outcome, DeliveryOutcome::Ignored));
     }
 }

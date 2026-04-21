@@ -30,9 +30,21 @@ pub fn response_topic(base: &str, peer: &PeerId) -> String {
 ///
 /// Used by the dispatcher to decide whether an incoming gossipsub message
 /// belongs on the request-handling path or the response-correlation path.
+///
+/// For hot-path dispatch (many messages, same `self_peer`), prefer
+/// [`strip_response_topic_with_suffix`] with a pre-computed suffix.
+pub fn response_topic_suffix(self_peer: &PeerId) -> String {
+    format!("/{self_peer}/_response")
+}
+
+/// Like [`strip_response_topic`] but reuses a pre-built suffix
+/// (`/{self_peer}/_response`) to avoid allocating per call.
+pub fn strip_response_topic_with_suffix<'a>(topic: &'a str, suffix: &str) -> Option<&'a str> {
+    topic.strip_suffix(suffix)
+}
+
 pub fn strip_response_topic<'a>(topic: &'a str, self_peer: &PeerId) -> Option<&'a str> {
-    let suffix = format!("/{self_peer}/_response");
-    topic.strip_suffix(&suffix)
+    strip_response_topic_with_suffix(topic, &response_topic_suffix(self_peer))
 }
 
 #[cfg(test)]

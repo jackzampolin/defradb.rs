@@ -2,7 +2,7 @@
 //!
 //! Tracks a map of in-flight request CIDs → response channels so incoming
 //! [`InternalResponse`] envelopes (delivered over `<base>/<self>/_response`)
-//! can be routed back to the original [`publish`](Correlator::publish) call.
+//! can be routed back to the original publish call.
 //!
 //! Mirrors the state machine in
 //! `sourcenetwork/go-libp2p-pubsub-rpc/rpc.go:204-278` minus the direct
@@ -20,6 +20,13 @@ use tokio::sync::mpsc;
 
 use super::envelope::InternalResponse;
 use super::id::derive_request_id;
+
+/// Default channel bound for multi-response publishes. If responses arrive
+/// faster than the caller drains them, older messages still block the sender
+/// side; pick a value large enough to accommodate burst traffic but small
+/// enough to signal backpressure before unbounded memory growth. This
+/// mirrors Go's per-topic response channel size (`rpc.go:224`).
+pub const DEFAULT_MULTI_RESPONSE_BUFFER: usize = 128;
 
 /// A single response delivered back to the caller.
 ///
@@ -39,15 +46,27 @@ pub struct PubsubResponse {
     pub err: Option<String>,
 }
 
-/// Options that control how many responses a publish collects and whether
-/// the publish retries for newly-joined peers. Mirrors `options.go`.
-#[derive(Debug, Clone, Copy, Default)]
+/// Options that control how many responses a publish collects.
+///
+/// Matches a subset of Go's `options.go`. `ignore_response` is expressed by
+/// choosing [`Correlator::publish_fire_and_forget`] rather than a flag.
+#[derive(Debug, Clone, Copy)]
 pub struct PublishOptions {
-    /// Fire-and-forget: don't allocate a correlation slot. Matches Go's
-    /// `WithIgnoreResponse(true)`.
-    pub ignore_response: bool,
     /// Collect responses from every peer that replies, not just the first.
     pub multi_response: bool,
+    /// Channel bound for multi-response publishes. Ignored when
+    /// `multi_response` is false (single-response always uses a 1-slot
+    /// bounded channel).
+    pub multi_response_buffer: usize,
+}
+
+impl Default for PublishOptions {
+    fn default() -> Self {
+        Self {
+            multi_response: false,
+            multi_response_buffer: DEFAULT_MULTI_RESPONSE_BUFFER,
+        }
+    }
 }
 
 /// Outstanding-request registry shared between the publisher and the
@@ -58,20 +77,31 @@ pub struct Correlator {
 }
 
 struct Entry {
-    sender: mpsc::UnboundedSender<PubsubResponse>,
+    sender: mpsc::Sender<PubsubResponse>,
     multi_response: bool,
 }
 
-/// Result of preparing a publish: the request bytes (unchanged), the derived
-/// request ID, and a receiver for incoming responses.
+/// Handle for a request that expects one or more responses.
 ///
-/// Fire-and-forget calls (`PublishOptions::ignore_response = true`) still
-/// receive an ID (so the responder can echo it), but the receiver channel
-/// is a dummy that is immediately dropped — no entry is stored in the map.
+/// The correlator entry is removed automatically when this handle is dropped
+/// (single-response entries are also auto-removed after the first delivery).
+/// Drain [`PreparedPublish::responses`] until the caller's deadline expires,
+/// then drop the handle to release the slot.
 pub struct PreparedPublish {
     pub id: Cid,
     pub data: Vec<u8>,
-    pub responses: mpsc::UnboundedReceiver<PubsubResponse>,
+    pub responses: mpsc::Receiver<PubsubResponse>,
+    /// Back-reference used by `Drop` to remove the entry if the caller drops
+    /// without having drained the channel.
+    correlator: Correlator,
+}
+
+impl Drop for PreparedPublish {
+    fn drop(&mut self) {
+        // Always attempt to remove — cheap if the entry was already cleared
+        // by a single-response auto-close or an explicit cancel.
+        self.correlator.ongoing.lock().remove(&self.id);
+    }
 }
 
 impl Correlator {
@@ -80,31 +110,43 @@ impl Correlator {
         Self::default()
     }
 
-    /// Prepare a publish: derive the request ID, register a correlation
-    /// entry if responses are expected, and return the receiver the caller
-    /// should drain until the context expires (or the first response arrives
-    /// for single-response publishes).
+    /// Prepare a publish that expects responses.
+    ///
+    /// Derives the request ID, registers a correlation entry, and returns a
+    /// handle whose `Drop` removes the entry automatically.
     pub fn publish(&self, data: Vec<u8>, opts: PublishOptions) -> PreparedPublish {
         let id = derive_request_id(&data);
-        let (tx, rx) = mpsc::unbounded_channel();
-        if !opts.ignore_response {
-            let entry = Entry {
-                sender: tx,
-                multi_response: opts.multi_response,
-            };
-            self.ongoing.lock().insert(id, entry);
-        }
-        // For fire-and-forget we still return the receiver, but nothing
-        // will ever send on it — caller drops it immediately.
+        let buffer = if opts.multi_response {
+            opts.multi_response_buffer.max(1)
+        } else {
+            1
+        };
+        let (tx, rx) = mpsc::channel(buffer);
+        let entry = Entry {
+            sender: tx,
+            multi_response: opts.multi_response,
+        };
+        self.ongoing.lock().insert(id, entry);
         PreparedPublish {
             id,
             data,
             responses: rx,
+            correlator: self.clone(),
         }
     }
 
-    /// Drop the correlation entry for `id`. Should be called when the
-    /// caller's context cancels or the single-response receiver yields.
+    /// Prepare a fire-and-forget publish. Matches Go's
+    /// `WithIgnoreResponse(true)`: the request still gets an ID so the
+    /// responder can echo it, but no correlation slot is allocated and any
+    /// response will be silently dropped.
+    pub fn publish_fire_and_forget(&self, data: &[u8]) -> Cid {
+        derive_request_id(data)
+    }
+
+    /// Drop the correlation entry for `id` without waiting for a response.
+    /// Normally not needed — [`PreparedPublish`]'s `Drop` does this — but
+    /// exposed for callers that want to cancel early while holding the
+    /// handle alive for other purposes (rare).
     pub fn cancel(&self, id: &Cid) {
         self.ongoing.lock().remove(id);
     }
@@ -134,15 +176,27 @@ impl Correlator {
             return false;
         };
         let multi = entry.multi_response;
-        if entry.sender.send(response).is_err() {
-            // Receiver dropped — treat as cancelled.
-            map.remove(&id);
-            return false;
+        // Use try_send: if the caller has fallen behind the buffer, Go also
+        // drops responses rather than blocking the gossipsub loop
+        // (`rpc.go:275` uses a non-blocking select with a default-log).
+        let send_result = entry.sender.try_send(response);
+        match send_result {
+            Ok(()) => {
+                if !multi {
+                    map.remove(&id);
+                }
+                true
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                // Receiver dropped — treat as cancelled.
+                map.remove(&id);
+                false
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Full: backpressure trap. Keep the entry but report drop.
+                false
+            }
         }
-        if !multi {
-            map.remove(&id);
-        }
-        true
     }
 
     /// Number of currently in-flight requests. Intended for tests and
@@ -164,16 +218,16 @@ mod tests {
     fn internal_for(id: &Cid, data: &[u8], err: &str) -> InternalResponse {
         InternalResponse {
             id: id.to_string(),
-            from: Vec::new(),
-            data: data.to_vec(),
             err: err.to_string(),
+            data: data.to_vec(),
+            from: Vec::new(),
         }
     }
 
     #[tokio::test]
     async fn single_response_delivers_and_removes() {
         let c = Correlator::new();
-        let prep = c.publish(b"req".to_vec(), PublishOptions::default());
+        let mut prep = c.publish(b"req".to_vec(), PublishOptions::default());
         assert_eq!(c.in_flight(), 1);
 
         let from = a_peer();
@@ -181,8 +235,7 @@ mod tests {
         assert!(delivered);
         assert_eq!(c.in_flight(), 0, "single-response entry must auto-remove");
 
-        let mut rx = prep.responses;
-        let r = rx.recv().await.expect("response");
+        let r = prep.responses.recv().await.expect("response");
         assert_eq!(r.id, prep.id);
         assert_eq!(r.from, from);
         assert_eq!(r.data, b"resp");
@@ -192,7 +245,7 @@ mod tests {
     #[tokio::test]
     async fn multi_response_keeps_entry_open() {
         let c = Correlator::new();
-        let prep = c.publish(
+        let mut prep = c.publish(
             b"req".to_vec(),
             PublishOptions {
                 multi_response: true,
@@ -207,32 +260,58 @@ mod tests {
         assert_eq!(
             c.in_flight(),
             1,
-            "multi-response entry stays until explicitly cancelled"
+            "multi-response entry stays until handle dropped"
         );
 
-        let mut rx = prep.responses;
-        let r1 = rx.recv().await.expect("first response");
-        let r2 = rx.recv().await.expect("second response");
+        let r1 = prep.responses.recv().await.expect("first response");
+        let r2 = prep.responses.recv().await.expect("second response");
         assert_eq!(r1.from, p1);
         assert_eq!(r2.from, p2);
         assert_eq!(r1.err, None);
         assert_eq!(r2.err.as_deref(), Some("boom"));
 
-        c.cancel(&prep.id);
+        drop(prep);
+        assert_eq!(c.in_flight(), 0, "dropping handle releases multi entry");
+    }
+
+    #[test]
+    fn publish_fire_and_forget_allocates_no_entry() {
+        let c = Correlator::new();
+        let id = c.publish_fire_and_forget(b"req");
         assert_eq!(c.in_flight(), 0);
+        assert_eq!(id, derive_request_id(b"req"));
     }
 
     #[tokio::test]
-    async fn ignore_response_allocates_no_entry() {
+    async fn dropping_handle_cancels_in_flight() {
+        let c = Correlator::new();
+        let prep = c.publish(b"req".to_vec(), PublishOptions::default());
+        assert_eq!(c.in_flight(), 1);
+        drop(prep);
+        assert_eq!(c.in_flight(), 0, "Drop must auto-cancel");
+    }
+
+    #[test]
+    fn multi_response_full_buffer_reports_drop_without_panic() {
         let c = Correlator::new();
         let _prep = c.publish(
             b"req".to_vec(),
             PublishOptions {
-                ignore_response: true,
-                ..Default::default()
+                multi_response: true,
+                multi_response_buffer: 1,
             },
         );
-        assert_eq!(c.in_flight(), 0);
+        let id = derive_request_id(b"req");
+        let p = a_peer();
+        // First send fills the 1-slot buffer.
+        assert!(c.deliver(p, internal_for(&id, b"a", "")));
+        // Second send should report false (backpressure drop) but keep the entry.
+        assert!(!c.deliver(p, internal_for(&id, b"b", "")));
+        assert_eq!(
+            c.in_flight(),
+            1,
+            "full channel must not remove multi-response entry"
+        );
     }
 
     #[test]
@@ -253,9 +332,9 @@ mod tests {
             a_peer(),
             InternalResponse {
                 id: "not-a-cid".to_string(),
-                from: Vec::new(),
-                data: Vec::new(),
                 err: String::new(),
+                data: Vec::new(),
+                from: Vec::new(),
             },
         );
         assert!(!delivered);

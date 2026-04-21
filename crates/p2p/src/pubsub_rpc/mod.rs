@@ -26,11 +26,12 @@
 pub mod correlator;
 pub mod envelope;
 pub mod id;
-pub mod messages;
 pub mod topic;
 pub mod topic_handler;
 
-pub use correlator::{Correlator, PreparedPublish, PublishOptions, PubsubResponse};
+pub use correlator::{
+    Correlator, PreparedPublish, PublishOptions, PubsubResponse, DEFAULT_MULTI_RESPONSE_BUFFER,
+};
 pub use envelope::InternalResponse;
 pub use id::derive_request_id;
 pub use topic::{response_topic, strip_response_topic};
