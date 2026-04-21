@@ -62,6 +62,7 @@ mod explicit_replay;
 pub mod host;
 pub mod message;
 pub mod protocol;
+pub mod pubsub_rpc;
 pub mod replicator;
 pub mod signing;
 pub mod sync;
