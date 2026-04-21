@@ -26,6 +26,7 @@
 pub mod correlator;
 pub mod envelope;
 pub mod id;
+pub mod messages;
 pub mod topic;
 
 pub use correlator::{Correlator, PreparedPublish, PublishOptions, PubsubResponse};

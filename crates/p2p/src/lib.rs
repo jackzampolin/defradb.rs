@@ -105,7 +105,7 @@ pub use protocol::{PUSHLOG_REQUEST_PROTOCOL, PUSHLOG_RESPONSE_PROTOCOL};
 pub use signing::{sign_message, sign_message_cloned, sign_with_transport, verify_message};
 
 // Re-export topic types
-pub use topics::{DefraTopic, DOC_SYNC_TOPIC, ENCRYPTION_TOPIC};
+pub use topics::{DefraTopic, DOC_SYNC_TOPIC, ENCRYPTION_TOPIC, SYNC_BRANCHABLE_TOPIC};
 
 // Re-export transport types
 pub use transport::{P2PTransport, TransportEvent};

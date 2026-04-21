@@ -1,7 +1,8 @@
 //! GossipSub topic definitions for DefraDB.
 //!
 //! Topics follow Go implementation naming conventions:
-//! - `doc-sync`: General document synchronization
+//! - `doc-sync`: General document synchronization (pubsub-RPC, #828)
+//! - `sync-branchable`: Branchable-collection sync (pubsub-RPC, #828)
 //! - `encryption`: Encryption key exchange
 //! - `{collection_id}`: Collection-specific updates
 //! - `{doc_id}`: Document-specific updates
@@ -10,6 +11,11 @@ use libp2p::gossipsub::IdentTopic;
 
 /// Well-known topic for general document synchronization.
 pub const DOC_SYNC_TOPIC: &str = "doc-sync";
+
+/// Well-known topic for branchable-collection sync. Matches Go's
+/// `syncBranchableCollectionTopic` at
+/// `defradb/internal/db/p2p/sync_branchable_col.go:35`.
+pub const SYNC_BRANCHABLE_TOPIC: &str = "sync-branchable";
 
 /// Well-known topic for encryption key exchange.
 pub const ENCRYPTION_TOPIC: &str = "encryption";
@@ -24,6 +30,9 @@ pub const ENCRYPTION_TOPIC: &str = "encryption";
 pub enum DefraTopic {
     /// General document synchronization topic.
     DocSync,
+
+    /// Branchable-collection sync topic (Go parity: `sync-branchable`).
+    SyncBranchable,
 
     /// Encryption key exchange topic.
     Encryption,
@@ -48,6 +57,7 @@ impl DefraTopic {
     pub fn topic_string(&self) -> String {
         match self {
             DefraTopic::DocSync => DOC_SYNC_TOPIC.to_string(),
+            DefraTopic::SyncBranchable => SYNC_BRANCHABLE_TOPIC.to_string(),
             DefraTopic::Encryption => ENCRYPTION_TOPIC.to_string(),
             DefraTopic::Collection(id) => id.clone(),
             DefraTopic::Document(id) => id.clone(),
@@ -88,6 +98,7 @@ impl From<&str> for DefraTopic {
     fn from(s: &str) -> Self {
         match s {
             DOC_SYNC_TOPIC => DefraTopic::DocSync,
+            SYNC_BRANCHABLE_TOPIC => DefraTopic::SyncBranchable,
             ENCRYPTION_TOPIC => DefraTopic::Encryption,
             other => DefraTopic::Custom(other.to_string()),
         }
@@ -140,11 +151,22 @@ mod tests {
     #[test]
     fn test_from_str() {
         assert_eq!(DefraTopic::from("doc-sync"), DefraTopic::DocSync);
+        assert_eq!(
+            DefraTopic::from("sync-branchable"),
+            DefraTopic::SyncBranchable
+        );
         assert_eq!(DefraTopic::from("encryption"), DefraTopic::Encryption);
         assert_eq!(
             DefraTopic::from("custom-topic"),
             DefraTopic::Custom("custom-topic".to_string())
         );
+    }
+
+    #[test]
+    fn test_sync_branchable_topic() {
+        let topic = DefraTopic::SyncBranchable;
+        assert_eq!(topic.topic_string(), "sync-branchable");
+        assert_eq!(topic.to_string(), "sync-branchable");
     }
 
     #[test]
