@@ -297,6 +297,27 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Publish raw bytes to a GossipSub topic.
+    ///
+    /// Used by the `pubsub_rpc` layer (issue #828) where the publisher
+    /// controls the wire format end-to-end — the request is an opaque
+    /// CBOR-encoded struct or an `InternalResponse` envelope. The topic
+    /// string may be a dynamically-named per-peer response sub-topic, so
+    /// it is passed as a plain `String` rather than a `DefraTopic`
+    /// variant.
+    pub async fn publish_raw(&self, topic: String, data: Vec<u8>) -> Result<gossipsub::MessageId> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::PublishRaw {
+                topic,
+                data,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Get list of subscribed topics.
     pub async fn subscribed_topics(&self) -> Result<Vec<String>> {
         let (response_tx, response_rx) = oneshot::channel();

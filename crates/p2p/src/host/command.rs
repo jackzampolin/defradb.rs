@@ -75,6 +75,20 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<gossipsub::MessageId>>,
     },
 
+    /// Publish raw bytes to a GossipSub topic.
+    ///
+    /// Used by the `pubsub_rpc` layer for DocSync / BranchableSync where
+    /// the payload is an opaque CBOR-encoded request or an IPLD
+    /// `InternalResponse` envelope that must land on the wire verbatim.
+    /// Accepts an arbitrary topic string (not the limited `DefraTopic`
+    /// enum) because per-peer response sub-topics are dynamically named
+    /// `<base>/<peer>/_response`.
+    PublishRaw {
+        topic: String,
+        data: Vec<u8>,
+        response: oneshot::Sender<Result<gossipsub::MessageId>>,
+    },
+
     /// Get subscribed topics.
     SubscribedTopics {
         response: oneshot::Sender<Vec<String>>,

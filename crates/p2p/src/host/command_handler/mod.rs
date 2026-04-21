@@ -63,6 +63,13 @@ impl<S: Store> P2PHost<S> {
             } => {
                 self.handle_publish(topic, message, response);
             }
+            HostCommand::PublishRaw {
+                topic,
+                data,
+                response,
+            } => {
+                self.handle_publish_raw(topic, data, response);
+            }
             HostCommand::SubscribedTopics { response } => {
                 self.handle_subscribed_topics(response);
             }

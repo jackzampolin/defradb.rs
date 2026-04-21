@@ -62,6 +62,23 @@ impl<S: Store> P2PHost<S> {
         }
     }
 
+    pub(super) fn handle_publish_raw(
+        &mut self,
+        topic: String,
+        data: Vec<u8>,
+        response: tokio::sync::oneshot::Sender<Result<libp2p::gossipsub::MessageId>>,
+    ) {
+        let ident_topic = libp2p::gossipsub::IdentTopic::new(&topic);
+        let result = self
+            .swarm
+            .behaviour_mut()
+            .publish(ident_topic, data)
+            .map_err(|e| Error::GossipSubPublish(e.to_string()));
+        if response.send(result).is_err() {
+            debug!(topic = %topic, "PublishRaw command response dropped - caller cancelled");
+        }
+    }
+
     pub(super) fn handle_subscribed_topics(
         &self,
         response: tokio::sync::oneshot::Sender<Vec<String>>,
