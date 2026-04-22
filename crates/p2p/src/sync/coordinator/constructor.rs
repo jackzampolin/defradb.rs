@@ -5,6 +5,7 @@ use std::sync::Arc;
 use blockstore::Blockstore;
 use tokio::sync::mpsc;
 
+use super::authorizer::{AccessAuthorizer, RuntimeAuthorizer};
 use super::{SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState};
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Result;
@@ -103,13 +104,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
         let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), config);
 
+        let authorizer = Arc::new(RuntimeAuthorizer::new(
+            transport.clone(),
+            Arc::clone(&peer_state),
+            Arc::clone(&replicators),
+            access_mode,
+        ));
         let pubsub_services = super::pubsub_services::PubsubServices::try_new(
             &local_peer_id,
             Arc::clone(&head_provider),
-            Arc::clone(&replicators),
-            Arc::clone(&peer_state),
-            access_mode,
-            Arc::clone(&subscribed_collections),
+            Arc::clone(&authorizer) as Arc<dyn AccessAuthorizer>,
         );
 
         Ok((
@@ -135,6 +139,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     collection_store,
                     head_provider,
                 },
+                authorizer,
                 document_acp: std::sync::OnceLock::new(),
                 pubsub_services,
             },

@@ -16,11 +16,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tracing::warn;
 
-use crate::bitswap::{AccessMode, ReplicatorRegistry};
+use super::authorizer::AccessAuthorizer;
 use crate::message::pubsub as wire;
 use crate::pubsub_rpc::{MessageHandler, TopicHandler};
 use crate::sync::head_provider::DocumentHeadProvider;
-use crate::sync::peer_state::PeerStateTracker;
 
 pub(super) const DOC_SYNC_TOPIC: &str = "doc-sync";
 pub(super) const BRANCHABLE_SYNC_TOPIC: &str = "sync-branchable";
@@ -45,18 +44,12 @@ impl PubsubServices {
     pub(super) fn try_new(
         local_peer_id_str: &str,
         head_provider: Arc<dyn DocumentHeadProvider>,
-        replicators: Arc<ReplicatorRegistry>,
-        peer_state: Arc<PeerStateTracker>,
-        access_mode: AccessMode,
-        subscribed_collections: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+        authorizer: Arc<dyn AccessAuthorizer>,
     ) -> Option<Self> {
         let self_peer: libp2p::PeerId = local_peer_id_str.parse().ok()?;
         let shared = Arc::new(HandlerContext {
             head_provider,
-            replicators,
-            peer_state,
-            access_mode,
-            subscribed_collections,
+            authorizer,
             local_peer_id: local_peer_id_str.to_string(),
         });
         let doc_sync = Arc::new(TopicHandler::new(
@@ -83,11 +76,9 @@ impl PubsubServices {
     /// Matches either the base topic exactly or any sub-topic that starts
     /// with `<base>/` (the response sub-topics).
     pub(super) fn handler_for_topic(&self, topic: &str) -> Option<&Arc<TopicHandler>> {
-        if topic == DOC_SYNC_TOPIC || topic.starts_with(concat!("doc-sync", "/")) {
+        if topic == DOC_SYNC_TOPIC || topic.starts_with("doc-sync/") {
             Some(&self.doc_sync)
-        } else if topic == BRANCHABLE_SYNC_TOPIC
-            || topic.starts_with(concat!("sync-branchable", "/"))
-        {
+        } else if topic == BRANCHABLE_SYNC_TOPIC || topic.starts_with("sync-branchable/") {
             Some(&self.branchable_sync)
         } else {
             None
@@ -98,46 +89,31 @@ impl PubsubServices {
 /// Shared state captured by both message handlers.
 struct HandlerContext {
     head_provider: Arc<dyn DocumentHeadProvider>,
-    replicators: Arc<ReplicatorRegistry>,
-    peer_state: Arc<PeerStateTracker>,
-    access_mode: AccessMode,
-    subscribed_collections: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+    authorizer: Arc<dyn AccessAuthorizer>,
     local_peer_id: String,
 }
 
 impl HandlerContext {
     /// Returns `true` when `peer` is authorised to ask for doc-sync heads.
-    /// Mirrors `SyncCoordinator::check_peer_is_replicator` at
-    /// `coordinator/access.rs:125`: Open mode always allows; Controlled
-    /// mode allows peers that are either registered as replicators for
-    /// at least one collection or currently connected.
-    fn peer_may_doc_sync(&self, peer: &libp2p::PeerId) -> bool {
-        if self.access_mode.is_open() {
-            return true;
-        }
-        let peer_str = peer.to_string();
-        self.replicators.is_any_replicator(&peer_str) || self.peer_state.is_connected(&peer_str)
+    /// Delegates to the shared authorizer so the pubsub_rpc path and the
+    /// two-stream `SyncCoordinator::check_peer_is_replicator` make the
+    /// same decision (including the transport-reports-connected fallback
+    /// used to close the `PeerState` cache-miss window).
+    async fn peer_may_doc_sync(&self, peer: &libp2p::PeerId) -> bool {
+        self.authorizer
+            .peer_authorized_for_any(&peer.to_string())
+            .await
     }
 
     /// Returns `true` when `peer` is authorised to ask for branchable heads
-    /// of `collection_id`. Collection-scoped protocols always require the
-    /// collection to be locally subscribed (see coordinator docs at
-    /// `mod.rs:30-37`).
+    /// of `collection_id`. Mirrors Go: subscription is RX-side only, so
+    /// we still serve heads for collections we haven't locally subscribed
+    /// to. The sync-level gate here is just "is this peer allowed to ask
+    /// us"; per-document ACP still applies at merge/read time elsewhere.
     async fn peer_may_branchable_sync(&self, peer: &libp2p::PeerId, collection_id: &str) -> bool {
-        if !self
-            .subscribed_collections
-            .read()
+        self.authorizer
+            .peer_authorized_for_collection(&peer.to_string(), collection_id)
             .await
-            .contains(collection_id)
-        {
-            return false;
-        }
-        if self.access_mode.is_open() {
-            return true;
-        }
-        let peer_str = peer.to_string();
-        self.replicators.is_replicator(collection_id, &peer_str)
-            || self.peer_state.is_connected(&peer_str)
     }
 }
 
@@ -148,7 +124,7 @@ struct DocSyncHandler {
 #[async_trait]
 impl MessageHandler for DocSyncHandler {
     async fn handle(&self, from: libp2p::PeerId, data: Vec<u8>) -> Result<Vec<u8>, String> {
-        if !self.ctx.peer_may_doc_sync(&from) {
+        if !self.ctx.peer_may_doc_sync(&from).await {
             return Err(format!("peer {from} not authorised for doc-sync"));
         }
 
@@ -234,9 +210,76 @@ impl MessageHandler for BranchableSyncHandler {
 mod tests {
     use super::*;
     use crate::sync::head_provider::NoOpHeadProvider;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn a_libp2p_peer() -> libp2p::PeerId {
         libp2p::PeerId::from_public_key(&libp2p::identity::Keypair::generate_ed25519().public())
+    }
+
+    struct AllowAllAuthorizer;
+
+    #[async_trait]
+    impl AccessAuthorizer for AllowAllAuthorizer {
+        async fn peer_authorized_for_any(&self, _peer_id_str: &str) -> bool {
+            true
+        }
+        async fn peer_authorized_for_collection(
+            &self,
+            _peer_id_str: &str,
+            _collection_id: &str,
+        ) -> bool {
+            true
+        }
+    }
+
+    struct DenyAllAuthorizer;
+
+    #[async_trait]
+    impl AccessAuthorizer for DenyAllAuthorizer {
+        async fn peer_authorized_for_any(&self, _peer_id_str: &str) -> bool {
+            false
+        }
+        async fn peer_authorized_for_collection(
+            &self,
+            _peer_id_str: &str,
+            _collection_id: &str,
+        ) -> bool {
+            false
+        }
+    }
+
+    /// Authorizer that records the last call and answers according to
+    /// the flags set at construction. Used to verify the pubsub handler
+    /// delegates to the shared authorizer instead of shortcutting.
+    struct RecordingAuthorizer {
+        allow_any: AtomicBool,
+        allow_collection: AtomicBool,
+        seen_collection: parking_lot::Mutex<Option<String>>,
+    }
+
+    impl RecordingAuthorizer {
+        fn new(allow_any: bool, allow_collection: bool) -> Self {
+            Self {
+                allow_any: AtomicBool::new(allow_any),
+                allow_collection: AtomicBool::new(allow_collection),
+                seen_collection: parking_lot::Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AccessAuthorizer for RecordingAuthorizer {
+        async fn peer_authorized_for_any(&self, _peer_id_str: &str) -> bool {
+            self.allow_any.load(Ordering::SeqCst)
+        }
+        async fn peer_authorized_for_collection(
+            &self,
+            _peer_id_str: &str,
+            collection_id: &str,
+        ) -> bool {
+            *self.seen_collection.lock() = Some(collection_id.to_string());
+            self.allow_collection.load(Ordering::SeqCst)
+        }
     }
 
     #[tokio::test]
@@ -245,10 +288,7 @@ mod tests {
         let services = PubsubServices::try_new(
             &peer.to_string(),
             Arc::new(NoOpHeadProvider),
-            Arc::new(ReplicatorRegistry::new()),
-            Arc::new(PeerStateTracker::new()),
-            AccessMode::Open,
-            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+            Arc::new(AllowAllAuthorizer),
         )
         .expect("local peer parses");
 
@@ -271,10 +311,7 @@ mod tests {
         let services = PubsubServices::try_new(
             "iroh-node-12345",
             Arc::new(NoOpHeadProvider),
-            Arc::new(ReplicatorRegistry::new()),
-            Arc::new(PeerStateTracker::new()),
-            AccessMode::Open,
-            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+            Arc::new(AllowAllAuthorizer),
         );
         assert!(services.is_none());
     }
@@ -306,10 +343,7 @@ mod tests {
         let services = PubsubServices::try_new(
             &peer.to_string(),
             Arc::new(HeadProviderStub),
-            Arc::new(ReplicatorRegistry::new()),
-            Arc::new(PeerStateTracker::new()),
-            AccessMode::Open,
-            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+            Arc::new(AllowAllAuthorizer),
         )
         .unwrap();
 
@@ -382,12 +416,7 @@ mod tests {
             head_provider: Arc::new(DocAHeadProvider {
                 head: head_cid_expected,
             }),
-            replicators: Arc::new(ReplicatorRegistry::new()),
-            peer_state: Arc::new(PeerStateTracker::new()),
-            access_mode: AccessMode::Open,
-            subscribed_collections: Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashSet::new(),
-            )),
+            authorizer: Arc::new(AllowAllAuthorizer),
             local_peer_id: "12D3KooWRustPeer".to_string(),
         });
         let handler = DocSyncHandler {
@@ -465,10 +494,7 @@ mod tests {
         let services = PubsubServices::try_new(
             &peer.to_string(),
             Arc::new(NoOpHeadProvider),
-            Arc::new(ReplicatorRegistry::new()),
-            Arc::new(PeerStateTracker::new()),
-            AccessMode::Controlled,
-            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+            Arc::new(DenyAllAuthorizer),
         )
         .unwrap();
 
@@ -489,5 +515,121 @@ mod tests {
         };
         let envelope = InternalResponse::from_cbor(&response.bytes).unwrap();
         assert!(envelope.err.contains("not authorised"));
+    }
+
+    /// Parity regression: the pubsub doc-sync handler must accept a peer
+    /// that only the shared authorizer says is valid (simulating the
+    /// `PeerState` cache-miss → transport fallback path used by
+    /// `SyncCoordinator::check_peer_is_replicator`). A shortened
+    /// version that only consulted `ReplicatorRegistry`/`PeerStateTracker`
+    /// directly would reject this request; delegating to the authorizer
+    /// must not.
+    #[tokio::test]
+    async fn doc_sync_handler_accepts_via_authorizer_transport_fallback() {
+        let peer = a_libp2p_peer();
+        let authorizer = Arc::new(RecordingAuthorizer::new(true, false));
+        let services = PubsubServices::try_new(
+            &peer.to_string(),
+            Arc::new(NoOpHeadProvider),
+            Arc::clone(&authorizer) as Arc<dyn AccessAuthorizer>,
+        )
+        .unwrap();
+
+        let req = wire::DocSyncRequest::new(vec!["a".into()]);
+        let mut req_bytes = Vec::new();
+        ciborium::into_writer(&req, &mut req_bytes).unwrap();
+
+        let outcome = services
+            .doc_sync
+            .deliver_gossip_message(DOC_SYNC_TOPIC, a_libp2p_peer(), req_bytes)
+            .await;
+
+        use crate::pubsub_rpc::{DeliveryOutcome, InternalResponse};
+        let response = match outcome {
+            DeliveryOutcome::Respond(r) => r,
+            other => panic!("expected Respond, got {other:?}"),
+        };
+        let envelope = InternalResponse::from_cbor(&response.bytes).unwrap();
+        assert_eq!(
+            envelope.err, "",
+            "authorizer::peer_authorized_for_any=true must let doc-sync through"
+        );
+    }
+
+    /// Parity regression: branchable-sync must delegate collection-scoped
+    /// authorization to the shared authorizer so the transport
+    /// `get_replicator` fallback (used by `check_access_str`) also closes
+    /// the registry cache-miss window on this path. A peer that only the
+    /// authorizer recognises as a replicator must be accepted.
+    #[tokio::test]
+    async fn branchable_sync_handler_accepts_via_authorizer_collection_fallback() {
+        let peer = a_libp2p_peer();
+        let authorizer = Arc::new(RecordingAuthorizer::new(false, true));
+        let services = PubsubServices::try_new(
+            &peer.to_string(),
+            Arc::new(NoOpHeadProvider),
+            Arc::clone(&authorizer) as Arc<dyn AccessAuthorizer>,
+        )
+        .unwrap();
+
+        let req = wire::BranchableSyncRequest::new("collectionA".to_string());
+        let mut req_bytes = Vec::new();
+        ciborium::into_writer(&req, &mut req_bytes).unwrap();
+
+        let outcome = services
+            .branchable_sync
+            .deliver_gossip_message(BRANCHABLE_SYNC_TOPIC, a_libp2p_peer(), req_bytes)
+            .await;
+
+        use crate::pubsub_rpc::{DeliveryOutcome, InternalResponse};
+        let response = match outcome {
+            DeliveryOutcome::Respond(r) => r,
+            other => panic!("expected Respond, got {other:?}"),
+        };
+        let envelope = InternalResponse::from_cbor(&response.bytes).unwrap();
+        assert_eq!(
+            envelope.err, "",
+            "authorizer::peer_authorized_for_collection=true must let branchable-sync through"
+        );
+        assert_eq!(
+            authorizer.seen_collection.lock().as_deref(),
+            Some("collectionA"),
+            "handler must forward the collection id to the authorizer"
+        );
+    }
+
+    /// Parity with Go: local subscription is RX-only. We still serve
+    /// branchable-sync heads for collections we haven't subscribed to as
+    /// long as the authorizer lets the caller through. Per-document ACP
+    /// (a separate layer) decides whether specific content surfaces.
+    #[tokio::test]
+    async fn branchable_sync_handler_serves_unsubscribed_collection_when_authorized() {
+        let peer = a_libp2p_peer();
+        let services = PubsubServices::try_new(
+            &peer.to_string(),
+            Arc::new(NoOpHeadProvider),
+            Arc::new(AllowAllAuthorizer),
+        )
+        .unwrap();
+
+        let req = wire::BranchableSyncRequest::new("unsubscribed_collection".to_string());
+        let mut req_bytes = Vec::new();
+        ciborium::into_writer(&req, &mut req_bytes).unwrap();
+
+        let outcome = services
+            .branchable_sync
+            .deliver_gossip_message(BRANCHABLE_SYNC_TOPIC, a_libp2p_peer(), req_bytes)
+            .await;
+
+        use crate::pubsub_rpc::{DeliveryOutcome, InternalResponse};
+        let response = match outcome {
+            DeliveryOutcome::Respond(r) => r,
+            other => panic!("expected Respond, got {other:?}"),
+        };
+        let envelope = InternalResponse::from_cbor(&response.bytes).unwrap();
+        assert_eq!(
+            envelope.err, "",
+            "Go parity: subscription is RX-only, handler must still serve unsubscribed collections"
+        );
     }
 }

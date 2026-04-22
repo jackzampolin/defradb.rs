@@ -186,6 +186,40 @@ jobs:
           echo "$CACHE_DIR" >> "$GITHUB_PATH"
           "$CACHE_DIR/defradb" version --format json
 
+      # Guards against silent drift between the committed Go-parity hex
+      # constants in `crates/p2p/src/**` and what upstream Go actually
+      # emits. Both generators print hex to stdout (no files written);
+      # every `(N bytes): <hex>` or `(N): <hex>` line is checked against
+      # the Rust source tree. If upstream reorders a struct field the
+      # hex changes, the grep misses, and the job fails — instead of
+      # Rust tests passing against stale constants.
+      - name: Verify Go fixtures still match Rust constants
+        if: matrix.suite == 'go-compat'
+        run: |
+          set -euo pipefail
+          OUT=$(mktemp)
+          go run crates/p2p/testdata/gen_message_fixtures/main.go   >> "$OUT"
+          go run crates/p2p/testdata/gen_pubsub_rpc_fixture/main.go >> "$OUT"
+          # Extract every hex token emitted after a "(N bytes): " or
+          # "(N): " marker. Lowercase hex, length >= 4.
+          HEXES=$(grep -Eo '\(([0-9]+)( bytes)?\): [0-9a-f]+' "$OUT" | awk '{print $NF}')
+          if [ -z "$HEXES" ]; then
+            echo "::error::no hex fixtures extracted from generator output" >&2
+            cat "$OUT" >&2
+            exit 1
+          fi
+          STALE=0
+          while IFS= read -r H; do
+            if ! grep -qR --include='*.rs' -F "$H" crates/p2p/src/; then
+              echo "::error::Go fixture hex not found in crates/p2p/src/**: $H" >&2
+              STALE=1
+            fi
+          done <<< "$HEXES"
+          if [ "$STALE" -ne 0 ]; then
+            echo "::error::Go fixture drift detected — regenerate Rust constants by running the generators locally and updating crates/p2p/src/message/pubsub.rs, crates/p2p/src/pubsub_rpc/envelope.rs, and crates/p2p/src/sync/coordinator/pubsub_services.rs" >&2
+            exit 1
+          fi
+
       # `basic` is serialized because its tests start rust nodes and the
       # harness port allocator (`defra-harness::ports`) has a TOCTOU race
       # between dropping the port guard listener and the child process
