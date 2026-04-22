@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::behaviour::DefraBehaviour;
-use crate::bitswap::ReplicatorRegistry;
+use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::{Error, Result};
 use crate::message::PushLogReply;
 use crate::two_stream::{TwoStreamHandler, TwoStreamRunner};
@@ -54,6 +54,10 @@ pub struct P2PHostConfig {
     pub max_connections_out: u32,
     /// Max connections per peer. Default: 4.
     pub max_connections_per_peer: u32,
+    /// Bitswap egress access control. When `Controlled`, served blocks
+    /// are filtered per-peer against the shared `ReplicatorRegistry`,
+    /// matching Go's `WithPeerBlockRequestFilter` wiring. Default: `Open`.
+    pub access_mode: AccessMode,
 }
 
 impl Default for P2PHostConfig {
@@ -68,6 +72,7 @@ impl Default for P2PHostConfig {
             max_connections_in: 100,
             max_connections_out: 400,
             max_connections_per_peer: 4,
+            access_mode: AccessMode::Open,
         }
     }
 }
@@ -101,7 +106,7 @@ pub struct P2PHost<S: Store> {
     pub(super) peer_identities: HashMap<PeerId, identity::Did>,
 }
 
-impl<S: Store> P2PHost<S> {
+impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
     /// Create a new P2P host with a generated identity and the given blockstore.
     ///
     /// # Arguments
@@ -214,12 +219,19 @@ impl<S: Store> P2PHost<S> {
 
         info!("Local peer ID: {}", local_peer_id);
 
+        // Replicator registry is constructed up-front because the Bitswap
+        // access filter (installed at behaviour construction time) needs
+        // the same Arc that SyncCoordinator will later populate.
+        let replicators = Arc::new(ReplicatorRegistry::new());
+
         // Pass keypair and blockstore to behaviour for message signing and block exchange
         let mut behaviour = DefraBehaviour::new(
             local_peer_id,
             local_public_key,
             keypair.clone(),
             bitswap_store,
+            config.access_mode,
+            Arc::clone(&replicators),
             config.enable_pubsub,
             &config,
         )
@@ -269,9 +281,6 @@ impl<S: Store> P2PHost<S> {
             local_peer_id,
             keypair.clone(),
         );
-
-        // Create the replicator registry for access control
-        let replicators = Arc::new(ReplicatorRegistry::new());
 
         // Set up two-stream protocol for Go compatibility
         let mut control = swarm.behaviour().stream.new_control();

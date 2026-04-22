@@ -85,7 +85,7 @@ ciborium = "0.2"
 # P2P networking
 # Note: Using 0.53 to match iroh-bitswap's dependency
 libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "relay"] }
-iroh-bitswap = { git = "https://github.com/sourcenetwork/beetle", branch = "main" }
+iroh-bitswap = { git = "https://github.com/fredcarle/beetle", branch = "fredcarle/async-peer-block-request-filter" }
 libp2p-stream = "0.1.0-alpha.1"
 multiaddr = "0.18"
 

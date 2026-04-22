@@ -5029,8 +5029,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
- "windows-result 0.4.1",
+ "windows-link 0.1.3",
+ "windows-result 0.3.4",
 ]
 
 [[package]]
@@ -5751,7 +5751,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -6246,7 +6246,7 @@ dependencies = [
 [[package]]
 name = "iroh-bitswap"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/beetle?branch=main#48e70b0345ea842012285e1fafa27406bb14ef83"
+source = "git+https://github.com/fredcarle/beetle?branch=fredcarle/async-peer-block-request-filter#e0fa8cd0aab748117d63a8dc1002487db1ee9da8"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -6366,7 +6366,7 @@ dependencies = [
 [[package]]
 name = "iroh-metrics"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/beetle?branch=main#48e70b0345ea842012285e1fafa27406bb14ef83"
+source = "git+https://github.com/fredcarle/beetle?branch=fredcarle/async-peer-block-request-filter#e0fa8cd0aab748117d63a8dc1002487db1ee9da8"
 dependencies = [
  "async-trait",
  "config",
@@ -6477,7 +6477,7 @@ dependencies = [
 [[package]]
 name = "iroh-util"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/beetle?branch=main#48e70b0345ea842012285e1fafa27406bb14ef83"
+source = "git+https://github.com/fredcarle/beetle?branch=fredcarle/async-peer-block-request-filter#e0fa8cd0aab748117d63a8dc1002487db1ee9da8"
 dependencies = [
  "anyhow",
  "cid 0.10.1",
@@ -10446,7 +10446,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "rustix 1.1.4",
- "windows 0.62.2",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -14692,8 +14692,8 @@ dependencies = [
  "log",
  "serde",
  "thiserror 2.0.18",
- "windows 0.62.2",
- "windows-core 0.62.2",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
 ]
 
 [[package]]

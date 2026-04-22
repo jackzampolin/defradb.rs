@@ -24,9 +24,11 @@
 //! missing DAG links and fetches them via Bitswap.
 
 mod access;
+mod filter;
 mod registry;
 mod store;
 
 pub use access::AccessMode;
+pub use filter::make_peer_block_access_filter;
 pub use registry::ReplicatorRegistry;
 pub use store::BitswapStoreAdapter;
