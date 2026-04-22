@@ -6246,7 +6246,7 @@ dependencies = [
 [[package]]
 name = "iroh-bitswap"
 version = "0.2.0"
-source = "git+https://github.com/fredcarle/beetle?branch=fredcarle/async-peer-block-request-filter#e0fa8cd0aab748117d63a8dc1002487db1ee9da8"
+source = "git+https://github.com/sourcenetwork/beetle?branch=main#6441b0ac5f42d466f44963afb782bb56030b1479"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -6366,7 +6366,7 @@ dependencies = [
 [[package]]
 name = "iroh-metrics"
 version = "0.2.0"
-source = "git+https://github.com/fredcarle/beetle?branch=fredcarle/async-peer-block-request-filter#e0fa8cd0aab748117d63a8dc1002487db1ee9da8"
+source = "git+https://github.com/sourcenetwork/beetle?branch=main#6441b0ac5f42d466f44963afb782bb56030b1479"
 dependencies = [
  "async-trait",
  "config",
@@ -6477,7 +6477,7 @@ dependencies = [
 [[package]]
 name = "iroh-util"
 version = "0.2.0"
-source = "git+https://github.com/fredcarle/beetle?branch=fredcarle/async-peer-block-request-filter#e0fa8cd0aab748117d63a8dc1002487db1ee9da8"
+source = "git+https://github.com/sourcenetwork/beetle?branch=main#6441b0ac5f42d466f44963afb782bb56030b1479"
 dependencies = [
  "anyhow",
  "cid 0.10.1",
