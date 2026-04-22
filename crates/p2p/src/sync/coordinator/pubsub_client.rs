@@ -22,8 +22,12 @@ use super::pubsub_services::{BRANCHABLE_SYNC_TOPIC, DOC_SYNC_TOPIC};
 use super::SyncCoordinator;
 use crate::error::{Error, Result};
 use crate::message::pubsub as wire;
+use crate::message::{
+    BranchableSyncReply as TwoStreamBranchableSyncReply, DocSyncItem as TwoStreamDocSyncItem,
+    DocSyncReply as TwoStreamDocSyncReply,
+};
 use crate::pubsub_rpc::{PublishOptions, PubsubResponse};
-use crate::transport::P2PTransport;
+use crate::transport::{P2PTransport, PeerId};
 
 /// Default wait for DocSync / BranchableSync responses before returning
 /// whatever has arrived. Matches Go's `5*time.Second` fallback in
@@ -117,7 +121,35 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let mut out = Vec::new();
         while let Ok(Some(resp)) = tokio::time::timeout(wait, prep.responses.recv()).await {
             if let Some(parsed) = parse_doc_sync_response(&resp) {
-                out.push((resp.from.to_string(), parsed));
+                let peer_str = resp.from.to_string();
+                // Feed the reply into the coordinator's standard handler
+                // so DAG fetches and merges trigger just like the
+                // two-stream path. Converted to the two-stream struct
+                // shape (which has a MetaData header) so we can reuse
+                // the existing handle_doc_sync_reply logic.
+                let converted = TwoStreamDocSyncReply {
+                    version: crate::protocol::MESSAGE_VERSION.to_string(),
+                    message_id: String::new(),
+                    sender_id: parsed.sender.clone(),
+                    pubkey: Vec::new(),
+                    signature: None,
+                    err_message: None,
+                    results: parsed
+                        .results
+                        .iter()
+                        .map(|item| TwoStreamDocSyncItem {
+                            doc_id: item.doc_id.clone(),
+                            heads: item.heads.clone(),
+                        })
+                        .collect(),
+                };
+                if let Err(e) = self
+                    .handle_doc_sync_reply(PeerId::new(peer_str.clone()), converted)
+                    .await
+                {
+                    warn!(from = %peer_str, error = %e, "doc-sync: reply processing failed");
+                }
+                out.push((peer_str, parsed));
             }
         }
         Ok(out)
@@ -161,8 +193,29 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let wait = timeout.unwrap_or(DEFAULT_PUBSUB_SYNC_TIMEOUT);
         match tokio::time::timeout(wait, prep.responses.recv()).await {
             Ok(Some(resp)) => {
-                Ok(parse_branchable_sync_response(&resp)
-                    .map(|reply| (resp.from.to_string(), reply)))
+                let peer_str = resp.from.to_string();
+                let parsed = parse_branchable_sync_response(&resp);
+                if let Some(reply) = &parsed {
+                    // Feed through the two-stream handler so DAG fetches
+                    // schedule the same way.
+                    let converted = TwoStreamBranchableSyncReply {
+                        version: crate::protocol::MESSAGE_VERSION.to_string(),
+                        message_id: String::new(),
+                        sender_id: reply.sender.clone(),
+                        pubkey: Vec::new(),
+                        signature: None,
+                        err_message: None,
+                        collection_id: reply.collection_id.clone(),
+                        heads: reply.heads.clone(),
+                    };
+                    if let Err(e) = self
+                        .handle_branchable_sync_reply(PeerId::new(peer_str.clone()), converted)
+                        .await
+                    {
+                        warn!(from = %peer_str, error = %e, "sync-branchable: reply processing failed");
+                    }
+                }
+                Ok(parsed.map(|reply| (peer_str, reply)))
             }
             _ => Ok(None),
         }

@@ -663,28 +663,56 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         let start = std::time::Instant::now();
         let doc_set: HashSet<String> = doc_ids.iter().cloned().collect();
 
+        // Wire-compatible with Go (#828): use pubsub_rpc doc-sync when the
+        // coordinator has it. `pubsub_sync_documents` also feeds each
+        // received reply through the coordinator's DAG-fetch scheduler,
+        // so merges flow to the event bus the same way as the two-stream
+        // path. Falls back to two-stream per-peer requests when no
+        // coordinator is wired (e.g. light tests).
+        let use_pubsub = self.sync_coordinator.is_some();
+
         for _attempt in 0..3 {
             if total_received >= total_expected || start.elapsed() >= overall_timeout {
                 break;
             }
 
-            let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
-            if let Err(error) = p2p::signing::sign_message(self.handle.keypair(), &mut request) {
-                event_bus.unsubscribe(sub.id());
-                return Err(P2PError::internal(format!(
-                    "failed to sign DocSync request: {error}"
-                )));
-            }
-
-            for peer_id in &connected_peers {
-                if let Err(error) = self
-                    .handle
-                    .send_doc_sync_request(*peer_id, request.clone())
-                    .await
+            let publish_result = if use_pubsub {
+                let coord = self.sync_coordinator.as_ref().unwrap().clone();
+                let doc_ids = doc_ids.clone();
+                // Remaining budget for this attempt.
+                let remaining = overall_timeout.saturating_sub(start.elapsed());
+                let attempt_timeout = remaining.min(std::time::Duration::from_secs(8));
+                tokio::spawn(async move {
+                    if let Err(error) = coord
+                        .pubsub_sync_documents(doc_ids, Some(attempt_timeout))
+                        .await
+                    {
+                        tracing::warn!(error = %error, "pubsub_rpc doc-sync publish failed");
+                    }
+                });
+                Ok::<(), P2PError>(())
+            } else {
+                let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
+                if let Err(error) = p2p::signing::sign_message(self.handle.keypair(), &mut request)
                 {
-                    tracing::warn!(peer_id = %peer_id, error = %error, "failed to send DocSync request");
+                    event_bus.unsubscribe(sub.id());
+                    return Err(P2PError::internal(format!(
+                        "failed to sign DocSync request: {error}"
+                    )));
                 }
-            }
+
+                for peer_id in &connected_peers {
+                    if let Err(error) = self
+                        .handle
+                        .send_doc_sync_request(*peer_id, request.clone())
+                        .await
+                    {
+                        tracing::warn!(peer_id = %peer_id, error = %error, "failed to send DocSync request");
+                    }
+                }
+                Ok(())
+            };
+            publish_result?;
 
             let mut last_merge = std::time::Instant::now();
             while total_received < total_expected && start.elapsed() < overall_timeout {
@@ -723,6 +751,29 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             P2PError::transport(format!("failed to get connected peers: {error}"))
         })?;
         if connected_peers.is_empty() {
+            return Ok(());
+        }
+
+        // Go-compatible pubsub_rpc path when coordinator is wired (#828).
+        // Falls back to two-stream per-peer requests otherwise.
+        if let Some(coord) = self.sync_coordinator.as_ref() {
+            let coord = coord.clone();
+            let collection_id = collection_id.to_string();
+            tokio::spawn(async move {
+                if let Err(error) = coord
+                    .pubsub_sync_branchable_collection(
+                        collection_id.clone(),
+                        Some(std::time::Duration::from_secs(8)),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        collection_id = %collection_id,
+                        error = %error,
+                        "pubsub_rpc branchable-sync failed",
+                    );
+                }
+            });
             return Ok(());
         }
 
