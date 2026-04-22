@@ -69,13 +69,10 @@ async fn doc_sync_against_go_defradb() {
 
     let transport = Libp2pTransport::new(handle.clone());
     let blockstore = Arc::new(TestBlockstore::new(Arc::new(MemoryStore::new()), true));
-    let (coord, _sync_events) = p2p::sync::SyncCoordinator::new(
-        transport,
-        blockstore,
-        p2p::sync::SyncConfig::default(),
-    )
-    .await
-    .expect("build coordinator");
+    let (coord, _sync_events) =
+        p2p::sync::SyncCoordinator::new(transport, blockstore, p2p::sync::SyncConfig::default())
+            .await
+            .expect("build coordinator");
     let coord = Arc::new(coord);
 
     let coord_pump = Arc::clone(&coord);
@@ -157,13 +154,10 @@ async fn branchable_sync_against_go_defradb() {
 
     let transport = Libp2pTransport::new(handle.clone());
     let blockstore = Arc::new(TestBlockstore::new(Arc::new(MemoryStore::new()), true));
-    let (coord, _sync_events) = p2p::sync::SyncCoordinator::new(
-        transport,
-        blockstore,
-        p2p::sync::SyncConfig::default(),
-    )
-    .await
-    .unwrap();
+    let (coord, _sync_events) =
+        p2p::sync::SyncCoordinator::new(transport, blockstore, p2p::sync::SyncConfig::default())
+            .await
+            .unwrap();
     let coord = Arc::new(coord);
 
     let coord_pump = Arc::clone(&coord);
