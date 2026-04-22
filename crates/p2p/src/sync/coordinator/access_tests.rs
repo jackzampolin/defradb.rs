@@ -144,6 +144,7 @@ fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
             head_provider: Arc::new(NoOpHeadProvider),
         },
         document_acp: std::sync::OnceLock::new(),
+        pubsub_services: None,
     };
 
     (coordinator, events)

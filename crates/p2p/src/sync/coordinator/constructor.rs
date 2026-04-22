@@ -99,7 +99,18 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let max_push_tasks = config.max_concurrent_push_tasks.max(1);
         let rate_limit_burst = config.rate_limit_burst;
         let rate_limit_rate = config.rate_limit_rate;
+        let subscribed_collections =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
         let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), config);
+
+        let pubsub_services = super::pubsub_services::PubsubServices::try_new(
+            &local_peer_id,
+            Arc::clone(&head_provider),
+            Arc::clone(&replicators),
+            Arc::clone(&peer_state),
+            access_mode,
+            Arc::clone(&subscribed_collections),
+        );
 
         Ok((
             Self {
@@ -120,13 +131,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     replicators,
                 },
                 subscriptions: SyncSubscriptionState {
-                    subscribed_collections: Arc::new(tokio::sync::RwLock::new(
-                        std::collections::HashSet::new(),
-                    )),
+                    subscribed_collections,
                     collection_store,
                     head_provider,
                 },
                 document_acp: std::sync::OnceLock::new(),
+                pubsub_services,
             },
             events,
         ))
