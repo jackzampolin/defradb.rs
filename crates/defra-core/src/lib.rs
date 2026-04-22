@@ -32,7 +32,8 @@ pub use encryption::EncryptionKey;
 pub use error::{Error, Result};
 pub use ipld::{collect_block_links, extract_links, walk_ipld, IpldVisitor};
 pub use lens_block::{
-    build_lens_ipld_blocks, CidBlock, LensConfigBlock, LensKeyValue, LensModuleBlock, LensWasmBlock,
+    build_lens_ipld_blocks, is_lens_block, CidBlock, LensConfigBlock, LensKeyValue,
+    LensModuleBlock, LensWasmBlock,
 };
 pub use signing::SigningKeyType;
 

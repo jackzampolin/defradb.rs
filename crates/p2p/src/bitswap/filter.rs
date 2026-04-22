@@ -19,18 +19,21 @@
 //! 5. Block decodes as a CRDT `Block` with a data delta → allow iff the
 //!    requesting peer is registered as a replicator for the block's
 //!    collection.
-//! 6. Anything else (lens/wasm/chunk blocks, decode errors) → deny by
-//!    default. Callers that need a permissive path for Rust-specific
-//!    block kinds should extend the match arms below.
+//! 6. Block decodes as a lens IPLD shape (config / module / WASM /
+//!    chunk) → allow. Schema-migration artifacts carry no user data
+//!    and mirror Go's `hasAccess` passthrough at `internal/db/p2p/
+//!    p2p.go:335-348`.
+//! 7. Anything else (decode errors on all known shapes) → deny.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use cid::Cid;
-use defra_core::{Block as DefraBlock, Signature};
+use defra_core::{is_lens_block, Block as DefraBlock, Signature};
 use iroh_bitswap::Store;
 use libp2p::PeerId;
+use tracing::debug;
 
 use super::{AccessMode, ReplicatorRegistry};
 
@@ -69,10 +72,16 @@ async fn check_access<S: Store>(
 
     let block = match store.get(cid).await {
         Ok(b) => b,
-        Err(_) => {
+        Err(error) => {
             // Miss or I/O error: deny without leaking block presence.
             // Matches Go's error path in hasAccess (returns false on
             // blockstore.Get failure).
+            debug!(
+                cid = %cid,
+                peer = %peer_id,
+                %error,
+                "bitswap request denied: block unavailable from store"
+            );
             return false;
         }
     };
@@ -84,22 +93,46 @@ async fn check_access<S: Store>(
         return true;
     }
 
-    let defra_block = match DefraBlock::from_dag_cbor(data) {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-
-    if defra_block.delta.is_definition() {
-        return true;
+    match DefraBlock::from_dag_cbor(data) {
+        Ok(defra_block) => {
+            if defra_block.delta.is_definition() {
+                return true;
+            }
+            let Some(collection_id) = defra_block.delta.schema_version_id() else {
+                debug!(
+                    cid = %cid,
+                    peer = %peer_id,
+                    "bitswap request denied: data delta missing collection id"
+                );
+                return false;
+            };
+            let peer_str = peer_id.to_string();
+            if registry.is_replicator(collection_id, &peer_str) {
+                return true;
+            }
+            debug!(
+                cid = %cid,
+                peer = %peer_id,
+                collection = %collection_id,
+                "bitswap request denied: peer not a replicator for collection"
+            );
+            false
+        }
+        Err(_) => {
+            // Not a CRDT block. Go's hasAccess lets lens IPLD artifacts
+            // (config / module / WASM / chunks) through unconditionally —
+            // they carry no user data. Match that or deny.
+            if is_lens_block(data) {
+                return true;
+            }
+            debug!(
+                cid = %cid,
+                peer = %peer_id,
+                "bitswap request denied: block is neither CRDT, signature, nor lens"
+            );
+            false
+        }
     }
-
-    let collection_id = match defra_block.delta.schema_version_id() {
-        Some(id) => id,
-        None => return false,
-    };
-
-    let peer_str = peer_id.to_string();
-    registry.is_replicator(collection_id, &peer_str)
 }
 
 #[cfg(test)]
@@ -256,5 +289,61 @@ mod tests {
             allowed,
             "signature blocks must be served even in Controlled mode"
         );
+    }
+
+    /// Schema/collection definitions are broadcast to every replicator
+    /// regardless of per-collection registration. A peer that has no
+    /// entry in the registry must still be able to fetch them.
+    #[tokio::test]
+    async fn definition_delta_is_served_without_registry_check() {
+        use defra_core::{CollectionSetDeltaPayload, CrdtDelta};
+
+        let delta = CrdtDelta::CollectionSet(CollectionSetDeltaPayload::new(1));
+        assert!(
+            delta.is_definition(),
+            "test precondition: CollectionSet is a definition delta"
+        );
+        let block = DefraBlock::new(delta, Vec::new(), Vec::new());
+        let bytes = block.to_dag_cbor().unwrap();
+        let cid = cid_for(&bytes);
+
+        let registry = Arc::new(ReplicatorRegistry::new());
+        let store = InMemoryStore::default();
+        store.put(cid, bytes);
+
+        let peer = PeerId::random();
+        let allowed = check_access(AccessMode::Controlled, &registry, &store, &peer, &cid).await;
+        assert!(
+            allowed,
+            "definition deltas must be served even to non-replicator peers"
+        );
+    }
+
+    /// Go parity: lens schema-migration blocks (`lens` / `modules` /
+    /// `wasmBytes` / `chunks`) must be served to any peer in Controlled
+    /// mode — they carry no user data and have to propagate so schema
+    /// migrations converge across the network.
+    #[tokio::test]
+    async fn lens_config_block_is_served_without_registry_check() {
+        use defra_core::{build_lens_ipld_blocks, CidBlock};
+
+        let wasm = b"wasm-bytes-test-payload".to_vec();
+        let (_config_cid, blocks): (_, Vec<CidBlock>) =
+            build_lens_ipld_blocks(&wasm, false, &[]).unwrap();
+
+        let registry = Arc::new(ReplicatorRegistry::new());
+        let store = InMemoryStore::default();
+        for (cid, bytes) in &blocks {
+            store.put(*cid, bytes.clone());
+        }
+
+        let peer = PeerId::random();
+        for (cid, _) in &blocks {
+            let allowed = check_access(AccessMode::Controlled, &registry, &store, &peer, cid).await;
+            assert!(
+                allowed,
+                "lens block at {cid} must be served without replicator trust"
+            );
+        }
     }
 }

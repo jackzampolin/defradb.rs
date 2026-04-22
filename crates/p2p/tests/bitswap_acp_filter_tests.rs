@@ -5,7 +5,6 @@
 //! issues Bitswap WANTs from the consumer for both allowed and denied
 //! block/peer pairs.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use defra_core::{Block as DefraBlock, CompositeDeltaPayload, CrdtDelta};
@@ -340,7 +339,7 @@ async fn open_mode_serves_all_peers() {
 
     // Producer in Open mode should serve the block regardless of registry
     // state. Matches the pre-#830 default / AccessMode::Open contract.
-    let (producer, producer_handle, _producer_events, producer_replicators) =
+    let (producer, producer_handle, _producer_events, _producer_replicators) =
         P2PHost::with_config(producer_store, P2PHostConfig::default())
             .await
             .unwrap();
@@ -367,10 +366,6 @@ async fn open_mode_serves_all_peers() {
         .unwrap();
     wait_connected(&consumer_handle, producer_peer).await;
     wait_connected(&producer_handle, consumer_peer).await;
-
-    // No registry entries.
-    let _ = Arc::clone(&producer_replicators);
-    let _ = consumer_peer; // silence unused in Open path
 
     let query = consumer_handle
         .bitswap_sync(cid, vec![producer_peer], vec![cid])
