@@ -134,7 +134,10 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         let parsed_peer_id: libp2p::PeerId = peer_id
             .parse()
             .map_err(|error| P2PError::invalid_input(format!("invalid peer ID: {error}")))?;
-        let info = p2p::ReplicatorInfo::new(parsed_peer_id, collections.to_vec());
+        let info =
+            p2p::ReplicatorInfo::new(parsed_peer_id, collections.to_vec()).map_err(|error| {
+                P2PError::invalid_input(format!("invalid replicator info: {error}"))
+            })?;
         let bytes = info.to_bytes().map_err(|error| {
             P2PError::internal(format!("failed to serialize replicator info: {error}"))
         })?;
