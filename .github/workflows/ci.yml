@@ -208,8 +208,10 @@ jobs:
         run: |
           set -euo pipefail
           OUT=$(mktemp)
-          go run crates/p2p/testdata/gen_message_fixtures/main.go   >> "$OUT"
-          go run crates/p2p/testdata/gen_pubsub_rpc_fixture/main.go >> "$OUT"
+          # Each generator has its own go.mod; `go run <path>/main.go`
+          # uses single-file mode and ignores it, so cd into each module.
+          (cd crates/p2p/testdata/gen_message_fixtures   && go run .) >> "$OUT"
+          (cd crates/p2p/testdata/gen_pubsub_rpc_fixture && go run .) >> "$OUT"
           # Extract every hex token emitted after a "(N bytes): " or
           # "(N): " marker. Lowercase hex, length >= 4.
           HEXES=$(grep -Eo '\(([0-9]+)( bytes)?\): [0-9a-f]+' "$OUT" | awk '{print $NF}')
