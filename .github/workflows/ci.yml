@@ -186,6 +186,16 @@ jobs:
           echo "$CACHE_DIR" >> "$GITHUB_PATH"
           "$CACHE_DIR/defradb" version --format json
 
+      # The self-hosted macOS ARM64 runner ships without a Go toolchain —
+      # the `go-compat` suite normally uses a prebuilt defradb binary.
+      # The fixture drift step below needs `go run`, so install Go on
+      # demand for that suite only.
+      - name: Install Go toolchain (fixture drift guard only)
+        if: matrix.suite == 'go-compat'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
       # Guards against silent drift between the committed Go-parity hex
       # constants in `crates/p2p/src/**` and what upstream Go actually
       # emits. Both generators print hex to stdout (no files written);
