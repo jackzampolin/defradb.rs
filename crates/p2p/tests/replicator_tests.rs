@@ -110,6 +110,51 @@ fn json_round_trip_preserves_all_fields() {
     assert_eq!(info, restored);
 }
 
+#[test]
+fn timestamp_encodes_like_go_rfc3339nano_with_trailing_zeros() {
+    // Go's `time.Time.MarshalJSON` uses RFC3339Nano, which strips trailing
+    // zeros from the fractional seconds (`.100` → `.1`, `.001` stays `.001`).
+    // Chrono's default serializer pads to 3/6/9 digits, so a naive
+    // implementation would emit `.100Z` and drift from a Go-produced peer
+    // store record. This test pins the Go-compatible behavior.
+    let cases: [(i64, u32, &str); 5] = [
+        // subsec ns, expected fractional suffix (or empty)
+        (1_700_000_000, 0, ""),
+        (1_700_000_000, 1_000_000, ".001"), // 1 ms
+        (1_700_000_000, 100_000_000, ".1"), // 100 ms (the drift case)
+        (1_700_000_000, 1_000, ".000001"),  // 1 µs
+        (1_700_000_000, 1, ".000000001"),   // 1 ns
+    ];
+    for (secs, ns, frac) in cases {
+        let mut info =
+            ReplicatorInfo::from_raw("peer".to_string(), vec!["users".to_string()], vec![]);
+        info.last_status_change = Utc.timestamp_opt(secs, ns).unwrap();
+
+        let json = info.to_bytes().unwrap();
+        let s = std::str::from_utf8(&json).unwrap();
+        // The emitted timestamp string must equal the Go-style rendering.
+        let go_expected = format!(r#""LastStatusChange":"2023-11-14T22:13:20{frac}Z""#);
+        assert!(
+            s.contains(&go_expected),
+            "subsec_ns={ns} expected to contain {go_expected} but got: {s}"
+        );
+
+        // Round-trip preserves the exact instant.
+        let restored = ReplicatorInfo::from_bytes(&json).unwrap();
+        assert_eq!(restored.last_status_change, info.last_status_change);
+    }
+}
+
+#[test]
+fn decode_ignores_unknown_fields() {
+    // serde_json ignores unknown fields by default. Documenting that contract
+    // here protects against accidental `#[serde(deny_unknown_fields)]` that
+    // would break forward-compat with future Go-side schema additions.
+    let future = r#"{"ID":"peer","Addresses":[],"CollectionIDs":["users"],"Status":0,"LastStatusChange":"0001-01-01T00:00:00Z","SomeNewField":123,"Another":"x"}"#;
+    let info = ReplicatorInfo::from_bytes(future.as_bytes()).unwrap();
+    assert_eq!(info.collections, vec!["users"]);
+}
+
 // ---------------------------------------------------------------------------
 // Constructors and validation
 // ---------------------------------------------------------------------------

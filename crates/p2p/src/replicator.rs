@@ -11,9 +11,9 @@
 //! Rust must match byte-for-byte so a shared peerstore (or future migration
 //! path) can round-trip between implementations.
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use libp2p::{Multiaddr, PeerId};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 /// Error type for replicator operations.
@@ -85,6 +85,45 @@ where
     Ok(Option::<Vec<String>>::deserialize(d)?.unwrap_or_default())
 }
 
+/// Serde adapter that matches Go's `time.Time.MarshalJSON`.
+///
+/// Go's encoder uses `RFC3339Nano`, which strips trailing zeros from the
+/// fractional seconds (e.g. 100 ms serializes as `.1`, 1 ms as `.001`).
+/// Chrono's default serializer pads to 3/6/9 digits, which means a timestamp
+/// like 100 ms round-trips as `.100` — byte-different from Go. Since the
+/// whole point of this struct is a byte-exact match against Go's peerstore
+/// output, we implement the Go rule ourselves on the write side. Decode
+/// stays on chrono's default, which already accepts both forms.
+mod go_time_serde {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(t: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error> {
+        // `SecondsFormat::AutoSi` picks 0/3/6/9 digits; trim trailing zeros
+        // off the fractional tail to match Go's RFC3339Nano rule.
+        let formatted = t.to_rfc3339_opts(SecondsFormat::AutoSi, true);
+        let normalized = match formatted.find('.') {
+            None => formatted,
+            Some(dot_idx) => {
+                // Suffix after the digits is always "Z" for UTC here.
+                let z_idx = formatted.len() - 1;
+                let digits = &formatted[dot_idx + 1..z_idx];
+                let trimmed = digits.trim_end_matches('0');
+                if trimmed.is_empty() {
+                    // All zeros → drop the fractional component entirely.
+                    format!("{}Z", &formatted[..dot_idx])
+                } else {
+                    format!("{}.{}Z", &formatted[..dot_idx], trimmed)
+                }
+            }
+        };
+        s.serialize_str(&normalized)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<DateTime<Utc>, D::Error> {
+        DateTime::<Utc>::deserialize(d)
+    }
+}
+
 /// Information about a replicator peer.
 ///
 /// Persisted to the peerstore as JSON, matching Go's `client.Replicator`
@@ -93,10 +132,10 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicatorInfo {
     #[serde(rename = "ID")]
-    id: String,
+    pub id: String,
 
     #[serde(rename = "Addresses", default, deserialize_with = "null_as_empty_vec")]
-    addresses: Vec<String>,
+    pub addresses: Vec<String>,
 
     #[serde(
         rename = "CollectionIDs",
@@ -108,7 +147,11 @@ pub struct ReplicatorInfo {
     #[serde(rename = "Status", default)]
     pub status: ReplicatorStatus,
 
-    #[serde(rename = "LastStatusChange", default = "go_time_zero")]
+    #[serde(
+        rename = "LastStatusChange",
+        default = "go_time_zero",
+        with = "go_time_serde"
+    )]
     pub last_status_change: DateTime<Utc>,
 }
 
@@ -132,9 +175,13 @@ impl ReplicatorInfo {
         })
     }
 
-    /// Create from raw strings (for deserialization or testing).
+    /// Unchecked constructor for test fixtures and raw peerstore reads.
     ///
-    /// Skips validation; use [`ReplicatorInfo::new`] for runtime construction.
+    /// Skips collection-non-empty validation and peer-id parsing. Leaves
+    /// `status` at `Active` and `last_status_change` at Go's `time.Time{}`
+    /// zero value; callers that care about those fields must set them
+    /// explicitly. Real persisted data is normally decoded directly via
+    /// `from_bytes`, which honors the on-wire values.
     pub fn from_raw(peer_id: String, collections: Vec<String>, addresses: Vec<String>) -> Self {
         Self {
             id: peer_id,
