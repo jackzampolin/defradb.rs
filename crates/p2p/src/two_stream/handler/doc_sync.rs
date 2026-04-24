@@ -19,7 +19,7 @@ impl TwoStreamHandler {
         peer_id: PeerId,
         request: DocSyncRequest,
     ) -> Result<DocSyncReply> {
-        let message_id = request.metadata.message_id.clone();
+        let message_id = request.message_id.clone();
 
         // Create response channel
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -93,7 +93,7 @@ impl TwoStreamHandler {
         peer_id: PeerId,
         request: DocSyncRequest,
     ) -> Result<()> {
-        let message_id = request.metadata.message_id.clone();
+        let message_id = request.message_id.clone();
 
         // Open stream and send request
         let mut stream = self

@@ -44,7 +44,7 @@ mod tests {
 
         let reply = TwoStreamHandler::success_reply(&request);
         // PushLogReply has flat fields (no metadata struct) for CBOR wire compatibility
-        assert_eq!(reply.message_id, request.metadata.message_id);
+        assert_eq!(reply.message_id, request.message_id);
         assert!(reply.err_message.is_none());
     }
 
@@ -60,7 +60,7 @@ mod tests {
 
         let reply = TwoStreamHandler::error_reply(&request, "test error");
         // PushLogReply has flat fields (no metadata struct) for CBOR wire compatibility
-        assert_eq!(reply.message_id, request.metadata.message_id);
+        assert_eq!(reply.message_id, request.message_id);
         assert_eq!(reply.err_message, Some("test error".to_string()));
     }
 }
