@@ -795,7 +795,7 @@ async fn branchable_sync_controlled_mode_rejects_non_replicator_connected_peer()
 }
 
 #[tokio::test]
-async fn gossip_access_falls_back_to_transport_connected_peer_state() {
+async fn gossip_subscribed_collection_uses_transport_connected_peer_state() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let transport = NoopTransport::new();
@@ -823,13 +823,20 @@ async fn gossip_access_falls_back_to_transport_connected_peer_state() {
         "test setup requires the coordinator peer_state cache to start cold"
     );
 
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
     let result = coordinator
         .handle_transport_event(gossip_event(peer.clone(), "collection1"))
         .await;
 
     assert!(
         !matches!(&result, Err(Error::AccessDenied { .. })),
-        "transport-connected peer should authorize gossip on peer_state cache miss, got {:?}",
+        "transport-connected peer should satisfy the gossip connection gate on subscribed collection, got {:?}",
         result
     );
 }

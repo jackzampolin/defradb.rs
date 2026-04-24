@@ -27,10 +27,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let is_connected = self.peer_is_connected(&propagation_source).await;
             let is_authorized_replicator = self
                 .authorizer
-                .peer_authorized_for_collection(
-                    propagation_source.as_str(),
-                    &message.collection_id,
-                )
+                .peer_authorized_for_collection(propagation_source.as_str(), &message.collection_id)
                 .await;
             let is_subscribed = self
                 .subscriptions
