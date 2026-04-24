@@ -70,7 +70,7 @@ fn create_test_coordinator_with_rate_limiter(
     let broadcaster = Broadcaster::new(transport.clone());
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
-    create_test_coordinator_with_blockstore(
+    create_test_coordinator_with_blockstore(TestCoordinatorParams {
         access_mode,
         replicators,
         peer_state,
@@ -79,10 +79,13 @@ fn create_test_coordinator_with_rate_limiter(
         broadcaster,
         blockstore,
         rate_limiter,
-    )
+    })
 }
 
-fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
+/// Bundled constructor arguments for [`create_test_coordinator_with_blockstore`].
+/// Grouped so the test helper stays under clippy's `too_many_arguments` budget
+/// without hiding the list of inputs behind a builder pattern.
+struct TestCoordinatorParams<B: Blockstore + 'static> {
     access_mode: AccessMode,
     replicators: Arc<ReplicatorRegistry>,
     peer_state: Arc<PeerStateTracker>,
@@ -91,10 +94,25 @@ fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
     broadcaster: Broadcaster<NoopTransport>,
     blockstore: Arc<B>,
     rate_limiter: Arc<PeerRateLimiter>,
+}
+
+fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
+    params: TestCoordinatorParams<B>,
 ) -> (
     SyncCoordinator<B, NoopTransport>,
     tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
 ) {
+    let TestCoordinatorParams {
+        access_mode,
+        replicators,
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore,
+        rate_limiter,
+    } = params;
+
     let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), SyncConfig::default());
 
     let coordinator = SyncCoordinator {
@@ -752,16 +770,16 @@ async fn gossip_access_falls_back_to_transport_connected_peer_state() {
     let peer = random_peer_id();
     transport.set_connected_peers(vec![peer.clone()]);
 
-    let (coordinator, _events) = create_test_coordinator_with_blockstore(
-        AccessMode::Controlled,
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        access_mode: AccessMode::Controlled,
         replicators,
-        peer_state.clone(),
+        peer_state: peer_state.clone(),
         transport,
         local_peer_id,
         broadcaster,
         blockstore,
-        Arc::new(PeerRateLimiter::default()),
-    );
+        rate_limiter: Arc::new(PeerRateLimiter::default()),
+    });
 
     assert!(
         !peer_state.is_connected(peer.as_str()),
@@ -928,16 +946,16 @@ async fn gossip_access_falls_back_to_transport_replicator_state() {
         .await
         .unwrap();
 
-    let (coordinator, _events) = create_test_coordinator_with_blockstore(
-        AccessMode::Controlled,
-        replicators.clone(),
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        access_mode: AccessMode::Controlled,
+        replicators: replicators.clone(),
         peer_state,
         transport,
         local_peer_id,
         broadcaster,
         blockstore,
-        Arc::new(PeerRateLimiter::default()),
-    );
+        rate_limiter: Arc::new(PeerRateLimiter::default()),
+    });
 
     assert!(
         !replicators.is_replicator("collection1", peer.as_str()),
@@ -968,16 +986,16 @@ async fn delete_replicator_preserves_connected_peer_gossip_access() {
     let peer = random_peer_id();
     transport.set_connected_peers(vec![peer.clone()]);
 
-    let (coordinator, _events) = create_test_coordinator_with_blockstore(
-        AccessMode::Controlled,
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        access_mode: AccessMode::Controlled,
         replicators,
         peer_state,
         transport,
         local_peer_id,
         broadcaster,
         blockstore,
-        Arc::new(PeerRateLimiter::default()),
-    );
+        rate_limiter: Arc::new(PeerRateLimiter::default()),
+    });
 
     coordinator
         .create_replicator(&peer, vec!["collection1".to_string()], false)
@@ -1009,16 +1027,16 @@ async fn create_replicator_update_preserves_connected_peer_old_collection_access
     let peer = random_peer_id();
     transport.set_connected_peers(vec![peer.clone()]);
 
-    let (coordinator, _events) = create_test_coordinator_with_blockstore(
-        AccessMode::Controlled,
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        access_mode: AccessMode::Controlled,
         replicators,
         peer_state,
         transport,
         local_peer_id,
         broadcaster,
         blockstore,
-        Arc::new(PeerRateLimiter::default()),
-    );
+        rate_limiter: Arc::new(PeerRateLimiter::default()),
+    });
 
     coordinator
         .create_replicator(&peer, vec!["collection_a".to_string()], false)
@@ -1196,16 +1214,17 @@ async fn pushlog_retries_transient_transaction_conflicts_without_sync_error() {
     let broadcaster = Broadcaster::new(transport.clone());
     let blockstore = Arc::new(ConflictOnceBlockstore::new());
 
-    let (coordinator, mut events) = create_test_coordinator_with_blockstore(
-        AccessMode::Open,
-        replicators,
-        peer_state,
-        transport,
-        local_peer_id,
-        broadcaster,
-        blockstore.clone(),
-        Arc::new(PeerRateLimiter::default()),
-    );
+    let (coordinator, mut events) =
+        create_test_coordinator_with_blockstore(TestCoordinatorParams {
+            access_mode: AccessMode::Open,
+            replicators,
+            peer_state,
+            transport,
+            local_peer_id,
+            broadcaster,
+            blockstore: blockstore.clone(),
+            rate_limiter: Arc::new(PeerRateLimiter::default()),
+        });
 
     let peer = random_peer_id();
     coordinator
@@ -1231,16 +1250,17 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
     let broadcaster = Broadcaster::new(transport.clone());
     let blockstore = Arc::new(ConflictOnceBlockstore::new());
 
-    let (coordinator, mut events) = create_test_coordinator_with_blockstore(
-        AccessMode::Open,
-        replicators,
-        peer_state,
-        transport,
-        local_peer_id,
-        broadcaster,
-        blockstore.clone(),
-        Arc::new(PeerRateLimiter::default()),
-    );
+    let (coordinator, mut events) =
+        create_test_coordinator_with_blockstore(TestCoordinatorParams {
+            access_mode: AccessMode::Open,
+            replicators,
+            peer_state,
+            transport,
+            local_peer_id,
+            broadcaster,
+            blockstore: blockstore.clone(),
+            rate_limiter: Arc::new(PeerRateLimiter::default()),
+        });
 
     let peer = random_peer_id();
     coordinator

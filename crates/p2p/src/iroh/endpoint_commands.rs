@@ -61,7 +61,7 @@ pub(super) async fn handle_command(
                 spawned_tasks,
                 event_tx,
             };
-            let result = handle_dial(&ctx, &peer_id, addrs).await;
+            let result = handle_dial(ctx, &peer_id, addrs).await;
             let _ = reply.send(result);
         }
         IrohCommand::Listen { addr: _, reply } => {
@@ -478,11 +478,10 @@ pub(super) async fn handle_command(
     false
 }
 
-/// Shared dispatcher state borrowed into `handle_dial`.
-///
-/// Bundled into a struct so the function signature stays under clippy's
-/// `too_many_arguments` threshold and to make the call site's intent —
-/// "dial this peer, using the usual endpoint context" — explicit.
+/// Long-lived endpoint state borrowed for a single dial. Groups the
+/// references that `handle_dial` needs so the function signature stays
+/// under clippy's `too_many_arguments` budget without losing the
+/// lifetime-by-reference semantics of the individual fields.
 struct DialContext<'a> {
     endpoint: &'a Endpoint,
     peer_map: &'a Arc<parking_lot::Mutex<PeerMap>>,
@@ -497,16 +496,10 @@ struct DialContext<'a> {
 ///
 /// Keeps the connection alive by spawning a stream handler task.
 async fn handle_dial(
-    ctx: &DialContext<'_>,
+    ctx: DialContext<'_>,
     peer_id: &PeerId,
     addrs: Vec<PeerAddr>,
 ) -> crate::error::Result<()> {
-    let endpoint = ctx.endpoint;
-    let peer_map = ctx.peer_map;
-    let pending_pushlog_replies = ctx.pending_pushlog_replies;
-    let subscriptions = ctx.subscriptions;
-    let spawned_tasks = ctx.spawned_tasks;
-    let event_tx = ctx.event_tx;
     let endpoint_id = parse_endpoint_id(peer_id)?;
     let endpoint_addr = endpoint_addr_from_parts(peer_id, &addrs)?;
 
@@ -515,19 +508,22 @@ async fn handle_dial(
         .filter_map(|a| a.as_str().parse().ok())
         .collect();
 
-    let connection = endpoint
+    let connection = ctx
+        .endpoint
         .connect(endpoint_addr, protocols::ALPN_PUSHLOG)
         .await
         .map_err(|e| crate::error::Error::Dial(e.to_string()))?;
 
     let conn_alpn = connection.alpn().to_vec();
 
-    let is_new = peer_map
+    let is_new = ctx
+        .peer_map
         .lock()
         .increment_connections(endpoint_id, direct_addresses.first().copied());
 
     if is_new
-        && event_tx
+        && ctx
+            .event_tx
             .send(TransportEvent::PeerConnected(peer_id.clone()))
             .await
             .is_err()
@@ -536,14 +532,14 @@ async fn handle_dial(
     }
 
     if is_new {
-        join_peer_to_subscriptions(subscriptions, endpoint_id).await;
+        join_peer_to_subscriptions(ctx.subscriptions, endpoint_id).await;
     }
 
     // Keep connection alive by spawning a handler for incoming streams.
-    let event_tx = event_tx.clone();
-    let peer_map = Arc::clone(peer_map);
-    let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
-    let spawned_tasks_for_connection = Arc::clone(spawned_tasks);
+    let event_tx = ctx.event_tx.clone();
+    let peer_map = Arc::clone(ctx.peer_map);
+    let pending_pushlog_replies = Arc::clone(ctx.pending_pushlog_replies);
+    let spawned_tasks_for_connection = Arc::clone(ctx.spawned_tasks);
     let task = tokio::spawn(async move {
         super::endpoint_streams::handle_connection_streams_from_dial(
             connection,
@@ -556,7 +552,7 @@ async fn handle_dial(
         )
         .await;
     });
-    track_task(spawned_tasks, task);
+    track_task(ctx.spawned_tasks, task);
 
     Ok(())
 }
