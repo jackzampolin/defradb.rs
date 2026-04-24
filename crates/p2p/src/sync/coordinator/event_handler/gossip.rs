@@ -3,6 +3,7 @@
 use blockstore::Blockstore;
 use cid::Cid;
 
+use super::super::authorizer::AccessAuthorizer;
 use super::super::SyncCoordinator;
 use crate::error::Result;
 use crate::message::PushLogBroadcast;
@@ -22,6 +23,37 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             topic = %topic,
             "Received GossipSub message"
         );
+
+        if !self.access.access_mode.is_open() {
+            let topic_matches_collection = topic == message.collection_id;
+            let is_authorized_replicator = self
+                .authorizer
+                .peer_authorized_for_collection(propagation_source.as_str(), &message.collection_id)
+                .await;
+            let is_subscribed = self
+                .subscriptions
+                .subscribed_collections
+                .read()
+                .await
+                .contains(&message.collection_id);
+
+            if !topic_matches_collection || (!is_authorized_replicator && !is_subscribed) {
+                tracing::warn!(
+                    peer_id = %propagation_source,
+                    topic = %topic,
+                    collection_id = %message.collection_id,
+                    doc_id = %message.doc_id,
+                    topic_matches_collection,
+                    is_authorized_replicator,
+                    is_subscribed,
+                    "Dropping GossipSub message from unauthorized peer"
+                );
+                return Err(crate::error::Error::AccessDenied {
+                    peer_id: propagation_source.to_string(),
+                    collection_id: message.collection_id.clone(),
+                });
+            }
+        }
 
         // Parse CID
         match Cid::try_from(message.cid.as_ref()) {

@@ -97,8 +97,8 @@ impl HandlerContext {
     /// Returns `true` when `peer` is authorised to ask for doc-sync heads.
     /// Delegates to the shared authorizer so the pubsub_rpc path and the
     /// two-stream `SyncCoordinator::check_peer_is_replicator` make the
-    /// same decision (including the transport-reports-connected fallback
-    /// used to close the `PeerState` cache-miss window).
+    /// same decision, including the transport replicator-state fallback
+    /// used to close registry cache-miss windows.
     async fn peer_may_doc_sync(&self, peer: &libp2p::PeerId) -> bool {
         self.authorizer
             .peer_authorized_for_any(&peer.to_string())
