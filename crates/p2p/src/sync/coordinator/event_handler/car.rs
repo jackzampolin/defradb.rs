@@ -9,6 +9,10 @@ use crate::sync::car::{collect_dag_blocks, collect_exact_blocks, decode_car, enc
 use crate::sync::coordinator::SyncCoordinator;
 use crate::transport::{P2PTransport, PeerId};
 
+fn sample_cids(cids: &[Cid]) -> Vec<String> {
+    cids.iter().take(4).map(ToString::to_string).collect()
+}
+
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Handle an inbound CAR fetch request: collect the DAG and send CARv1 response.
     pub(crate) async fn handle_car_fetch_request(
@@ -17,7 +21,33 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         request: CarFetchRequest,
         token: Option<T::ResponseToken>,
     ) -> Result<()> {
-        self.check_peer_is_replicator(&peer_id).await?;
+        let root_present = match self.manager.blockstore().has(&request.root_cid).await {
+            Ok(present) => Some(present),
+            Err(error) => {
+                tracing::debug!(
+                    root_cid = %request.root_cid,
+                    peer_id = %peer_id,
+                    error = %error,
+                    "CAR handler: failed to check root presence before serving request"
+                );
+                None
+            }
+        };
+
+        if let Err(error) = self.check_peer_is_replicator(&peer_id).await {
+            tracing::warn!(
+                root_cid = %request.root_cid,
+                peer_id = %peer_id,
+                recursive = request.recursive,
+                requested_count = request.wanted_cids.len(),
+                root_present = ?root_present,
+                connected = self.access.peer_state.is_connected(peer_id.as_str()),
+                registered_any = self.access.replicators.is_any_replicator(peer_id.as_str()),
+                error = %error,
+                "CAR handler rejected request"
+            );
+            return Err(error);
+        }
 
         tracing::debug!(
             root_cid = %request.root_cid,
@@ -41,13 +71,25 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             // Normal race: peer asked for blocks we have not yet received
             // ourselves. Noisy at WARN during concurrent replication catch-up;
             // the requester retries until some peer serves the DAG.
-            tracing::debug!(
-                root_cid = %request.root_cid,
-                peer_id = %peer_id,
-                recursive = request.recursive,
-                requested_count = request.wanted_cids.len(),
-                "CAR handler: no blocks found for request"
-            );
+            if request.recursive {
+                tracing::debug!(
+                    root_cid = %request.root_cid,
+                    peer_id = %peer_id,
+                    recursive = request.recursive,
+                    requested_count = request.wanted_cids.len(),
+                    root_present = ?root_present,
+                    "CAR handler: no blocks found for request"
+                );
+            } else {
+                tracing::warn!(
+                    root_cid = %request.root_cid,
+                    peer_id = %peer_id,
+                    root_present = ?root_present,
+                    requested_count = request.wanted_cids.len(),
+                    requested_cids = ?sample_cids(&request.wanted_cids),
+                    "CAR handler: no exact blocks found for selective request"
+                );
+            }
             // Send a header-only CAR so both transports (iroh and libp2p)
             // receive a well-formed response they can decode. Without this,
             // the libp2p response handler errors on empty bytes and the
