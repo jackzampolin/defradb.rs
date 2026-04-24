@@ -353,6 +353,7 @@ mod tests {
 
     #[test]
     fn resolve_cosmos_bearer_token_uses_request_token_for_remote_identity() {
+        let _guard = crate::signing_state_test_guard();
         let did = "did:key:zRemoteCosmosToken";
         let token = "delegated.jwt.token".to_string();
         defra_core::signing::clear_identity_store();
@@ -372,6 +373,7 @@ mod tests {
 
     #[test]
     fn resolve_cosmos_bearer_token_builds_local_secp256r1_token() {
+        let _guard = crate::signing_state_test_guard();
         let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
         let raw_identity =
             identity::RawIdentity::from_secp256r1(private_key).expect("identity should build");
