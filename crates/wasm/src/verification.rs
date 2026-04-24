@@ -1,80 +1,14 @@
-//! Merkle proof and signature verification.
+//! Signature verification and key generation.
 //!
 //! Standalone functions for verifying data integrity without a full client.
 
 use wasm_bindgen::prelude::*;
 
 use crypto::{
-    generate_ed25519, generate_secp256k1, public_key_from_string, sha256, Key, MerkleProof,
-    PrivateKey, SignedMerkleProof,
+    generate_ed25519, generate_secp256k1, public_key_from_string, sha256, Key, PrivateKey,
 };
 
 use crate::error::{Result, WasmError};
-
-/// Verify a Merkle proof from JSON.
-///
-/// The proof should be a JSON object with:
-/// - `leaf_cid`: The CID of the leaf block
-/// - `root_cid`: The CID of the root block
-/// - `path`: Array of proof nodes
-///
-/// # Behavior
-///
-/// - **Returns `true`** if the proof verifies successfully.
-/// - **Throws** (resolves to `Err` in Rust → exception in JS) for any
-///   verification failure: structural input errors (empty path, anchor
-///   mismatch), cryptographic failures (content hash mismatch, broken
-///   chain link), and decode errors.
-///
-/// **This function never returns `false`.** Verification failures are
-/// always surfaced as exceptions so JS callers cannot accidentally
-/// bypass them by using truthiness checks on a `false` result. See
-/// issue #733 for the rationale.
-#[wasm_bindgen]
-pub fn verify_merkle_proof(proof_json: &str) -> std::result::Result<bool, JsValue> {
-    verify_merkle_proof_impl(proof_json).map_err(|e| e.into())
-}
-
-fn verify_merkle_proof_impl(proof_json: &str) -> Result<bool> {
-    // Parse the proof from JSON
-    let proof: MerkleProof = serde_json::from_str(proof_json)?;
-
-    proof.verify().map_err(WasmError::from)
-}
-
-/// Verify a Merkle proof from DAG-CBOR bytes.
-///
-/// This is the native format for proofs transmitted over the wire.
-///
-/// Behavior is identical to [`verify_merkle_proof`] — returns `true` on
-/// success and throws on any failure (#733). Never returns `false`.
-#[wasm_bindgen]
-pub fn verify_merkle_proof_cbor(proof_bytes: &[u8]) -> std::result::Result<bool, JsValue> {
-    verify_merkle_proof_cbor_impl(proof_bytes).map_err(|e| e.into())
-}
-
-fn verify_merkle_proof_cbor_impl(proof_bytes: &[u8]) -> Result<bool> {
-    let proof = MerkleProof::from_dag_cbor(proof_bytes)?;
-    proof.verify().map_err(WasmError::from)
-}
-
-/// Verify a signed Merkle proof using the embedded public key.
-///
-/// Returns `true` if both the signature and proof verify successfully.
-/// Throws on any failure (signature verification failure, hash mismatch,
-/// broken chain, structural input error). Never returns `false` — see
-/// issue #733 for rationale.
-#[wasm_bindgen]
-pub fn verify_signed_proof(proof_bytes: &[u8]) -> std::result::Result<bool, JsValue> {
-    verify_signed_proof_impl(proof_bytes).map_err(|e| e.into())
-}
-
-fn verify_signed_proof_impl(proof_bytes: &[u8]) -> Result<bool> {
-    let signed_proof = SignedMerkleProof::from_dag_cbor(proof_bytes)?;
-    signed_proof
-        .verify_with_embedded_key()
-        .map_err(WasmError::from)
-}
 
 /// Verify an Ed25519 signature.
 ///
@@ -236,12 +170,6 @@ mod tests {
         let h1 = sha256_hash(b"defradb");
         let h2 = sha256_hash(b"defradb");
         assert_eq!(h1, h2);
-    }
-
-    #[test]
-    fn test_verify_invalid_merkle_proof_json() {
-        let result = verify_merkle_proof_impl("not valid json");
-        assert!(result.is_err());
     }
 
     #[test]
