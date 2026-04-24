@@ -21,12 +21,14 @@ use storage::{corekv::Key, keys::CRDTValueKey, Reader, ReaderWriter};
 #[non_exhaustive]
 pub enum NumericKind {
     Int64,
+    Float32,
     Float64,
 }
 
 /// Internal helper for computed new values (used in apply_delta)
 enum NewValue {
     Int64(i64),
+    Float32(f32),
     Float64(f64),
 }
 
@@ -43,9 +45,10 @@ pub struct CounterDelta {
     nonce: i64,
     /// Schema version identifier
     schema_version_id: String,
-    /// The increment/decrement value as big-endian bytes (can be negative)
-    data: [u8; 8],
-    /// Numeric kind (Int64 or Float64)
+    /// The increment/decrement value as big-endian bytes.
+    /// Int64/Float64: 8 bytes, Float32: 4 bytes.
+    data: Vec<u8>,
+    /// Numeric kind (Int64, Float32, or Float64)
     kind: NumericKind,
 }
 
@@ -76,7 +79,7 @@ impl CounterDelta {
             priority,
             nonce,
             schema_version_id,
-            data: increment.to_be_bytes(),
+            data: increment.to_be_bytes().to_vec(),
             kind: NumericKind::Int64,
         })
     }
@@ -107,8 +110,42 @@ impl CounterDelta {
             priority,
             nonce,
             schema_version_id,
-            data: increment.to_be_bytes(),
+            data: increment.to_be_bytes().to_vec(),
             kind: NumericKind::Float64,
+        })
+    }
+
+    /// Create a new Float32 counter delta.
+    ///
+    /// Matches Go's `FieldKind_NILLABLE_FLOAT32` path. Accumulates with
+    /// f32 precision to produce identical results to Go's `validateAndIncrement[float32]`.
+    pub fn new_float32(
+        doc_id: Vec<u8>,
+        field_name: String,
+        priority: u64,
+        nonce: i64,
+        schema_version_id: String,
+        increment: f32,
+    ) -> Result<Self> {
+        if doc_id.is_empty() {
+            return Err(Error::MergeError("doc_id cannot be empty".into()));
+        }
+        if field_name.is_empty() {
+            return Err(Error::MergeError("field_name cannot be empty".into()));
+        }
+        if schema_version_id.is_empty() {
+            return Err(Error::MergeError(
+                "schema_version_id cannot be empty".into(),
+            ));
+        }
+        Ok(Self {
+            doc_id,
+            field_name,
+            priority,
+            nonce,
+            schema_version_id,
+            data: increment.to_be_bytes().to_vec(),
+            kind: NumericKind::Float32,
         })
     }
 
@@ -149,12 +186,35 @@ impl CounterDelta {
 
     /// Decode the increment value as i64
     pub fn decode_int64(&self) -> Result<i64> {
-        Ok(i64::from_be_bytes(self.data))
+        let arr: [u8; 8] = self.data[..].try_into().map_err(|_| {
+            Error::MergeError(format!(
+                "invalid Int64 data length: expected 8, got {}",
+                self.data.len()
+            ))
+        })?;
+        Ok(i64::from_be_bytes(arr))
+    }
+
+    /// Decode the increment value as f32
+    pub fn decode_float32(&self) -> Result<f32> {
+        let arr: [u8; 4] = self.data[..].try_into().map_err(|_| {
+            Error::MergeError(format!(
+                "invalid Float32 data length: expected 4, got {}",
+                self.data.len()
+            ))
+        })?;
+        Ok(f32::from_be_bytes(arr))
     }
 
     /// Decode the increment value as f64
     pub fn decode_float64(&self) -> Result<f64> {
-        Ok(f64::from_be_bytes(self.data))
+        let arr: [u8; 8] = self.data[..].try_into().map_err(|_| {
+            Error::MergeError(format!(
+                "invalid Float64 data length: expected 8, got {}",
+                self.data.len()
+            ))
+        })?;
+        Ok(f64::from_be_bytes(arr))
     }
 }
 
@@ -307,6 +367,39 @@ impl Counter {
         }
     }
 
+    /// Get current value as f32
+    async fn get_float32(&self, reader: &dyn Reader) -> Result<f32> {
+        match reader
+            .get(&self.value_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+        {
+            Some(bytes) => {
+                if bytes.len() != 4 {
+                    return Err(Error::MergeError(format!(
+                        "invalid counter value length for field '{}' in schema '{}': \
+                         expected 4 bytes (Float32), got {} bytes",
+                        self.field_name,
+                        self.schema_version_id,
+                        bytes.len()
+                    )));
+                }
+                let arr: [u8; 4] = bytes[..4]
+                    .try_into()
+                    .expect("length already validated as 4 bytes");
+                Ok(f32::from_be_bytes(arr))
+            }
+            None => Ok(0.0),
+        }
+    }
+
+    /// Set value as f32
+    async fn set_float32(&self, rw: &mut dyn ReaderWriter, value: f32) -> Result<()> {
+        rw.set(&self.value_key, &value.to_be_bytes())
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))
+    }
+
     /// Set value as f64
     async fn set_float64(&self, rw: &mut dyn ReaderWriter, value: f64) -> Result<()> {
         rw.set(&self.value_key, &value.to_be_bytes())
@@ -354,6 +447,18 @@ impl Counter {
                 // Int64: Wrap on overflow to match Go DefraDB behavior
                 NewValue::Int64(current.wrapping_add(increment))
             }
+            NumericKind::Float32 => {
+                let increment = delta.decode_float32()?;
+                if !self.allow_decrement && increment < 0.0 {
+                    return Err(Error::MergeError("decrement not allowed".into()));
+                }
+                let current = if is_create {
+                    0.0f32
+                } else {
+                    self.get_float32(rw).await?
+                };
+                NewValue::Float32(current + increment)
+            }
             NumericKind::Float64 => {
                 let increment = delta.decode_float64()?;
                 if !self.allow_decrement && increment < 0.0 {
@@ -371,6 +476,7 @@ impl Counter {
 
         match new_value {
             NewValue::Int64(v) => self.set_int64(rw, v).await?,
+            NewValue::Float32(v) => self.set_float32(rw, v).await?,
             NewValue::Float64(v) => self.set_float64(rw, v).await?,
         }
 
@@ -403,6 +509,23 @@ impl Counter {
             return Ok(false);
         }
         self.set_int64(rw, value).await?;
+        Ok(true)
+    }
+
+    /// Float32 variant of `seed_if_uninitialized_int64`.
+    pub async fn seed_if_uninitialized_float32(
+        &self,
+        rw: &mut dyn ReaderWriter,
+        value: f32,
+    ) -> Result<bool> {
+        let has_value = rw
+            .has(&self.value_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        if has_value {
+            return Ok(false);
+        }
+        self.set_float32(rw, value).await?;
         Ok(true)
     }
 
