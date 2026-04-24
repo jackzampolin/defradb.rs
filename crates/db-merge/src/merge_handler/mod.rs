@@ -474,7 +474,13 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                 tracing::debug!(cid = %cid, "CollectionSet delta - skipping");
                 Ok(MergeOutcome::terminal_skip("collection set delta"))
             }
-            _ => unreachable!(),
+            // Only the variant discriminant is reported — `CrdtDelta` carries
+            // field-value bytes from user documents and must not be formatted
+            // into error strings that may end up in logs.
+            other => Err(MergeError::UnsupportedDelta(format!(
+                "unhandled CrdtDelta variant in merge dispatch: {:?}",
+                std::mem::discriminant(other)
+            ))),
         }
     }
 

@@ -403,7 +403,13 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     .await
             }
             CrdtDelta::CollectionSet(_) => Ok(MergeOutcome::terminal_skip("collection set delta")),
-            _ => unreachable!(),
+            // Only the variant discriminant is reported — `CrdtDelta` carries
+            // field-value bytes from user documents and must not be formatted
+            // into error strings that may end up in logs.
+            other => Err(MergeError::UnsupportedDelta(format!(
+                "unhandled CrdtDelta variant in batch dispatch: {:?}",
+                std::mem::discriminant(other)
+            ))),
         }
     }
 }

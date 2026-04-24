@@ -42,7 +42,7 @@ pub fn generate_field_artifact(
     let identity_bytes = identity_pubkey.unwrap_or(&[]);
 
     // Generate tag based on index type
-    let tag = match enc_idx.index_type {
+    let tag = match &enc_idx.index_type {
         EncryptedIndexType::Equality => generate_equality_tag(
             enc_key,
             identity_bytes,
