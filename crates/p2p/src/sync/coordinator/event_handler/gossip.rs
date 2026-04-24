@@ -3,6 +3,7 @@
 use blockstore::Blockstore;
 use cid::Cid;
 
+use super::super::authorizer::AccessAuthorizer;
 use super::super::SyncCoordinator;
 use crate::error::Result;
 use crate::message::PushLogBroadcast;
