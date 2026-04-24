@@ -127,6 +127,19 @@ impl P2PTransport for Libp2pTransport {
         Ok(MessageId::from(gossip_id))
     }
 
+    async fn publish_raw(&self, topic: String, data: Vec<u8>) -> Result<MessageId> {
+        let gossip_id = self.handle.publish_raw(topic, data).await?;
+        Ok(MessageId::from(gossip_id))
+    }
+
+    async fn subscribe_raw(&self, topic: String) -> Result<bool> {
+        self.handle.subscribe_raw(topic).await
+    }
+
+    async fn register_pubsub_rpc_topic(&self, topic: String) -> Result<()> {
+        self.handle.register_pubsub_rpc_topic(topic).await
+    }
+
     async fn topic_peers(&self, topic: DefraTopic) -> Result<Vec<PeerId>> {
         let libp2p_peers = self.handle.topic_peers(topic).await?;
         Ok(libp2p_peers
@@ -311,6 +324,17 @@ pub fn convert_host_event(event: crate::host::HostEvent) -> TransportEvent<Respo
             message_id: MessageId::from(message_id),
             topic,
             message,
+        },
+        HostEvent::GossipRawMessage {
+            propagation_source,
+            message_id,
+            topic,
+            data,
+        } => TransportEvent::GossipRawMessage {
+            propagation_source: PeerId::from(propagation_source),
+            message_id: MessageId::from(message_id),
+            topic,
+            data,
         },
         HostEvent::PeerSubscribed { peer_id, topic } => TransportEvent::PeerSubscribed {
             peer_id: PeerId::from(peer_id),

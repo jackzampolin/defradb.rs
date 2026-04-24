@@ -123,6 +123,12 @@ where
         Err(error) => tracing::warn!(error = %error, "failed to load persisted P2P collections"),
     }
 
+    // Start pubsub_rpc doc-sync / sync-branchable services (#828) so this
+    // node can interoperate with Go DefraDB peers over gossipsub.
+    if let Err(error) = coordinator.start_pubsub_services().await {
+        tracing::warn!(error = %error, "failed to start pubsub_rpc services");
+    }
+
     let host_event_task =
         spawn_libp2p_event_handler(event_rx, coordinator.clone(), event_bus.clone());
     let replication_task = spawn_replication_loop(

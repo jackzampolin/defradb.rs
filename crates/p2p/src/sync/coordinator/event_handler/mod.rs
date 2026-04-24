@@ -5,6 +5,7 @@ mod branchable_sync;
 pub(crate) mod car;
 mod doc_sync;
 mod gossip;
+mod pubsub_raw;
 mod pushlog;
 
 use blockstore::Blockstore;
@@ -117,6 +118,25 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     });
                 }
                 self.handle_gossip_message(propagation_source, message, topic)
+                    .await?;
+            }
+            TransportEvent::GossipRawMessage {
+                propagation_source,
+                topic,
+                data,
+                ..
+            } => {
+                if !self.runtime.rate_limiter.check(&propagation_source) {
+                    tracing::debug!(
+                        peer_id = %propagation_source,
+                        "Rate limit exceeded for GossipRawMessage, dropping"
+                    );
+                    return Err(Error::AccessDenied {
+                        peer_id: propagation_source.to_string(),
+                        collection_id: "rate-limited".into(),
+                    });
+                }
+                self.handle_gossip_raw_message(propagation_source, topic, data)
                     .await?;
             }
             TransportEvent::PushLogRequest {

@@ -40,6 +40,21 @@ pub enum HostEvent {
         message: PushLogBroadcast,
     },
 
+    /// Received a gossipsub message on a topic registered as `pubsub_rpc`
+    /// (via [`super::command::HostCommand::RegisterPubsubRpcTopic`]).
+    ///
+    /// The host does not attempt to decode the payload; the consumer (the
+    /// coordinator, see `sync/coordinator/event_handler/doc_sync.rs` and
+    /// `branchable_sync.rs`) runs it through its own
+    /// `pubsub_rpc::TopicHandler`. This channel is how DocSync and
+    /// BranchableSync receive Go-compatible traffic (#828).
+    GossipRawMessage {
+        propagation_source: PeerId,
+        message_id: gossipsub::MessageId,
+        topic: String,
+        data: Vec<u8>,
+    },
+
     /// A peer subscribed to a topic we're also subscribed to.
     PeerSubscribed { peer_id: PeerId, topic: String },
 

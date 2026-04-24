@@ -132,6 +132,16 @@ pub enum TransportEvent<ResponseToken> {
         topic: String,
         message: PushLogBroadcast,
     },
+    /// Raw gossipsub message on a topic registered as `pubsub_rpc`-owned
+    /// (#828). The payload is an opaque CBOR-encoded DocSync/Branchable
+    /// request or an `InternalResponse` envelope; the coordinator feeds
+    /// it into a `pubsub_rpc::TopicHandler` for decoding.
+    GossipRawMessage {
+        propagation_source: PeerId,
+        message_id: MessageId,
+        topic: String,
+        data: Vec<u8>,
+    },
     PeerSubscribed {
         peer_id: PeerId,
         topic: String,
@@ -247,6 +257,43 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
     async fn unsubscribe(&self, topic: DefraTopic) -> Result<bool>;
 
     async fn publish(&self, topic: DefraTopic, msg: PushLogBroadcast) -> Result<MessageId>;
+
+    /// Publish raw pre-encoded bytes on `topic`. Used by the pubsub_rpc layer
+    /// (#828) for DocSync/BranchableSync requests and for
+    /// `<base>/<peer>/_response` reply envelopes, whose payloads are not
+    /// `PushLogBroadcast`-shaped and whose topic names are not
+    /// [`DefraTopic`] variants.
+    ///
+    /// Default implementation returns `Error::Transport("not supported")` —
+    /// transports that don't implement gossipsub (iroh, mocks) can rely on
+    /// it; libp2p overrides.
+    async fn publish_raw(&self, _topic: String, _data: Vec<u8>) -> Result<MessageId> {
+        Err(crate::error::Error::Transport(
+            "publish_raw is not supported on this transport".to_string(),
+        ))
+    }
+
+    /// Subscribe to an arbitrary topic string without the [`DefraTopic`]
+    /// wrapper. Used for dynamic pubsub_rpc response sub-topics.
+    ///
+    /// Default implementation returns `Error::Transport("not supported")`.
+    async fn subscribe_raw(&self, _topic: String) -> Result<bool> {
+        Err(crate::error::Error::Transport(
+            "subscribe_raw is not supported on this transport".to_string(),
+        ))
+    }
+
+    /// Register `topic` as owned by the pubsub_rpc layer. Future inbound
+    /// gossipsub messages on `topic` (or any sub-topic matching
+    /// `<topic>/<peer>/_response`) arrive as
+    /// [`TransportEvent::GossipRawMessage`] rather than being decoded as
+    /// PushLog broadcasts. Idempotent.
+    ///
+    /// Default implementation is a no-op so callers can register
+    /// unconditionally on transports without a gossipsub dispatcher.
+    async fn register_pubsub_rpc_topic(&self, _topic: String) -> Result<()> {
+        Ok(())
+    }
 
     /// Get all peers known to GossipSub for a topic (mesh + non-mesh).
     async fn topic_peers(&self, topic: DefraTopic) -> Result<Vec<PeerId>>;

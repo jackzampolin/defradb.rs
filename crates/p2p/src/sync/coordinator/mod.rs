@@ -38,10 +38,13 @@
 
 mod access;
 mod accessors;
+mod authorizer;
 mod broadcast;
 mod constructor;
 pub(crate) mod dag_fetcher;
 mod event_handler;
+mod pubsub_client;
+mod pubsub_services;
 mod replicators;
 mod result_types;
 mod subscriptions;
@@ -234,8 +237,17 @@ pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
     /// Subscription and doc-sync support state.
     pub(super) subscriptions: SyncSubscriptionState,
 
+    /// Shared peer-authorization backend. Used by both the two-stream
+    /// access helpers and the `pubsub_rpc` handlers so both paths make
+    /// the same decision for the same peer state.
+    pub(super) authorizer: Arc<authorizer::RuntimeAuthorizer<T>>,
+
     /// Optional document ACP used for local ACP relationship snapshot replay.
     pub(super) document_acp: std::sync::OnceLock<Arc<dyn DocumentACP>>,
+
+    /// Pubsub_rpc DocSync/BranchableSync services (#828). `None` on
+    /// transports whose local peer id isn't a libp2p PeerId (e.g. iroh).
+    pub(super) pubsub_services: Option<pubsub_services::PubsubServices>,
 }
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {

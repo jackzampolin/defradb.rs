@@ -105,7 +105,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         Ok(())
     }
 
-    pub(super) async fn handle_branchable_sync_reply(
+    pub(in crate::sync::coordinator) async fn handle_branchable_sync_reply(
         &self,
         peer_id: PeerId,
         reply: crate::message::BranchableSyncReply,

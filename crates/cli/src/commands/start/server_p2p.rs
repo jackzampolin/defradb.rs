@@ -114,6 +114,12 @@ impl Node {
         let coordinator = Arc::new(coordinator);
         let coordinator_for_acp = coordinator.clone();
 
+        // Start pubsub_rpc doc-sync / sync-branchable services (#828) so
+        // this node can interoperate with Go DefraDB peers over gossipsub.
+        if let Err(e) = coordinator.start_pubsub_services().await {
+            warn!("Failed to start pubsub_rpc services: {}", e);
+        }
+
         match db_merge::load_persisted_collections(&coordinator).await {
             Ok(count) => {
                 if count > 0 {
@@ -468,6 +474,12 @@ impl Node {
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         let coordinator_for_acp = coordinator.clone();
+
+        // Start pubsub_rpc doc-sync / sync-branchable services (#828) so
+        // this node can interoperate with Go DefraDB peers over gossipsub.
+        if let Err(e) = coordinator.start_pubsub_services().await {
+            warn!("Failed to start pubsub_rpc services: {}", e);
+        }
 
         match db_merge::load_persisted_collections(&coordinator).await {
             Ok(count) => {

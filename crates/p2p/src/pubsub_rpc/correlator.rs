@@ -17,6 +17,7 @@ use cid::Cid;
 use libp2p::PeerId;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
+use tracing::debug;
 
 use super::envelope::InternalResponse;
 use super::id::derive_request_id;
@@ -194,6 +195,11 @@ impl Correlator {
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 // Full: backpressure trap. Keep the entry but report drop.
+                debug!(
+                    from = %from,
+                    request_id = %id,
+                    "pubsub_rpc: response dropped due to full buffer"
+                );
                 false
             }
         }

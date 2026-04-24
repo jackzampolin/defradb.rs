@@ -32,6 +32,7 @@ use crate::ReplicatorInfo;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 
+use super::authorizer::RuntimeAuthorizer;
 use super::{
     SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState,
     DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
@@ -115,6 +116,13 @@ fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
 
     let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), SyncConfig::default());
 
+    let authorizer = Arc::new(RuntimeAuthorizer::new(
+        transport.clone(),
+        Arc::clone(&peer_state),
+        Arc::clone(&replicators),
+        access_mode,
+    ));
+
     let coordinator = SyncCoordinator {
         runtime: SyncRuntime {
             transport,
@@ -143,7 +151,9 @@ fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
             collection_store: Arc::new(NoOpCollectionStorage),
             head_provider: Arc::new(NoOpHeadProvider),
         },
+        authorizer,
         document_acp: std::sync::OnceLock::new(),
+        pubsub_services: None,
     };
 
     (coordinator, events)
