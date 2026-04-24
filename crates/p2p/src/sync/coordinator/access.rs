@@ -110,29 +110,4 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub fn access_mode(&self) -> AccessMode {
         self.access.access_mode
     }
-
-    pub(super) async fn peer_is_connected(&self, peer_id: &PeerId) -> bool {
-        let peer_id_str = peer_id.as_str();
-        if self.access.peer_state.is_connected(peer_id_str) {
-            return true;
-        }
-
-        match self.runtime.transport.connected_peers().await {
-            Ok(peers) => {
-                let is_connected = peers.iter().any(|peer| peer.as_str() == peer_id_str);
-                if is_connected {
-                    self.access.peer_state.peer_connected(peer_id_str);
-                }
-                is_connected
-            }
-            Err(error) => {
-                tracing::debug!(
-                    peer_id = %peer_id,
-                    error = %error,
-                    "Failed to read transport-connected peers during access check"
-                );
-                false
-            }
-        }
-    }
 }

@@ -25,7 +25,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         );
 
         if !self.access.access_mode.is_open() {
-            let is_connected = self.peer_is_connected(&propagation_source).await;
+            let topic_matches_collection = topic == message.collection_id;
             let is_authorized_replicator = self
                 .authorizer
                 .peer_authorized_for_collection(propagation_source.as_str(), &message.collection_id)
@@ -37,12 +37,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 .await
                 .contains(&message.collection_id);
 
-            if !is_connected || (!is_authorized_replicator && !is_subscribed) {
+            if !topic_matches_collection || (!is_authorized_replicator && !is_subscribed) {
                 tracing::warn!(
                     peer_id = %propagation_source,
+                    topic = %topic,
                     collection_id = %message.collection_id,
                     doc_id = %message.doc_id,
-                    is_connected,
+                    topic_matches_collection,
                     is_authorized_replicator,
                     is_subscribed,
                     "Dropping GossipSub message from unauthorized peer"

@@ -557,10 +557,14 @@ fn pushlog_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
 }
 
 fn gossip_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
+    gossip_event_on_topic(peer_id, collection_id, collection_id)
+}
+
+fn gossip_event_on_topic(peer_id: PeerId, topic: &str, collection_id: &str) -> TransportEvent<()> {
     TransportEvent::GossipMessage {
         propagation_source: peer_id,
         message_id: MessageId::new("gossip".to_string()),
-        topic: collection_id.to_string(),
+        topic: topic.to_string(),
         message: PushLogBroadcast::from_request(&pushlog_request(collection_id)),
     }
 }
@@ -795,28 +799,12 @@ async fn branchable_sync_controlled_mode_rejects_non_replicator_connected_peer()
 }
 
 #[tokio::test]
-async fn gossip_subscribed_collection_uses_transport_connected_peer_state() {
+async fn gossip_subscribed_collection_accepts_without_peer_connection_cache() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
-    let transport = NoopTransport::new();
-    let local_peer_id = transport.local_peer_id().to_string();
-    let broadcaster = Broadcaster::new(transport.clone());
-    let store = Arc::new(MemoryStore::new());
-    let blockstore = Arc::new(DefraBlockstore::new(store, true));
-
     let peer = random_peer_id();
-    transport.set_connected_peers(vec![peer.clone()]);
-
-    let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
-        access_mode: AccessMode::Controlled,
-        replicators,
-        peer_state: peer_state.clone(),
-        transport,
-        local_peer_id,
-        broadcaster,
-        blockstore,
-        rate_limiter: Arc::new(PeerRateLimiter::default()),
-    });
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state.clone());
 
     assert!(
         !peer_state.is_connected(peer.as_str()),
@@ -836,7 +824,7 @@ async fn gossip_subscribed_collection_uses_transport_connected_peer_state() {
 
     assert!(
         !matches!(&result, Err(Error::AccessDenied { .. })),
-        "transport-connected peer should satisfy the gossip connection gate on subscribed collection, got {:?}",
+        "delivered gossip on a subscribed collection should not require a separate connection-cache hit, got {:?}",
         result
     );
 }
@@ -963,7 +951,6 @@ async fn gossip_controlled_mode_allows_subscribed_collection() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
-    peer_state.peer_connected(peer.as_str());
     let (coordinator, _events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
 
@@ -980,7 +967,33 @@ async fn gossip_controlled_mode_allows_subscribed_collection() {
 
     assert!(
         !matches!(&result, Err(Error::AccessDenied { .. })),
-        "gossip from a connected peer on a subscribed collection must be accepted, got {:?}",
+        "gossip on a subscribed collection must be accepted, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gossip_controlled_mode_rejects_mismatched_topic_and_payload_collection() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    let result = coordinator
+        .handle_transport_event(gossip_event_on_topic(peer, "collection2", "collection1"))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "gossip payload collection must match the received topic, got {:?}",
         result
     );
 }
@@ -1021,7 +1034,6 @@ async fn gossip_access_falls_back_to_transport_replicator_state() {
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
     let peer = random_peer_id();
-    transport.set_connected_peers(vec![peer.clone()]);
     transport
         .create_replicator(&peer, vec!["collection1".to_string()])
         .await
