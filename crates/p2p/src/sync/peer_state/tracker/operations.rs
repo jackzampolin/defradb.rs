@@ -6,6 +6,20 @@ use cid::Cid;
 
 use super::{PeerInfo, PeerStateTracker};
 use crate::sync::peer_state::stats::PeerStats;
+use crate::topics::{DOC_SYNC_TOPIC, ENCRYPTION_TOPIC, SYNC_BRANCHABLE_TOPIC};
+
+fn is_topic_or_subtopic(topic: &str, base: &str) -> bool {
+    topic == base
+        || topic
+            .strip_prefix(base)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn is_data_subscription_topic(topic: &str) -> bool {
+    topic != ENCRYPTION_TOPIC
+        && !is_topic_or_subtopic(topic, DOC_SYNC_TOPIC)
+        && !is_topic_or_subtopic(topic, SYNC_BRANCHABLE_TOPIC)
+}
 
 impl PeerStateTracker {
     /// Record that a peer connected.
@@ -123,6 +137,23 @@ impl PeerStateTracker {
             })
             .map(|(peer_id, _)| peer_id.clone())
             .collect()
+    }
+
+    /// Check if a peer has advertised interest in any data topic.
+    ///
+    /// System RPC topics are excluded because every libp2p node joins
+    /// them at startup; accepting those would collapse Controlled mode back
+    /// to "any connected sync peer".
+    pub fn peer_has_data_subscription(&self, peer_id: &str) -> bool {
+        let peers = self.peers.read();
+        peers
+            .get(peer_id)
+            .map(|info| {
+                info.subscribed_collections
+                    .iter()
+                    .any(|topic| is_data_subscription_topic(topic))
+            })
+            .unwrap_or(false)
     }
 
     /// Get all connected peers.

@@ -5,7 +5,7 @@
 //! `check_access_str`) and the `pubsub_rpc` path
 //! (`HandlerContext::peer_may_*`) can't drift. Drift here is a Go
 //! parity hazard: every request path must agree that Controlled mode
-//! requires replicator membership, not just an authenticated connection.
+//! requires sync authorization, not just an authenticated connection.
 
 use std::sync::Arc;
 
@@ -23,7 +23,7 @@ use crate::transport::{P2PTransport, PeerId};
 #[async_trait]
 pub(super) trait AccessAuthorizer: Send + Sync {
     /// Returns `true` when the peer is allowed to send an any-collection
-    /// sync request (DocSync).
+    /// sync request (DocSync/CAR fetch).
     async fn peer_authorized_for_any(&self, peer_id_str: &str) -> bool;
 
     /// Returns `true` when the peer is allowed to send a
@@ -37,6 +37,7 @@ pub(super) trait AccessAuthorizer: Send + Sync {
 /// backfills caches on hits so subsequent checks stay hot.
 pub(in crate::sync) struct RuntimeAuthorizer<T: P2PTransport> {
     transport: T,
+    peer_state: Arc<PeerStateTracker>,
     replicators: Arc<ReplicatorRegistry>,
     access_mode: AccessMode,
 }
@@ -44,12 +45,13 @@ pub(in crate::sync) struct RuntimeAuthorizer<T: P2PTransport> {
 impl<T: P2PTransport> RuntimeAuthorizer<T> {
     pub(in crate::sync) fn new(
         transport: T,
-        _peer_state: Arc<PeerStateTracker>,
+        peer_state: Arc<PeerStateTracker>,
         replicators: Arc<ReplicatorRegistry>,
         access_mode: AccessMode,
     ) -> Self {
         Self {
             transport,
+            peer_state,
             replicators,
             access_mode,
         }
@@ -83,6 +85,9 @@ impl<T: P2PTransport> AccessAuthorizer for RuntimeAuthorizer<T> {
             return true;
         }
         if self.replicators.is_any_replicator(peer_id_str) {
+            return true;
+        }
+        if self.peer_state.peer_has_data_subscription(peer_id_str) {
             return true;
         }
         self.transport_replicator_collections(peer_id_str)

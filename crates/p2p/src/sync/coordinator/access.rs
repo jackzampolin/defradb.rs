@@ -78,9 +78,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// carry a collection id. Strict membership is the best gate we can
     /// apply without protocol-level collection scoping; it still eliminates
     /// the "any connected peer" bypass that #838 flagged. In Open mode all
-    /// peers are allowed; in Controlled mode the peer must be registered as a
-    /// replicator for at least one collection, either in the local registry or
-    /// in the transport's replicator state on a registry cache miss.
+    /// peers are allowed. In Controlled mode the peer must either be
+    /// registered as a replicator for at least one collection, be observed on
+    /// a data subscription topic, or appear in the transport's replicator
+    /// state on a registry cache miss.
     ///
     /// Per-doc collection filtering (rejecting reads for specific collections
     /// the peer isn't authorized for) would be a stricter fix but requires a

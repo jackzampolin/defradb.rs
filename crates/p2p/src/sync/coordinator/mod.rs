@@ -25,16 +25,18 @@
 //! - **Replicator registration** expresses outbound replay intent and explicit
 //!   replay trust. It controls what we push and which peers are treated as
 //!   explicit replicators.
-//! - **Inbound PushLog/Gossip acceptance** is broader. Transport-authenticated
-//!   peers may deliver updates even if the receiver has not registered them as
-//!   local replicators for that collection.
+//! - **Inbound PushLog acceptance** requires collection replicator membership,
+//!   except for requests carrying explicit replay authorization.
+//! - **Inbound Gossip acceptance** also allows locally subscribed collection
+//!   topics so subscription-based sync can receive updates without registering
+//!   the publisher as an explicit replicator.
 //! - **Document-level ACP** remains the authoritative policy boundary for whether
 //!   replicated document content is actually mergeable/readable locally.
 //!
-//! Collection-scoped access checks are still used for protocols that ask the
-//! receiver to actively serve or enumerate state (for example DocSync,
-//! BranchableSync, CAR fetch). They are intentionally not the primary ingress
-//! gate for passive PushLog/Gossip delivery, matching Go.
+//! Collection-scoped access checks are also used for protocols that ask the
+//! receiver to actively serve or enumerate state. Unscoped fetch protocols
+//! (DocSync/CAR) admit registered replicators and observed data-topic
+//! subscribers while still denying peers that are merely connected.
 
 mod access;
 mod accessors;

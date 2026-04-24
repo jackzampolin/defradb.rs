@@ -25,7 +25,7 @@ use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
 use crate::sync::peer_state::PeerStateTracker;
 use crate::sync::rate_limiter::PeerRateLimiter;
 use crate::sync::SyncShutdownHandle;
-use crate::topics::DefraTopic;
+use crate::topics::{DefraTopic, DOC_SYNC_TOPIC};
 use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
 use crate::ReplicatorInfo;
@@ -639,10 +639,10 @@ async fn doc_sync_controlled_mode_allows_replicator() {
 }
 
 // #838: in Controlled mode, a merely-connected peer must not pass
-// `check_peer_is_replicator`. Only registry membership (for at least
-// one collection) counts. The previous behaviour silently accepted
-// any authenticated-by-transport peer, which defeats the collection
-// authorization layer.
+// `check_peer_is_replicator`. Registry membership or an observed data-topic
+// subscription is required. The previous behaviour silently accepted any
+// authenticated-by-transport peer, which defeats the collection authorization
+// layer.
 #[tokio::test]
 async fn doc_sync_controlled_mode_rejects_non_replicator_connected_peer() {
     let replicators = Arc::new(ReplicatorRegistry::new());
@@ -661,6 +661,50 @@ async fn doc_sync_controlled_mode_rejects_non_replicator_connected_peer() {
     assert!(
         matches!(&result, Err(Error::AccessDenied { .. })),
         "Connected-but-not-registered peer must be denied in Controlled mode, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn doc_sync_controlled_mode_allows_data_topic_subscriber() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+
+    let peer = random_peer_id();
+    peer_state.peer_subscribed(peer.as_str(), "collection1".to_string());
+
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(doc_sync_event(peer))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "Data-topic subscriber should not get AccessDenied, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn doc_sync_controlled_mode_rejects_system_topic_only_subscriber() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+
+    let peer = random_peer_id();
+    peer_state.peer_subscribed(peer.as_str(), DOC_SYNC_TOPIC.to_string());
+
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(doc_sync_event(peer))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "System RPC topic subscription must not authorize DocSync, got {:?}",
         result
     );
 }
