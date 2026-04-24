@@ -26,6 +26,7 @@
 //! IPFS block exchange protocol (1.0.0, 1.1.0, 1.2.0), enabling
 //! interoperability with Go DefraDB.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use iroh_bitswap::{Bitswap, BitswapEvent, Config as BitswapConfig, Store};
@@ -43,6 +44,7 @@ use libp2p_stream as stream;
 
 use libp2p::identity::Keypair;
 
+use crate::bitswap::{make_peer_block_access_filter, AccessMode, ReplicatorRegistry};
 use crate::codec::PushLogCodec;
 use crate::message::{PushLogReply, PushLogRequest};
 
@@ -159,7 +161,7 @@ impl From<void::Void> for DefraEvent {
     }
 }
 
-impl<S: Store> DefraBehaviour<S> {
+impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
     /// Create a new DefraDB network behaviour with message signing enabled.
     ///
     /// # Arguments
@@ -168,6 +170,10 @@ impl<S: Store> DefraBehaviour<S> {
     /// * `local_public_key` - The local peer's public key
     /// * `keypair` - The keypair for message signing/verification
     /// * `bitswap_store` - The blockstore for Bitswap block exchange
+    /// * `access_mode` - Controls whether the Bitswap filter enforces
+    ///   per-peer access control on served blocks
+    /// * `replicators` - Registry used by the filter to authorize peers
+    ///   per collection (shared with SyncCoordinator)
     ///
     /// # Returns
     ///
@@ -177,11 +183,14 @@ impl<S: Store> DefraBehaviour<S> {
     ///
     /// This must be called within a tokio runtime context as Bitswap spawns
     /// background tasks for operations.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         local_peer_id: PeerId,
         local_public_key: libp2p::identity::PublicKey,
         keypair: Keypair,
         bitswap_store: S,
+        access_mode: AccessMode,
+        replicators: Arc<ReplicatorRegistry>,
         enable_pubsub: bool,
         config: &super::P2PHostConfig,
     ) -> Result<Self, crate::error::Error> {
@@ -235,9 +244,23 @@ impl<S: Store> DefraBehaviour<S> {
         // Run as server to respond to DHT queries from other peers
         kademlia.set_mode(Some(Mode::Server));
 
-        // Configure Bitswap for block exchange (Go compatibility)
-        // iroh-bitswap implements the standard IPFS bitswap protocols
-        let bitswap_config = BitswapConfig::default();
+        // Configure Bitswap for block exchange (Go compatibility).
+        // iroh-bitswap implements the standard IPFS bitswap protocols.
+        //
+        // Install a per-peer block-request filter to enforce ACP on the
+        // egress path. Without this, any connected peer could fetch any
+        // block in the blockstore — see #830. Matches Go's
+        // `bitswap.WithPeerBlockRequestFilter(hasAccess)` wiring
+        // (`go-p2p/peer.go:146`).
+        let filter = make_peer_block_access_filter(
+            access_mode,
+            Arc::clone(&replicators),
+            bitswap_store.clone(),
+        );
+        let mut bitswap_config = BitswapConfig::default();
+        if let Some(server_cfg) = bitswap_config.server.as_mut() {
+            server_cfg.decision_config.peer_block_request_filter = Some(Box::new(filter));
+        }
         let bitswap = Bitswap::new(local_peer_id, bitswap_store, bitswap_config).await;
 
         // Configure stream behaviour for Go two-stream compatibility
@@ -461,8 +484,18 @@ mod tests {
         let store = MockBitswapStore::new();
 
         let config = crate::P2PHostConfig::default();
-        let behaviour =
-            DefraBehaviour::new(peer_id, public_key, keypair, store, true, &config).await;
+        let registry = Arc::new(ReplicatorRegistry::new());
+        let behaviour = DefraBehaviour::new(
+            peer_id,
+            public_key,
+            keypair,
+            store,
+            AccessMode::Open,
+            registry,
+            true,
+            &config,
+        )
+        .await;
         assert!(behaviour.is_ok());
     }
 
@@ -485,8 +518,18 @@ mod tests {
         let store = MockBitswapStore::new();
 
         let config = crate::P2PHostConfig::default();
-        let behaviour =
-            DefraBehaviour::new(peer_id, public_key, keypair, store, false, &config).await;
+        let registry = Arc::new(ReplicatorRegistry::new());
+        let behaviour = DefraBehaviour::new(
+            peer_id,
+            public_key,
+            keypair,
+            store,
+            AccessMode::Open,
+            registry,
+            false,
+            &config,
+        )
+        .await;
         assert!(behaviour.is_ok());
         let behaviour = behaviour.unwrap();
         assert!(behaviour.gossipsub.as_ref().is_none());

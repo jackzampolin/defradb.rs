@@ -53,17 +53,15 @@ pub(super) async fn handle_command(
             addrs,
             reply,
         } => {
-            let result = handle_dial(
+            let ctx = DialContext {
                 endpoint,
                 peer_map,
                 pending_pushlog_replies,
                 subscriptions,
                 spawned_tasks,
-                &peer_id,
-                addrs,
                 event_tx,
-            )
-            .await;
+            };
+            let result = handle_dial(&ctx, &peer_id, addrs).await;
             let _ = reply.send(result);
         }
         IrohCommand::Listen { addr: _, reply } => {
@@ -480,21 +478,35 @@ pub(super) async fn handle_command(
     false
 }
 
+/// Shared dispatcher state borrowed into `handle_dial`.
+///
+/// Bundled into a struct so the function signature stays under clippy's
+/// `too_many_arguments` threshold and to make the call site's intent —
+/// "dial this peer, using the usual endpoint context" — explicit.
+struct DialContext<'a> {
+    endpoint: &'a Endpoint,
+    peer_map: &'a Arc<parking_lot::Mutex<PeerMap>>,
+    pending_pushlog_replies:
+        &'a Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
+    subscriptions: &'a HashMap<String, TopicSubscription>,
+    spawned_tasks: &'a SpawnedTasks,
+    event_tx: &'a mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
+}
+
 /// Dial a peer by EndpointId.
 ///
 /// Keeps the connection alive by spawning a stream handler task.
 async fn handle_dial(
-    endpoint: &Endpoint,
-    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
-    pending_pushlog_replies: &Arc<
-        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
-    >,
-    subscriptions: &HashMap<String, TopicSubscription>,
-    spawned_tasks: &SpawnedTasks,
+    ctx: &DialContext<'_>,
     peer_id: &PeerId,
     addrs: Vec<PeerAddr>,
-    event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> crate::error::Result<()> {
+    let endpoint = ctx.endpoint;
+    let peer_map = ctx.peer_map;
+    let pending_pushlog_replies = ctx.pending_pushlog_replies;
+    let subscriptions = ctx.subscriptions;
+    let spawned_tasks = ctx.spawned_tasks;
+    let event_tx = ctx.event_tx;
     let endpoint_id = parse_endpoint_id(peer_id)?;
     let endpoint_addr = endpoint_addr_from_parts(peer_id, &addrs)?;
 
