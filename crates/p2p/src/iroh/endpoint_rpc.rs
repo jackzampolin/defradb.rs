@@ -18,6 +18,96 @@ use super::protocols;
 /// needs time to process the request before replying.
 pub(super) const REQUEST_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+#[derive(Debug, Clone)]
+struct CarFetchAttempt {
+    provider: PeerId,
+    outcome: CarFetchOutcome,
+}
+
+#[derive(Debug, Clone)]
+enum CarFetchOutcome {
+    Success,
+    InvalidPeerId(String),
+    ConnectFailed(String),
+    OpenBiFailed(String),
+    WriteFailed(String),
+    ReadFailed(String),
+    EmptyResponse,
+    HeaderOnlyCar,
+    EventChannelClosed,
+}
+
+impl CarFetchOutcome {
+    fn is_success(&self) -> bool {
+        matches!(self, Self::Success)
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::InvalidPeerId(_) => "invalid_peer_id",
+            Self::ConnectFailed(_) => "connect_failed",
+            Self::OpenBiFailed(_) => "open_bi_failed",
+            Self::WriteFailed(_) => "write_failed",
+            Self::ReadFailed(_) => "read_failed",
+            Self::EmptyResponse => "empty_response",
+            Self::HeaderOnlyCar => "header_only_car",
+            Self::EventChannelClosed => "event_channel_closed",
+        }
+    }
+
+    fn detail(&self) -> Option<&str> {
+        match self {
+            Self::InvalidPeerId(detail)
+            | Self::ConnectFailed(detail)
+            | Self::OpenBiFailed(detail)
+            | Self::WriteFailed(detail)
+            | Self::ReadFailed(detail) => Some(detail),
+            Self::Success
+            | Self::EmptyResponse
+            | Self::HeaderOnlyCar
+            | Self::EventChannelClosed => None,
+        }
+    }
+}
+
+fn summarize_car_fetch_attempts(attempts: &[CarFetchAttempt]) -> String {
+    const MAX_ATTEMPTS: usize = 4;
+
+    let mut parts = Vec::new();
+    for attempt in attempts.iter().take(MAX_ATTEMPTS) {
+        let mut summary = format!("{}:{}", attempt.provider, attempt.outcome.label());
+        if let Some(detail) = attempt.outcome.detail() {
+            summary.push('(');
+            summary.push_str(detail);
+            summary.push(')');
+        }
+        parts.push(summary);
+    }
+
+    if attempts.len() > MAX_ATTEMPTS {
+        parts.push(format!("+{} more", attempts.len() - MAX_ATTEMPTS));
+    }
+
+    parts.join(", ")
+}
+
+fn summarize_cid_sample(cids: &[cid::Cid]) -> String {
+    const MAX_CIDS: usize = 4;
+
+    let mut parts: Vec<String> = cids
+        .iter()
+        .take(MAX_CIDS)
+        .map(ToString::to_string)
+        .collect();
+
+    if cids.len() > MAX_CIDS {
+        parts.push(format!("+{} more", cids.len() - MAX_CIDS));
+    }
+
+    parts.join(", ")
+}
+
 fn endpoint_addr(
     endpoint_id: iroh::EndpointId,
     direct_addr: Option<std::net::SocketAddr>,
@@ -189,14 +279,14 @@ pub(super) async fn handle_car_request_response(
 
 /// Try to fetch CAR blocks from a single provider.
 ///
-/// Returns `true` if the fetch succeeded and a `CarFetchResponse` was emitted.
-pub(super) async fn try_fetch_from_provider(
+/// Returns a provider outcome so the caller can aggregate useful diagnostics.
+async fn try_fetch_from_provider(
     endpoint: &Endpoint,
     provider: &PeerId,
     request: CarFetchRequest,
     direct_addr: Option<std::net::SocketAddr>,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
-) -> bool {
+) -> CarFetchAttempt {
     // Per-provider CAR failures log at debug — the caller aggregates per-DAG
     // outcomes into a single WARN via BitswapComplete (see issue #858).
     if let Err(error) = parse_endpoint_id(provider) {
@@ -205,7 +295,10 @@ pub(super) async fn try_fetch_from_provider(
             error = %error,
             "CAR fetch: invalid provider peer ID"
         );
-        return false;
+        return CarFetchAttempt {
+            provider: provider.clone(),
+            outcome: CarFetchOutcome::InvalidPeerId(error.to_string()),
+        };
     }
 
     let connection = match connect_with_direct_addr_fallback(
@@ -226,7 +319,10 @@ pub(super) async fn try_fetch_from_provider(
                 error = %e,
                 "CAR fetch: connection failed"
             );
-            return false;
+            return CarFetchAttempt {
+                provider: provider.clone(),
+                outcome: CarFetchOutcome::ConnectFailed(e.to_string()),
+            };
         }
     };
 
@@ -239,7 +335,10 @@ pub(super) async fn try_fetch_from_provider(
                 error = %e,
                 "CAR fetch: open_bi failed"
             );
-            return false;
+            return CarFetchAttempt {
+                provider: provider.clone(),
+                outcome: CarFetchOutcome::OpenBiFailed(e.to_string()),
+            };
         }
     };
 
@@ -250,7 +349,10 @@ pub(super) async fn try_fetch_from_provider(
             error = %e,
             "CAR fetch: write_message failed"
         );
-        return false;
+        return CarFetchAttempt {
+            provider: provider.clone(),
+            outcome: CarFetchOutcome::WriteFailed(e.to_string()),
+        };
     }
     let _ = send.finish();
 
@@ -271,7 +373,10 @@ pub(super) async fn try_fetch_from_provider(
                 error = %e,
                 "CAR fetch: read response failed"
             );
-            return false;
+            return CarFetchAttempt {
+                provider: provider.clone(),
+                outcome: CarFetchOutcome::ReadFailed(e.to_string()),
+            };
         }
     };
 
@@ -291,7 +396,10 @@ pub(super) async fn try_fetch_from_provider(
                 car_data: Vec::new(),
             })
             .await;
-        return false;
+        return CarFetchAttempt {
+            provider: provider.clone(),
+            outcome: CarFetchOutcome::EmptyResponse,
+        };
     }
 
     // Distinguish a header-only CAR (server's "no blocks" signal) from a
@@ -322,9 +430,19 @@ pub(super) async fn try_fetch_from_provider(
         .is_err()
     {
         warn!("Event channel closed, cannot emit CarFetchResponse");
-        return false;
+        return CarFetchAttempt {
+            provider: provider.clone(),
+            outcome: CarFetchOutcome::EventChannelClosed,
+        };
     }
-    has_blocks
+    CarFetchAttempt {
+        provider: provider.clone(),
+        outcome: if has_blocks {
+            CarFetchOutcome::Success
+        } else {
+            CarFetchOutcome::HeaderOnlyCar
+        },
+    }
 }
 
 /// CAR-based block sync: fetch blocks from providers concurrently.
@@ -351,7 +469,7 @@ pub(super) async fn handle_block_sync(
         );
     }
 
-    let mut tasks: JoinSet<bool> = JoinSet::new();
+    let mut tasks: JoinSet<CarFetchAttempt> = JoinSet::new();
 
     let request = if missing.is_empty() {
         CarFetchRequest::full_dag(root)
@@ -372,6 +490,7 @@ pub(super) async fn handle_block_sync(
     }
 
     let mut any_success = false;
+    let mut failures = Vec::new();
     let provider_count = providers.len();
     let kind = if missing.is_empty() {
         "full-dag"
@@ -381,14 +500,18 @@ pub(super) async fn handle_block_sync(
 
     while let Some(task) = tasks.join_next().await {
         match task {
-            Ok(true) => {
+            Ok(attempt) if attempt.outcome.is_success() => {
                 any_success = true;
                 tasks.abort_all();
                 break;
             }
-            Ok(false) => {}
+            Ok(attempt) => failures.push(attempt),
             Err(e) => {
                 debug!("Block sync task panicked: {}", e);
+                failures.push(CarFetchAttempt {
+                    provider: PeerId::new("task".to_string()),
+                    outcome: CarFetchOutcome::ReadFailed(format!("join_error: {e}")),
+                });
             }
         }
     }
@@ -396,9 +519,18 @@ pub(super) async fn handle_block_sync(
     let error = if any_success {
         None
     } else {
+        let missing_summary = if missing.is_empty() {
+            String::new()
+        } else {
+            format!("; missing_sample=[{}]", summarize_cid_sample(&missing))
+        };
         Some(format!(
-            "{} CAR fetch failed: {} provider(s) tried, none returned usable blocks (root={})",
-            kind, provider_count, root
+            "{} CAR fetch failed: {} provider(s) tried, none returned usable blocks (root={}); outcomes=[{}]{}",
+            kind,
+            provider_count,
+            root,
+            summarize_car_fetch_attempts(&failures),
+            missing_summary,
         ))
     };
 
@@ -412,5 +544,53 @@ pub(super) async fn handle_block_sync(
         .is_err()
     {
         warn!("Event channel closed, cannot emit BitswapComplete");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cid::multihash::{Code, MultihashDigest};
+
+    fn peer_id(label: &[u8]) -> PeerId {
+        let hash = Code::Sha2_256.digest(label);
+        let cid = cid::Cid::new_v1(0x71, hash);
+        PeerId::new(cid.to_string())
+    }
+
+    fn cid(label: &[u8]) -> cid::Cid {
+        let hash = Code::Sha2_256.digest(label);
+        cid::Cid::new_v1(0x71, hash)
+    }
+
+    #[test]
+    fn summarize_car_fetch_attempts_includes_provider_and_reason() {
+        let attempts = vec![
+            CarFetchAttempt {
+                provider: peer_id(b"provider-a"),
+                outcome: CarFetchOutcome::HeaderOnlyCar,
+            },
+            CarFetchAttempt {
+                provider: peer_id(b"provider-b"),
+                outcome: CarFetchOutcome::ConnectFailed("timeout".into()),
+            },
+        ];
+
+        let summary = summarize_car_fetch_attempts(&attempts);
+
+        assert!(summary.contains("header_only_car"));
+        assert!(summary.contains("connect_failed(timeout)"));
+        assert!(summary.contains(&attempts[0].provider.to_string()));
+        assert!(summary.contains(&attempts[1].provider.to_string()));
+    }
+
+    #[test]
+    fn summarize_cid_sample_limits_output() {
+        let summary =
+            summarize_cid_sample(&[cid(b"a"), cid(b"b"), cid(b"c"), cid(b"d"), cid(b"e")]);
+
+        assert!(summary.contains(&cid(b"a").to_string()));
+        assert!(summary.contains(&cid(b"d").to_string()));
+        assert!(summary.contains("+1 more"));
     }
 }
