@@ -93,9 +93,18 @@ pub fn decode_car(data: &[u8]) -> Result<CarContents> {
     cursor = &cursor[header_len as usize..];
     let roots = decode_car_header(header_bytes)?;
 
-    // Read blocks
+    // Read blocks. Cap at CAR_MAX_BLOCKS to prevent a hostile peer from
+    // sending millions of tiny block headers that allocate unbounded memory
+    // before any downstream limit fires (#840).
     let mut blocks = Vec::new();
     while !cursor.is_empty() {
+        if blocks.len() >= CAR_MAX_BLOCKS {
+            return Err(Error::Codec(format!(
+                "CAR file exceeds maximum block count of {}",
+                CAR_MAX_BLOCKS
+            )));
+        }
+
         let section_len = read_varint(&mut cursor)?;
         if section_len as usize > cursor.len() {
             return Err(Error::Codec("CAR block section length exceeds data".into()));
@@ -470,5 +479,35 @@ mod tests {
 
         assert_eq!(collected.blocks.len(), depth);
         assert!(!collected.truncated());
+    }
+
+    #[test]
+    fn decode_car_rejects_block_count_exceeding_cap() {
+        let root = make_cid(b"root");
+        let blocks: Vec<(&Cid, &[u8])> = (0..CAR_MAX_BLOCKS + 1)
+            .map(|_| (&root, b"x".as_slice()))
+            .collect();
+        let encoded = encode_car(&[root], &blocks).unwrap();
+
+        let result = decode_car(&encoded);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("maximum block count"),
+            "expected block-count error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn decode_car_accepts_exactly_max_blocks() {
+        let root = make_cid(b"root");
+        let blocks: Vec<(&Cid, &[u8])> = (0..CAR_MAX_BLOCKS)
+            .map(|_| (&root, b"x".as_slice()))
+            .collect();
+        let encoded = encode_car(&[root], &blocks).unwrap();
+
+        let (roots, decoded) = decode_car(&encoded).unwrap();
+        assert_eq!(roots, vec![root]);
+        assert_eq!(decoded.len(), CAR_MAX_BLOCKS);
     }
 }
