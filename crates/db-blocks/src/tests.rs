@@ -1,8 +1,7 @@
 use super::*;
 use blockstore::{Blockstore, DefraBlockstore};
-use crypto::keys::PublicKey;
+use crypto::keys::Key;
 use defra_core::encryption::EncryptionConfig;
-use defra_core::SignatureType;
 use std::sync::{Arc, Mutex};
 use storage::backends::MemoryStore;
 
@@ -135,11 +134,11 @@ fn test_compute_document_blocks_places_encryption_metadata_in_blockstore_entries
     );
 }
 
-struct TestRemoteSecp256r1Signer {
+struct LocalSecp256r1Signer {
     private_key: crypto::Secp256r1PrivateKey,
 }
 
-impl defra_core::signing::RemoteSigner for TestRemoteSecp256r1Signer {
+impl defra_core::signing::RemoteSigner for LocalSecp256r1Signer {
     fn sign_sync(
         &self,
         data: &[u8],
@@ -151,8 +150,44 @@ impl defra_core::signing::RemoteSigner for TestRemoteSecp256r1Signer {
     }
 }
 
+// Go's internal/core/block/signing.go:74-79 rejects any key type other than
+// secp256k1 or Ed25519 with ErrUnsupportedKeyForSigning. Rust must match so
+// that a Rust node cannot produce blocks a Go node will refuse to verify.
 #[test]
-fn test_compute_signature_supports_remote_secp256r1() {
+fn test_compute_signature_rejects_local_secp256r1_block_signing() {
+    let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
+    let public_key = private_key.public_key();
+
+    let block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"doc-1".to_vec(),
+            schema_version_id: "schema-v1".to_string(),
+            status: 1,
+            priority: 1,
+        }),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let signer = defra_core::signing::SigningConfig {
+        key_type: defra_core::signing::SigningKeyType::Secp256r1,
+        private_key_bytes: private_key.raw().to_vec(),
+        public_key_bytes: public_key.raw_owned(),
+        public_key_hex: hex::encode(public_key.raw()),
+        remote_signer: None,
+        signing_authorization: None,
+    };
+
+    let err = compute_signature(&block, &signer)
+        .expect_err("secp256r1 block signing must be rejected for Go parity");
+    assert!(
+        err.contains("secp256r1") || err.contains("ES256") || err.contains("secp256k1"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_compute_signature_rejects_remote_secp256r1_block_signing() {
     let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
     let public_key = private_key.public_key();
 
@@ -172,33 +207,20 @@ fn test_compute_signature_supports_remote_secp256r1() {
         private_key_bytes: Vec::new(),
         public_key_bytes: public_key.raw_owned(),
         public_key_hex: hex::encode(public_key.raw()),
-        remote_signer: Some(Arc::new(TestRemoteSecp256r1Signer { private_key })),
+        remote_signer: Some(Arc::new(LocalSecp256r1Signer { private_key })),
         signing_authorization: None,
     };
 
-    let (sig_cid, sig_cbor) = compute_signature(&block, &signer)
-        .expect("signature should succeed")
-        .expect("composite block should be signed");
-    assert!(!sig_cid.to_bytes().is_empty());
-
-    let signature = Signature::from_dag_cbor(&sig_cbor).expect("signature block should decode");
-    assert_eq!(signature.header.sig_type, SignatureType::ES256);
-    assert_eq!(
-        signature.header.identity,
-        signer.public_key_hex.as_bytes().to_vec()
+    let err = compute_signature(&block, &signer)
+        .expect_err("secp256r1 block signing must be rejected even when delegated to remote");
+    assert!(
+        err.contains("secp256r1") || err.contains("ES256") || err.contains("secp256k1"),
+        "unexpected error: {err}"
     );
-
-    let public_key = crypto::Secp256r1PublicKey::from_bytes(&signer.public_key_bytes)
-        .expect("public key should decode");
-    let signed_bytes = block.to_dag_cbor().expect("block should encode");
-    let valid = public_key
-        .verify(&signed_bytes, &signature.value)
-        .expect("verification should succeed");
-    assert!(valid, "remote secp256r1 signature should verify");
 }
 
 struct CapturingRemoteSigner {
-    private_key: crypto::Secp256r1PrivateKey,
+    private_key: crypto::Ed25519PrivateKey,
     seen_authorization: Arc<Mutex<Option<defra_core::signing::SigningAuthorization>>>,
 }
 
@@ -217,7 +239,7 @@ impl defra_core::signing::RemoteSigner for CapturingRemoteSigner {
 
 #[test]
 fn test_compute_signature_passes_signing_authorization_to_remote_signer() {
-    let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
+    let private_key = crypto::generate_ed25519().expect("should generate ed25519 key");
     let public_key = private_key.public_key();
     let seen_authorization = Arc::new(Mutex::new(None));
 
@@ -233,7 +255,7 @@ fn test_compute_signature_passes_signing_authorization_to_remote_signer() {
     );
 
     let signer = defra_core::signing::SigningConfig {
-        key_type: defra_core::signing::SigningKeyType::Secp256r1,
+        key_type: defra_core::signing::SigningKeyType::Ed25519,
         private_key_bytes: Vec::new(),
         public_key_bytes: public_key.raw_owned(),
         public_key_hex: hex::encode(public_key.raw()),
