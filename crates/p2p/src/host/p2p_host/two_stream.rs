@@ -159,10 +159,9 @@ impl<S: Store> P2PHost<S> {
                         Some(request.peer_id.clone()),
                         None,
                     ) {
-                        Ok(token) => crate::message::IdentityResponse::success(
-                            &request.message_id,
-                            token,
-                        ),
+                        Ok(token) => {
+                            crate::message::IdentityResponse::success(&request.message_id, token)
+                        }
                         Err(error) => crate::message::IdentityResponse::error(
                             &request.message_id,
                             &format!("failed to generate identity token: {error}"),
