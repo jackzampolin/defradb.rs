@@ -24,7 +24,10 @@ use blockstore::Blockstore;
 use tokio::sync::{mpsc, Semaphore};
 
 use super::config::ReplicationConfig;
-use super::handlers::{is_mergeable_event, process_event, process_merge_batch};
+use super::handlers::{
+    has_duplicate_merge_cids, is_mergeable_event, process_event_serialized,
+    process_events_individually, process_merge_batch,
+};
 use super::result::ReplicationResult;
 use crate::sync::coordinator::SyncCoordinator;
 use crate::sync::manager::SyncEvent;
@@ -218,7 +221,7 @@ impl ReplicationLoop {
             let cb = on_result.clone();
 
             tokio::spawn(async move {
-                let result = process_event(&coord, event, h.as_ref(), &c).await;
+                let result = process_event_serialized(&coord, event, h.as_ref(), &c).await;
                 cb(result);
                 drop(permit);
             });
@@ -248,7 +251,7 @@ impl ReplicationLoop {
             None => return ReplicationResult::ChannelClosed,
         };
 
-        process_event(coordinator, event, handler, config).await
+        process_event_serialized(coordinator, event, handler, config).await
     }
 
     /// Process the next batch of sync events.
@@ -298,14 +301,21 @@ impl ReplicationLoop {
 
         // Process immediate events normally
         for event in immediate {
-            results.push(process_event(coordinator, event, handler, config).await);
+            results.push(process_event_serialized(coordinator, event, handler, config).await);
         }
 
         // Batch-process merge events
         if !merge_events.is_empty() {
-            tracing::debug!(batch_size = merge_events.len(), "Processing merge batch");
-            let batch_results =
-                process_merge_batch(coordinator, merge_events, handler, config).await;
+            let batch_results = if has_duplicate_merge_cids(&merge_events) {
+                tracing::debug!(
+                    batch_size = merge_events.len(),
+                    "Processing duplicate-CID merge batch individually"
+                );
+                process_events_individually(coordinator, merge_events, handler, config).await
+            } else {
+                tracing::debug!(batch_size = merge_events.len(), "Processing merge batch");
+                process_merge_batch(coordinator, merge_events, handler, config).await
+            };
             results.extend(batch_results);
         }
 
@@ -332,7 +342,8 @@ impl ReplicationLoop {
             match events.try_recv() {
                 Ok(event) => {
                     let result =
-                        process_event(&coordinator, event, handler.as_ref(), &config).await;
+                        process_event_serialized(&coordinator, event, handler.as_ref(), &config)
+                            .await;
                     results.push(result);
                 }
                 Err(mpsc::error::TryRecvError::Empty) => break,
