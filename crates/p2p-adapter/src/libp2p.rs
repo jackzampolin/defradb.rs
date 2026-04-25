@@ -669,7 +669,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         // so merges flow to the event bus the same way as the two-stream
         // path. Falls back to two-stream per-peer requests when no
         // coordinator is wired (e.g. light tests).
-        let use_pubsub = self.sync_coordinator.is_some();
+        let use_pubsub = self
+            .sync_coordinator
+            .as_ref()
+            .is_some_and(|coord| coord.pubsub_services_ready());
 
         for _attempt in 0..3 {
             if total_received >= total_expected || start.elapsed() >= overall_timeout {
@@ -677,7 +680,11 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             }
 
             let publish_result = if use_pubsub {
-                let coord = self.sync_coordinator.as_ref().unwrap().clone();
+                let coord = self
+                    .sync_coordinator
+                    .as_ref()
+                    .expect("pubsub readiness requires a coordinator")
+                    .clone();
                 let doc_ids = doc_ids.clone();
                 // Remaining budget for this attempt.
                 let remaining = overall_timeout.saturating_sub(start.elapsed());
