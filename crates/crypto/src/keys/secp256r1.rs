@@ -130,7 +130,7 @@ pub struct Secp256r1PublicKey {
 
 impl PartialEq for Secp256r1PublicKey {
     fn eq(&self, other: &Self) -> bool {
-        self.key == other.key
+        self.raw_bytes.ct_eq(&other.raw_bytes).into()
     }
 }
 

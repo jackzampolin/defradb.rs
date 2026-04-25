@@ -142,7 +142,7 @@ pub fn decrypt_aes(
     // Decrypt
     let plaintext = cipher
         .decrypt(nonce, payload)
-        .map_err(|e| crate::error::crypto_error(format!("decryption failed: {:?}", e)))?;
+        .map_err(|_| crate::error::crypto_error("decryption failed"))?;
 
     Ok(plaintext)
 }
