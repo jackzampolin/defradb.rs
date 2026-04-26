@@ -138,6 +138,8 @@ pub struct ReplicatorInfo {
     pub id: Option<String>,
     pub collections: Vec<String>,
     pub address: Option<String>,
+    pub status: Option<u8>,
+    pub last_status_change: Option<String>,
 }
 
 /// P2P document information for HTTP responses.

@@ -13,6 +13,35 @@ use p2p::P2PTransport;
 
 type WireDocumentAcp = Option<Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>>;
 
+async fn set_persisted_replicator_status<S: storage::corekv::Store>(
+    peerstore: &storage::stores::Peerstore<S>,
+    peer_id: &str,
+    status: p2p::ReplicatorStatus,
+) -> Result<bool> {
+    let Some(bytes) = peerstore
+        .get_replicator(peer_id)
+        .await
+        .map_err(|e| Error::Server(format!("failed to load replicator: {e}")))?
+    else {
+        return Ok(false);
+    };
+
+    let mut info = p2p::ReplicatorInfo::from_bytes(&bytes)
+        .map_err(|e| Error::Server(format!("failed to decode replicator: {e}")))?;
+    if !info.set_status_if_changed_now(status) {
+        return Ok(false);
+    }
+
+    let bytes = info
+        .to_bytes()
+        .map_err(|e| Error::Server(format!("failed to encode replicator: {e}")))?;
+    peerstore
+        .create_replicator(peer_id, &bytes)
+        .await
+        .map_err(|e| Error::Server(format!("failed to persist replicator: {e}")))?;
+    Ok(true)
+}
+
 pub(super) struct P2PSetup {
     pub(super) host_handle: Option<p2p::P2PHostHandle>,
     pub(super) p2p_tasks: Option<P2PTasks>,
@@ -290,6 +319,16 @@ impl Node {
                     .await
                 {
                     warn!(error = %e, "Failed to record push failure");
+                    continue;
+                }
+                if let Err(e) = set_persisted_replicator_status(
+                    &peerstore,
+                    &failure.peer_id.to_string(),
+                    p2p::ReplicatorStatus::Inactive,
+                )
+                .await
+                {
+                    warn!(error = %e, "Failed to mark replicator inactive");
                 }
             }
         });
@@ -327,6 +366,12 @@ impl Node {
                     };
                     if docs.is_empty() {
                         let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                        let _ = set_persisted_replicator_status(
+                            &peerstore,
+                            &peer_id_str,
+                            p2p::ReplicatorStatus::Active,
+                        )
+                        .await;
                         continue;
                     }
                     let mut all_succeeded = true;
@@ -345,7 +390,19 @@ impl Node {
                     }
                     if all_succeeded {
                         let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                        let _ = set_persisted_replicator_status(
+                            &peerstore,
+                            &peer_id_str,
+                            p2p::ReplicatorStatus::Active,
+                        )
+                        .await;
                     } else {
+                        let _ = set_persisted_replicator_status(
+                            &peerstore,
+                            &peer_id_str,
+                            p2p::ReplicatorStatus::Inactive,
+                        )
+                        .await;
                         retry_info.bump();
                         if let Ok(bytes) = retry_info.to_bytes() {
                             let _ = peerstore.update_retry_info(&peer_id_str, &bytes).await;
@@ -618,6 +675,16 @@ impl Node {
                     .await
                 {
                     warn!(error = %e, "Failed to record push failure");
+                    continue;
+                }
+                if let Err(e) = set_persisted_replicator_status(
+                    &peerstore,
+                    &failure.peer_id,
+                    p2p::ReplicatorStatus::Inactive,
+                )
+                .await
+                {
+                    warn!(error = %e, "Failed to mark replicator inactive");
                 }
             }
         });
@@ -649,6 +716,12 @@ impl Node {
                     };
                     if docs.is_empty() {
                         let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                        let _ = set_persisted_replicator_status(
+                            &peerstore,
+                            &peer_id_str,
+                            p2p::ReplicatorStatus::Active,
+                        )
+                        .await;
                         continue;
                     }
                     let mut all_succeeded = true;
@@ -667,7 +740,19 @@ impl Node {
                     }
                     if all_succeeded {
                         let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                        let _ = set_persisted_replicator_status(
+                            &peerstore,
+                            &peer_id_str,
+                            p2p::ReplicatorStatus::Active,
+                        )
+                        .await;
                     } else {
+                        let _ = set_persisted_replicator_status(
+                            &peerstore,
+                            &peer_id_str,
+                            p2p::ReplicatorStatus::Inactive,
+                        )
+                        .await;
                         retry_info.bump();
                         if let Ok(bytes) = retry_info.to_bytes() {
                             let _ = peerstore.update_retry_info(&peer_id_str, &bytes).await;
