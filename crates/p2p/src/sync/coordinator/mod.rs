@@ -43,6 +43,7 @@ mod accessors;
 mod authorizer;
 mod broadcast;
 mod constructor;
+pub(crate) mod dag_context;
 pub(crate) mod dag_fetcher;
 mod event_handler;
 mod pubsub_client;

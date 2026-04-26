@@ -918,7 +918,7 @@ mod tests {
                     bytes::Bytes::from(root_data),
                 ),
                 token: None,
-                is_explicit_replicator: false,
+                is_explicit_replicator: true,
                 explicit_replay_authorization: None,
             })
             .await
@@ -949,7 +949,28 @@ mod tests {
             .expect("DagReady should arrive")
             .expect("event should be present");
 
-        assert!(matches!(&event, SyncEvent::DagReady { root_cid: cid, .. } if *cid == root_cid));
+        match &event {
+            SyncEvent::DagReady {
+                root_cid: cid,
+                doc_id,
+                collection_id,
+                creator,
+                sender_peer,
+                is_explicit_replicator,
+                ..
+            } => {
+                assert_eq!(*cid, root_cid);
+                assert_eq!(doc_id, "doc1");
+                assert_eq!(collection_id, "col1");
+                assert_eq!(creator, "creator-1");
+                assert_eq!(sender_peer.as_deref(), Some("source-peer"));
+                assert!(
+                    *is_explicit_replicator,
+                    "poll fetcher should preserve push-driven explicit replicator trust"
+                );
+            }
+            other => panic!("expected DagReady, got {:?}", other),
+        }
         assert_eq!(transport_handle.sync_blocks_calls(), 0);
         assert!(blockstore.has(&child_cid).await.unwrap());
 

@@ -76,8 +76,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
         }
 
+        let is_explicit_replicator =
+            self.is_registered_replicator(propagation_source.as_str(), &message.collection_id);
+
         self.manager
-            .process_pushlog(&message, Some(propagation_source.as_str()), false, None)
+            .process_pushlog(
+                &message,
+                Some(propagation_source.as_str()),
+                is_explicit_replicator,
+                None,
+            )
             .await
     }
 }
