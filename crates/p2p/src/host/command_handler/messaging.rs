@@ -92,13 +92,13 @@ impl<S: Store> P2PHost<S> {
             {
                 Ok(Ok(reply)) => Ok(reply),
                 Ok(Err(_)) => {
-                    handler.lock().await.cleanup_pending(&message_id);
+                    handler.lock().await.cleanup_pending(peer_id, &message_id);
                     Err(crate::error::Error::Transport(
                         "response channel closed".into(),
                     ))
                 }
                 Err(_) => {
-                    handler.lock().await.cleanup_pending(&message_id);
+                    handler.lock().await.cleanup_pending(peer_id, &message_id);
                     Err(crate::error::Error::Transport(
                         "timeout waiting for response".into(),
                     ))

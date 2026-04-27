@@ -207,6 +207,101 @@ async fn test_identity_protocol_roundtrip_returns_defra_identity() {
 }
 
 #[tokio::test]
+async fn test_two_stream_reply_from_wrong_transport_peer_is_rejected() {
+    let store0 = MockBitswapStore::new();
+    let store1 = MockBitswapStore::new();
+    let store2 = MockBitswapStore::new();
+    let (host0, handle0, _events0, _replicators0) = P2PHost::new(store0).await.unwrap();
+    let (host1, handle1, mut events1, _replicators1) = P2PHost::new(store1).await.unwrap();
+    let (host2, handle2, _events2, _replicators2) = P2PHost::new(store2).await.unwrap();
+
+    tokio::spawn(host0.run());
+    tokio::spawn(host1.run());
+    tokio::spawn(host2.run());
+
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr1 = handle1.listen_addresses().await.unwrap().remove(0);
+    handle0
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr0 = handle0.listen_addresses().await.unwrap().remove(0);
+
+    let peer0 = handle0.local_peer_id_cached();
+    let peer1 = handle1.local_peer_id_cached();
+    let peer2 = handle2.local_peer_id_cached();
+
+    handle0.dial(peer1, vec![addr1]).await.unwrap();
+    handle2.dial(peer0, vec![addr0]).await.unwrap();
+    wait_until_connected(&handle0, peer1).await;
+    wait_until_connected(&handle1, peer0).await;
+    wait_until_connected(&handle0, peer2).await;
+    wait_until_connected(&handle2, peer0).await;
+
+    let request = PushLogRequest::new(
+        "doc1".to_string(),
+        Bytes::from(vec![1, 2, 3]),
+        "collection1".to_string(),
+        "creator1".to_string(),
+        Bytes::from(b"block-data".to_vec()),
+    );
+
+    let sender_handle = handle0.clone();
+    let mut send_task =
+        tokio::spawn(async move { sender_handle.send_two_stream_request(peer1, request).await });
+
+    let received_request = loop {
+        let event = timeout(Duration::from_secs(5), events1.recv())
+            .await
+            .expect("timed out waiting for two-stream request")
+            .expect("host event channel closed");
+
+        match event {
+            p2p::HostEvent::TwoStreamRequest {
+                peer_id, request, ..
+            } => {
+                assert_eq!(peer_id, peer0);
+                break request;
+            }
+            _ => continue,
+        }
+    };
+
+    let mut replayed_reply = PushLogReply::success(&received_request.message_id);
+    sign_message(handle1.keypair(), &mut replayed_reply).unwrap();
+    handle2
+        .send_two_stream_response(peer0, replayed_reply)
+        .await
+        .unwrap();
+
+    match timeout(Duration::from_millis(300), &mut send_task).await {
+        Err(_) => {}
+        Ok(result) => panic!("wrong-peer replay unexpectedly completed request: {result:?}"),
+    }
+
+    let mut legitimate_reply = PushLogReply::success(&received_request.message_id);
+    sign_message(handle1.keypair(), &mut legitimate_reply).unwrap();
+    handle1
+        .send_two_stream_response(peer0, legitimate_reply)
+        .await
+        .unwrap();
+
+    let reply = timeout(Duration::from_secs(5), send_task)
+        .await
+        .expect("timed out waiting for legitimate two-stream response")
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.message_id, received_request.message_id);
+
+    handle0.shutdown().await.unwrap();
+    handle1.shutdown().await.unwrap();
+    handle2.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_two_stream_registered_replicator_without_capability_is_not_marked_explicit() {
     let store0 = MockBitswapStore::new();
     let store1 = MockBitswapStore::new();
