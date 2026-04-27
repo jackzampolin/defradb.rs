@@ -237,9 +237,21 @@ impl ReplicatorInfo {
         true
     }
 
-    /// Update status using the current UTC timestamp when the state changes.
+    /// Update status using Go's recovery-aware timestamp rule.
+    ///
+    /// Mirrors Go's `updateReplicatorStatus`
+    /// (`defradb/internal/db/p2p/replicator.go:495`):
+    /// - `Active → Inactive` stamps `Utc::now()`.
+    /// - `Inactive → Active` resets to `time.Time{}` so a recovered record
+    ///   serializes identically to a freshly-constructed one.
+    ///
+    /// Same-status calls leave the timestamp untouched.
     pub fn set_status_if_changed_now(&mut self, status: ReplicatorStatus) -> bool {
-        self.set_status_if_changed(status, Utc::now())
+        let changed_at = match status {
+            ReplicatorStatus::Inactive => Utc::now(),
+            ReplicatorStatus::Active => go_time_zero(),
+        };
+        self.set_status_if_changed(status, changed_at)
     }
 
     /// Format `LastStatusChange` exactly like Go's `time.Time.MarshalJSON`.
