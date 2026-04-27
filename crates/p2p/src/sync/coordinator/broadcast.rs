@@ -1,6 +1,7 @@
 //! Broadcasting local updates to the network.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use acp::ReplicatedDocActorRelationships;
 use blockstore::Blockstore;
@@ -8,19 +9,58 @@ use bytes::Bytes;
 use cid::Cid;
 
 use super::SyncCoordinator;
-use crate::error::Result;
+use crate::error::{is_rate_limited_message, Result};
 use crate::message::PushLogRequest;
 use crate::signing::sign_with_transport;
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::BroadcastResult;
 use crate::transport::{P2PTransport, PeerId};
 
+const MAX_RATE_LIMITED_PUSH_ATTEMPTS: usize = 10;
+
+fn rate_limited_push_delay(attempt: usize) -> Duration {
+    #[cfg(test)]
+    {
+        match attempt {
+            1 => Duration::from_millis(1),
+            2 => Duration::from_millis(2),
+            3 => Duration::from_millis(4),
+            4 => Duration::from_millis(8),
+            _ => Duration::from_millis(10),
+        }
+    }
+
+    #[cfg(not(test))]
+    {
+        match attempt {
+            1 => Duration::from_millis(25),
+            2 => Duration::from_millis(50),
+            3 => Duration::from_millis(100),
+            4 => Duration::from_millis(200),
+            5 => Duration::from_millis(400),
+            _ => Duration::from_millis(500),
+        }
+    }
+}
+
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     async fn list_replicators_for_push(&self) -> Option<Vec<crate::replicator::ReplicatorInfo>> {
+        if self.runtime.shutdown.is_shutting_down() {
+            tracing::debug!("Skipping replicator push because coordinator is shutting down");
+            return None;
+        }
+
         match self.runtime.transport.list_replicators().await {
             Ok(replicators) => Some(replicators),
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to get replicators for push");
+                if e.is_connection_like() {
+                    tracing::debug!(
+                        error = %e,
+                        "Skipping replicator push because the transport is unavailable"
+                    );
+                } else {
+                    tracing::warn!(error = %e, "Failed to get replicators for push");
+                }
                 None
             }
         }
@@ -183,8 +223,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let doc_id_owned = doc_id.to_string();
             let collection_id_owned = collection_id.to_string();
             let semaphore = self.runtime.push_semaphore.clone();
-            tokio::spawn(async move {
-                let _permit = semaphore.acquire().await;
+            self.spawn_background_task("push_dag_to_replicators", async move {
+                let Ok(_permit) = semaphore.acquire().await else {
+                    return;
+                };
                 let any_failed =
                     Self::send_ordered_pushlogs_via_transport(&transport, &peer_id, requests).await;
                 if any_failed {
@@ -257,18 +299,17 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let collection_id_owned = collection_id.to_string();
             let semaphore = self.runtime.push_semaphore.clone();
             let peer_id_clone = peer_id.clone();
-            tokio::spawn(async move {
-                let _permit = semaphore.acquire().await;
-                if let Err(e) = transport
-                    .send_two_stream_request(&peer_id_clone, request)
-                    .await
-                {
-                    tracing::debug!(
-                        peer_id = %peer_id_clone,
-                        cid = %cid_clone,
-                        error = %e,
-                        "PushLog to replicator failed"
-                    );
+            self.spawn_background_task("push_to_replicators", async move {
+                let Ok(_permit) = semaphore.acquire().await else {
+                    return;
+                };
+                let any_failed = Self::send_ordered_pushlogs_via_transport(
+                    &transport,
+                    &peer_id_clone,
+                    vec![(cid_clone, request)],
+                )
+                .await;
+                if any_failed {
                     Self::report_push_failure(
                         &failure_tx,
                         &peer_id_clone,
@@ -335,29 +376,426 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         requests: Vec<(Cid, PushLogRequest)>,
     ) -> bool {
         let mut any_failed = false;
-        for (cid, request) in requests {
-            match transport.send_two_stream_request(peer_id, request).await {
-                Ok(reply) if reply.err_message.is_some() => {
-                    tracing::warn!(
-                        peer_id = %peer_id,
-                        cid = %cid,
-                        error = %reply.err_message.as_deref().unwrap_or("unknown pushlog error"),
-                        "PushLog to replicator was rejected"
-                    );
-                    any_failed = true;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::debug!(
-                        peer_id = %peer_id,
-                        cid = %cid,
-                        error = %e,
-                        "PushLog to replicator failed"
-                    );
-                    any_failed = true;
+        'requests: for (cid, request) in requests {
+            let mut rate_limited_attempts = 0;
+            loop {
+                match transport
+                    .send_two_stream_request(peer_id, request.clone())
+                    .await
+                {
+                    Ok(reply) => {
+                        let Some(error_message) = reply.err_message.as_deref() else {
+                            break;
+                        };
+
+                        if is_rate_limited_message(error_message) {
+                            rate_limited_attempts += 1;
+                            if rate_limited_attempts > MAX_RATE_LIMITED_PUSH_ATTEMPTS {
+                                tracing::warn!(
+                                    peer_id = %peer_id,
+                                    cid = %cid,
+                                    attempts = rate_limited_attempts,
+                                    "PushLog to replicator remained rate-limited; stopping ordered push"
+                                );
+                                any_failed = true;
+                                break 'requests;
+                            }
+
+                            let delay = rate_limited_push_delay(rate_limited_attempts);
+                            tracing::debug!(
+                                peer_id = %peer_id,
+                                cid = %cid,
+                                attempt = rate_limited_attempts,
+                                delay_ms = delay.as_millis(),
+                                "PushLog to replicator was rate-limited; backing off before retry"
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+
+                        tracing::warn!(
+                            peer_id = %peer_id,
+                            cid = %cid,
+                            error = %error_message,
+                            "PushLog to replicator was rejected"
+                        );
+                        any_failed = true;
+                        break;
+                    }
+                    Err(e) => {
+                        if e.is_connection_like() {
+                            tracing::debug!(
+                                peer_id = %peer_id,
+                                cid = %cid,
+                                error = %e,
+                                "PushLog to replicator failed because the connection became unavailable; stopping replay for this peer"
+                            );
+                            any_failed = true;
+                            break 'requests;
+                        }
+
+                        tracing::debug!(
+                            peer_id = %peer_id,
+                            cid = %cid,
+                            error = %e,
+                            "PushLog to replicator failed"
+                        );
+                        any_failed = true;
+                        break;
+                    }
                 }
             }
         }
         any_failed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use cid::multihash::{Code, MultihashDigest};
+
+    use crate::error::{Result as P2PResult, RATE_LIMITED_MESSAGE};
+    use crate::message::{
+        BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
+        PushLogReply, PushSEArtifactsRequest,
+    };
+    use crate::topics::DefraTopic;
+    use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId};
+    use crate::{QueryId, ReplicatorInfo};
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct TestTransport {
+        peer_id: PeerId,
+        pubkey: Vec<u8>,
+        replies: Arc<Mutex<VecDeque<PushLogReply>>>,
+        sent_cids: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl TestTransport {
+        fn new(replies: Vec<PushLogReply>) -> Self {
+            Self {
+                peer_id: PeerId::new("local-peer".to_string()),
+                pubkey: vec![1, 2, 3],
+                replies: Arc::new(Mutex::new(VecDeque::from(replies))),
+                sent_cids: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn sent_cids(&self) -> Vec<Vec<u8>> {
+            self.sent_cids.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl P2PTransport for TestTransport {
+        type ResponseToken = ();
+
+        fn local_peer_id(&self) -> &PeerId {
+            &self.peer_id
+        }
+
+        fn local_public_key_proto(&self) -> &[u8] {
+            &self.pubkey
+        }
+
+        fn sign(&self, _data: &[u8]) -> P2PResult<Vec<u8>> {
+            Ok(vec![0])
+        }
+
+        async fn dial(&self, _peer_id: &PeerId, _addrs: Vec<PeerAddr>) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn listen(&self, _addr: PeerAddr) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn connected_peers(&self) -> P2PResult<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
+        async fn listen_addresses(&self) -> P2PResult<Vec<PeerAddr>> {
+            Ok(Vec::new())
+        }
+
+        async fn poll_until_connected(
+            &self,
+            _peer_id: &PeerId,
+            _timeout: Duration,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn peer_addresses(&self) -> P2PResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn subscribe(&self, _topic: DefraTopic) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn unsubscribe(&self, _topic: DefraTopic) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn publish(
+            &self,
+            _topic: DefraTopic,
+            _msg: PushLogBroadcast,
+        ) -> P2PResult<MessageId> {
+            Ok(MessageId::new("noop".to_string()))
+        }
+
+        async fn topic_peers(&self, _topic: DefraTopic) -> P2PResult<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
+        async fn send_pushlog_response(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: PushLogReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_two_stream_request(
+            &self,
+            _peer_id: &PeerId,
+            req: PushLogRequest,
+        ) -> P2PResult<PushLogReply> {
+            self.sent_cids.lock().unwrap().push(req.cid.to_vec());
+            Ok(self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| PushLogReply::success("ok")))
+        }
+
+        async fn send_two_stream_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: PushLogReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: DocSyncRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: DocSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: BranchableSyncRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: BranchableSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_car_request(&self, _peer_id: &PeerId, _root_cid: Cid) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_car_response(&self, _peer_id: &PeerId, _car_data: Vec<u8>) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_car_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _car_data: Vec<u8>,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: DocSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: BranchableSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_se_artifacts(
+            &self,
+            _peer_id: &PeerId,
+            _req: PushSEArtifactsRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn sync_blocks(
+            &self,
+            _root: Cid,
+            _providers: Vec<PeerId>,
+            _missing: Vec<Cid>,
+        ) -> P2PResult<QueryId> {
+            Ok(QueryId(1))
+        }
+
+        async fn cancel_sync(&self, _query_id: QueryId) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn create_replicator(
+            &self,
+            _peer_id: &PeerId,
+            _collections: Vec<String>,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn delete_replicator(&self, _peer_id: &PeerId) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn list_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_replicator(&self, _peer_id: &PeerId) -> P2PResult<Option<ReplicatorInfo>> {
+            Ok(None)
+        }
+
+        async fn remove_replicator_collections(
+            &self,
+            _peer_id: &PeerId,
+            _collections: Vec<String>,
+        ) -> P2PResult<bool> {
+            Ok(false)
+        }
+
+        async fn shutdown(&self) -> P2PResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn ordered_pushlogs_retry_rate_limited_request_before_advancing() {
+        let transport = TestTransport::new(vec![
+            PushLogReply::error("first", RATE_LIMITED_MESSAGE),
+            PushLogReply::success("first"),
+            PushLogReply::success("second"),
+        ]);
+        let peer_id = PeerId::new("remote-peer".to_string());
+        let cid1 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-1"));
+        let cid2 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-2"));
+        let requests = vec![
+            (
+                cid1,
+                PushLogRequest::new(
+                    "doc-1".to_string(),
+                    Bytes::from(cid1.to_bytes()),
+                    "collection".to_string(),
+                    "creator".to_string(),
+                    Bytes::from_static(b"block-1"),
+                ),
+            ),
+            (
+                cid2,
+                PushLogRequest::new(
+                    "doc-1".to_string(),
+                    Bytes::from(cid2.to_bytes()),
+                    "collection".to_string(),
+                    "creator".to_string(),
+                    Bytes::from_static(b"block-2"),
+                ),
+            ),
+        ];
+
+        let any_failed =
+            SyncCoordinator::<
+                blockstore::DefraBlockstore<storage::backends::MemoryStore>,
+                TestTransport,
+            >::send_ordered_pushlogs_via_transport(&transport, &peer_id, requests)
+            .await;
+
+        assert!(!any_failed);
+        assert_eq!(
+            transport.sent_cids(),
+            vec![cid1.to_bytes(), cid1.to_bytes(), cid2.to_bytes()]
+        );
+    }
+
+    #[tokio::test]
+    async fn ordered_pushlogs_stop_after_bounded_rate_limit_retries() {
+        let transport = TestTransport::new(
+            std::iter::repeat_with(|| PushLogReply::error("first", RATE_LIMITED_MESSAGE))
+                .take(MAX_RATE_LIMITED_PUSH_ATTEMPTS + 2)
+                .collect(),
+        );
+        let peer_id = PeerId::new("remote-peer".to_string());
+        let cid1 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-1"));
+        let cid2 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-2"));
+        let requests = vec![
+            (
+                cid1,
+                PushLogRequest::new(
+                    "doc-1".to_string(),
+                    Bytes::from(cid1.to_bytes()),
+                    "collection".to_string(),
+                    "creator".to_string(),
+                    Bytes::from_static(b"block-1"),
+                ),
+            ),
+            (
+                cid2,
+                PushLogRequest::new(
+                    "doc-1".to_string(),
+                    Bytes::from(cid2.to_bytes()),
+                    "collection".to_string(),
+                    "creator".to_string(),
+                    Bytes::from_static(b"block-2"),
+                ),
+            ),
+        ];
+
+        let any_failed =
+            SyncCoordinator::<
+                blockstore::DefraBlockstore<storage::backends::MemoryStore>,
+                TestTransport,
+            >::send_ordered_pushlogs_via_transport(&transport, &peer_id, requests)
+            .await;
+
+        assert!(any_failed);
+        assert_eq!(
+            transport.sent_cids(),
+            vec![cid1.to_bytes(); MAX_RATE_LIMITED_PUSH_ATTEMPTS + 1]
+        );
     }
 }

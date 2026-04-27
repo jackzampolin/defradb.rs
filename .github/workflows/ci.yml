@@ -186,6 +186,52 @@ jobs:
           echo "$CACHE_DIR" >> "$GITHUB_PATH"
           "$CACHE_DIR/defradb" version --format json
 
+      # The self-hosted macOS ARM64 runner ships without a Go toolchain —
+      # the `go-compat` suite normally uses a prebuilt defradb binary.
+      # The fixture drift step below needs `go run`, so install Go on
+      # demand for that suite only.
+      - name: Install Go toolchain (fixture drift guard only)
+        if: matrix.suite == 'go-compat'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      # Guards against silent drift between the committed Go-parity hex
+      # constants in `crates/p2p/src/**` and what upstream Go actually
+      # emits. Both generators print hex to stdout (no files written);
+      # every `(N bytes): <hex>` or `(N): <hex>` line is checked against
+      # the Rust source tree. If upstream reorders a struct field the
+      # hex changes, the grep misses, and the job fails — instead of
+      # Rust tests passing against stale constants.
+      - name: Verify Go fixtures still match Rust constants
+        if: matrix.suite == 'go-compat'
+        run: |
+          set -euo pipefail
+          OUT=$(mktemp)
+          # Each generator has its own go.mod; `go run <path>/main.go`
+          # uses single-file mode and ignores it, so cd into each module.
+          (cd crates/p2p/testdata/gen_message_fixtures   && go run .) >> "$OUT"
+          (cd crates/p2p/testdata/gen_pubsub_rpc_fixture && go run .) >> "$OUT"
+          # Extract every hex token emitted after a "(N bytes): " or
+          # "(N): " marker. Lowercase hex, length >= 4.
+          HEXES=$(grep -Eo '\(([0-9]+)( bytes)?\): [0-9a-f]+' "$OUT" | awk '{print $NF}')
+          if [ -z "$HEXES" ]; then
+            echo "::error::no hex fixtures extracted from generator output" >&2
+            cat "$OUT" >&2
+            exit 1
+          fi
+          STALE=0
+          while IFS= read -r H; do
+            if ! grep -qR --include='*.rs' -F "$H" crates/p2p/src/; then
+              echo "::error::Go fixture hex not found in crates/p2p/src/**: $H" >&2
+              STALE=1
+            fi
+          done <<< "$HEXES"
+          if [ "$STALE" -ne 0 ]; then
+            echo "::error::Go fixture drift detected — regenerate Rust constants by running the generators locally and updating crates/p2p/src/message/pubsub.rs, crates/p2p/src/pubsub_rpc/envelope.rs, and crates/p2p/src/sync/coordinator/pubsub_services.rs" >&2
+            exit 1
+          fi
+
       # `basic` is serialized because its tests start rust nodes and the
       # harness port allocator (`defra-harness::ports`) has a TOCTOU race
       # between dropping the port guard listener and the child process
@@ -229,7 +275,7 @@ jobs:
         if: matrix.suite == 'go-compat'
         run: >-
           cargo test -p integration-test
-          --test basic --test query --test acp --test nac --test backup
+          --test basic --test query --test acp --test nac --test backup --test p2p
           -- --test-threads=1 go_
           --skip go_acp_link_collection_nonexistent_policy_reject
           --skip go_acp_link_collection_nonexistent_resource_reject

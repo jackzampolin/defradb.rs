@@ -67,8 +67,7 @@ pub use client::DefraClient;
 // Re-export standalone verification functions
 pub use verification::{
     compute_document_cid, generate_ed25519_keypair, generate_secp256k1_keypair, sha256_hash,
-    verify_ed25519_signature, verify_merkle_proof, verify_merkle_proof_cbor,
-    verify_secp256k1_signature, verify_signed_proof,
+    verify_ed25519_signature, verify_secp256k1_signature,
 };
 
 use wasm_bindgen::prelude::*;

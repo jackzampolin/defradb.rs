@@ -285,12 +285,8 @@ impl<S: Store> P2PHost<S> {
     ) {
         debug!(peer_id = %peer_id, collections = ?collections, "Creating replicator");
         let peer_str = peer_id.to_string();
-        // First remove peer from all existing collections
-        self.replicators.remove_peer(&peer_str);
-        // Then add to the new collections
-        for collection_id in &collections {
-            self.replicators.add_replicator(collection_id, &peer_str);
-        }
+        self.replicators
+            .set_peer_collections(&peer_str, &collections);
         if response.send(Ok(())).is_err() {
             debug!(peer_id = %peer_id, "CreateReplicator command response dropped - caller cancelled");
         }
@@ -320,14 +316,10 @@ impl<S: Store> P2PHost<S> {
             "Removing collections from replicator"
         );
 
-        // Remove specific collections from the replicator
         let peer_str = peer_id.to_string();
-        for collection_id in &collections {
-            self.replicators.remove_replicator(collection_id, &peer_str);
-        }
-
-        // Check if the replicator still has any collections
-        let fully_deleted = !self.replicators.is_any_replicator(&peer_str);
+        let fully_deleted = self
+            .replicators
+            .remove_peer_collections(&peer_str, &collections);
 
         if fully_deleted {
             debug!(peer_id = %peer_id, "Replicator fully deleted (no collections remain)");

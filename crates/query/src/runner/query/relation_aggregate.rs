@@ -446,15 +446,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                                     crate::mapper::FilterOp::parse(op_str)
                                                 {
                                                     match op {
-                                                        crate::mapper::FilterOp::Eq => {
-                                                            if value != expected {
-                                                                return false;
-                                                            }
+                                                        crate::mapper::FilterOp::Eq
+                                                            if value != expected =>
+                                                        {
+                                                            return false;
                                                         }
-                                                        crate::mapper::FilterOp::Ne => {
-                                                            if value == expected {
-                                                                return false;
-                                                            }
+                                                        crate::mapper::FilterOp::Ne
+                                                            if value == expected =>
+                                                        {
+                                                            return false;
                                                         }
                                                         crate::mapper::FilterOp::Gt => {
                                                             let v = value.as_f64().unwrap_or(0.0);

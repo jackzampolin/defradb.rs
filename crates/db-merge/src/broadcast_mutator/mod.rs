@@ -222,8 +222,9 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         tokio::spawn(async move {
             let creator_ref = creator_did.as_deref();
 
-            // Push the full DAG (field blocks + composite) to replicators.
-            sync.push_dag_to_replicators_with_creator(
+            // Match Go DefraDB's live replicator model: push the new head block
+            // and let the receiver resolve any missing links via DAG sync.
+            sync.push_to_replicators_with_creator(
                 &block_result.cid,
                 &block_result.block,
                 &block_result.doc_id,
@@ -379,7 +380,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 let creator_ref = creator_did.as_deref();
 
                 for (block_result, branchable_data) in &broadcast_work {
-                    sync.push_dag_to_replicators_with_creator(
+                    sync.push_to_replicators_with_creator(
                         &block_result.cid,
                         &block_result.block,
                         &block_result.doc_id,
@@ -509,8 +510,9 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         tokio::spawn(async move {
             let creator_ref = creator_did.as_deref();
 
-            // Push the full DAG (field blocks + composite) to replicators.
-            sync.push_dag_to_replicators_with_creator(
+            // Match Go DefraDB's live replicator model: push the new head block
+            // and let the receiver resolve any missing links via DAG sync.
+            sync.push_to_replicators_with_creator(
                 &block_result.cid,
                 &block_result.block,
                 &block_result.doc_id,

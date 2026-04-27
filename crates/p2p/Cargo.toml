@@ -32,8 +32,14 @@ futures = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_cbor = { workspace = true }
+serde_json = { workspace = true }
+ciborium = { workspace = true }
 serde_bytes = { workspace = true }
+postcard = { workspace = true }
 base64 = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
 
 # UUID for message IDs
 uuid = { workspace = true }
@@ -64,19 +70,17 @@ iroh = { workspace = true, optional = true }
 iroh-gossip = { workspace = true, optional = true }
 iroh-blobs = { workspace = true, optional = true }
 iroh-tickets = { workspace = true, optional = true }
-postcard = { workspace = true, optional = true }
 rand = { version = "0.9", optional = true }
 blake3 = { version = "1", optional = true }
 
 [features]
 default = []
 test-utils = []
-iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-blobs", "dep:iroh-tickets", "dep:postcard", "dep:rand", "dep:blake3"]
+iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-blobs", "dep:iroh-tickets", "dep:rand", "dep:blake3"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 p2p = { path = ".", features = ["test-utils"] }
-ciborium = { workspace = true }
 
 [lints]
 workspace = true

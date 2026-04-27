@@ -68,11 +68,46 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<bool>>,
     },
 
+    /// Subscribe to an arbitrary topic string without the [`DefraTopic`]
+    /// wrapper. Used for dynamic pubsub_rpc response sub-topics whose names
+    /// embed a runtime peer ID.
+    SubscribeRaw {
+        topic: String,
+        response: oneshot::Sender<Result<bool>>,
+    },
+
     /// Publish a message to a GossipSub topic.
     Publish {
         topic: DefraTopic,
         message: PushLogBroadcast,
         response: oneshot::Sender<Result<gossipsub::MessageId>>,
+    },
+
+    /// Publish raw bytes to a GossipSub topic.
+    ///
+    /// Used by the `pubsub_rpc` layer for DocSync / BranchableSync where
+    /// the payload is an opaque CBOR-encoded request or an IPLD
+    /// `InternalResponse` envelope that must land on the wire verbatim.
+    /// Accepts an arbitrary topic string (not the limited `DefraTopic`
+    /// enum) because per-peer response sub-topics are dynamically named
+    /// `<base>/<peer>/_response`.
+    PublishRaw {
+        topic: String,
+        data: Vec<u8>,
+        response: oneshot::Sender<Result<gossipsub::MessageId>>,
+    },
+
+    /// Register a topic as owned by the `pubsub_rpc` layer.
+    ///
+    /// Incoming gossipsub messages on registered topics skip the default
+    /// PushLog-broadcast decoder and are forwarded verbatim via
+    /// [`super::event::HostEvent::GossipRawMessage`]. Idempotent: registering
+    /// the same topic twice is a no-op. The coordinator is expected to
+    /// register both the base topic (e.g. `"doc-sync"`) and its own
+    /// `<base>/<self>/_response` sub-topic so replies correlate back.
+    RegisterPubsubRpcTopic {
+        topic: String,
+        response: oneshot::Sender<()>,
     },
 
     /// Get subscribed topics.

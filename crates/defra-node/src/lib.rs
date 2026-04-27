@@ -16,10 +16,6 @@ pub mod config;
 mod db_impls;
 pub mod dense_search;
 mod node_acp;
-#[cfg(feature = "p2p")]
-mod p2p_error;
-#[cfg(feature = "p2p")]
-mod p2p_handle;
 pub mod search_chunks;
 pub mod version;
 
@@ -45,211 +41,29 @@ pub use config::P2PConfig;
 pub use config::{DocumentAcpConfig, SourceHubConfig};
 pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybridSearchResponse};
 pub use events::EventName;
-#[cfg(feature = "p2p")]
-pub use p2p_error::{P2PError, P2PResult};
+pub use lens::{LensConfig, LensModule, TransformId};
 pub use query::{QueryExecutor, QueryRequest, QueryResponse};
-
-#[cfg(all(feature = "http", feature = "p2p"))]
-struct HttpP2PAdapter {
-    inner: Arc<dyn P2POps>,
-}
-
-#[cfg(all(feature = "http", feature = "p2p"))]
-impl HttpP2PAdapter {
-    fn unsupported() -> String {
-        "not supported by embedded defra-node HTTP adapter".to_string()
-    }
-
-    fn map_p2p_error(error: P2PError) -> defra_http::router::P2PError {
-        match error {
-            P2PError::InvalidInput(message) => defra_http::router::P2PError::InvalidInput(message),
-            P2PError::NotFound(message) => defra_http::router::P2PError::NotFound(message),
-            P2PError::Unsupported(message) => defra_http::router::P2PError::Unsupported(message),
-            P2PError::Transport(message) => defra_http::router::P2PError::Transport(message),
-            P2PError::Persistence(message) | P2PError::Internal(message) => {
-                defra_http::router::P2PError::Internal(message)
-            }
-        }
-    }
-}
-
-#[cfg(all(feature = "http", feature = "p2p"))]
-#[async_trait::async_trait]
-impl defra_http::P2POperations for HttpP2PAdapter {
-    async fn local_peer_id(&self) -> defra_http::router::P2PResult<String> {
-        Ok(self.inner.local_peer_id().await)
-    }
-
-    async fn listen_addresses(&self) -> defra_http::router::P2PResult<Vec<String>> {
-        Ok(self.inner.listen_addresses().await)
-    }
-
-    async fn connected_peers(&self) -> defra_http::router::P2PResult<Vec<String>> {
-        self.inner
-            .connected_peers()
-            .await
-            .map_err(Self::map_p2p_error)
-    }
-
-    async fn connect_peer(&self, addr: &str) -> defra_http::router::P2PResult<()> {
-        self.inner
-            .connect_peer(addr)
-            .await
-            .map_err(Self::map_p2p_error)
-    }
-
-    async fn get_replicators(
-        &self,
-    ) -> defra_http::router::P2PResult<Vec<defra_http::router::ReplicatorInfo>> {
-        Err(defra_http::router::P2PError::Unsupported(
-            Self::unsupported(),
-        ))
-    }
-
-    async fn add_replicator(
-        &self,
-        collections: Vec<String>,
-        addr: Option<&str>,
-        _explicit_replay_capabilities: Vec<defra_http::router::ExplicitReplayCapabilityInput>,
-        _expected_authorizer_did: Option<&str>,
-    ) -> defra_http::router::P2PResult<()> {
-        let addr = addr.ok_or_else(|| {
-            defra_http::router::P2PError::InvalidInput("replicator address is required".into())
-        })?;
-        self.inner
-            .set_replicator(addr, collections)
-            .await
-            .map_err(Self::map_p2p_error)
-    }
-
-    async fn remove_replicator(
-        &self,
-        _collections: Vec<String>,
-        _addr: Option<&str>,
-    ) -> defra_http::router::P2PResult<()> {
-        Err(defra_http::router::P2PError::Unsupported(
-            Self::unsupported(),
-        ))
-    }
-
-    async fn get_collections(&self) -> defra_http::router::P2PResult<Vec<String>> {
-        Err(defra_http::router::P2PError::Unsupported(
-            Self::unsupported(),
-        ))
-    }
-
-    async fn add_collections(&self, collections: Vec<String>) -> defra_http::router::P2PResult<()> {
-        for collection in collections {
-            self.inner
-                .subscribe_collection(&collection)
-                .await
-                .map_err(Self::map_p2p_error)?;
-        }
-        Ok(())
-    }
-
-    async fn remove_collections(
-        &self,
-        _collections: Vec<String>,
-    ) -> defra_http::router::P2PResult<()> {
-        Err(defra_http::router::P2PError::Unsupported(
-            Self::unsupported(),
-        ))
-    }
-
-    async fn get_documents(
-        &self,
-    ) -> defra_http::router::P2PResult<Vec<defra_http::router::P2pDocumentInfo>> {
-        Err(defra_http::router::P2PError::Unsupported(
-            Self::unsupported(),
-        ))
-    }
-
-    async fn add_documents(
-        &self,
-        _docs: Vec<defra_http::router::P2pDocumentRequest>,
-    ) -> defra_http::router::P2PResult<()> {
-        Err(defra_http::router::P2PError::Unsupported(
-            Self::unsupported(),
-        ))
-    }
-
-    async fn remove_documents(
-        &self,
-        _docs: Vec<defra_http::router::P2pDocumentRequest>,
-    ) -> defra_http::router::P2PResult<()> {
-        Err(defra_http::router::P2PError::Unsupported(
-            Self::unsupported(),
-        ))
-    }
-
-    async fn republish_document(
-        &self,
-        _collection_name: &str,
-        _doc_id: &str,
-    ) -> defra_http::router::P2PResult<()> {
-        Err(defra_http::router::P2PError::Unsupported(
-            Self::unsupported(),
-        ))
-    }
-
-    async fn sync_documents(
-        &self,
-        _collection_name: &str,
-        _doc_ids: Vec<String>,
-    ) -> defra_http::router::P2PResult<()> {
-        Err(defra_http::router::P2PError::Unsupported(
-            Self::unsupported(),
-        ))
-    }
-
-    async fn sync_branchable_collection(
-        &self,
-        _collection_id: &str,
-    ) -> defra_http::router::P2PResult<()> {
-        Err(defra_http::router::P2PError::Unsupported(
-            Self::unsupported(),
-        ))
-    }
-
-    async fn sync_collection_versions(
-        &self,
-        _version_ids: Vec<String>,
-    ) -> defra_http::router::P2PResult<()> {
-        Err(defra_http::router::P2PError::Unsupported(
-            Self::unsupported(),
-        ))
-    }
-}
-
-/// Type-erased P2P operations exposed on EmbeddedNode.
-#[cfg(feature = "p2p")]
-#[async_trait::async_trait]
-pub trait P2POps: Send + Sync {
-    async fn local_peer_id(&self) -> String;
-    async fn listen_addresses(&self) -> Vec<String>;
-    async fn connected_peers(&self) -> P2PResult<Vec<String>>;
-    async fn connect_peer(&self, addr: &str) -> P2PResult<()>;
-    async fn notify_network_change(&self) -> P2PResult<()>;
-    async fn subscribe_collection(&self, name: &str) -> P2PResult<()>;
-    /// Set up push replication to a peer for the given collections.
-    /// The peer address may be an endpoint ticket, `<node-id>@<ip>:<port>`,
-    /// or just `<node-id>`.
-    async fn set_replicator(&self, peer_addr: &str, collections: Vec<String>) -> P2PResult<()>;
-}
+pub use schema::CollectionVersion;
 
 /// Type-erased schema operations so we can store DB<S> without leaking the Store generic.
 #[async_trait::async_trait]
 trait SchemaOps: Send + Sync {
     async fn add_schema(&self, sdl: &str) -> anyhow::Result<()>;
     async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()>;
-}
-
-/// Type-erased collection lookup for resolving names to CIDs.
-/// Required by P2P: gossip topics use collection CIDs, not names.
-#[cfg(feature = "p2p")]
-trait CollectionLookup: Send + Sync {
-    fn get_collection_id(&self, name: &str) -> Option<String>;
+    async fn patch_collection(
+        &self,
+        collection_name: &str,
+        patch: &str,
+    ) -> anyhow::Result<CollectionVersion>;
+    async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()>;
+    async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId>;
+    fn list_collections(&self) -> anyhow::Result<Vec<String>>;
+    fn get_collection(&self, name: &str) -> anyhow::Result<Option<CollectionVersion>>;
+    async fn get_collection_by_version_id(
+        &self,
+        version_id: &str,
+    ) -> anyhow::Result<Option<CollectionVersion>>;
+    async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>>;
 }
 
 /// An embedded DefraDB node with query execution and event subscription.
@@ -259,7 +73,7 @@ pub struct EmbeddedNode {
     schema_ops: Arc<dyn SchemaOps>,
     embedding_config: db::EmbeddingClientConfig,
     #[cfg(feature = "p2p")]
-    p2p_ops: Option<Arc<dyn P2POps>>,
+    p2p_ops: Option<Arc<dyn defra_http::P2POperations>>,
     #[cfg(feature = "p2p")]
     p2p_lifecycle: Option<P2PLifecycle>,
 }
@@ -272,6 +86,7 @@ struct P2PLifecycle {
 #[cfg(feature = "p2p")]
 struct P2PLifecycleInner {
     transport: p2p::iroh::IrohTransport,
+    coordinator: p2p::sync::SyncShutdownHandle,
     endpoint_task: tokio::task::JoinHandle<()>,
     replication_task: tokio::task::JoinHandle<()>,
     event_handler_task: tokio::task::JoinHandle<()>,
@@ -302,16 +117,71 @@ impl P2PLifecycle {
 #[cfg(feature = "p2p")]
 impl P2PLifecycleInner {
     async fn shutdown(self) {
-        abort_background_task("iroh retry loop", self.retry_loop_task).await;
+        let shutdown_started = std::time::Instant::now();
+        let Self {
+            transport,
+            coordinator,
+            endpoint_task,
+            replication_task,
+            event_handler_task,
+            failure_recorder_task,
+            retry_loop_task,
+        } = self;
 
-        if let Err(error) = self.transport.shutdown().await {
+        let retry_started = std::time::Instant::now();
+        abort_background_task("iroh retry loop", retry_loop_task).await;
+        tracing::warn!(
+            elapsed_ms = retry_started.elapsed().as_millis(),
+            "P2P shutdown: retry loop stopped"
+        );
+
+        let coordinator_started = std::time::Instant::now();
+        coordinator.shutdown().await;
+        tracing::warn!(
+            elapsed_ms = coordinator_started.elapsed().as_millis(),
+            "P2P shutdown: coordinator stopped"
+        );
+
+        let transport_started = std::time::Instant::now();
+        if let Err(error) = transport.shutdown().await {
             tracing::debug!(%error, "Iroh transport shutdown returned an error");
         }
+        tracing::warn!(
+            elapsed_ms = transport_started.elapsed().as_millis(),
+            "P2P shutdown: transport stop requested"
+        );
 
-        await_endpoint_task(self.endpoint_task).await;
-        abort_background_task("iroh event handler", self.event_handler_task).await;
-        abort_background_task("iroh replication loop", self.replication_task).await;
-        abort_background_task("iroh failure recorder", self.failure_recorder_task).await;
+        drop(transport);
+        drop(coordinator);
+
+        let event_handler_started = std::time::Instant::now();
+        await_background_task("iroh event handler", event_handler_task).await;
+        tracing::warn!(
+            elapsed_ms = event_handler_started.elapsed().as_millis(),
+            "P2P shutdown: event handler stopped"
+        );
+
+        let replication_started = std::time::Instant::now();
+        abort_background_task("iroh replication loop", replication_task).await;
+        tracing::warn!(
+            elapsed_ms = replication_started.elapsed().as_millis(),
+            "P2P shutdown: replication loop stopped"
+        );
+
+        let failure_started = std::time::Instant::now();
+        abort_background_task("iroh failure recorder", failure_recorder_task).await;
+        tracing::warn!(
+            elapsed_ms = failure_started.elapsed().as_millis(),
+            "P2P shutdown: failure recorder stopped"
+        );
+
+        let endpoint_started = std::time::Instant::now();
+        await_endpoint_task(endpoint_task).await;
+        tracing::warn!(
+            elapsed_ms = endpoint_started.elapsed().as_millis(),
+            total_elapsed_ms = shutdown_started.elapsed().as_millis(),
+            "P2P shutdown: endpoint task stopped"
+        );
     }
 }
 
@@ -351,6 +221,25 @@ async fn abort_background_task(task_name: &'static str, task: tokio::task::JoinH
     }
 }
 
+#[cfg(feature = "p2p")]
+async fn await_background_task(task_name: &'static str, mut task: tokio::task::JoinHandle<()>) {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if error.is_cancelled() => {}
+        Ok(Err(error)) => {
+            tracing::debug!(task = task_name, %error, "P2P background task failed during shutdown");
+        }
+        Err(_) => {
+            tracing::debug!(
+                task = task_name,
+                "P2P background task did not stop after graceful shutdown; aborting"
+            );
+            task.abort();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
+        }
+    }
+}
+
 impl EmbeddedNode {
     /// Start building a new embedded node.
     pub fn builder() -> NodeBuilder {
@@ -376,6 +265,78 @@ impl EmbeddedNode {
         self.schema_ops.add_view(source_query, target_sdl).await
     }
 
+    /// Apply a JSON Patch (RFC 6902) to an existing collection's schema.
+    ///
+    /// Returns the updated [`CollectionVersion`] (with a new `version_id`). The
+    /// prior version is deactivated and the patched version is activated, unless
+    /// the patch is a metadata-only or in-place change (see [`db::DB::patch_collection`]).
+    ///
+    /// `collection_name` may be a collection name, version ID, or variant; the
+    /// underlying implementation falls back to version-ID lookup if name lookup fails.
+    pub async fn patch_collection(
+        &self,
+        collection_name: &str,
+        patch: &str,
+    ) -> anyhow::Result<CollectionVersion> {
+        self.schema_ops
+            .patch_collection(collection_name, patch)
+            .await
+    }
+
+    /// Activate a specific collection version by its `version_id`.
+    ///
+    /// Deactivates sibling versions of the same collection and updates the
+    /// collection-name pointer to resolve to this version. If migrations are
+    /// registered, documents are reindexed through them.
+    pub async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()> {
+        self.schema_ops
+            .set_active_collection_version(version_id)
+            .await
+    }
+
+    /// Register a Lens migration between two collection versions.
+    ///
+    /// Returns the content-addressed [`TransformId`] of the stored transform.
+    /// Placeholder versions are created if the source or destination are not
+    /// yet materialized, allowing migrations to be registered ahead of patches.
+    pub async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
+        self.schema_ops.set_migration(config).await
+    }
+
+    /// List the names of every active collection known to the node.
+    ///
+    /// Useful for idempotent schema-bootstrap flows that need to decide whether
+    /// to call [`Self::add_schema`] (create) or [`Self::patch_collection`] (evolve).
+    pub fn list_collections(&self) -> anyhow::Result<Vec<String>> {
+        self.schema_ops.list_collections()
+    }
+
+    /// Fetch the active schema definition for a collection by name.
+    ///
+    /// Returns `Ok(None)` if no active collection with that name exists.
+    pub fn get_collection(&self, name: &str) -> anyhow::Result<Option<CollectionVersion>> {
+        self.schema_ops.get_collection(name)
+    }
+
+    /// Fetch a collection schema by its version ID, including inactive versions.
+    ///
+    /// Searches both the in-memory cache (active versions) and the underlying
+    /// systemstore (all stored versions), so callers can inspect the history
+    /// of a patched collection.
+    pub async fn get_collection_by_version_id(
+        &self,
+        version_id: &str,
+    ) -> anyhow::Result<Option<CollectionVersion>> {
+        self.schema_ops
+            .get_collection_by_version_id(version_id)
+            .await
+    }
+
+    /// Return every collection version known to the node, active and inactive.
+    pub async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>> {
+        self.schema_ops.get_all_collection_versions().await
+    }
+
     /// Subscribe to DefraDB events.
     pub fn subscribe(&self, event_names: &[EventName]) -> events::Subscription {
         self.event_bus.subscribe(event_names)
@@ -398,13 +359,13 @@ impl EmbeddedNode {
 
     /// Access P2P operations (if P2P is enabled and configured).
     #[cfg(feature = "p2p")]
-    pub fn p2p(&self) -> Option<&dyn P2POps> {
+    pub fn p2p(&self) -> Option<&dyn defra_http::P2POperations> {
         self.p2p_ops.as_deref()
     }
 
     /// Cloneable P2P operations handle for background tasks.
     #[cfg(feature = "p2p")]
-    pub fn p2p_arc(&self) -> Option<Arc<dyn P2POps>> {
+    pub fn p2p_arc(&self) -> Option<Arc<dyn defra_http::P2POperations>> {
         self.p2p_ops.as_ref().map(Arc::clone)
     }
 
@@ -626,9 +587,7 @@ impl NodeBuilder {
 
             #[cfg(feature = "p2p")]
             let server = if let Some(p2p) = node.p2p_ops.as_ref() {
-                server.with_p2p(HttpP2PAdapter {
-                    inner: Arc::clone(p2p),
-                })
+                server.with_p2p_arc(Arc::clone(p2p))
             } else {
                 server
             };
@@ -696,7 +655,10 @@ impl NodeBuilder {
         // P2P setup (affects mutator choice)
         #[cfg(feature = "p2p")]
         let mut p2p_result = if let Some(p2p_cfg) = p2p_config {
-            Some(Self::setup_p2p(store.clone(), database.clone(), &p2p_cfg).await?)
+            Some(
+                Self::setup_p2p(store.clone(), database.clone(), event_bus.clone(), &p2p_cfg)
+                    .await?,
+            )
         } else {
             None
         };
@@ -760,6 +722,7 @@ impl NodeBuilder {
     async fn setup_p2p<S: storage::corekv::Store + 'static>(
         store: Arc<S>,
         database: Arc<db::DB<S>>,
+        event_bus: Arc<dyn events::Bus>,
         config: &P2PConfig,
     ) -> anyhow::Result<P2PSetupResult> {
         // 1. Load or generate secret key for stable node identity
@@ -774,9 +737,10 @@ impl NodeBuilder {
             bind_port: Some(config.port),
             bind_addr: config.bind_addr,
         };
-        let (command_tx, iroh_events, endpoint_task) = p2p::iroh::spawn_endpoint(iroh_config)
-            .await
-            .map_err(|e| anyhow::anyhow!("IROH endpoint spawn failed: {}", e))?;
+        let (command_tx, iroh_events, replicator_registry, endpoint_task) =
+            p2p::iroh::spawn_endpoint(iroh_config)
+                .await
+                .map_err(|e| anyhow::anyhow!("IROH endpoint spawn failed: {}", e))?;
 
         // 3. Create IROH transport facade
         let transport = p2p::iroh::IrohTransport::new(command_tx, secret_key);
@@ -796,11 +760,12 @@ impl NodeBuilder {
             rate_limit_rate: config.rate_limit_rate,
             ..Default::default()
         };
-        let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_collection_store(
+        let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_access_control(
             transport.clone(),
             sync_blockstore.clone(),
             sync_config,
             p2p::AccessMode::Controlled,
+            replicator_registry,
             collection_store,
         )
         .await
@@ -823,7 +788,7 @@ impl NodeBuilder {
         // 8. Merge handler
         let replication = db_merge::create_replication_stack(
             database.clone(),
-            sync_blockstore,
+            sync_blockstore.clone(),
             coordinator.clone(),
         );
         let merge_handler_for_loop = replication.merge_handler.clone();
@@ -850,26 +815,39 @@ impl NodeBuilder {
         let retry_loop_task =
             spawn_iroh_retry_loop(store.clone(), database.clone(), transport.clone());
 
-        // 11. Collection lookup (resolves names -> CIDs for gossip topics)
-        let collection_lookup: Arc<dyn CollectionLookup> = database.clone();
+        let doc_pusher_impl = Arc::new(defra_p2p_adapter::DbTransportDocPusher::new(
+            database.clone(),
+            transport.clone(),
+        ));
+        let doc_pusher_for_acp = doc_pusher_impl.clone();
+        let doc_pusher: Arc<dyn defra_p2p_adapter::TransportDocPusher> = doc_pusher_impl;
+        let version_syncer = Some(defra_p2p_adapter::DbTransportVersionSyncer::new_arc(
+            sync_blockstore,
+            replication.merge_handler_inner.clone(),
+            database.clone(),
+            transport.clone(),
+        ));
 
-        // 12. BroadcastMutator (replaces AutoCommitMutator)
+        // 11. BroadcastMutator (replaces AutoCommitMutator)
         let broadcast_mutator_for_acp = broadcast_mutator.clone();
         let mutator: Arc<dyn query::DocMutator> = broadcast_mutator;
 
         let peer_id = transport.local_peer_id().to_string();
         tracing::info!(peer_id = %peer_id, "P2P started (IROH/QUIC)");
-        let ops_transport = transport.clone();
-        let ops: Arc<dyn P2POps> = Arc::new(p2p_handle::P2PHandleImpl {
-            transport: ops_transport,
-            coordinator,
-            collection_lookup,
-        });
+        let ops: Arc<dyn defra_http::P2POperations> =
+            Arc::new(defra_p2p_adapter::IrohP2PAdapter::with_full_context(
+                transport.clone(),
+                coordinator.clone(),
+                doc_pusher,
+                event_bus,
+                version_syncer,
+            ));
 
         Ok(P2PSetupResult {
             ops,
             lifecycle: Some(P2PLifecycle::new(P2PLifecycleInner {
                 transport,
+                coordinator: coordinator.shutdown_handle(),
                 endpoint_task,
                 replication_task,
                 event_handler_task,
@@ -880,6 +858,7 @@ impl NodeBuilder {
             wire_document_acp: Some(Box::new(move |acp, strict| {
                 merge_handler_for_acp.set_document_acp(acp.clone());
                 merge_handler_for_acp.set_strict_replicated_doc_access(strict);
+                doc_pusher_for_acp.set_document_acp(acp.clone());
                 broadcast_mutator_for_acp.set_document_acp(acp);
             })),
         })
@@ -894,12 +873,27 @@ impl NodeBuilder {
     ) {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
         while let Some(event) = events.recv().await {
+            if event.requires_inline_ordering() {
+                if let Err(e) = coordinator.handle_transport_event(event).await {
+                    if e.is_rate_limited() {
+                        tracing::debug!(error = %e, "P2P rate-limited");
+                    } else if e.is_retriable() {
+                        tracing::warn!(error = %e, "P2P transport event failed after retries");
+                    } else {
+                        tracing::error!(error = %e, "P2P event handler error");
+                    }
+                }
+                continue;
+            }
+
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             let coord = coordinator.clone();
             tokio::spawn(async move {
                 if let Err(e) = coord.handle_transport_event(event).await {
-                    if e.to_string().contains("rate-limited") {
+                    if e.is_rate_limited() {
                         tracing::debug!(error = %e, "P2P rate-limited");
+                    } else if e.is_retriable() {
+                        tracing::warn!(error = %e, "P2P transport event failed after retries");
                     } else {
                         tracing::error!(error = %e, "P2P event handler error");
                     }
@@ -980,16 +974,9 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                 }
 
                 let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
-                let connected = match transport.connected_peers().await {
-                    Ok(peers) => peers,
-                    Err(error) => {
-                        tracing::debug!(error = %error, "failed to load connected peers for retry");
-                        continue;
-                    }
-                };
-                if !connected.contains(&peer_id) {
-                    continue;
-                }
+                // Iroh request-response can reconnect on demand, so don't
+                // suppress retries based on the peer-map's current
+                // connected_peers snapshot.
 
                 let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
                     Ok(docs) => docs,
@@ -1046,7 +1033,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
 /// Internal result from P2P setup, carrying the type-erased ops and mutator.
 #[cfg(feature = "p2p")]
 struct P2PSetupResult {
-    ops: Arc<dyn P2POps>,
+    ops: Arc<dyn defra_http::P2POperations>,
     lifecycle: Option<P2PLifecycle>,
     mutator: Arc<dyn query::DocMutator>,
     wire_document_acp: Option<WireDocumentAcpCallback>,
@@ -1081,11 +1068,20 @@ mod p2p_tests {
     fn init_tracing() {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::from_default_env()
-                        .add_directive(tracing::Level::INFO.into()),
+            let filter = tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into())
+                .add_directive(
+                    "iroh_quinn_proto::connection=error"
+                        .parse()
+                        .expect("valid tracing directive"),
                 )
+                .add_directive(
+                    "noq_proto::connection=error"
+                        .parse()
+                        .expect("valid tracing directive"),
+                );
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(filter)
                 .with_test_writer()
                 .try_init();
         });

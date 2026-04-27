@@ -481,6 +481,19 @@ fn test_extract_links_empty_structures() {
 }
 
 #[test]
+fn test_extract_links_handles_deeply_nested_lists_iteratively() {
+    let link = cid_to_libipld(&test_cid()).unwrap();
+    let mut ipld = Ipld::Link(link);
+    for _ in 0..10_000 {
+        ipld = Ipld::List(vec![ipld]);
+    }
+
+    let links = extract_links(&ipld).unwrap();
+    assert_eq!(links, vec![test_cid()]);
+    std::mem::forget(ipld);
+}
+
+#[test]
 fn test_collect_block_links() {
     let head = test_cid();
     let link = DAGLink::new("field", test_cid());
@@ -538,6 +551,40 @@ fn test_walk_ipld_visitor_stops_traversal() {
 
     // Should only visit the root Map
     assert_eq!(visitor.count, 1);
+}
+
+#[test]
+fn test_walk_ipld_handles_deeply_nested_lists_iteratively() {
+    struct CountVisitor {
+        visits: usize,
+        links: usize,
+    }
+
+    impl IpldVisitor for CountVisitor {
+        fn visit(&mut self, _ipld: &Ipld) -> bool {
+            self.visits += 1;
+            true
+        }
+
+        fn visit_link(&mut self, _cid: &cid::Cid) {
+            self.links += 1;
+        }
+    }
+
+    let mut ipld = Ipld::Link(cid_to_libipld(&test_cid()).unwrap());
+    for _ in 0..10_000 {
+        ipld = Ipld::List(vec![ipld]);
+    }
+
+    let mut visitor = CountVisitor {
+        visits: 0,
+        links: 0,
+    };
+    walk_ipld(&ipld, &mut visitor).unwrap();
+
+    assert_eq!(visitor.links, 1);
+    assert_eq!(visitor.visits, 10_001);
+    std::mem::forget(ipld);
 }
 
 // ============================================================================

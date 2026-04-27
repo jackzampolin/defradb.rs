@@ -5,6 +5,7 @@ use std::sync::Arc;
 use blockstore::Blockstore;
 use tokio::sync::mpsc;
 
+use super::authorizer::{AccessAuthorizer, RuntimeAuthorizer};
 use super::{SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState};
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Result;
@@ -99,7 +100,21 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let max_push_tasks = config.max_concurrent_push_tasks.max(1);
         let rate_limit_burst = config.rate_limit_burst;
         let rate_limit_rate = config.rate_limit_rate;
+        let subscribed_collections =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
         let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), config);
+
+        let authorizer = Arc::new(RuntimeAuthorizer::new(
+            transport.clone(),
+            Arc::clone(&peer_state),
+            Arc::clone(&replicators),
+            access_mode,
+        ));
+        let pubsub_services = super::pubsub_services::PubsubServices::try_new(
+            &local_peer_id,
+            Arc::clone(&head_provider),
+            Arc::clone(&authorizer) as Arc<dyn AccessAuthorizer>,
+        );
 
         Ok((
             Self {
@@ -110,6 +125,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(max_dag_fetches)),
                     push_semaphore: Arc::new(tokio::sync::Semaphore::new(max_push_tasks)),
                     rate_limiter: Arc::new(PeerRateLimiter::new(rate_limit_burst, rate_limit_rate)),
+                    shutdown: super::SyncShutdownHandle::new(),
                 },
                 manager,
                 access: SyncAccessState {
@@ -119,13 +135,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     replicators,
                 },
                 subscriptions: SyncSubscriptionState {
-                    subscribed_collections: Arc::new(tokio::sync::RwLock::new(
-                        std::collections::HashSet::new(),
-                    )),
+                    subscribed_collections,
                     collection_store,
                     head_provider,
                 },
+                authorizer,
                 document_acp: std::sync::OnceLock::new(),
+                pubsub_services,
             },
             events,
         ))

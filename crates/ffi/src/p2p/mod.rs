@@ -98,15 +98,14 @@ impl fmt::Display for FfiP2PError {
     }
 }
 
-impl From<embedded::P2PError> for FfiP2PError {
-    fn from(error: embedded::P2PError) -> Self {
+impl From<defra_http::router::P2PError> for FfiP2PError {
+    fn from(error: defra_http::router::P2PError) -> Self {
         match error {
-            embedded::P2PError::InvalidInput(message) => Self::invalid_input(message),
-            embedded::P2PError::NotFound(message) => Self::not_found(message),
-            embedded::P2PError::Unsupported(message) => Self::unsupported(message),
-            embedded::P2PError::Transport(message) => Self::transport(message),
-            embedded::P2PError::Persistence(message) => Self::internal(message),
-            embedded::P2PError::Internal(message) => Self::internal(message),
+            defra_http::router::P2PError::InvalidInput(message) => Self::invalid_input(message),
+            defra_http::router::P2PError::NotFound(message) => Self::not_found(message),
+            defra_http::router::P2PError::Unsupported(message) => Self::unsupported(message),
+            defra_http::router::P2PError::Transport(message) => Self::transport(message),
+            defra_http::router::P2PError::Internal(message) => Self::internal(message),
             _ => Self::internal(error.to_string()),
         }
     }
@@ -159,12 +158,16 @@ mod tests {
     use super::{parse_collections_json, FfiP2PError, FfiP2PErrorCode};
 
     #[test]
-    fn maps_embedded_error_variants() {
-        let error = FfiP2PError::from(embedded::P2PError::invalid_input("bad addr"));
+    fn maps_http_error_variants() {
+        let error = FfiP2PError::from(defra_http::router::P2PError::InvalidInput(
+            "bad addr".to_string(),
+        ));
         assert_eq!(error.code, FfiP2PErrorCode::InvalidInput);
         assert_eq!(error.message, "bad addr");
 
-        let error = FfiP2PError::from(embedded::P2PError::transport("dial failed"));
+        let error = FfiP2PError::from(defra_http::router::P2PError::Transport(
+            "dial failed".to_string(),
+        ));
         assert_eq!(error.code, FfiP2PErrorCode::Transport);
         assert_eq!(error.message, "dial failed");
     }

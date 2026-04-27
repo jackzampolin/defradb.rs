@@ -90,6 +90,14 @@ impl DocPusher for LookupOnlyDocPusher {
     ) -> Result<Option<acp::ReplicatedDocActorRelationships>, String> {
         Err("load_doc_actor_relationships not available (no database context)".to_string())
     }
+
+    async fn load_doc_creator_did(
+        &self,
+        _collection_name: &str,
+        _doc_id: &str,
+    ) -> Result<Option<String>, String> {
+        Err("load_doc_creator_did not available (no database context)".to_string())
+    }
 }
 
 /// Implementation of CollectionLookup for the database.

@@ -96,6 +96,18 @@ pub fn test_collection_subscription() {
 }
 
 #[test]
+pub fn test_data_subscription_excludes_system_topics() {
+    let tracker = PeerStateTracker::new();
+    let peer = test_peer_id();
+
+    tracker.peer_subscribed(&peer, crate::topics::DOC_SYNC_TOPIC.to_string());
+    assert!(!tracker.peer_has_data_subscription(&peer));
+
+    tracker.peer_subscribed(&peer, "users".to_string());
+    assert!(tracker.peer_has_data_subscription(&peer));
+}
+
+#[test]
 pub fn test_disconnected_peer_not_in_results() {
     let tracker = PeerStateTracker::new();
     let peer = test_peer_id();

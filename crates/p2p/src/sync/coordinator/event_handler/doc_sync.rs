@@ -50,7 +50,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         request: crate::message::DocSyncRequest,
         token: Option<T::ResponseToken>,
     ) -> Result<()> {
-        self.check_peer_is_replicator(&peer_id)?;
+        self.check_peer_is_replicator(&peer_id).await?;
 
         if request.doc_ids.len() > MAX_DOC_IDS {
             tracing::warn!(
@@ -69,7 +69,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         tracing::debug!(
             peer_id = %peer_id,
             doc_ids = ?request.doc_ids,
-            message_id = %request.metadata.message_id,
+            message_id = %request.message_id,
             "Received DocSync request"
         );
 
@@ -115,7 +115,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .send_doc_sync_reply(
                 &peer_id,
                 token,
-                DocSyncReply::success(&request.metadata.message_id, results),
+                DocSyncReply::success(&request.message_id, results),
             )
             .await
         {
@@ -130,7 +130,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         Ok(())
     }
 
-    pub(super) async fn handle_doc_sync_reply(
+    pub(in crate::sync::coordinator) async fn handle_doc_sync_reply(
         &self,
         peer_id: PeerId,
         reply: DocSyncReply,
@@ -272,8 +272,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 let semaphore = semaphore.clone();
                 let source_peer = peer_id.clone();
 
-                tokio::spawn(async move {
-                    let _permit = semaphore.acquire_owned().await;
+                self.spawn_background_task("doc_sync_reply_fetch_dag", async move {
+                    let Ok(_permit) = semaphore.acquire_owned().await else {
+                        return;
+                    };
                     super::super::dag_fetcher::poll_fetch_dag(
                         transport,
                         blockstore,

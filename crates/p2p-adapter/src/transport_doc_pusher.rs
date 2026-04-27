@@ -1,23 +1,38 @@
 use std::sync::Arc;
 
-use crate::libp2p_adapter::CollectionLookup;
-use crate::{P2PError, P2PResult};
+use crate::{P2PError, P2PErrorExt as _, P2PResult};
 use acp::ReplicatedDocActorRelationships;
 use async_trait::async_trait;
 use cid::Cid;
-use p2p::P2PHostHandle;
+use p2p::transport::PeerId;
+use p2p::P2PTransport;
 
-/// Type-erased interface for libp2p-backed document push operations.
+/// Type-erased interface for transport-generic push operations.
 #[async_trait]
-pub trait DocPusher: Send + Sync {
+pub trait TransportDocPusher: Send + Sync {
     async fn push_existing_docs(
         &self,
-        handle: &P2PHostHandle,
-        peer_id: libp2p::PeerId,
+        peer_id: &PeerId,
         collections: &[String],
         se_key: Option<&[u8]>,
-        se_identity_pubkey: Option<&[u8]>,
     ) -> P2PResult<()>;
+
+    async fn retry_doc(&self, peer_id: &PeerId, doc_id: &str, collection_id: &str)
+        -> P2PResult<()>;
+
+    async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>>;
+
+    async fn load_doc_actor_relationships(
+        &self,
+        collection_name: &str,
+        doc_id: &str,
+    ) -> P2PResult<Option<ReplicatedDocActorRelationships>>;
+
+    async fn load_doc_creator_did(
+        &self,
+        collection_name: &str,
+        doc_id: &str,
+    ) -> P2PResult<Option<String>>;
 
     fn get_collection_id(&self, name: &str) -> Option<String>;
 
@@ -36,40 +51,26 @@ pub trait DocPusher: Send + Sync {
     fn validate_collection_exists(&self, name: &str) -> P2PResult<()>;
 
     fn validate_branchable_collection(&self, collection_id: &str) -> P2PResult<()>;
-
-    async fn retry_doc(
-        &self,
-        handle: &P2PHostHandle,
-        peer_id: libp2p::PeerId,
-        doc_id: &str,
-        collection_id: &str,
-    ) -> P2PResult<()>;
-
-    async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>>;
-
-    async fn load_doc_actor_relationships(
-        &self,
-        collection_name: &str,
-        doc_id: &str,
-    ) -> P2PResult<Option<ReplicatedDocActorRelationships>>;
 }
 
-/// Database-backed `DocPusher` implementation.
-pub struct DbDocPusher<S: storage::corekv::Store> {
+/// Database-backed `TransportDocPusher` with an embedded transport.
+pub struct DbTransportDocPusher<S: storage::corekv::Store, T: P2PTransport> {
     db: Arc<db::DB<S>>,
+    transport: T,
     document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
 }
 
-impl<S: storage::corekv::Store + 'static> DbDocPusher<S> {
-    pub fn new(db: Arc<db::DB<S>>) -> Self {
+impl<S: storage::corekv::Store + 'static, T: P2PTransport> DbTransportDocPusher<S, T> {
+    pub fn new(db: Arc<db::DB<S>>, transport: T) -> Self {
         Self {
             db,
+            transport,
             document_acp: std::sync::OnceLock::new(),
         }
     }
 
-    pub fn new_arc(db: Arc<db::DB<S>>) -> Arc<dyn DocPusher> {
-        Arc::new(Self::new(db))
+    pub fn new_arc(db: Arc<db::DB<S>>, transport: T) -> Arc<dyn TransportDocPusher> {
+        Arc::new(Self::new(db, transport))
     }
 
     pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
@@ -78,26 +79,115 @@ impl<S: storage::corekv::Store + 'static> DbDocPusher<S> {
 }
 
 #[async_trait]
-impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
+impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
+    for DbTransportDocPusher<S, T>
+{
     async fn push_existing_docs(
         &self,
-        handle: &P2PHostHandle,
-        peer_id: libp2p::PeerId,
+        peer_id: &PeerId,
         collections: &[String],
         se_key: Option<&[u8]>,
-        se_identity_pubkey: Option<&[u8]>,
     ) -> P2PResult<()> {
-        db_merge::push_existing_docs(
-            handle,
+        db_merge::push_existing_docs_via_transport(
+            &self.transport,
             &self.db,
             self.document_acp.get().map(|acp| acp.as_ref()),
             peer_id,
             collections,
             se_key,
-            se_identity_pubkey,
         )
         .await
         .map_err(P2PError::from)
+    }
+
+    async fn retry_doc(
+        &self,
+        peer_id: &PeerId,
+        doc_id: &str,
+        collection_id: &str,
+    ) -> P2PResult<()> {
+        db_merge::retry_doc_via_transport(
+            &self.transport,
+            &self.db,
+            self.document_acp.get().map(|acp| acp.as_ref()),
+            peer_id,
+            doc_id,
+            collection_id,
+        )
+        .await
+        .map_err(P2PError::from)
+    }
+
+    async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>> {
+        db_merge::load_document_head_blocks(&self.db, doc_id)
+            .await
+            .map_err(P2PError::internal)
+    }
+
+    async fn load_doc_actor_relationships(
+        &self,
+        collection_name: &str,
+        doc_id: &str,
+    ) -> P2PResult<Option<ReplicatedDocActorRelationships>> {
+        let Some(acp) = self.document_acp.get() else {
+            return Ok(None);
+        };
+        let collection = match self.db.get_collection(collection_name) {
+            Ok(Some(collection)) => collection,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                return Err(P2PError::internal(format!(
+                    "failed to load collection for ACP relationships: {error}"
+                )));
+            }
+        };
+        let Some(policy) = collection.schema().policy.as_ref() else {
+            return Ok(None);
+        };
+
+        let relationships = acp
+            .export_actor_relationships(&policy.id, &policy.resource_name, doc_id)
+            .await
+            .map_err(|error| {
+                P2PError::internal(format!("failed to export ACP relationships: {error}"))
+            })?;
+
+        Ok(Some(ReplicatedDocActorRelationships {
+            policy_id: policy.id.clone(),
+            resource_name: policy.resource_name.clone(),
+            relationships,
+        }))
+    }
+
+    async fn load_doc_creator_did(
+        &self,
+        collection_name: &str,
+        doc_id: &str,
+    ) -> P2PResult<Option<String>> {
+        let Some(acp) = self.document_acp.get() else {
+            return Ok(None);
+        };
+        let collection = match self.db.get_collection(collection_name) {
+            Ok(Some(collection)) => collection,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                return Err(P2PError::internal(format!(
+                    "failed to load collection for ACP creator resolution: {error}"
+                )));
+            }
+        };
+        let Some(policy) = collection.schema().policy.as_ref() else {
+            return Ok(None);
+        };
+
+        let owner = acp
+            .get_doc_owner(&policy.id, &policy.resource_name, doc_id)
+            .await
+            .map_err(|error| {
+                P2PError::internal(format!("failed to resolve ACP owner DID: {error}"))
+            })?;
+
+        Ok(owner.map(|did| did.to_string()))
     }
 
     fn get_collection_id(&self, name: &str) -> Option<String> {
@@ -125,10 +215,8 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
     }
 
     async fn persist_replicator(&self, peer_id: &str, collections: &[String]) -> P2PResult<()> {
-        let parsed_peer_id: libp2p::PeerId = peer_id
-            .parse()
-            .map_err(|error| P2PError::invalid_input(format!("invalid peer ID: {error}")))?;
-        let info = p2p::ReplicatorInfo::new(parsed_peer_id, collections.to_vec());
+        let info =
+            p2p::ReplicatorInfo::from_raw(peer_id.to_string(), collections.to_vec(), Vec::new());
         let bytes = info.to_bytes().map_err(|error| {
             P2PError::internal(format!("failed to serialize replicator info: {error}"))
         })?;
@@ -195,71 +283,5 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
                 "failed to find collection: {error}"
             ))),
         }
-    }
-
-    async fn retry_doc(
-        &self,
-        handle: &P2PHostHandle,
-        peer_id: libp2p::PeerId,
-        doc_id: &str,
-        collection_id: &str,
-    ) -> P2PResult<()> {
-        db_merge::retry_doc(
-            handle,
-            &self.db,
-            self.document_acp.get().map(|acp| acp.as_ref()),
-            peer_id,
-            doc_id,
-            collection_id,
-        )
-        .await
-        .map_err(P2PError::from)
-    }
-
-    async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>> {
-        db_merge::load_document_head_blocks(&self.db, doc_id)
-            .await
-            .map_err(P2PError::internal)
-    }
-
-    async fn load_doc_actor_relationships(
-        &self,
-        collection_name: &str,
-        doc_id: &str,
-    ) -> P2PResult<Option<ReplicatedDocActorRelationships>> {
-        let Some(acp) = self.document_acp.get() else {
-            return Ok(None);
-        };
-        let collection = match self.db.get_collection(collection_name) {
-            Ok(Some(collection)) => collection,
-            Ok(None) => return Ok(None),
-            Err(error) => {
-                return Err(P2PError::internal(format!(
-                    "failed to load collection for ACP relationships: {error}"
-                )));
-            }
-        };
-        let Some(policy) = collection.schema().policy.as_ref() else {
-            return Ok(None);
-        };
-
-        let relationships = acp
-            .export_actor_relationships(&policy.id, &policy.resource_name, doc_id)
-            .await
-            .map_err(|error| {
-                P2PError::internal(format!("failed to export ACP relationships: {error}"))
-            })?;
-
-        Ok(Some(ReplicatedDocActorRelationships {
-            policy_id: policy.id.clone(),
-            resource_name: policy.resource_name.clone(),
-            relationships,
-        }))
-    }
-}
-
-impl<S: storage::corekv::Store + 'static> CollectionLookup for DbDocPusher<S> {
-    fn get_collection_id(&self, name: &str) -> Option<String> {
-        DocPusher::get_collection_id(self, name)
     }
 }

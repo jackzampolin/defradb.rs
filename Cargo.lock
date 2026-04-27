@@ -927,6 +927,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "asn1_der"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4858a9d740c5007a9069007c3b4e91152d0506f13c1b31dd49051fd537656156"
+
+[[package]]
 name = "async-broadcast"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3130,7 +3136,6 @@ name = "crypto"
 version = "0.5.0"
 dependencies = [
  "aes-gcm",
- "async-trait",
  "blst",
  "cid 0.10.1",
  "defra-core",
@@ -3768,8 +3773,10 @@ dependencies = [
  "db-merge",
  "defra-core",
  "defra-http",
+ "defra-p2p-adapter",
  "events",
  "identity",
+ "lens",
  "p2p",
  "query",
  "reqwest 0.12.28",
@@ -3782,6 +3789,34 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "defra-p2p-adapter"
+version = "0.5.0"
+dependencies = [
+ "acp",
+ "async-trait",
+ "blockstore",
+ "bytes",
+ "cid 0.10.1",
+ "db",
+ "db-merge",
+ "defra-core",
+ "defra-http",
+ "document",
+ "events",
+ "hex",
+ "lens",
+ "libp2p",
+ "p2p",
+ "serde",
+ "serde_bytes",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "storage",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4285,6 +4320,8 @@ dependencies = [
  "db",
  "db-merge",
  "defra-core",
+ "defra-http",
+ "defra-p2p-adapter",
  "document",
  "events",
  "hex",
@@ -4577,6 +4614,7 @@ dependencies = [
  "db-backup",
  "db-merge",
  "defra-core",
+ "defra-http",
  "document",
  "embedded",
  "events",
@@ -4996,8 +5034,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
- "windows-result 0.4.1",
+ "windows-link 0.1.3",
+ "windows-result 0.3.4",
 ]
 
 [[package]]
@@ -5718,7 +5756,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -6213,7 +6251,7 @@ dependencies = [
 [[package]]
 name = "iroh-bitswap"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/beetle?branch=main#48e70b0345ea842012285e1fafa27406bb14ef83"
+source = "git+https://github.com/sourcenetwork/beetle?branch=main#6441b0ac5f42d466f44963afb782bb56030b1479"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -6333,7 +6371,7 @@ dependencies = [
 [[package]]
 name = "iroh-metrics"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/beetle?branch=main#48e70b0345ea842012285e1fafa27406bb14ef83"
+source = "git+https://github.com/sourcenetwork/beetle?branch=main#6441b0ac5f42d466f44963afb782bb56030b1479"
 dependencies = [
  "async-trait",
  "config",
@@ -6444,7 +6482,7 @@ dependencies = [
 [[package]]
 name = "iroh-util"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/beetle?branch=main#48e70b0345ea842012285e1fafa27406bb14ef83"
+source = "git+https://github.com/sourcenetwork/beetle?branch=main#6441b0ac5f42d466f44963afb782bb56030b1479"
 dependencies = [
  "anyhow",
  "cid 0.10.1",
@@ -7060,9 +7098,11 @@ version = "0.2.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0c7892c221730ba55f7196e98b0b8ba5e04b4155651736036628e9f73ed6fc3"
 dependencies = [
+ "asn1_der",
  "bs58",
  "ed25519-dalek 2.2.0",
  "hkdf",
+ "k256",
  "multihash 0.19.3",
  "quick-protobuf",
  "rand 0.8.5",
@@ -8789,12 +8829,14 @@ dependencies = [
  "blake3",
  "blockstore",
  "bytes",
+ "chrono",
  "ciborium",
  "cid 0.10.1",
  "crdt",
  "crypto",
  "defra-core",
  "futures",
+ "hex",
  "identity",
  "iroh",
  "iroh-bitswap",
@@ -8812,6 +8854,8 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_cbor",
+ "serde_json",
+ "sha2 0.10.9",
  "storage",
  "thiserror 2.0.18",
  "tokio",
@@ -10411,7 +10455,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "rustix 1.1.4",
- "windows 0.62.2",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -14657,8 +14701,8 @@ dependencies = [
  "log",
  "serde",
  "thiserror 2.0.18",
- "windows 0.62.2",
- "windows-core 0.62.2",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
 ]
 
 [[package]]

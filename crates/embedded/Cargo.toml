@@ -15,6 +15,8 @@ crypto = { path = "../crypto" }
 db = { path = "../db" }
 db-merge = { path = "../db-merge" }
 defra-core = { path = "../defra-core" }
+defra-http = { path = "../http" }
+defra-p2p-adapter = { workspace = true, default-features = false, features = ["libp2p"] }
 document = { path = "../document" }
 events = { path = "../events" }
 identity = { path = "../identity" }
@@ -42,7 +44,7 @@ tracing.workspace = true
 [features]
 default = ["redb"]
 redb = ["storage/redb"]
-iroh = ["p2p/iroh-transport"]
+iroh = ["p2p/iroh-transport", "defra-p2p-adapter/iroh"]
 
 [dev-dependencies]
 tempfile = "3.17"

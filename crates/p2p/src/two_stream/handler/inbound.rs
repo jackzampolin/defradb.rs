@@ -63,7 +63,7 @@ impl TwoStreamHandler {
             ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
                 peer_id = %peer_id,
-                message_id = %request.metadata.message_id,
+                message_id = %request.message_id,
                 doc_id = %request.doc_id,
                 "Successfully read PushLog request on two-stream protocol"
             );
@@ -76,7 +76,7 @@ impl TwoStreamHandler {
             ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
                 peer_id = %peer_id,
-                message_id = %request.metadata.message_id,
+                message_id = %request.message_id,
                 doc_ids = ?request.doc_ids,
                 "Successfully read DocSync request on two-stream protocol"
             );
@@ -89,7 +89,7 @@ impl TwoStreamHandler {
             ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
                 peer_id = %peer_id,
-                message_id = %request.metadata.message_id,
+                message_id = %request.message_id,
                 collection_id = %request.collection_id,
                 "Successfully read BranchableSync request on two-stream protocol"
             );
@@ -102,7 +102,7 @@ impl TwoStreamHandler {
             ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
                 peer_id = %peer_id,
-                message_id = %request.metadata.message_id,
+                message_id = %request.message_id,
                 requester = %request.peer_id,
                 "Successfully read Identity request on two-stream protocol"
             );

@@ -28,6 +28,7 @@
 //!
 //! ## P2P (requires P2POperations)
 //! - `GET /api/v0/p2p/info` - Get P2P node info
+//! - `GET /api/v0/p2p/shareable-address` - Get the single best shareable P2P address
 //! - `GET /api/v0/p2p/peers` - List connected peers
 //! - `POST /api/v0/p2p/peers` - Connect to peer
 //! - `GET /api/v0/p2p/replicator` - List replicators

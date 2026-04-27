@@ -5,7 +5,7 @@ use acp::{DocumentACP, DocumentPermission, Identity};
 use async_trait::async_trait;
 use cid::Cid;
 use identity::Identity as _;
-use p2p::sync::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
+use p2p::sync::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome, RecoveredBlockMetadata};
 use schema::CollectionVersion;
 use storage::corekv::Store;
 
@@ -230,6 +230,24 @@ where
     B: blockstore::Blockstore + Send + Sync + 'static,
 {
     type Error = AcpMergeError;
+
+    async fn validate_authorization(
+        &self,
+        authorization: Option<&p2p::ExplicitReplayAuthorization>,
+        block: &MergeBlock,
+    ) -> Result<(), Self::Error> {
+        self.inner
+            .validate_authorization(authorization, block)
+            .await
+    }
+
+    async fn recover_block_metadata(
+        &self,
+        cid: &Cid,
+        block_data: &[u8],
+    ) -> Result<Option<RecoveredBlockMetadata>, Self::Error> {
+        self.inner.recover_block_metadata(cid, block_data).await
+    }
 
     async fn handle_block(
         &self,

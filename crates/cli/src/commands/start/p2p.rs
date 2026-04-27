@@ -4,7 +4,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 use super::node::Node;
-use crate::config::Config;
+use crate::config::{AcpDocumentType, Config};
 use crate::error::{Error, Result};
 
 impl Node {
@@ -94,8 +94,14 @@ impl Node {
     ) -> Result<(
         p2p::P2PHostHandle,
         tokio::sync::mpsc::Receiver<p2p::HostEvent>,
+        std::sync::Arc<p2p::ReplicatorRegistry>,
         JoinHandle<()>,
     )> {
+        let access_mode = if config.acp.document_type != AcpDocumentType::None {
+            p2p::bitswap::AccessMode::Controlled
+        } else {
+            p2p::bitswap::AccessMode::Open
+        };
         let p2p_config = p2p::P2PHostConfig {
             enable_pubsub,
             enable_relay: config.net.relay_enabled,
@@ -106,8 +112,9 @@ impl Node {
             max_connections_in: config.net.max_connections_in,
             max_connections_out: config.net.max_connections_out,
             max_connections_per_peer: config.net.max_connections_per_peer,
+            access_mode,
         };
-        let (host, handle, events, _replicators) = match keypair {
+        let (host, handle, events, replicators) = match keypair {
             Some(kp) => p2p::P2PHost::with_keypair_and_config(kp, bitswap_store, p2p_config)
                 .await
                 .map_err(Error::P2P)?,
@@ -153,6 +160,6 @@ impl Node {
             Err(e) => error!("Failed to get local peer ID: {}", e),
         }
 
-        Ok((handle, events, host_task))
+        Ok((handle, events, replicators, host_task))
     }
 }

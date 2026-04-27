@@ -47,7 +47,7 @@ impl<S: Store> P2PHost<S> {
                 let is_explicit_replicator = explicit_replay_authorization.is_some();
                 info!(
                     peer_id = %peer_id,
-                    message_id = %request.metadata.message_id,
+                    message_id = %request.message_id,
                     doc_id = %request.doc_id,
                     "Host received PushLog request via two-stream protocol"
                 );
@@ -73,7 +73,7 @@ impl<S: Store> P2PHost<S> {
             TwoStreamEvent::DocSyncRequest { peer_id, request } => {
                 info!(
                     peer_id = %peer_id,
-                    message_id = %request.metadata.message_id,
+                    message_id = %request.message_id,
                     doc_ids = ?request.doc_ids,
                     "Host received DocSync request via two-stream protocol"
                 );
@@ -115,7 +115,7 @@ impl<S: Store> P2PHost<S> {
             TwoStreamEvent::BranchableSyncRequest { peer_id, request } => {
                 info!(
                     peer_id = %peer_id,
-                    message_id = %request.metadata.message_id,
+                    message_id = %request.message_id,
                     collection_id = %request.collection_id,
                     "Host received BranchableSync request via two-stream protocol"
                 );
@@ -159,17 +159,16 @@ impl<S: Store> P2PHost<S> {
                         Some(request.peer_id.clone()),
                         None,
                     ) {
-                        Ok(token) => crate::message::IdentityResponse::success(
-                            &request.metadata.message_id,
-                            token,
-                        ),
+                        Ok(token) => {
+                            crate::message::IdentityResponse::success(&request.message_id, token)
+                        }
                         Err(error) => crate::message::IdentityResponse::error(
-                            &request.metadata.message_id,
+                            &request.message_id,
                             &format!("failed to generate identity token: {error}"),
                         ),
                     },
                     None => crate::message::IdentityResponse::error(
-                        &request.metadata.message_id,
+                        &request.message_id,
                         "node identity is not configured",
                     ),
                 };

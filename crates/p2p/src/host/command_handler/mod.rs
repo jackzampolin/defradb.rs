@@ -56,12 +56,25 @@ impl<S: Store> P2PHost<S> {
             HostCommand::Unsubscribe { topic, response } => {
                 self.handle_unsubscribe(topic, response);
             }
+            HostCommand::SubscribeRaw { topic, response } => {
+                self.handle_subscribe_raw(topic, response);
+            }
             HostCommand::Publish {
                 topic,
                 message,
                 response,
             } => {
                 self.handle_publish(topic, message, response);
+            }
+            HostCommand::PublishRaw {
+                topic,
+                data,
+                response,
+            } => {
+                self.handle_publish_raw(topic, data, response);
+            }
+            HostCommand::RegisterPubsubRpcTopic { topic, response } => {
+                self.handle_register_pubsub_rpc_topic(topic, response);
             }
             HostCommand::SubscribedTopics { response } => {
                 self.handle_subscribed_topics(response);

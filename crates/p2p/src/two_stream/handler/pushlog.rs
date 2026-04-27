@@ -21,7 +21,7 @@ impl TwoStreamHandler {
         peer_id: PeerId,
         request: PushLogRequest,
     ) -> Result<(String, oneshot::Receiver<PushLogReply>)> {
-        let message_id = request.metadata.message_id.clone();
+        let message_id = request.message_id.clone();
 
         // Create response channel
         let (tx, rx) = oneshot::channel();

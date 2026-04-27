@@ -31,7 +31,9 @@ pub use result::ReplicationResult;
 
 #[cfg(test)]
 mod tests {
-    use super::handlers::handle_block_received;
+    use super::handlers::{
+        handle_block_received, is_mergeable_event, process_event, process_merge_batch,
+    };
     use super::*;
     use crate::bitswap::AccessMode;
     use crate::error::Result as P2PResult;
@@ -40,9 +42,12 @@ mod tests {
         PushLogReply, PushLogRequest, PushSEArtifactsRequest,
     };
     use crate::sync::manager::SyncEvent;
-    use crate::sync::merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
+    use crate::sync::merge::{
+        BlockMetadata, MergeBlock, MergeHandler, MergeOutcome, RecoveredBlockMetadata,
+    };
     use crate::topics::DefraTopic;
-    use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId};
+    use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, TransportEvent};
+    use crate::ExplicitReplayAuthorization;
     use crate::QueryId;
     use crate::ReplicatorInfo;
     use async_trait::async_trait;
@@ -110,6 +115,248 @@ mod tests {
                 peer_id: PeerId::new("local-peer".to_string()),
                 pubkey: vec![1, 2, 3],
             }
+        }
+    }
+
+    #[derive(Clone)]
+    struct PollFetchTransport {
+        peer_id: PeerId,
+        pubkey: Vec<u8>,
+        blockstore: Arc<DefraBlockstore<MemoryStore>>,
+        child_cid: Cid,
+        child_data: Vec<u8>,
+        sync_blocks_calls: Arc<AtomicUsize>,
+    }
+
+    impl PollFetchTransport {
+        fn new(
+            blockstore: Arc<DefraBlockstore<MemoryStore>>,
+            child_cid: Cid,
+            child_data: Vec<u8>,
+        ) -> Self {
+            Self {
+                peer_id: PeerId::new("local-peer".to_string()),
+                pubkey: vec![1, 2, 3],
+                blockstore,
+                child_cid,
+                child_data,
+                sync_blocks_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn sync_blocks_calls(&self) -> usize {
+            self.sync_blocks_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl P2PTransport for PollFetchTransport {
+        type ResponseToken = ();
+
+        fn local_peer_id(&self) -> &PeerId {
+            &self.peer_id
+        }
+
+        fn local_public_key_proto(&self) -> &[u8] {
+            &self.pubkey
+        }
+
+        fn sign(&self, _data: &[u8]) -> P2PResult<Vec<u8>> {
+            Ok(vec![0])
+        }
+
+        async fn dial(&self, _peer_id: &PeerId, _addrs: Vec<PeerAddr>) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn listen(&self, _addr: PeerAddr) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn connected_peers(&self) -> P2PResult<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
+        async fn listen_addresses(&self) -> P2PResult<Vec<PeerAddr>> {
+            Ok(Vec::new())
+        }
+
+        async fn poll_until_connected(
+            &self,
+            _peer_id: &PeerId,
+            _timeout: Duration,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn peer_addresses(&self) -> P2PResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn topic_peers(&self, _topic: DefraTopic) -> P2PResult<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
+        async fn subscribe(&self, _topic: DefraTopic) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn unsubscribe(&self, _topic: DefraTopic) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn publish(
+            &self,
+            _topic: DefraTopic,
+            _msg: PushLogBroadcast,
+        ) -> P2PResult<MessageId> {
+            Ok(MessageId::new("noop".to_string()))
+        }
+
+        async fn send_pushlog_response(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: PushLogReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_two_stream_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: PushLogRequest,
+        ) -> P2PResult<PushLogReply> {
+            Ok(PushLogReply::success("noop"))
+        }
+
+        async fn send_two_stream_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: PushLogReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: DocSyncRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: DocSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: BranchableSyncRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: BranchableSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_car_request(&self, _peer_id: &PeerId, _root_cid: Cid) -> P2PResult<()> {
+            self.blockstore
+                .put(&self.child_cid, &self.child_data)
+                .await
+                .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn send_car_response(&self, _peer_id: &PeerId, _car_data: Vec<u8>) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_car_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _car_data: Vec<u8>,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: DocSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: BranchableSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_se_artifacts(
+            &self,
+            _peer_id: &PeerId,
+            _req: PushSEArtifactsRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn sync_blocks(
+            &self,
+            _root: Cid,
+            _providers: Vec<PeerId>,
+            _missing: Vec<Cid>,
+        ) -> P2PResult<QueryId> {
+            self.sync_blocks_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(QueryId(1))
+        }
+
+        async fn cancel_sync(&self, _query_id: QueryId) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn create_replicator(
+            &self,
+            _peer_id: &PeerId,
+            _collections: Vec<String>,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn delete_replicator(&self, _peer_id: &PeerId) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn list_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_replicator(&self, _peer_id: &PeerId) -> P2PResult<Option<ReplicatorInfo>> {
+            Ok(None)
+        }
+
+        async fn remove_replicator_collections(
+            &self,
+            _peer_id: &PeerId,
+            _collections: Vec<String>,
+        ) -> P2PResult<bool> {
+            Ok(false)
+        }
+
+        async fn shutdown(&self) -> P2PResult<()> {
+            Ok(())
         }
     }
 
@@ -414,6 +661,50 @@ mod tests {
         }
     }
 
+    struct RejectingAuthorizationHandler {
+        validation_calls: AtomicUsize,
+        batch_calls: AtomicUsize,
+    }
+
+    impl RejectingAuthorizationHandler {
+        fn new() -> Self {
+            Self {
+                validation_calls: AtomicUsize::new(0),
+                batch_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn validation_calls(&self) -> usize {
+            self.validation_calls.load(Ordering::SeqCst)
+        }
+
+        fn batch_calls(&self) -> usize {
+            self.batch_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    struct RecoveryMetadataHandler {
+        recover_calls: AtomicUsize,
+        handle_calls: AtomicUsize,
+    }
+
+    impl RecoveryMetadataHandler {
+        fn new() -> Self {
+            Self {
+                recover_calls: AtomicUsize::new(0),
+                handle_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn recover_calls(&self) -> usize {
+            self.recover_calls.load(Ordering::SeqCst)
+        }
+
+        fn handle_calls(&self) -> usize {
+            self.handle_calls.load(Ordering::SeqCst)
+        }
+    }
+
     #[async_trait]
     impl MergeHandler for BatchTestHandler {
         type Error = TestError;
@@ -447,6 +738,82 @@ mod tests {
                     }
                 })
                 .collect()
+        }
+    }
+
+    #[async_trait]
+    impl MergeHandler for RejectingAuthorizationHandler {
+        type Error = TestError;
+
+        async fn validate_authorization(
+            &self,
+            authorization: Option<&ExplicitReplayAuthorization>,
+            _block: &MergeBlock,
+        ) -> Result<(), Self::Error> {
+            self.validation_calls.fetch_add(1, Ordering::SeqCst);
+            if authorization.is_some() {
+                Err(TestError("authorization rejected".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn handle_block(
+            &self,
+            _cid: &Cid,
+            _block_data: &[u8],
+            _metadata: BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, Self::Error> {
+            Ok(MergeOutcome::Merged)
+        }
+
+        async fn handle_block_batch(
+            &self,
+            blocks: &[MergeBlock],
+        ) -> Vec<Result<MergeOutcome, Self::Error>> {
+            self.batch_calls.fetch_add(1, Ordering::SeqCst);
+            blocks.iter().map(|_| Ok(MergeOutcome::Merged)).collect()
+        }
+    }
+
+    #[async_trait]
+    impl MergeHandler for RecoveryMetadataHandler {
+        type Error = TestError;
+
+        async fn recover_block_metadata(
+            &self,
+            _cid: &Cid,
+            _block_data: &[u8],
+        ) -> Result<Option<RecoveredBlockMetadata>, Self::Error> {
+            self.recover_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(RecoveredBlockMetadata::new(
+                "doc-recovered",
+                "col-recovered",
+                "did:key:creator",
+            )))
+        }
+
+        async fn handle_block(
+            &self,
+            _cid: &Cid,
+            _block_data: &[u8],
+            metadata: BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, Self::Error> {
+            self.handle_calls.fetch_add(1, Ordering::SeqCst);
+            if !metadata.is_recovery {
+                return Err(TestError(
+                    "metadata should remain in recovery mode".to_string(),
+                ));
+            }
+            if metadata.doc_id != Some("doc-recovered")
+                || metadata.collection_id != Some("col-recovered")
+                || metadata.creator != Some("did:key:creator")
+            {
+                return Err(TestError(
+                    "recovered metadata was not forwarded".to_string(),
+                ));
+            }
+            Ok(MergeOutcome::Merged)
         }
     }
 
@@ -616,6 +983,195 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_recovery_refuses_blocks_without_recovered_metadata() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let cid = test_cid();
+        blockstore.put(&cid, b"test data").await.unwrap();
+
+        let (coordinator, _events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                NoopTransport::new(),
+                blockstore,
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            )
+            .await
+            .unwrap();
+
+        let handler = TestMergeHandler::new(true, false);
+        let result = handle_block_received(
+            &coordinator,
+            &handler,
+            &ReplicationConfig::default(),
+            cid,
+            BlockMetadata::recovery(),
+            None,
+        )
+        .await;
+
+        match result {
+            ReplicationResult::Failed { error, .. } => {
+                assert!(error.contains("Recovery metadata incomplete"));
+            }
+            other => panic!("expected recovery metadata failure, got {:?}", other),
+        }
+        assert_eq!(
+            handler.calls(),
+            0,
+            "recovery must fail before merge when metadata cannot be recovered"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recovery_forwards_handler_recovered_metadata() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let cid = test_cid();
+        blockstore.put(&cid, b"test data").await.unwrap();
+
+        let (coordinator, _events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                NoopTransport::new(),
+                blockstore,
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            )
+            .await
+            .unwrap();
+
+        let handler = RecoveryMetadataHandler::new();
+        let result = handle_block_received(
+            &coordinator,
+            &handler,
+            &ReplicationConfig::default(),
+            cid,
+            BlockMetadata::recovery(),
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, ReplicationResult::Merged { .. }));
+        assert_eq!(handler.recover_calls(), 1);
+        assert_eq!(handler.handle_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pushlog_dag_needs_fetch_uses_poll_fetcher_when_sender_known() {
+        use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+        let child_block = Block::new(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                doc_id: b"doc1".to_vec(),
+                field_name: "name".to_string(),
+                priority: 1,
+                schema_version_id: "schema1".to_string(),
+                data: b"value".to_vec(),
+            }),
+            vec![],
+            vec![],
+        );
+        let child_data = child_block.to_dag_cbor().unwrap();
+        let child_cid = child_block.generate_cid().unwrap();
+
+        let root_block = Block::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                doc_id: b"doc1".to_vec(),
+                schema_version_id: "schema1".to_string(),
+                priority: 1,
+                status: 1,
+            }),
+            vec![],
+            vec![DAGLink::new("name", child_cid)],
+        );
+        let root_data = root_block.to_dag_cbor().unwrap();
+        let root_cid = root_block.generate_cid().unwrap();
+
+        blockstore.put(&root_cid, &root_data).await.unwrap();
+
+        let transport = PollFetchTransport::new(blockstore.clone(), child_cid, child_data);
+        let transport_handle = transport.clone();
+        let (coordinator, mut events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                transport,
+                blockstore.clone(),
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            )
+            .await
+            .unwrap();
+
+        coordinator
+            .handle_transport_event(TransportEvent::TwoStreamRequest {
+                peer_id: PeerId::new("source-peer".to_string()),
+                request: PushLogRequest::new(
+                    "doc1".to_string(),
+                    bytes::Bytes::from(root_cid.to_bytes()),
+                    "col1".to_string(),
+                    "creator-1".to_string(),
+                    bytes::Bytes::from(root_data),
+                ),
+                token: None,
+                is_explicit_replicator: false,
+                explicit_replay_authorization: None,
+            })
+            .await
+            .unwrap();
+
+        let dag_needs_fetch = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("DagNeedsFetch should arrive")
+            .expect("event should be present");
+
+        assert_eq!(coordinator.pending_dag_count(), 1);
+
+        let result = process_event(
+            &coordinator,
+            dag_needs_fetch,
+            &TestMergeHandler::new(true, false),
+            &ReplicationConfig::default(),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            ReplicationResult::DagFetchStarted { root_cid: cid } if cid == root_cid
+        ));
+
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("DagReady should arrive")
+            .expect("event should be present");
+
+        assert!(matches!(&event, SyncEvent::DagReady { root_cid: cid, .. } if *cid == root_cid));
+        assert_eq!(transport_handle.sync_blocks_calls(), 0);
+        assert!(blockstore.has(&child_cid).await.unwrap());
+
+        let merge_result = process_event(
+            &coordinator,
+            event,
+            &TestMergeHandler::new(true, false),
+            &ReplicationConfig::default(),
+        )
+        .await;
+
+        assert!(matches!(
+            merge_result,
+            ReplicationResult::Merged { cid, .. } if cid == root_cid
+        ));
+        assert_eq!(coordinator.pending_dag_count(), 0);
+    }
+
+    #[tokio::test]
     async fn test_replication_result_merged_but_not_marked() {
         // Test that MergedButNotMarked is a distinct result type
         let cid = test_cid();
@@ -726,6 +1282,210 @@ mod tests {
     // =========================================================================
     // Batch merge tests
     // =========================================================================
+
+    #[tokio::test]
+    async fn test_process_next_batch_caps_drain_at_config_batch_size() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (coordinator, _events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                NoopTransport::new(),
+                blockstore.clone(),
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            )
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = mpsc::channel(16);
+        for i in 0..10 {
+            let data = format!("block{}", i);
+            let cid = make_cid(data.as_bytes());
+            blockstore.put(&cid, data.as_bytes()).await.unwrap();
+            tx.send(SyncEvent::BlockReceived {
+                cid,
+                doc_id: format!("doc{}", i),
+                collection_id: "col1".to_string(),
+                creator: "peer1".to_string(),
+                sender_peer: None,
+                is_explicit_replicator: false,
+                explicit_replay_authorization: None,
+                acp_actor_relationships: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        let config = ReplicationConfig {
+            continue_on_error: true,
+            rebroadcast_on_merge: false,
+            batch_size: 3,
+            max_workers: 1,
+        };
+        let handler = BatchTestHandler::new();
+
+        let results =
+            ReplicationLoop::process_next_batch(&coordinator, &mut rx, &handler, &config).await;
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(handler.batch_calls(), 1);
+        assert_eq!(handler.batch_block_count(), 3);
+        assert_eq!(rx.len(), 7, "remaining backlog must stay queued");
+    }
+
+    #[tokio::test]
+    async fn test_acp_events_are_batch_mergeable() {
+        use acp::{ReplicatedActorRelationship, ReplicatedDocActorRelationships, READER_RELATION};
+
+        let event = SyncEvent::BlockReceived {
+            cid: test_cid(),
+            doc_id: "doc1".to_string(),
+            collection_id: "col1".to_string(),
+            creator: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string(),
+            sender_peer: None,
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+            acp_actor_relationships: Some(ReplicatedDocActorRelationships {
+                policy_id: "policy1".to_string(),
+                resource_name: "users".to_string(),
+                relationships: vec![ReplicatedActorRelationship {
+                    relation: READER_RELATION.to_string(),
+                    actor: "did:key:z6MkfXG2FkNy3u7Eg3jm8e2YQpGz7Z1JqWgHDAP1hLk9r2bR".to_string(),
+                }],
+            }),
+        };
+
+        assert!(
+            is_mergeable_event(&event),
+            "ACP-bearing events must stay eligible for batch merge"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_terminal_skip_applies_acp_relationships() {
+        use acp::{
+            DocumentACP, LocalDocumentACP, MemoryAcpStore, ReplicatedActorRelationship,
+            ReplicatedDocActorRelationships, READER_RELATION,
+        };
+
+        let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+        let reader = "did:key:z6MkfXG2FkNy3u7Eg3jm8e2YQpGz7Z1JqWgHDAP1hLk9r2bR";
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let cid = make_cid(b"acp-terminal-skip");
+        blockstore.put(&cid, b"acp-terminal-skip").await.unwrap();
+
+        let (coordinator, _events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                NoopTransport::new(),
+                blockstore,
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            )
+            .await
+            .unwrap();
+        let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
+        coordinator.set_document_acp(acp.clone());
+
+        let relationships = vec![ReplicatedActorRelationship {
+            relation: READER_RELATION.to_string(),
+            actor: reader.to_string(),
+        }];
+        let events = vec![SyncEvent::BlockReceived {
+            cid,
+            doc_id: "doc1".to_string(),
+            collection_id: "col1".to_string(),
+            creator: owner.to_string(),
+            sender_peer: None,
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+            acp_actor_relationships: Some(ReplicatedDocActorRelationships {
+                policy_id: "policy1".to_string(),
+                resource_name: "users".to_string(),
+                relationships: relationships.clone(),
+            }),
+        }];
+
+        let handler = TestMergeHandler::new(true, true);
+        let results = process_merge_batch(
+            &coordinator,
+            events,
+            &handler,
+            &ReplicationConfig::default(),
+        )
+        .await;
+
+        assert!(matches!(
+            results.as_slice(),
+            [ReplicationResult::Skipped { terminal: true, .. }]
+        ));
+        assert!(acp
+            .is_doc_registered("policy1", "users", "doc1")
+            .await
+            .unwrap());
+        assert_eq!(
+            acp.export_actor_relationships("policy1", "users", "doc1")
+                .await
+                .unwrap(),
+            relationships
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_validates_explicit_replay_before_merge() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let cid = make_cid(b"auth-rejected");
+        blockstore.put(&cid, b"auth-rejected").await.unwrap();
+        let (coordinator, _events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                NoopTransport::new(),
+                blockstore,
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            )
+            .await
+            .unwrap();
+
+        let handler = RejectingAuthorizationHandler::new();
+        let events = vec![SyncEvent::BlockReceived {
+            cid,
+            doc_id: "doc1".to_string(),
+            collection_id: "col1".to_string(),
+            creator: "did:key:authorizer".to_string(),
+            sender_peer: Some("source-peer".to_string()),
+            is_explicit_replicator: true,
+            explicit_replay_authorization: Some(ExplicitReplayAuthorization {
+                source_peer_id: "source-peer".to_string(),
+                target_peer_id: "target-peer".to_string(),
+                collection_id: "col1".to_string(),
+                authorizer_did: "did:key:authorizer".to_string(),
+                expires_at: u64::MAX,
+            }),
+            acp_actor_relationships: None,
+        }];
+
+        let results = process_merge_batch(
+            &coordinator,
+            events,
+            &handler,
+            &ReplicationConfig::default(),
+        )
+        .await;
+
+        assert!(matches!(
+            results.as_slice(),
+            [ReplicationResult::Failed { error, .. }] if error.contains("authorization rejected")
+        ));
+        assert_eq!(handler.validation_calls(), 1);
+        assert_eq!(handler.batch_calls(), 0);
+    }
 
     #[tokio::test]
     async fn test_default_handle_block_batch_calls_per_block() {

@@ -11,16 +11,6 @@ use crate::types::{c_str_to_string, FfiResult};
 
 use super::{into_ffi_ok, into_ffi_result, parse_collections_json, FfiP2PError};
 
-fn replicator_push_options(state: &crate::state::NodeState) -> embedded::ReplicatorPushOptions {
-    embedded::ReplicatorPushOptions {
-        se_encryption_key: state.se_encryption_key.as_ref().map(|key| key.to_vec()),
-        se_identity_pubkey: state
-            .node_identity_did
-            .as_ref()
-            .map(|identity| identity.as_bytes().to_vec()),
-    }
-}
-
 /// Set (add/update) a replicator for collections.
 ///
 /// # Safety
@@ -57,12 +47,11 @@ pub unsafe extern "C" fn p2p_add_replicator(
                 };
 
                 let addr = addr_str.clone();
-                let push_options = replicator_push_options(state);
                 let collections = collections.clone();
                 rt.block_on(async move {
                     p2p.system
                         .ops()
-                        .add_replicator(collections, Some(&addr), push_options)
+                        .add_replicator(collections, Some(&addr), Vec::new(), None)
                         .await
                         .map_err(FfiP2PError::from)
                 })

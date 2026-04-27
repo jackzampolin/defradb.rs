@@ -3,7 +3,7 @@
 //! CARv1 (Content ARchive) packs a set of IPLD blocks with their CIDs into a
 //! single byte stream, enabling single-round-trip DAG transfer over P2P.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use blockstore::Blockstore;
 use bytes::Bytes;
@@ -56,6 +56,27 @@ pub fn encode_car(roots: &[Cid], blocks: &[(&Cid, &[u8])]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Cheap peek: does this CAR byte stream contain at least one block section?
+///
+/// Reads only the header-length varint and checks whether any bytes remain
+/// after the header. Used by the iroh requester to distinguish a header-only
+/// "no blocks" response from a usable fetch without paying full decode cost.
+/// Any malformed input — unreadable varint, or declared header length
+/// exceeding the remaining bytes — reports `true` so the caller forwards
+/// the bytes and lets the coordinator surface the decode error.
+#[cfg(feature = "iroh-transport")]
+pub(crate) fn car_has_any_block(data: &[u8]) -> bool {
+    let mut cursor = data;
+    let Ok(header_len) = read_varint(&mut cursor) else {
+        return true;
+    };
+    let header_len = header_len as usize;
+    if header_len > cursor.len() {
+        return true;
+    }
+    cursor.len() > header_len
+}
+
 /// Decoded CAR contents: root CIDs and blocks (CID + data pairs).
 pub type CarContents = (Vec<Cid>, Vec<(Cid, Vec<u8>)>);
 
@@ -72,9 +93,18 @@ pub fn decode_car(data: &[u8]) -> Result<CarContents> {
     cursor = &cursor[header_len as usize..];
     let roots = decode_car_header(header_bytes)?;
 
-    // Read blocks
+    // Read blocks. Cap at CAR_MAX_BLOCKS to prevent a hostile peer from
+    // sending millions of tiny block headers that allocate unbounded memory
+    // before any downstream limit fires (#840).
     let mut blocks = Vec::new();
     while !cursor.is_empty() {
+        if blocks.len() >= CAR_MAX_BLOCKS {
+            return Err(Error::Codec(format!(
+                "CAR file exceeds maximum block count of {}",
+                CAR_MAX_BLOCKS
+            )));
+        }
+
         let section_len = read_varint(&mut cursor)?;
         if section_len as usize > cursor.len() {
             return Err(Error::Codec("CAR block section length exceeds data".into()));
@@ -105,14 +135,45 @@ pub async fn collect_dag_blocks<B: Blockstore>(
     let mut outcome = CarCollectOutcome::default();
     let mut visited = HashSet::new();
     let mut total_bytes: usize = 0;
-    collect_recursive(
-        blockstore,
-        root_cid,
-        &mut outcome,
-        &mut visited,
-        &mut total_bytes,
-    )
-    .await?;
+    let mut queue = VecDeque::from([*root_cid]);
+
+    while let Some(cid) = queue.pop_front() {
+        if !visited.insert(cid) {
+            continue;
+        }
+
+        if outcome.blocks.len() >= CAR_MAX_BLOCKS {
+            outcome.truncated_by_blocks = true;
+            break;
+        }
+
+        let data = match blockstore.get(&cid).await {
+            Ok(Some(d)) => d,
+            Ok(None) => continue,
+            Err(e) => {
+                return Err(Error::BlockstoreError(format!(
+                    "failed to get block {}: {}",
+                    cid, e
+                )));
+            }
+        };
+
+        if total_bytes + data.len() > CAR_MAX_BYTES {
+            outcome.truncated_by_bytes = true;
+            break;
+        }
+        total_bytes += data.len();
+
+        let refs = extract_links(&data);
+        outcome.blocks.push((cid, data));
+
+        for child_cid in refs {
+            if !visited.contains(&child_cid) {
+                queue.push_back(child_cid);
+            }
+        }
+    }
+
     Ok(outcome)
 }
 
@@ -155,53 +216,6 @@ pub async fn collect_exact_blocks<B: Blockstore>(
     }
 
     Ok(outcome)
-}
-
-fn collect_recursive<'a, B: Blockstore + 'a>(
-    blockstore: &'a B,
-    cid: &'a Cid,
-    outcome: &'a mut CarCollectOutcome,
-    visited: &'a mut HashSet<Cid>,
-    total_bytes: &'a mut usize,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
-    Box::pin(async move {
-        if !visited.insert(*cid) {
-            return Ok(());
-        }
-
-        // Enforce limits before fetching each block.
-        if outcome.blocks.len() >= CAR_MAX_BLOCKS {
-            outcome.truncated_by_blocks = true;
-            return Ok(());
-        }
-
-        let data = match blockstore.get(cid).await {
-            Ok(Some(d)) => d,
-            Ok(None) => return Ok(()),
-            Err(e) => {
-                return Err(Error::BlockstoreError(format!(
-                    "failed to get block {}: {}",
-                    cid, e
-                )));
-            }
-        };
-
-        if *total_bytes + data.len() > CAR_MAX_BYTES {
-            outcome.truncated_by_bytes = true;
-            return Ok(());
-        }
-        *total_bytes += data.len();
-
-        // Extract child links
-        let refs = extract_links(&data);
-        outcome.blocks.push((*cid, data));
-
-        for child_cid in refs {
-            collect_recursive(blockstore, &child_cid, outcome, visited, total_bytes).await?;
-        }
-
-        Ok(())
-    })
 }
 
 /// Extract CID links from a DAG-CBOR block.
@@ -327,6 +341,27 @@ mod tests {
         DagCborCodec.encode(&ipld).unwrap()
     }
 
+    #[cfg(feature = "iroh-transport")]
+    #[test]
+    fn car_has_any_block_detects_header_only_and_populated_cars() {
+        let cid = make_cid(b"root");
+        let header_only = encode_car(&[cid], &[]).unwrap();
+        assert!(!car_has_any_block(&header_only));
+
+        let data = b"payload";
+        let populated = encode_car(&[cid], &[(&cid, data.as_slice())]).unwrap();
+        assert!(car_has_any_block(&populated));
+
+        // Malformed input: no varint → report `true` so the caller forwards
+        // to the coordinator instead of silently dropping.
+        assert!(car_has_any_block(&[]));
+
+        // Malformed subtype: varint declares a header longer than the
+        // remaining bytes. Also report `true` (fail-safe).
+        // Varint 0x7f = 127, but only 1 byte follows.
+        assert!(car_has_any_block(&[0x7f, 0xaa]));
+    }
+
     #[test]
     fn round_trip_single_block() {
         let data = b"hello world";
@@ -417,5 +452,62 @@ mod tests {
         assert_eq!(collected.blocks[0].0, root_cid);
         assert_eq!(collected.blocks[0].1, root_data);
         assert!(!collected.truncated());
+    }
+
+    #[tokio::test]
+    async fn collect_dag_blocks_handles_deep_chains_iteratively() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true);
+
+        let mut next: Option<Cid> = None;
+        let mut root_cid: Option<Cid> = None;
+        let depth = 5_000usize;
+
+        for idx in (0..depth).rev() {
+            let data = match next {
+                Some(child) => encode_ipld(ipld!({ "idx": idx as i64, "next": child })),
+                None => encode_ipld(ipld!({ "idx": idx as i64 })),
+            };
+            let cid = make_cid(&data);
+            blockstore.put(&cid, &data).await.unwrap();
+            next = Some(cid);
+            root_cid = Some(cid);
+        }
+
+        let root_cid = root_cid.expect("deep chain root");
+        let collected = collect_dag_blocks(&blockstore, &root_cid).await.unwrap();
+
+        assert_eq!(collected.blocks.len(), depth);
+        assert!(!collected.truncated());
+    }
+
+    #[test]
+    fn decode_car_rejects_block_count_exceeding_cap() {
+        let root = make_cid(b"root");
+        let blocks: Vec<(&Cid, &[u8])> = (0..CAR_MAX_BLOCKS + 1)
+            .map(|_| (&root, b"x".as_slice()))
+            .collect();
+        let encoded = encode_car(&[root], &blocks).unwrap();
+
+        let result = decode_car(&encoded);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("maximum block count"),
+            "expected block-count error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn decode_car_accepts_exactly_max_blocks() {
+        let root = make_cid(b"root");
+        let blocks: Vec<(&Cid, &[u8])> = (0..CAR_MAX_BLOCKS)
+            .map(|_| (&root, b"x".as_slice()))
+            .collect();
+        let encoded = encode_car(&[root], &blocks).unwrap();
+
+        let (roots, decoded) = decode_car(&encoded).unwrap();
+        assert_eq!(roots, vec![root]);
+        assert_eq!(decoded.len(), CAR_MAX_BLOCKS);
     }
 }

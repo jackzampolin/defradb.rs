@@ -126,9 +126,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)>,
         )> = Vec::with_capacity(prepared_docs.len());
 
-        for ((doc, id_was_generated), blocks) in
-            prepared_docs.into_iter().zip(computed_blocks.into_iter())
-        {
+        for ((doc, id_was_generated), blocks) in prepared_docs.into_iter().zip(computed_blocks) {
             let doc_id = doc.id().cloned().ok_or_else(|| {
                 query::error::QueryError::execution("document should have ID after generation")
             })?;

@@ -6,6 +6,9 @@ use thiserror::Error;
 /// Result type for P2P operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Error text used when the coordinator rejects a request due to peer backpressure.
+pub const RATE_LIMITED_MESSAGE: &str = "rate limited: too many requests, retry later";
+
 /// P2P error types.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -150,6 +153,12 @@ pub enum Error {
     #[error("blockstore error: {0}")]
     BlockstoreError(String),
 
+    /// Blockstore operation failed because of a retriable storage-layer
+    /// transaction conflict. Kept distinct from `BlockstoreError` so retry
+    /// logic can match on a typed variant instead of a string suffix.
+    #[error("blockstore transaction conflict")]
+    BlockstoreTxnConflict,
+
     /// Failed to send response.
     #[error("failed to send response: {0}")]
     ResponseSend(String),
@@ -243,6 +252,105 @@ pub enum Error {
     HeadProvider(String),
 }
 
+impl Error {
+    /// Suffix that storage surfaces in stringified transaction-conflict errors.
+    ///
+    /// Used only as a fallback for legacy call sites that still construct
+    /// `BlockstoreError`/`Storage` from an already-stringified error chain.
+    /// New call sites should flow typed `blockstore::Error` /
+    /// `storage::corekv::Error` values through `Error::from_blockstore`
+    /// instead, which preserves `BlockstoreTxnConflict` without relying on
+    /// wording stability.
+    const TXN_CONFLICT_SUFFIX: &str = "transaction conflict. Please retry";
+
+    /// Convert a typed blockstore error into the nearest P2P error,
+    /// preserving the retriable transaction-conflict signal instead of
+    /// stringifying it away.
+    pub fn from_blockstore(err: blockstore::Error) -> Self {
+        if err.is_txn_conflict() {
+            Error::BlockstoreTxnConflict
+        } else {
+            Error::BlockstoreError(err.to_string())
+        }
+    }
+
+    /// Returns true if this error represents a storage-layer transaction conflict.
+    pub fn is_txn_conflict(&self) -> bool {
+        match self {
+            Error::BlockstoreTxnConflict => true,
+            Error::BlockstoreError(msg) | Error::Storage(msg) => {
+                msg.ends_with(Self::TXN_CONFLICT_SUFFIX)
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns true if retrying the operation may succeed without changing inputs.
+    pub fn is_retriable(&self) -> bool {
+        self.is_txn_conflict()
+    }
+
+    /// Returns true if the error looks like a transport/connection teardown signal.
+    ///
+    /// This is intentionally broader than a single enum variant because iroh and
+    /// libp2p surface many disconnect cases through stringified transport errors.
+    pub fn is_connection_like(&self) -> bool {
+        match self {
+            Error::ConnectionClosed
+            | Error::ChannelSend
+            | Error::ChannelReceive
+            | Error::ResponseTimeout
+            | Error::ConnectionTimeout(_) => true,
+            Error::Dial(msg)
+            | Error::Transport(msg)
+            | Error::Codec(msg)
+            | Error::ProtocolNegotiation(msg)
+            | Error::Noise(msg)
+            | Error::Swarm(msg)
+            | Error::ResponseSend(msg) => Self::is_connection_loss_reason(msg),
+            Error::Io(err) => Self::is_connection_loss_reason(&err.to_string()),
+            Error::StreamOpen { reason, .. } | Error::StreamWrite { reason, .. } => {
+                Self::is_connection_loss_reason(reason)
+            }
+            _ => false,
+        }
+    }
+
+    /// Best-effort classifier for common disconnect / teardown reasons surfaced
+    /// as transport strings.
+    pub fn is_connection_loss_reason(reason: &str) -> bool {
+        let lower = reason.to_ascii_lowercase();
+        lower == "closed"
+            || lower.ends_with(": closed")
+            || lower.contains("connection lost")
+            || lower.contains("connection closed")
+            || lower.contains("connection reset")
+            || lower.contains("stream reset")
+            || lower.contains("broken pipe")
+            || lower.contains("peer closed")
+            || lower.contains("aborted by peer")
+            || lower.contains("closed during the handshake")
+            || lower.contains("timed out waiting for peer")
+            || lower.contains("endpoint closed")
+    }
+
+    /// Returns true if this is the coordinator's synthetic rate-limit rejection.
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(
+            self,
+            Error::AccessDenied {
+                collection_id,
+                ..
+            } if collection_id == "rate-limited"
+        )
+    }
+}
+
+/// Returns true when a peer reply carries the coordinator's explicit rate-limit signal.
+pub fn is_rate_limited_message(message: &str) -> bool {
+    message == RATE_LIMITED_MESSAGE
+}
+
 /// Convert a blockstore CID verification error into its P2P counterpart.
 ///
 /// Called at each P2P block ingestion boundary so callers get typed errors
@@ -281,5 +389,80 @@ impl From<libp2p::TransportError<io::Error>> for Error {
 impl From<libp2p::multiaddr::Error> for Error {
     fn from(e: libp2p::multiaddr::Error) -> Self {
         Error::InvalidMultiaddr(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    #[test]
+    fn txn_conflict_detection_matches_wrapped_storage_messages() {
+        // Legacy stringified variants: retained so any caller that still
+        // builds errors by stringifying stays retriable.
+        let blockstore_error =
+            Error::BlockstoreError("storage error: transaction conflict. Please retry".into());
+        let storage_error = Error::Storage("transaction conflict. Please retry".into());
+
+        assert!(blockstore_error.is_txn_conflict());
+        assert!(storage_error.is_txn_conflict());
+        assert!(blockstore_error.is_retriable());
+        assert!(storage_error.is_retriable());
+    }
+
+    #[test]
+    fn txn_conflict_detection_matches_typed_variant() {
+        let typed = Error::BlockstoreTxnConflict;
+        assert!(typed.is_txn_conflict());
+        assert!(typed.is_retriable());
+    }
+
+    #[test]
+    fn from_blockstore_preserves_typed_txn_conflict() {
+        let conflict = blockstore::Error::Storage(storage::corekv::Error::TxnConflict);
+        assert!(conflict.is_txn_conflict());
+        let p2p_err = Error::from_blockstore(conflict);
+        assert!(matches!(p2p_err, Error::BlockstoreTxnConflict));
+        assert!(p2p_err.is_retriable());
+    }
+
+    #[test]
+    fn from_blockstore_non_conflict_keeps_stringified_message() {
+        let other = blockstore::Error::NotFound("missing".into());
+        let p2p_err = Error::from_blockstore(other);
+        match p2p_err {
+            Error::BlockstoreError(msg) => assert!(msg.contains("missing")),
+            other => panic!("expected BlockstoreError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_detection_is_typed() {
+        let rate_limited = Error::AccessDenied {
+            peer_id: "peer-1".into(),
+            collection_id: "rate-limited".into(),
+        };
+        let ordinary_denial = Error::AccessDenied {
+            peer_id: "peer-1".into(),
+            collection_id: "users".into(),
+        };
+
+        assert!(rate_limited.is_rate_limited());
+        assert!(!ordinary_denial.is_rate_limited());
+    }
+
+    #[test]
+    fn connection_like_detection_matches_common_transport_failures() {
+        assert!(Error::ChannelSend.is_connection_like());
+        assert!(Error::ChannelReceive.is_connection_like());
+        assert!(Error::Dial("closed".into()).is_connection_like());
+        assert!(Error::Codec("failed to read length: connection lost".into()).is_connection_like());
+        assert!(Error::Transport("peer closed stream".into()).is_connection_like());
+        assert!(Error::ResponseSend("broken pipe".into()).is_connection_like());
+        assert!(!Error::AccessDenied {
+            peer_id: "peer-1".into(),
+            collection_id: "users".into(),
+        }
+        .is_connection_like());
     }
 }

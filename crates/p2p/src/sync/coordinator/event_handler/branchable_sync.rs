@@ -8,6 +8,7 @@ use super::super::SyncCoordinator;
 use crate::error::Result;
 use crate::message::BranchableSyncReply;
 use crate::signing::sign_with_transport;
+use crate::sync::manager::links::find_all_missing_links;
 use crate::transport::{P2PTransport, PeerId};
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
@@ -85,11 +86,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .send_branchable_sync_reply(
                 &peer_id,
                 token,
-                BranchableSyncReply::success(
-                    &request.metadata.message_id,
-                    &request.collection_id,
-                    heads,
-                ),
+                BranchableSyncReply::success(&request.message_id, &request.collection_id, heads),
             )
             .await
         {
@@ -104,7 +101,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         Ok(())
     }
 
-    pub(super) async fn handle_branchable_sync_reply(
+    pub(in crate::sync::coordinator) async fn handle_branchable_sync_reply(
         &self,
         peer_id: PeerId,
         reply: crate::message::BranchableSyncReply,
@@ -129,18 +126,44 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             match Cid::try_from(head_bytes.as_slice()) {
                 Ok(cid) => {
                     tracing::trace!(cid = %cid, "Parsed collection head CID");
-                    match self.manager.blockstore().has(&cid).await {
-                        Ok(true) => {
-                            tracing::debug!(cid = %cid, "Already have block");
-                        }
-                        Ok(false) => {
-                            tracing::debug!(cid = %cid, "Need to fetch block");
-                            cids_to_fetch.push(cid);
-                        }
+                    // Having the head block locally does NOT imply we have its
+                    // ancestors. The head can land via gossip for a single
+                    // commit while earlier collection commits (other docs)
+                    // remain missing. Walk the local DAG and skip the fetch
+                    // only when no descendants are missing.
+                    let needs_fetch = match self.manager.blockstore().has(&cid).await {
+                        Ok(true) => match self.manager.blockstore().get(&cid).await {
+                            Ok(Some(data)) => {
+                                match find_all_missing_links(
+                                    self.manager.blockstore().as_ref(),
+                                    &data,
+                                )
+                                .await
+                                {
+                                    Ok(missing) => !missing.is_empty(),
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            cid = %cid,
+                                            error = %e,
+                                            "Failed to walk DAG; falling back to fetch"
+                                        );
+                                        true
+                                    }
+                                }
+                            }
+                            _ => true,
+                        },
+                        Ok(false) => true,
                         Err(e) => {
                             tracing::warn!(cid = %cid, error = %e, "Error checking block");
-                            cids_to_fetch.push(cid);
+                            true
                         }
+                    };
+                    if needs_fetch {
+                        tracing::debug!(cid = %cid, "Need to fetch DAG");
+                        cids_to_fetch.push(cid);
+                    } else {
+                        tracing::debug!(cid = %cid, "Already have block and full DAG");
                     }
                 }
                 Err(e) => {
@@ -169,8 +192,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 let semaphore = semaphore.clone();
                 let source_peer = peer_id.clone();
 
-                tokio::spawn(async move {
-                    let _permit = semaphore.acquire_owned().await;
+                self.spawn_background_task("branchable_sync_reply_fetch_dag", async move {
+                    let Ok(_permit) = semaphore.acquire_owned().await else {
+                        return;
+                    };
                     super::super::dag_fetcher::poll_fetch_dag(
                         transport,
                         blockstore,

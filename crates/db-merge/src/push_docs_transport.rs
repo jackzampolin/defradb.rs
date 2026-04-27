@@ -1,4 +1,3 @@
-use std::str::FromStr;
 use std::sync::Arc;
 
 use acp::DocumentACP;
@@ -9,7 +8,8 @@ use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
 
 use crate::push_docs_common::{
-    load_push_dag_blocks, resolve_push_creator, MAX_CONCURRENT_REPLAY_TASKS,
+    load_latest_composite_head_cids, load_push_dag_blocks, resolve_push_creator,
+    MAX_CONCURRENT_REPLAY_TASKS,
 };
 use db::database::DB;
 
@@ -113,30 +113,10 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
         for doc_id in &doc_ids {
             let creator =
                 resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id).await;
-            let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
-            let opts = IterOptions::new().with_prefix(prefix);
-            let mut iter = headstore
-                .iterator(opts)
-                .await
-                .map_err(|e| format!("failed to iterate headstore: {}", e))?;
-
             let mut doc_blocks = Vec::new();
-
-            while let Some(pair) = iter
-                .next()
-                .await
-                .map_err(|e| format!("headstore iteration error: {}", e))?
+            for head_cid in
+                load_latest_composite_head_cids(&headstore, &blockstore_view, doc_id).await
             {
-                let key_str = String::from_utf8_lossy(&pair.key);
-                let parts: Vec<&str> = key_str.split('/').collect();
-                if parts.len() < 5 {
-                    continue;
-                }
-                let head_cid = match cid::Cid::from_str(parts[4]) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-
                 let block_key = head_cid.to_bytes();
                 let block_data = match blockstore_view.get(&block_key).await {
                     Ok(Some(data)) => data,
@@ -148,10 +128,6 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
                         .await,
                 );
             }
-
-            iter.close()
-                .await
-                .map_err(|e| format!("headstore close error: {}", e))?;
 
             let mut requests = Vec::new();
             for (block_cid, block_data) in doc_blocks {
@@ -172,6 +148,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
             if !requests.is_empty() {
                 let t = transport.clone();
                 let pid = peer_id.clone();
+                let total_blocks = requests.len();
                 let permit = replay_semaphore
                     .clone()
                     .acquire_owned()
@@ -179,25 +156,45 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
                     .map_err(|_| "replay semaphore closed before scheduling push".to_string())?;
                 push_handles.push(tokio::spawn(async move {
                     let _permit = permit;
+                    let mut completed_blocks = 0usize;
                     for req in requests {
                         let cid = req.cid.clone();
                         match t.send_two_stream_request(&pid, req).await {
                             Ok(reply) if reply.err_message.is_some() => {
                                 tracing::warn!(
                                     peer_id = %pid,
+                                    completed_blocks,
+                                    total_blocks,
                                     cid_len = cid.len(),
                                     error = %reply.err_message.as_deref().unwrap_or("unknown pushlog error"),
-                                    "Existing document replay PushLog was rejected"
+                                    "Existing document replay PushLog was rejected; stopping replay for this document"
                                 );
+                                break;
                             }
-                            Ok(_) => {}
+                            Ok(_) => {
+                                completed_blocks += 1;
+                            }
                             Err(e) => {
-                                tracing::warn!(
-                                    peer_id = %pid,
-                                    cid_len = cid.len(),
-                                    error = %e,
-                                    "Existing document replay PushLog failed"
-                                );
+                                if e.is_connection_like() {
+                                    tracing::debug!(
+                                        peer_id = %pid,
+                                        completed_blocks,
+                                        total_blocks,
+                                        cid_len = cid.len(),
+                                        error = %e,
+                                        "Existing document replay stopped because the connection became unavailable"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        peer_id = %pid,
+                                        completed_blocks,
+                                        total_blocks,
+                                        cid_len = cid.len(),
+                                        error = %e,
+                                        "Existing document replay PushLog failed; stopping replay for this document"
+                                    );
+                                }
+                                break;
                             }
                         }
                     }
@@ -363,29 +360,8 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
         .await
         .map_err(|e| format!("encstore txn: {}", e))?;
 
-    let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
-    let opts = IterOptions::new().with_prefix(prefix);
-    let mut iter = head_txn
-        .iterator(opts)
-        .await
-        .map_err(|e| format!("headstore iterator: {}", e))?;
-
-    let mut any_failed = false;
-    while let Some(pair) = iter
-        .next()
-        .await
-        .map_err(|e| format!("headstore iteration: {}", e))?
-    {
-        let key_str = String::from_utf8_lossy(&pair.key);
-        let parts: Vec<&str> = key_str.split('/').collect();
-        if parts.len() < 5 {
-            continue;
-        }
-        let head_cid = match cid::Cid::from_str(parts[4]) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
+    let mut successful_blocks = 0usize;
+    for head_cid in load_latest_composite_head_cids(&*head_txn, &*block_txn, doc_id).await {
         let block_data = match block_txn.get(&head_cid.to_bytes()).await {
             Ok(Some(data)) => data,
             _ => continue,
@@ -403,21 +379,36 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
             );
 
             if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
-                any_failed = true;
-                continue;
+                return Err(format!(
+                    "failed to sign replay block after {successful_blocks} successful block(s)"
+                ));
             }
 
             match transport.send_two_stream_request(peer_id, request).await {
-                Ok(reply) if reply.err_message.is_some() => any_failed = true,
-                Ok(_) => {}
-                Err(_) => any_failed = true,
+                Ok(reply) if reply.err_message.is_some() => {
+                    return Err(format!(
+                        "peer rejected replay after {successful_blocks} successful block(s): {}",
+                        reply
+                            .err_message
+                            .as_deref()
+                            .unwrap_or("unknown pushlog error")
+                    ));
+                }
+                Ok(_) => {
+                    successful_blocks += 1;
+                }
+                Err(error) => {
+                    let prefix = if error.is_connection_like() {
+                        "transport became unavailable"
+                    } else {
+                        "replay push failed"
+                    };
+                    return Err(format!(
+                        "{prefix} after {successful_blocks} successful block(s): {error}"
+                    ));
+                }
             }
         }
     }
-
-    if any_failed {
-        Err("some pushes failed".to_string())
-    } else {
-        Ok(())
-    }
+    Ok(())
 }

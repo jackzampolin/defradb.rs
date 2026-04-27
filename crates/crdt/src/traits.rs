@@ -16,8 +16,6 @@ pub enum MergeResult {
     RejectedLowerPriority { current: u64, incoming: u64 },
     /// Delta was rejected due to lexicographic tie-breaking (same priority, current value wins)
     RejectedTieBreak,
-    /// Delta was skipped because it was already applied (idempotency via nonce)
-    SkippedAlreadyApplied { nonce: i64 },
 }
 
 impl MergeResult {
@@ -32,11 +30,6 @@ impl MergeResult {
             self,
             MergeResult::RejectedLowerPriority { .. } | MergeResult::RejectedTieBreak
         )
-    }
-
-    /// Returns true if the delta was skipped due to idempotency
-    pub fn was_skipped(&self) -> bool {
-        matches!(self, MergeResult::SkippedAlreadyApplied { .. })
     }
 }
 

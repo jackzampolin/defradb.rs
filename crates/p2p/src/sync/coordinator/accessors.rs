@@ -5,7 +5,7 @@ use std::sync::Arc;
 use acp::{DocumentACP, ReplicatedDocActorRelationships};
 use blockstore::Blockstore;
 
-use super::SyncCoordinator;
+use super::{SyncCoordinator, SyncShutdownHandle};
 use crate::bitswap::ReplicatorRegistry;
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::manager::SyncManager;
@@ -43,6 +43,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         &self.runtime.transport
     }
 
+    /// Get the shutdown handle for coordinator-owned background tasks.
+    pub fn background_shutdown_handle(&self) -> SyncShutdownHandle {
+        self.runtime.shutdown.clone()
+    }
+
     /// Get the sync manager reference.
     pub fn manager(&self) -> &SyncManager<B> {
         &self.manager
@@ -56,6 +61,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub(crate) async fn apply_replicated_actor_relationships(
         &self,
         doc_id: &str,
+        creator: Option<&str>,
         snapshot: Option<&ReplicatedDocActorRelationships>,
     ) -> crate::Result<()> {
         let Some(snapshot) = snapshot else {
@@ -64,6 +70,37 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let Some(acp) = self.document_acp.get() else {
             return Ok(());
         };
+
+        if let Some(creator) = creator {
+            let creator_did = identity::Did::new(creator).map_err(|error| {
+                crate::Error::Behaviour(format!(
+                    "failed to parse replicated ACP creator DID '{creator}': {error}"
+                ))
+            })?;
+            let is_registered = acp
+                .is_doc_registered(&snapshot.policy_id, &snapshot.resource_name, doc_id)
+                .await
+                .map_err(|error| {
+                    crate::Error::Behaviour(format!(
+                        "failed to check replicated ACP registration: {error}"
+                    ))
+                })?;
+
+            if !is_registered {
+                acp.register_doc_object(
+                    &creator_did,
+                    &snapshot.policy_id,
+                    &snapshot.resource_name,
+                    doc_id,
+                )
+                .await
+                .map_err(|error| {
+                    crate::Error::Behaviour(format!(
+                        "failed to register replicated ACP document owner: {error}"
+                    ))
+                })?;
+            }
+        }
 
         acp.replace_actor_relationships(
             &snapshot.policy_id,

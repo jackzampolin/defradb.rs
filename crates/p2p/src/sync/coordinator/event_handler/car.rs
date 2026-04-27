@@ -9,6 +9,10 @@ use crate::sync::car::{collect_dag_blocks, collect_exact_blocks, decode_car, enc
 use crate::sync::coordinator::SyncCoordinator;
 use crate::transport::{P2PTransport, PeerId};
 
+fn sample_cids(cids: &[Cid]) -> Vec<String> {
+    cids.iter().take(4).map(ToString::to_string).collect()
+}
+
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Handle an inbound CAR fetch request: collect the DAG and send CARv1 response.
     pub(crate) async fn handle_car_fetch_request(
@@ -17,7 +21,33 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         request: CarFetchRequest,
         token: Option<T::ResponseToken>,
     ) -> Result<()> {
-        self.check_peer_is_replicator(&peer_id)?;
+        let root_present = match self.manager.blockstore().has(&request.root_cid).await {
+            Ok(present) => Some(present),
+            Err(error) => {
+                tracing::debug!(
+                    root_cid = %request.root_cid,
+                    peer_id = %peer_id,
+                    error = %error,
+                    "CAR handler: failed to check root presence before serving request"
+                );
+                None
+            }
+        };
+
+        if let Err(error) = self.check_peer_is_replicator(&peer_id).await {
+            tracing::warn!(
+                root_cid = %request.root_cid,
+                peer_id = %peer_id,
+                recursive = request.recursive,
+                requested_count = request.wanted_cids.len(),
+                root_present = ?root_present,
+                connected = self.access.peer_state.is_connected(peer_id.as_str()),
+                registered_any = self.access.replicators.is_any_replicator(peer_id.as_str()),
+                error = %error,
+                "CAR handler rejected request"
+            );
+            return Err(error);
+        }
 
         tracing::debug!(
             root_cid = %request.root_cid,
@@ -37,13 +67,46 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let blocks = collected.blocks;
 
         if blocks.is_empty() {
-            tracing::warn!(
-                root_cid = %request.root_cid,
-                peer_id = %peer_id,
-                recursive = request.recursive,
-                requested_count = request.wanted_cids.len(),
-                "CAR handler: no blocks found for request"
-            );
+            self.manager.diagnostics.record_car_no_blocks_served();
+            // Normal race: peer asked for blocks we have not yet received
+            // ourselves. Noisy at WARN during concurrent replication catch-up;
+            // the requester retries until some peer serves the DAG.
+            if request.recursive {
+                tracing::debug!(
+                    root_cid = %request.root_cid,
+                    peer_id = %peer_id,
+                    recursive = request.recursive,
+                    requested_count = request.wanted_cids.len(),
+                    root_present = ?root_present,
+                    "CAR handler: no blocks found for request"
+                );
+            } else {
+                tracing::warn!(
+                    root_cid = %request.root_cid,
+                    peer_id = %peer_id,
+                    root_present = ?root_present,
+                    requested_count = request.wanted_cids.len(),
+                    requested_cids = ?sample_cids(&request.wanted_cids),
+                    "CAR handler: no exact blocks found for selective request"
+                );
+            }
+            // Send a header-only CAR so both transports (iroh and libp2p)
+            // receive a well-formed response they can decode. Without this,
+            // the libp2p response handler errors on empty bytes and the
+            // requester-side car_empty_responses counter stays at zero
+            // (issue #858 review feedback).
+            let car_data = encode_car(&response_roots, &[])?;
+            if let Some(token) = token {
+                self.runtime
+                    .transport
+                    .send_car_response_token(token, car_data)
+                    .await?;
+            } else {
+                self.runtime
+                    .transport
+                    .send_car_response(&peer_id, car_data)
+                    .await?;
+            }
             return Ok(());
         }
 
@@ -93,13 +156,31 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         root_cid: Cid,
         car_data: Vec<u8>,
     ) -> Result<()> {
+        // Raw-empty: transport received zero bytes (peer had nothing for
+        // this root, e.g. the serving side's handle_car_fetch_request
+        // returned without writing a body). Count and skip decode.
+        if car_data.is_empty() {
+            self.manager.diagnostics.record_car_empty_response();
+            tracing::debug!(
+                root_cid = %root_cid,
+                peer_id = %peer_id,
+                "Received empty CAR response (raw bytes)"
+            );
+            return Ok(());
+        }
+
         let (_roots, blocks) = decode_car(&car_data)?;
 
         if blocks.is_empty() {
-            tracing::warn!(
+            self.manager.diagnostics.record_car_empty_response();
+            // Peer replied with a parseable but block-less CAR (provider
+            // had nothing for this root). Debug: transport layer surfaces
+            // the final "no provider succeeded" outcome via BitswapComplete
+            // (see issue #858).
+            tracing::debug!(
                 root_cid = %root_cid,
                 peer_id = %peer_id,
-                "Received empty CAR response"
+                "Received empty CAR response (decoded 0 blocks)"
             );
             return Ok(());
         }

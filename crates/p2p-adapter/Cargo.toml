@@ -1,0 +1,42 @@
+[package]
+name = "defra-p2p-adapter"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DefraDB P2P adapters for HTTP-facing operations"
+
+[dependencies]
+acp = { path = "../acp" }
+blockstore = { path = "../blockstore" }
+db = { path = "../db" }
+db-merge = { path = "../db-merge" }
+defra-core = { path = "../defra-core" }
+defra-http = { path = "../http" }
+document = { path = "../document" }
+events = { path = "../events" }
+lens = { path = "../lens" }
+p2p = { path = "../p2p", default-features = false }
+storage = { path = "../storage" }
+
+async-trait.workspace = true
+bytes.workspace = true
+cid.workspace = true
+hex.workspace = true
+libp2p.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+serde_ipld_dagcbor.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+tracing.workspace = true
+
+[features]
+default = ["iroh", "libp2p"]
+iroh = ["p2p/iroh-transport"]
+libp2p = []
+
+[lints]
+workspace = true

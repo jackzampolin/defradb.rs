@@ -64,6 +64,33 @@ impl LensWasmBlock {
 /// A CID paired with its serialized bytes.
 pub type CidBlock = (Cid, Vec<u8>);
 
+/// Returns `true` if `bytes` decode as any known lens IPLD block shape —
+/// the top-level config, a module block, a WASM block (direct or chunked),
+/// or a raw WASM chunk byte string.
+///
+/// Mirrors Go DefraDB's `hasAccess` passthrough for
+/// `lens` / `modules` / `wasmBytes` / `chunks` blocks
+/// (`internal/db/p2p/p2p.go:335-348`). The Bitswap access filter uses this
+/// to let lens schema-migration blocks propagate in `Controlled` mode
+/// without per-collection replicator trust (they carry no user data).
+pub fn is_lens_block(bytes: &[u8]) -> bool {
+    use serde_bytes::ByteBuf;
+
+    // Most specific structural shapes first — failures here are fast and
+    // the order isn't behaviourally significant (any match → allow).
+    if serde_ipld_dagcbor::from_slice::<LensModuleBlock>(bytes).is_ok() {
+        return true;
+    }
+    if serde_ipld_dagcbor::from_slice::<LensWasmBlock>(bytes).is_ok() {
+        return true;
+    }
+    if serde_ipld_dagcbor::from_slice::<LensConfigBlock>(bytes).is_ok() {
+        return true;
+    }
+    // Chunked WASM stores each chunk as a bare CBOR byte string.
+    serde_ipld_dagcbor::from_slice::<ByteBuf>(bytes).is_ok()
+}
+
 /// Maximum size for a single WASM block before chunking.
 /// Must be well below iroh-bitswap's MAX_BUF_SIZE (2 MB) to account for
 /// CBOR encoding overhead and Bitswap message framing.

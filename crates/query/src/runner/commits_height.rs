@@ -106,10 +106,10 @@ fn extract_commits_height_range_from_conditions(
                     ));
                 }
             }
-            Some(crate::mapper::FilterOp::Or | crate::mapper::FilterOp::Not) => {
-                if logical_value_contains_top_level_height(value) {
-                    return HeightRangeExtraction::Unsupported;
-                }
+            Some(crate::mapper::FilterOp::Or | crate::mapper::FilterOp::Not)
+                if logical_value_contains_top_level_height(value) =>
+            {
+                return HeightRangeExtraction::Unsupported;
             }
             _ => {}
         }

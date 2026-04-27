@@ -13,11 +13,11 @@ pub(crate) struct PendingPostCommitAction {
     pub action: Box<dyn CompositePostCommitAction>,
 }
 
-/// Field blocks that should be marked merged and have any transient replay state cleaned up
-/// once the surrounding batch transaction commits.
+/// Field blocks that should be marked merged in the blockstore once the
+/// surrounding batch transaction commits. The blockstore's merged-set is the
+/// single source of CRDT idempotency; see #847.
 pub(crate) struct PendingFieldBlockFinalization {
     pub cids: Vec<Cid>,
-    pub fallback_collection_id: Option<String>,
 }
 
 impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMergeHandler<S, B> {
@@ -30,6 +30,17 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
 
         let mut results = Vec::with_capacity(blocks.len());
         for block in blocks {
+            if let Err(error) = self
+                .validate_explicit_replay_authorization(
+                    block.explicit_replay_authorization.as_ref(),
+                    block,
+                )
+                .await
+            {
+                results.push(Err(error));
+                continue;
+            }
+
             // Serialize merges for the same document
             let _guard = self.merge_queue.acquire(&block.doc_id).await;
 
@@ -148,6 +159,12 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
             let headstore = txn.headstore()?;
 
             for block in blocks {
+                self.validate_explicit_replay_authorization(
+                    block.explicit_replay_authorization.as_ref(),
+                    block,
+                )
+                .await?;
+
                 let metadata = BlockMetadata::normal(
                     &block.doc_id,
                     &block.collection_id,
@@ -213,11 +230,8 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
 
         let field_block_finalizations = pending_field_block_finalizations.into_inner().unwrap();
         for finalization in field_block_finalizations {
-            self.best_effort_finalize_linked_field_blocks(
-                &finalization.cids,
-                finalization.fallback_collection_id.as_deref(),
-            )
-            .await;
+            self.best_effort_finalize_linked_field_blocks(&finalization.cids)
+                .await;
         }
 
         // Emit all collected events
@@ -379,12 +393,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                                 );
                                 e.into_inner()
                             })
-                            .push(PendingFieldBlockFinalization {
-                                cids: vec![*cid],
-                                fallback_collection_id: metadata
-                                    .collection_id
-                                    .map(ToOwned::to_owned),
-                            });
+                            .push(PendingFieldBlockFinalization { cids: vec![*cid] });
                         Ok(MergeOutcome::Merged)
                     }
                     Ok(_) => {
@@ -396,12 +405,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                                 );
                                 e.into_inner()
                             })
-                            .push(PendingFieldBlockFinalization {
-                                cids: vec![*cid],
-                                fallback_collection_id: metadata
-                                    .collection_id
-                                    .map(ToOwned::to_owned),
-                            });
+                            .push(PendingFieldBlockFinalization { cids: vec![*cid] });
                         Ok(MergeOutcome::terminal_skip("rejected by CRDT"))
                     }
                     Err(e) => Err(e),
@@ -416,7 +420,13 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     .await
             }
             CrdtDelta::CollectionSet(_) => Ok(MergeOutcome::terminal_skip("collection set delta")),
-            _ => unreachable!(),
+            // Only the variant discriminant is reported — `CrdtDelta` carries
+            // field-value bytes from user documents and must not be formatted
+            // into error strings that may end up in logs.
+            other => Err(MergeError::UnsupportedDelta(format!(
+                "unhandled CrdtDelta variant in batch dispatch: {:?}",
+                std::mem::discriminant(other)
+            ))),
         }
     }
 }

@@ -5,17 +5,25 @@
 //!
 //! # Security Model
 //!
-//! Access control is enforced at the **SyncCoordinator level**, not at the Bitswap level.
-//! The SyncCoordinator checks access on incoming PushLog and GossipSub messages before
-//! blocks are stored. This means:
+//! Access control is enforced on **both the ingress and egress paths**:
 //!
-//! 1. Unauthorized peers cannot push blocks to this node
-//! 2. Bitswap inherently only serves blocks that passed the coordinator's access check
-//! 3. Per-collection authorization is enforced (a replicator for collection A cannot
-//!    access collection B)
+//! - **Ingress:** `SyncCoordinator` checks incoming PushLog and GossipSub
+//!   messages against the `ReplicatorRegistry` before storing blocks.
+//!   Unauthorized peers cannot push blocks into this node.
+//! - **Egress:** A per-peer Bitswap filter
+//!   (`crate::bitswap::make_peer_block_access_filter`) is installed at
+//!   behaviour-construction time (`crates/p2p/src/behaviour.rs`). On every
+//!   incoming Bitswap `WANT`, the filter reads the block, decodes its
+//!   `collectionVersionID`, and consults the same `ReplicatorRegistry`.
+//!   Peers that are not registered replicators for the block's collection
+//!   are denied (signature and definition blocks are exempt to allow
+//!   signature verification and schema bootstrap).
 //!
-//! This follows the Go DefraDB security model where each replicator is authorized
-//! per-collection.
+//! This matches Go DefraDB's `bitswap.WithPeerBlockRequestFilter(hasAccess)`
+//! wiring (`go-p2p/peer.go:146`), closing issue #830.
+//!
+//! Note: in `AccessMode::Open` the filter allows all requests, preserving the
+//! previous behaviour for nodes that haven't enabled ACP.
 
 /// Access control mode for P2P synchronization.
 ///

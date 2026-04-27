@@ -275,14 +275,10 @@ impl IndexManager {
         let key_bytes = seq_key.bytes();
 
         let current = match datastore.get(&key_bytes).await.map_err(Error::Storage)? {
-            Some(bytes) => {
-                if bytes.len() == 4 {
-                    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-                } else {
-                    0
-                }
+            Some(bytes) if bytes.len() == 4 => {
+                u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
             }
-            None => 0,
+            _ => 0,
         };
 
         let next_id = current + 1;

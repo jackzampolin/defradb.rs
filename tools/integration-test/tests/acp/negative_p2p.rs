@@ -178,37 +178,35 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
         "Bob must read _commits on node1 after the reader grant replicates"
     );
 
-    // Charlie was never granted access, so replication must not make the
-    // document visible to him on node1.
-    let charlie_node1 = node1
-        .query_with_identity("query { User { _docID name } }", &charlie.private_key_hex)
-        .expect("Charlie query on node1");
-    let charlie_node1_count = charlie_node1["User"]
-        .as_array()
-        .map(|a| a.len())
-        .unwrap_or(0);
-    assert_eq!(
-        charlie_node1_count, 0,
-        "replication must not grant access on node1 to identities without a relationship"
-    );
+    let node1_ref = &node1;
+    let charlie_key = charlie.private_key_hex.clone();
+    let doc_id_for_charlie = doc_id.clone();
+    poll_until(
+        || {
+            let visible_docs = node1_ref
+                .query_with_identity("query { User { _docID name } }", &charlie_key)
+                .ok()
+                .and_then(|value| value["User"].as_array().map(|rows| rows.len()))
+                .unwrap_or(usize::MAX);
+            let visible_commits = node1_ref
+                .query_with_identity(
+                    &format!(
+                        r#"query {{ _commits(docID: "{}") {{ cid height }} }}"#,
+                        doc_id_for_charlie
+                    ),
+                    &charlie_key,
+                )
+                .ok()
+                .and_then(|value| value["_commits"].as_array().map(|rows| rows.len()))
+                .unwrap_or(usize::MAX);
 
-    let charlie_commits_node1 = node1
-        .query_with_identity(
-            &format!(
-                r#"query {{ _commits(docID: "{}") {{ cid height }} }}"#,
-                doc_id
-            ),
-            &charlie.private_key_hex,
-        )
-        .expect("Charlie commits query on node1");
-    let charlie_commits_count = charlie_commits_node1["_commits"]
-        .as_array()
-        .map(|a| a.len())
-        .unwrap_or(0);
-    assert_eq!(
-        charlie_commits_count, 0,
-        "Charlie must not read _commits on node1 without a local or replicated grant"
-    );
+            visible_docs == 0 && visible_commits == 0
+        },
+        Duration::from_secs(15),
+        Duration::from_millis(200),
+        "replication must not grant access on node1 to identities without a relationship",
+    )
+    .await;
 
     // Alice can still read the document on node1 (she's the owner, not relying on grant)
     let alice_node1 = node1

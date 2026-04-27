@@ -17,7 +17,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::dac::DocumentACP;
+use crate::dac::{DocumentACP, ReplicatedActorRelationship};
 use crate::error::{Error, Result};
 use crate::identity::Identity;
 use crate::permission::DocumentPermission;
@@ -385,6 +385,69 @@ impl DocumentACP for LocalDocumentACP {
             "Actor relationship deleted"
         );
         Ok(true)
+    }
+
+    async fn export_actor_relationships(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<Vec<ReplicatedActorRelationship>> {
+        let ns_collection = Self::namespaced_collection(policy_id, resource_name);
+        let tuples = self.store.get_doc_tuples(&ns_collection, doc_id).await?;
+
+        Ok(tuples
+            .into_iter()
+            .filter(|tuple| tuple.relation() != OWNER_RELATION)
+            .map(|tuple| ReplicatedActorRelationship {
+                relation: tuple.relation().to_string(),
+                actor: if tuple.subject().is_wildcard() {
+                    "*".to_string()
+                } else {
+                    tuple.subject().to_string()
+                },
+            })
+            .collect())
+    }
+
+    async fn replace_actor_relationships(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+        relationships: &[ReplicatedActorRelationship],
+    ) -> Result<()> {
+        let ns_collection = Self::namespaced_collection(policy_id, resource_name);
+        let existing = self.store.get_doc_tuples(&ns_collection, doc_id).await?;
+
+        for tuple in existing {
+            if tuple.relation() == OWNER_RELATION {
+                continue;
+            }
+            self.store.delete_tuple(&tuple).await?;
+        }
+
+        for relationship in relationships {
+            if relationship.relation == OWNER_RELATION {
+                continue;
+            }
+
+            let actor = if relationship.actor == "*" {
+                Did::wildcard()
+            } else {
+                Did::new(&relationship.actor).map_err(|error| {
+                    Error::Storage(format!(
+                        "invalid replicated actor DID '{}': {}",
+                        relationship.actor, error
+                    ))
+                })?
+            };
+
+            let tuple = RelationTuple::new(actor, &relationship.relation, &ns_collection, doc_id);
+            self.store.put_tuple(&tuple).await?;
+        }
+
+        Ok(())
     }
 
     async fn unregister_doc_object(

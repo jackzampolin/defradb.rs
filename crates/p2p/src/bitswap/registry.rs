@@ -38,6 +38,22 @@ impl ReplicatorRegistry {
             .insert(peer_id.to_string());
     }
 
+    /// Replace the full set of collections replicated by a peer.
+    pub fn set_peer_collections(&self, peer_id: &str, collections: &[String]) {
+        let mut replicators = self.replicators.write();
+        for peers in replicators.values_mut() {
+            peers.remove(peer_id);
+        }
+        replicators.retain(|_, peers| !peers.is_empty());
+
+        for collection_id in collections {
+            replicators
+                .entry(collection_id.clone())
+                .or_default()
+                .insert(peer_id.to_string());
+        }
+    }
+
     /// Remove a peer as a replicator for a collection.
     pub fn remove_replicator(&self, collection_id: &str, peer_id: &str) {
         let mut replicators = self.replicators.write();
@@ -56,6 +72,22 @@ impl ReplicatorRegistry {
             peers.remove(peer_id);
         }
         replicators.retain(|_, peers| !peers.is_empty());
+    }
+
+    /// Remove a peer from specific collections. Returns true if the peer no
+    /// longer replicates any collections afterwards.
+    pub fn remove_peer_collections(&self, peer_id: &str, collections: &[String]) -> bool {
+        let mut replicators = self.replicators.write();
+        for collection_id in collections {
+            if let Some(peers) = replicators.get_mut(collection_id) {
+                peers.remove(peer_id);
+                if peers.is_empty() {
+                    replicators.remove(collection_id);
+                }
+            }
+        }
+
+        !replicators.values().any(|peers| peers.contains(peer_id))
     }
 
     /// Check if a peer is a replicator for a collection.
@@ -317,8 +349,8 @@ mod tests {
         let peer2 = libp2p::PeerId::random();
 
         let infos = vec![
-            ReplicatorInfo::new(peer1, vec!["users".to_string(), "posts".to_string()]),
-            ReplicatorInfo::new(peer2, vec!["comments".to_string()]),
+            ReplicatorInfo::new(peer1, vec!["users".to_string(), "posts".to_string()]).unwrap(),
+            ReplicatorInfo::new(peer2, vec!["comments".to_string()]).unwrap(),
         ];
 
         let (loaded, skipped) = registry.load_from_infos(&infos);
@@ -344,7 +376,7 @@ mod tests {
         registry.add_replicator("users", &peer1);
         assert!(registry.is_replicator("users", &peer1));
 
-        let infos = vec![ReplicatorInfo::new(peer2, vec!["comments".to_string()])];
+        let infos = vec![ReplicatorInfo::new(peer2, vec!["comments".to_string()]).unwrap()];
         let (loaded, skipped) = registry.load_from_infos(&infos);
         assert_eq!(loaded, 1);
         assert_eq!(skipped, 0);

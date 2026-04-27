@@ -64,8 +64,13 @@ async fn test_counter_increment() {
     txn.commit().await.unwrap();
 }
 
+/// Regression guard for #847. Counter merge must NOT dedupe by nonce — that
+/// job belongs to the blockstore's `is_merged(cid)` check. This test calls
+/// `merge` twice with the same delta directly, which is the exact scenario
+/// the blockstore would normally suppress; the counter must match Go's
+/// unconditional-apply behaviour if the blockstore ever doesn't.
 #[tokio::test]
-async fn test_counter_idempotency() {
+async fn test_counter_retransmit_applies_twice() {
     let store = MemoryStore::new();
     let counter = Counter::new(
         "v1".to_string(),
@@ -84,7 +89,6 @@ async fn test_counter_idempotency() {
 
     let mut txn = store.new_txn(false).await.unwrap();
 
-    // Apply same delta twice
     let delta = CounterDelta::new_int64(
         b"doc1".to_vec(),
         "count".to_string(),
@@ -95,60 +99,19 @@ async fn test_counter_idempotency() {
     )
     .unwrap();
 
-    counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-    counter.merge(&mut *txn, &ctx, &delta).await.unwrap(); // Should be ignored
+    // Apply the same delta twice. Both applications must succeed, and the
+    // accumulated value must be 10 — matching Go, where Merge ignores the
+    // delta nonce entirely.
+    let first = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+    let second = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+    assert_eq!(first, MergeResult::Applied);
+    assert_eq!(second, MergeResult::Applied);
 
-    // Should still be 5 (not 10)
     let value_bytes = counter.value(&*txn).await.unwrap();
     let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
-    assert_eq!(value, 5);
+    assert_eq!(value, 10);
 
     txn.commit().await.unwrap();
-}
-
-#[tokio::test]
-async fn test_counter_clear_nonce_removes_replay_marker() {
-    let store = MemoryStore::new();
-    let counter = Counter::new(
-        "v1".to_string(),
-        b"doc1",
-        "count".to_string(),
-        true,
-        NumericKind::Int64,
-    )
-    .unwrap();
-
-    let ctx = Context {
-        doc_id: DocId::new_unchecked("doc1"),
-        schema_version: "v1".to_string(),
-        is_create: false,
-    };
-
-    let mut txn = store.new_txn(false).await.unwrap();
-
-    let delta = CounterDelta::new_int64(
-        b"doc1".to_vec(),
-        "count".to_string(),
-        1,
-        1,
-        "v1".to_string(),
-        1,
-    )
-    .unwrap();
-    counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-
-    let replay_within_window = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-    assert!(matches!(
-        replay_within_window,
-        MergeResult::SkippedAlreadyApplied { nonce: 1 }
-    ));
-
-    assert!(counter.clear_nonce(&mut *txn, 1).await.unwrap());
-    assert!(!counter.clear_nonce(&mut *txn, 1).await.unwrap());
-
-    let value_bytes = counter.value(&*txn).await.unwrap();
-    let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
-    assert_eq!(value, 1);
 }
 
 #[tokio::test]
@@ -568,48 +531,6 @@ async fn test_counter_merge_result_applied() {
 }
 
 #[tokio::test]
-async fn test_counter_merge_result_skipped_already_applied() {
-    let store = MemoryStore::new();
-    let counter = Counter::new(
-        "v1".to_string(),
-        b"doc1",
-        "count".to_string(),
-        true,
-        NumericKind::Int64,
-    )
-    .unwrap();
-
-    let ctx = Context {
-        doc_id: DocId::new_unchecked("doc1"),
-        schema_version: "v1".to_string(),
-        is_create: false,
-    };
-
-    let mut txn = store.new_txn(false).await.unwrap();
-
-    let delta = CounterDelta::new_int64(
-        b"doc1".to_vec(),
-        "count".to_string(),
-        10,
-        12345,
-        "v1".to_string(),
-        5,
-    )
-    .unwrap();
-
-    // First merge should apply
-    let result1 = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-    assert!(matches!(result1, MergeResult::Applied));
-
-    // Second merge with same nonce should be skipped
-    let result2 = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
-    assert!(matches!(
-        result2,
-        MergeResult::SkippedAlreadyApplied { nonce: 12345 }
-    ));
-}
-
-#[tokio::test]
 async fn test_counter_wrong_delta_type() {
     let store = MemoryStore::new();
     let counter = Counter::new(
@@ -760,4 +681,93 @@ fn test_counter_delta_validation_rejects_empty_values() {
         .unwrap_err()
         .to_string()
         .contains("schema_version_id"));
+}
+
+// === Float32 tests (issue #848) ===
+
+#[tokio::test]
+async fn test_counter_float32_basic() {
+    let store = MemoryStore::new();
+    let counter = Counter::new(
+        "v1".to_string(),
+        b"doc1",
+        "score".to_string(),
+        true,
+        NumericKind::Float32,
+    )
+    .unwrap();
+
+    let ctx = Context {
+        doc_id: DocId::new_unchecked("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    let delta = CounterDelta::new_float32(
+        b"doc1".to_vec(),
+        "score".to_string(),
+        1,
+        1,
+        "v1".to_string(),
+        1.5f32,
+    )
+    .unwrap();
+
+    let result = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+    assert_eq!(result, MergeResult::Applied);
+
+    let value_bytes = counter.value(&*txn).await.unwrap();
+    assert_eq!(value_bytes.len(), 4, "Float32 counter stores 4 bytes");
+    let value = f32::from_be_bytes(value_bytes[..4].try_into().unwrap());
+    assert_eq!(value, 1.5f32);
+}
+
+#[tokio::test]
+async fn test_counter_float32_accumulation_uses_f32_precision() {
+    // Go accumulates float32 counters in f32 precision, not f64.
+    // This test verifies Rust does the same by checking that the result
+    // matches f32 arithmetic (which differs from f64 for 1.1 + 2.2).
+    let store = MemoryStore::new();
+    let counter = Counter::new(
+        "v1".to_string(),
+        b"doc1",
+        "score".to_string(),
+        true,
+        NumericKind::Float32,
+    )
+    .unwrap();
+
+    let ctx = Context {
+        doc_id: DocId::new_unchecked("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    let d1 = CounterDelta::new_float32(b"doc1".to_vec(), "score".into(), 1, 1, "v1".into(), 1.1f32)
+        .unwrap();
+    let d2 = CounterDelta::new_float32(b"doc1".to_vec(), "score".into(), 2, 2, "v1".into(), 2.2f32)
+        .unwrap();
+
+    counter.merge(&mut *txn, &ctx, &d1).await.unwrap();
+    counter.merge(&mut *txn, &ctx, &d2).await.unwrap();
+
+    let value_bytes = counter.value(&*txn).await.unwrap();
+    let value = f32::from_be_bytes(value_bytes[..4].try_into().unwrap());
+
+    // f32: 1.1 + 2.2 = 3.3000002 (NOT 3.3000000000000003 which is f64)
+    let expected = 1.1f32 + 2.2f32;
+    assert_eq!(
+        value, expected,
+        "Float32 counter must use f32 arithmetic for Go parity, got {value} expected {expected}"
+    );
+    // Confirm it differs from f64 arithmetic
+    let f64_result = (1.1f64 + 2.2f64) as f32;
+    assert_ne!(
+        value, f64_result,
+        "Float32 result should differ from f64-promoted arithmetic"
+    );
 }

@@ -13,6 +13,13 @@ use std::any::Any;
 use std::collections::HashMap;
 use storage::{corekv::Key, keys::CRDTValueKey, Reader, ReaderWriter};
 
+/// Document status matching Go's `client.DocumentStatus`.
+///
+/// Active (1) is the default for new documents.
+/// Deleted (2) represents a document that has been marked as deleted.
+pub const STATUS_ACTIVE: u8 = 1;
+pub const STATUS_DELETED: u8 = 2;
+
 /// Composite Delta - represents changes to multiple fields in a document
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompositeDelta {
@@ -22,13 +29,26 @@ pub struct CompositeDelta {
     schema_version_id: String,
     /// Priority for this delta
     priority: u64,
+    /// Document status (1 = Active, 2 = Deleted).
+    /// Matches Go's `DocCompositeDelta.Status` (`client.DocumentStatus`).
+    status: u8,
     /// Field-level deltas
     field_deltas: HashMap<String, FieldDelta>,
 }
 
 impl CompositeDelta {
-    /// Create a new composite delta
+    /// Create a new composite delta with Active status
     pub fn new(doc_id: Vec<u8>, schema_version_id: String, priority: u64) -> Result<Self> {
+        Self::with_status(doc_id, schema_version_id, priority, STATUS_ACTIVE)
+    }
+
+    /// Create a new composite delta with the given status
+    pub fn with_status(
+        doc_id: Vec<u8>,
+        schema_version_id: String,
+        priority: u64,
+        status: u8,
+    ) -> Result<Self> {
         if doc_id.is_empty() {
             return Err(Error::MergeError("doc_id cannot be empty".into()));
         }
@@ -41,8 +61,19 @@ impl CompositeDelta {
             doc_id,
             schema_version_id,
             priority,
+            status,
             field_deltas: HashMap::new(),
         })
+    }
+
+    /// Get the document status (1 = Active, 2 = Deleted)
+    pub fn status(&self) -> u8 {
+        self.status
+    }
+
+    /// Check if this delta represents a document deletion
+    pub fn is_deleted(&self) -> bool {
+        self.status == STATUS_DELETED
     }
 
     /// Add a field delta
@@ -320,6 +351,19 @@ impl CompositeDAG {
                         i64::from_be_bytes(data[..8].try_into().map_err(|_| {
                             Error::MergeError(format!(
                                 "invalid counter increment data for field '{}': expected 8 bytes, got {}",
+                                field_name, data.len()
+                            ))
+                        })?),
+                    )?,
+                    NumericKind::Float32 => CounterDelta::new_float32(
+                        self.doc_id.as_str().as_bytes().to_vec(),
+                        field_name.to_string(),
+                        *priority,
+                        *nonce,
+                        self.schema_version_id.clone(),
+                        f32::from_be_bytes(data[..4].try_into().map_err(|_| {
+                            Error::MergeError(format!(
+                                "invalid counter increment data for field '{}': expected 4 bytes (Float32), got {}",
                                 field_name, data.len()
                             ))
                         })?),

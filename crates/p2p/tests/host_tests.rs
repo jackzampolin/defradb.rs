@@ -67,7 +67,7 @@ async fn send_two_stream_request_and_capture_flag(
                 is_explicit_replicator,
                 ..
             } => {
-                let mut reply = PushLogReply::success(&request.metadata.message_id);
+                let mut reply = PushLogReply::success(&request.message_id);
                 sign_message(receiver_handle.keypair(), &mut reply).unwrap();
                 receiver_handle
                     .send_two_stream_response(peer_id, reply)

@@ -13,7 +13,7 @@ impl TwoStreamHandler {
         peer_id: PeerId,
         request: IdentityRequest,
     ) -> Result<IdentityResponse> {
-        let message_id = request.metadata.message_id.clone();
+        let message_id = request.message_id.clone();
         let (tx, rx) = oneshot::channel();
 
         {

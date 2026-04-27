@@ -74,8 +74,17 @@ impl ReplicationLoop {
             let mut should_break = false;
             for result in &results {
                 match result {
-                    ReplicationResult::Merged { cid, doc_id, .. } => {
-                        tracing::info!(cid = %cid, doc_id = %doc_id, "Block merged successfully");
+                    ReplicationResult::Merged {
+                        cid,
+                        doc_id,
+                        collection_id,
+                    } => {
+                        tracing::info!(
+                            cid = %cid,
+                            doc_id = %doc_id,
+                            collection_id = %collection_id,
+                            "Block merged successfully"
+                        );
                     }
                     ReplicationResult::MergedButBroadcastFailed {
                         cid,
@@ -112,6 +121,12 @@ impl ReplicationLoop {
                         tracing::info!("Event channel closed, stopping replication loop");
                         should_break = true;
                         break;
+                    }
+                    ReplicationResult::DagFetchStarted { root_cid } => {
+                        tracing::debug!(
+                            cid = %root_cid,
+                            "Poll-based DAG fetch started for missing blocks"
+                        );
                     }
                     ReplicationResult::BitswapFetchStarted { root_cid, query_id } => {
                         tracing::debug!(
@@ -260,13 +275,15 @@ impl ReplicationLoop {
         };
 
         // Drain more events non-blocking
+        let max_batch_size = config.batch_size.max(1);
         let mut batch = vec![first];
-        while batch.len() < config.batch_size {
+        while batch.len() < max_batch_size {
             match events.try_recv() {
                 Ok(e) => batch.push(e),
                 Err(_) => break,
             }
         }
+        debug_assert!(batch.len() <= max_batch_size);
 
         // Separate merge-worthy events from immediate-action events
         let mut immediate = Vec::new();

@@ -79,6 +79,12 @@ pub trait DocPusher: Send + Sync {
         collection_name: &str,
         doc_id: &str,
     ) -> Result<Option<acp::ReplicatedDocActorRelationships>, String>;
+
+    async fn load_doc_creator_did(
+        &self,
+        collection_name: &str,
+        doc_id: &str,
+    ) -> Result<Option<String>, String>;
 }
 
 /// Trait for syncing collection versions (schema definitions) via Bitswap.
@@ -285,6 +291,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             addrs.insert(parsed.peer_id.to_string(), addr.to_string());
         }
 
+        Ok(())
+    }
+
+    async fn notify_network_change(&self) -> P2PResult<()> {
         Ok(())
     }
 
@@ -792,6 +802,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .load_document_head_blocks(doc_id)
             .await
             .map_err(P2PError::Internal)?;
+        let creator_did = pusher
+            .load_doc_creator_did(collection_name, doc_id)
+            .await
+            .map_err(P2PError::Internal)?;
         let acp_actor_relationships = pusher
             .load_doc_actor_relationships(collection_name, doc_id)
             .await
@@ -804,7 +818,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                     &block,
                     doc_id,
                     &collection_id,
-                    None,
+                    creator_did.as_deref(),
                     acp_actor_relationships.clone(),
                 )
                 .await

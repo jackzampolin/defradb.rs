@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use p2p::sync::{PushFailure, ReplicationConfig, ReplicationLoop, ReplicationResult};
+#[cfg(feature = "iroh")]
+use p2p::P2PTransport;
 
 use crate::node::EmbeddedMergeHandler;
 
@@ -52,13 +54,18 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
                 _ => {}
             }
 
+            let transport_event = p2p::convert_host_event(event);
+            if transport_event.requires_inline_ordering() {
+                if let Err(error) = coordinator.handle_transport_event(transport_event).await {
+                    tracing::error!(error = %error, "error handling libp2p event");
+                }
+                continue;
+            }
+
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             let coordinator = coordinator.clone();
             tokio::spawn(async move {
-                if let Err(error) = coordinator
-                    .handle_transport_event(p2p::convert_host_event(event))
-                    .await
-                {
+                if let Err(error) = coordinator.handle_transport_event(transport_event).await {
                     tracing::error!(error = %error, "error handling libp2p event");
                 }
                 drop(permit);
@@ -69,7 +76,9 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
 
 #[cfg(feature = "iroh")]
 pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
-    mut events: tokio::sync::mpsc::Receiver<p2p::TransportEvent>,
+    mut events: tokio::sync::mpsc::Receiver<
+        p2p::TransportEvent<<p2p::iroh::IrohTransport as P2PTransport>::ResponseToken>,
+    >,
     coordinator: Arc<p2p::sync::IrohSyncCoordinator<B>>,
     event_bus: Arc<dyn events::Bus>,
 ) -> tokio::task::JoinHandle<()> {
@@ -96,6 +105,13 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
                     ));
                 }
                 _ => {}
+            }
+
+            if event.requires_inline_ordering() {
+                if let Err(error) = coordinator.handle_transport_event(event).await {
+                    tracing::error!(error = %error, "error handling iroh event");
+                }
+                continue;
             }
 
             let permit = semaphore.clone().acquire_owned().await.unwrap();
@@ -229,7 +245,7 @@ pub(crate) fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
 pub(crate) fn spawn_libp2p_retry_loop<S: storage::corekv::Store + 'static>(
     store: Arc<S>,
     handle: p2p::P2PHostHandle,
-    doc_pusher: Arc<dyn crate::DocPusher>,
+    doc_pusher: Arc<dyn defra_p2p_adapter::DocPusher>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -307,7 +323,7 @@ pub(crate) fn spawn_libp2p_retry_loop<S: storage::corekv::Store + 'static>(
 pub(crate) fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
     store: Arc<S>,
     transport: p2p::iroh::IrohTransport,
-    doc_pusher: Arc<dyn crate::TransportDocPusher>,
+    doc_pusher: Arc<dyn defra_p2p_adapter::TransportDocPusher>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -331,10 +347,9 @@ pub(crate) fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                 }
 
                 let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
-                let connected = transport.connected_peers().await.unwrap_or_default();
-                if !connected.contains(&peer_id) {
-                    continue;
-                }
+                // Iroh request-response reconnects on demand. The peer-map-backed
+                // connected_peers snapshot is not authoritative enough to gate
+                // retries here, so let the transport attempt the replay.
 
                 let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
                     Ok(docs) => docs,

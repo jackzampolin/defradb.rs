@@ -7,11 +7,13 @@ use iroh::endpoint::Connection;
 use iroh::EndpointId;
 use iroh_gossip::net::Gossip;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
+use crate::message::PushLogReply;
 use crate::transport::{PeerId, TransportEvent};
 
-use super::endpoint::{join_peer_to_subscriptions, TopicSubscription};
+use super::endpoint::{join_peer_to_subscriptions, track_task, SpawnedTasks, TopicSubscription};
 use super::peer_map::{endpoint_id_to_peer_id, PeerMap};
 use super::protocols;
 
@@ -20,7 +22,11 @@ pub(super) async fn handle_incoming(
     incoming: iroh::endpoint::Incoming,
     gossip: &Gossip,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    pending_pushlog_replies: &Arc<
+        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
+    >,
     subscriptions: &HashMap<String, TopicSubscription>,
+    spawned_tasks: &SpawnedTasks,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
     let remote_addr = match incoming.remote_addr() {
@@ -33,7 +39,20 @@ pub(super) async fn handle_incoming(
         Ok(accepting) => match accepting.await {
             Ok(conn) => conn,
             Err(e) => {
-                warn!("Failed to complete connection handshake: {}", e);
+                let error_msg = e.to_string();
+                if crate::error::Error::is_connection_loss_reason(&error_msg) {
+                    debug!(
+                        remote_addr = ?remote_addr,
+                        error = %error_msg,
+                        "Incoming connection handshake ended before completion"
+                    );
+                } else {
+                    warn!(
+                        remote_addr = ?remote_addr,
+                        error = %error_msg,
+                        "Failed to complete connection handshake"
+                    );
+                }
                 return;
             }
         },
@@ -77,9 +96,21 @@ pub(super) async fn handle_incoming(
     // Spawn handler for this connection's streams
     let event_tx = event_tx.clone();
     let peer_map = Arc::clone(peer_map);
-    tokio::spawn(async move {
-        handle_connection_streams(connection, remote_id, conn_alpn, event_tx, peer_map).await;
+    let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
+    let spawned_tasks_for_connection = Arc::clone(spawned_tasks);
+    let task = tokio::spawn(async move {
+        handle_connection_streams(
+            connection,
+            remote_id,
+            conn_alpn,
+            event_tx,
+            peer_map,
+            pending_pushlog_replies,
+            &spawned_tasks_for_connection,
+        )
+        .await;
     });
+    track_task(spawned_tasks, task);
 }
 
 /// Process streams on an accepted connection, dispatching by ALPN.
@@ -91,6 +122,10 @@ async fn handle_connection_streams(
     alpn: Vec<u8>,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
     peer_map: Arc<parking_lot::Mutex<PeerMap>>,
+    pending_pushlog_replies: Arc<
+        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
+    >,
+    spawned_tasks: &SpawnedTasks,
 ) {
     let peer_id = endpoint_id_to_peer_id(&remote_id);
 
@@ -98,11 +133,22 @@ async fn handle_connection_streams(
         let peer_id = peer_id.clone();
         let event_tx = event_tx.clone();
         let alpn = alpn.clone();
-        tokio::spawn(async move {
-            if let Err(e) = dispatch_stream(&alpn, &peer_id, send, &mut recv, &event_tx).await {
+        let pending_pushlog_replies = pending_pushlog_replies.clone();
+        let task = tokio::spawn(async move {
+            if let Err(e) = dispatch_stream(
+                &alpn,
+                &peer_id,
+                send,
+                &mut recv,
+                &event_tx,
+                &pending_pushlog_replies,
+            )
+            .await
+            {
                 debug!("Stream error from {}: {}", peer_id, e);
             }
         });
+        track_task(spawned_tasks, task);
     }
 
     let fully_disconnected = peer_map.lock().decrement_connections(&remote_id);
@@ -125,8 +171,21 @@ pub(super) async fn handle_connection_streams_from_dial(
     alpn: Vec<u8>,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
     peer_map: Arc<parking_lot::Mutex<PeerMap>>,
+    pending_pushlog_replies: Arc<
+        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
+    >,
+    spawned_tasks: &SpawnedTasks,
 ) {
-    handle_connection_streams(connection, remote_id, alpn, event_tx, peer_map).await;
+    handle_connection_streams(
+        connection,
+        remote_id,
+        alpn,
+        event_tx,
+        peer_map,
+        pending_pushlog_replies,
+        spawned_tasks,
+    )
+    .await;
 }
 
 /// Dispatch a stream based on the connection ALPN.
@@ -136,6 +195,9 @@ async fn dispatch_stream(
     send: iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
+    pending_pushlog_replies: &Arc<
+        parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
+    >,
 ) -> crate::error::Result<()> {
     match alpn {
         x if x == protocols::ALPN_PUSHLOG => {
@@ -154,8 +216,17 @@ async fn dispatch_stream(
             }
         }
         x if x == protocols::ALPN_TWOSTREAM => {
-            let request: crate::message::PushLogRequest =
-                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
+            let payload = protocols::read_message_bytes(recv, protocols::MAX_MESSAGE_SIZE).await?;
+            if let Ok(reply) = serde_cbor::from_slice::<PushLogReply>(&payload) {
+                let sender = pending_pushlog_replies.lock().remove(&reply.message_id);
+                if let Some(sender) = sender {
+                    let _ = sender.send(reply);
+                    return Ok(());
+                }
+            }
+
+            let request: crate::message::PushLogRequest = serde_cbor::from_slice(&payload)
+                .map_err(|e| crate::error::Error::Codec(e.to_string()))?;
             if event_tx
                 .send(TransportEvent::TwoStreamRequest {
                     peer_id: peer_id.clone(),

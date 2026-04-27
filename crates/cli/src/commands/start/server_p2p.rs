@@ -83,7 +83,7 @@ impl Node {
 
         let blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
         let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-        let (handle, mut events, host_task) = Self::start_p2p(
+        let (handle, mut events, replicator_registry, host_task) = Self::start_p2p(
             config,
             bitswap_store,
             peer_keypair,
@@ -103,7 +103,7 @@ impl Node {
             sync_blockstore,
             Self::sync_config(config),
             Self::access_mode(config),
-            Arc::new(p2p::ReplicatorRegistry::new()),
+            replicator_registry,
             collection_store,
             head_provider,
         )
@@ -113,6 +113,12 @@ impl Node {
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         let coordinator_for_acp = coordinator.clone();
+
+        // Start pubsub_rpc doc-sync / sync-branchable services (#828) so
+        // this node can interoperate with Go DefraDB peers over gossipsub.
+        if let Err(e) = coordinator.start_pubsub_services().await {
+            warn!("Failed to start pubsub_rpc services: {}", e);
+        }
 
         match db_merge::load_persisted_collections(&coordinator).await {
             Ok(count) => {
@@ -150,8 +156,17 @@ impl Node {
                     max_workers: 32,
                 },
                 |result| match &result {
-                    p2p::sync::ReplicationResult::Merged { cid, doc_id, .. } => {
-                        info!(cid = %cid, doc_id = %doc_id, "Block merged successfully");
+                    p2p::sync::ReplicationResult::Merged {
+                        cid,
+                        doc_id,
+                        collection_id,
+                    } => {
+                        info!(
+                            cid = %cid,
+                            doc_id = %doc_id,
+                            collection_id = %collection_id,
+                            "Block merged successfully"
+                        );
                     }
                     p2p::sync::ReplicationResult::MergedButBroadcastFailed {
                         cid,
@@ -211,7 +226,7 @@ impl Node {
                     } => {
                         info!(
                             peer_id = %peer_id,
-                            message_id = %request.metadata.message_id,
+                            message_id = %request.message_id,
                             doc_id = %request.doc_id,
                             "Processing TwoStreamRequest through coordinator"
                         );
@@ -219,10 +234,20 @@ impl Node {
                     _ => {}
                 }
 
+                let transport_event = p2p::convert_host_event(event);
+                if transport_event.requires_inline_ordering() {
+                    if let Err(e) = coordinator_for_events
+                        .handle_transport_event(transport_event)
+                        .await
+                    {
+                        error!("Failed to handle host event: {}", e);
+                    }
+                    continue;
+                }
+
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
                 let coord = coordinator_for_events.clone();
                 tokio::spawn(async move {
-                    let transport_event = p2p::convert_host_event(event);
                     if let Err(e) = coord.handle_transport_event(transport_event).await {
                         error!("Failed to handle host event: {}", e);
                     }
@@ -377,6 +402,7 @@ impl Node {
         Ok(P2PSetup {
             host_handle: Some(handle),
             p2p_tasks: Some(P2PTasks {
+                coordinator: coordinator.shutdown_handle(),
                 host_task,
                 replication_task,
                 event_handler_task,
@@ -416,7 +442,7 @@ impl Node {
             Arc::new(db_merge::create_head_provider(database.clone()));
 
         let iroh_secret_key = Self::iroh_secret_key(peer_keypair.as_ref())?;
-        let (command_tx, mut iroh_events, host_task) =
+        let (command_tx, mut iroh_events, replicator_registry, host_task) =
             p2p::iroh::spawn_endpoint(p2p::iroh::IrohEndpointConfig {
                 secret_key: iroh_secret_key.clone(),
                 relay_mode: Self::iroh_relay_mode(config)?,
@@ -438,7 +464,7 @@ impl Node {
             sync_blockstore,
             Self::sync_config(config),
             Self::access_mode(config),
-            Arc::new(p2p::ReplicatorRegistry::new()),
+            replicator_registry,
             collection_store,
             head_provider,
         )
@@ -448,6 +474,12 @@ impl Node {
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         let coordinator_for_acp = coordinator.clone();
+
+        // Start pubsub_rpc doc-sync / sync-branchable services (#828) so
+        // this node can interoperate with Go DefraDB peers over gossipsub.
+        if let Err(e) = coordinator.start_pubsub_services().await {
+            warn!("Failed to start pubsub_rpc services: {}", e);
+        }
 
         match db_merge::load_persisted_collections(&coordinator).await {
             Ok(count) => {
@@ -530,6 +562,13 @@ impl Node {
                     _ => {}
                 }
 
+                if event.requires_inline_ordering() {
+                    if let Err(e) = coordinator_for_events.handle_transport_event(event).await {
+                        error!("Failed to handle iroh event: {}", e);
+                    }
+                    continue;
+                }
+
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
                 let coord = coordinator_for_events.clone();
                 tokio::spawn(async move {
@@ -585,7 +624,6 @@ impl Node {
 
         let retry_store = store.clone();
         let retry_pusher = doc_pusher.clone();
-        let retry_transport = transport.clone();
         let retry_loop_task = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -603,10 +641,8 @@ impl Node {
                         continue;
                     }
                     let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
-                    let connected = retry_transport.connected_peers().await.unwrap_or_default();
-                    if !connected.iter().any(|p| p.as_str() == peer_id.as_str()) {
-                        continue;
-                    }
+                    // Iroh request-response can reconnect on demand, so don't
+                    // gate retries on the peer-map snapshot.
                     let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
                         Ok(d) => d,
                         Err(_) => continue,
@@ -682,6 +718,7 @@ impl Node {
         Ok(P2PSetup {
             host_handle: None,
             p2p_tasks: Some(P2PTasks {
+                coordinator: coordinator.shutdown_handle(),
                 host_task,
                 replication_task,
                 event_handler_task,

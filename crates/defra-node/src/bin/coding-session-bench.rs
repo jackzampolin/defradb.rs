@@ -178,7 +178,17 @@ mod rocksdb_runner {
         }
 
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+            .add_directive(
+                "iroh_quinn_proto::connection=error"
+                    .parse()
+                    .expect("valid tracing directive"),
+            )
+            .add_directive(
+                "noq_proto::connection=error"
+                    .parse()
+                    .expect("valid tracing directive"),
+            );
         let _ = tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_target(true)
@@ -306,7 +316,7 @@ mod rocksdb_runner {
         Ok(options)
     }
 
-    fn next_value<'a>(args: &mut impl Iterator<Item = String>, flag: &'a str) -> Result<String> {
+    fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
         args.next()
             .with_context(|| format!("missing value for {flag}"))
     }
