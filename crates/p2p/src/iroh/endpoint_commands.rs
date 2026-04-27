@@ -24,7 +24,7 @@ use super::endpoint::{
 };
 use super::endpoint_rpc::{
     handle_block_sync, handle_car_request_response, handle_fire_and_forget,
-    handle_request_response, handle_send_only, ConnectionCache,
+    handle_request_response, handle_send_only, BlockSyncResources, ConnectionCache,
 };
 use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
 use super::protocols;
@@ -440,22 +440,14 @@ pub(super) async fn handle_command(
             let query_id = QueryId(*next_query_id);
             *next_query_id += 1;
 
-            let endpoint = endpoint.clone();
-            let peer_map = Arc::clone(peer_map);
-            let connection_cache = Arc::clone(connection_cache);
-            let event_tx = event_tx.clone();
+            let resources = BlockSyncResources::new(
+                endpoint.clone(),
+                Arc::clone(peer_map),
+                Arc::clone(connection_cache),
+                event_tx.clone(),
+            );
             let task = tokio::spawn(async move {
-                handle_block_sync(
-                    endpoint,
-                    peer_map,
-                    connection_cache,
-                    query_id,
-                    root,
-                    providers,
-                    missing,
-                    event_tx,
-                )
-                .await;
+                handle_block_sync(resources, query_id, root, providers, missing).await;
             });
             active_syncs.insert(
                 query_id.0,

@@ -299,9 +299,8 @@ where
         evict_connection(cache, peer_id, alpn);
         crate::error::Error::ResponseTimeout
     })?
-    .map_err(|error| {
+    .inspect_err(|_| {
         evict_connection(cache, peer_id, alpn);
-        error
     })?;
     Ok(response)
 }
@@ -648,19 +647,40 @@ async fn try_fetch_from_provider(
     }
 }
 
+#[derive(Clone)]
+pub(super) struct BlockSyncResources {
+    endpoint: Endpoint,
+    peer_map: std::sync::Arc<parking_lot::Mutex<PeerMap>>,
+    connection_cache: ConnectionCache,
+    event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
+}
+
+impl BlockSyncResources {
+    pub(super) fn new(
+        endpoint: Endpoint,
+        peer_map: std::sync::Arc<parking_lot::Mutex<PeerMap>>,
+        connection_cache: ConnectionCache,
+        event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
+    ) -> Self {
+        Self {
+            endpoint,
+            peer_map,
+            connection_cache,
+            event_tx,
+        }
+    }
+}
+
 /// CAR-based block sync: fetch blocks from providers concurrently.
 ///
 /// Full-DAG requests are recursive from `root`; partial recovery requests carry
 /// the exact missing CIDs and expect a selective CAR response.
 pub(super) async fn handle_block_sync(
-    endpoint: Endpoint,
-    peer_map: std::sync::Arc<parking_lot::Mutex<PeerMap>>,
-    connection_cache: ConnectionCache,
+    resources: BlockSyncResources,
     query_id: QueryId,
     root: cid::Cid,
     providers: Vec<PeerId>,
     missing: Vec<cid::Cid>,
-    event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
     use tokio::task::JoinSet;
 
@@ -680,6 +700,13 @@ pub(super) async fn handle_block_sync(
     } else {
         CarFetchRequest::selective_blocks(root, missing.clone())
     };
+
+    let BlockSyncResources {
+        endpoint,
+        peer_map,
+        connection_cache,
+        event_tx,
+    } = resources;
 
     for provider in &providers {
         let endpoint = endpoint.clone();
