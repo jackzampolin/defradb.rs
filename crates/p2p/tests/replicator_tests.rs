@@ -131,6 +131,34 @@ fn status_update_records_first_transition_only() {
 }
 
 #[test]
+fn set_status_if_changed_now_matches_go_recovery_rule() {
+    // Go's `updateReplicatorStatus` (`defradb/internal/db/p2p/replicator.go:495`)
+    // resets `LastStatusChange` to `time.Time{}` on `Inactive → Active`,
+    // and stamps `time.Now()` on `Active → Inactive`. Mirroring that here
+    // keeps the JSON wire format identical to a Go-produced peerstore record.
+    let peer_id = PeerId::random();
+    let mut info = ReplicatorInfo::new(peer_id, vec!["users".to_string()]).unwrap();
+    let go_zero = Utc.with_ymd_and_hms(1, 1, 1, 0, 0, 0).unwrap();
+
+    let before = Utc::now();
+    assert!(info.set_status_if_changed_now(ReplicatorStatus::Inactive));
+    let after = Utc::now();
+    assert_eq!(info.status, ReplicatorStatus::Inactive);
+    assert!(
+        info.last_status_change >= before && info.last_status_change <= after,
+        "Active → Inactive must stamp now(), got {}",
+        info.last_status_change
+    );
+
+    assert!(info.set_status_if_changed_now(ReplicatorStatus::Active));
+    assert_eq!(info.status, ReplicatorStatus::Active);
+    assert_eq!(
+        info.last_status_change, go_zero,
+        "Inactive → Active must reset to Go's time.Time{{}} zero value"
+    );
+}
+
+#[test]
 fn timestamp_encodes_like_go_rfc3339nano_with_trailing_zeros() {
     // Go's `time.Time.MarshalJSON` uses RFC3339Nano, which strips trailing
     // zeros from the fractional seconds (`.100` → `.1`, `.001` stays `.001`).
