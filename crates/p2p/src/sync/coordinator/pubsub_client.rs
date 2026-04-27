@@ -40,15 +40,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// the transport so inbound messages arrive as
     /// [`crate::transport::TransportEvent::GossipRawMessage`].
     ///
-    /// Idempotent: safe to call at startup and again on reconnect.
-    /// Silently skips on transports without pubsub_rpc support
-    /// (`subscribe_raw` / `register_pubsub_rpc_topic` return `Err`/`Ok`
-    /// per the trait defaults; iroh inherits the defaults).
+    /// Idempotent: safe to call at startup and again on reconnect. Returns
+    /// an error if any subscription or registration fails so callers never
+    /// observe a partially wired pubsub_rpc service as ready.
     pub async fn start_pubsub_services(&self) -> Result<()> {
         let Some(services) = self.pubsub_services.as_ref() else {
             debug!("pubsub_rpc services disabled (local peer is not a libp2p PeerId)");
             return Ok(());
         };
+        services.set_ready(false);
 
         let doc_self = services.doc_sync.self_response_topic().to_string();
         let branch_self = services.branchable_sync.self_response_topic().to_string();
@@ -59,26 +59,26 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             doc_self.clone(),
             branch_self.clone(),
         ] {
-            // subscribe_raw returns Err on transports without gossipsub.
-            // Treat that as soft-failure so the coordinator can be started
-            // uniformly on libp2p + iroh; the raw-message dispatcher only
-            // fires when messages actually arrive.
-            if let Err(e) = self.runtime.transport.subscribe_raw(topic.clone()).await {
-                debug!(topic = %topic, error = %e, "subscribe_raw skipped");
-                return Ok(());
-            }
+            self.runtime.transport.subscribe_raw(topic.clone()).await?;
             self.runtime
                 .transport
                 .register_pubsub_rpc_topic(topic)
                 .await?;
         }
 
+        services.set_ready(true);
         debug!(
             doc_sync_topic = DOC_SYNC_TOPIC,
             branchable_topic = BRANCHABLE_SYNC_TOPIC,
             "pubsub_rpc services started"
         );
         Ok(())
+    }
+
+    pub fn pubsub_services_ready(&self) -> bool {
+        self.pubsub_services
+            .as_ref()
+            .is_some_and(|services| services.is_ready())
     }
 
     /// Publish a DocSync request over `doc-sync` and wait up to
@@ -94,6 +94,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 "pubsub_rpc DocSync is not available on this transport".into(),
             ));
         };
+        if !services.is_ready() {
+            return Err(Error::Transport(
+                "pubsub_rpc DocSync is not ready on this transport".into(),
+            ));
+        }
 
         let mut req_bytes = Vec::new();
         ciborium::into_writer(&wire::DocSyncRequest::new(doc_ids), &mut req_bytes)
@@ -168,6 +173,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 "pubsub_rpc BranchableSync is not available on this transport".into(),
             ));
         };
+        if !services.is_ready() {
+            return Err(Error::Transport(
+                "pubsub_rpc BranchableSync is not ready on this transport".into(),
+            ));
+        }
 
         let mut req_bytes = Vec::new();
         ciborium::into_writer(
@@ -247,5 +257,292 @@ fn parse_branchable_sync_response(resp: &PubsubResponse) -> Option<wire::Brancha
             warn!(from = %resp.from, error = %e, "sync-branchable: failed to decode reply");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use blockstore::DefraBlockstore;
+    use parking_lot::Mutex;
+    use storage::backends::MemoryStore;
+
+    use super::*;
+    use crate::message::{
+        BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
+        PushLogReply, PushLogRequest, PushSEArtifactsRequest,
+    };
+    use crate::sync::SyncConfig;
+    use crate::topics::DefraTopic;
+    use crate::transport::{MessageId, PeerAddr, PeerId};
+    use crate::{QueryId, ReplicatorInfo};
+
+    #[derive(Clone)]
+    struct RawSubscribeFailTransport {
+        local_peer_id: PeerId,
+        subscribe_calls: Arc<AtomicUsize>,
+        fail_on_call: usize,
+        registered_topics: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RawSubscribeFailTransport {
+        fn new(fail_on_call: usize) -> Self {
+            let peer = libp2p::PeerId::from_public_key(
+                &libp2p::identity::Keypair::generate_ed25519().public(),
+            );
+            Self {
+                local_peer_id: PeerId::new(peer.to_string()),
+                subscribe_calls: Arc::new(AtomicUsize::new(0)),
+                fail_on_call,
+                registered_topics: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl P2PTransport for RawSubscribeFailTransport {
+        type ResponseToken = ();
+
+        fn local_peer_id(&self) -> &PeerId {
+            &self.local_peer_id
+        }
+
+        fn local_public_key_proto(&self) -> &[u8] {
+            &[]
+        }
+
+        fn sign(&self, _data: &[u8]) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        async fn dial(&self, _peer_id: &PeerId, _addrs: Vec<PeerAddr>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn listen(&self, _addr: PeerAddr) -> Result<()> {
+            Ok(())
+        }
+
+        async fn connected_peers(&self) -> Result<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
+        async fn listen_addresses(&self) -> Result<Vec<PeerAddr>> {
+            Ok(Vec::new())
+        }
+
+        async fn poll_until_connected(&self, _peer_id: &PeerId, _timeout: Duration) -> Result<()> {
+            Ok(())
+        }
+
+        async fn peer_addresses(&self) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn topic_peers(&self, _topic: DefraTopic) -> Result<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
+        async fn subscribe(&self, _topic: DefraTopic) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn unsubscribe(&self, _topic: DefraTopic) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn publish(&self, _topic: DefraTopic, _msg: PushLogBroadcast) -> Result<MessageId> {
+            Ok(MessageId::new("noop".to_string()))
+        }
+
+        async fn publish_raw(&self, _topic: String, _data: Vec<u8>) -> Result<MessageId> {
+            Ok(MessageId::new("noop".to_string()))
+        }
+
+        async fn subscribe_raw(&self, _topic: String) -> Result<bool> {
+            let call = self.subscribe_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == self.fail_on_call {
+                Err(Error::Transport("subscribe failed".to_string()))
+            } else {
+                Ok(true)
+            }
+        }
+
+        async fn register_pubsub_rpc_topic(&self, topic: String) -> Result<()> {
+            self.registered_topics.lock().push(topic);
+            Ok(())
+        }
+
+        async fn send_pushlog_response(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: PushLogReply,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_two_stream_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: PushLogRequest,
+        ) -> Result<PushLogReply> {
+            Err(Error::Transport("not implemented".to_string()))
+        }
+
+        async fn send_two_stream_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: PushLogReply,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: DocSyncRequest,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: DocSyncReply,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: BranchableSyncRequest,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: BranchableSyncReply,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_car_request(&self, _peer_id: &PeerId, _root_cid: cid::Cid) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_car_response(&self, _peer_id: &PeerId, _car_data: Vec<u8>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_car_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _car_data: Vec<u8>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: DocSyncReply,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: BranchableSyncReply,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_se_artifacts(
+            &self,
+            _peer_id: &PeerId,
+            _req: PushSEArtifactsRequest,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn sync_blocks(
+            &self,
+            _root: cid::Cid,
+            _providers: Vec<PeerId>,
+            _missing: Vec<cid::Cid>,
+        ) -> Result<QueryId> {
+            Ok(QueryId(0))
+        }
+
+        async fn cancel_sync(&self, _query_id: QueryId) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn create_replicator(
+            &self,
+            _peer_id: &PeerId,
+            _collections: Vec<String>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete_replicator(&self, _peer_id: &PeerId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list_replicators(&self) -> Result<Vec<ReplicatorInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_replicator(&self, _peer_id: &PeerId) -> Result<Option<ReplicatorInfo>> {
+            Ok(None)
+        }
+
+        async fn remove_replicator_collections(
+            &self,
+            _peer_id: &PeerId,
+            _collections: Vec<String>,
+        ) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn shutdown(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn start_pubsub_services_returns_error_and_stays_unready_on_partial_subscribe() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let transport = RawSubscribeFailTransport::new(2);
+        let registered_topics = transport.registered_topics.clone();
+        let subscribe_calls = transport.subscribe_calls.clone();
+        let (coordinator, _events) =
+            SyncCoordinator::new(transport, blockstore, SyncConfig::default())
+                .await
+                .expect("coordinator should construct");
+
+        let error = coordinator
+            .start_pubsub_services()
+            .await
+            .expect_err("partial subscribe failure must be visible to caller");
+
+        assert!(error.to_string().contains("subscribe failed"));
+        assert!(!coordinator.pubsub_services_ready());
+        assert_eq!(subscribe_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            registered_topics.lock().len(),
+            1,
+            "first topic registered before failure, but services must remain unready"
+        );
     }
 }

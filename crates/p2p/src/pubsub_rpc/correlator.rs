@@ -152,6 +152,14 @@ impl Correlator {
         self.ongoing.lock().remove(id);
     }
 
+    /// Drop every in-flight response sender and wake waiting publishers.
+    ///
+    /// Used during coordinator shutdown so callers don't sit on the normal
+    /// response timeout after the transport has already started closing.
+    pub fn cancel_all(&self) -> usize {
+        self.ongoing.lock().drain().count()
+    }
+
     /// Deliver a decoded response envelope. Routes to the matching ongoing
     /// entry if one exists; single-response entries are auto-removed after
     /// one successful delivery.
@@ -295,6 +303,20 @@ mod tests {
         assert_eq!(c.in_flight(), 1);
         drop(prep);
         assert_eq!(c.in_flight(), 0, "Drop must auto-cancel");
+    }
+
+    #[tokio::test]
+    async fn cancel_all_wakes_waiting_publishers() {
+        let c = Correlator::new();
+        let mut first = c.publish(b"first".to_vec(), PublishOptions::default());
+        let mut second = c.publish(b"second".to_vec(), PublishOptions::default());
+        assert_eq!(c.in_flight(), 2);
+
+        assert_eq!(c.cancel_all(), 2);
+        assert_eq!(c.in_flight(), 0);
+
+        assert!(first.responses.recv().await.is_none());
+        assert!(second.responses.recv().await.is_none());
     }
 
     #[test]

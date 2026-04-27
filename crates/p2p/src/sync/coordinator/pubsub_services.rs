@@ -11,10 +11,11 @@
 //! coordinator skips starting these services on iroh and falls back to
 //! the two-stream DocSync/Branchable paths.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::authorizer::AccessAuthorizer;
 use crate::message::pubsub as wire;
@@ -32,6 +33,7 @@ pub(super) const BRANCHABLE_SYNC_TOPIC: &str = "sync-branchable";
 pub(crate) struct PubsubServices {
     pub(super) doc_sync: Arc<TopicHandler>,
     pub(super) branchable_sync: Arc<TopicHandler>,
+    ready: AtomicBool,
 }
 
 impl PubsubServices {
@@ -69,7 +71,36 @@ impl PubsubServices {
         Some(Self {
             doc_sync,
             branchable_sync,
+            ready: AtomicBool::new(false),
         })
+    }
+
+    pub(super) fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+
+    pub(super) fn set_ready(&self, ready: bool) {
+        self.ready.store(ready, Ordering::Release);
+    }
+
+    pub(super) fn cancel_in_flight(&self) -> usize {
+        let doc_sync = self.doc_sync.cancel_all();
+        let branchable_sync = self.branchable_sync.cancel_all();
+        if doc_sync > 0 {
+            debug!(
+                topic = DOC_SYNC_TOPIC,
+                cancelled = doc_sync,
+                "Cancelled in-flight pubsub_rpc requests"
+            );
+        }
+        if branchable_sync > 0 {
+            debug!(
+                topic = BRANCHABLE_SYNC_TOPIC,
+                cancelled = branchable_sync,
+                "Cancelled in-flight pubsub_rpc requests"
+            );
+        }
+        doc_sync + branchable_sync
     }
 
     /// Return the TopicHandler for `topic` if this services bundle owns it.
@@ -314,6 +345,23 @@ mod tests {
             Arc::new(AllowAllAuthorizer),
         );
         assert!(services.is_none());
+    }
+
+    #[tokio::test]
+    async fn services_start_not_ready_until_all_topics_subscribe() {
+        let peer = a_libp2p_peer();
+        let services = PubsubServices::try_new(
+            &peer.to_string(),
+            Arc::new(NoOpHeadProvider),
+            Arc::new(AllowAllAuthorizer),
+        )
+        .expect("local peer parses");
+
+        assert!(!services.is_ready());
+        services.set_ready(true);
+        assert!(services.is_ready());
+        services.set_ready(false);
+        assert!(!services.is_ready());
     }
 
     #[tokio::test]

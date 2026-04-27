@@ -262,6 +262,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     }
 
     pub async fn shutdown(&self) {
+        if let Some(services) = self.pubsub_services.as_ref() {
+            services.set_ready(false);
+            let cancelled = services.cancel_in_flight();
+            if cancelled > 0 {
+                tracing::debug!(
+                    cancelled,
+                    "Cancelled in-flight pubsub_rpc requests during coordinator shutdown"
+                );
+            }
+        }
         self.runtime.dag_fetch_semaphore.close();
         self.runtime.push_semaphore.close();
         self.runtime.shutdown.shutdown().await;

@@ -148,6 +148,11 @@ impl TopicHandler {
         self.inner.correlator.cancel(id);
     }
 
+    /// Cancel all in-flight publishes for this topic.
+    pub fn cancel_all(&self) -> usize {
+        self.inner.correlator.cancel_all()
+    }
+
     /// Number of in-flight requests awaiting responses. Test/metric helper.
     pub fn in_flight(&self) -> usize {
         self.inner.correlator.in_flight()
