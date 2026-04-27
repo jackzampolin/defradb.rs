@@ -13,7 +13,9 @@ use tracing::{debug, warn};
 use crate::message::PushLogReply;
 use crate::transport::{PeerId, TransportEvent};
 
-use super::endpoint::{join_peer_to_subscriptions, track_task, SpawnedTasks, TopicSubscription};
+use super::endpoint::{
+    join_peer_to_subscription_senders, track_task, SpawnedTasks, SubscriptionSenders,
+};
 use super::peer_map::{endpoint_id_to_peer_id, PeerMap};
 use super::protocols;
 
@@ -25,7 +27,7 @@ pub(super) async fn handle_incoming(
     pending_pushlog_replies: &Arc<
         parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
     >,
-    subscriptions: &HashMap<String, TopicSubscription>,
+    subscription_senders: &SubscriptionSenders,
     spawned_tasks: &SpawnedTasks,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
@@ -90,7 +92,7 @@ pub(super) async fn handle_incoming(
     }
 
     if is_new {
-        join_peer_to_subscriptions(subscriptions, remote_id).await;
+        join_peer_to_subscription_senders(subscription_senders, remote_id).await;
     }
 
     // Spawn handler for this connection's streams
@@ -216,17 +218,8 @@ async fn dispatch_stream(
             }
         }
         x if x == protocols::ALPN_TWOSTREAM => {
-            let payload = protocols::read_message_bytes(recv, protocols::MAX_MESSAGE_SIZE).await?;
-            if let Ok(reply) = serde_cbor::from_slice::<PushLogReply>(&payload) {
-                let sender = pending_pushlog_replies.lock().remove(&reply.message_id);
-                if let Some(sender) = sender {
-                    let _ = sender.send(reply);
-                    return Ok(());
-                }
-            }
-
-            let request: crate::message::PushLogRequest = serde_cbor::from_slice(&payload)
-                .map_err(|e| crate::error::Error::Codec(e.to_string()))?;
+            let request: crate::message::PushLogRequest =
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
             if event_tx
                 .send(TransportEvent::TwoStreamRequest {
                     peer_id: peer_id.clone(),
@@ -239,6 +232,25 @@ async fn dispatch_stream(
                 .is_err()
             {
                 warn!("Event channel closed, cannot emit TwoStreamRequest");
+            }
+        }
+        x if x == protocols::ALPN_TWOSTREAM_RESP => {
+            let reply: PushLogReply =
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
+            let (sender, pending_len_after_remove) = {
+                let mut pending = pending_pushlog_replies.lock();
+                let sender = pending.remove(&reply.message_id);
+                (sender, pending.len())
+            };
+            if let Some(sender) = sender {
+                let _ = sender.send(reply);
+            } else {
+                warn!(
+                    peer_id = %peer_id,
+                    message_id = %reply.message_id,
+                    pending_reply_count = pending_len_after_remove,
+                    "Received unmatched two-stream reply on response protocol"
+                );
             }
         }
         x if x == protocols::ALPN_DOCSYNC => {

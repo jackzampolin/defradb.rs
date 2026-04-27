@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
 use crate::bitswap::ReplicatorRegistry;
-use crate::message::PushLogReply;
+use crate::message::{PushLogBroadcast, PushLogReply};
 use crate::transport::{MessageId, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
 
@@ -23,7 +23,8 @@ use super::endpoint::{
     TopicSubscription,
 };
 use super::endpoint_rpc::{
-    handle_block_sync, handle_car_request_response, handle_fire_and_forget, handle_request_response,
+    handle_block_sync, handle_car_request_response, handle_fire_and_forget,
+    handle_request_response, handle_send_only, BlockSyncResources, ConnectionCache,
 };
 use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
 use super::protocols;
@@ -40,6 +41,7 @@ pub(super) async fn handle_command(
     pending_pushlog_replies: &Arc<
         parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
     >,
+    connection_cache: &ConnectionCache,
     subscriptions: &mut HashMap<String, TopicSubscription>,
     replicators: &Arc<ReplicatorRegistry>,
     active_syncs: &mut HashMap<u64, ActiveSync>,
@@ -47,6 +49,8 @@ pub(super) async fn handle_command(
     next_query_id: &mut u64,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> bool {
+    active_syncs.retain(|_, sync| !sync.abort_handle.is_finished());
+
     match cmd {
         IrohCommand::Dial {
             peer_id,
@@ -106,8 +110,7 @@ pub(super) async fn handle_command(
             }
         }
         IrohCommand::Publish { topic, msg, reply } => {
-            let result =
-                handle_publish(gossip, subscriptions, peer_map, topic, &msg, event_tx).await;
+            let result = handle_publish(gossip, subscriptions, peer_map, topic, msg, spawned_tasks);
             let _ = reply.send(result);
         }
         IrohCommand::SendPushLogResponse {
@@ -136,24 +139,28 @@ pub(super) async fn handle_command(
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
             let pending_pushlog_replies = pending_pushlog_replies.clone();
+            let connection_cache = Arc::clone(connection_cache);
+            let message_id = request.message_id.clone();
             let task = tokio::spawn(async move {
+                let request_peer_id = peer_id.clone();
+                let request_message_id = message_id.clone();
                 let result = async move {
-                    let message_id = request.message_id.clone();
                     let (reply_tx, reply_rx) = oneshot::channel();
                     pending_pushlog_replies
                         .lock()
-                        .insert(message_id.clone(), reply_tx);
+                        .insert(request_message_id.clone(), reply_tx);
 
-                    if let Err(error) = handle_fire_and_forget(
+                    if let Err(error) = handle_send_only(
                         &endpoint,
-                        &peer_id,
+                        &request_peer_id,
                         protocols::ALPN_TWOSTREAM,
                         &request,
                         direct_addr,
+                        &connection_cache,
                     )
                     .await
                     {
-                        pending_pushlog_replies.lock().remove(&message_id);
+                        pending_pushlog_replies.lock().remove(&request_message_id);
                         return Err(error);
                     }
 
@@ -165,13 +172,13 @@ pub(super) async fn handle_command(
                     {
                         Ok(Ok(reply_msg)) => Ok(reply_msg),
                         Ok(Err(_)) => {
-                            pending_pushlog_replies.lock().remove(&message_id);
+                            pending_pushlog_replies.lock().remove(&request_message_id);
                             Err(crate::error::Error::Transport(
                                 "response channel closed".into(),
                             ))
                         }
                         Err(_) => {
-                            pending_pushlog_replies.lock().remove(&message_id);
+                            pending_pushlog_replies.lock().remove(&request_message_id);
                             Err(crate::error::Error::ResponseTimeout)
                         }
                     }
@@ -188,13 +195,15 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
             let task = tokio::spawn(async move {
-                let result = handle_fire_and_forget(
+                let result = handle_send_only(
                     &endpoint,
                     &peer_id,
-                    protocols::ALPN_TWOSTREAM,
+                    protocols::ALPN_TWOSTREAM_RESP,
                     &reply_msg,
                     direct_addr,
+                    &connection_cache,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -208,6 +217,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
             let event_tx = event_tx.clone();
             let task = tokio::spawn(async move {
                 let result: crate::error::Result<crate::message::DocSyncReply> =
@@ -217,6 +227,7 @@ pub(super) async fn handle_command(
                         protocols::ALPN_DOCSYNC,
                         &request,
                         direct_addr,
+                        &connection_cache,
                     )
                     .await;
                 match result {
@@ -243,6 +254,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
             let event_tx = event_tx.clone();
             let task = tokio::spawn(async move {
                 let result: crate::error::Result<crate::message::BranchableSyncReply> =
@@ -252,6 +264,7 @@ pub(super) async fn handle_command(
                         protocols::ALPN_BRANCHABLE,
                         &request,
                         direct_addr,
+                        &connection_cache,
                     )
                     .await;
                 match result {
@@ -278,6 +291,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
             let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
@@ -285,6 +299,7 @@ pub(super) async fn handle_command(
                     protocols::ALPN_DOCSYNC_RESP,
                     &reply_msg,
                     direct_addr,
+                    &connection_cache,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -298,6 +313,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
             let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
@@ -305,6 +321,7 @@ pub(super) async fn handle_command(
                     protocols::ALPN_BRANCHABLE_RESP,
                     &reply_msg,
                     direct_addr,
+                    &connection_cache,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -354,6 +371,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
             let event_tx = event_tx.clone();
             let task = tokio::spawn(async move {
                 let result = handle_car_request_response(
@@ -361,6 +379,7 @@ pub(super) async fn handle_command(
                     &peer_id,
                     root_cid,
                     direct_addr,
+                    &connection_cache,
                     &event_tx,
                 )
                 .await;
@@ -375,6 +394,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
             let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
@@ -382,6 +402,7 @@ pub(super) async fn handle_command(
                     protocols::ALPN_CAR_RESP,
                     &car_data,
                     direct_addr,
+                    &connection_cache,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -395,6 +416,7 @@ pub(super) async fn handle_command(
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
             let task = tokio::spawn(async move {
                 let result = handle_fire_and_forget(
                     &endpoint,
@@ -402,6 +424,7 @@ pub(super) async fn handle_command(
                     protocols::ALPN_SE,
                     &request,
                     direct_addr,
+                    &connection_cache,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -417,14 +440,14 @@ pub(super) async fn handle_command(
             let query_id = QueryId(*next_query_id);
             *next_query_id += 1;
 
-            let endpoint = endpoint.clone();
-            let peer_map = Arc::clone(peer_map);
-            let event_tx = event_tx.clone();
+            let resources = BlockSyncResources::new(
+                endpoint.clone(),
+                Arc::clone(peer_map),
+                Arc::clone(connection_cache),
+                event_tx.clone(),
+            );
             let task = tokio::spawn(async move {
-                handle_block_sync(
-                    endpoint, peer_map, query_id, root, providers, missing, event_tx,
-                )
-                .await;
+                handle_block_sync(resources, query_id, root, providers, missing).await;
             });
             active_syncs.insert(
                 query_id.0,
@@ -718,40 +741,54 @@ pub(super) async fn handle_subscribe(
     Ok(true)
 }
 
-/// Publish a message on a gossip topic.
-///
-/// If the topic is not yet subscribed, lazily subscribes first (matching Go gossipsub
-/// behavior where publishing to a topic implicitly joins it). This is needed for
-/// document-level topics which are not subscribed at startup.
-async fn handle_publish(
+fn handle_publish(
     gossip: &Gossip,
-    subscriptions: &mut HashMap<String, TopicSubscription>,
+    subscriptions: &HashMap<String, TopicSubscription>,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
     topic: crate::topics::DefraTopic,
-    msg: &crate::message::PushLogBroadcast,
-    event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
+    msg: PushLogBroadcast,
+    spawned_tasks: &SpawnedTasks,
 ) -> crate::error::Result<MessageId> {
     let topic_str = topic.to_string();
+    let topic_id = topic_to_id(&topic_str);
+    let sender = subscriptions.get(&topic_str).map(|sub| sub.sender.clone());
+    let gossip = gossip.clone();
+    let initial_peers: Vec<iroh::EndpointId> = peer_map.lock().endpoint_ids().collect();
+    let message_id = MessageId::new(uuid::Uuid::new_v4().to_string());
+    let payload = postcard::to_allocvec(&msg)
+        .map_err(|error| crate::error::Error::Codec(error.to_string()))?;
 
-    // Auto-subscribe to the topic if not already subscribed
-    if !subscriptions.contains_key(&topic_str) {
-        debug!(topic = %topic_str, "Auto-subscribing to topic on first publish");
-        handle_subscribe(gossip, subscriptions, peer_map, topic, event_tx).await?;
-    }
+    let task = tokio::spawn(async move {
+        let sender = if let Some(sender) = sender {
+            sender
+        } else {
+            match gossip.subscribe(topic_id, initial_peers).await {
+                Ok(topic) => {
+                    let (sender, _receiver) = topic.split();
+                    sender
+                }
+                Err(error) => {
+                    warn!(
+                        topic = %topic_str,
+                        error = %error,
+                        "Failed to create ephemeral Iroh gossip publisher"
+                    );
+                    return;
+                }
+            }
+        };
 
-    let sub = subscriptions
-        .get_mut(&topic_str)
-        .ok_or_else(|| crate::error::Error::InvalidTopic(topic_str.clone()))?;
+        if let Err(error) = sender.broadcast(Bytes::from(payload)).await {
+            warn!(
+                topic = %topic_str,
+                error = %error,
+                "Failed to publish Iroh gossip message"
+            );
+        }
+    });
+    track_task(spawned_tasks, task);
 
-    let payload =
-        postcard::to_allocvec(msg).map_err(|e| crate::error::Error::Codec(e.to_string()))?;
-
-    sub.sender
-        .broadcast(Bytes::from(payload))
-        .await
-        .map_err(|e| crate::error::Error::GossipSubPublish(e.to_string()))?;
-
-    Ok(MessageId::new(uuid::Uuid::new_v4().to_string()))
+    Ok(message_id)
 }
 
 /// Hash a topic string to an iroh-gossip `TopicId`.

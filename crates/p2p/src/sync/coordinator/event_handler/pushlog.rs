@@ -257,17 +257,18 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         reply: PushLogReply,
         _token: Option<T::ResponseToken>,
     ) {
-        if let Err(e) = self
+        let send_result = self
             .runtime
             .transport
             .send_two_stream_response(peer_id, reply)
-            .await
-        {
+            .await;
+
+        if let Err(e) = send_result {
             if e.is_connection_like() {
                 tracing::debug!(
                     peer_id = %peer_id,
                     error = %e,
-                    "Peer disconnected before the fallback two-stream response could be sent"
+                    "Peer disconnected before the two-stream response could be sent"
                 );
             } else {
                 tracing::warn!(
