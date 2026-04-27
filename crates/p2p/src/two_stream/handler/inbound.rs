@@ -5,27 +5,15 @@ use std::sync::Arc;
 use libp2p::{PeerId, Stream};
 use parking_lot::Mutex;
 
-use super::{PendingResponseKey, PendingResponses};
+use super::{ensure_transport_sender, PendingResponseKey, PendingResponses};
 use crate::error::{Error, Result};
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, IdentityRequest,
-    IdentityResponse, Message, PushLogReply, PushLogRequest,
+    IdentityResponse, PushLogReply, PushLogRequest,
 };
 use crate::two_stream::event::TwoStreamEvent;
 
 use super::TwoStreamHandler;
-
-fn ensure_transport_sender<M: Message>(peer_id: &PeerId, msg: &M) -> Result<()> {
-    if msg.sender_id() == peer_id.to_string() {
-        Ok(())
-    } else {
-        Err(Error::Transport(format!(
-            "transport peer {} did not match signed sender {}",
-            peer_id,
-            msg.sender_id()
-        )))
-    }
-}
 
 impl TwoStreamHandler {
     /// Handle an incoming stream on the request protocol.

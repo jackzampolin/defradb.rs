@@ -222,6 +222,23 @@ fn test_ecies_ciphertext_only_public_key_no_data() {
 }
 
 #[test]
+fn test_ecies_rejects_payload_below_go_min_ciphertext_size() {
+    let private_key = generate_x25519().unwrap();
+    let mut malformed_ct = vec![0u8; X25519_PUBLIC_KEY_SIZE];
+    malformed_ct.push(1);
+    malformed_ct.extend_from_slice(&[0u8; HMAC_SIZE]);
+
+    let options = EciesOptions::builder().prepend_public_key(true).build();
+    let error = decrypt_ecies(&malformed_ct, &private_key, options)
+        .expect_err("payload smaller than Go minCipherTextSize must fail");
+
+    assert!(
+        error.to_string().contains("encrypted payload is 1 bytes"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn test_ecies_ciphertext_no_hmac() {
     let private_key = generate_x25519().unwrap();
 

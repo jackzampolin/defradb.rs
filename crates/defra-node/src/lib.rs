@@ -938,6 +938,16 @@ fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                 .await
             {
                 tracing::warn!(error = %error, "failed to record push failure");
+                continue;
+            }
+            if let Err(error) = defra_p2p_adapter::set_persisted_replicator_status(
+                &peerstore,
+                &failure.peer_id.to_string(),
+                p2p::ReplicatorStatus::Inactive,
+            )
+            .await
+            {
+                tracing::warn!(error = %error, "failed to mark replicator inactive");
             }
         }
     })
@@ -987,6 +997,12 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                 };
                 if docs.is_empty() {
                     let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                    let _ = defra_p2p_adapter::set_persisted_replicator_status(
+                        &peerstore,
+                        &peer_id_str,
+                        p2p::ReplicatorStatus::Active,
+                    )
+                    .await;
                     continue;
                 }
 
@@ -1019,7 +1035,19 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
 
                 if all_succeeded {
                     let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                    let _ = defra_p2p_adapter::set_persisted_replicator_status(
+                        &peerstore,
+                        &peer_id_str,
+                        p2p::ReplicatorStatus::Active,
+                    )
+                    .await;
                 } else {
+                    let _ = defra_p2p_adapter::set_persisted_replicator_status(
+                        &peerstore,
+                        &peer_id_str,
+                        p2p::ReplicatorStatus::Inactive,
+                    )
+                    .await;
                     retry_info.bump();
                     if let Ok(bytes) = retry_info.to_bytes() {
                         let _ = peerstore.update_retry_info(&peer_id_str, &bytes).await;

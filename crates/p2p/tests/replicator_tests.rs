@@ -111,6 +111,26 @@ fn json_round_trip_preserves_all_fields() {
 }
 
 #[test]
+fn status_update_records_first_transition_only() {
+    let peer_id = PeerId::random();
+    let mut info = ReplicatorInfo::new(peer_id, vec!["users".to_string()]).unwrap();
+    let inactive_at = Utc.with_ymd_and_hms(2026, 4, 26, 10, 0, 0).unwrap();
+    let repeated_at = Utc.with_ymd_and_hms(2026, 4, 26, 10, 5, 0).unwrap();
+    let active_at = Utc.with_ymd_and_hms(2026, 4, 26, 10, 10, 0).unwrap();
+
+    assert!(info.set_status_if_changed(ReplicatorStatus::Inactive, inactive_at));
+    assert_eq!(info.status, ReplicatorStatus::Inactive);
+    assert_eq!(info.last_status_change, inactive_at);
+
+    assert!(!info.set_status_if_changed(ReplicatorStatus::Inactive, repeated_at));
+    assert_eq!(info.last_status_change, inactive_at);
+
+    assert!(info.set_status_if_changed(ReplicatorStatus::Active, active_at));
+    assert_eq!(info.status, ReplicatorStatus::Active);
+    assert_eq!(info.last_status_change, active_at);
+}
+
+#[test]
 fn timestamp_encodes_like_go_rfc3339nano_with_trailing_zeros() {
     // Go's `time.Time.MarshalJSON` uses RFC3339Nano, which strips trailing
     // zeros from the fractional seconds (`.100` → `.1`, `.001` stays `.001`).

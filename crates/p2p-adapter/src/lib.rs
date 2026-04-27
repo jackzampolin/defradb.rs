@@ -6,6 +6,7 @@ mod iroh;
 mod libp2p;
 #[cfg(feature = "libp2p")]
 mod libp2p_doc_pusher;
+mod replicator_status;
 #[cfg(feature = "iroh")]
 mod transport_doc_pusher;
 #[cfg(feature = "iroh")]
@@ -19,6 +20,7 @@ pub use iroh::IrohP2PAdapter;
 pub use libp2p::{CollectionLookup, P2PAdapter, VersionSyncer};
 #[cfg(feature = "libp2p")]
 pub use libp2p_doc_pusher::{DbDocPusher, DocPusher};
+pub use replicator_status::{load_persisted_replicators, set_persisted_replicator_status};
 #[cfg(feature = "iroh")]
 pub use transport_doc_pusher::{DbTransportDocPusher, TransportDocPusher};
 #[cfg(feature = "iroh")]

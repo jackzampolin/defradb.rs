@@ -30,6 +30,14 @@ mod tests {
             TwoStreamHandler::response_protocol().as_ref(),
             "/defradb/rep_resp/0.0.1"
         );
+        assert_eq!(
+            TwoStreamHandler::se_query_request_protocol().as_ref(),
+            "/defradb/se_query_req/0.0.1"
+        );
+        assert_eq!(
+            TwoStreamHandler::se_query_response_protocol().as_ref(),
+            "/defradb/se_query_resp/0.0.1"
+        );
     }
 
     #[test]

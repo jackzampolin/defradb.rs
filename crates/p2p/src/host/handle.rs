@@ -675,6 +675,44 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Send an SE query request to a peer via the SE query two-stream protocol.
+    ///
+    /// The response arrives asynchronously as [`HostEvent::SEQueryReply`].
+    pub async fn send_se_query_request(
+        &self,
+        peer_id: PeerId,
+        request: crate::message::QuerySEArtifactsRequest,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendSEQueryRequest {
+                peer_id,
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Send an SE query response to a peer via the SE query two-stream protocol.
+    pub async fn send_se_query_response(
+        &self,
+        peer_id: PeerId,
+        reply: crate::message::QuerySEArtifactsReply,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendSEQueryResponse {
+                peer_id,
+                reply,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Send a CAR request to a peer (request DAG as CARv1).
     pub async fn send_car_request(&self, peer_id: PeerId, root_cid: Cid) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();

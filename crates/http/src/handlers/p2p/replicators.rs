@@ -23,6 +23,12 @@ pub struct ReplicatorInfoResponse {
     /// Collection IDs being replicated (Go uses CollectionIDs).
     #[serde(rename = "CollectionIDs")]
     pub collection_ids: Vec<String>,
+    /// Active=0, Inactive=1, matching Go's client.ReplicatorStatus.
+    #[serde(rename = "Status")]
+    pub status: u8,
+    /// Last time the status changed, formatted like Go's time.Time JSON.
+    #[serde(rename = "LastStatusChange")]
+    pub last_status_change: String,
 }
 
 /// Request to add a replicator (Go-compatible format).
@@ -55,7 +61,7 @@ pub struct ReplicatorDeleteRequest {
 /// GET /api/v0/p2p/replicators
 ///
 /// Returns array of replicators with Go-compatible PascalCase field names:
-/// `[{"ID": "...", "Addresses": [...], "CollectionIDs": [...]}]`
+/// `[{"ID": "...", "Addresses": [...], "CollectionIDs": [...], "Status": 0, "LastStatusChange": "..."}]`
 ///
 /// Requires `P2pReplicatorList` permission when NAC is enabled.
 pub async fn list_replicators(
@@ -76,6 +82,10 @@ pub async fn list_replicators(
             addresses: r.address.into_iter().collect(),
             // Use collections as collection IDs
             collection_ids: r.collections,
+            status: r.status.unwrap_or(0),
+            last_status_change: r
+                .last_status_change
+                .unwrap_or_else(|| "0001-01-01T00:00:00Z".to_string()),
         })
         .collect();
 
@@ -207,11 +217,15 @@ mod tests {
             id: Some("replicator-123".to_string()),
             addresses: vec!["/ip4/127.0.0.1/tcp/9000".to_string()],
             collection_ids: vec!["Users".to_string(), "Posts".to_string()],
+            status: 0,
+            last_status_change: "0001-01-01T00:00:00Z".to_string(),
         };
         let json = serde_json::to_string(&response).unwrap();
         // Verify PascalCase field names
         assert!(json.contains("\"ID\""));
         assert!(json.contains("\"Addresses\""));
         assert!(json.contains("\"CollectionIDs\""));
+        assert!(json.contains("\"Status\""));
+        assert!(json.contains("\"LastStatusChange\""));
     }
 }

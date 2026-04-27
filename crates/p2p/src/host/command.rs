@@ -220,6 +220,20 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<()>>,
     },
 
+    /// Send an SE query request to a peer via SE query two-stream protocol.
+    SendSEQueryRequest {
+        peer_id: PeerId,
+        request: crate::message::QuerySEArtifactsRequest,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send an SE query response to a peer via SE query two-stream protocol.
+    SendSEQueryResponse {
+        peer_id: PeerId,
+        reply: crate::message::QuerySEArtifactsReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
     /// Send a CAR request to a peer (request DAG as CARv1).
     SendCarRequest {
         peer_id: PeerId,

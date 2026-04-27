@@ -50,7 +50,8 @@ fn test_decrypt_with_wrong_key_fails() {
 
     let (ciphertext, nonce) = encrypt_aes(plaintext, &key1, &[], false).unwrap();
     let result = decrypt_aes(Some(&nonce), &ciphertext, &key2, &[]);
-    assert!(result.is_err());
+    let error = result.expect_err("wrong key should fail");
+    assert_eq!(error.to_string(), "crypto error: decryption failed");
 }
 
 #[test]
