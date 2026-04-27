@@ -129,7 +129,7 @@ pub use iroh_bitswap::Store as BitswapStore;
 pub struct QueryId(pub u64);
 
 // Re-export replicator types
-pub use replicator::ReplicatorInfo;
+pub use replicator::{ReplicatorInfo, ReplicatorStatus};
 
 // Re-export two-stream protocol types
 pub use two_stream::{TwoStreamEvent, TwoStreamHandler, TwoStreamRunner};

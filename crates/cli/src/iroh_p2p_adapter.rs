@@ -32,6 +32,19 @@ pub struct IrohP2PAdapter<B: Blockstore + 'static> {
 }
 
 impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
+    fn to_http_replicator_info(info: p2p::ReplicatorInfo) -> ReplicatorInfo {
+        let address = info.addresses_str().first().map(|s| s.to_string());
+        let status = Some(info.status.into());
+        let last_status_change = Some(info.last_status_change_go_string());
+        ReplicatorInfo {
+            id: Some(info.peer_id_str().to_string()),
+            collections: info.collections,
+            address,
+            status,
+            last_status_change,
+        }
+    }
+
     pub fn with_full_context(
         transport: IrohTransport,
         coordinator: Arc<IrohSyncCoordinator<B>>,
@@ -129,22 +142,26 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
     }
 
     async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
-        let p2p_infos = self
-            .transport
-            .list_replicators()
-            .await
-            .map_err(|e| P2PError::Transport(e.to_string()))?;
+        let p2p_infos = if let Some(ref pusher) = self.doc_pusher {
+            match pusher.load_persisted_replicators().await {
+                Ok(Some(infos)) => infos,
+                Ok(None) => self
+                    .transport
+                    .list_replicators()
+                    .await
+                    .map_err(|e| P2PError::Transport(e.to_string()))?,
+                Err(e) => return Err(P2PError::Internal(e)),
+            }
+        } else {
+            self.transport
+                .list_replicators()
+                .await
+                .map_err(|e| P2PError::Transport(e.to_string()))?
+        };
 
         let http_infos: Vec<ReplicatorInfo> = p2p_infos
             .into_iter()
-            .map(|info| {
-                let address = info.addresses_str().first().map(|s| s.to_string());
-                ReplicatorInfo {
-                    id: Some(info.peer_id_str().to_string()),
-                    collections: info.collections,
-                    address,
-                }
-            })
+            .map(Self::to_http_replicator_info)
             .collect();
 
         Ok(http_infos)

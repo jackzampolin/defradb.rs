@@ -4,8 +4,10 @@
 /// backoff intervals matching Go DefraDB's replicator retry behavior.
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Exponential backoff intervals in seconds: 30s, 1m, 2m, 4m, 8m, 16m, 32m.
-pub const RETRY_INTERVALS_SECS: &[u64] = &[30, 60, 120, 240, 480, 960, 1920];
+/// Exponential backoff intervals in seconds, matching Go's seconds-to-hours retry ladder.
+pub const RETRY_INTERVALS_SECS: &[u64] = &[
+    30, 60, 120, 240, 480, 960, 1920, 3600, 7200, 14400, 28800, 43200,
+];
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RetryInfo {
@@ -71,6 +73,14 @@ mod tests {
         info.bump();
         assert_eq!(info.num_retries, 1);
         assert!(!info.is_due());
+    }
+
+    #[test]
+    fn test_retry_intervals_reach_hours_scale_cap() {
+        assert_eq!(
+            RETRY_INTERVALS_SECS,
+            &[30, 60, 120, 240, 480, 960, 1920, 3600, 7200, 14400, 28800, 43200]
+        );
     }
 
     #[test]

@@ -38,12 +38,25 @@ pub struct P2pReplicatorInfo {
     pub id: Option<String>,
 
     /// Collections being replicated
-    #[serde(rename = "collections", alias = "Collections", default)]
+    #[serde(
+        rename = "collections",
+        alias = "Collections",
+        alias = "CollectionIDs",
+        default
+    )]
     pub collections: Vec<String>,
 
     /// Peer address
     #[serde(rename = "address", alias = "Address", default)]
     pub address: Option<String>,
+
+    /// Active=0, Inactive=1.
+    #[serde(rename = "status", alias = "Status", default)]
+    pub status: Option<u8>,
+
+    /// Last time the replicator status changed.
+    #[serde(rename = "lastStatusChange", alias = "LastStatusChange", default)]
+    pub last_status_change: Option<String>,
 }
 
 /// P2P replicator request (Go-compatible format).
@@ -182,5 +195,24 @@ impl HttpClient {
             "collectionID": collection_id,
         }))?;
         self.request_void("POST", &url, Some(&body)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replicator_info_accepts_go_status_fields() {
+        let json = r#"{"ID":"peer-1","Addresses":["/ip4/127.0.0.1/tcp/9000"],"CollectionIDs":["Users"],"Status":1,"LastStatusChange":"2026-04-26T10:00:00Z"}"#;
+        let info: P2pReplicatorInfo = serde_json::from_str(json).unwrap();
+
+        assert_eq!(info.id.as_deref(), Some("peer-1"));
+        assert_eq!(info.collections, vec!["Users"]);
+        assert_eq!(info.status, Some(1));
+        assert_eq!(
+            info.last_status_change.as_deref(),
+            Some("2026-04-26T10:00:00Z")
+        );
     }
 }
