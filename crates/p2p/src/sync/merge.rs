@@ -31,6 +31,43 @@ pub struct MergeBlock {
     pub verified_creator: Option<String>,
 }
 
+/// Metadata recovered from block contents during startup crash recovery.
+///
+/// Normal replication carries this metadata in the push message. Recovery only
+/// has a CID and raw block bytes, so handlers must reconstruct these fields
+/// from durable block contents before the block is merged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredBlockMetadata {
+    pub doc_id: String,
+    pub collection_id: String,
+    pub creator: String,
+    pub verified_creator: Option<String>,
+}
+
+impl RecoveredBlockMetadata {
+    pub fn new(
+        doc_id: impl Into<String>,
+        collection_id: impl Into<String>,
+        creator: impl Into<String>,
+    ) -> Self {
+        Self {
+            doc_id: doc_id.into(),
+            collection_id: collection_id.into(),
+            creator: creator.into(),
+            verified_creator: None,
+        }
+    }
+
+    pub fn with_verified_creator(mut self, verified_creator: Option<String>) -> Self {
+        self.verified_creator = verified_creator;
+        self
+    }
+
+    pub fn is_complete(&self) -> bool {
+        !self.doc_id.is_empty() && !self.collection_id.is_empty() && !self.creator.is_empty()
+    }
+}
+
 /// Outcome of a merge operation.
 ///
 /// Used by `MergeHandler::handle_block` to communicate the result.
@@ -176,6 +213,29 @@ impl<'a> BlockMetadata<'a> {
         }
     }
 
+    /// Create crash-recovery metadata after a handler has extracted it.
+    ///
+    /// The `is_recovery` flag remains true so merge implementations can keep
+    /// recovery-specific behavior while still receiving complete identifiers.
+    pub fn recovered(
+        doc_id: &'a str,
+        collection_id: &'a str,
+        creator: &'a str,
+        verified_creator: Option<String>,
+    ) -> Self {
+        Self {
+            doc_id: Some(doc_id),
+            collection_id: Some(collection_id),
+            creator: Some(creator),
+            sender_peer: None,
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+            verified_creator,
+            is_recovery: true,
+            is_schema_block: false,
+        }
+    }
+
     pub fn with_explicit_replay_authorization(
         mut self,
         authorization: Option<ExplicitReplayAuthorization>,
@@ -264,6 +324,32 @@ pub trait MergeHandler: Send + Sync {
         metadata: BlockMetadata<'_>,
     ) -> Result<MergeOutcome, Self::Error>;
 
+    /// Validate explicit replay authorization before merge work starts.
+    ///
+    /// Implementations that honor `ExplicitReplayAuthorization` should reject
+    /// authorizations that do not apply to this block's collection or creator.
+    /// The replication loop invokes this for both single-block and batch paths
+    /// before dispatching the block to merge code.
+    async fn validate_authorization(
+        &self,
+        _authorization: Option<&ExplicitReplayAuthorization>,
+        _block: &MergeBlock,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Recover complete metadata for a crash-recovery block.
+    ///
+    /// Returning `None` means the handler could not recover all required
+    /// fields, and the replication recovery path will refuse to merge the block.
+    async fn recover_block_metadata(
+        &self,
+        _cid: &Cid,
+        _block_data: &[u8],
+    ) -> Result<Option<RecoveredBlockMetadata>, Self::Error> {
+        Ok(None)
+    }
+
     /// Process a batch of blocks. Default impl calls handle_block() per block.
     ///
     /// Implementations can override this to process all blocks within a single
@@ -274,6 +360,14 @@ pub trait MergeHandler: Send + Sync {
     ) -> Vec<Result<MergeOutcome, Self::Error>> {
         let mut results = Vec::with_capacity(blocks.len());
         for block in blocks {
+            if let Err(error) = self
+                .validate_authorization(block.explicit_replay_authorization.as_ref(), block)
+                .await
+            {
+                results.push(Err(error));
+                continue;
+            }
+
             let metadata = BlockMetadata::normal(
                 &block.doc_id,
                 &block.collection_id,
@@ -335,6 +429,14 @@ mod tests {
         let mut meta = BlockMetadata::recovery();
         meta.verified_creator = Some("did:key:VERIFIED".to_string());
         assert_eq!(meta.effective_creator(), Some("did:key:VERIFIED"));
+    }
+
+    #[test]
+    fn recovered_metadata_is_complete_only_when_all_required_fields_exist() {
+        assert!(RecoveredBlockMetadata::new("doc1", "col1", "did:key:creator").is_complete());
+        assert!(!RecoveredBlockMetadata::new("", "col1", "did:key:creator").is_complete());
+        assert!(!RecoveredBlockMetadata::new("doc1", "", "did:key:creator").is_complete());
+        assert!(!RecoveredBlockMetadata::new("doc1", "col1", "").is_complete());
     }
 
     #[test]
