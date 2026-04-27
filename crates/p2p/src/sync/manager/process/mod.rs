@@ -140,6 +140,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))
     }
 
+    /// Get the process queue used to serialize work for the same CID.
+    pub(crate) fn process_queue(&self) -> ProcessQueue {
+        self.process_queue.clone()
+    }
+
     /// Get all unmerged block CIDs.
     pub async fn get_unmerged(&self) -> crate::error::Result<Vec<Cid>> {
         self.blockstore
