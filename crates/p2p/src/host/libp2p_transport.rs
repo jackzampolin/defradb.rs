@@ -12,7 +12,8 @@ use crate::error::{Error, Result};
 use crate::host::{P2PHostHandle, ResponseChannel};
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
-    PushLogReply, PushLogRequest, PushSEArtifactsRequest,
+    PushLogReply, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
+    QuerySEArtifactsRequest,
 };
 use crate::replicator::ReplicatorInfo;
 use crate::topics::DefraTopic;
@@ -243,6 +244,24 @@ impl P2PTransport for Libp2pTransport {
         self.handle.send_se_artifacts(pid, req).await
     }
 
+    async fn send_se_query_request(
+        &self,
+        peer_id: &PeerId,
+        req: QuerySEArtifactsRequest,
+    ) -> Result<()> {
+        let pid = parse_libp2p_peer_id(peer_id)?;
+        self.handle.send_se_query_request(pid, req).await
+    }
+
+    async fn send_se_query_response(
+        &self,
+        peer_id: &PeerId,
+        reply: QuerySEArtifactsReply,
+    ) -> Result<()> {
+        let pid = parse_libp2p_peer_id(peer_id)?;
+        self.handle.send_se_query_response(pid, reply).await
+    }
+
     async fn sync_blocks(
         &self,
         root: Cid,
@@ -418,6 +437,14 @@ pub fn convert_host_event(event: crate::host::HostEvent) -> TransportEvent<Respo
         HostEvent::SEArtifactsReceived { peer_id, data } => TransportEvent::SEArtifactsReceived {
             peer_id: PeerId::from(peer_id),
             data,
+        },
+        HostEvent::SEQueryRequest { peer_id, request } => TransportEvent::SEQueryRequest {
+            peer_id: PeerId::from(peer_id),
+            request,
+        },
+        HostEvent::SEQueryReply { peer_id, reply } => TransportEvent::SEQueryReply {
+            peer_id: PeerId::from(peer_id),
+            reply,
         },
     }
 }

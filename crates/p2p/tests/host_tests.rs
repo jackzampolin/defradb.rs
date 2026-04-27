@@ -6,7 +6,11 @@ use identity::{Identity, RawIdentity};
 use std::time::Duration;
 
 use p2p::testutil::MockBitswapStore;
-use p2p::{message::PushLogReply, signing::sign_message, P2PHost, PeerId, PushLogRequest};
+use p2p::{
+    message::{PushLogReply, QuerySEArtifactsReply, QuerySEArtifactsRequest, SEFieldQuery},
+    signing::sign_message,
+    P2PHost, PeerId, PushLogRequest,
+};
 use tokio::time::timeout;
 
 fn authorizer_identity() -> RawIdentity {
@@ -201,6 +205,90 @@ async fn test_identity_protocol_roundtrip_returns_defra_identity() {
         peer_identity.to_string(),
         node_identity1.did().unwrap().to_string()
     );
+
+    handle0.shutdown().await.unwrap();
+    handle1.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_se_query_protocol_roundtrip() {
+    let store0 = MockBitswapStore::new();
+    let store1 = MockBitswapStore::new();
+    let (host0, handle0, mut events0, _replicators0) = P2PHost::new(store0).await.unwrap();
+    let (host1, handle1, mut events1, _replicators1) = P2PHost::new(store1).await.unwrap();
+
+    tokio::spawn(host0.run());
+    tokio::spawn(host1.run());
+
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr1 = handle1.listen_addresses().await.unwrap().remove(0);
+    let peer1 = handle1.local_peer_id_cached();
+    let peer0 = handle0.local_peer_id_cached();
+
+    handle0.dial(peer1, vec![addr1]).await.unwrap();
+    wait_until_connected(&handle0, peer1).await;
+    wait_until_connected(&handle1, peer0).await;
+
+    let mut request = QuerySEArtifactsRequest::new(
+        "collection1",
+        vec![SEFieldQuery::new("name", "name", vec![1, 2, 3])],
+    );
+    sign_message(handle0.keypair(), &mut request).unwrap();
+    let request_message_id = request.message_id.clone();
+
+    handle0
+        .send_se_query_request(peer1, request.clone())
+        .await
+        .unwrap();
+
+    let received_request = loop {
+        let event = timeout(Duration::from_secs(5), events1.recv())
+            .await
+            .expect("timed out waiting for SE query request")
+            .expect("host event channel closed");
+
+        match event {
+            p2p::HostEvent::SEQueryRequest { peer_id, request } => {
+                assert_eq!(peer_id, peer0);
+                break request;
+            }
+            _ => continue,
+        }
+    };
+    assert_eq!(received_request.message_id, request_message_id);
+    assert_eq!(received_request.sender_id, peer0.to_string());
+    assert_eq!(received_request.collection_id, "collection1");
+    assert_eq!(received_request.queries.len(), 1);
+    assert_eq!(received_request.queries[0].search_tag, vec![1, 2, 3]);
+
+    let mut reply =
+        QuerySEArtifactsReply::success(&request_message_id, vec!["doc1".into(), "doc2".into()]);
+    sign_message(handle1.keypair(), &mut reply).unwrap();
+    handle1
+        .send_se_query_response(peer0, reply.clone())
+        .await
+        .unwrap();
+
+    loop {
+        let event = timeout(Duration::from_secs(5), events0.recv())
+            .await
+            .expect("timed out waiting for SE query reply")
+            .expect("host event channel closed");
+
+        match event {
+            p2p::HostEvent::SEQueryReply { peer_id, reply } => {
+                assert_eq!(peer_id, peer1);
+                assert_eq!(reply.message_id, request_message_id);
+                assert_eq!(reply.sender_id, peer1.to_string());
+                assert_eq!(reply.doc_ids, vec!["doc1".to_string(), "doc2".to_string()]);
+                break;
+            }
+            _ => continue,
+        }
+    }
 
     handle0.shutdown().await.unwrap();
     handle1.shutdown().await.unwrap();

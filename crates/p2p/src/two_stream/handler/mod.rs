@@ -13,6 +13,7 @@ mod doc_sync;
 mod identity;
 mod inbound;
 mod pushlog;
+mod se_query;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,12 +27,26 @@ use tokio::sync::oneshot;
 use crate::message::{IdentityResponse, PushLogReply, PushLogRequest};
 use crate::protocol::{
     CAR_REQUEST_PROTOCOL, CAR_RESPONSE_PROTOCOL, IDENTITY_REQUEST_PROTOCOL,
-    IDENTITY_RESPONSE_PROTOCOL, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL, SE_REQUEST_PROTOCOL,
+    IDENTITY_RESPONSE_PROTOCOL, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
+    SE_QUERY_REQUEST_PROTOCOL, SE_QUERY_RESPONSE_PROTOCOL, SE_REQUEST_PROTOCOL,
     SE_RESPONSE_PROTOCOL,
 };
+use crate::{error::Error, message::Message, Result};
 
 /// Timeout for waiting for a response.
 pub(super) const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(super) fn ensure_transport_sender<M: Message>(peer_id: &libp2p::PeerId, msg: &M) -> Result<()> {
+    if msg.sender_id() == peer_id.to_string() {
+        Ok(())
+    } else {
+        Err(Error::Transport(format!(
+            "transport peer {} did not match signed sender {}",
+            peer_id,
+            msg.sender_id()
+        )))
+    }
+}
 
 /// State for tracking pending responses.
 #[derive(Default)]
@@ -87,6 +102,16 @@ impl TwoStreamHandler {
     /// Get the SE response protocol.
     pub fn se_response_protocol() -> StreamProtocol {
         StreamProtocol::new(SE_RESPONSE_PROTOCOL)
+    }
+
+    /// Get the SE query request protocol.
+    pub fn se_query_request_protocol() -> StreamProtocol {
+        StreamProtocol::new(SE_QUERY_REQUEST_PROTOCOL)
+    }
+
+    /// Get the SE query response protocol.
+    pub fn se_query_response_protocol() -> StreamProtocol {
+        StreamProtocol::new(SE_QUERY_RESPONSE_PROTOCOL)
     }
 
     /// Get the CAR request protocol.

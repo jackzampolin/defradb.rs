@@ -342,6 +342,14 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
         let se_response_streams = control
             .accept(TwoStreamHandler::se_response_protocol())
             .map_err(|_| Error::Behaviour("Failed to register SE response protocol".into()))?;
+        let se_query_request_streams = control
+            .accept(TwoStreamHandler::se_query_request_protocol())
+            .map_err(|_| Error::Behaviour("Failed to register SE query request protocol".into()))?;
+        let se_query_response_streams = control
+            .accept(TwoStreamHandler::se_query_response_protocol())
+            .map_err(|_| {
+                Error::Behaviour("Failed to register SE query response protocol".into())
+            })?;
         let car_request_streams = control
             .accept(TwoStreamHandler::car_request_protocol())
             .map_err(|_| Error::Behaviour("Failed to register CAR request protocol".into()))?;
@@ -369,6 +377,8 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
             response_streams,
             se_request_streams,
             se_response_streams,
+            se_query_request_streams,
+            se_query_response_streams,
             car_request_streams,
             car_response_streams,
             identity_request_streams,

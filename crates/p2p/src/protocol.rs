@@ -49,6 +49,14 @@ pub const SE_REQUEST_PROTOCOL: &str = "/defradb/rep_se_req/0.0.1";
 /// Go uses "rep_se" as the channel name: `/defradb/rep_se_resp/0.0.1`
 pub const SE_RESPONSE_PROTOCOL: &str = "/defradb/rep_se_resp/0.0.1";
 
+/// SE query request protocol ID.
+/// Go uses "se_query" as the channel name: `/defradb/se_query_req/0.0.1`
+pub const SE_QUERY_REQUEST_PROTOCOL: &str = "/defradb/se_query_req/0.0.1";
+
+/// SE query response protocol ID.
+/// Go uses "se_query" as the channel name: `/defradb/se_query_resp/0.0.1`
+pub const SE_QUERY_RESPONSE_PROTOCOL: &str = "/defradb/se_query_resp/0.0.1";
+
 /// CAR (Content ARchive) request protocol ID.
 pub const CAR_REQUEST_PROTOCOL: &str = "/defradb/car_req/0.0.1";
 
@@ -69,6 +77,16 @@ pub fn se_request_protocol() -> StreamProtocol {
 /// StreamProtocol for the SE response protocol.
 pub fn se_response_protocol() -> StreamProtocol {
     StreamProtocol::new(SE_RESPONSE_PROTOCOL)
+}
+
+/// StreamProtocol for the SE query request protocol.
+pub fn se_query_request_protocol() -> StreamProtocol {
+    StreamProtocol::new(SE_QUERY_REQUEST_PROTOCOL)
+}
+
+/// StreamProtocol for the SE query response protocol.
+pub fn se_query_response_protocol() -> StreamProtocol {
+    StreamProtocol::new(SE_QUERY_RESPONSE_PROTOCOL)
 }
 
 /// StreamProtocol for the CAR request protocol.
@@ -136,6 +154,18 @@ mod tests {
     fn test_rep_protocols() {
         assert_eq!(rep_request_protocol().as_ref(), "/defradb/rep_req/0.0.1");
         assert_eq!(rep_response_protocol().as_ref(), "/defradb/rep_resp/0.0.1");
+    }
+
+    #[test]
+    fn test_se_query_protocols() {
+        assert_eq!(
+            se_query_request_protocol().as_ref(),
+            "/defradb/se_query_req/0.0.1"
+        );
+        assert_eq!(
+            se_query_response_protocol().as_ref(),
+            "/defradb/se_query_resp/0.0.1"
+        );
     }
 
     #[test]

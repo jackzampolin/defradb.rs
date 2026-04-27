@@ -135,4 +135,16 @@ pub enum HostEvent {
         /// Raw CBOR bytes of the PushSEArtifactsRequest for the db layer to process.
         data: Vec<u8>,
     },
+
+    /// Received an SE query request from a peer.
+    SEQueryRequest {
+        peer_id: PeerId,
+        request: crate::message::QuerySEArtifactsRequest,
+    },
+
+    /// Received an SE query reply from a peer.
+    SEQueryReply {
+        peer_id: PeerId,
+        reply: crate::message::QuerySEArtifactsReply,
+    },
 }

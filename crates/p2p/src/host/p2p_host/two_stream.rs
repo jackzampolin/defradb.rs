@@ -276,6 +276,39 @@ impl<S: Store> P2PHost<S> {
                     }
                 }
             }
+            TwoStreamEvent::SEQueryRequest { peer_id, request } => {
+                info!(
+                    peer_id = %peer_id,
+                    message_id = %request.message_id,
+                    collection_id = %request.collection_id,
+                    query_count = request.queries.len(),
+                    "Host received SE query request via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::SEQueryRequest { peer_id, request })
+                    .await
+                    .is_err()
+                {
+                    error!(peer_id = %peer_id, "Failed to send SEQueryRequest event");
+                }
+            }
+            TwoStreamEvent::SEQueryReply { peer_id, reply } => {
+                debug!(
+                    peer_id = %peer_id,
+                    message_id = %reply.message_id,
+                    doc_count = reply.doc_ids.len(),
+                    "Host received SE query reply via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::SEQueryReply { peer_id, reply })
+                    .await
+                    .is_err()
+                {
+                    error!(peer_id = %peer_id, "Failed to send SEQueryReply event");
+                }
+            }
             TwoStreamEvent::DecodeError { peer_id, error } => {
                 warn!(
                     peer_id = %peer_id,
