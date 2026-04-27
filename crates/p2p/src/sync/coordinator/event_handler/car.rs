@@ -3,9 +3,11 @@
 use blockstore::{verify_block_cid, Blockstore};
 use cid::Cid;
 
-use crate::error::Result;
+use super::super::authorizer::AccessAuthorizer;
+use crate::error::{Error, Result};
 use crate::message::CarFetchRequest;
 use crate::sync::car::{collect_dag_blocks, collect_exact_blocks, decode_car, encode_car};
+use crate::sync::coordinator::dag_context::block_context_from_data;
 use crate::sync::coordinator::SyncCoordinator;
 use crate::transport::{P2PTransport, PeerId};
 
@@ -14,6 +16,67 @@ fn sample_cids(cids: &[Cid]) -> Vec<String> {
 }
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
+    async fn check_car_fetch_access(
+        &self,
+        peer_id: &PeerId,
+        request: &CarFetchRequest,
+    ) -> Result<()> {
+        if self.access.access_mode.is_open() {
+            return Ok(());
+        }
+
+        let mut checked_collection = false;
+        for cid in request.response_roots() {
+            let block_data = match self.manager.blockstore().get(&cid).await {
+                Ok(Some(data)) => data,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::debug!(
+                        cid = %cid,
+                        peer_id = %peer_id,
+                        error = %error,
+                        "CAR handler: failed to read requested block for collection access check"
+                    );
+                    continue;
+                }
+            };
+
+            let Some(collection_id) = block_context_from_data(&block_data).collection_id else {
+                continue;
+            };
+
+            checked_collection = true;
+            let is_collection_replicator = self
+                .authorizer
+                .peer_authorized_for_collection(peer_id.as_str(), &collection_id)
+                .await;
+            let is_collection_subscriber = self
+                .access
+                .peer_state
+                .peer_subscribed_to_collection(peer_id.as_str(), &collection_id);
+
+            if !is_collection_replicator && !is_collection_subscriber {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    collection_id = %collection_id,
+                    is_collection_replicator,
+                    is_collection_subscriber,
+                    "Access denied: peer cannot fetch CAR blocks for this collection"
+                );
+                return Err(Error::AccessDenied {
+                    peer_id: peer_id.to_string(),
+                    collection_id,
+                });
+            }
+        }
+
+        if checked_collection {
+            Ok(())
+        } else {
+            self.check_peer_is_replicator(peer_id).await
+        }
+    }
+
     /// Handle an inbound CAR fetch request: collect the DAG and send CARv1 response.
     pub(crate) async fn handle_car_fetch_request(
         &self,
@@ -34,7 +97,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
         };
 
-        if let Err(error) = self.check_peer_is_replicator(&peer_id).await {
+        if let Err(error) = self.check_car_fetch_access(&peer_id, &request).await {
             tracing::warn!(
                 root_cid = %request.root_cid,
                 peer_id = %peer_id,

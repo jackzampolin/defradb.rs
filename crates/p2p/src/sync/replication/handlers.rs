@@ -7,6 +7,7 @@ use acp::ReplicatedDocActorRelationships;
 
 use super::config::ReplicationConfig;
 use super::result::ReplicationResult;
+use crate::sync::coordinator::dag_context::DagFetchContext;
 use crate::sync::coordinator::SyncCoordinator;
 use crate::sync::manager::SyncEvent;
 use crate::sync::merge::{
@@ -22,6 +23,9 @@ pub(super) struct DagFetchRequest {
     collection_id: String,
     creator: String,
     sender_peer: Option<String>,
+    is_explicit_replicator: bool,
+    explicit_replay_authorization: Option<crate::ExplicitReplayAuthorization>,
+    acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
 }
 
 struct MergeEventMetadata {
@@ -102,6 +106,9 @@ where
         collection_id,
         creator,
         sender_peer,
+        is_explicit_replicator,
+        explicit_replay_authorization,
+        acp_actor_relationships,
     } = request;
 
     tracing::debug!(
@@ -122,17 +129,14 @@ where
         let blockstore = coordinator.blockstore().clone();
         let event_tx = coordinator.manager().event_sender();
         let source_peer = crate::transport::PeerId::new(source_peer);
+        let context = DagFetchContext::new(doc_id, collection_id, creator, source_peer)
+            .with_explicit_replicator(is_explicit_replicator)
+            .with_explicit_replay_authorization(explicit_replay_authorization)
+            .with_acp_actor_relationships(acp_actor_relationships);
 
         coordinator.spawn_background_task("pushlog_fetch_dag", async move {
             crate::sync::coordinator::dag_fetcher::poll_fetch_dag(
-                transport,
-                blockstore,
-                event_tx,
-                root_cid,
-                doc_id,
-                collection_id,
-                creator,
-                source_peer,
+                transport, blockstore, event_tx, root_cid, context,
             )
             .await;
         });
@@ -698,7 +702,9 @@ where
             collection_id,
             creator,
             sender_peer,
-            ..
+            is_explicit_replicator,
+            explicit_replay_authorization,
+            acp_actor_relationships,
         } => {
             handle_dag_needs_fetch(
                 coordinator,
@@ -710,6 +716,9 @@ where
                     collection_id,
                     creator,
                     sender_peer,
+                    is_explicit_replicator,
+                    explicit_replay_authorization,
+                    acp_actor_relationships,
                 },
             )
             .await

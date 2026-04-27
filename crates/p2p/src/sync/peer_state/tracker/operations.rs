@@ -156,6 +156,15 @@ impl PeerStateTracker {
             .unwrap_or(false)
     }
 
+    /// Check if a peer has advertised interest in a specific data collection.
+    pub fn peer_subscribed_to_collection(&self, peer_id: &str, collection_id: &str) -> bool {
+        let peers = self.peers.read();
+        peers
+            .get(peer_id)
+            .map(|info| info.subscribed_collections.contains(collection_id))
+            .unwrap_or(false)
+    }
+
     /// Get all connected peers.
     pub fn connected_peers(&self) -> Vec<String> {
         let peers = self.peers.read();
