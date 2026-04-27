@@ -29,6 +29,9 @@ pub const ALPN_SE: &[u8] = b"/defra-iroh/se/0.1";
 /// ALPN for two-stream push protocol.
 pub const ALPN_TWOSTREAM: &[u8] = b"/defra-iroh/twostream/0.1";
 
+/// ALPN for two-stream push replies.
+pub const ALPN_TWOSTREAM_RESP: &[u8] = b"/defra-iroh/twostream/0.1/resp";
+
 /// All ALPNs this node should accept.
 pub const ALL_ALPNS: &[&[u8]] = &[
     ALPN_PUSHLOG,
@@ -40,6 +43,7 @@ pub const ALL_ALPNS: &[&[u8]] = &[
     ALPN_CAR_RESP,
     ALPN_SE,
     ALPN_TWOSTREAM,
+    ALPN_TWOSTREAM_RESP,
 ];
 
 /// Maximum size for general messages (matches libp2p default).
