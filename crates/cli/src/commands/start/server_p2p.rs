@@ -226,7 +226,7 @@ impl Node {
                     } => {
                         info!(
                             peer_id = %peer_id,
-                            message_id = %request.metadata.message_id,
+                            message_id = %request.message_id,
                             doc_id = %request.doc_id,
                             "Processing TwoStreamRequest through coordinator"
                         );

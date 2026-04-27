@@ -36,7 +36,7 @@ use defra_core::block::{
 use defra_core::types::DocId;
 use document::{DocID, Document, NormalValue};
 use events::{MergeCompleteData, Message, Update};
-use p2p::sync::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
+use p2p::sync::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome, RecoveredBlockMetadata};
 use schema::{
     self, CType, CollectionSource, CollectionVersion, FieldDescription, FieldKind, QuerySource,
     ScalarKind,
@@ -134,6 +134,81 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     /// Get reference to blockstore.
     pub fn blockstore(&self) -> &Arc<B> {
         &self.blockstore
+    }
+
+    pub(crate) async fn validate_explicit_replay_authorization(
+        &self,
+        authorization: Option<&p2p::ExplicitReplayAuthorization>,
+        block: &MergeBlock,
+    ) -> Result<(), MergeError> {
+        let Some(authorization) = authorization else {
+            return Ok(());
+        };
+
+        if authorization.collection_id != block.collection_id {
+            return Err(MergeError::MergeFailed(format!(
+                "explicit replay authorization collection '{}' does not match block collection '{}'",
+                authorization.collection_id, block.collection_id
+            )));
+        }
+
+        let decoded_block = Block::from_dag_cbor(&block.block_data)
+            .map_err(|error| MergeError::BlockDecode(error.to_string()))?;
+        let verified_creator = self
+            .verify_block_signature(&block.cid, &decoded_block, &block.block_data)
+            .await?;
+        let effective_creator = verified_creator
+            .as_deref()
+            .unwrap_or(block.creator.as_str());
+
+        if effective_creator != authorization.authorizer_did {
+            return Err(MergeError::MergeFailed(format!(
+                "explicit replay authorization authorizer '{}' does not match block creator '{}'",
+                authorization.authorizer_did, effective_creator
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn recover_metadata_from_block(
+        &self,
+        cid: &Cid,
+        block_data: &[u8],
+    ) -> Result<Option<RecoveredBlockMetadata>, MergeError> {
+        let block =
+            Block::from_dag_cbor(block_data).map_err(|e| MergeError::BlockDecode(e.to_string()))?;
+
+        let Some((doc_id, collection_id)) = Self::doc_metadata_from_block(&block) else {
+            return Ok(None);
+        };
+
+        let Some(creator) = self.verify_block_signature(cid, &block, block_data).await? else {
+            return Ok(None);
+        };
+
+        Ok(Some(
+            RecoveredBlockMetadata::new(doc_id, collection_id, creator.clone())
+                .with_verified_creator(Some(creator)),
+        ))
+    }
+
+    fn doc_metadata_from_block(block: &Block) -> Option<(String, String)> {
+        match &block.delta {
+            CrdtDelta::Lww(payload) => Some((
+                String::from_utf8_lossy(&payload.doc_id).to_string(),
+                payload.schema_version_id.clone(),
+            )),
+            CrdtDelta::Counter(payload) => Some((
+                String::from_utf8_lossy(&payload.doc_id).to_string(),
+                payload.schema_version_id.clone(),
+            )),
+            CrdtDelta::Composite(payload) => Some((
+                String::from_utf8_lossy(&payload.doc_id).to_string(),
+                payload.schema_version_id.clone(),
+            )),
+            _ => None,
+        }
     }
 
     /// Decrypt block delta data using the encryption metadata block.
@@ -339,6 +414,23 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
     for DbMergeHandler<S, B>
 {
     type Error = MergeError;
+
+    async fn validate_authorization(
+        &self,
+        authorization: Option<&p2p::ExplicitReplayAuthorization>,
+        block: &MergeBlock,
+    ) -> Result<(), Self::Error> {
+        self.validate_explicit_replay_authorization(authorization, block)
+            .await
+    }
+
+    async fn recover_block_metadata(
+        &self,
+        cid: &Cid,
+        block_data: &[u8],
+    ) -> Result<Option<RecoveredBlockMetadata>, Self::Error> {
+        self.recover_metadata_from_block(cid, block_data).await
+    }
 
     async fn handle_block(
         &self,
@@ -726,6 +818,98 @@ mod tests {
             verified_identity.unwrap().starts_with("did:key:"),
             "verified identity should be a DID"
         );
+    }
+
+    #[tokio::test]
+    async fn recover_block_metadata_extracts_signed_lww_metadata() {
+        let (handler, blockstore) = make_handler();
+
+        let mut block = make_lww_block(None);
+        let (_priv_key, _pub_hex, did) = sign_block_ed25519(&mut block, &blockstore).await;
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+
+        let metadata = handler
+            .recover_block_metadata(&cid, &block_data)
+            .await
+            .unwrap()
+            .expect("signed document block should recover metadata");
+
+        assert_eq!(metadata.doc_id, "doc1");
+        assert_eq!(metadata.collection_id, "v1");
+        assert_eq!(metadata.creator, did);
+        assert_eq!(metadata.verified_creator.as_deref(), Some(did.as_str()));
+    }
+
+    #[tokio::test]
+    async fn recover_block_metadata_refuses_unsigned_blocks() {
+        let (handler, _blockstore) = make_handler();
+
+        let block = make_lww_block(None);
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+
+        let metadata = handler
+            .recover_block_metadata(&cid, &block_data)
+            .await
+            .unwrap();
+
+        assert!(
+            metadata.is_none(),
+            "recovery metadata must include a verifiable creator"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_explicit_replay_authorization_checks_collection_and_creator() {
+        let (handler, blockstore) = make_handler();
+
+        let mut block = make_lww_block(None);
+        let (_priv_key, _pub_hex, did) = sign_block_ed25519(&mut block, &blockstore).await;
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+        let mut merge_block = MergeBlock {
+            cid,
+            block_data: bytes::Bytes::from(block_data),
+            doc_id: "doc1".to_string(),
+            collection_id: "v1".to_string(),
+            creator: did.clone(),
+            sender_peer: Some("source-peer".to_string()),
+            is_explicit_replicator: true,
+            explicit_replay_authorization: None,
+            verified_creator: None,
+        };
+        let valid_authorization = p2p::ExplicitReplayAuthorization {
+            source_peer_id: "source-peer".to_string(),
+            target_peer_id: "target-peer".to_string(),
+            collection_id: "v1".to_string(),
+            authorizer_did: did.clone(),
+            expires_at: u64::MAX,
+        };
+
+        handler
+            .validate_authorization(Some(&valid_authorization), &merge_block)
+            .await
+            .expect("matching explicit replay authorization should validate");
+
+        let wrong_creator = p2p::ExplicitReplayAuthorization {
+            authorizer_did: "did:key:z6MkWrongCreator".to_string(),
+            ..valid_authorization.clone()
+        };
+        let error = handler
+            .validate_authorization(Some(&wrong_creator), &merge_block)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("does not match block creator"));
+
+        merge_block.collection_id = "other-collection".to_string();
+        let error = handler
+            .validate_authorization(Some(&valid_authorization), &merge_block)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not match block collection"));
     }
 
     #[tokio::test]
