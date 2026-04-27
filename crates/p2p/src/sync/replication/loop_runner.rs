@@ -278,13 +278,15 @@ impl ReplicationLoop {
         };
 
         // Drain more events non-blocking
+        let max_batch_size = config.batch_size.max(1);
         let mut batch = vec![first];
-        while batch.len() < config.batch_size {
+        while batch.len() < max_batch_size {
             match events.try_recv() {
                 Ok(e) => batch.push(e),
                 Err(_) => break,
             }
         }
+        debug_assert!(batch.len() <= max_batch_size);
 
         // Separate merge-worthy events from immediate-action events
         let mut immediate = Vec::new();
