@@ -19,6 +19,8 @@ use crate::error::{
 };
 use crate::types::{AES_KEY_SIZE, HMAC_KEY_SIZE, HMAC_SIZE, X25519_PUBLIC_KEY_SIZE};
 
+const MIN_CIPHER_TEXT_SIZE: usize = 16;
+
 /// Options for ECIES encryption/decryption
 #[derive(Default)]
 pub struct EciesOptions {
@@ -222,6 +224,13 @@ pub fn decrypt_ecies(
         )));
     }
     let (encrypted_data, received_mac) = remaining.split_at(remaining.len() - HMAC_SIZE);
+    if encrypted_data.len() < MIN_CIPHER_TEXT_SIZE {
+        return Err(crypto_error(format!(
+            "ciphertext too short: encrypted payload is {} bytes, expected at least {} bytes",
+            encrypted_data.len(),
+            MIN_CIPHER_TEXT_SIZE
+        )));
+    }
 
     // 3. ECDH: compute shared secret
     let shared_secret = private_key.diffie_hellman(&ephemeral_public);

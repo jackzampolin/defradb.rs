@@ -146,6 +146,20 @@ fn test_private_key_from_string_invalid_hex() {
 }
 
 #[test]
+fn test_private_key_from_string_invalid_hex_does_not_echo_input() {
+    let secret_like_input = "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdzz";
+    let error = match private_key_from_string(KeyType::Secp256k1, secret_like_input) {
+        Ok(_) => panic!("invalid hex should fail"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+
+    assert!(!message.contains(secret_like_input));
+    assert!(!message.contains("abcdabcd"));
+    assert_eq!(message, "crypto error: invalid private key hex format");
+}
+
+#[test]
 fn test_public_key_from_string_invalid_hex() {
     // Invalid hex characters
     let result = public_key_from_string(KeyType::Ed25519, "gggggggg");
