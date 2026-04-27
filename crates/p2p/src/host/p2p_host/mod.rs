@@ -17,7 +17,10 @@ use libp2p::{
     identity::Keypair, noise, request_response, swarm::behaviour::toggle::Toggle, tcp, yamux,
     Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
-use tokio::sync::mpsc;
+use tokio::{
+    sync::mpsc,
+    time::{self, Instant, MissedTickBehavior},
+};
 use tracing::{debug, info, warn};
 
 use crate::behaviour::DefraBehaviour;
@@ -34,6 +37,44 @@ use super::ResponseChannel;
 
 /// Default idle connection timeout.
 const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Periodic DHT refresh interval.
+const DHT_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Delay used to coalesce connection-triggered DHT bootstrap requests.
+const DHT_BOOTSTRAP_DEBOUNCE: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+struct BootstrapScheduler {
+    pending: bool,
+    debounce: Duration,
+}
+
+impl BootstrapScheduler {
+    fn new(debounce: Duration) -> Self {
+        Self {
+            pending: false,
+            debounce,
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        self.pending
+    }
+
+    fn schedule(&mut self, now: Instant) -> Option<Instant> {
+        if self.pending {
+            return None;
+        }
+
+        self.pending = true;
+        Some(now + self.debounce)
+    }
+
+    fn mark_fired(&mut self) {
+        self.pending = false;
+    }
+}
 
 /// Configuration options for P2P host construction.
 #[derive(Debug, Clone)]
@@ -64,7 +105,7 @@ impl Default for P2PHostConfig {
     fn default() -> Self {
         Self {
             enable_pubsub: true,
-            enable_relay: false,
+            enable_relay: true,
             max_msg_size: 16 * 1024 * 1024,
             max_car_size: 64 * 1024 * 1024,
             stream_timeout: 30,
@@ -150,7 +191,7 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
 
     /// Create a new P2P host with the given keypair and blockstore.
     ///
-    /// Uses default config: pubsub enabled, relay disabled.
+    /// Uses default config: pubsub enabled, relay enabled.
     ///
     /// # Arguments
     ///
@@ -374,6 +415,12 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
     ///
     /// This method runs until shutdown is requested.
     pub async fn run(mut self) {
+        let mut bootstrap_scheduler = BootstrapScheduler::new(DHT_BOOTSTRAP_DEBOUNCE);
+        let mut bootstrap_deadline = Box::pin(time::sleep(DHT_BOOTSTRAP_DEBOUNCE));
+        let mut bootstrap_interval = time::interval(DHT_BOOTSTRAP_INTERVAL);
+        bootstrap_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        bootstrap_interval.tick().await;
+
         loop {
             // Biased select: process swarm events before commands.
             // This ensures ConnectionEstablished events (which update peer_addrs)
@@ -382,7 +429,15 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
                 biased;
 
                 event = self.swarm.select_next_some() => {
-                    self.handle_swarm_event(event).await;
+                    if self.handle_swarm_event(event).await {
+                        if let Some(deadline) = bootstrap_scheduler.schedule(Instant::now()) {
+                            bootstrap_deadline.as_mut().reset(deadline);
+                            debug!(
+                                delay_ms = DHT_BOOTSTRAP_DEBOUNCE.as_millis() as u64,
+                                "Scheduled debounced Kademlia bootstrap"
+                            );
+                        }
+                    }
                 }
                 // Handle two-stream protocol events (Go compatibility)
                 Some(two_stream_event) = self.two_stream_event_rx.recv() => {
@@ -401,10 +456,28 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
                         }
                     }
                 }
+                _ = &mut bootstrap_deadline, if bootstrap_scheduler.is_pending() => {
+                    bootstrap_scheduler.mark_fired();
+                    self.run_kademlia_bootstrap("debounced connection");
+                }
+                _ = bootstrap_interval.tick() => {
+                    self.run_kademlia_bootstrap("periodic");
+                }
             }
         }
 
         info!("P2P host shutdown complete");
+    }
+
+    fn run_kademlia_bootstrap(&mut self, reason: &'static str) {
+        match self.swarm.behaviour_mut().kademlia.bootstrap() {
+            Ok(query_id) => {
+                debug!(?query_id, reason, "Started Kademlia bootstrap");
+            }
+            Err(error) => {
+                debug!(?error, reason, "Skipped Kademlia bootstrap");
+            }
+        }
     }
 
     /// Dial a peer at the given addresses.
@@ -436,5 +509,32 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
                 resp.message_id
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_enables_relay() {
+        assert!(P2PHostConfig::default().enable_relay);
+    }
+
+    #[test]
+    fn bootstrap_scheduler_debounces_pending_connection_triggers() {
+        let mut scheduler = BootstrapScheduler::new(Duration::from_secs(30));
+        let now = Instant::now();
+
+        assert_eq!(scheduler.schedule(now), Some(now + Duration::from_secs(30)));
+        assert!(scheduler.is_pending());
+        assert_eq!(scheduler.schedule(now + Duration::from_secs(1)), None);
+
+        scheduler.mark_fired();
+        assert!(!scheduler.is_pending());
+        assert_eq!(
+            scheduler.schedule(now + Duration::from_secs(31)),
+            Some(now + Duration::from_secs(61))
+        );
     }
 }
