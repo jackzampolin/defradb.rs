@@ -792,6 +792,53 @@ fn test_block_with_corrupted_cid_in_heads() {
     assert!(result.is_err());
 }
 
+#[test]
+fn test_composite_status_zero_cbor_rejected() {
+    let block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"doc-1".to_vec(),
+            schema_version_id: "schema-v1".to_string(),
+            priority: 1,
+            status: 0,
+        }),
+        vec![],
+        vec![],
+    );
+    let bytes = block.to_dag_cbor().expect("invalid status can serialize");
+
+    let result = Block::from_dag_cbor(&bytes);
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("invalid document status: 0"));
+}
+
+#[test]
+fn test_composite_missing_status_cbor_rejected() {
+    let mut composite = std::collections::BTreeMap::new();
+    composite.insert("docID".to_string(), libipld::Ipld::Bytes(b"doc-1".to_vec()));
+    composite.insert(
+        "schemaVersionID".to_string(),
+        libipld::Ipld::String("schema-v1".to_string()),
+    );
+    composite.insert("priority".to_string(), libipld::Ipld::Integer(1));
+
+    let mut delta = std::collections::BTreeMap::new();
+    delta.insert("composite".to_string(), libipld::Ipld::Map(composite));
+
+    let mut block = std::collections::BTreeMap::new();
+    block.insert("delta".to_string(), libipld::Ipld::Map(delta));
+
+    let bytes =
+        serde_ipld_dagcbor::to_vec(&libipld::Ipld::Map(block)).expect("manual block should encode");
+    let result = Block::from_dag_cbor(&bytes);
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("missing field"));
+}
+
 // ============================================================================
 // Go Wire Compatibility: Encryption Tests
 // ============================================================================

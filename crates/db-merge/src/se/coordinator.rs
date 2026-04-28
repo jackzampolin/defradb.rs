@@ -59,8 +59,6 @@ pub struct SECoordinatorConfig {
     pub enc_key: Zeroizing<Vec<u8>>,
     /// Identity's public key for tag isolation.
     pub identity_pubkey: Option<Vec<u8>>,
-    /// Maximum number of retry attempts.
-    pub max_retries: usize,
 }
 
 impl Default for SECoordinatorConfig {
@@ -68,7 +66,6 @@ impl Default for SECoordinatorConfig {
         Self {
             enc_key: Zeroizing::new(vec![0u8; 32]),
             identity_pubkey: None,
-            max_retries: 5,
         }
     }
 }
@@ -102,7 +99,6 @@ impl SECoordinator {
         Self::new(SECoordinatorConfig {
             enc_key: Zeroizing::new(enc_key),
             identity_pubkey: Some(identity_pubkey),
-            max_retries: 5,
         })
     }
 
@@ -200,7 +196,6 @@ mod tests {
         let config = SECoordinatorConfig {
             enc_key: Zeroizing::new(vec![1u8; 32]),
             identity_pubkey: Some(b"user_pubkey".to_vec()),
-            max_retries: 3,
         };
         let coordinator = SECoordinator::new(config);
 
