@@ -22,7 +22,7 @@ use crate::message::{
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::NoOpCollectionStorage;
 use crate::sync::head_provider::{DocumentHeadProvider, NoOpHeadProvider};
-use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
+use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager, DEFAULT_PUSH_SEND_TIMEOUT};
 use crate::sync::peer_state::PeerStateTracker;
 use crate::sync::rate_limiter::PeerRateLimiter;
 use crate::sync::SyncShutdownHandle;
@@ -146,6 +146,7 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
                 DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
             )),
             rate_limiter,
+            push_send_timeout: DEFAULT_PUSH_SEND_TIMEOUT,
             shutdown: SyncShutdownHandle::new(),
         },
         manager,

@@ -192,6 +192,9 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
     /// Per-peer rate limiter applied at event dispatch to throttle abusive peers.
     pub(super) rate_limiter: Arc<PeerRateLimiter>,
 
+    /// Timeout for one outbound PushLog send to a replicator peer.
+    pub(super) push_send_timeout: Duration,
+
     /// Shutdown state for coordinator-owned background tasks.
     pub(super) shutdown: SyncShutdownHandle,
 }

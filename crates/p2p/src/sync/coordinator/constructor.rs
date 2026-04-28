@@ -1,6 +1,7 @@
 //! Constructor methods for the sync coordinator.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use blockstore::Blockstore;
 use tokio::sync::mpsc;
@@ -12,7 +13,7 @@ use crate::error::Result;
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::{NoOpCollectionStorage, P2PCollectionStorage};
 use crate::sync::head_provider::{DocumentHeadProvider, NoOpHeadProvider};
-use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
+use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager, DEFAULT_PUSH_SEND_TIMEOUT};
 use crate::sync::peer_state::PeerStateTracker;
 use crate::sync::rate_limiter::PeerRateLimiter;
 use crate::transport::P2PTransport;
@@ -100,6 +101,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let max_push_tasks = config.max_concurrent_push_tasks.max(1);
         let rate_limit_burst = config.rate_limit_burst;
         let rate_limit_rate = config.rate_limit_rate;
+        let rate_limit_backoff = config.rate_limit_backoff.clone();
+        let push_send_timeout = if config.push_send_timeout.is_zero() {
+            DEFAULT_PUSH_SEND_TIMEOUT
+        } else {
+            config.push_send_timeout.max(Duration::from_millis(1))
+        };
         let subscribed_collections =
             Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
         let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), config);
@@ -124,7 +131,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     failure_tx: None,
                     dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(max_dag_fetches)),
                     push_semaphore: Arc::new(tokio::sync::Semaphore::new(max_push_tasks)),
-                    rate_limiter: Arc::new(PeerRateLimiter::new(rate_limit_burst, rate_limit_rate)),
+                    rate_limiter: Arc::new(PeerRateLimiter::with_backoff_steps(
+                        rate_limit_burst,
+                        rate_limit_rate,
+                        rate_limit_backoff,
+                    )),
+                    push_send_timeout,
                     shutdown: super::SyncShutdownHandle::new(),
                 },
                 manager,
