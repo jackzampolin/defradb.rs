@@ -223,12 +223,18 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let doc_id_owned = doc_id.to_string();
             let collection_id_owned = collection_id.to_string();
             let semaphore = self.runtime.push_semaphore.clone();
+            let send_timeout = self.runtime.push_send_timeout;
             self.spawn_background_task("push_dag_to_replicators", async move {
                 let Ok(_permit) = semaphore.acquire().await else {
                     return;
                 };
-                let any_failed =
-                    Self::send_ordered_pushlogs_via_transport(&transport, &peer_id, requests).await;
+                let any_failed = Self::send_ordered_pushlogs_via_transport(
+                    &transport,
+                    &peer_id,
+                    requests,
+                    send_timeout,
+                )
+                .await;
                 if any_failed {
                     Self::report_push_failure(
                         &failure_tx,
@@ -299,6 +305,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let collection_id_owned = collection_id.to_string();
             let semaphore = self.runtime.push_semaphore.clone();
             let peer_id_clone = peer_id.clone();
+            let send_timeout = self.runtime.push_send_timeout;
             self.spawn_background_task("push_to_replicators", async move {
                 let Ok(_permit) = semaphore.acquire().await else {
                     return;
@@ -307,6 +314,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     &transport,
                     &peer_id_clone,
                     vec![(cid_clone, request)],
+                    send_timeout,
                 )
                 .await;
                 if any_failed {
@@ -374,16 +382,50 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         transport: &T,
         peer_id: &PeerId,
         requests: Vec<(Cid, PushLogRequest)>,
+        send_timeout: Duration,
     ) -> bool {
         let mut any_failed = false;
         'requests: for (cid, request) in requests {
             let mut rate_limited_attempts = 0;
             loop {
-                match transport
-                    .send_two_stream_request(peer_id, request.clone())
-                    .await
+                match tokio::time::timeout(
+                    send_timeout,
+                    transport.send_two_stream_request(peer_id, request.clone()),
+                )
+                .await
                 {
-                    Ok(reply) => {
+                    Err(_) => {
+                        tracing::warn!(
+                            peer_id = %peer_id,
+                            cid = %cid,
+                            timeout_ms = send_timeout.as_millis(),
+                            "PushLog to replicator timed out"
+                        );
+                        any_failed = true;
+                        break 'requests;
+                    }
+                    Ok(Err(e)) => {
+                        if e.is_connection_like() {
+                            tracing::debug!(
+                                peer_id = %peer_id,
+                                cid = %cid,
+                                error = %e,
+                                "PushLog to replicator failed because the connection became unavailable; stopping replay for this peer"
+                            );
+                            any_failed = true;
+                            break 'requests;
+                        }
+
+                        tracing::debug!(
+                            peer_id = %peer_id,
+                            cid = %cid,
+                            error = %e,
+                            "PushLog to replicator failed"
+                        );
+                        any_failed = true;
+                        break;
+                    }
+                    Ok(Ok(reply)) => {
                         let Some(error_message) = reply.err_message.as_deref() else {
                             break;
                         };
@@ -422,27 +464,6 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         any_failed = true;
                         break;
                     }
-                    Err(e) => {
-                        if e.is_connection_like() {
-                            tracing::debug!(
-                                peer_id = %peer_id,
-                                cid = %cid,
-                                error = %e,
-                                "PushLog to replicator failed because the connection became unavailable; stopping replay for this peer"
-                            );
-                            any_failed = true;
-                            break 'requests;
-                        }
-
-                        tracing::debug!(
-                            peer_id = %peer_id,
-                            cid = %cid,
-                            error = %e,
-                            "PushLog to replicator failed"
-                        );
-                        any_failed = true;
-                        break;
-                    }
                 }
             }
         }
@@ -476,6 +497,7 @@ mod tests {
         pubkey: Vec<u8>,
         replies: Arc<Mutex<VecDeque<PushLogReply>>>,
         sent_cids: Arc<Mutex<Vec<Vec<u8>>>>,
+        send_delay: Duration,
     }
 
     impl TestTransport {
@@ -485,7 +507,13 @@ mod tests {
                 pubkey: vec![1, 2, 3],
                 replies: Arc::new(Mutex::new(VecDeque::from(replies))),
                 sent_cids: Arc::new(Mutex::new(Vec::new())),
+                send_delay: Duration::ZERO,
             }
+        }
+
+        fn with_send_delay(mut self, send_delay: Duration) -> Self {
+            self.send_delay = send_delay;
+            self
         }
 
         fn sent_cids(&self) -> Vec<Vec<u8>> {
@@ -571,6 +599,9 @@ mod tests {
             req: PushLogRequest,
         ) -> P2PResult<PushLogReply> {
             self.sent_cids.lock().unwrap().push(req.cid.to_vec());
+            if !self.send_delay.is_zero() {
+                tokio::time::sleep(self.send_delay).await;
+            }
             Ok(self
                 .replies
                 .lock()
@@ -738,12 +769,16 @@ mod tests {
             ),
         ];
 
-        let any_failed =
-            SyncCoordinator::<
-                blockstore::DefraBlockstore<storage::backends::MemoryStore>,
-                TestTransport,
-            >::send_ordered_pushlogs_via_transport(&transport, &peer_id, requests)
-            .await;
+        let any_failed = SyncCoordinator::<
+            blockstore::DefraBlockstore<storage::backends::MemoryStore>,
+            TestTransport,
+        >::send_ordered_pushlogs_via_transport(
+            &transport,
+            &peer_id,
+            requests,
+            Duration::from_secs(1),
+        )
+        .await;
 
         assert!(!any_failed);
         assert_eq!(
@@ -785,17 +820,66 @@ mod tests {
             ),
         ];
 
-        let any_failed =
-            SyncCoordinator::<
-                blockstore::DefraBlockstore<storage::backends::MemoryStore>,
-                TestTransport,
-            >::send_ordered_pushlogs_via_transport(&transport, &peer_id, requests)
-            .await;
+        let any_failed = SyncCoordinator::<
+            blockstore::DefraBlockstore<storage::backends::MemoryStore>,
+            TestTransport,
+        >::send_ordered_pushlogs_via_transport(
+            &transport,
+            &peer_id,
+            requests,
+            Duration::from_secs(1),
+        )
+        .await;
 
         assert!(any_failed);
         assert_eq!(
             transport.sent_cids(),
             vec![cid1.to_bytes(); MAX_RATE_LIMITED_PUSH_ATTEMPTS + 1]
         );
+    }
+
+    #[tokio::test]
+    async fn ordered_pushlogs_timeout_stops_peer_push() {
+        let transport = TestTransport::new(vec![PushLogReply::success("first")])
+            .with_send_delay(Duration::from_millis(25));
+        let peer_id = PeerId::new("remote-peer".to_string());
+        let cid1 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-1"));
+        let cid2 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-2"));
+        let requests = vec![
+            (
+                cid1,
+                PushLogRequest::new(
+                    "doc-1".to_string(),
+                    Bytes::from(cid1.to_bytes()),
+                    "collection".to_string(),
+                    "creator".to_string(),
+                    Bytes::from_static(b"block-1"),
+                ),
+            ),
+            (
+                cid2,
+                PushLogRequest::new(
+                    "doc-1".to_string(),
+                    Bytes::from(cid2.to_bytes()),
+                    "collection".to_string(),
+                    "creator".to_string(),
+                    Bytes::from_static(b"block-2"),
+                ),
+            ),
+        ];
+
+        let any_failed = SyncCoordinator::<
+            blockstore::DefraBlockstore<storage::backends::MemoryStore>,
+            TestTransport,
+        >::send_ordered_pushlogs_via_transport(
+            &transport,
+            &peer_id,
+            requests,
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert!(any_failed);
+        assert_eq!(transport.sent_cids(), vec![cid1.to_bytes()]);
     }
 }
