@@ -151,7 +151,7 @@ mod tests {
         let public_key = private_key.public_key();
         SigningConfig {
             key_type: defra_core::signing::SigningKeyType::Ed25519,
-            private_key_bytes: private_key.raw_owned(),
+            private_key_bytes: SigningConfig::private_key_bytes_from_vec(private_key.raw_owned()),
             public_key_bytes: public_key.raw_owned(),
             public_key_hex: public_key.to_hex_string(),
             remote_signer: None,
@@ -164,7 +164,7 @@ mod tests {
         let public_key = private_key.public_key();
         SigningConfig {
             key_type: defra_core::signing::SigningKeyType::Secp256k1,
-            private_key_bytes: private_key.raw_owned(),
+            private_key_bytes: SigningConfig::private_key_bytes_from_vec(private_key.raw_owned()),
             public_key_bytes: public_key.raw_owned(),
             public_key_hex: public_key.to_hex_string(),
             remote_signer: None,
