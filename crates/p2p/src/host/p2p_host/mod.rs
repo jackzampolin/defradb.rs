@@ -298,6 +298,12 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
                 .with_tokio()
                 .with_tcp(tcp_config, noise::Config::new, yamux::Config::default)
                 .map_err(|e| Error::Transport(e.to_string()))?
+                .with_quic()
+                .with_dns()
+                .map_err(|e| Error::Transport(e.to_string()))?
+                .with_websocket(noise::Config::new, yamux::Config::default)
+                .await
+                .map_err(|e| Error::Transport(e.to_string()))?
                 .with_relay_client(noise::Config::new, yamux::Config::default)
                 .map_err(|e| Error::Transport(e.to_string()))?
                 .with_behaviour(|_key, relay_client| {
@@ -311,6 +317,12 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
             SwarmBuilder::with_existing_identity(keypair.clone())
                 .with_tokio()
                 .with_tcp(tcp_config, noise::Config::new, yamux::Config::default)
+                .map_err(|e| Error::Transport(e.to_string()))?
+                .with_quic()
+                .with_dns()
+                .map_err(|e| Error::Transport(e.to_string()))?
+                .with_websocket(noise::Config::new, yamux::Config::default)
+                .await
                 .map_err(|e| Error::Transport(e.to_string()))?
                 .with_behaviour(|_key| behaviour)
                 .expect("behaviour already constructed")
