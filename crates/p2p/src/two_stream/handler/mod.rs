@@ -24,6 +24,8 @@ use libp2p_stream as stream;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
+use libp2p::PeerId;
+
 use crate::message::{IdentityResponse, PushLogReply, PushLogRequest};
 use crate::protocol::{
     CAR_REQUEST_PROTOCOL, CAR_RESPONSE_PROTOCOL, IDENTITY_REQUEST_PROTOCOL,
@@ -36,7 +38,23 @@ use crate::{error::Error, message::Message, Result};
 /// Timeout for waiting for a response.
 pub(super) const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(super) fn ensure_transport_sender<M: Message>(peer_id: &libp2p::PeerId, msg: &M) -> Result<()> {
+/// Pending response key bound to the expected transport peer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PendingResponseKey {
+    pub(crate) peer_id: PeerId,
+    pub(crate) message_id: String,
+}
+
+impl PendingResponseKey {
+    pub(crate) fn new(peer_id: PeerId, message_id: impl Into<String>) -> Self {
+        Self {
+            peer_id,
+            message_id: message_id.into(),
+        }
+    }
+}
+
+pub(super) fn ensure_transport_sender<M: Message>(peer_id: &PeerId, msg: &M) -> Result<()> {
     if msg.sender_id() == peer_id.to_string() {
         Ok(())
     } else {
@@ -51,10 +69,10 @@ pub(super) fn ensure_transport_sender<M: Message>(peer_id: &libp2p::PeerId, msg:
 /// State for tracking pending responses.
 #[derive(Default)]
 pub(crate) struct PendingResponses {
-    /// Map of MessageID to response channel.
-    pub(crate) channels: HashMap<String, oneshot::Sender<PushLogReply>>,
-    /// Map of MessageID to identity response channel.
-    pub(crate) identity_channels: HashMap<String, oneshot::Sender<IdentityResponse>>,
+    /// Map of expected peer + MessageID to response channel.
+    pub(crate) channels: HashMap<PendingResponseKey, oneshot::Sender<PushLogReply>>,
+    /// Map of expected peer + MessageID to identity response channel.
+    pub(crate) identity_channels: HashMap<PendingResponseKey, oneshot::Sender<IdentityResponse>>,
 }
 
 /// Two-stream protocol handler.
@@ -66,7 +84,7 @@ pub(crate) struct PendingResponses {
 pub struct TwoStreamHandler {
     /// Control for the stream behaviour (for opening streams).
     pub(super) control: stream::Control,
-    /// Pending response channels keyed by MessageID.
+    /// Pending response channels keyed by expected peer and MessageID.
     pub(super) pending: Arc<Mutex<PendingResponses>>,
 }
 
@@ -135,15 +153,19 @@ impl TwoStreamHandler {
     }
 
     /// Clean up a pending response channel (used on timeout or cancellation).
-    pub fn cleanup_pending(&self, message_id: &str) {
+    pub fn cleanup_pending(&self, peer_id: PeerId, message_id: &str) {
         let mut pending = self.pending.lock();
-        pending.channels.remove(message_id);
+        pending
+            .channels
+            .remove(&PendingResponseKey::new(peer_id, message_id));
     }
 
     /// Clean up a pending identity response channel (used on timeout or cancellation).
-    pub fn cleanup_pending_identity(&self, message_id: &str) {
+    pub fn cleanup_pending_identity(&self, peer_id: PeerId, message_id: &str) {
         let mut pending = self.pending.lock();
-        pending.identity_channels.remove(message_id);
+        pending
+            .identity_channels
+            .remove(&PendingResponseKey::new(peer_id, message_id));
     }
 
     /// Create a success reply for a request.

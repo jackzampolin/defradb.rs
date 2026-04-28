@@ -7,7 +7,7 @@ use crate::codec::write_message;
 use crate::error::{Error, Result};
 use crate::message::{PushLogReply, PushLogRequest};
 
-use super::TwoStreamHandler;
+use super::{PendingResponseKey, TwoStreamHandler};
 
 impl TwoStreamHandler {
     /// Send a request to a peer and return a receiver for the response.
@@ -22,6 +22,7 @@ impl TwoStreamHandler {
         request: PushLogRequest,
     ) -> Result<(String, oneshot::Receiver<PushLogReply>)> {
         let message_id = request.message_id.clone();
+        let pending_key = PendingResponseKey::new(peer_id, message_id.clone());
 
         // Create response channel
         let (tx, rx) = oneshot::channel();
@@ -29,7 +30,7 @@ impl TwoStreamHandler {
         // Register pending response
         {
             let mut pending = self.pending.lock();
-            pending.channels.insert(message_id.clone(), tx);
+            pending.channels.insert(pending_key.clone(), tx);
         }
 
         // Open stream and send request
@@ -40,14 +41,14 @@ impl TwoStreamHandler {
             .map_err(|e| {
                 // Clean up pending on failure
                 let mut pending = self.pending.lock();
-                pending.channels.remove(&message_id);
+                pending.channels.remove(&pending_key);
                 Error::Transport(format!("failed to open stream: {}", e))
             })?;
 
         write_message(&mut stream, &request).await.map_err(|e| {
             // Clean up pending on failure
             let mut pending = self.pending.lock();
-            pending.channels.remove(&message_id);
+            pending.channels.remove(&pending_key);
             Error::CborSerialization(format!("failed to write request: {}", e))
         })?;
 
