@@ -1387,9 +1387,13 @@ async fn test_unique_constraint_violation_returns_error() {
         doc2.generate_and_set_doc_id().unwrap();
 
         let result = manager.on_document_create(&datastore, &doc2, &schema).await;
+        let error = result.expect_err("duplicate value should fail through IndexManager");
         assert!(
-            result.is_err(),
-            "Duplicate value in unique index should fail through IndexManager"
+            matches!(
+                error,
+                db_index::Error::Storage(storage::Error::UniqueConstraintViolation)
+            ),
+            "duplicate value should preserve typed unique constraint error: {error}"
         );
     }
 }

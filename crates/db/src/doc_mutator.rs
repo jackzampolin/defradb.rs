@@ -117,17 +117,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection
             .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
             .await
-            .map_err(|e| {
-                let msg = e.to_string();
-                // If this is a unique constraint violation, return the core message without wrapping
-                if msg.contains("can not index a doc's field(s) that violates unique index") {
-                    query::error::QueryError::execution(
-                        "can not index a doc's field(s) that violates unique index.".to_string(),
-                    )
-                } else {
-                    query::error::QueryError::execution(format!("create error: {}", e))
-                }
-            })?;
+            .map_err(|e| crate::error::index_write_query_error("create", e))?;
 
         {
             let txn_guard = self.txn.lock().await;
@@ -222,18 +212,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 crate::error::Error::DocumentNotFound(id) => {
                     query::error::QueryError::document_not_found(id)
                 }
-                other => {
-                    let msg = other.to_string();
-                    // If this is a unique constraint violation, return the core message without wrapping
-                    if msg.contains("can not index a doc's field(s) that violates unique index") {
-                        query::error::QueryError::execution(
-                            "can not index a doc's field(s) that violates unique index."
-                                .to_string(),
-                        )
-                    } else {
-                        query::error::QueryError::execution(format!("update error: {}", other))
-                    }
-                }
+                other => crate::error::index_write_query_error("update", other),
             })?;
 
         // Return count of actually modified fields

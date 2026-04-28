@@ -70,7 +70,7 @@ pub mod traits;
 pub mod types;
 
 // Re-export commonly used types and traits for convenience
-pub use errors::{Error, Result};
+pub use errors::{Error, Result, UNIQUE_CONSTRAINT_VIOLATION_MESSAGE};
 pub use iterator::{Iterator, KvPair};
 pub use traits::private;
 pub use traits::{

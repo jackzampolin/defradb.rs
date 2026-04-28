@@ -179,16 +179,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         collection
             .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
             .await
-            .map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("can not index a doc's field(s) that violates unique index") {
-                    query::error::QueryError::execution(
-                        "can not index a doc's field(s) that violates unique index.".to_string(),
-                    )
-                } else {
-                    query::error::QueryError::execution(format!("create error: {}", e))
-                }
-            })?;
+            .map_err(|e| crate::error::index_write_query_error("create", e))?;
 
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
@@ -318,17 +309,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 crate::error::Error::DocumentNotFound(id) => {
                     query::error::QueryError::document_not_found(id)
                 }
-                other => {
-                    let msg = other.to_string();
-                    if msg.contains("can not index a doc's field(s) that violates unique index") {
-                        query::error::QueryError::execution(
-                            "can not index a doc's field(s) that violates unique index."
-                                .to_string(),
-                        )
-                    } else {
-                        query::error::QueryError::execution(format!("update error: {}", other))
-                    }
-                }
+                other => crate::error::index_write_query_error("update", other),
             })?;
 
         let short_id = collection.resolved_root_id();
