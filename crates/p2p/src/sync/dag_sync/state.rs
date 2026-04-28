@@ -84,7 +84,11 @@ impl DagSyncState {
         self.state.read().await.syncing.contains(cid)
     }
 
-    /// Check if a CID has already been synced.
+    /// Check if a CID has recently been synced.
+    ///
+    /// This is a bounded in-memory hint used to avoid duplicate work during a
+    /// session, not a persistent claim. A `false` result may mean the CID was
+    /// never synced or that it was evicted from the recent synced cache.
     pub async fn is_synced(&self, cid: &Cid) -> bool {
         self.state.read().await.synced.contains(cid)
     }

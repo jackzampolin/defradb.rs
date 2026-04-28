@@ -62,6 +62,7 @@ impl PeerStateTracker {
                     break;
                 }
                 if let Some(info) = peers.get_mut(&peer_id) {
+                    info.debug_assert_cid_tracking_consistent();
                     // Evict oldest CIDs from this peer
                     while evicted < excess && !info.cid_order.is_empty() {
                         if let Some(cid) = info.cid_order.pop_front() {
@@ -69,6 +70,7 @@ impl PeerStateTracker {
                             evicted += 1;
                         }
                     }
+                    info.debug_assert_cid_tracking_consistent();
                 }
             }
 
