@@ -115,6 +115,19 @@ impl Correlator {
     ///
     /// Derives the request ID, registers a correlation entry, and returns a
     /// handle whose `Drop` removes the entry automatically.
+    ///
+    /// # Concurrent identical requests
+    ///
+    /// The request ID is the CID of `data`, so two callers publishing
+    /// **identical** bytes derive the same ID. The second `publish` overwrites
+    /// the first's entry in the in-flight map — the first caller's response
+    /// channel is silently dropped and that caller times out instead of
+    /// receiving the reply. Go has the same behavior: `Topic.Publish` in
+    /// `sourcenetwork/go-libp2p-pubsub-rpc/rpc.go:222-230` performs an
+    /// unguarded `t.ongoing[msgID] = ongoingMessage{...}`, so this is a Go
+    /// parity match by design. Callers that need to multiplex truly identical
+    /// requests must serialize them externally or vary the payload (e.g.
+    /// add a nonce) so the derived CIDs differ.
     pub fn publish(&self, data: Vec<u8>, opts: PublishOptions) -> PreparedPublish {
         let id = derive_request_id(&data);
         let buffer = if opts.multi_response {
