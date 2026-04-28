@@ -5,6 +5,8 @@
 use cid::Cid;
 use serde::{Deserialize, Serialize};
 
+use crate::block_signature::DocumentStatus;
+
 /// LWW Register delta payload for block embedding
 ///
 /// Matches Go's `crdt.LWWDelta` structure.
@@ -75,8 +77,24 @@ pub struct CompositeDeltaPayload {
     pub priority: u64,
 
     /// Document status (1 = active, 2 = deleted)
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_document_status")]
     pub status: u8,
+}
+
+impl CompositeDeltaPayload {
+    pub(crate) fn validate_status(status: u8) -> Result<u8, String> {
+        DocumentStatus::from_u8(status)
+            .map(|_| status)
+            .ok_or_else(|| format!("invalid document status: {status}"))
+    }
+}
+
+fn deserialize_document_status<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let status = u8::deserialize(deserializer)?;
+    CompositeDeltaPayload::validate_status(status).map_err(serde::de::Error::custom)
 }
 
 /// Collection delta payload for block embedding

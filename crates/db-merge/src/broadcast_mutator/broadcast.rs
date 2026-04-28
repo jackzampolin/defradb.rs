@@ -8,6 +8,7 @@ use query::mutator::BroadcastStatus;
 use db_blocks::BlockResult;
 
 pub(crate) const BROADCAST_MAX_RETRIES: u32 = 10;
+const BROADCAST_MAX_RETRY_DELAY_MS: u64 = 10_000;
 
 fn is_expected_fire_and_forget_failure(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
@@ -28,7 +29,17 @@ pub(crate) fn broadcast_retry_delay_ms(
     if connected_peers == 0 || attempt > BROADCAST_MAX_RETRIES {
         return None;
     }
-    Some(100 * (1u64 << attempt.min(5)))
+    let base_delay_ms = 100 * (1u64 << attempt.min(5));
+    let peer_multiplier = match connected_peers {
+        1 => 4,
+        2 => 2,
+        _ => 1,
+    };
+    Some(
+        base_delay_ms
+            .saturating_mul(peer_multiplier)
+            .min(BROADCAST_MAX_RETRY_DELAY_MS),
+    )
 }
 
 async fn connected_peer_count<B: Blockstore + 'static, T: P2PTransport>(
@@ -201,9 +212,26 @@ mod tests {
     }
 
     #[test]
-    fn insufficient_peers_with_connections_retries_with_backoff() {
+    fn insufficient_peers_with_two_connections_uses_peer_aware_backoff() {
         let delay = broadcast_retry_delay_ms("gossipsub publish error: InsufficientPeers", 2, 3);
-        assert_eq!(delay, Some(800));
+        assert_eq!(delay, Some(1600));
+    }
+
+    #[test]
+    fn insufficient_peers_with_one_connection_waits_longer_than_many_peers() {
+        let sparse_delay =
+            broadcast_retry_delay_ms("gossipsub publish error: InsufficientPeers", 1, 3).unwrap();
+        let many_peer_delay =
+            broadcast_retry_delay_ms("gossipsub publish error: InsufficientPeers", 8, 3).unwrap();
+
+        assert!(sparse_delay > many_peer_delay);
+        assert_eq!(many_peer_delay, 800);
+    }
+
+    #[test]
+    fn insufficient_peers_retry_delay_is_capped() {
+        let delay = broadcast_retry_delay_ms("gossipsub publish error: InsufficientPeers", 1, 10);
+        assert_eq!(delay, Some(10_000));
     }
 
     #[test]

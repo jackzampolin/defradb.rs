@@ -366,6 +366,47 @@ fn test_parse_u8_out_of_range_fails() {
 }
 
 #[test]
+fn test_composite_status_zero_fails() {
+    let mut map = BTreeMap::new();
+    map.insert("docID".to_string(), Ipld::Bytes(b"doc".to_vec()));
+    map.insert(
+        "schemaVersionID".to_string(),
+        Ipld::String("v1".to_string()),
+    );
+    map.insert("priority".to_string(), Ipld::Integer(1));
+    map.insert("status".to_string(), Ipld::Integer(0));
+    let ipld = Ipld::Map(map);
+
+    let result = CompositeDeltaPayload::try_from(&ipld);
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("invalid document status: 0"));
+}
+
+#[test]
+fn test_composite_status_missing_fails() {
+    let mut map = BTreeMap::new();
+    map.insert("docID".to_string(), Ipld::Bytes(b"doc".to_vec()));
+    map.insert(
+        "schemaVersionID".to_string(),
+        Ipld::String("v1".to_string()),
+    );
+    map.insert("priority".to_string(), Ipld::Integer(1));
+    let ipld = Ipld::Map(map);
+
+    let result = CompositeDeltaPayload::try_from(&ipld);
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Missing field 'status'"));
+}
+
+#[test]
 fn test_field_definition_optional_field_wrong_type_fails() {
     let mut map = BTreeMap::new();
     map.insert("priority".to_string(), Ipld::Integer(1));
