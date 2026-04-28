@@ -149,9 +149,26 @@ impl TwoStreamHandler {
             Ok(reply) if !reply.collection_id.is_empty() => {
                 crate::verify_message(&reply)?;
                 ensure_transport_sender(&peer_id, &reply)?;
+                let message_id = reply.message_id.clone();
+                let pending_key = PendingResponseKey::new(peer_id, message_id.clone());
+                let is_pending_branchable_sync = {
+                    let mut pending = pending.lock();
+                    pending.consume_branchable_sync_request(&pending_key)
+                };
+
+                if !is_pending_branchable_sync {
+                    tracing::debug!(
+                        peer_id = %peer_id,
+                        message_id = %message_id,
+                        collection_id = %reply.collection_id,
+                        "Ignoring BranchableSync response for unknown request"
+                    );
+                    return Ok(None);
+                }
+
                 tracing::debug!(
                     peer_id = %peer_id,
-                    message_id = %reply.message_id,
+                    message_id = %message_id,
                     collection_id = %reply.collection_id,
                     heads_count = reply.heads.len(),
                     "Received BranchableSync response on two-stream protocol"
@@ -233,8 +250,36 @@ impl TwoStreamHandler {
             crate::verify_message(&reply)?;
             ensure_transport_sender(&peer_id, &reply)?;
             let message_id = reply.message_id.clone();
+            let pending_key = PendingResponseKey::new(peer_id, message_id.clone());
 
-            // No pending channel - this is a DocSyncReply for the coordinator
+            let doc_sync_sender = {
+                let mut pending = pending.lock();
+                pending.doc_sync_channels.remove(&pending_key)
+            };
+            if let Some(sender) = doc_sync_sender {
+                let _ = sender.send(reply);
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    message_id = %message_id,
+                    "Received awaited DocSync response on two-stream protocol"
+                );
+                return Ok(None);
+            }
+
+            let is_pending_doc_sync = {
+                let mut pending = pending.lock();
+                pending.consume_doc_sync_request(&pending_key)
+            };
+
+            if !is_pending_doc_sync {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    message_id = %message_id,
+                    "Ignoring DocSync response for unknown request"
+                );
+                return Ok(None);
+            }
+
             tracing::debug!(
                 peer_id = %peer_id,
                 message_id = %message_id,

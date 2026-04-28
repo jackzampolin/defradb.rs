@@ -306,7 +306,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                                 doc_id = %doc_id,
                                 "DAG complete locally, emitting BlockReceived for re-merge"
                             );
-                            let _ = event_tx
+                            if event_tx
                                 .send(crate::sync::manager::SyncEvent::BlockReceived {
                                     cid,
                                     doc_id: context.doc_id,
@@ -317,7 +317,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                                     explicit_replay_authorization: None,
                                     acp_actor_relationships: None,
                                 })
-                                .await;
+                                .await
+                                .is_err()
+                            {
+                                tracing::error!(
+                                    cid = %cid,
+                                    doc_id = %doc_id,
+                                    "Failed to emit BlockReceived for locally complete DocSync DAG"
+                                );
+                                return Err(Error::ChannelSend);
+                            }
                         } else {
                             tracing::info!(
                                 cid = %cid,
