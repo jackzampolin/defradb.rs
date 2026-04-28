@@ -61,6 +61,7 @@ impl PeerStateTracker {
             .entry(peer_id.to_string())
             .or_insert_with(PeerInfo::new);
         info.add_cid(cid, max_cids);
+        info.debug_assert_cid_tracking_consistent();
         info.last_seen = Instant::now();
         self.enforce_global_limits(&mut peers);
     }
@@ -81,6 +82,7 @@ impl PeerStateTracker {
         for cid in cids {
             info.add_cid(cid, max_cids);
         }
+        info.debug_assert_cid_tracking_consistent();
         info.last_seen = Instant::now();
         self.enforce_global_limits(&mut peers);
     }

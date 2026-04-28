@@ -1,6 +1,5 @@
 //! Tests for DAG synchronization.
 
-use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -323,7 +322,7 @@ async fn test_dag_sync_state_concurrent_complete() {
 #[test]
 fn test_dag_sync_config_zero_timeout_returns_error() {
     // DagSyncConfig::new should return error if block_fetch_timeout is zero
-    let result = DagSyncConfig::new(Duration::ZERO, None, NonZeroUsize::new(16).unwrap());
+    let result = DagSyncConfig::new(Duration::ZERO);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.to_string().contains("block_fetch_timeout"));
@@ -341,11 +340,7 @@ fn test_dag_sync_config_with_timeout_zero_returns_error() {
 #[test]
 fn test_dag_sync_config_valid_timeout_succeeds() {
     // Valid timeout should succeed
-    let result = DagSyncConfig::new(
-        Duration::from_secs(10),
-        None,
-        NonZeroUsize::new(16).unwrap(),
-    );
+    let result = DagSyncConfig::new(Duration::from_secs(10));
     assert!(result.is_ok());
     let config = result.unwrap();
     assert_eq!(config.block_fetch_timeout(), Duration::from_secs(10));
@@ -357,21 +352,15 @@ fn test_dag_sync_config_default_values() {
 
     // Verify default values
     assert_eq!(config.block_fetch_timeout(), Duration::from_secs(30));
-    assert!(config.max_depth().is_none()); // Unlimited
-    assert_eq!(config.max_concurrent_fetches().get(), 16);
 }
 
 #[test]
 fn test_dag_sync_config_builder() {
     let config = DagSyncConfig::default()
         .with_timeout(Duration::from_secs(60))
-        .expect("valid timeout")
-        .with_max_depth(Some(NonZeroUsize::new(10).unwrap()))
-        .with_max_concurrent_fetches(NonZeroUsize::new(32).unwrap());
+        .expect("valid timeout");
 
     assert_eq!(config.block_fetch_timeout(), Duration::from_secs(60));
-    assert_eq!(config.max_depth(), Some(NonZeroUsize::new(10).unwrap()));
-    assert_eq!(config.max_concurrent_fetches().get(), 32);
 }
 
 #[tokio::test]
@@ -413,6 +402,23 @@ async fn test_sync_state_eviction() {
 
     // Evicted CIDs can be synced again
     assert!(state.start_sync(cids[0]).await);
+}
+
+#[tokio::test]
+async fn test_sync_state_is_synced_is_recent_memory_hint() {
+    let state = DagSyncState::with_max_synced(1);
+    let first = test_cid();
+    let second = test_cid2();
+
+    state.start_sync(first).await;
+    state.complete_sync(first).await;
+    assert!(state.is_synced(&first).await);
+
+    state.start_sync(second).await;
+    state.complete_sync(second).await;
+
+    assert!(!state.is_synced(&first).await);
+    assert!(state.start_sync(first).await);
 }
 
 #[tokio::test]
