@@ -325,8 +325,14 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
         );
 
         // Configure GossipSub (optional, matches Go's `if options.EnablePubSub`).
-        // No custom `message_id_fn` — use libp2p default (source + seqno) to
-        // match Go parity. See #834.
+        //
+        // We deliberately do NOT override `message_id_fn`. Go DefraDB (via
+        // go-libp2p-pubsub at `go-p2p/peer.go:133-139`) uses the default
+        // message-id derivation (`source + seqno`). Using the same default
+        // here keeps Rust and Go mesh-propagation semantics aligned: two
+        // peers publishing identical payloads produce distinct message IDs,
+        // so neither implementation silently dedups legitimate duplicate
+        // content from different senders. See issue #834.
         let gossipsub = if enable_pubsub {
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(1))

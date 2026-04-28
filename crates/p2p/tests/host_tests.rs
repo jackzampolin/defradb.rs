@@ -36,6 +36,29 @@ async fn wait_until_connected(handle: &p2p::P2PHostHandle, peer_id: PeerId) {
     }
 }
 
+/// Repeatedly attempt to publish on a topic until gossipsub mesh formation
+/// completes (heartbeat interval is 1s). `topic_peers` reflects subscription
+/// knowledge, not mesh membership, so we poll on `publish` itself.
+async fn publish_when_ready(
+    handle: &p2p::P2PHostHandle,
+    topic: DefraTopic,
+    payload: PushLogBroadcast,
+) -> libp2p::gossipsub::MessageId {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match handle.publish(topic.clone(), payload.clone()).await {
+            Ok(id) => return id,
+            Err(e) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "publish never succeeded within 15s: {e}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+}
+
 async fn send_two_stream_request_and_capture_flag(
     sender: &p2p::P2PHostHandle,
     receiver: &p2p::P2PHostHandle,
@@ -570,21 +593,11 @@ async fn test_replicator_management() {
     handle.shutdown().await.unwrap();
 }
 
-// Regression guard for issue #834.
-//
-// Go DefraDB (via go-libp2p-pubsub) uses the default message-id function,
-// which hashes `(source peer, sequence number)`. Two peers publishing the
-// same payload on the same topic therefore produce DIFFERENT message IDs.
-//
-// The Rust implementation previously overrode `message_id_fn` in
-// `crates/p2p/src/behaviour.rs` to compute `sha256(message.data)`, which
-// collides across senders with identical payloads. Removing that override
-// restores Go parity.
-//
-// This test fails on the pre-fix code: both hosts publish identical
-// `PushLogBroadcast` content, and the current custom `sha256(data)`
-// `message_id_fn` returns the same `MessageId` from each. Post-fix, the
-// IDs differ because they incorporate the sender's peer ID and sequence.
+// Regression guard for issue #834. Go's gossipsub default message-id is
+// `(source peer, sequence number)`, so identical payloads from different
+// senders produce DIFFERENT IDs. A prior Rust override hashed message
+// data, collapsing them — see #834. This test fails pre-fix and passes
+// post-fix.
 #[tokio::test]
 async fn regression_834_gossipsub_message_id_distinguishes_senders() {
     let store0 = MockBitswapStore::new();
@@ -616,11 +629,6 @@ async fn regression_834_gossipsub_message_id_distinguishes_senders() {
     handle0.subscribe(topic.clone()).await.unwrap();
     handle1.subscribe(topic.clone()).await.unwrap();
 
-    // Wait for gossipsub mesh formation — each peer must see the other
-    // on the topic, AND the mesh GRAFT exchange must complete. Heartbeat
-    // interval is 1s; we poll until `publish` actually succeeds rather
-    // than relying on `topic_peers` alone (which reflects subscription
-    // knowledge, not mesh membership).
     let payload = PushLogBroadcast::new(
         "doc-834".to_string(),
         Bytes::from(vec![0xCA, 0xFE]),
@@ -629,26 +637,6 @@ async fn regression_834_gossipsub_message_id_distinguishes_senders() {
         Bytes::from(vec![0x01, 0x02, 0x03]),
         None,
     );
-
-    async fn publish_when_ready(
-        handle: &p2p::P2PHostHandle,
-        topic: DefraTopic,
-        payload: PushLogBroadcast,
-    ) -> libp2p::gossipsub::MessageId {
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        loop {
-            match handle.publish(topic.clone(), payload.clone()).await {
-                Ok(id) => return id,
-                Err(e) => {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "publish never succeeded within 15s: {e}"
-                    );
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-            }
-        }
-    }
 
     let id_from_peer0 = publish_when_ready(&handle0, topic.clone(), payload.clone()).await;
     let id_from_peer1 = publish_when_ready(&handle1, topic, payload).await;
