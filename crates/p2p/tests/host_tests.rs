@@ -36,6 +36,28 @@ async fn wait_until_connected(handle: &p2p::P2PHostHandle, peer_id: PeerId) {
     }
 }
 
+async fn assert_hosts_connect_over(listen_addr: &str) {
+    let store0 = MockBitswapStore::new();
+    let store1 = MockBitswapStore::new();
+    let (host0, handle0, _events0, _replicators0) = P2PHost::new(store0).await.unwrap();
+    let (host1, handle1, _events1, _replicators1) = P2PHost::new(store1).await.unwrap();
+
+    tokio::spawn(host0.run());
+    tokio::spawn(host1.run());
+
+    handle1.listen(listen_addr.parse().unwrap()).await.unwrap();
+    let addr1 = handle1.listen_addresses().await.unwrap().remove(0);
+    let peer1 = handle1.local_peer_id_cached();
+    let peer0 = handle0.local_peer_id_cached();
+
+    handle0.dial(peer1, vec![addr1]).await.unwrap();
+    wait_until_connected(&handle0, peer1).await;
+    wait_until_connected(&handle1, peer0).await;
+
+    handle0.shutdown().await.unwrap();
+    handle1.shutdown().await.unwrap();
+}
+
 async fn send_two_stream_request_and_capture_flag(
     sender: &p2p::P2PHostHandle,
     receiver: &p2p::P2PHostHandle,
@@ -113,6 +135,16 @@ async fn test_host_creation() {
 
     // Shutdown
     handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_host_connects_over_quic() {
+    assert_hosts_connect_over("/ip4/127.0.0.1/udp/0/quic-v1").await;
+}
+
+#[tokio::test]
+async fn test_host_connects_over_websocket() {
+    assert_hosts_connect_over("/ip4/127.0.0.1/tcp/0/ws").await;
 }
 
 #[tokio::test]
