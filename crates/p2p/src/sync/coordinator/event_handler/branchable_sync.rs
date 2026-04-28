@@ -4,6 +4,7 @@ use cid::Cid;
 
 use blockstore::Blockstore;
 
+use super::super::dag_context::DagFetchContext;
 use super::super::SyncCoordinator;
 use crate::error::Result;
 use crate::message::BranchableSyncReply;
@@ -191,6 +192,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 let collection_id = reply.collection_id.clone();
                 let semaphore = semaphore.clone();
                 let source_peer = peer_id.clone();
+                let is_explicit_replicator =
+                    self.is_registered_replicator(peer_id.as_str(), &collection_id);
 
                 self.spawn_background_task("branchable_sync_reply_fetch_dag", async move {
                     let Ok(_permit) = semaphore.acquire_owned().await else {
@@ -201,10 +204,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         blockstore,
                         event_tx,
                         root_cid,
-                        String::new(),
-                        collection_id,
-                        String::new(),
-                        source_peer,
+                        DagFetchContext::new(
+                            String::new(),
+                            collection_id,
+                            String::new(),
+                            source_peer,
+                        )
+                        .with_explicit_replicator(is_explicit_replicator),
                     )
                     .await;
                 });

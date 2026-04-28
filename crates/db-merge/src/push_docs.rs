@@ -5,11 +5,16 @@ use bytes::Bytes;
 use p2p::message::PushLogRequest;
 use storage::corekv::{IterOptions, Reader, Store};
 
-use crate::push_docs_common::{
-    load_latest_composite_head_cids, load_push_dag_blocks, resolve_push_creator,
-    MAX_CONCURRENT_REPLAY_TASKS,
-};
+use crate::push_docs_common::{load_latest_composite_head_cids, load_push_dag_blocks};
+use crate::push_docs_creator::resolve_push_creator;
+use crate::push_docs_replay::{ReplayPushConfig, ReplayPushGate};
 use db::database::DB;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PushExistingDocsSeOptions<'a> {
+    pub encryption_key: Option<&'a [u8]>,
+    pub identity_pubkey: Option<&'a [u8]>,
+}
 
 /// Push existing documents to a replicator peer.
 ///
@@ -26,6 +31,31 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
     collections: &[String],
     se_encryption_key: Option<&[u8]>,
     se_identity_pubkey: Option<&[u8]>,
+) -> Result<(), String> {
+    push_existing_docs_with_config(
+        handle,
+        db,
+        document_acp,
+        peer_id,
+        collections,
+        PushExistingDocsSeOptions {
+            encryption_key: se_encryption_key,
+            identity_pubkey: se_identity_pubkey,
+        },
+        ReplayPushConfig::default(),
+    )
+    .await
+}
+
+/// Push existing documents to a replicator peer with explicit replay limits.
+pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>(
+    handle: &p2p::P2PHostHandle,
+    db: &DB<S>,
+    document_acp: Option<&dyn DocumentACP>,
+    peer_id: libp2p::PeerId,
+    collections: &[String],
+    se_options: PushExistingDocsSeOptions<'_>,
+    replay_config: ReplayPushConfig,
 ) -> Result<(), String> {
     // Wait for the connection to be fully established (dial is non-blocking).
     // After a node restart, re-establishing connectivity can take longer than
@@ -69,7 +99,9 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
 
     // Collect JoinHandles so we can await all pushes before signaling completion.
     let mut push_handles = Vec::new();
-    let replay_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REPLAY_TASKS));
+    let replay_gate = Arc::new(ReplayPushGate::new(replay_config));
+    let peer_key = p2p::transport::PeerId::from(peer_id);
+    let mut skipped_creator_docs = 0usize;
 
     for col_name in collections {
         let collection = match db
@@ -115,8 +147,27 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
         // processes the composite block, otherwise it tries Bitswap which
         // doesn't work reliably cross-platform.
         for doc_id in &doc_ids {
-            let creator =
-                resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id_str).await;
+            let creator = match resolve_push_creator(
+                document_acp,
+                &collection,
+                doc_id,
+                &local_peer_id_str,
+            )
+            .await
+            {
+                Ok(creator) => creator,
+                Err(error) => {
+                    skipped_creator_docs += 1;
+                    tracing::warn!(
+                        collection = %collection.name(),
+                        collection_id = %collection.collection_id(),
+                        doc_id = %doc_id,
+                        error = %error,
+                        "Skipping existing document replay because ACP creator could not be resolved"
+                    );
+                    continue;
+                }
+            };
             // Collect phase: pre-load all DAG blocks before spawning tasks.
             let mut doc_blocks = Vec::new();
             for head_cid in
@@ -154,18 +205,22 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
 
             if !requests.is_empty() {
                 let push_h = handle.clone();
+                let gate = replay_gate.clone();
+                let peer_key = peer_key.clone();
                 let total_blocks = requests.len();
-                let permit = replay_semaphore
-                    .clone()
-                    .acquire_owned()
+                let permit = replay_gate
+                    .acquire_document_task()
                     .await
-                    .map_err(|_| "replay semaphore closed before scheduling push".to_string())?;
+                    .map_err(|e| format!("replay gate closed before scheduling push: {e}"))?;
                 push_handles.push(tokio::spawn(async move {
                     let _permit = permit;
                     let mut completed_blocks = 0usize;
                     for req in requests {
                         let cid = req.cid.clone();
-                        match push_h.send_two_stream_request(peer_id, req).await {
+                        match gate
+                            .send_pushlog(&peer_key, push_h.send_two_stream_request(peer_id, req))
+                            .await
+                        {
                             Ok(reply) if reply.err_message.is_some() => {
                                 tracing::warn!(
                                     peer_id = %peer_id,
@@ -218,9 +273,15 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
     }
     tracing::debug!("all push tasks completed");
 
+    if skipped_creator_docs > 0 {
+        return Err(format!(
+            "skipped {skipped_creator_docs} existing document replay(s) because ACP creator could not be resolved"
+        ));
+    }
+
     // Generate and push SE artifacts for collections with encrypted indexes.
-    if let Some(se_key) = se_encryption_key {
-        let coordinator = match se_identity_pubkey {
+    if let Some(se_key) = se_options.encryption_key {
+        let coordinator = match se_options.identity_pubkey {
             Some(pubkey) => {
                 crate::se::SECoordinator::with_key_and_identity(se_key.to_vec(), pubkey.to_vec())
             }
@@ -359,7 +420,9 @@ pub async fn retry_doc<S: Store + 'static>(
         .find_collection_by_id(collection_id)
         .map_err(|e| format!("failed to get collection: {}", e))?
         .ok_or_else(|| format!("collection '{}' not found", collection_id))?;
-    let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id_str).await;
+    let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id_str)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let headstore = storage::stores::Headstore::new(db.store().clone());
     let head_txn = headstore

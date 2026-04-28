@@ -15,11 +15,14 @@ use tokio::time::timeout;
 
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Error;
-use crate::message::{BranchableSyncRequest, DocSyncRequest, PushLogBroadcast, PushLogRequest};
+use crate::message::{
+    BranchableSyncRequest, CarFetchRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
+    PushLogRequest,
+};
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::NoOpCollectionStorage;
-use crate::sync::head_provider::NoOpHeadProvider;
-use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
+use crate::sync::head_provider::{DocumentHeadProvider, NoOpHeadProvider};
+use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager, DEFAULT_PUSH_SEND_TIMEOUT};
 use crate::sync::peer_state::PeerStateTracker;
 use crate::sync::rate_limiter::PeerRateLimiter;
 use crate::sync::SyncShutdownHandle;
@@ -101,6 +104,16 @@ fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
     SyncCoordinator<B, NoopTransport>,
     tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
 ) {
+    create_test_coordinator_with_blockstore_and_head_provider(params, Arc::new(NoOpHeadProvider))
+}
+
+fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'static>(
+    params: TestCoordinatorParams<B>,
+    head_provider: Arc<dyn DocumentHeadProvider>,
+) -> (
+    SyncCoordinator<B, NoopTransport>,
+    tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
+) {
     let TestCoordinatorParams {
         access_mode,
         replicators,
@@ -133,6 +146,7 @@ fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
                 DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
             )),
             rate_limiter,
+            push_send_timeout: DEFAULT_PUSH_SEND_TIMEOUT,
             shutdown: SyncShutdownHandle::new(),
         },
         manager,
@@ -147,7 +161,7 @@ fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
                 std::collections::HashSet::new(),
             )),
             collection_store: Arc::new(NoOpCollectionStorage),
-            head_provider: Arc::new(NoOpHeadProvider),
+            head_provider,
         },
         authorizer,
         document_acp: std::sync::OnceLock::new(),
@@ -252,6 +266,7 @@ struct NoopTransport {
     pubkey: Vec<u8>,
     replicators: Arc<RwLock<std::collections::HashMap<String, Vec<String>>>>,
     connected_peers: Arc<RwLock<Vec<PeerId>>>,
+    doc_sync_replies: Arc<RwLock<Vec<DocSyncReply>>>,
 }
 
 impl NoopTransport {
@@ -261,11 +276,16 @@ impl NoopTransport {
             pubkey: vec![1, 2, 3],
             replicators: Arc::new(RwLock::new(std::collections::HashMap::new())),
             connected_peers: Arc::new(RwLock::new(Vec::new())),
+            doc_sync_replies: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
     fn set_connected_peers(&self, peers: Vec<PeerId>) {
         *self.connected_peers.write() = peers;
+    }
+
+    fn doc_sync_replies(&self) -> Vec<DocSyncReply> {
+        self.doc_sync_replies.read().clone()
     }
 }
 
@@ -368,8 +388,9 @@ impl P2PTransport for NoopTransport {
     async fn send_doc_sync_response(
         &self,
         _peer_id: &PeerId,
-        _reply: crate::message::DocSyncReply,
+        reply: crate::message::DocSyncReply,
     ) -> crate::Result<()> {
+        self.doc_sync_replies.write().push(reply);
         Ok(())
     }
 
@@ -408,8 +429,9 @@ impl P2PTransport for NoopTransport {
     async fn send_doc_sync_response_token(
         &self,
         _token: Self::ResponseToken,
-        _reply: crate::message::DocSyncReply,
+        reply: crate::message::DocSyncReply,
     ) -> crate::Result<()> {
+        self.doc_sync_replies.write().push(reply);
         Ok(())
     }
 
@@ -558,6 +580,29 @@ fn gossip_event_on_topic(peer_id: PeerId, topic: &str, collection_id: &str) -> T
         message_id: MessageId::new("gossip".to_string()),
         topic: topic.to_string(),
         message: PushLogBroadcast::from_request(&pushlog_request(collection_id)),
+    }
+}
+
+fn car_fetch_event(peer_id: PeerId, root_cid: Cid) -> TransportEvent<()> {
+    TransportEvent::CarFetchRequest {
+        peer_id,
+        request: CarFetchRequest::full_dag(root_cid),
+        token: None,
+    }
+}
+
+struct StaticHeadProvider {
+    heads: Vec<Cid>,
+}
+
+#[async_trait]
+impl DocumentHeadProvider for StaticHeadProvider {
+    async fn get_document_heads(&self, _doc_id: &str) -> crate::Result<Vec<Cid>> {
+        Ok(self.heads.clone())
+    }
+
+    async fn get_collection_heads(&self, _collection_id: &str) -> crate::Result<Vec<Cid>> {
+        Ok(Vec::new())
     }
 }
 
@@ -719,6 +764,116 @@ async fn doc_sync_controlled_mode_allows_any_replicator() {
     assert!(
         !matches!(&result, Err(Error::AccessDenied { .. })),
         "Registered replicator (any collection) should be allowed, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn doc_sync_filters_heads_outside_replicator_collection() {
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta};
+
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+
+    let peer = random_peer_id();
+    replicators.add_replicator("collection_a", peer.as_str());
+
+    let transport = NoopTransport::new();
+    let transport_handle = transport.clone();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "collection_b".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![],
+    );
+    let block_data = block.to_dag_cbor().unwrap();
+    let cid = block.generate_cid().unwrap();
+    blockstore.put(&cid, &block_data).await.unwrap();
+
+    let (coordinator, _events) = create_test_coordinator_with_blockstore_and_head_provider(
+        TestCoordinatorParams {
+            access_mode: AccessMode::Controlled,
+            replicators,
+            peer_state,
+            transport,
+            local_peer_id,
+            broadcaster,
+            blockstore,
+            rate_limiter: Arc::new(PeerRateLimiter::default()),
+        },
+        Arc::new(StaticHeadProvider { heads: vec![cid] }),
+    );
+
+    coordinator
+        .handle_transport_event(doc_sync_event(peer))
+        .await
+        .unwrap();
+
+    let replies = transport_handle.doc_sync_replies();
+    assert_eq!(replies.len(), 1);
+    assert!(
+        replies[0].results.is_empty(),
+        "DocSync must not return heads from collections the peer cannot replicate"
+    );
+}
+
+#[tokio::test]
+async fn car_fetch_controlled_mode_rejects_wrong_collection_root() {
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta};
+
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+
+    let peer = random_peer_id();
+    replicators.add_replicator("collection_a", peer.as_str());
+
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "collection_b".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![],
+    );
+    let block_data = block.to_dag_cbor().unwrap();
+    let cid = block.generate_cid().unwrap();
+    blockstore.put(&cid, &block_data).await.unwrap();
+
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        access_mode: AccessMode::Controlled,
+        replicators,
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore,
+        rate_limiter: Arc::new(PeerRateLimiter::default()),
+    });
+
+    let result = coordinator
+        .handle_transport_event(car_fetch_event(peer, cid))
+        .await;
+
+    assert!(
+        matches!(result, Err(Error::AccessDenied { .. })),
+        "CAR root access must be collection-scoped in Controlled mode, got {:?}",
         result
     );
 }
@@ -1057,6 +1212,37 @@ async fn create_replicator_updates_access_registry_for_gossip() {
         "registered replicator should authorize gossip immediately, got {:?}",
         result
     );
+}
+
+#[tokio::test]
+async fn gossip_registered_replicator_is_marked_explicit_replicator() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    replicators.add_replicator("collection1", peer.as_str());
+
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .handle_transport_event(gossip_event(peer.clone(), "collection1"))
+        .await
+        .unwrap();
+
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+            assert!(
+                is_explicit_replicator,
+                "registered gossip source should preserve explicit replicator trust"
+            );
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
 }
 
 #[tokio::test]

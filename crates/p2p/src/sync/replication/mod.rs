@@ -92,6 +92,45 @@ mod tests {
         }
     }
 
+    struct SlowMergeHandler {
+        call_count: AtomicUsize,
+        in_flight: AtomicUsize,
+        max_in_flight: AtomicUsize,
+    }
+
+    impl SlowMergeHandler {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                in_flight: AtomicUsize::new(0),
+                max_in_flight: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.call_count.load(Ordering::SeqCst)
+        }
+
+        fn max_in_flight(&self) -> usize {
+            self.max_in_flight.load(Ordering::SeqCst)
+        }
+
+        fn record_in_flight(&self, current: usize) {
+            let mut observed = self.max_in_flight.load(Ordering::SeqCst);
+            while current > observed {
+                match self.max_in_flight.compare_exchange(
+                    observed,
+                    current,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(next) => observed = next,
+                }
+            }
+        }
+    }
+
     #[derive(Debug)]
     struct TestError(String);
 
@@ -621,6 +660,25 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl MergeHandler for SlowMergeHandler {
+        type Error = TestError;
+
+        async fn handle_block(
+            &self,
+            _cid: &Cid,
+            _block_data: &[u8],
+            _metadata: BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, Self::Error> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let current = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.record_in_flight(current);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(MergeOutcome::Merged)
+        }
+    }
+
     /// Batch-aware merge handler that tracks per-block and batch calls separately.
     struct BatchTestHandler {
         per_block_calls: AtomicUsize,
@@ -1121,7 +1179,7 @@ mod tests {
                     bytes::Bytes::from(root_data),
                 ),
                 token: None,
-                is_explicit_replicator: false,
+                is_explicit_replicator: true,
                 explicit_replay_authorization: None,
             })
             .await
@@ -1152,7 +1210,28 @@ mod tests {
             .expect("DagReady should arrive")
             .expect("event should be present");
 
-        assert!(matches!(&event, SyncEvent::DagReady { root_cid: cid, .. } if *cid == root_cid));
+        match &event {
+            SyncEvent::DagReady {
+                root_cid: cid,
+                doc_id,
+                collection_id,
+                creator,
+                sender_peer,
+                is_explicit_replicator,
+                ..
+            } => {
+                assert_eq!(*cid, root_cid);
+                assert_eq!(doc_id, "doc1");
+                assert_eq!(collection_id, "col1");
+                assert_eq!(creator, "creator-1");
+                assert_eq!(sender_peer.as_deref(), Some("source-peer"));
+                assert!(
+                    *is_explicit_replicator,
+                    "poll fetcher should preserve push-driven explicit replicator trust"
+                );
+            }
+            other => panic!("expected DagReady, got {:?}", other),
+        }
         assert_eq!(transport_handle.sync_blocks_calls(), 0);
         assert!(blockstore.has(&child_cid).await.unwrap());
 
@@ -1277,6 +1356,92 @@ mod tests {
             0,
             "closed semaphore should stop the loop before any worker starts"
         );
+    }
+
+    #[tokio::test]
+    async fn test_run_parallel_serializes_duplicate_cids() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let cid = test_cid();
+        blockstore.put(&cid, b"test data").await.unwrap();
+
+        let (coordinator, _events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                NoopTransport::new(),
+                blockstore,
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            )
+            .await
+            .unwrap();
+
+        let (tx, rx) = mpsc::channel(2);
+        for _ in 0..2 {
+            tx.send(SyncEvent::BlockReceived {
+                cid,
+                doc_id: "doc1".to_string(),
+                collection_id: "col1".to_string(),
+                creator: "peer1".to_string(),
+                sender_peer: Some("sender1".to_string()),
+                is_explicit_replicator: true,
+                explicit_replay_authorization: None,
+                acp_actor_relationships: None,
+            })
+            .await
+            .unwrap();
+        }
+        drop(tx);
+
+        let handler = Arc::new(SlowMergeHandler::new());
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        ReplicationLoop::run_parallel_with_semaphore(
+            Arc::new(coordinator),
+            rx,
+            handler.clone(),
+            ReplicationConfig {
+                max_workers: 2,
+                ..Default::default()
+            },
+            move |result| {
+                let _ = result_tx.send(result);
+            },
+            Arc::new(Semaphore::new(2)),
+        )
+        .await;
+
+        let mut results = Vec::new();
+        for _ in 0..2 {
+            results.push(
+                tokio::time::timeout(Duration::from_secs(1), result_rx.recv())
+                    .await
+                    .expect("result should arrive")
+                    .expect("result channel should remain open"),
+            );
+        }
+
+        assert_eq!(handler.calls(), 1, "duplicate CID should merge once");
+        assert_eq!(
+            handler.max_in_flight(),
+            1,
+            "duplicate CID merges must not overlap"
+        );
+        assert!(results
+            .iter()
+            .any(|result| matches!(result, ReplicationResult::Merged { cid: c, .. } if *c == cid)));
+        assert!(results.iter().any(|result| {
+            matches!(
+                result,
+                ReplicationResult::Skipped {
+                    cid: c,
+                    terminal: true,
+                    reason,
+                    ..
+                } if *c == cid && reason == "already merged"
+            )
+        }));
     }
 
     // =========================================================================

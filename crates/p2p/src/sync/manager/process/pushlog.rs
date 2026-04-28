@@ -582,4 +582,36 @@ mod tests {
             vec![field_cid]
         );
     }
+
+    #[tokio::test]
+    async fn process_pushlog_clears_pending_dag_when_fetch_event_receiver_is_dropped() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, events) =
+            SyncManager::new(blockstore.clone(), peer_state, SyncConfig::default());
+        drop(events);
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (composite_cid, composite_block) = create_composite_block("doc123", "name", field_cid);
+        blockstore
+            .put(&composite_cid, &composite_block)
+            .await
+            .expect("store composite block");
+
+        let (collection_cid, collection_block) =
+            create_collection_block("schema1", "doc123", composite_cid);
+
+        let result = manager
+            .process_pushlog(
+                &make_broadcast("doc123", collection_cid, collection_block, "collection1"),
+                Some("peer-1"),
+                false,
+                None,
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::ChannelSend)));
+        assert_eq!(manager.pending_dag_count(), 0);
+    }
 }

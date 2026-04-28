@@ -83,9 +83,13 @@ pub use error::{Error, Result};
 pub use explicit_replay::{
     generate_capability as generate_explicit_replay_capability,
     generate_capability_from_claims as generate_explicit_replay_capability_from_claims,
-    verify_capability as verify_explicit_replay_capability, ExplicitReplayAuthorization,
-    ExplicitReplayCapabilityClaims,
+    is_capability_revoked as is_explicit_replay_capability_revoked,
+    revoke_capability as revoke_explicit_replay_capability,
+    verify_capability as verify_explicit_replay_capability,
+    verify_capability_with_revocations as verify_explicit_replay_capability_with_revocations,
+    ExplicitReplayAuthorization, ExplicitReplayCapabilityClaims, ExplicitReplayRevocationRegistry,
     DEFAULT_CAPABILITY_TTL as DEFAULT_EXPLICIT_REPLAY_CAPABILITY_TTL,
+    MAX_CAPABILITY_TTL as MAX_EXPLICIT_REPLAY_CAPABILITY_TTL,
 };
 pub use host::{
     convert_host_event, HostCommand, HostEvent, Libp2pTransport, P2PHost, P2PHostConfig,
@@ -129,7 +133,7 @@ pub use iroh_bitswap::Store as BitswapStore;
 pub struct QueryId(pub u64);
 
 // Re-export replicator types
-pub use replicator::ReplicatorInfo;
+pub use replicator::{ReplicatorInfo, ReplicatorStatus};
 
 // Re-export two-stream protocol types
 pub use two_stream::{TwoStreamEvent, TwoStreamHandler, TwoStreamRunner};

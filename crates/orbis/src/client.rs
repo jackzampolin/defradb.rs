@@ -91,7 +91,7 @@ struct UtilitySignClaims {
 /// Holds a dedicated single-threaded tokio runtime so that `sign_sync()`
 /// can be called from synchronous contexts without nesting `block_on`.
 pub struct OrbisClient {
-    endpoint: String,
+    channel: Channel,
     ring_id: String,
     derivation: Vec<u8>,
     /// BLS public key bytes from DerivePublicKey response
@@ -128,7 +128,7 @@ impl OrbisClient {
                 source: Box::new(source),
             })?;
 
-        let mut client = UtilityServiceClient::new(channel);
+        let mut client = UtilityServiceClient::new(channel.clone());
 
         let resp = client
             .derive_public_key(DerivePublicKeyRequest {
@@ -163,7 +163,7 @@ impl OrbisClient {
             .map_err(OrbisClientError::RuntimeBuild)?;
 
         Ok(Self {
-            endpoint,
+            channel,
             ring_id,
             derivation: derivation_bytes,
             public_key_bytes,
@@ -319,21 +319,6 @@ impl OrbisClient {
         data: &[u8],
         authorization: Option<SigningAuthorization>,
     ) -> Result<Vec<u8>, OrbisClientError> {
-        let connect_start = Instant::now();
-        let channel = Channel::from_shared(self.endpoint.clone())
-            .map_err(|e| OrbisClientError::InvalidEndpoint(e.to_string()))?
-            .connect()
-            .await
-            .map_err(|source| OrbisClientError::Connect {
-                endpoint: self.endpoint.clone(),
-                source: Box::new(source),
-            })?;
-        info!(
-            ring_id = %self.ring_id,
-            elapsed = ?connect_start.elapsed(),
-            "Orbis gRPC channel connected"
-        );
-
         match authorization.as_ref() {
             Some(SigningAuthorization::Decision { decision_id }) => {
                 info!(
@@ -372,14 +357,16 @@ impl OrbisClient {
         let bearer_token = self.create_bearer_token(data.to_vec(), authorization.as_ref())?;
 
         #[allow(clippy::result_large_err)]
-        let mut client =
-            UtilityServiceClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
+        let mut client = UtilityServiceClient::with_interceptor(
+            self.channel.clone(),
+            move |mut req: tonic::Request<()>| {
                 let val: MetadataValue<_> = format!("Bearer {}", bearer_token)
                     .parse()
                     .map_err(|_| tonic::Status::internal("invalid bearer token"))?;
                 req.metadata_mut().insert("authorization", val);
                 Ok(req)
-            });
+            },
+        );
 
         let sign_rpc_start = Instant::now();
         let resp = client
@@ -432,10 +419,13 @@ impl RemoteSigner for OrbisClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use identity::Identity;
     use tokio::sync::oneshot;
     use tokio_stream::wrappers::TcpListenerStream;
+    use tokio_stream::StreamExt;
     use tonic::transport::Server;
     use tonic::{Request, Response, Status};
 
@@ -446,19 +436,22 @@ mod tests {
         let private_key = crypto::generate_secp256k1().expect("should generate secp256k1 key");
         let service_identity =
             Arc::new(identity::RawIdentity::from_secp256k1(private_key).expect("identity"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let channel = runtime
+            .block_on(async { Channel::from_static("http://127.0.0.1:50051").connect_lazy() });
 
         OrbisClient {
-            endpoint: "http://127.0.0.1:50051".to_string(),
+            channel,
             ring_id: "ring-123".to_string(),
             derivation: b"platform".to_vec(),
             public_key_bytes: vec![1, 2, 3],
             public_key_hex: "010203".to_string(),
             signer_did: "did:key:zSigner".to_string(),
             service_identity,
-            runtime: tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime"),
+            runtime,
         }
     }
 
@@ -556,6 +549,7 @@ mod tests {
 
     struct TestServer {
         endpoint: String,
+        accepted_connections: Arc<AtomicUsize>,
         shutdown: Option<oneshot::Sender<()>>,
         task: tokio::task::JoinHandle<()>,
     }
@@ -568,7 +562,14 @@ mod tests {
                 .set_nonblocking(true)
                 .expect("set nonblocking test server");
             let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
-            let incoming = TcpListenerStream::new(listener);
+            let accepted_connections = Arc::new(AtomicUsize::new(0));
+            let accepted_connections_for_stream = Arc::clone(&accepted_connections);
+            let incoming = TcpListenerStream::new(listener).map(move |result| {
+                if result.is_ok() {
+                    accepted_connections_for_stream.fetch_add(1, Ordering::SeqCst);
+                }
+                result
+            });
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
             let task = tokio::spawn(async move {
@@ -585,9 +586,14 @@ mod tests {
 
             Self {
                 endpoint: format!("http://{}", addr),
+                accepted_connections,
                 shutdown: Some(shutdown_tx),
                 task,
             }
+        }
+
+        fn accepted_connections(&self) -> usize {
+            self.accepted_connections.load(Ordering::SeqCst)
         }
     }
 
@@ -708,5 +714,45 @@ mod tests {
         .expect("blocking task should join");
 
         assert!(err.contains("Orbis Sign returned empty signature"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sign_sync_reuses_initialized_grpc_channel() {
+        let server = TestServer::start(MockUtilityService {
+            derive_public_key_response: DerivePublicKeyResponse {
+                public_key: valid_bls_public_key_bytes(),
+                algorithm: 0,
+            },
+            sign_response: SignResponse {
+                signature: vec![1, 2, 3],
+                algorithm: 0,
+                public_key: vec![],
+                metadata: Default::default(),
+            },
+        })
+        .await;
+
+        let client = OrbisClient::new(
+            server.endpoint.clone(),
+            "ring-123".to_string(),
+            "platform".to_string(),
+            make_test_service_identity(),
+        )
+        .await
+        .expect("client should build");
+
+        assert_eq!(server.accepted_connections(), 1);
+
+        let (first_signature, second_signature) = tokio::task::spawn_blocking(move || {
+            let first_signature = client.sign_sync(b"hello", None).expect("first sign");
+            let second_signature = client.sign_sync(b"world", None).expect("second sign");
+            (first_signature, second_signature)
+        })
+        .await
+        .expect("blocking task should join");
+
+        assert_eq!(first_signature, vec![1, 2, 3]);
+        assert_eq!(second_signature, vec![1, 2, 3]);
+        assert_eq!(server.accepted_connections(), 1);
     }
 }

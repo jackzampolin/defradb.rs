@@ -10,6 +10,8 @@ pub mod merge_handler;
 pub mod peer_identity;
 pub mod push_docs;
 pub mod push_docs_common;
+mod push_docs_creator;
+mod push_docs_replay;
 pub mod push_docs_transport;
 pub mod replication;
 pub mod se;
@@ -22,8 +24,14 @@ pub use merge_handler::{DbMergeHandler, MergeError};
 pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };
-pub use push_docs::{push_existing_docs, retry_doc};
-pub use push_docs_transport::{push_existing_docs_via_transport, retry_doc_via_transport};
+pub use push_docs::{
+    push_existing_docs, push_existing_docs_with_config, retry_doc, PushExistingDocsSeOptions,
+};
+pub use push_docs_replay::ReplayPushConfig;
+pub use push_docs_transport::{
+    push_existing_docs_via_transport, push_existing_docs_via_transport_with_config,
+    retry_doc_via_transport,
+};
 pub use replication::{
     attach_failure_channel, create_acp_merge_handler, create_broadcast_mutator,
     create_head_provider, create_merge_handler, create_replication_stack,

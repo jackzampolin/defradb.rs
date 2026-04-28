@@ -7,7 +7,7 @@ use crate::codec::write_message;
 use crate::error::{Error, Result};
 use crate::message::{DocSyncReply, DocSyncRequest};
 
-use super::{TwoStreamHandler, RESPONSE_TIMEOUT};
+use super::{PendingResponseKey, TwoStreamHandler, RESPONSE_TIMEOUT};
 
 impl TwoStreamHandler {
     /// Send a DocSync request to a peer and wait for response.
@@ -20,16 +20,17 @@ impl TwoStreamHandler {
         request: DocSyncRequest,
     ) -> Result<DocSyncReply> {
         let message_id = request.message_id.clone();
+        let pending_key = PendingResponseKey::new(peer_id, message_id.clone());
 
         // Create response channel
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        // Register pending response (use the same pending map, keyed by message ID)
+        // Register pending response against the expected peer as well as the message ID.
         {
             let mut pending = self.pending.lock();
             // Store as a PushLogReply channel - we'll need a different approach for DocSyncReply
             // Actually, we need a separate map for DocSync responses
-            pending.channels.insert(message_id.clone(), tx);
+            pending.channels.insert(pending_key.clone(), tx);
         }
 
         // Open stream and send request
@@ -40,14 +41,14 @@ impl TwoStreamHandler {
             .map_err(|e| {
                 // Clean up pending on failure
                 let mut pending = self.pending.lock();
-                pending.channels.remove(&message_id);
+                pending.channels.remove(&pending_key);
                 Error::Transport(format!("failed to open stream: {}", e))
             })?;
 
         write_message(&mut stream, &request).await.map_err(|e| {
             // Clean up pending on failure
             let mut pending = self.pending.lock();
-            pending.channels.remove(&message_id);
+            pending.channels.remove(&pending_key);
             Error::CborSerialization(format!("failed to write request: {}", e))
         })?;
 
@@ -72,12 +73,12 @@ impl TwoStreamHandler {
             }
             Ok(Err(_)) => {
                 let mut pending = self.pending.lock();
-                pending.channels.remove(&message_id);
+                pending.channels.remove(&pending_key);
                 Err(Error::Transport("response channel closed".into()))
             }
             Err(_) => {
                 let mut pending = self.pending.lock();
-                pending.channels.remove(&message_id);
+                pending.channels.remove(&pending_key);
                 Err(Error::Transport("timeout waiting for response".into()))
             }
         }

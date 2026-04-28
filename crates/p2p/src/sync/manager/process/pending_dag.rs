@@ -1,5 +1,6 @@
 //! Pending DAG registration and retry logic.
 
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use cid::Cid;
@@ -20,6 +21,23 @@ pub struct PendingDagFetchFailure {
     pub source_peer: Option<String>,
     pub missing_count: usize,
     pub fetch_failures: u32,
+}
+
+fn evict_expired_pending_dags(
+    pending: &mut HashMap<Cid, PendingDag>,
+    now: Instant,
+) -> Vec<(Cid, PendingDag)> {
+    let expired: Vec<_> = pending
+        .iter()
+        .filter(|(_, dag)| now.duration_since(dag.inserted_at) >= PENDING_DAG_TTL)
+        .map(|(cid, dag)| (*cid, dag.clone()))
+        .collect();
+
+    for (cid, _) in &expired {
+        pending.remove(cid);
+    }
+
+    expired
 }
 
 impl<B: Blockstore + 'static> SyncManager<B> {
@@ -120,17 +138,43 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// new entry is silently dropped and `false` is returned so callers can log.
     pub(super) fn insert_pending_dag(&self, root_cid: Cid, dag: PendingDag) -> bool {
         let mut pending = self.pending_dags.write();
-        let now = Instant::now();
+        evict_expired_pending_dags(&mut pending, Instant::now());
 
-        // Evict expired entries.
-        pending.retain(|_, v| now.duration_since(v.inserted_at) < PENDING_DAG_TTL);
-
-        if pending.len() >= MAX_PENDING_DAGS {
+        if pending.len() >= MAX_PENDING_DAGS && !pending.contains_key(&root_cid) {
             return false;
         }
 
         pending.insert(root_cid, dag);
         true
+    }
+
+    fn update_pending_dag_missing_if_current(
+        &self,
+        root_cid: &Cid,
+        inserted_at: Instant,
+        missing: HashSet<Cid>,
+    ) -> bool {
+        let mut pending = self.pending_dags.write();
+        let Some(dag) = pending.get_mut(root_cid) else {
+            return false;
+        };
+        if dag.inserted_at != inserted_at {
+            return false;
+        }
+        dag.missing = missing;
+        true
+    }
+
+    fn take_pending_dag_if_current(
+        &self,
+        root_cid: &Cid,
+        inserted_at: Instant,
+    ) -> Option<PendingDag> {
+        let mut pending = self.pending_dags.write();
+        match pending.get(root_cid) {
+            Some(dag) if dag.inserted_at == inserted_at => pending.remove(root_cid),
+            _ => None,
+        }
     }
 
     /// Remove a pending DAG entry once another fetch path has completed it.
@@ -236,14 +280,24 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// blocks have arrived. We re-check the DAG for any remaining missing links
     /// (recursively, at all depths) and process it if complete.
     pub async fn retry_pending_dag(&self, root_cid: &Cid) -> Result<bool> {
+        enum PendingDagRetryEntry {
+            Current(PendingDag),
+            Expired(PendingDag),
+        }
+
         // Record the attempt (and capture the incremented value) while holding
         // the lock so concurrent retries observe monotonic attempt counts.
         let pending_info = {
             let mut pending = self.pending_dags.write();
-            pending.get_mut(root_cid).map(|dag| {
-                dag.attempts = dag.attempts.saturating_add(1);
-                dag.clone()
-            })
+            let expired = evict_expired_pending_dags(&mut pending, Instant::now());
+            if let Some((_, dag)) = expired.into_iter().find(|(cid, _)| cid == root_cid) {
+                Some(PendingDagRetryEntry::Expired(dag))
+            } else {
+                pending.get_mut(root_cid).map(|dag| {
+                    dag.attempts = dag.attempts.saturating_add(1);
+                    PendingDagRetryEntry::Current(dag.clone())
+                })
+            }
         };
 
         let Some(info) = pending_info else {
@@ -254,26 +308,27 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             return Ok(false);
         };
 
-        self.diagnostics.record_missing_link_retry();
+        let info = match info {
+            PendingDagRetryEntry::Current(info) => info,
+            PendingDagRetryEntry::Expired(info) => {
+                self.diagnostics.record_pending_dag_expired();
+                tracing::warn!(
+                    root_cid = %root_cid,
+                    doc_id = %info.doc_id,
+                    collection_id = %info.collection_id,
+                    source_peer = ?info.source_peer,
+                    missing_count = info.missing.len(),
+                    attempts = info.attempts,
+                    fetch_failures = info.fetch_failures,
+                    last_fetch_error = ?info.last_fetch_error,
+                    age_secs = info.inserted_at.elapsed().as_secs(),
+                    "Pending DAG expired (TTL exceeded), dropping"
+                );
+                return Ok(false);
+            }
+        };
 
-        // Check TTL before retrying.
-        if info.inserted_at.elapsed() >= PENDING_DAG_TTL {
-            self.pending_dags.write().remove(root_cid);
-            self.diagnostics.record_pending_dag_expired();
-            tracing::warn!(
-                root_cid = %root_cid,
-                doc_id = %info.doc_id,
-                collection_id = %info.collection_id,
-                source_peer = ?info.source_peer,
-                missing_count = info.missing.len(),
-                attempts = info.attempts,
-                fetch_failures = info.fetch_failures,
-                last_fetch_error = ?info.last_fetch_error,
-                age_secs = info.inserted_at.elapsed().as_secs(),
-                "Pending DAG expired (TTL exceeded), dropping"
-            );
-            return Ok(false);
-        }
+        self.diagnostics.record_missing_link_retry();
 
         // Load the root block from blockstore
         let block_data = match self.blockstore.get(root_cid).await {
@@ -324,18 +379,27 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 "Still missing blocks for DAG"
             );
             // Update the pending info with new missing CIDs (preserve original inserted_at).
-            self.pending_dags.write().insert(
-                *root_cid,
-                PendingDag {
-                    missing: missing.into_iter().collect(),
-                    ..info
-                },
-            );
+            if !self.update_pending_dag_missing_if_current(
+                root_cid,
+                info.inserted_at,
+                missing.into_iter().collect(),
+            ) {
+                tracing::debug!(
+                    root_cid = %root_cid,
+                    "Pending DAG changed before retry update; skipping stale retry result"
+                );
+            }
             return Ok(false);
         }
 
         // DAG is complete at all depths - remove from pending and process
-        self.pending_dags.write().remove(root_cid);
+        let Some(info) = self.take_pending_dag_if_current(root_cid, info.inserted_at) else {
+            tracing::debug!(
+                root_cid = %root_cid,
+                "Pending DAG changed before ready event; skipping stale retry result"
+            );
+            return Ok(false);
+        };
         self.diagnostics.record_pending_dag_resolved();
         tracing::info!(
             root_cid = %root_cid,
@@ -362,5 +426,116 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .await;
 
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use blockstore::DefraBlockstore;
+    use cid::multihash::{Code, MultihashDigest};
+    use storage::backends::MemoryStore;
+
+    use crate::sync::{PeerStateTracker, SyncConfig};
+
+    fn test_cid(label: usize) -> Cid {
+        Cid::new_v1(
+            0x55,
+            Code::Sha2_256.digest(format!("cid-{label}").as_bytes()),
+        )
+    }
+
+    fn test_manager() -> SyncManager<DefraBlockstore<MemoryStore>> {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, _events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
+        manager
+    }
+
+    fn pending_dag(doc_id: &str, inserted_at: Instant) -> PendingDag {
+        PendingDag {
+            doc_id: doc_id.to_string(),
+            collection_id: "collection".to_string(),
+            creator: "creator".to_string(),
+            missing: HashSet::new(),
+            source_peer: Some("peer".to_string()),
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+            acp_actor_relationships: None,
+            inserted_at,
+            attempts: 0,
+            fetch_failures: 0,
+            last_fetch_error: None,
+        }
+    }
+
+    #[test]
+    fn insert_pending_dag_replaces_existing_entry_at_capacity() {
+        let manager = test_manager();
+        let root = test_cid(0);
+
+        assert!(manager.insert_pending_dag(root, pending_dag("original", Instant::now())));
+        for idx in 1..MAX_PENDING_DAGS {
+            assert!(manager.insert_pending_dag(
+                test_cid(idx),
+                pending_dag(&format!("doc-{idx}"), Instant::now()),
+            ));
+        }
+        assert_eq!(manager.pending_dag_count(), MAX_PENDING_DAGS);
+
+        assert!(manager.insert_pending_dag(root, pending_dag("replacement", Instant::now())));
+        assert_eq!(manager.pending_dag_count(), MAX_PENDING_DAGS);
+        assert_eq!(
+            manager
+                .pending_dags
+                .read()
+                .get(&root)
+                .map(|dag| dag.doc_id.as_str()),
+            Some("replacement")
+        );
+    }
+
+    #[test]
+    fn stale_pending_dag_update_does_not_resurrect_old_generation() {
+        let manager = test_manager();
+        let root = test_cid(0);
+        let current_inserted_at = Instant::now();
+        let stale_inserted_at = current_inserted_at + std::time::Duration::from_secs(1);
+
+        assert!(manager.insert_pending_dag(root, pending_dag("current", current_inserted_at)));
+        assert!(!manager.update_pending_dag_missing_if_current(
+            &root,
+            stale_inserted_at,
+            [test_cid(1)].into_iter().collect(),
+        ));
+        assert!(manager.pending_dag_missing(&root).is_empty());
+    }
+
+    #[test]
+    fn concurrent_pending_dag_insert_burst_stays_bounded() {
+        let manager = Arc::new(test_manager());
+        let mut handles = Vec::new();
+
+        for worker in 0..8 {
+            let manager = Arc::clone(&manager);
+            handles.push(std::thread::spawn(move || {
+                for idx in 0..200 {
+                    let label = worker * 1_000 + idx;
+                    manager.insert_pending_dag(
+                        test_cid(label),
+                        pending_dag(&format!("doc-{label}"), Instant::now()),
+                    );
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("insert worker should not panic");
+        }
+
+        assert!(manager.pending_dag_count() <= MAX_PENDING_DAGS);
     }
 }

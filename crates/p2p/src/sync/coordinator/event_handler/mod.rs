@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use super::SyncCoordinator;
 use crate::error::{Error, Result};
+use crate::sync::rate_limiter::RateLimitDecision;
 use crate::transport::{P2PTransport, PeerId, TransportEvent};
 
 const MAX_RETRIABLE_EVENT_ATTEMPTS: usize = 4;
@@ -76,6 +77,28 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .peer_unsubscribed(peer_id.as_str(), &topic);
     }
 
+    fn enforce_gossip_rate_limit(&self, peer_id: &PeerId, event_kind: &'static str) -> Result<()> {
+        match self.runtime.rate_limiter.check(peer_id) {
+            RateLimitDecision::Allowed => Ok(()),
+            RateLimitDecision::Limited {
+                retry_after,
+                consecutive_failures,
+            } => {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    event_kind,
+                    retry_after_ms = retry_after.as_millis(),
+                    consecutive_failures,
+                    "Rate limit exceeded for gossip event, dropping"
+                );
+                Err(Error::AccessDenied {
+                    peer_id: peer_id.to_string(),
+                    collection_id: "rate-limited".into(),
+                })
+            }
+        }
+    }
+
     /// Handle an event from the transport layer.
     ///
     /// This should be called from the event loop that processes TransportEvents.
@@ -107,16 +130,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 topic,
                 ..
             } => {
-                if !self.runtime.rate_limiter.check(&propagation_source) {
-                    tracing::debug!(
-                        peer_id = %propagation_source,
-                        "Rate limit exceeded for GossipMessage, dropping"
-                    );
-                    return Err(Error::AccessDenied {
-                        peer_id: propagation_source.to_string(),
-                        collection_id: "rate-limited".into(),
-                    });
-                }
+                self.enforce_gossip_rate_limit(&propagation_source, "GossipMessage")?;
                 self.handle_gossip_message(propagation_source, message, topic)
                     .await?;
             }
@@ -126,16 +140,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 data,
                 ..
             } => {
-                if !self.runtime.rate_limiter.check(&propagation_source) {
-                    tracing::debug!(
-                        peer_id = %propagation_source,
-                        "Rate limit exceeded for GossipRawMessage, dropping"
-                    );
-                    return Err(Error::AccessDenied {
-                        peer_id: propagation_source.to_string(),
-                        collection_id: "rate-limited".into(),
-                    });
-                }
+                self.enforce_gossip_rate_limit(&propagation_source, "GossipRawMessage")?;
                 self.handle_gossip_raw_message(propagation_source, topic, data)
                     .await?;
             }

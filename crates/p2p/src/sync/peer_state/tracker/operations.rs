@@ -61,6 +61,7 @@ impl PeerStateTracker {
             .entry(peer_id.to_string())
             .or_insert_with(PeerInfo::new);
         info.add_cid(cid, max_cids);
+        info.debug_assert_cid_tracking_consistent();
         info.last_seen = Instant::now();
         self.enforce_global_limits(&mut peers);
     }
@@ -81,6 +82,7 @@ impl PeerStateTracker {
         for cid in cids {
             info.add_cid(cid, max_cids);
         }
+        info.debug_assert_cid_tracking_consistent();
         info.last_seen = Instant::now();
         self.enforce_global_limits(&mut peers);
     }
@@ -153,6 +155,15 @@ impl PeerStateTracker {
                     .iter()
                     .any(|topic| is_data_subscription_topic(topic))
             })
+            .unwrap_or(false)
+    }
+
+    /// Check if a peer has advertised interest in a specific data collection.
+    pub fn peer_subscribed_to_collection(&self, peer_id: &str, collection_id: &str) -> bool {
+        let peers = self.peers.read();
+        peers
+            .get(peer_id)
+            .map(|info| info.subscribed_collections.contains(collection_id))
             .unwrap_or(false)
     }
 

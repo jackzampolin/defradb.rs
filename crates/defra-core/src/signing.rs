@@ -171,11 +171,16 @@ impl SigningConfig {
     }
 
     /// Normalize owned private key bytes to an exactly sized allocation.
-    pub fn private_key_bytes_from_vec(bytes: Vec<u8>) -> Vec<u8> {
+    pub fn private_key_bytes_from_vec(mut bytes: Vec<u8>) -> Vec<u8> {
         if bytes.len() == bytes.capacity() {
             bytes
         } else {
-            Self::private_key_bytes_from_slice(&bytes)
+            let exact = Self::private_key_bytes_from_slice(&bytes);
+            // Wipe spare capacity too: oversized buffers may have held key
+            // material while being built incrementally.
+            bytes.resize(bytes.capacity(), 0);
+            bytes.zeroize();
+            exact
         }
     }
 
@@ -408,6 +413,25 @@ mod tests {
         let mut bytes = Vec::with_capacity(64);
         bytes.extend_from_slice(&[1_u8, 2, 3, 4]);
         assert_eq!(bytes.capacity(), 64);
+
+        let exact = SigningConfig::private_key_bytes_from_vec(bytes);
+
+        assert_eq!(exact, vec![1, 2, 3, 4]);
+        assert_eq!(exact.len(), exact.capacity());
+    }
+
+    #[test]
+    fn private_key_bytes_from_slice_uses_exact_capacity() {
+        let bytes = SigningConfig::private_key_bytes_from_slice(&[1_u8, 2, 3, 4]);
+
+        assert_eq!(bytes, vec![1, 2, 3, 4]);
+        assert_eq!(bytes.len(), bytes.capacity());
+    }
+
+    #[test]
+    fn private_key_bytes_from_vec_reuses_exact_capacity() {
+        let bytes = vec![1_u8, 2, 3, 4];
+        assert_eq!(bytes.len(), bytes.capacity());
 
         let exact = SigningConfig::private_key_bytes_from_vec(bytes);
 

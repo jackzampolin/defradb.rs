@@ -43,6 +43,7 @@ mod accessors;
 mod authorizer;
 mod broadcast;
 mod constructor;
+pub(crate) mod dag_context;
 pub(crate) mod dag_fetcher;
 mod event_handler;
 mod pubsub_client;
@@ -191,6 +192,9 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
     /// Per-peer rate limiter applied at event dispatch to throttle abusive peers.
     pub(super) rate_limiter: Arc<PeerRateLimiter>,
 
+    /// Timeout for one outbound PushLog send to a replicator peer.
+    pub(super) push_send_timeout: Duration,
+
     /// Shutdown state for coordinator-owned background tasks.
     pub(super) shutdown: SyncShutdownHandle,
 }
@@ -262,6 +266,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     }
 
     pub async fn shutdown(&self) {
+        if let Some(services) = self.pubsub_services.as_ref() {
+            services.set_ready(false);
+            let cancelled = services.cancel_in_flight();
+            if cancelled > 0 {
+                tracing::debug!(
+                    cancelled,
+                    "Cancelled in-flight pubsub_rpc requests during coordinator shutdown"
+                );
+            }
+        }
         self.runtime.dag_fetch_semaphore.close();
         self.runtime.push_semaphore.close();
         self.runtime.shutdown.shutdown().await;

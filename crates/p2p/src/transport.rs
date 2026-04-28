@@ -13,7 +13,8 @@ use cid::Cid;
 use crate::error::Result;
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, CarFetchRequest, DocSyncReply, DocSyncRequest,
-    PushLogBroadcast, PushLogReply, PushLogRequest, PushSEArtifactsRequest,
+    PushLogBroadcast, PushLogReply, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
+    QuerySEArtifactsRequest,
 };
 use crate::replicator::ReplicatorInfo;
 use crate::topics::DefraTopic;
@@ -203,6 +204,14 @@ pub enum TransportEvent<ResponseToken> {
         peer_id: PeerId,
         data: Vec<u8>,
     },
+    SEQueryRequest {
+        peer_id: PeerId,
+        request: QuerySEArtifactsRequest,
+    },
+    SEQueryReply {
+        peer_id: PeerId,
+        reply: QuerySEArtifactsReply,
+    },
     Listening(PeerAddr),
 }
 
@@ -353,6 +362,26 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
     ) -> Result<()>;
 
     async fn send_se_artifacts(&self, peer_id: &PeerId, req: PushSEArtifactsRequest) -> Result<()>;
+
+    async fn send_se_query_request(
+        &self,
+        _peer_id: &PeerId,
+        _req: QuerySEArtifactsRequest,
+    ) -> Result<()> {
+        Err(crate::error::Error::Transport(
+            "send_se_query_request is not supported on this transport".to_string(),
+        ))
+    }
+
+    async fn send_se_query_response(
+        &self,
+        _peer_id: &PeerId,
+        _reply: QuerySEArtifactsReply,
+    ) -> Result<()> {
+        Err(crate::error::Error::Transport(
+            "send_se_query_response is not supported on this transport".to_string(),
+        ))
+    }
 
     // ---- Block sync ----
 

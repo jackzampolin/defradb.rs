@@ -98,29 +98,30 @@ mod go_time_serde {
     use super::*;
 
     pub fn serialize<S: Serializer>(t: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error> {
-        // `SecondsFormat::AutoSi` picks 0/3/6/9 digits; trim trailing zeros
-        // off the fractional tail to match Go's RFC3339Nano rule.
-        let formatted = t.to_rfc3339_opts(SecondsFormat::AutoSi, true);
-        let normalized = match formatted.find('.') {
-            None => formatted,
-            Some(dot_idx) => {
-                // Suffix after the digits is always "Z" for UTC here.
-                let z_idx = formatted.len() - 1;
-                let digits = &formatted[dot_idx + 1..z_idx];
-                let trimmed = digits.trim_end_matches('0');
-                if trimmed.is_empty() {
-                    // All zeros → drop the fractional component entirely.
-                    format!("{}Z", &formatted[..dot_idx])
-                } else {
-                    format!("{}.{}Z", &formatted[..dot_idx], trimmed)
-                }
-            }
-        };
-        s.serialize_str(&normalized)
+        s.serialize_str(&format_go_time(t))
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<DateTime<Utc>, D::Error> {
         DateTime::<Utc>::deserialize(d)
+    }
+}
+
+fn format_go_time(t: &DateTime<Utc>) -> String {
+    // `SecondsFormat::AutoSi` picks 0/3/6/9 digits; trim trailing zeros off
+    // the fractional tail to match Go's RFC3339Nano rule.
+    let formatted = t.to_rfc3339_opts(SecondsFormat::AutoSi, true);
+    match formatted.find('.') {
+        None => formatted,
+        Some(dot_idx) => {
+            let z_idx = formatted.len() - 1;
+            let digits = &formatted[dot_idx + 1..z_idx];
+            let trimmed = digits.trim_end_matches('0');
+            if trimmed.is_empty() {
+                format!("{}Z", &formatted[..dot_idx])
+            } else {
+                format!("{}.{}Z", &formatted[..dot_idx], trimmed)
+            }
+        }
     }
 }
 
@@ -220,6 +221,42 @@ impl ReplicatorInfo {
     /// Raw address strings as persisted.
     pub fn addresses_str(&self) -> &[String] {
         &self.addresses
+    }
+
+    /// Update status and timestamp only when the state actually changes.
+    pub fn set_status_if_changed(
+        &mut self,
+        status: ReplicatorStatus,
+        changed_at: DateTime<Utc>,
+    ) -> bool {
+        if self.status == status {
+            return false;
+        }
+        self.status = status;
+        self.last_status_change = changed_at;
+        true
+    }
+
+    /// Update status using Go's recovery-aware timestamp rule.
+    ///
+    /// Mirrors Go's `updateReplicatorStatus`
+    /// (`defradb/internal/db/p2p/replicator.go:495`):
+    /// - `Active → Inactive` stamps `Utc::now()`.
+    /// - `Inactive → Active` resets to `time.Time{}` so a recovered record
+    ///   serializes identically to a freshly-constructed one.
+    ///
+    /// Same-status calls leave the timestamp untouched.
+    pub fn set_status_if_changed_now(&mut self, status: ReplicatorStatus) -> bool {
+        let changed_at = match status {
+            ReplicatorStatus::Inactive => Utc::now(),
+            ReplicatorStatus::Active => go_time_zero(),
+        };
+        self.set_status_if_changed(status, changed_at)
+    }
+
+    /// Format `LastStatusChange` exactly like Go's `time.Time.MarshalJSON`.
+    pub fn last_status_change_go_string(&self) -> String {
+        format_go_time(&self.last_status_change)
     }
 
     /// Serialize to JSON bytes for peerstore persistence.

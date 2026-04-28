@@ -30,6 +30,10 @@ pub struct TwoStreamRunner {
     se_request_streams: stream::IncomingStreams,
     /// Incoming SE response streams.
     se_response_streams: stream::IncomingStreams,
+    /// Incoming SE query request streams.
+    se_query_request_streams: stream::IncomingStreams,
+    /// Incoming SE query response streams.
+    se_query_response_streams: stream::IncomingStreams,
     /// Incoming CAR request streams.
     car_request_streams: stream::IncomingStreams,
     /// Incoming CAR response streams.
@@ -59,6 +63,8 @@ impl TwoStreamRunner {
         response_streams: stream::IncomingStreams,
         se_request_streams: stream::IncomingStreams,
         se_response_streams: stream::IncomingStreams,
+        se_query_request_streams: stream::IncomingStreams,
+        se_query_response_streams: stream::IncomingStreams,
         car_request_streams: stream::IncomingStreams,
         car_response_streams: stream::IncomingStreams,
         identity_request_streams: stream::IncomingStreams,
@@ -75,6 +81,8 @@ impl TwoStreamRunner {
             response_streams,
             se_request_streams,
             se_response_streams,
+            se_query_request_streams,
+            se_query_response_streams,
             car_request_streams,
             car_response_streams,
             identity_request_streams,
@@ -246,6 +254,62 @@ impl TwoStreamRunner {
                                     buf_len = buf.len(),
                                     "Received SE response (acknowledgement)"
                                 );
+                            }
+                        }
+                    });
+                }
+                // Handle incoming SE query request streams
+                Some((peer_id, stream)) = self.se_query_request_streams.next() => {
+                    let event_tx = self.event_tx.clone();
+                    let sem = self.semaphore.clone();
+                    let max_msg_size = self.max_msg_size;
+                    let stream_read_timeout = self.stream_read_timeout;
+                    tokio::spawn(async move {
+                        let Ok(_permit) = sem.acquire().await else { return };
+                        match TwoStreamHandler::handle_se_query_request_stream(peer_id, stream, max_msg_size, stream_read_timeout).await {
+                            Ok(event) => {
+                                if event_tx.send(event).await.is_err() {
+                                    tracing::warn!(peer_id = %peer_id, "Failed to send SE query request event");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    peer_id = %peer_id,
+                                    error = %e,
+                                    "Failed to handle SE query request stream"
+                                );
+                                let _ = event_tx.send(TwoStreamEvent::DecodeError {
+                                    peer_id,
+                                    error: e.to_string(),
+                                }).await;
+                            }
+                        }
+                    });
+                }
+                // Handle incoming SE query response streams
+                Some((peer_id, stream)) = self.se_query_response_streams.next() => {
+                    let event_tx = self.event_tx.clone();
+                    let sem = self.semaphore.clone();
+                    let max_msg_size = self.max_msg_size;
+                    let stream_read_timeout = self.stream_read_timeout;
+                    tokio::spawn(async move {
+                        let Ok(_permit) = sem.acquire().await else { return };
+                        match TwoStreamHandler::handle_se_query_response_stream(peer_id, stream, max_msg_size, stream_read_timeout).await {
+                            Ok(event) => {
+                                if event_tx.send(event).await.is_err() {
+                                    tracing::warn!(peer_id = %peer_id, "Failed to send SE query response event");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    peer_id = %peer_id,
+                                    error = %e,
+                                    "Failed to handle SE query response stream"
+                                );
+                                let _ = event_tx.send(TwoStreamEvent::DecodeError {
+                                    peer_id,
+                                    error: e.to_string(),
+                                }).await;
                             }
                         }
                     });

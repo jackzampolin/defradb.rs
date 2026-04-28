@@ -171,7 +171,9 @@ fn test_compute_signature_rejects_local_secp256r1_block_signing() {
 
     let signer = defra_core::signing::SigningConfig {
         key_type: defra_core::signing::SigningKeyType::Secp256r1,
-        private_key_bytes: private_key.raw().to_vec(),
+        private_key_bytes: defra_core::signing::SigningConfig::private_key_bytes_from_slice(
+            private_key.raw(),
+        ),
         public_key_bytes: public_key.raw_owned(),
         public_key_hex: hex::encode(public_key.raw()),
         remote_signer: None,

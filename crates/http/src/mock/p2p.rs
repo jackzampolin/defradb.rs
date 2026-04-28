@@ -59,6 +59,8 @@ impl MockP2POperations {
             id: Some("12D3KooWReplicator".to_string()),
             collections,
             address,
+            status: Some(0),
+            last_status_change: Some("0001-01-01T00:00:00Z".to_string()),
         });
         self
     }
@@ -118,6 +120,8 @@ impl P2POperations for MockP2POperations {
             id: Some("12D3KooWNewReplicator".to_string()),
             collections,
             address: addr.map(|s| s.to_string()),
+            status: Some(0),
+            last_status_change: Some("0001-01-01T00:00:00Z".to_string()),
         });
         Ok(())
     }

@@ -43,6 +43,19 @@ pub struct P2PAdapter<B: Blockstore + 'static> {
 }
 
 impl<B: Blockstore + 'static> P2PAdapter<B> {
+    fn to_http_replicator_info(info: p2p::ReplicatorInfo) -> ReplicatorInfo {
+        let address = info.addresses_str().first().map(|addr| addr.to_string());
+        let status = Some(info.status.into());
+        let last_status_change = Some(info.last_status_change_go_string());
+        ReplicatorInfo {
+            id: Some(info.peer_id_str().to_string()),
+            collections: info.collections,
+            address,
+            status,
+            last_status_change,
+        }
+    }
+
     async fn resubscribe_tracked_document_topics(&self) {
         let doc_ids: Vec<String> = match self.tracked_documents.read() {
             Ok(docs) => docs.iter().cloned().collect(),
@@ -176,22 +189,25 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
-        let p2p_infos = self
-            .handle
-            .list_replicators()
-            .await
-            .map_err(|error| P2PError::transport(error.to_string()))?;
+        let p2p_infos = if let Some(ref pusher) = self.doc_pusher {
+            match pusher.load_persisted_replicators().await? {
+                Some(infos) => infos,
+                None => self
+                    .handle
+                    .list_replicators()
+                    .await
+                    .map_err(|error| P2PError::transport(error.to_string()))?,
+            }
+        } else {
+            self.handle
+                .list_replicators()
+                .await
+                .map_err(|error| P2PError::transport(error.to_string()))?
+        };
 
         Ok(p2p_infos
             .into_iter()
-            .map(|info| {
-                let address = info.addresses_str().first().map(|addr| addr.to_string());
-                ReplicatorInfo {
-                    id: Some(info.peer_id_str().to_string()),
-                    collections: info.collections,
-                    address,
-                }
-            })
+            .map(Self::to_http_replicator_info)
             .collect())
     }
 
@@ -669,7 +685,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         // so merges flow to the event bus the same way as the two-stream
         // path. Falls back to two-stream per-peer requests when no
         // coordinator is wired (e.g. light tests).
-        let use_pubsub = self.sync_coordinator.is_some();
+        let use_pubsub = self
+            .sync_coordinator
+            .as_ref()
+            .is_some_and(|coord| coord.pubsub_services_ready());
 
         for _attempt in 0..3 {
             if total_received >= total_expected || start.elapsed() >= overall_timeout {
@@ -677,7 +696,11 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             }
 
             let publish_result = if use_pubsub {
-                let coord = self.sync_coordinator.as_ref().unwrap().clone();
+                let coord = self
+                    .sync_coordinator
+                    .as_ref()
+                    .expect("pubsub readiness requires a coordinator")
+                    .clone();
                 let doc_ids = doc_ids.clone();
                 // Remaining budget for this attempt.
                 let remaining = overall_timeout.saturating_sub(start.elapsed());
