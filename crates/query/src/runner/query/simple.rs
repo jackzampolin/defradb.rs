@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 
 use crate::document::{documents_to_plan_docs, documents_with_status_to_plan_docs};
 use crate::error::Result;
-use crate::mapper::Select;
+use crate::mapper::{Requestable, Select};
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index};
 use crate::txn::TransactionRegistry;
 
@@ -28,8 +28,31 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         collection: &Arc<CollectionVersion>,
         identity: Option<Did>,
     ) -> Result<JsonValue> {
+        let can_page_at_fetch = select.limit.is_some()
+            && !select.show_deleted
+            && select.filter.is_none()
+            && select.doc_ids.is_none()
+            && select.order_by.is_none()
+            && select.group_by.is_none()
+            && collection.policy.is_none()
+            && select
+                .fields
+                .iter()
+                .all(|field| !matches!(field, Requestable::Aggregate(_)));
+        let select_without_limit;
+        let select_for_plan = if can_page_at_fetch {
+            select_without_limit = {
+                let mut select = select.clone();
+                select.limit = None;
+                select
+            };
+            &select_without_limit
+        } else {
+            select
+        };
+
         // Build document mapping first (needed for both paths)
-        let mapping = plan::build_mapping(select, collection)?;
+        let mapping = plan::build_mapping(select_for_plan, collection)?;
 
         // When show_deleted is true, we need to use get_all_with_deleted to include
         // logically deleted documents. The doc_ids filter will be applied by the plan.
@@ -104,7 +127,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     fetcher.get_all(&select.collection_name).await?
                 }
             } else {
-                fetcher.get_all(&select.collection_name).await?
+                if can_page_at_fetch {
+                    let limit = select.limit.as_ref().and_then(|limit| match limit.limit {
+                        Some(0) => None,
+                        other => other,
+                    });
+                    let offset = select.limit.as_ref().map(|limit| limit.offset).unwrap_or(0);
+                    fetcher
+                        .get_all_page(&select.collection_name, limit, offset)
+                        .await?
+                } else {
+                    fetcher.get_all(&select.collection_name).await?
+                }
             };
             documents_to_plan_docs(&docs, &mapping)?
         };
@@ -118,8 +152,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         });
 
         // Build and execute the plan (ACP filter is inserted inside, after Select but before aggregates)
-        let mut plan =
-            plan::build_plan(select, plan_docs, mapping.clone(), collection, acp_filter)?;
+        let mut plan = plan::build_plan(
+            select_for_plan,
+            plan_docs,
+            mapping.clone(),
+            collection,
+            acp_filter,
+        )?;
 
         // Execute the plan and collect results
         plan.init().await?;

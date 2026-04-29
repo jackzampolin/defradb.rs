@@ -97,6 +97,35 @@ impl DocFetcher for FetcherWrapper {
             })
     }
 
+    async fn get_all_page(
+        &self,
+        collection_name: &str,
+        limit: Option<u64>,
+        offset: u64,
+    ) -> Result<Vec<Document>> {
+        self.get_fetcher()
+            .get_all_page(collection_name, limit, offset)
+            .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during planner execution for collection '{}' (page limit {:?}, offset {}): {}",
+                    collection_name, limit, offset, e
+                ))
+            })
+    }
+
+    async fn count_all(&self, collection_name: &str) -> Result<u64> {
+        self.get_fetcher()
+            .count_all(collection_name)
+            .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during planner execution for collection '{}' (count): {}",
+                    collection_name, e
+                ))
+            })
+    }
+
     async fn get_all_with_deleted(
         &self,
         collection_name: &str,

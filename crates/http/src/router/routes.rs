@@ -80,7 +80,9 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/indexes", get(handlers::index::go_list_all_indexes))
         .route(
             "/{name}",
-            post(handlers::create_document).delete(handlers::delete_collection),
+            get(handlers::get_collection_doc_ids)
+                .post(handlers::create_document)
+                .delete(handlers::delete_collection),
         )
         .route("/{name}/describe", get(handlers::describe_collection))
         .route("/{name}/exists", get(handlers::collection_exists))

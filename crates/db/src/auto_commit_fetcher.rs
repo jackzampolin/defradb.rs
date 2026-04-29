@@ -75,6 +75,79 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         result
     }
 
+    async fn get_all_page(
+        &self,
+        collection_name: &str,
+        limit: Option<u64>,
+        offset: u64,
+    ) -> query::error::Result<Vec<Document>> {
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+
+        let result = collection
+            .get_all_page_with_datastore(&datastore, limit, offset)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)));
+
+        if let Err(e) = txn.discard() {
+            warn!(
+                collection = %collection_name,
+                error = %e,
+                "Failed to discard read-only transaction after get_all_page"
+            );
+        }
+
+        result
+    }
+
+    async fn count_all(&self, collection_name: &str) -> query::error::Result<u64> {
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+
+        let result = collection
+            .count_all_with_datastore(&datastore)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)));
+
+        if let Err(e) = txn.discard() {
+            warn!(
+                collection = %collection_name,
+                error = %e,
+                "Failed to discard read-only transaction after count_all"
+            );
+        }
+
+        result
+    }
+
     async fn get_all_with_deleted(
         &self,
         collection_name: &str,

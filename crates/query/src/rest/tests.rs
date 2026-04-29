@@ -1,7 +1,12 @@
 use super::*;
 use crate::error::QueryError;
+use crate::runner::QueryRunner;
+use crate::test_utils::MockFetcher;
+use document::Document;
+use schema::{CollectionVersion, FieldDescription, FieldKind};
 use serde_json::json;
 use serde_json::Value as JsonValue;
+use std::sync::Arc;
 
 fn json_to_graphql(value: &JsonValue) -> String {
     match value {
@@ -229,4 +234,54 @@ fn test_rest_error_from_query_error() {
     let rest_err: RestError = err.into();
     assert!(matches!(rest_err, RestError::PermissionDenied(_)));
     assert!(rest_err.to_string().contains("ACP registration failed"));
+}
+
+#[tokio::test]
+async fn test_get_collection_doc_ids_paginates_and_counts() {
+    let fetcher = MockFetcher::new();
+    fetcher.add_doc(
+        "Users",
+        Document::from_json_str(r#"{"_docID":"bae-11111111-1111-1111-1111-111111111111"}"#)
+            .unwrap(),
+    );
+    fetcher.add_doc(
+        "Users",
+        Document::from_json_str(r#"{"_docID":"bae-22222222-2222-2222-2222-222222222222"}"#)
+            .unwrap(),
+    );
+    fetcher.add_doc(
+        "Users",
+        Document::from_json_str(r#"{"_docID":"bae-33333333-3333-3333-3333-333333333333"}"#)
+            .unwrap(),
+    );
+
+    let collection = CollectionVersion::new(
+        "Users",
+        "v1",
+        "coll-users",
+        vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+    );
+    let runner = Arc::new(QueryRunner::new(fetcher, vec![collection]));
+    let rest = RestOperationsImpl::new(runner);
+
+    let page = rest
+        .get_collection_doc_ids(
+            "Users",
+            CollectionDocIdsPagination {
+                limit: 1,
+                offset: 1,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        page.doc_ids,
+        vec!["bae-22222222-2222-2222-2222-222222222222".to_string()]
+    );
+    assert_eq!(page.total, 3);
+    assert_eq!(page.offset, 1);
+    assert_eq!(page.limit, 1);
+    assert!(page.has_more);
 }

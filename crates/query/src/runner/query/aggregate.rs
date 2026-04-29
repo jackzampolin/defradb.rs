@@ -29,6 +29,19 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         collection: &Arc<CollectionVersion>,
         identity: Option<Did>,
     ) -> Result<JsonValue> {
+        if collection.policy.is_none() && select.fields.len() == 1 {
+            if let Some(Requestable::Aggregate(agg)) = select.fields.first() {
+                let can_count_at_fetch = agg.aggregate_type == crate::mapper::AggregateType::Count
+                    && agg.targets.len() == 1
+                    && agg.targets[0].filter.is_none()
+                    && agg.targets[0].field_name.is_none();
+                if can_count_at_fetch {
+                    let count = fetcher.count_all(&select.collection_name).await?;
+                    return Ok(JsonValue::Number(count.into()));
+                }
+            }
+        }
+
         // Fetch all documents from the collection
         let docs = fetcher.get_all(&select.collection_name).await?;
 

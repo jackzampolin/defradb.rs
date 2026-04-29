@@ -6,16 +6,20 @@
 //! All endpoints enforce NAC permissions when NAC is enabled.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
-use serde::Serialize;
+use query::rest::{CollectionDocIdsPage, CollectionDocIdsPagination};
+use serde::{Deserialize, Serialize};
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
+
+const DEFAULT_DOC_IDS_LIMIT: usize = 100;
+const MAX_DOC_IDS_LIMIT: usize = 1000;
 
 /// Response for listing collections.
 #[derive(Debug, Clone, Serialize)]
@@ -27,6 +31,56 @@ pub struct CollectionsResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct DocIdsResponse {
     pub doc_ids: Vec<String>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
+}
+
+impl From<CollectionDocIdsPage> for DocIdsResponse {
+    fn from(page: CollectionDocIdsPage) -> Self {
+        let next_offset = page
+            .has_more
+            .then(|| page.offset.saturating_add(page.doc_ids.len()));
+
+        Self {
+            doc_ids: page.doc_ids,
+            total: page.total,
+            offset: page.offset,
+            limit: page.limit,
+            has_more: page.has_more,
+            next_offset,
+        }
+    }
+}
+
+/// Query parameters for document ID pagination.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+pub struct DocIdsQuery {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+impl DocIdsQuery {
+    fn into_pagination(self) -> Result<CollectionDocIdsPagination, HttpError> {
+        let limit = self.limit.unwrap_or(DEFAULT_DOC_IDS_LIMIT);
+        if limit == 0 {
+            return Err(HttpError::BadRequest("limit must be greater than 0".into()));
+        }
+        if limit > MAX_DOC_IDS_LIMIT {
+            return Err(HttpError::BadRequest(format!(
+                "limit must be less than or equal to {}",
+                MAX_DOC_IDS_LIMIT
+            )));
+        }
+
+        Ok(CollectionDocIdsPagination {
+            limit,
+            offset: self.offset.unwrap_or(0),
+        })
+    }
 }
 
 /// List all collection names.
@@ -54,9 +108,9 @@ pub async fn list_collections(
     }
 }
 
-/// Get all document IDs in a collection.
+/// Get document IDs in a collection.
 ///
-/// GET /api/v0/collections/{name}
+/// GET /api/v0/collections/{name}?limit=100&offset=0
 ///
 /// Identity is extracted from the Authorization header and used to filter
 /// documents based on read permissions (protected documents will only be
@@ -67,16 +121,21 @@ pub async fn get_collection_doc_ids(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path(name): Path<String>,
+    Query(query): Query<DocIdsQuery>,
 ) -> Result<Json<DocIdsResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
+    let pagination = query.into_pagination()?;
 
     let rest = state
         .rest
         .as_ref()
         .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
 
-    match rest.get_collection_doc_ids(&name, identity.did()).await {
-        Ok(doc_ids) => Ok(Json(DocIdsResponse { doc_ids })),
+    match rest
+        .get_collection_doc_ids(&name, pagination, identity.did())
+        .await
+    {
+        Ok(page) => Ok(Json(page.into())),
         Err(e) => {
             tracing::warn!(collection = %name, error = %e, "Failed to get collection doc IDs");
             Err(e.into())
@@ -402,9 +461,12 @@ mod tests {
     use crate::identity_extractor::ExtractIdentity;
     use crate::mock::{FailingMockRestOperations, MockQueryExecutor, MockRestOperations};
     use crate::router::AppStateBuilder;
+    use axum::body::Body;
+    use axum::http::Request;
     use query::executor::QueryExecutor;
     use query::rest::RestOperations;
     use std::sync::Arc;
+    use tower::ServiceExt;
 
     fn create_state() -> AppState {
         AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
@@ -453,21 +515,93 @@ mod tests {
     async fn test_get_collection_doc_ids() {
         let state = create_state();
         let identity = ExtractIdentity::anonymous();
-        let result =
-            get_collection_doc_ids(State(state), identity, Path("Users".to_string())).await;
+        let result = get_collection_doc_ids(
+            State(state),
+            identity,
+            Path("Users".to_string()),
+            Query(DocIdsQuery::default()),
+        )
+        .await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert_eq!(response.doc_ids.len(), 2);
+        assert_eq!(response.total, 2);
+        assert_eq!(response.offset, 0);
+        assert_eq!(response.limit, DEFAULT_DOC_IDS_LIMIT);
+        assert!(!response.has_more);
+        assert_eq!(response.next_offset, None);
         assert!(response.doc_ids.contains(&"bae-123".to_string()));
         assert!(response.doc_ids.contains(&"bae-456".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_collection_doc_ids_paginated() {
+        let state = create_state();
+        let identity = ExtractIdentity::anonymous();
+        let result = get_collection_doc_ids(
+            State(state),
+            identity,
+            Path("Users".to_string()),
+            Query(DocIdsQuery {
+                limit: Some(1),
+                offset: Some(0),
+            }),
+        )
+        .await;
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.doc_ids, vec!["bae-123".to_string()]);
+        assert_eq!(response.total, 2);
+        assert_eq!(response.offset, 0);
+        assert_eq!(response.limit, 1);
+        assert!(response.has_more);
+        assert_eq!(response.next_offset, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_get_collection_doc_ids_rejects_invalid_limit() {
+        let state = create_state();
+        let identity = ExtractIdentity::anonymous();
+        let result = get_collection_doc_ids(
+            State(state),
+            identity,
+            Path("Users".to_string()),
+            Query(DocIdsQuery {
+                limit: Some(MAX_DOC_IDS_LIMIT + 1),
+                offset: None,
+            }),
+        )
+        .await;
+        assert!(matches!(result, Err(HttpError::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_get_collection_doc_ids_route_is_registered() {
+        let app = crate::router::create_router_with_state(create_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v0/collections/Users?limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn test_get_collection_doc_ids_not_found() {
         let state = create_state();
         let identity = ExtractIdentity::anonymous();
-        let result =
-            get_collection_doc_ids(State(state), identity, Path("NonExistent".to_string())).await;
+        let result = get_collection_doc_ids(
+            State(state),
+            identity,
+            Path("NonExistent".to_string()),
+            Query(DocIdsQuery::default()),
+        )
+        .await;
         assert!(result.is_err());
         match result.unwrap_err() {
             HttpError::NotFound(msg) => assert!(msg.contains("NonExistent")),
@@ -479,8 +613,13 @@ mod tests {
     async fn test_get_collection_doc_ids_no_rest() {
         let state = create_state_without_rest();
         let identity = ExtractIdentity::anonymous();
-        let result =
-            get_collection_doc_ids(State(state), identity, Path("Users".to_string())).await;
+        let result = get_collection_doc_ids(
+            State(state),
+            identity,
+            Path("Users".to_string()),
+            Query(DocIdsQuery::default()),
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -488,10 +627,17 @@ mod tests {
     async fn test_get_empty_collection() {
         let state = create_state();
         let identity = ExtractIdentity::anonymous();
-        let result =
-            get_collection_doc_ids(State(state), identity, Path("Books".to_string())).await;
+        let result = get_collection_doc_ids(
+            State(state),
+            identity,
+            Path("Books".to_string()),
+            Query(DocIdsQuery::default()),
+        )
+        .await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.doc_ids.is_empty());
+        assert_eq!(response.total, 0);
+        assert!(!response.has_more);
     }
 }

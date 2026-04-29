@@ -90,6 +90,31 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))
     }
 
+    async fn get_all_page(
+        &self,
+        collection_name: &str,
+        limit: Option<u64>,
+        offset: u64,
+    ) -> query::error::Result<Vec<Document>> {
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+
+        collection
+            .get_all_page_with_datastore(&datastore, limit, offset)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))
+    }
+
+    async fn count_all(&self, collection_name: &str) -> query::error::Result<u64> {
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+
+        collection
+            .count_all_with_datastore(&datastore)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))
+    }
+
     async fn get_all_with_deleted(
         &self,
         collection_name: &str,

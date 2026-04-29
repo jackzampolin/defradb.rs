@@ -11,7 +11,7 @@ use crate::runner::QueryRunner;
 use crate::txn::TransactionRegistry;
 
 use super::error::{RestError, RestResult};
-use super::trait_def::RestOperations;
+use super::trait_def::{CollectionDocIdsPage, CollectionDocIdsPagination, RestOperations};
 
 /// Production implementation of REST operations using QueryRunner.
 ///
@@ -55,9 +55,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
         }
     }
 
-    fn build_list_ids_query(&self, collection: &str) -> String {
+    fn build_list_ids_query(&self, collection: &str, limit: usize, offset: usize) -> String {
         format!(
-            r#"{{ {collection} {{ _docID }} }}"#,
+            r#"{{ {collection}(limit: {limit}, offset: {offset}) {{ _docID }} }}"#,
+            collection = collection,
+            limit = limit,
+            offset = offset
+        )
+    }
+
+    fn build_count_query(&self, collection: &str) -> String {
+        format!(
+            r#"{{ total: COUNT({collection}: {{}}) }}"#,
             collection = collection
         )
     }
@@ -135,6 +144,40 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
             .collect())
     }
 
+    fn extract_total(&self, result: &JsonValue, collection: &str) -> RestResult<usize> {
+        let total = result
+            .get("total")
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| {
+                tracing::warn!(
+                    collection = %collection,
+                    result = ?result,
+                    "Count result missing numeric total"
+                );
+                RestError::internal(format!("count result missing total for '{}'", collection))
+            })?;
+
+        usize::try_from(total).map_err(|_| {
+            RestError::internal(format!(
+                "count result for '{}' does not fit into usize",
+                collection
+            ))
+        })
+    }
+
+    async fn count_collection_doc_ids(
+        &self,
+        collection: &str,
+        identity: Option<&Did>,
+    ) -> RestResult<usize> {
+        let query = self.build_count_query(collection);
+        let result = self
+            .runner
+            .execute_query_with_identity(&query, identity.cloned())
+            .await?;
+        self.extract_total(&result, collection)
+    }
+
     async fn fetch_full_document(
         &self,
         collection: &str,
@@ -192,8 +235,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
     async fn get_collection_doc_ids(
         &self,
         collection: &str,
+        pagination: CollectionDocIdsPagination,
         identity: Option<&Did>,
-    ) -> RestResult<Vec<String>> {
+    ) -> RestResult<CollectionDocIdsPage> {
         if !self
             .runner
             .has_collection(collection)
@@ -203,12 +247,24 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
             return Err(RestError::collection_not_found(collection));
         }
 
-        let query = self.build_list_ids_query(collection);
+        let fetch_limit = pagination.limit.saturating_add(1);
+        let query = self.build_list_ids_query(collection, fetch_limit, pagination.offset);
         let result = self
             .runner
             .execute_query_with_identity(&query, identity.cloned())
             .await?;
-        self.extract_doc_ids(&result, collection)
+        let mut doc_ids = self.extract_doc_ids(&result, collection)?;
+        let has_more = doc_ids.len() > pagination.limit;
+        doc_ids.truncate(pagination.limit);
+        let total = self.count_collection_doc_ids(collection, identity).await?;
+
+        Ok(CollectionDocIdsPage {
+            doc_ids,
+            total,
+            offset: pagination.offset,
+            limit: pagination.limit,
+            has_more,
+        })
     }
 
     async fn get_document(

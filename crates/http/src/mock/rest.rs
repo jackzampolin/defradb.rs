@@ -6,7 +6,9 @@ use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use query::rest::{RestError, RestOperations, RestResult};
+use query::rest::{
+    CollectionDocIdsPage, CollectionDocIdsPagination, RestError, RestOperations, RestResult,
+};
 
 /// Internal document storage for mock REST operations.
 #[derive(Debug, Clone, Default)]
@@ -105,11 +107,25 @@ impl RestOperations for MockRestOperations {
     async fn get_collection_doc_ids(
         &self,
         collection: &str,
+        pagination: CollectionDocIdsPagination,
         _identity: Option<&Did>,
-    ) -> RestResult<Vec<String>> {
+    ) -> RestResult<CollectionDocIdsPage> {
         let collections = self.collections.read().unwrap();
         match collections.get(collection) {
-            Some(docs) => Ok(docs.iter().map(|d| d.doc_id.clone()).collect()),
+            Some(docs) => {
+                let total = docs.len();
+                let start = pagination.offset.min(total);
+                let end = start.saturating_add(pagination.limit).min(total);
+                let doc_ids = docs[start..end].iter().map(|d| d.doc_id.clone()).collect();
+
+                Ok(CollectionDocIdsPage {
+                    doc_ids,
+                    total,
+                    offset: pagination.offset,
+                    limit: pagination.limit,
+                    has_more: end < total,
+                })
+            }
             None => Err(RestError::collection_not_found(collection)),
         }
     }
@@ -284,8 +300,9 @@ impl RestOperations for FailingMockRestOperations {
     async fn get_collection_doc_ids(
         &self,
         _collection: &str,
+        _pagination: CollectionDocIdsPagination,
         _identity: Option<&Did>,
-    ) -> RestResult<Vec<String>> {
+    ) -> RestResult<CollectionDocIdsPage> {
         Err(self.error.clone())
     }
 

@@ -7,6 +7,23 @@ use storage::corekv::MaybeSendSync;
 
 use super::error::RestResult;
 
+/// Pagination request for collection document ID listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CollectionDocIdsPagination {
+    pub limit: usize,
+    pub offset: usize,
+}
+
+/// Paginated document IDs in a collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionDocIdsPage {
+    pub doc_ids: Vec<String>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub has_more: bool,
+}
+
 /// REST operations trait for collection and document CRUD.
 ///
 /// This trait provides REST-specific operations separate from GraphQL execution.
@@ -25,12 +42,13 @@ pub trait RestOperations: MaybeSendSync {
     /// List all collection names.
     async fn list_collections(&self) -> RestResult<Vec<String>>;
 
-    /// Get all document IDs in a collection.
+    /// Get document IDs in a collection.
     async fn get_collection_doc_ids(
         &self,
         collection: &str,
+        pagination: CollectionDocIdsPagination,
         identity: Option<&Did>,
-    ) -> RestResult<Vec<String>>;
+    ) -> RestResult<CollectionDocIdsPage>;
 
     /// Get a single document by ID.
     async fn get_document(

@@ -121,6 +121,37 @@ pub trait DocFetcher: MaybeSendSync {
     /// Get all documents from a collection (excludes deleted documents).
     async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>>;
 
+    /// Get a page of documents from a collection (excludes deleted documents).
+    ///
+    /// Implementations can override this to stop storage iteration once the
+    /// requested page has been collected. The default keeps existing fetcher
+    /// behavior by loading all documents and slicing in memory.
+    async fn get_all_page(
+        &self,
+        collection_name: &str,
+        limit: Option<u64>,
+        offset: u64,
+    ) -> Result<Vec<Document>> {
+        let docs = self.get_all(collection_name).await?;
+        let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+        let iter = docs.into_iter().skip(offset);
+
+        Ok(match limit {
+            Some(limit) => iter
+                .take(usize::try_from(limit).unwrap_or(usize::MAX))
+                .collect(),
+            None => iter.collect(),
+        })
+    }
+
+    /// Count all non-deleted documents in a collection.
+    ///
+    /// Implementations can override this to count while iterating keys instead
+    /// of materializing every document. The default preserves existing behavior.
+    async fn count_all(&self, collection_name: &str) -> Result<u64> {
+        Ok(self.get_all(collection_name).await?.len() as u64)
+    }
+
     /// Get all documents from a collection with their deletion status.
     ///
     /// If `show_deleted` is true, returns all documents including deleted ones.

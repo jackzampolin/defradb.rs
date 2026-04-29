@@ -73,6 +73,93 @@ impl Collection {
         Ok(result.into_iter().map(|(doc, _)| doc).collect())
     }
 
+    /// Get one page of non-deleted documents using a NamespaceView directly.
+    pub async fn get_all_page_with_datastore(
+        &self,
+        datastore: &NamespaceView,
+        limit: Option<u64>,
+        offset: u64,
+    ) -> Result<Vec<Document>> {
+        let prefix = self.collection_key_prefix();
+        let opts = IterOptions::new().with_prefix(prefix);
+
+        let mut iter = datastore.iterator(opts).await.map_err(Error::Storage)?;
+        let mut docs = Vec::new();
+        let mut skipped = 0u64;
+
+        while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+            if pair.key.ends_with(b"/v") {
+                continue;
+            }
+
+            let Some(pos) = pair.key.iter().rposition(|&b| b == b'/') else {
+                continue;
+            };
+            let doc_id_str = String::from_utf8_lossy(&pair.key[pos + 1..]);
+            let Ok(doc_id) = doc_id_str.parse::<DocID>() else {
+                continue;
+            };
+
+            if self.is_deleted(datastore, &doc_id).await? {
+                continue;
+            }
+
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+
+            if let Some(limit) = limit {
+                if docs.len() as u64 >= limit {
+                    break;
+                }
+            }
+
+            let mut doc = Document::from_cbor(&pair.value)
+                .map_err(|e| Error::document_at_key(&pair.key, e))?;
+            doc.set_id(doc_id.clone());
+
+            if let Some(version) = self.load_version(datastore, &doc_id).await? {
+                doc.set_schema_version_id(version);
+            }
+
+            docs.push(doc);
+        }
+
+        iter.close().await.map_err(Error::Storage)?;
+        Ok(docs)
+    }
+
+    /// Count non-deleted documents using a NamespaceView directly.
+    pub async fn count_all_with_datastore(&self, datastore: &NamespaceView) -> Result<u64> {
+        let prefix = self.collection_key_prefix();
+        let opts = IterOptions::new().with_prefix(prefix);
+
+        let mut iter = datastore.iterator(opts).await.map_err(Error::Storage)?;
+        let mut count = 0u64;
+
+        while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+            if pair.key.ends_with(b"/v") {
+                continue;
+            }
+
+            let Some(pos) = pair.key.iter().rposition(|&b| b == b'/') else {
+                continue;
+            };
+            let doc_id_str = String::from_utf8_lossy(&pair.key[pos + 1..]);
+            let Ok(doc_id) = doc_id_str.parse::<DocID>() else {
+                continue;
+            };
+
+            if !self.is_deleted(datastore, &doc_id).await? {
+                count += 1;
+            }
+        }
+
+        iter.close().await.map_err(Error::Storage)?;
+        Ok(count)
+    }
+
     /// Get all documents in the collection with deletion status.
     ///
     /// If `show_deleted` is true, returns all documents including deleted ones.
