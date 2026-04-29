@@ -38,18 +38,29 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                             providers.push(source_transport_id);
                         }
                     }
-                    if let Err(e) = self
+                    match self
                         .runtime
                         .transport
                         .sync_blocks(root_cid, providers, missing)
                         .await
                     {
-                        tracing::warn!(
-                            query_id = query_id.0,
-                            root_cid = %root_cid,
-                            error = %e,
-                            "Failed to start Bitswap fetch for remaining child blocks"
-                        );
+                        Ok(retry_query_id) => {
+                            self.manager.register_query(retry_query_id, root_cid);
+                            tracing::debug!(
+                                query_id = query_id.0,
+                                retry_query_id = retry_query_id.0,
+                                root_cid = %root_cid,
+                                "Started Bitswap fetch for remaining child blocks"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                query_id = query_id.0,
+                                root_cid = %root_cid,
+                                error = %e,
+                                "Failed to start Bitswap fetch for remaining child blocks"
+                            );
+                        }
                     }
                 }
             }
@@ -617,12 +628,28 @@ mod tests {
         assert_eq!(coordinator.manager().pending_dag_attempts(&root2_cid), 0);
 
         coordinator
+            .handle_bitswap_complete(
+                QueryId(999),
+                false,
+                Some("remaining child fetch failed".to_string()),
+            )
+            .await
+            .expect("registered retry bitswap complete");
+        assert_eq!(
+            transport_handle.sync_calls().len(),
+            2,
+            "retry query completion should trigger another retry"
+        );
+        assert_eq!(coordinator.manager().pending_dag_attempts(&root1_cid), 2);
+        assert_eq!(coordinator.manager().pending_dag_attempts(&root2_cid), 0);
+
+        coordinator
             .handle_bitswap_complete(QueryId(9999), false, Some("ignored".to_string()))
             .await
             .expect("unknown query is ignored");
         assert_eq!(
             transport_handle.sync_calls().len(),
-            1,
+            2,
             "unknown query should not trigger another retry"
         );
     }

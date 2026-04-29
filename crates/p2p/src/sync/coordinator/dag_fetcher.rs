@@ -191,7 +191,16 @@ async fn emit_dag_ready(
 ) {
     let mut context = context.clone();
     context.fill_missing_from_block(root_data);
-    let _ = event_tx.send(context.into_dag_ready(root_cid)).await;
+    if event_tx
+        .send(context.into_dag_ready(root_cid))
+        .await
+        .is_err()
+    {
+        warn!(
+            root_cid = %root_cid,
+            "Failed to emit DagReady after DAG fetch"
+        );
+    }
 }
 
 /// Try to fetch an entire DAG via a single CAR request.

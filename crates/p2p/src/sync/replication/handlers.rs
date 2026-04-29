@@ -541,7 +541,7 @@ pub(super) async fn process_merge_batch<B, T, H>(
     coordinator: &SyncCoordinator<B, T>,
     events: Vec<SyncEvent>,
     handler: &H,
-    _config: &ReplicationConfig,
+    config: &ReplicationConfig,
 ) -> Vec<ReplicationResult>
 where
     B: Blockstore + 'static,
@@ -677,6 +677,59 @@ where
                     *result = ReplicationResult::MergedButNotMarked {
                         cid,
                         error: e.to_string(),
+                    };
+                }
+            }
+        }
+    }
+
+    if config.rebroadcast_on_merge {
+        for (index, block) in merge_blocks.iter().enumerate() {
+            let result_index = batch_result_start + index;
+            if block.collection_id.is_empty()
+                || !matches!(results[result_index], ReplicationResult::Merged { .. })
+            {
+                continue;
+            }
+
+            match coordinator
+                .broadcast_local_update(
+                    &block.cid,
+                    block.block_data.as_ref(),
+                    &block.doc_id,
+                    &block.collection_id,
+                )
+                .await
+            {
+                Ok(crate::sync::BroadcastResult::Success) => {}
+                Ok(crate::sync::BroadcastResult::PartialDocumentOnly { collection_error }) => {
+                    results[result_index] = ReplicationResult::MergedButBroadcastFailed {
+                        cid: block.cid,
+                        doc_id: block.doc_id.clone(),
+                        collection_id: block.collection_id.clone(),
+                        broadcast_error: format!(
+                            "Partial: document topic succeeded but collection topic failed: {}",
+                            collection_error
+                        ),
+                    };
+                }
+                Ok(crate::sync::BroadcastResult::PartialCollectionOnly { document_error }) => {
+                    results[result_index] = ReplicationResult::MergedButBroadcastFailed {
+                        cid: block.cid,
+                        doc_id: block.doc_id.clone(),
+                        collection_id: block.collection_id.clone(),
+                        broadcast_error: format!(
+                            "Partial: collection topic succeeded but document topic failed: {}",
+                            document_error
+                        ),
+                    };
+                }
+                Err(error) => {
+                    results[result_index] = ReplicationResult::MergedButBroadcastFailed {
+                        cid: block.cid,
+                        doc_id: block.doc_id.clone(),
+                        collection_id: block.collection_id.clone(),
+                        broadcast_error: error.to_string(),
                     };
                 }
             }

@@ -17,7 +17,7 @@ mod se_query;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use libp2p::StreamProtocol;
 use libp2p_stream as stream;
@@ -26,7 +26,7 @@ use tokio::sync::oneshot;
 
 use libp2p::PeerId;
 
-use crate::message::{IdentityResponse, PushLogReply, PushLogRequest};
+use crate::message::{DocSyncReply, IdentityResponse, PushLogReply, PushLogRequest};
 use crate::protocol::{
     CAR_REQUEST_PROTOCOL, CAR_RESPONSE_PROTOCOL, IDENTITY_REQUEST_PROTOCOL,
     IDENTITY_RESPONSE_PROTOCOL, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
@@ -73,6 +73,42 @@ pub(crate) struct PendingResponses {
     pub(crate) channels: HashMap<PendingResponseKey, oneshot::Sender<PushLogReply>>,
     /// Map of expected peer + MessageID to identity response channel.
     pub(crate) identity_channels: HashMap<PendingResponseKey, oneshot::Sender<IdentityResponse>>,
+    /// Map of expected peer + MessageID to DocSync response channel.
+    pub(crate) doc_sync_channels: HashMap<PendingResponseKey, oneshot::Sender<DocSyncReply>>,
+    /// Fire-and-forget DocSync requests awaiting an async response event.
+    pub(crate) doc_sync_requests: HashMap<PendingResponseKey, Instant>,
+    /// Fire-and-forget BranchableSync requests awaiting an async response event.
+    pub(crate) branchable_sync_requests: HashMap<PendingResponseKey, Instant>,
+}
+
+impl PendingResponses {
+    fn prune_expired(&mut self) {
+        let now = Instant::now();
+        self.doc_sync_requests
+            .retain(|_, inserted_at| now.duration_since(*inserted_at) <= RESPONSE_TIMEOUT);
+        self.branchable_sync_requests
+            .retain(|_, inserted_at| now.duration_since(*inserted_at) <= RESPONSE_TIMEOUT);
+    }
+
+    pub(crate) fn register_doc_sync_request(&mut self, key: PendingResponseKey) {
+        self.prune_expired();
+        self.doc_sync_requests.insert(key, Instant::now());
+    }
+
+    pub(crate) fn consume_doc_sync_request(&mut self, key: &PendingResponseKey) -> bool {
+        self.prune_expired();
+        self.doc_sync_requests.remove(key).is_some()
+    }
+
+    pub(crate) fn register_branchable_sync_request(&mut self, key: PendingResponseKey) {
+        self.prune_expired();
+        self.branchable_sync_requests.insert(key, Instant::now());
+    }
+
+    pub(crate) fn consume_branchable_sync_request(&mut self, key: &PendingResponseKey) -> bool {
+        self.prune_expired();
+        self.branchable_sync_requests.remove(key).is_some()
+    }
 }
 
 /// Two-stream protocol handler.
@@ -168,6 +204,22 @@ impl TwoStreamHandler {
             .remove(&PendingResponseKey::new(peer_id, message_id));
     }
 
+    /// Clean up a pending DocSync request.
+    pub fn cleanup_pending_doc_sync(&self, peer_id: PeerId, message_id: &str) {
+        let mut pending = self.pending.lock();
+        let key = PendingResponseKey::new(peer_id, message_id);
+        pending.doc_sync_channels.remove(&key);
+        pending.doc_sync_requests.remove(&key);
+    }
+
+    /// Clean up a pending BranchableSync request.
+    pub fn cleanup_pending_branchable_sync(&self, peer_id: PeerId, message_id: &str) {
+        let mut pending = self.pending.lock();
+        pending
+            .branchable_sync_requests
+            .remove(&PendingResponseKey::new(peer_id, message_id));
+    }
+
     /// Create a success reply for a request.
     pub fn success_reply(request: &PushLogRequest) -> PushLogReply {
         PushLogReply::success(&request.message_id)
@@ -176,5 +228,40 @@ impl TwoStreamHandler {
     /// Create an error reply for a request.
     pub fn error_reply(request: &PushLogRequest, error: &str) -> PushLogReply {
         PushLogReply::error(&request.message_id, error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doc_sync_pending_requests_are_peer_bound_and_single_use() {
+        let peer = PeerId::random();
+        let other_peer = PeerId::random();
+        let key = PendingResponseKey::new(peer, "doc-sync-1");
+        let wrong_peer_key = PendingResponseKey::new(other_peer, "doc-sync-1");
+        let mut pending = PendingResponses::default();
+
+        pending.register_doc_sync_request(key.clone());
+
+        assert!(!pending.consume_doc_sync_request(&wrong_peer_key));
+        assert!(pending.consume_doc_sync_request(&key));
+        assert!(!pending.consume_doc_sync_request(&key));
+    }
+
+    #[test]
+    fn branchable_sync_pending_requests_are_peer_bound_and_single_use() {
+        let peer = PeerId::random();
+        let other_peer = PeerId::random();
+        let key = PendingResponseKey::new(peer, "branchable-sync-1");
+        let wrong_peer_key = PendingResponseKey::new(other_peer, "branchable-sync-1");
+        let mut pending = PendingResponses::default();
+
+        pending.register_branchable_sync_request(key.clone());
+
+        assert!(!pending.consume_branchable_sync_request(&wrong_peer_key));
+        assert!(pending.consume_branchable_sync_request(&key));
+        assert!(!pending.consume_branchable_sync_request(&key));
     }
 }

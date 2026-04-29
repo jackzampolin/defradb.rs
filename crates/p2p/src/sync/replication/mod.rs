@@ -146,6 +146,7 @@ mod tests {
     struct NoopTransport {
         peer_id: PeerId,
         pubkey: Vec<u8>,
+        publish_calls: Arc<AtomicUsize>,
     }
 
     impl NoopTransport {
@@ -153,7 +154,12 @@ mod tests {
             Self {
                 peer_id: PeerId::new("local-peer".to_string()),
                 pubkey: vec![1, 2, 3],
+                publish_calls: Arc::new(AtomicUsize::new(0)),
             }
+        }
+
+        fn publish_calls(&self) -> usize {
+            self.publish_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -460,6 +466,7 @@ mod tests {
             _topic: DefraTopic,
             _msg: PushLogBroadcast,
         ) -> P2PResult<MessageId> {
+            self.publish_calls.fetch_add(1, Ordering::SeqCst);
             Ok(MessageId::new("noop".to_string()))
         }
 
@@ -1498,6 +1505,58 @@ mod tests {
         assert_eq!(handler.batch_calls(), 1);
         assert_eq!(handler.batch_block_count(), 3);
         assert_eq!(rx.len(), 7, "remaining backlog must stay queued");
+    }
+
+    #[tokio::test]
+    async fn test_process_merge_batch_rebroadcasts_when_config_enabled() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let cid = make_cid(b"rebroadcast-batch");
+        blockstore.put(&cid, b"rebroadcast-batch").await.unwrap();
+
+        let transport = NoopTransport::new();
+        let transport_handle = transport.clone();
+        let (coordinator, _events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                transport,
+                blockstore.clone(),
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            )
+            .await
+            .unwrap();
+
+        let events = vec![SyncEvent::BlockReceived {
+            cid,
+            doc_id: "doc1".to_string(),
+            collection_id: "col1".to_string(),
+            creator: "peer1".to_string(),
+            sender_peer: None,
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+            acp_actor_relationships: None,
+        }];
+        let config = ReplicationConfig {
+            continue_on_error: true,
+            rebroadcast_on_merge: true,
+            batch_size: 50,
+            max_workers: 1,
+        };
+        let handler = BatchTestHandler::new();
+
+        let results = process_merge_batch(&coordinator, events, &handler, &config).await;
+
+        assert!(matches!(
+            results.as_slice(),
+            [ReplicationResult::Merged { cid: merged_cid, .. }] if *merged_cid == cid
+        ));
+        assert_eq!(
+            transport_handle.publish_calls(),
+            2,
+            "document and collection topics should be rebroadcast"
+        );
     }
 
     #[tokio::test]

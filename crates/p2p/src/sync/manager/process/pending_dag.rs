@@ -400,7 +400,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             );
             return Ok(false);
         };
-        self.diagnostics.record_pending_dag_resolved();
         tracing::info!(
             root_cid = %root_cid,
             doc_id = %info.doc_id,
@@ -411,7 +410,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         );
 
         // Emit event that DAG is ready for merge
-        let _ = self
+        if self
             .event_tx
             .send(SyncEvent::DagReady {
                 root_cid: *root_cid,
@@ -423,8 +422,19 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 explicit_replay_authorization: info.explicit_replay_authorization.clone(),
                 acp_actor_relationships: info.acp_actor_relationships.clone(),
             })
-            .await;
+            .await
+            .is_err()
+        {
+            let reinserted = self.insert_pending_dag(*root_cid, info);
+            tracing::error!(
+                root_cid = %root_cid,
+                reinserted,
+                "Failed to emit DagReady for completed DAG"
+            );
+            return Err(Error::ChannelSend);
+        }
 
+        self.diagnostics.record_pending_dag_resolved();
         Ok(true)
     }
 }

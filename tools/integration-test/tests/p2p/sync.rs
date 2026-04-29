@@ -78,14 +78,9 @@ async fn document_sync_test(cluster: TestCluster) {
         .expect("could not extract _docID");
 
     // Explicitly sync the document.
-    // Note: Rust's sync_documents handler can block for up to 90s with retries,
-    // causing HTTP timeouts when Rust is involved. Go-Go topology works fine.
-    // Automatic replication (tested in replication.rs) works for all topologies.
-    let sync_result = node0.p2p_document_sync("Task", &[doc_id]);
-    if sync_result.is_err() {
-        // Sync endpoint timed out — skip the poll check
-        return;
-    }
+    node0
+        .p2p_document_sync("Task", &[doc_id])
+        .expect("p2p document sync should succeed");
 
     // Poll node1 until the doc appears
     let deadline = Instant::now() + Duration::from_secs(15);

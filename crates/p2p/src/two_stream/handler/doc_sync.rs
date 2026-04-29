@@ -28,9 +28,7 @@ impl TwoStreamHandler {
         // Register pending response against the expected peer as well as the message ID.
         {
             let mut pending = self.pending.lock();
-            // Store as a PushLogReply channel - we'll need a different approach for DocSyncReply
-            // Actually, we need a separate map for DocSync responses
-            pending.channels.insert(pending_key.clone(), tx);
+            pending.doc_sync_channels.insert(pending_key.clone(), tx);
         }
 
         // Open stream and send request
@@ -41,14 +39,14 @@ impl TwoStreamHandler {
             .map_err(|e| {
                 // Clean up pending on failure
                 let mut pending = self.pending.lock();
-                pending.channels.remove(&pending_key);
+                pending.doc_sync_channels.remove(&pending_key);
                 Error::Transport(format!("failed to open stream: {}", e))
             })?;
 
         write_message(&mut stream, &request).await.map_err(|e| {
             // Clean up pending on failure
             let mut pending = self.pending.lock();
-            pending.channels.remove(&pending_key);
+            pending.doc_sync_channels.remove(&pending_key);
             Error::CborSerialization(format!("failed to write request: {}", e))
         })?;
 
@@ -59,26 +57,17 @@ impl TwoStreamHandler {
             "Sent DocSync request on two-stream protocol"
         );
 
-        // Wait for response with timeout - we'll receive a PushLogReply and need to
-        // handle DocSyncReply differently. For now, this is a simplified approach.
-        // The actual DocSyncReply handling needs to be done in handle_response_stream.
+        // Wait for the response routed by handle_response_stream.
         match timeout(RESPONSE_TIMEOUT, rx).await {
-            Ok(Ok(_response)) => {
-                // The response channel receives PushLogReply, but we need DocSyncReply
-                // This is a limitation of the current design - we need separate channels
-                // For now, return an error indicating the simplified implementation
-                Err(Error::Transport(
-                    "DocSync response handling requires dedicated channel".into(),
-                ))
-            }
+            Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => {
                 let mut pending = self.pending.lock();
-                pending.channels.remove(&pending_key);
+                pending.doc_sync_channels.remove(&pending_key);
                 Err(Error::Transport("response channel closed".into()))
             }
             Err(_) => {
                 let mut pending = self.pending.lock();
-                pending.channels.remove(&pending_key);
+                pending.doc_sync_channels.remove(&pending_key);
                 Err(Error::Transport("timeout waiting for response".into()))
             }
         }
@@ -95,17 +84,27 @@ impl TwoStreamHandler {
         request: DocSyncRequest,
     ) -> Result<()> {
         let message_id = request.message_id.clone();
+        let pending_key = PendingResponseKey::new(peer_id, message_id.clone());
+
+        {
+            let mut pending = self.pending.lock();
+            pending.register_doc_sync_request(pending_key.clone());
+        }
 
         // Open stream and send request
         let mut stream = self
             .control
             .open_stream(peer_id, Self::request_protocol())
             .await
-            .map_err(|e| Error::Transport(format!("failed to open stream: {}", e)))?;
+            .map_err(|e| {
+                self.cleanup_pending_doc_sync(peer_id, &message_id);
+                Error::Transport(format!("failed to open stream: {}", e))
+            })?;
 
-        write_message(&mut stream, &request)
-            .await
-            .map_err(|e| Error::CborSerialization(format!("failed to write request: {}", e)))?;
+        write_message(&mut stream, &request).await.map_err(|e| {
+            self.cleanup_pending_doc_sync(peer_id, &message_id);
+            Error::CborSerialization(format!("failed to write request: {}", e))
+        })?;
 
         tracing::info!(
             peer_id = %peer_id,
