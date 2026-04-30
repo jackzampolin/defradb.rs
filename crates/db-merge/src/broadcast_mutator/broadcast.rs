@@ -128,19 +128,22 @@ pub(crate) async fn broadcast_with_retry_with_creator<B: Blockstore + 'static, T
                 ));
             }
             Ok(BroadcastResult::PartialCollectionOnly { document_error }) => {
-                let connected_peers = connected_peer_count(sync).await;
-                if let Some(delay_ms) =
-                    broadcast_retry_delay_ms(&document_error, connected_peers, attempt)
-                {
-                    tracing::trace!(
+                // Per-doc topics only have subscribers when a client explicitly
+                // calls subscribe_document. For the common batch-create path
+                // nobody is watching the doc-topic, and gossipsub returns
+                // InsufficientPeers. Go's PublishToTopicAsync silently skips
+                // when the topic has no local subscription, so for parity we
+                // treat this as success: the collection-topic delivered to
+                // subscribed replicators, which is the meaningful path.
+                if document_error.contains("InsufficientPeers") {
+                    tracing::debug!(
                         doc_id = %block_result.doc_id,
-                        attempt = attempt,
-                        connected_peers = connected_peers,
-                        delay_ms = delay_ms,
-                        "Retrying broadcast after document-topic InsufficientPeers"
+                        cid = %block_result.cid,
+                        collection = %collection_name,
+                        attempts = attempt,
+                        "Doc-topic has no subscribers; broadcast delivered via collection topic"
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                    continue;
+                    return BroadcastStatus::Success;
                 }
                 tracing::warn!(
                     doc_id = %block_result.doc_id,
