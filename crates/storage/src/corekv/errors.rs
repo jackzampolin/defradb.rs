@@ -7,6 +7,10 @@ use thiserror::Error;
 /// Result type alias for CoreKV operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Go-compatible unique index violation message.
+pub const UNIQUE_CONSTRAINT_VIOLATION_MESSAGE: &str =
+    "can not index a doc's field(s) that violates unique index.";
+
 /// CoreKV error types.
 ///
 /// These errors match the error types defined in the Go corekv package
@@ -52,6 +56,10 @@ pub enum Error {
     /// The transaction should typically be retried.
     #[error("transaction conflict. Please retry")]
     TxnConflict,
+
+    /// Unique index constraint violation.
+    #[error("can not index a doc's field(s) that violates unique index.")]
+    UniqueConstraintViolation,
 
     /// Attempted a write operation on a read-only transaction.
     ///
@@ -99,6 +107,11 @@ impl Error {
     /// Check if this error indicates a transaction conflict.
     pub fn is_txn_conflict(&self) -> bool {
         matches!(self, Error::TxnConflict)
+    }
+
+    /// Check if this error indicates a unique index constraint violation.
+    pub fn is_unique_constraint_violation(&self) -> bool {
+        matches!(self, Error::UniqueConstraintViolation)
     }
 
     /// Check if this error indicates a closed database.
@@ -157,6 +170,10 @@ mod tests {
         assert_eq!(
             Error::TxnConflict.to_string(),
             "transaction conflict. Please retry"
+        );
+        assert_eq!(
+            Error::UniqueConstraintViolation.to_string(),
+            UNIQUE_CONSTRAINT_VIOLATION_MESSAGE
         );
     }
 

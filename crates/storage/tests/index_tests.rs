@@ -538,9 +538,13 @@ async fn test_composite_unique_enforced_on_non_null() {
 
     // Should fail - same non-NULL values
     let result = index.save(&mut txn, "doc2", &values).await;
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("violates unique index"));
+    let error = result.expect_err("duplicate composite unique value should fail");
+    assert!(matches!(
+        error,
+        storage::corekv::Error::UniqueConstraintViolation
+    ));
+    assert_eq!(
+        error.to_string(),
+        storage::corekv::UNIQUE_CONSTRAINT_VIOLATION_MESSAGE
+    );
 }

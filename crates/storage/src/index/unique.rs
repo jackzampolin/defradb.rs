@@ -238,9 +238,7 @@ impl CollectionIndex for UniqueIndex {
         // would indicate duplicate values within the same document (e.g., JSON
         // array self-duplicates like [5, 8, 5]).
         if txn.has(&key).await? {
-            return Err(crate::corekv::Error::Other(
-                "can not index a doc's field(s) that violates unique index.".to_string(),
-            ));
+            return Err(crate::corekv::Error::UniqueConstraintViolation);
         }
 
         // Store doc_id as the value
@@ -266,9 +264,7 @@ impl CollectionIndex for UniqueIndex {
                 let existing_doc_id = String::from_utf8(existing)
                     .map_err(|e| crate::corekv::Error::Other(e.to_string()))?;
                 if existing_doc_id != doc_id {
-                    return Err(crate::corekv::Error::Other(
-                        "can not index a doc's field(s) that violates unique index.".to_string(),
-                    ));
+                    return Err(crate::corekv::Error::UniqueConstraintViolation);
                 }
             }
         }
