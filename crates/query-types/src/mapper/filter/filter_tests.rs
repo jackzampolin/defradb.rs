@@ -137,6 +137,22 @@ fn test_not_filter() {
 }
 
 #[test]
+fn test_custom_filter_depth_limit() {
+    let filter = Filter::from_conditions(map([(
+        "_and".to_string(),
+        json!([{ "_and": [{ "name": { "_eq": "Alice" } }] }]),
+    )]))
+    .with_max_depth(1);
+    let mapping = make_mapping();
+    let fields = make_fields();
+
+    let err = filter.matches(&fields, &mapping).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("filter exceeds maximum nesting depth of 1"));
+}
+
+#[test]
 fn test_like_filter() {
     let filter = Filter::from_conditions(map([("name".to_string(), json!({"_like": "Ali%"}))]));
     let mapping = make_mapping();

@@ -18,6 +18,17 @@ impl Filter {
         conditions: &serde_json::Map<String, JsonValue>,
         obj: &serde_json::Map<String, JsonValue>,
     ) -> Result<bool> {
+        self.eval_relation_conditions_at_depth(conditions, obj, 0)
+    }
+
+    fn eval_relation_conditions_at_depth(
+        &self,
+        conditions: &serde_json::Map<String, JsonValue>,
+        obj: &serde_json::Map<String, JsonValue>,
+        depth: usize,
+    ) -> Result<bool> {
+        self.check_depth(depth)?;
+
         for (key, value) in conditions {
             // Check for logical operators
             if let Some(op) = FilterOp::parse(key) {
@@ -30,7 +41,7 @@ impl Filter {
                             let sub_conds = item.as_object().ok_or_else(|| {
                                 QueryError::invalid_filter("_and items must be objects")
                             })?;
-                            if !self.eval_relation_conditions(sub_conds, obj)? {
+                            if !self.eval_relation_conditions_at_depth(sub_conds, obj, depth + 1)? {
                                 return Ok(false);
                             }
                         }
@@ -45,7 +56,7 @@ impl Filter {
                             let sub_conds = item.as_object().ok_or_else(|| {
                                 QueryError::invalid_filter("_or items must be objects")
                             })?;
-                            if self.eval_relation_conditions(sub_conds, obj)? {
+                            if self.eval_relation_conditions_at_depth(sub_conds, obj, depth + 1)? {
                                 any_match = true;
                                 break;
                             }
@@ -59,7 +70,7 @@ impl Filter {
                         let sub_conds = value
                             .as_object()
                             .ok_or_else(|| QueryError::invalid_filter("_not requires object"))?;
-                        if self.eval_relation_conditions(sub_conds, obj)? {
+                        if self.eval_relation_conditions_at_depth(sub_conds, obj, depth + 1)? {
                             return Ok(false);
                         }
                         continue;
@@ -93,7 +104,7 @@ impl Filter {
                     let mut any_match = false;
                     for elem in arr {
                         if let Some(obj) = elem.as_object() {
-                            if self.eval_relation_conditions(ops, obj)? {
+                            if self.eval_relation_conditions_at_depth(ops, obj, depth + 1)? {
                                 any_match = true;
                                 break;
                             }
@@ -103,7 +114,7 @@ impl Filter {
                         return Ok(false);
                     }
                 } else if let Some(nested_obj) = field_value.as_object() {
-                    if !self.eval_relation_conditions(ops, nested_obj)? {
+                    if !self.eval_relation_conditions_at_depth(ops, nested_obj, depth + 1)? {
                         return Ok(false);
                     }
                 } else {

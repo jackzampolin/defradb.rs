@@ -351,7 +351,10 @@ impl Planner {
                                         .or_insert(
                                             serde_json::json!({"_neq": serde_json::Value::Null}),
                                         );
-                                    Filter::from_conditions(merged)
+                                    Filter::from_conditions_with_max_depth(
+                                        merged,
+                                        existing.max_depth(),
+                                    )
                                 }
                                 None => neq_null_filter,
                             });

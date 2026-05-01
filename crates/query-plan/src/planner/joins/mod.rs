@@ -659,17 +659,26 @@ impl Planner {
 
             // Build a combined filter from doc_ids and explicit filter
             let doc_ids_filter = if let Some(ref doc_ids) = nested_select.doc_ids {
+                let max_depth = nested_select
+                    .filter
+                    .as_ref()
+                    .map(Filter::max_depth)
+                    .unwrap_or(query_types::DEFAULT_MAX_FILTER_DEPTH);
                 // Create a filter: _docID IN [...]
                 if doc_ids.len() == 1 {
                     // Single ID: _docID == "..."
                     let mut conditions = serde_json::Map::new();
                     conditions.insert("_docID".to_string(), serde_json::json!({"_eq": doc_ids[0]}));
-                    Some(Filter::from_conditions(conditions))
+                    Some(Filter::from_conditions_with_max_depth(
+                        conditions, max_depth,
+                    ))
                 } else {
                     // Multiple IDs: _docID IN [...]
                     let mut conditions = serde_json::Map::new();
                     conditions.insert("_docID".to_string(), serde_json::json!({"_in": doc_ids}));
-                    Some(Filter::from_conditions(conditions))
+                    Some(Filter::from_conditions_with_max_depth(
+                        conditions, max_depth,
+                    ))
                 }
             } else {
                 None

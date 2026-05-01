@@ -179,6 +179,18 @@ fn test_config_serialization_roundtrip() {
     assert_eq!(original.log.level, deserialized.log.level);
     assert_eq!(original.datastore.store, deserialized.datastore.store);
     assert_eq!(original.api.address, deserialized.api.address);
+    assert_eq!(
+        original.api.query_max_depth,
+        deserialized.api.query_max_depth
+    );
+    assert_eq!(
+        original.api.query_max_width,
+        deserialized.api.query_max_width
+    );
+    assert_eq!(
+        original.api.query_max_filter_depth,
+        deserialized.api.query_max_filter_depth
+    );
     assert_eq!(original.embedding.url, deserialized.embedding.url);
     assert_eq!(original.embedding.model, deserialized.embedding.model);
     assert_eq!(
