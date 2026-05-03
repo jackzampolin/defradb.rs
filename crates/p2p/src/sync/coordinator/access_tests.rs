@@ -1062,6 +1062,42 @@ async fn pushlog_controlled_mode_rejects_non_replicator_connected_peer() {
 }
 
 #[tokio::test]
+async fn pushlog_controlled_mode_allows_locally_subscribed_collection() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    coordinator
+        .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
+        .await
+        .unwrap();
+
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+            assert!(
+                !is_explicit_replicator,
+                "collection subscription should not mark the source as an explicit replicator"
+            );
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
+}
+
+#[tokio::test]
 async fn pushlog_registered_replicator_is_marked_explicit_replicator() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
@@ -1113,6 +1149,42 @@ async fn two_stream_controlled_mode_rejects_non_replicator_connected_peer() {
         "Connected-but-not-registered peer must be denied on two-stream ingress, got {:?}",
         result
     );
+}
+
+#[tokio::test]
+async fn two_stream_controlled_mode_allows_locally_subscribed_collection() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    coordinator
+        .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
+        .await
+        .unwrap();
+
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+            assert!(
+                !is_explicit_replicator,
+                "collection subscription should not mark two-stream senders as explicit replicators"
+            );
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
 }
 
 // --- GossipSub access check tests ---
@@ -1190,7 +1262,7 @@ async fn gossip_controlled_mode_rejects_mismatched_topic_and_payload_collection(
 }
 
 #[tokio::test]
-async fn create_replicator_updates_access_registry_for_gossip() {
+async fn gossip_controlled_mode_rejects_outbound_replicator_target() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
@@ -1203,50 +1275,46 @@ async fn create_replicator_updates_access_registry_for_gossip() {
         .await
         .unwrap();
 
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
     let result = coordinator
         .handle_transport_event(gossip_event(peer, "collection1"))
         .await;
 
     assert!(
-        !matches!(&result, Err(Error::AccessDenied { .. })),
-        "registered replicator should authorize gossip immediately, got {:?}",
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "outbound replicator targets must not be accepted as gossip sources, got {:?}",
         result
     );
 }
 
 #[tokio::test]
-async fn gossip_registered_replicator_is_marked_explicit_replicator() {
+async fn gossip_open_mode_rejects_outbound_replicator_target() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
     replicators.add_replicator("collection1", peer.as_str());
 
-    let (coordinator, mut events) =
-        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
 
-    coordinator
+    let result = coordinator
         .handle_transport_event(gossip_event(peer.clone(), "collection1"))
-        .await
-        .unwrap();
+        .await;
 
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
-            sender_peer,
-            is_explicit_replicator,
-            ..
-        } => {
-            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
-            assert!(
-                is_explicit_replicator,
-                "registered gossip source should preserve explicit replicator trust"
-            );
-        }
-        other => panic!("expected BlockReceived, got {:?}", other),
-    }
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "open access mode must still preserve one-way replicator gossip direction, got {:?}",
+        result
+    );
 }
 
 #[tokio::test]
-async fn gossip_access_falls_back_to_transport_replicator_state() {
+async fn gossip_ignores_transport_replicator_state_for_directionality() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let transport = NoopTransport::new();
@@ -1282,9 +1350,13 @@ async fn gossip_access_falls_back_to_transport_replicator_state() {
         .await;
 
     assert!(
-        !matches!(&result, Err(Error::AccessDenied { .. })),
-        "transport replicator state should authorize gossip on registry miss, got {:?}",
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "transport outbound replicator state must not authorize inbound gossip, got {:?}",
         result
+    );
+    assert!(
+        !replicators.is_replicator("collection1", peer.as_str()),
+        "gossip access checks must not backfill outbound replicator state as inbound gossip trust"
     );
 }
 
@@ -1330,7 +1402,7 @@ async fn delete_replicator_removes_gossip_access_without_subscription() {
 }
 
 #[tokio::test]
-async fn create_replicator_update_removes_old_collection_gossip_access() {
+async fn create_replicator_update_keeps_outbound_targets_from_gossip_sources() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let transport = NoopTransport::new();
@@ -1375,8 +1447,8 @@ async fn create_replicator_update_removes_old_collection_gossip_access() {
         old_collection_result
     );
     assert!(
-        !matches!(&new_collection_result, Err(Error::AccessDenied { .. })),
-        "updating a replicator must authorize the new collection immediately, got {:?}",
+        matches!(&new_collection_result, Err(Error::AccessDenied { .. })),
+        "updating a replicator must not turn the outbound target into a gossip source, got {:?}",
         new_collection_result
     );
 }

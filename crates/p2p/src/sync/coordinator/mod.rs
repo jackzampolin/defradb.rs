@@ -26,10 +26,10 @@
 //!   replay trust. It controls what we push and which peers are treated as
 //!   explicit replicators.
 //! - **Inbound PushLog acceptance** requires collection replicator membership,
-//!   except for requests carrying explicit replay authorization.
-//! - **Inbound Gossip acceptance** also allows locally subscribed collection
-//!   topics so subscription-based sync can receive updates without registering
-//!   the publisher as an explicit replicator.
+//!   a local collection subscription, or explicit replay authorization.
+//! - **Inbound Gossip acceptance** is topic-scoped to local collection
+//!   subscriptions and rejects outbound replicator targets so one-way
+//!   replicators do not receive reverse-direction gossip from their targets.
 //! - **Document-level ACP** remains the authoritative policy boundary for whether
 //!   replicated document content is actually mergeable/readable locally.
 //!

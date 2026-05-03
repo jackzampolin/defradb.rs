@@ -72,11 +72,10 @@ async fn create_does_not_sync() {
 
 /// Port: TestP2PCreateWithP2PCollection
 /// When collection subscription + replicator are set, docs sync one-way.
-/// KNOWN GAP: Bidirectional gossip subscriptions override one-way replicator semantics.
-/// Both nodes subscribe to the same gossip topic, so broadcasts from node1 reach node0.
+/// Both nodes subscribe to the same gossip topic, but node0 must still reject
+/// reverse-direction gossip from its outbound replicator target.
 #[tokio::test]
 #[serial]
-#[ignore = "gossip subscriptions override replicator directionality"]
 async fn create_with_p2p_collection() {
     let cluster = TestCluster::builder()
         .rust_nodes(2)

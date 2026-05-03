@@ -25,7 +25,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         );
 
         if let Err(e) = self
-            .check_access_str(peer_id.as_str(), &request.collection_id)
+            .check_pushlog_access_str(peer_id.as_str(), &request.collection_id)
             .await
         {
             tracing::warn!(
@@ -169,7 +169,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let access_err = if is_explicit_replicator {
             None
         } else {
-            self.check_access_str(peer_id.as_str(), &request.collection_id)
+            self.check_pushlog_access_str(peer_id.as_str(), &request.collection_id)
                 .await
                 .err()
         };
