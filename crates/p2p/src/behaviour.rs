@@ -80,9 +80,10 @@ pub struct DefraBehaviour<S: Store> {
     /// Go's DefraDB uses separate streams for request and response.
     pub stream: stream::Behaviour,
 
-    /// Connection limits to prevent resource exhaustion from too many peers.
-    /// Watermarks match Go DefraDB's defaults: 100 pending/established inbound,
-    /// 400 established outbound, 4 streams per peer.
+    /// Hard connection limits for pending handshakes and per-peer fan-out.
+    /// Total established connection pruning is handled by `P2PHost` so new
+    /// peers are not rejected before the Go-compatible low/high-water pruner
+    /// can trim older connections.
     pub connection_limits: connection_limits::Behaviour,
 }
 
@@ -269,8 +270,6 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
         let limits = ConnectionLimits::default()
             .with_max_pending_incoming(Some(config.max_connections_in))
             .with_max_pending_outgoing(Some(config.max_connections_out))
-            .with_max_established_incoming(Some(config.max_connections_in))
-            .with_max_established_outgoing(Some(config.max_connections_out))
             .with_max_established_per_peer(Some(config.max_connections_per_peer));
         let connection_limits = connection_limits::Behaviour::new(limits);
 
@@ -351,12 +350,11 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
         // Configure stream behaviour for Go two-stream compatibility
         let stream = stream::Behaviour::new();
 
-        // Configure connection limits — matches Go DefraDB watermarks
+        // Configure hard pending/per-peer limits; total connection pruning
+        // happens at the host layer to match Go's active conn manager.
         let limits = ConnectionLimits::default()
             .with_max_pending_incoming(Some(100))
             .with_max_pending_outgoing(Some(100))
-            .with_max_established_incoming(Some(100))
-            .with_max_established_outgoing(Some(400))
             .with_max_established_per_peer(Some(4));
         let connection_limits = connection_limits::Behaviour::new(limits);
 

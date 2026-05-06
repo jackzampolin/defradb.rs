@@ -3,6 +3,7 @@
 //! This module provides the main P2P host that manages the libp2p swarm,
 //! handles peer connections, and coordinates CRDT synchronization.
 
+mod connection_manager;
 mod protocols;
 mod swarm;
 mod two_stream;
@@ -30,6 +31,8 @@ use crate::message::PushLogReply;
 use crate::two_stream::{TwoStreamHandler, TwoStreamRunner};
 use crate::QueryId;
 
+use connection_manager::ActiveConnectionManager;
+
 use super::command::HostCommand;
 use super::event::HostEvent;
 use super::handle::P2PHostHandle;
@@ -43,6 +46,12 @@ const DHT_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Delay used to coalesce connection-triggered DHT bootstrap requests.
 const DHT_BOOTSTRAP_DEBOUNCE: Duration = Duration::from_secs(30);
+
+/// Go libp2p connection manager grace period before pruning new connections.
+const CONNECTION_MANAGER_GRACE_PERIOD: Duration = Duration::from_secs(20);
+
+/// Frequency for checking whether the active connection set should be pruned.
+const CONNECTION_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 struct BootstrapScheduler {
@@ -89,9 +98,9 @@ pub struct P2PHostConfig {
     pub stream_timeout: u64,
     /// Max concurrent stream handler tasks. Default: 64.
     pub max_p2p_tasks: usize,
-    /// Max established inbound connections. Default: 100.
+    /// Connection manager low watermark. Default: 100.
     pub max_connections_in: u32,
-    /// Max established outbound connections. Default: 400.
+    /// Connection manager high watermark. Default: 400.
     pub max_connections_out: u32,
     /// Max connections per peer. Default: 4.
     pub max_connections_per_peer: u32,
@@ -145,6 +154,9 @@ pub struct P2PHost<S: Store> {
     pub(super) node_identity: Option<Arc<identity::RawIdentity>>,
     /// Verified peer DEFRA DIDs keyed by peer ID.
     pub(super) peer_identities: HashMap<PeerId, identity::Did>,
+    /// Tracks established connections and actively prunes them after the
+    /// Go-compatible low/high watermarks are exceeded.
+    connection_manager: ActiveConnectionManager,
     /// Topics whose incoming gossipsub messages bypass the PushLog decoder
     /// and flow through `HostEvent::GossipRawMessage` instead. Populated
     /// by `HostCommand::RegisterPubsubRpcTopic` when the coordinator wires
@@ -417,6 +429,11 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
             peer_addrs: HashMap::new(),
             node_identity,
             peer_identities: HashMap::new(),
+            connection_manager: ActiveConnectionManager::new(
+                config.max_connections_in,
+                config.max_connections_out,
+                CONNECTION_MANAGER_GRACE_PERIOD,
+            ),
             pubsub_rpc_topics: HashSet::new(),
         };
 
@@ -442,6 +459,9 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
         let mut bootstrap_interval = time::interval(DHT_BOOTSTRAP_INTERVAL);
         bootstrap_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         bootstrap_interval.tick().await;
+        let mut connection_prune_interval = time::interval(CONNECTION_PRUNE_INTERVAL);
+        connection_prune_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        connection_prune_interval.tick().await;
 
         loop {
             // Biased select: process swarm events before commands.
@@ -460,6 +480,7 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
                             );
                         }
                     }
+                    self.prune_connections("swarm event");
                 }
                 // Handle two-stream protocol events (Go compatibility)
                 Some(two_stream_event) = self.two_stream_event_rx.recv() => {
@@ -485,6 +506,9 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
                 _ = bootstrap_interval.tick() => {
                     self.run_kademlia_bootstrap("periodic");
                 }
+                _ = connection_prune_interval.tick() => {
+                    self.prune_connections("periodic");
+                }
             }
         }
 
@@ -498,6 +522,22 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
             }
             Err(error) => {
                 debug!(?error, reason, "Skipped Kademlia bootstrap");
+            }
+        }
+    }
+
+    fn prune_connections(&mut self, reason: &'static str) {
+        for candidate in self.connection_manager.prune_candidates(Instant::now()) {
+            if self.swarm.close_connection(candidate.connection_id) {
+                debug!(
+                    peer_id = %candidate.peer_id,
+                    connection_id = %candidate.connection_id,
+                    age_secs = candidate.age.as_secs(),
+                    reason,
+                    "Pruning established P2P connection above high watermark"
+                );
+            } else {
+                self.connection_manager.on_closed(candidate.connection_id);
             }
         }
     }
