@@ -33,7 +33,7 @@ use iroh_bitswap::{Bitswap, BitswapEvent, Config as BitswapConfig, Store};
 use libp2p::{
     connection_limits::{self, ConnectionLimits},
     gossipsub::{self, MessageAuthenticity, MessageId, ValidationMode},
-    identify, relay,
+    identify, memory_connection_limits, relay,
     request_response::{self, ProtocolSupport},
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
     PeerId, StreamProtocol,
@@ -116,6 +116,17 @@ pub struct DefraBehaviour<S: Store> {
     /// peers are not rejected before the Go-compatible low/high-water pruner
     /// can trim older connections.
     pub connection_limits: connection_limits::Behaviour,
+
+    /// Process-memory guard approximating Go's ResourceManager system scope.
+    ///
+    /// #831: rust-libp2p 0.53 does not expose go-libp2p ResourceManager
+    /// scopes for transient, per-peer, service, or protocol memory/FD
+    /// accounting. This behaviour can only refuse new connections once
+    /// process physical memory exceeds the Go-compatible system budget.
+    /// Existing connection count limits cover pending/per-peer counts, but
+    /// the Go transient 25% byte scope and service/protocol/peer byte scopes
+    /// have no Rust equivalent here.
+    pub memory_connection_limits: memory_connection_limits::Behaviour,
 }
 
 /// Events emitted by the DefraDB network behaviour.
@@ -187,8 +198,8 @@ impl From<()> for DefraEvent {
 
 impl From<void::Void> for DefraEvent {
     fn from(v: void::Void) -> Self {
-        // connection_limits::Behaviour emits Void — it never actually fires events,
-        // it only enforces limits by refusing connections at the transport layer.
+        // Resource-limit behaviours emit Void — they never actually fire events,
+        // they only enforce limits by refusing connections at the transport layer.
         void::unreachable(v)
     }
 }
@@ -225,6 +236,7 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
         replicators: Arc<ReplicatorRegistry>,
         enable_pubsub: bool,
         config: &super::P2PHostConfig,
+        resource_manager_system_memory_budget_bytes: usize,
     ) -> Result<Self, crate::error::Error> {
         // Configure identify behaviour
         let identify_config =
@@ -296,6 +308,9 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
             .with_max_pending_outgoing(Some(MAX_PENDING_OUTGOING_CONNECTIONS))
             .with_max_established_per_peer(Some(config.max_connections_per_peer));
         let connection_limits = connection_limits::Behaviour::new(limits);
+        let memory_connection_limits = memory_connection_limits::Behaviour::with_max_bytes(
+            resource_manager_system_memory_budget_bytes,
+        );
 
         Ok(Self {
             identify,
@@ -306,6 +321,7 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
             relay: Toggle::from(None),
             stream,
             connection_limits,
+            memory_connection_limits,
         })
     }
 
@@ -376,6 +392,8 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
             .with_max_pending_outgoing(Some(100))
             .with_max_established_per_peer(Some(4));
         let connection_limits = connection_limits::Behaviour::new(limits);
+        let memory_connection_limits =
+            memory_connection_limits::Behaviour::with_max_bytes(usize::MAX);
 
         Ok(Self {
             identify,
@@ -386,6 +404,7 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
             relay: Toggle::from(None),
             stream,
             connection_limits,
+            memory_connection_limits,
         })
     }
 
@@ -519,6 +538,7 @@ mod tests {
             registry,
             true,
             &config,
+            usize::MAX,
         )
         .await;
         assert!(behaviour.is_ok());
@@ -582,6 +602,7 @@ mod tests {
             registry,
             false,
             &config,
+            usize::MAX,
         )
         .await;
         assert!(behaviour.is_ok());

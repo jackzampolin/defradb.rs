@@ -18,6 +18,7 @@ use libp2p::{
     identity::Keypair, noise, request_response, swarm::behaviour::toggle::Toggle, tcp, yamux,
     Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
+use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tokio::{
     sync::mpsc,
     time::{self, Instant, MissedTickBehavior},
@@ -52,6 +53,93 @@ const DEFAULT_CONNECTION_MANAGER_GRACE_PERIOD: Duration = Duration::from_secs(20
 
 /// Frequency for checking whether the active connection set should be pruned.
 const CONNECTION_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Go ResourceManager minimum FD cap. See go-libp2p resource-manager defaults.
+const GO_RESOURCE_MANAGER_MIN_FD_LIMIT: u64 = 256;
+
+/// Go ResourceManager minimum memory budget.
+const GO_RESOURCE_MANAGER_MIN_MEMORY_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Go DefraDB gives libp2p half of system RAM by default.
+const GO_RESOURCE_MANAGER_SYSTEM_MEMORY_DIVISOR: u64 = 2;
+
+/// Go's transient ResourceManager scope is capped at 25% of the system scope.
+const GO_RESOURCE_MANAGER_TRANSIENT_MEMORY_DIVISOR: u64 = 4;
+
+#[derive(Debug, Clone, Copy)]
+struct ResourceManagerRuntimeLimits {
+    fd_limit: u64,
+    system_memory_budget_bytes: u64,
+    transient_memory_budget_bytes: u64,
+}
+
+impl ResourceManagerRuntimeLimits {
+    fn detect() -> Result<Self> {
+        let fd_limit = current_fd_limit()?;
+        let system_memory_budget_bytes =
+            total_system_memory_bytes() / GO_RESOURCE_MANAGER_SYSTEM_MEMORY_DIVISOR;
+        validate_resource_manager_startup_limits(fd_limit, system_memory_budget_bytes)?;
+
+        Ok(Self {
+            fd_limit,
+            system_memory_budget_bytes,
+            transient_memory_budget_bytes: system_memory_budget_bytes
+                / GO_RESOURCE_MANAGER_TRANSIENT_MEMORY_DIVISOR,
+        })
+    }
+
+    fn system_memory_budget_usize(&self) -> usize {
+        self.system_memory_budget_bytes
+            .try_into()
+            .unwrap_or(usize::MAX)
+    }
+}
+
+fn total_system_memory_bytes() -> u64 {
+    let system = System::new_with_specifics(
+        RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()),
+    );
+    system.total_memory()
+}
+
+#[cfg(unix)]
+fn current_fd_limit() -> Result<u64> {
+    let (soft_limit, _) = rlimit::Resource::NOFILE.get().map_err(|error| {
+        Error::InvalidConfig(format!(
+            "failed to read NOFILE resource limit for libp2p ResourceManager validation: {error}"
+        ))
+    })?;
+    Ok(soft_limit)
+}
+
+#[cfg(windows)]
+fn current_fd_limit() -> Result<u64> {
+    Ok(u64::from(rlimit::getmaxstdio()))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn current_fd_limit() -> Result<u64> {
+    Ok(GO_RESOURCE_MANAGER_MIN_FD_LIMIT)
+}
+
+fn validate_resource_manager_startup_limits(fd_limit: u64, memory_budget_bytes: u64) -> Result<()> {
+    if fd_limit < GO_RESOURCE_MANAGER_MIN_FD_LIMIT {
+        return Err(Error::InvalidConfig(format!(
+            "libp2p ResourceManager requires at least {} file descriptors; current soft limit is {fd_limit}",
+            GO_RESOURCE_MANAGER_MIN_FD_LIMIT
+        )));
+    }
+
+    if memory_budget_bytes < GO_RESOURCE_MANAGER_MIN_MEMORY_BYTES {
+        return Err(Error::InvalidConfig(format!(
+            "libp2p ResourceManager requires at least {} MiB memory budget; computed budget is {} MiB",
+            GO_RESOURCE_MANAGER_MIN_MEMORY_BYTES / 1024 / 1024,
+            memory_budget_bytes / 1024 / 1024
+        )));
+    }
+
+    Ok(())
+}
 
 /// Tracks the one-time first-connection bootstrap that complements periodic DHT refresh.
 ///
@@ -292,6 +380,15 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
 
         info!("Local peer ID: {}", local_peer_id);
 
+        let resource_limits = ResourceManagerRuntimeLimits::detect()?;
+        info!(
+            fd_limit = resource_limits.fd_limit,
+            system_memory_budget_mib = resource_limits.system_memory_budget_bytes / 1024 / 1024,
+            transient_memory_budget_mib =
+                resource_limits.transient_memory_budget_bytes / 1024 / 1024,
+            "Configured libp2p ResourceManager parity limits"
+        );
+
         // Replicator registry is constructed up-front because the Bitswap
         // access filter (installed at behaviour construction time) needs
         // the same Arc that SyncCoordinator will later populate.
@@ -307,6 +404,7 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
             Arc::clone(&replicators),
             config.enable_pubsub,
             &config,
+            resource_limits.system_memory_budget_usize(),
         )
         .await?;
 
@@ -608,6 +706,20 @@ mod tests {
     #[test]
     fn default_config_enables_relay() {
         assert!(P2PHostConfig::default().enable_relay);
+    }
+
+    #[test]
+    fn resource_manager_startup_validation_rejects_low_fd_limit() {
+        let err = validate_resource_manager_startup_limits(
+            GO_RESOURCE_MANAGER_MIN_FD_LIMIT - 1,
+            GO_RESOURCE_MANAGER_MIN_MEMORY_BYTES,
+        )
+        .expect_err("fd limits below the Go minimum must fail startup validation");
+
+        assert!(
+            err.to_string().contains("file descriptors"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
