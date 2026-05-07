@@ -34,6 +34,8 @@ mod relation_queries;
 mod relationship;
 #[path = "acp/revoke_lifecycle.rs"]
 mod revoke_lifecycle;
+#[path = "acp/secp256k1_round_trip.rs"]
+mod secp256k1_round_trip;
 #[path = "acp/transaction_rollback.rs"]
 mod transaction_rollback;
 #[path = "acp/xarchive_access_matrix.rs"]
