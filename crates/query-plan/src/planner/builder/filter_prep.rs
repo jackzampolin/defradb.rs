@@ -147,7 +147,7 @@ impl super::Planner {
                     .as_ref()
                     .or(relation_filter.as_ref())
                     .map(Filter::max_depth)
-                    .unwrap_or(query_types::DEFAULT_MAX_FILTER_DEPTH);
+                    .unwrap_or(self.query_limits.max_filter_depth);
                 Some(Filter::from_conditions_with_max_depth(
                     combined_conditions,
                     max_depth,

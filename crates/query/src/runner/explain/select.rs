@@ -156,7 +156,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
-        let mut planner = Planner::new(collections);
+        let mut planner = Planner::new(collections).with_query_limits(self.query_limits);
         if let Some(ref lens_store) = self.lens_store {
             planner = planner.with_lens_store(lens_store.clone());
         }
@@ -188,7 +188,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mapping = plan::build_mapping(select, collection)?;
 
         // Create an empty plan with no documents for explanation purposes
-        let plan = plan::build_plan(select, vec![], mapping, collection, None)?;
+        let plan = plan::build_plan(select, vec![], mapping, collection, None, self.query_limits)?;
 
         // Get the plan explanation based on type
         let explain = match explain_type {

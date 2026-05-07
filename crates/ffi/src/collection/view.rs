@@ -4,6 +4,7 @@ use acp::nac::NodePermission;
 
 use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
+use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, ffi_entry, try_ffi};
 use query::select_to_go_json;
@@ -62,7 +63,12 @@ pub unsafe extern "C" fn add_view(
         let query_str = try_ffi!(require_c_str(gql_query, "gql_query"));
         let sdl_str = try_ffi!(require_c_str(sdl, "sdl"));
         let transform_opt = c_str_to_string(transform);
-        let database = try_ffi!(get_node_database(node_ptr));
+        let (database, query_limits) = match NODES.get(node_ptr, |state| {
+            (state.database.clone(), state.query_limits)
+        }) {
+            Some(state) => state,
+            None => return FfiResult::error(crate::ERR_INVALID_NODE_HANDLE),
+        };
 
         ffi_async!(rt, {
             // Get existing collection names so the SDL parser can resolve external type references
@@ -79,7 +85,7 @@ pub unsafe extern "C" fn add_view(
             // Parse the GQL query into a Select, matching Go's `addView` behavior:
             // Go wraps query as `query { <input> }` then parses to request.Select
             let wrapped_query = format!("query {{ {} }}", &query_str);
-            let selects = query::parse_query(&wrapped_query)
+            let selects = query::parse_query_with_limits(&wrapped_query, None, query_limits)
                 .map_err(|e| format!("failed to parse view query: {}", e))?;
             if selects.is_empty() {
                 return Err("invalid view query: no selections found".to_string());

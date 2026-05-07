@@ -11,8 +11,8 @@ use graphql_parser::query::{
 use serde_json::Value as JsonValue;
 
 use crate::error::{QueryError, Result};
-use crate::query_parse::{parse_request_with_variables, ParsedOperation};
-use crate::QueryResponse;
+use crate::query_parse::{parse_request_with_limits, ParsedOperation};
+use crate::{QueryLimits, QueryResponse};
 
 /// Check whether the provided request resolves to a subscription operation.
 pub fn is_subscription_operation(
@@ -20,9 +20,19 @@ pub fn is_subscription_operation(
     variables: Option<&JsonValue>,
     operation_name: Option<&str>,
 ) -> bool {
+    is_subscription_operation_with_limits(query, variables, operation_name, QueryLimits::default())
+}
+
+/// Check whether the provided request resolves to a subscription operation with custom limits.
+pub fn is_subscription_operation_with_limits(
+    query: &str,
+    variables: Option<&JsonValue>,
+    operation_name: Option<&str>,
+    limits: QueryLimits,
+) -> bool {
     let variable_map = variables_to_map(variables);
     matches!(
-        parse_request_with_variables(query, variable_map.as_ref(), operation_name),
+        parse_request_with_limits(query, variable_map.as_ref(), operation_name, limits),
         Ok(ParsedOperation::Subscription { .. })
     )
 }
@@ -33,8 +43,18 @@ pub fn subscription_doc_ids(
     variables: Option<&JsonValue>,
     operation_name: Option<&str>,
 ) -> Option<Vec<String>> {
+    subscription_doc_ids_with_limits(query, variables, operation_name, QueryLimits::default())
+}
+
+/// Extract the parsed docID/docIDs filter from a subscription root field with custom limits.
+pub fn subscription_doc_ids_with_limits(
+    query: &str,
+    variables: Option<&JsonValue>,
+    operation_name: Option<&str>,
+    limits: QueryLimits,
+) -> Option<Vec<String>> {
     let variable_map = variables_to_map(variables);
-    match parse_request_with_variables(query, variable_map.as_ref(), operation_name).ok()? {
+    match parse_request_with_limits(query, variable_map.as_ref(), operation_name, limits).ok()? {
         ParsedOperation::Subscription { select } => select.doc_ids.clone(),
         _ => None,
     }
@@ -203,7 +223,7 @@ mod tests {
         variables: Option<&JsonValue>,
         operation_name: Option<&str>,
     ) -> crate::Select {
-        match parse_request_with_variables(
+        match crate::query_parse::parse_request_with_variables(
             query,
             variables_to_map(variables).as_ref(),
             operation_name,

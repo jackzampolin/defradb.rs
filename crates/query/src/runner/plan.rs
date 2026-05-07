@@ -8,6 +8,7 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
+use crate::limits::QueryLimits;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
     AllDocsNode, ChildSelectMeta, GroupAlias, GroupByNode, LimitNode, OrderByNode,
@@ -193,6 +194,7 @@ pub(crate) fn build_plan(
     mapping: DocumentMapping,
     collection: &CollectionVersion,
     acp_filter: Option<AcpFilter>,
+    query_limits: QueryLimits,
 ) -> Result<Box<dyn PlanNode>> {
     // Create ScanNode with preloaded documents, filter, and docIDs
     let mut scan = ScanNode::new(collection.clone(), mapping.clone())
@@ -239,7 +241,10 @@ pub(crate) fn build_plan(
                                 field_name.clone(),
                                 serde_json::json!({"_neq": serde_json::Value::Null}),
                             );
-                            Filter::from_conditions(conditions)
+                            Filter::from_conditions_with_max_depth(
+                                conditions,
+                                query_limits.max_filter_depth,
+                            )
                         }
                     });
                 }
@@ -382,7 +387,7 @@ pub(crate) fn build_plan(
                             .filter
                             .as_ref()
                             .map(Filter::max_depth)
-                            .unwrap_or(query_types::DEFAULT_MAX_FILTER_DEPTH);
+                            .unwrap_or(query_limits.max_filter_depth);
                         cs.filter = Some(Filter::from_conditions_with_max_depth(
                             conditions, max_depth,
                         ));

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use query::executor::QueryExecutor;
 use query::rest::RestOperations;
+use query::QueryLimits;
 
 use super::{
     AcpOperations, BackupOperations, BlockOperations, CollectionManagementOperations,
@@ -35,6 +36,7 @@ pub struct AppState {
     pub node_identity_did: Option<String>,
     pub signing_enabled: bool,
     pub dev_mode: bool,
+    pub query_limits: QueryLimits,
 }
 
 impl std::fmt::Debug for AppState {
@@ -83,6 +85,7 @@ impl std::fmt::Debug for AppState {
             .field("event_bus", &self.event_bus.as_ref().map(|_| "<EventBus>"))
             .field("node_identity_did", &self.node_identity_did)
             .field("dev_mode", &self.dev_mode)
+            .field("query_limits", &self.query_limits)
             .finish()
     }
 }
@@ -239,6 +242,7 @@ pub struct AppStateBuilder {
     node_identity_did: Option<String>,
     signing_enabled: bool,
     dev_mode: bool,
+    query_limits: QueryLimits,
 }
 
 impl AppStateBuilder {
@@ -265,6 +269,7 @@ impl AppStateBuilder {
             node_identity_did: None,
             signing_enabled: false,
             dev_mode: false,
+            query_limits: QueryLimits::default(),
         }
     }
 
@@ -388,6 +393,12 @@ impl AppStateBuilder {
         self
     }
 
+    /// Set GraphQL parsing and filter evaluation limits.
+    pub fn with_query_limits(mut self, limits: QueryLimits) -> Self {
+        self.query_limits = limits;
+        self
+    }
+
     /// Build the AppState.
     pub fn build(self) -> AppState {
         AppState {
@@ -411,6 +422,7 @@ impl AppStateBuilder {
             node_identity_did: self.node_identity_did,
             signing_enabled: self.signing_enabled,
             dev_mode: self.dev_mode,
+            query_limits: self.query_limits,
         }
     }
 }

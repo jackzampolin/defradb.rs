@@ -11,17 +11,24 @@ use storage::corekv::Store;
 /// Adapter that implements ViewOperations using the database.
 pub struct ViewAdapter<S: Store> {
     database: Arc<db::DB<S>>,
+    query_limits: query::QueryLimits,
 }
 
 impl<S: Store + 'static> ViewAdapter<S> {
-    /// Create a new adapter wrapping the given database.
-    pub fn new(database: Arc<db::DB<S>>) -> Self {
-        Self { database }
+    /// Create a new adapter wrapping the given database and query limits.
+    pub fn new(database: Arc<db::DB<S>>, query_limits: query::QueryLimits) -> Self {
+        Self {
+            database,
+            query_limits,
+        }
     }
 
     /// Create an Arc-wrapped adapter.
-    pub fn new_arc(database: Arc<db::DB<S>>) -> Arc<dyn ViewOperations> {
-        Arc::new(Self::new(database))
+    pub fn new_arc(
+        database: Arc<db::DB<S>>,
+        query_limits: query::QueryLimits,
+    ) -> Arc<dyn ViewOperations> {
+        Arc::new(Self::new(database, query_limits))
     }
 }
 
@@ -44,7 +51,7 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
             .map_err(|e| format!("failed to parse view SDL: {}", e))?;
 
         let wrapped_query = format!("query {{ {} }}", gql_query);
-        let selects = query::parse_query(&wrapped_query)
+        let selects = query::parse_query_with_limits(&wrapped_query, None, self.query_limits)
             .map_err(|e| format!("failed to parse view query: {}", e))?;
         if selects.is_empty() {
             return Err("invalid view query: no selections found".to_string());
