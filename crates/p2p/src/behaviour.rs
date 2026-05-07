@@ -26,6 +26,7 @@
 //! IPFS block exchange protocol (1.0.0, 1.1.0, 1.2.0), enabling
 //! interoperability with Go DefraDB.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,7 +35,7 @@ use libp2p::{
     connection_limits::{self, ConnectionLimits},
     gossipsub::{self, MessageAuthenticity, ValidationMode},
     identify,
-    kad::{self, store::MemoryStore, Mode},
+    kad::{self, store::MemoryStore},
     relay,
     request_response::{self, ProtocolSupport},
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
@@ -50,6 +51,13 @@ use crate::message::{PushLogReply, PushLogRequest};
 
 /// Timeout for PushLog requests.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Kademlia query parallelism. Matches Go's `dht.Concurrency(10)`
+/// (`go-p2p/host.go:44`). rust-libp2p defaults to `ALPHA_VALUE` = 3.
+const KAD_PARALLELISM: NonZeroUsize = match NonZeroUsize::new(10) {
+    Some(n) => n,
+    None => unreachable!(),
+};
 
 /// Composite network behaviour for DefraDB nodes.
 #[derive(NetworkBehaviour)]
@@ -245,9 +253,15 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
         // Configure Kademlia DHT for peer discovery
         // Required for Bitswap to find peers who have specific blocks
         let kad_store = MemoryStore::new(local_peer_id);
-        let mut kademlia = kad::Behaviour::new(local_peer_id, kad_store);
-        // Run as server to respond to DHT queries from other peers
-        kademlia.set_mode(Some(Mode::Server));
+        let mut kad_config = kad::Config::default();
+        // Match Go DefraDB's `dht.Concurrency(10)` (`go-p2p/host.go:44`).
+        // rust-libp2p defaults to ALPHA_VALUE = 3.
+        kad_config.set_parallelism(KAD_PARALLELISM);
+        let mut kademlia = kad::Behaviour::with_config(local_peer_id, kad_store, kad_config);
+        // Auto mode mirrors Go's `dht.ModeAuto` (`go-p2p/host.go:45`):
+        // start as Client, swap to Server once an external address is
+        // confirmed. set_mode(None) is rust-libp2p's auto-mode opt-in.
+        kademlia.set_mode(None);
 
         // Configure Bitswap for block exchange (Go compatibility).
         // iroh-bitswap implements the standard IPFS bitswap protocols.
@@ -346,10 +360,13 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
             Toggle::from(None)
         };
 
-        // Configure Kademlia DHT for peer discovery
+        // Configure Kademlia DHT for peer discovery — same Go-parity knobs
+        // as the production constructor (concurrency=10, auto mode).
         let kad_store = MemoryStore::new(local_peer_id);
-        let mut kademlia = kad::Behaviour::new(local_peer_id, kad_store);
-        kademlia.set_mode(Some(Mode::Server));
+        let mut kad_config = kad::Config::default();
+        kad_config.set_parallelism(KAD_PARALLELISM);
+        let mut kademlia = kad::Behaviour::with_config(local_peer_id, kad_store, kad_config);
+        kademlia.set_mode(None);
 
         // Configure Bitswap for block exchange
         let bitswap_config = BitswapConfig::default();
