@@ -48,7 +48,7 @@ const DHT_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DHT_BOOTSTRAP_DEBOUNCE: Duration = Duration::from_secs(30);
 
 /// Go libp2p connection manager grace period before pruning new connections.
-const CONNECTION_MANAGER_GRACE_PERIOD: Duration = Duration::from_secs(20);
+const DEFAULT_CONNECTION_MANAGER_GRACE_PERIOD: Duration = Duration::from_secs(20);
 
 /// Frequency for checking whether the active connection set should be pruned.
 const CONNECTION_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
@@ -98,10 +98,12 @@ pub struct P2PHostConfig {
     pub stream_timeout: u64,
     /// Max concurrent stream handler tasks. Default: 64.
     pub max_p2p_tasks: usize,
-    /// Connection manager low watermark. Default: 100.
-    pub max_connections_in: u32,
-    /// Connection manager high watermark. Default: 400.
-    pub max_connections_out: u32,
+    /// Established connection low watermark. Default: 100.
+    pub connection_manager_low_water: u32,
+    /// Established connection high watermark. Default: 400.
+    pub connection_manager_high_water: u32,
+    /// Grace period before new established connections are eligible for pruning. Default: 20s.
+    pub connection_manager_grace_period: Duration,
     /// Max connections per peer. Default: 4.
     pub max_connections_per_peer: u32,
     /// Bitswap egress access control. When `Controlled`, served blocks
@@ -119,8 +121,9 @@ impl Default for P2PHostConfig {
             max_car_size: 64 * 1024 * 1024,
             stream_timeout: 30,
             max_p2p_tasks: 64,
-            max_connections_in: 100,
-            max_connections_out: 400,
+            connection_manager_low_water: 100,
+            connection_manager_high_water: 400,
+            connection_manager_grace_period: DEFAULT_CONNECTION_MANAGER_GRACE_PERIOD,
             max_connections_per_peer: 4,
             access_mode: AccessMode::Open,
         }
@@ -430,9 +433,9 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
             node_identity,
             peer_identities: HashMap::new(),
             connection_manager: ActiveConnectionManager::new(
-                config.max_connections_in,
-                config.max_connections_out,
-                CONNECTION_MANAGER_GRACE_PERIOD,
+                config.connection_manager_low_water,
+                config.connection_manager_high_water,
+                config.connection_manager_grace_period,
             ),
             pubsub_rpc_topics: HashSet::new(),
         };

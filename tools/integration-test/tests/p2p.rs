@@ -1,3 +1,5 @@
+#[path = "p2p/connection_manager.rs"]
+mod connection_manager;
 #[path = "p2p/document.rs"]
 mod document;
 #[path = "p2p/idempotent_replay.rs"]

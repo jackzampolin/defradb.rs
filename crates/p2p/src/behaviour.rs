@@ -59,6 +59,11 @@ const KAD_PARALLELISM: NonZeroUsize = match NonZeroUsize::new(10) {
     None => unreachable!(),
 };
 
+/// Pending dial/listen limits are intentionally separate from the exposed
+/// established-connection watermarks and follow the Go default shape.
+const MAX_PENDING_INCOMING_CONNECTIONS: u32 = 100;
+const MAX_PENDING_OUTGOING_CONNECTIONS: u32 = 400;
+
 /// Composite network behaviour for DefraDB nodes.
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "DefraEvent")]
@@ -286,8 +291,8 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
         let stream = stream::Behaviour::new();
 
         let limits = ConnectionLimits::default()
-            .with_max_pending_incoming(Some(config.max_connections_in))
-            .with_max_pending_outgoing(Some(config.max_connections_out))
+            .with_max_pending_incoming(Some(MAX_PENDING_INCOMING_CONNECTIONS))
+            .with_max_pending_outgoing(Some(MAX_PENDING_OUTGOING_CONNECTIONS))
             .with_max_established_per_peer(Some(config.max_connections_per_peer));
         let connection_limits = connection_limits::Behaviour::new(limits);
 

@@ -1,5 +1,7 @@
 //! P2P initialization methods for Node
 
+use std::time::Duration;
+
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
@@ -109,8 +111,11 @@ impl Node {
             max_car_size: config.net.max_car_size,
             stream_timeout: config.net.stream_timeout,
             max_p2p_tasks: config.net.max_p2p_tasks,
-            max_connections_in: config.net.max_connections_in,
-            max_connections_out: config.net.max_connections_out,
+            connection_manager_low_water: config.net.connection_manager_low_water,
+            connection_manager_high_water: config.net.connection_manager_high_water,
+            connection_manager_grace_period: Duration::from_millis(
+                config.net.connection_manager_grace_period_ms,
+            ),
             max_connections_per_peer: config.net.max_connections_per_peer,
             access_mode,
         };

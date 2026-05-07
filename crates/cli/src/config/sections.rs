@@ -237,12 +237,15 @@ pub struct NetConfig {
     /// Max concurrent P2P stream handler tasks. Default: 64.
     #[serde(default = "default_max_p2p_tasks")]
     pub max_p2p_tasks: usize,
-    /// P2P connection manager low watermark. Default: 100.
-    #[serde(default = "default_max_connections_in")]
-    pub max_connections_in: u32,
-    /// P2P connection manager high watermark. Default: 400.
-    #[serde(default = "default_max_connections_out")]
-    pub max_connections_out: u32,
+    /// P2P established connection low watermark. Default: 100.
+    #[serde(default = "default_connection_manager_low_water")]
+    pub connection_manager_low_water: u32,
+    /// P2P established connection high watermark. Default: 400.
+    #[serde(default = "default_connection_manager_high_water")]
+    pub connection_manager_high_water: u32,
+    /// P2P connection manager grace period in milliseconds. Default: 20000.
+    #[serde(default = "default_connection_manager_grace_period_ms")]
+    pub connection_manager_grace_period_ms: u64,
     /// Max established connections per peer. Default: 4.
     #[serde(default = "default_max_connections_per_peer")]
     pub max_connections_per_peer: u32,
@@ -293,11 +296,14 @@ fn default_stream_timeout() -> u64 {
 fn default_max_p2p_tasks() -> usize {
     64
 }
-fn default_max_connections_in() -> u32 {
+fn default_connection_manager_low_water() -> u32 {
     100
 }
-fn default_max_connections_out() -> u32 {
+fn default_connection_manager_high_water() -> u32 {
     400
+}
+fn default_connection_manager_grace_period_ms() -> u64 {
+    20_000
 }
 fn default_max_connections_per_peer() -> u32 {
     4
@@ -324,8 +330,9 @@ impl Default for NetConfig {
             max_car_size: default_max_car_size(),
             stream_timeout: default_stream_timeout(),
             max_p2p_tasks: default_max_p2p_tasks(),
-            max_connections_in: default_max_connections_in(),
-            max_connections_out: default_max_connections_out(),
+            connection_manager_low_water: default_connection_manager_low_water(),
+            connection_manager_high_water: default_connection_manager_high_water(),
+            connection_manager_grace_period_ms: default_connection_manager_grace_period_ms(),
             max_connections_per_peer: default_max_connections_per_peer(),
             transport: TransportType::default(),
             iroh_relay_url: None,
