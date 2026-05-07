@@ -26,7 +26,6 @@
 //! IPFS block exchange protocol (1.0.0, 1.1.0, 1.2.0), enabling
 //! interoperability with Go DefraDB.
 
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,9 +33,7 @@ use iroh_bitswap::{Bitswap, BitswapEvent, Config as BitswapConfig, Store};
 use libp2p::{
     connection_limits::{self, ConnectionLimits},
     gossipsub::{self, MessageAuthenticity, MessageId, ValidationMode},
-    identify,
-    kad::{self, store::MemoryStore},
-    relay,
+    identify, relay,
     request_response::{self, ProtocolSupport},
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
     PeerId, StreamProtocol,
@@ -49,18 +46,18 @@ use crate::bitswap::{make_peer_block_access_filter, AccessMode, ReplicatorRegist
 use crate::codec::PushLogCodec;
 use crate::message::{PushLogReply, PushLogRequest};
 
+mod dual_kademlia;
+
+pub use dual_kademlia::{
+    validate_pk_namespaced_record, DefraKademliaEvent, DualKademlia, KademliaNetwork,
+    PublicKeyRecordValidationError, LAN_KAD_PROTOCOL, WAN_KAD_PROTOCOL,
+};
+
 /// Timeout for PushLog requests.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Enough for the common identity multihash plus an 8-byte sequence number.
 const GO_MESSAGE_ID_CAPACITY: usize = 48;
-
-/// Kademlia query parallelism. Matches Go's `dht.Concurrency(10)`
-/// (`go-p2p/host.go:44`). rust-libp2p defaults to `ALPHA_VALUE` = 3.
-const KAD_PARALLELISM: NonZeroUsize = match NonZeroUsize::new(10) {
-    Some(n) => n,
-    None => unreachable!(),
-};
 
 /// Pending dial/listen limits are intentionally separate from the exposed
 /// established-connection watermarks and follow the Go default shape.
@@ -93,9 +90,8 @@ pub struct DefraBehaviour<S: Store> {
     /// Peer identification protocol.
     pub identify: identify::Behaviour,
 
-    /// Kademlia DHT for peer discovery and content routing.
-    /// Required for Bitswap to find peers who have specific blocks.
-    pub kademlia: kad::Behaviour<MemoryStore>,
+    /// LAN and WAN Kademlia DHTs for peer discovery and content routing.
+    pub kademlia: DualKademlia,
 
     /// Bitswap block exchange protocol (Go compatibility).
     /// Uses iroh-bitswap for IPFS block exchange.
@@ -130,7 +126,7 @@ pub enum DefraEvent {
     Identify(identify::Event),
 
     /// Kademlia DHT event.
-    Kademlia(kad::Event),
+    Kademlia(DefraKademliaEvent),
 
     /// Bitswap block exchange event.
     Bitswap(BitswapEvent),
@@ -151,8 +147,8 @@ impl From<identify::Event> for DefraEvent {
     }
 }
 
-impl From<kad::Event> for DefraEvent {
-    fn from(event: kad::Event) -> Self {
+impl From<DefraKademliaEvent> for DefraEvent {
+    fn from(event: DefraKademliaEvent) -> Self {
         DefraEvent::Kademlia(event)
     }
 }
@@ -271,18 +267,7 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
             Toggle::from(None)
         };
 
-        // Configure Kademlia DHT for peer discovery
-        // Required for Bitswap to find peers who have specific blocks
-        let kad_store = MemoryStore::new(local_peer_id);
-        let mut kad_config = kad::Config::default();
-        // Match Go DefraDB's `dht.Concurrency(10)` (`go-p2p/host.go:44`).
-        // rust-libp2p defaults to ALPHA_VALUE = 3.
-        kad_config.set_parallelism(KAD_PARALLELISM);
-        let mut kademlia = kad::Behaviour::with_config(local_peer_id, kad_store, kad_config);
-        // Auto mode mirrors Go's `dht.ModeAuto` (`go-p2p/host.go:45`):
-        // start as Client, swap to Server once an external address is
-        // confirmed. set_mode(None) is rust-libp2p's auto-mode opt-in.
-        kademlia.set_mode(None);
+        let kademlia = DualKademlia::new(local_peer_id);
 
         // Configure Bitswap for block exchange (Go compatibility).
         // iroh-bitswap implements the standard IPFS bitswap protocols.
@@ -375,13 +360,7 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
             Toggle::from(None)
         };
 
-        // Configure Kademlia DHT for peer discovery — same Go-parity knobs
-        // as the production constructor (concurrency=10, auto mode).
-        let kad_store = MemoryStore::new(local_peer_id);
-        let mut kad_config = kad::Config::default();
-        kad_config.set_parallelism(KAD_PARALLELISM);
-        let mut kademlia = kad::Behaviour::with_config(local_peer_id, kad_store, kad_config);
-        kademlia.set_mode(None);
+        let kademlia = DualKademlia::new(local_peer_id);
 
         // Configure Bitswap for block exchange
         let bitswap_config = BitswapConfig::default();
@@ -513,6 +492,14 @@ mod tests {
     use super::*;
     use crate::testutil::MockBitswapStore;
     use libp2p::identity::Keypair;
+    use libp2p::kad;
+    use libp2p::kad::store::RecordStore;
+
+    fn pk_record_key(peer_id: PeerId) -> Vec<u8> {
+        let mut key = b"/pk/".to_vec();
+        key.extend_from_slice(&peer_id.to_bytes());
+        key
+    }
 
     #[tokio::test]
     async fn test_behaviour_creation_with_signing() {
@@ -546,6 +533,35 @@ mod tests {
 
         let behaviour = DefraBehaviour::new_without_signing(peer_id, public_key, store, true).await;
         assert!(behaviour.is_ok());
+        let mut behaviour = behaviour.unwrap();
+
+        assert_eq!(
+            behaviour.kademlia.lan.protocol_names()[0].as_ref(),
+            LAN_KAD_PROTOCOL
+        );
+        assert_eq!(
+            behaviour.kademlia.wan.protocol_names()[0].as_ref(),
+            WAN_KAD_PROTOCOL
+        );
+
+        let record = kad::Record::new(b"/v/split".to_vec(), b"lan".to_vec());
+        let key = record.key.clone();
+        behaviour
+            .kademlia
+            .store_mut(KademliaNetwork::Lan)
+            .put(record)
+            .unwrap();
+
+        assert!(behaviour
+            .kademlia
+            .store_mut(KademliaNetwork::Lan)
+            .get(&key)
+            .is_some());
+        assert!(behaviour
+            .kademlia
+            .store_mut(KademliaNetwork::Wan)
+            .get(&key)
+            .is_none());
     }
 
     #[tokio::test]
@@ -571,5 +587,63 @@ mod tests {
         assert!(behaviour.is_ok());
         let behaviour = behaviour.unwrap();
         assert!(behaviour.gossipsub.as_ref().is_none());
+    }
+
+    #[test]
+    fn pk_namespaced_validator_accepts_matching_public_key() {
+        let keypair = Keypair::generate_ed25519();
+        let public_key = keypair.public();
+        let record = kad::Record::new(
+            pk_record_key(public_key.to_peer_id()),
+            public_key.encode_protobuf(),
+        );
+
+        assert_eq!(validate_pk_namespaced_record(&record), Ok(()));
+    }
+
+    #[test]
+    fn pk_namespaced_validator_rejects_mismatched_public_key() {
+        let keypair = Keypair::generate_ed25519();
+        let other_keypair = Keypair::generate_ed25519();
+        let record = kad::Record::new(
+            pk_record_key(keypair.public().to_peer_id()),
+            other_keypair.public().encode_protobuf(),
+        );
+
+        assert!(matches!(
+            validate_pk_namespaced_record(&record),
+            Err(PublicKeyRecordValidationError::PeerIdMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn pk_namespaced_validator_rejects_invalid_peer_id_key() {
+        let record = kad::Record::new(b"/pk/not-a-peer-id".to_vec(), b"not checked".to_vec());
+
+        assert!(matches!(
+            validate_pk_namespaced_record(&record),
+            Err(PublicKeyRecordValidationError::InvalidPeerId(_))
+        ));
+    }
+
+    #[test]
+    fn pk_namespaced_validator_rejects_invalid_public_key() {
+        let keypair = Keypair::generate_ed25519();
+        let record = kad::Record::new(
+            pk_record_key(keypair.public().to_peer_id()),
+            b"not protobuf".to_vec(),
+        );
+
+        assert!(matches!(
+            validate_pk_namespaced_record(&record),
+            Err(PublicKeyRecordValidationError::InvalidPublicKey(_))
+        ));
+    }
+
+    #[test]
+    fn pk_namespaced_validator_ignores_other_namespaces() {
+        let record = kad::Record::new(b"/v/hello".to_vec(), b"not a public key".to_vec());
+
+        assert_eq!(validate_pk_namespaced_record(&record), Ok(()));
     }
 }
