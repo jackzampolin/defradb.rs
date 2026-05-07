@@ -8,15 +8,19 @@ cargo test -p integration-test --test p2p
 
 | File | Tests | What it covers |
 |------|-------|----------------|
+| `connection_manager.rs` | 1 | Connection manager pruning behavior |
 | `document.rs` | 2 | Document replication across runtimes |
+| `idempotent_replay.rs` | 3 | Idempotent reconnect/replay behavior |
 | `management.rs` | 3 | P2P collection/replicator management |
-| `sync.rs` | 10 | Sync protocol (document sync, versions, branchable, invalid CID) |
+| `sync.rs` | 11 | Sync protocol (document sync, versions, branchable, invalid CID) |
 | `trust_boundary.rs` | 3 | ACP enforcement at P2P trust boundaries |
-| `replication.rs` | 3 | Basic replication lifecycle |
+| `transports.rs` | 3 | TCP, QUIC, and WebSocket listen address coverage; Rust↔Rust QUIC/WS and Rust↔Go QUIC dialing |
+| `replication.rs` | 4 | Basic replication lifecycle |
 | `replication_advanced.rs` | 3 | Multi-collection and bidirectional replication |
 | `resilience.rs` | 9 | P2P stress tests (ignored by default) |
+| `write_contention.rs` | 9 | Concurrent write behavior across P2P topologies |
 
-**22 active tests, 11 ignored.**
+**51 total tests: 40 active, 11 ignored.**
 
 ### Ignored
 
