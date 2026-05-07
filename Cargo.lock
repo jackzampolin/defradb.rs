@@ -8907,7 +8907,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "storage",
- "sysinfo 0.37.2",
+ "sysinfo 0.29.11",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

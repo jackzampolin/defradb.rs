@@ -53,7 +53,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 rlimit = "0.9"
-sysinfo = "0.37"
+sysinfo = "0.29"
 
 # Bytes
 bytes = { workspace = true }

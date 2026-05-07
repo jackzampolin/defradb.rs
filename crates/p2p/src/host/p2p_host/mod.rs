@@ -18,7 +18,7 @@ use libp2p::{
     identity::Keypair, noise, request_response, swarm::behaviour::toggle::Toggle, tcp, yamux,
     Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
-use sysinfo::{MemoryRefreshKind, RefreshKind, System};
+use sysinfo::{RefreshKind, System, SystemExt};
 use tokio::{
     sync::mpsc,
     time::{self, Instant, MissedTickBehavior},
@@ -70,7 +70,6 @@ const GO_RESOURCE_MANAGER_TRANSIENT_MEMORY_DIVISOR: u64 = 4;
 struct ResourceManagerRuntimeLimits {
     fd_limit: u64,
     system_memory_budget_bytes: u64,
-    transient_memory_budget_bytes: u64,
 }
 
 impl ResourceManagerRuntimeLimits {
@@ -83,9 +82,11 @@ impl ResourceManagerRuntimeLimits {
         Ok(Self {
             fd_limit,
             system_memory_budget_bytes,
-            transient_memory_budget_bytes: system_memory_budget_bytes
-                / GO_RESOURCE_MANAGER_TRANSIENT_MEMORY_DIVISOR,
         })
+    }
+
+    fn transient_memory_budget_bytes(&self) -> u64 {
+        self.system_memory_budget_bytes / GO_RESOURCE_MANAGER_TRANSIENT_MEMORY_DIVISOR
     }
 
     fn system_memory_budget_usize(&self) -> usize {
@@ -96,9 +97,7 @@ impl ResourceManagerRuntimeLimits {
 }
 
 fn total_system_memory_bytes() -> u64 {
-    let system = System::new_with_specifics(
-        RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()),
-    );
+    let system = System::new_with_specifics(RefreshKind::new().with_memory());
     system.total_memory()
 }
 
@@ -125,7 +124,7 @@ fn current_fd_limit() -> Result<u64> {
 fn validate_resource_manager_startup_limits(fd_limit: u64, memory_budget_bytes: u64) -> Result<()> {
     if fd_limit < GO_RESOURCE_MANAGER_MIN_FD_LIMIT {
         return Err(Error::InvalidConfig(format!(
-            "libp2p ResourceManager requires at least {} file descriptors; current soft limit is {fd_limit}",
+            "libp2p ResourceManager requires at least {} file descriptors; current soft limit is {fd_limit}; raise the soft limit with `ulimit -n 1024` or an equivalent service/container limit",
             GO_RESOURCE_MANAGER_MIN_FD_LIMIT
         )));
     }
@@ -385,7 +384,7 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
             fd_limit = resource_limits.fd_limit,
             system_memory_budget_mib = resource_limits.system_memory_budget_bytes / 1024 / 1024,
             transient_memory_budget_mib =
-                resource_limits.transient_memory_budget_bytes / 1024 / 1024,
+                resource_limits.transient_memory_budget_bytes() / 1024 / 1024,
             "Configured libp2p ResourceManager parity limits"
         );
 
@@ -720,6 +719,29 @@ mod tests {
             err.to_string().contains("file descriptors"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn resource_manager_startup_validation_rejects_low_memory_budget() {
+        let err = validate_resource_manager_startup_limits(
+            GO_RESOURCE_MANAGER_MIN_FD_LIMIT,
+            GO_RESOURCE_MANAGER_MIN_MEMORY_BYTES - 1,
+        )
+        .expect_err("memory below the Go minimum must fail startup validation");
+
+        assert!(
+            err.to_string().contains("memory budget"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resource_manager_startup_validation_accepts_go_minimums() {
+        validate_resource_manager_startup_limits(
+            GO_RESOURCE_MANAGER_MIN_FD_LIMIT,
+            GO_RESOURCE_MANAGER_MIN_MEMORY_BYTES,
+        )
+        .expect("Go minimum FD and memory limits must be accepted");
     }
 
     #[test]

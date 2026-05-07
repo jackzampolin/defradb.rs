@@ -119,13 +119,13 @@ pub struct DefraBehaviour<S: Store> {
 
     /// Process-memory guard approximating Go's ResourceManager system scope.
     ///
-    /// #831: rust-libp2p 0.53 does not expose go-libp2p ResourceManager
-    /// scopes for transient, per-peer, service, or protocol memory/FD
-    /// accounting. This behaviour can only refuse new connections once
-    /// process physical memory exceeds the Go-compatible system budget.
-    /// Existing connection count limits cover pending/per-peer counts, but
-    /// the Go transient 25% byte scope and service/protocol/peer byte scopes
-    /// have no Rust equivalent here.
+    /// rust-libp2p 0.53 does not expose go-libp2p ResourceManager scopes for
+    /// transient, per-peer, service, or protocol memory/FD accounting. This
+    /// behaviour can only refuse new connections once process physical memory
+    /// exceeds the Go-compatible system budget. Existing connection count
+    /// limits cover pending/per-peer counts, but the Go transient 25% byte
+    /// scope and service/protocol/peer byte scopes have no Rust equivalent
+    /// here.
     pub memory_connection_limits: memory_connection_limits::Behaviour,
 }
 
