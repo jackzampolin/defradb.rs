@@ -6735,6 +6735,7 @@ dependencies = [
  "josekit",
  "keyring 3.6.3",
  "serde_json",
+ "serial_test",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
