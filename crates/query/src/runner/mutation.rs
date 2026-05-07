@@ -499,7 +499,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     None
                 }
                 None => {
-                    tracing::warn!(
+                    // No signing config is the normal case for nodes that don't
+                    // run with `--signer-type=...`. There is nothing to authorize
+                    // and nothing actionable for an operator to do, so this stays
+                    // at debug. The two `warn!` arms above remain warnings because
+                    // they signal a *partially* configured remote-signer setup.
+                    tracing::debug!(
                         collection = %mutation.collection_name,
                         "create mutation has no signing config; remote signer authorization skipped"
                     );
