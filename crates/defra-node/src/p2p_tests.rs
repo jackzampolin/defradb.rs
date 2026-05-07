@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
@@ -50,6 +51,33 @@ fn desktop_like_streaming_p2p_config() -> P2PConfig {
     config.rate_limit_burst = 5_000;
     config.rate_limit_rate = 500.0;
     config
+}
+
+fn persistent_p2p_config(secret_key_path: PathBuf) -> P2PConfig {
+    let mut config = test_p2p_config();
+    config.secret_key_path = Some(secret_key_path);
+    config.load_persisted_collections = true;
+    config
+}
+
+fn unique_data_path(test_name: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "defra-node-{test_name}-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+async fn build_persistent_p2p_node(data_path: PathBuf, secret_key_path: PathBuf) -> EmbeddedNode {
+    EmbeddedNode::builder()
+        .data_path(data_path)
+        .with_p2p(persistent_p2p_config(secret_key_path))
+        .build()
+        .await
+        .expect("build persistent P2P node")
 }
 
 async fn wait_for_listen_addr(node: &EmbeddedNode) -> String {
@@ -123,6 +151,36 @@ async fn wait_for_collection_len(node: &EmbeddedNode, collection: &str, expected
         assert!(
             Instant::now() < deadline,
             "collection {collection} never reached {expected} docs; last response: {:?}",
+            response.data
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn wait_for_user_age(node: &EmbeddedNode, expected: i64) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let response = node.execute("query { User { _docID age } }").await;
+        assert!(
+            response.errors.is_empty(),
+            "query returned errors: {:?}",
+            response.errors
+        );
+        let replicated = response
+            .data
+            .as_ref()
+            .and_then(|data| data.get("User"))
+            .and_then(|value| value.as_array())
+            .and_then(|rows| rows.first())
+            .and_then(|row| row.get("age"))
+            .and_then(|value| value.as_i64())
+            == Some(expected);
+        if replicated {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "User age never reached {expected}; last response: {:?}",
             response.data
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1097,6 +1155,181 @@ async fn live_replicator_pushes_post_config_writes() {
 
     node0.shutdown().await;
     node1.shutdown().await;
+}
+
+#[tokio::test]
+async fn p2p_document_subscriptions_survive_restart_and_delete() {
+    init_tracing();
+
+    let data_path = unique_data_path("p2p-doc-subscriptions");
+    let secret_key_path = data_path.join("p2p.key");
+
+    let doc_id = {
+        let node = build_persistent_p2p_node(data_path.clone(), secret_key_path.clone()).await;
+
+        node.add_schema("type Note { text: String }")
+            .await
+            .expect("add schema");
+        let response = node
+            .execute(r#"mutation { add_Note(input: {text: "persist me"}) { _docID } }"#)
+            .await;
+        assert!(
+            response.errors.is_empty(),
+            "mutation returned errors: {:?}",
+            response.errors
+        );
+        let doc_id = extract_created_doc_id(&response, "add_Note");
+
+        node.p2p()
+            .expect("p2p")
+            .add_documents(vec![defra_http::router::P2pDocumentRequest {
+                collection: String::new(),
+                doc_id: doc_id.clone(),
+            }])
+            .await
+            .expect("add document subscription");
+        let docs = node
+            .p2p()
+            .expect("p2p")
+            .get_documents()
+            .await
+            .expect("list document subscriptions");
+        assert!(docs.iter().any(|doc| doc.doc_id == doc_id));
+
+        node.shutdown().await;
+        doc_id
+    };
+
+    {
+        let node = build_persistent_p2p_node(data_path.clone(), secret_key_path.clone()).await;
+
+        let docs = node
+            .p2p()
+            .expect("p2p")
+            .get_documents()
+            .await
+            .expect("list restored document subscriptions");
+        assert!(
+            docs.iter().any(|doc| doc.doc_id == doc_id),
+            "persisted document subscription was not restored"
+        );
+
+        node.p2p()
+            .expect("p2p")
+            .remove_documents(vec![defra_http::router::P2pDocumentRequest {
+                collection: String::new(),
+                doc_id: doc_id.clone(),
+            }])
+            .await
+            .expect("remove document subscription");
+        let docs = node
+            .p2p()
+            .expect("p2p")
+            .get_documents()
+            .await
+            .expect("list document subscriptions after remove");
+        assert!(!docs.iter().any(|doc| doc.doc_id == doc_id));
+
+        node.shutdown().await;
+    }
+
+    {
+        let node = build_persistent_p2p_node(data_path.clone(), secret_key_path).await;
+
+        let docs = node
+            .p2p()
+            .expect("p2p")
+            .get_documents()
+            .await
+            .expect("list document subscriptions after restart");
+        assert!(
+            !docs.iter().any(|doc| doc.doc_id == doc_id),
+            "removed document subscription was restored after restart"
+        );
+
+        node.shutdown().await;
+    }
+
+    let _ = tokio::fs::remove_dir_all(data_path).await;
+}
+
+#[tokio::test]
+async fn p2p_replicator_survives_embedded_restart() {
+    init_tracing();
+
+    let data_path0 = unique_data_path("p2p-replicator-node0");
+    let data_path1 = unique_data_path("p2p-replicator-node1");
+    let secret_key_path0 = data_path0.join("p2p.key");
+    let secret_key_path1 = data_path1.join("p2p.key");
+
+    let doc_id = {
+        let node0 = build_persistent_p2p_node(data_path0.clone(), secret_key_path0.clone()).await;
+        let node1 = build_persistent_p2p_node(data_path1.clone(), secret_key_path1.clone()).await;
+
+        node0
+            .add_schema("type User { name: String age: Int }")
+            .await
+            .expect("schema on node0");
+        node1
+            .add_schema("type User { name: String age: Int }")
+            .await
+            .expect("schema on node1");
+
+        install_one_way_replicator(&node0, &node1, &["User"]).await;
+
+        let response = node0
+            .execute(
+                r#"mutation { add_User(input: {name: "Persisted", age: 30}) { _docID name age } }"#,
+            )
+            .await;
+        assert!(
+            response.errors.is_empty(),
+            "mutation returned errors: {:?}",
+            response.errors
+        );
+        let doc_id = extract_created_doc_id(&response, "add_User");
+
+        wait_for_collection_len(&node1, "User", 1).await;
+
+        node0.shutdown().await;
+        node1.shutdown().await;
+        doc_id
+    };
+
+    {
+        let node0 = build_persistent_p2p_node(data_path0.clone(), secret_key_path0).await;
+        let node1 = build_persistent_p2p_node(data_path1.clone(), secret_key_path1).await;
+
+        let addr1 = wait_for_listen_addr(&node1).await;
+        node0
+            .p2p()
+            .expect("node0 p2p")
+            .connect_peer(&addr1)
+            .await
+            .expect("reconnect node0 -> node1");
+        wait_for_connected_peer(&node0).await;
+        wait_for_connected_peer(&node1).await;
+
+        let response = node0
+            .execute(&format!(
+                r#"mutation {{ update_User(docID: "{}", input: {{age: 42}}) {{ _docID age }} }}"#,
+                doc_id
+            ))
+            .await;
+        assert!(
+            response.errors.is_empty(),
+            "update returned errors: {:?}",
+            response.errors
+        );
+
+        wait_for_user_age(&node1, 42).await;
+
+        node0.shutdown().await;
+        node1.shutdown().await;
+    }
+
+    let _ = tokio::fs::remove_dir_all(data_path0).await;
+    let _ = tokio::fs::remove_dir_all(data_path1).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

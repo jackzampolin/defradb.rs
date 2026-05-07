@@ -804,6 +804,17 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             }
         }
 
+        if let Some(ref pusher) = self.doc_pusher {
+            let all_docs: Vec<String> = self
+                .tracked_documents
+                .read()
+                .map(|docs| docs.iter().cloned().collect())
+                .unwrap_or_default();
+            if let Err(e) = pusher.persist_p2p_documents(&all_docs).await {
+                tracing::warn!(error = %e, "failed to persist P2P documents after removal");
+            }
+        }
+
         Ok(())
     }
 

@@ -940,16 +940,20 @@ impl NodeBuilder {
         let broadcast_mutator_for_acp = broadcast_mutator.clone();
         let mutator: Arc<dyn query::DocMutator> = broadcast_mutator;
 
+        let restored_doc_ids =
+            restore_iroh_p2p_state(store.clone(), &transport, &coordinator).await;
+
         let peer_id = transport.local_peer_id().to_string();
         tracing::info!(peer_id = %peer_id, "P2P started (IROH/QUIC)");
-        let ops: Arc<dyn defra_http::P2POperations> =
-            Arc::new(defra_p2p_adapter::IrohP2PAdapter::with_full_context(
-                transport.clone(),
-                coordinator.clone(),
-                doc_pusher,
-                event_bus,
-                version_syncer,
-            ));
+        let adapter = defra_p2p_adapter::IrohP2PAdapter::with_full_context(
+            transport.clone(),
+            coordinator.clone(),
+            doc_pusher,
+            event_bus,
+            version_syncer,
+        );
+        adapter.set_initial_tracked_documents(restored_doc_ids);
+        let ops: Arc<dyn defra_http::P2POperations> = Arc::new(adapter);
 
         Ok(P2PSetupResult {
             ops,
@@ -1010,6 +1014,73 @@ impl NodeBuilder {
             });
         }
     }
+}
+
+#[cfg(feature = "p2p")]
+async fn restore_iroh_p2p_state<S, B>(
+    store: Arc<S>,
+    transport: &p2p::iroh::IrohTransport,
+    coordinator: &Arc<p2p::sync::IrohSyncCoordinator<B>>,
+) -> std::collections::HashSet<String>
+where
+    S: storage::corekv::Store + 'static,
+    B: blockstore::Blockstore + 'static,
+{
+    let peerstore = storage::stores::Peerstore::new(store);
+
+    match peerstore.list_replicators().await {
+        Ok(entries) => {
+            for (peer_id_str, data) in entries {
+                let replicator = match p2p::ReplicatorInfo::from_bytes(&data) {
+                    Ok(replicator) => replicator,
+                    Err(error) => {
+                        tracing::warn!(
+                            peer_id = %peer_id_str,
+                            error = %error,
+                            "failed to decode persisted P2P replicator"
+                        );
+                        continue;
+                    }
+                };
+                let peer_id = p2p::transport::PeerId::new(replicator.peer_id_str().to_string());
+                if let Err(error) = coordinator
+                    .create_replicator(&peer_id, replicator.collections.clone(), false)
+                    .await
+                {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %error,
+                        "failed to restore persisted P2P replicator"
+                    );
+                }
+            }
+        }
+        Err(error) => tracing::warn!(error = %error, "failed to load persisted P2P replicators"),
+    }
+
+    let mut restored_doc_ids = std::collections::HashSet::new();
+    match peerstore.load_documents().await {
+        Ok(doc_ids) => {
+            for doc_id in doc_ids {
+                if let Err(error) = transport
+                    .subscribe(p2p::topics::DefraTopic::document(&doc_id))
+                    .await
+                {
+                    tracing::warn!(
+                        doc_id = %doc_id,
+                        error = %error,
+                        "failed to restore P2P document subscription"
+                    );
+                }
+                restored_doc_ids.insert(doc_id);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to load persisted P2P document subscriptions");
+        }
+    }
+
+    restored_doc_ids
 }
 
 #[cfg(feature = "p2p")]
