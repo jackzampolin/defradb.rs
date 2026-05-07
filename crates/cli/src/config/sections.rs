@@ -212,10 +212,10 @@ pub struct NetConfig {
     /// Max concurrent P2P stream handler tasks. Default: 64.
     #[serde(default = "default_max_p2p_tasks")]
     pub max_p2p_tasks: usize,
-    /// Max established inbound P2P connections. Default: 100.
+    /// P2P connection manager low watermark. Default: 100.
     #[serde(default = "default_max_connections_in")]
     pub max_connections_in: u32,
-    /// Max established outbound P2P connections. Default: 400.
+    /// P2P connection manager high watermark. Default: 400.
     #[serde(default = "default_max_connections_out")]
     pub max_connections_out: u32,
     /// Max established connections per peer. Default: 4.

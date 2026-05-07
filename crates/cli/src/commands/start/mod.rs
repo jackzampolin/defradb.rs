@@ -164,11 +164,11 @@ pub struct StartArgs {
     #[arg(long)]
     pub max_p2p_tasks: Option<usize>,
 
-    /// Max established inbound P2P connections (default: 100)
+    /// P2P connection manager low watermark (default: 100)
     #[arg(long)]
     pub max_connections_in: Option<u32>,
 
-    /// Max established outbound P2P connections (default: 400)
+    /// P2P connection manager high watermark (default: 400)
     #[arg(long)]
     pub max_connections_out: Option<u32>,
 

@@ -29,9 +29,18 @@ impl<S: Store> P2PHost<S> {
             }
 
             SwarmEvent::ConnectionEstablished {
-                peer_id, endpoint, ..
+                peer_id,
+                connection_id,
+                endpoint,
+                ..
             } => {
                 info!(peer_id = %peer_id, "Peer connected");
+                self.connection_manager.on_established(
+                    connection_id,
+                    peer_id,
+                    tokio::time::Instant::now(),
+                );
+
                 // Store the remote peer's address from the connection endpoint.
                 // For dialer: the address we dialed (peer's listen addr).
                 // For listener: the send_back_addr. With TCP port reuse enabled,
@@ -86,10 +95,12 @@ impl<S: Store> P2PHost<S> {
 
             SwarmEvent::ConnectionClosed {
                 peer_id,
+                connection_id,
                 num_established,
                 ..
             } => {
                 info!(peer_id = %peer_id, "Peer disconnected");
+                self.connection_manager.on_closed(connection_id);
                 if num_established == 0 {
                     self.peer_addrs.remove(&peer_id);
                 }
