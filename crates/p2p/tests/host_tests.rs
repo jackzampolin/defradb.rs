@@ -7,9 +7,12 @@ use std::time::Duration;
 
 use p2p::testutil::MockBitswapStore;
 use p2p::{
-    message::{PushLogReply, QuerySEArtifactsReply, QuerySEArtifactsRequest, SEFieldQuery},
+    message::{
+        PushLogBroadcast, PushLogReply, QuerySEArtifactsReply, QuerySEArtifactsRequest,
+        SEFieldQuery,
+    },
     signing::sign_message,
-    P2PHost, PeerId, PushLogRequest,
+    DefraTopic, P2PHost, PeerId, PushLogRequest,
 };
 use tokio::time::timeout;
 
@@ -33,6 +36,29 @@ async fn wait_until_connected(handle: &p2p::P2PHostHandle, peer_id: PeerId) {
             "timed out waiting for connection to {peer_id}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Repeatedly attempt to publish on a topic until gossipsub mesh formation
+/// completes (heartbeat interval is 1s). `topic_peers` reflects subscription
+/// knowledge, not mesh membership, so we poll on `publish` itself.
+async fn publish_when_ready(
+    handle: &p2p::P2PHostHandle,
+    topic: DefraTopic,
+    payload: PushLogBroadcast,
+) -> libp2p::gossipsub::MessageId {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match handle.publish(topic.clone(), payload.clone()).await {
+            Ok(id) => return id,
+            Err(e) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "publish never succeeded within 15s: {e}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
     }
 }
 
@@ -779,4 +805,64 @@ async fn test_replicator_management() {
 
     // Shutdown
     handle.shutdown().await.unwrap();
+}
+
+// Regression guard for issue #834. Go's gossipsub default message-id is
+// `(source peer, sequence number)`, so identical payloads from different
+// senders produce DIFFERENT IDs. A prior Rust override hashed message
+// data, collapsing them — see #834. This test fails pre-fix and passes
+// post-fix.
+#[tokio::test]
+async fn regression_834_gossipsub_message_id_distinguishes_senders() {
+    let store0 = MockBitswapStore::new();
+    let store1 = MockBitswapStore::new();
+    let (host0, handle0, _events0, _replicators0) = P2PHost::new(store0).await.unwrap();
+    let (host1, handle1, _events1, _replicators1) = P2PHost::new(store1).await.unwrap();
+
+    tokio::spawn(host0.run());
+    tokio::spawn(host1.run());
+
+    handle0
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .unwrap();
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr1 = handle1.listen_addresses().await.unwrap().remove(0);
+    let peer0 = handle0.local_peer_id_cached();
+    let peer1 = handle1.local_peer_id_cached();
+
+    handle0.dial(peer1, vec![addr1]).await.unwrap();
+    wait_until_connected(&handle0, peer1).await;
+    wait_until_connected(&handle1, peer0).await;
+
+    // Both peers subscribe to the same topic.
+    let topic = DefraTopic::Custom("regression-834".to_string());
+    handle0.subscribe(topic.clone()).await.unwrap();
+    handle1.subscribe(topic.clone()).await.unwrap();
+
+    let payload = PushLogBroadcast::new(
+        "doc-834".to_string(),
+        Bytes::from(vec![0xCA, 0xFE]),
+        "col-834".to_string(),
+        "creator-834".to_string(),
+        Bytes::from(vec![0x01, 0x02, 0x03]),
+        None,
+    );
+
+    let id_from_peer0 = publish_when_ready(&handle0, topic.clone(), payload.clone()).await;
+    let id_from_peer1 = publish_when_ready(&handle1, topic, payload).await;
+
+    assert_ne!(
+        id_from_peer0, id_from_peer1,
+        "bug #834: two peers publishing identical payload produced the same \
+         gossipsub MessageId. The Go-parity default (source + seqno) must \
+         distinguish senders; a content-hash `message_id_fn` has been \
+         reintroduced."
+    );
+
+    handle0.shutdown().await.unwrap();
+    handle1.shutdown().await.unwrap();
 }
