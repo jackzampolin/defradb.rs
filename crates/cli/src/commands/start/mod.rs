@@ -164,13 +164,17 @@ pub struct StartArgs {
     #[arg(long)]
     pub max_p2p_tasks: Option<usize>,
 
-    /// P2P connection manager low watermark (default: 100)
+    /// P2P established connection low watermark (default: 100)
     #[arg(long)]
-    pub max_connections_in: Option<u32>,
+    pub connection_manager_low_water: Option<u32>,
 
-    /// P2P connection manager high watermark (default: 400)
+    /// P2P established connection high watermark (default: 400)
     #[arg(long)]
-    pub max_connections_out: Option<u32>,
+    pub connection_manager_high_water: Option<u32>,
+
+    /// P2P connection manager grace period in milliseconds (default: 20000)
+    #[arg(long)]
+    pub connection_manager_grace_period_ms: Option<u64>,
 
     /// Max established P2P connections per peer (default: 4)
     #[arg(long)]
@@ -472,11 +476,14 @@ impl StartArgs {
         if let Some(max) = self.max_p2p_tasks {
             config.net.max_p2p_tasks = max;
         }
-        if let Some(max) = self.max_connections_in {
-            config.net.max_connections_in = max;
+        if let Some(low_water) = self.connection_manager_low_water {
+            config.net.connection_manager_low_water = low_water;
         }
-        if let Some(max) = self.max_connections_out {
-            config.net.max_connections_out = max;
+        if let Some(high_water) = self.connection_manager_high_water {
+            config.net.connection_manager_high_water = high_water;
+        }
+        if let Some(grace_period_ms) = self.connection_manager_grace_period_ms {
+            config.net.connection_manager_grace_period_ms = grace_period_ms;
         }
         if let Some(max) = self.max_connections_per_peer {
             config.net.max_connections_per_peer = max;

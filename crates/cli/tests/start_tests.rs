@@ -38,8 +38,9 @@ fn default_start_args() -> StartArgs {
         max_car_size: None,
         stream_timeout: None,
         max_p2p_tasks: None,
-        max_connections_in: None,
-        max_connections_out: None,
+        connection_manager_low_water: None,
+        connection_manager_high_water: None,
+        connection_manager_grace_period_ms: None,
         max_connections_per_peer: None,
         p2p_rate_limit_burst: None,
         p2p_rate_limit_rate: None,
@@ -130,8 +131,9 @@ fn test_apply_to_config_all_flags() {
         max_car_size: Some(128 * 1024 * 1024),
         stream_timeout: Some(60),
         max_p2p_tasks: Some(128),
-        max_connections_in: Some(200),
-        max_connections_out: Some(800),
+        connection_manager_low_water: Some(200),
+        connection_manager_high_water: Some(800),
+        connection_manager_grace_period_ms: Some(10_000),
         max_connections_per_peer: Some(8),
         p2p_rate_limit_burst: Some(32),
         p2p_rate_limit_rate: Some(4.5),
@@ -159,8 +161,9 @@ fn test_apply_to_config_all_flags() {
     assert_eq!(config.net.max_car_size, 128 * 1024 * 1024);
     assert_eq!(config.net.stream_timeout, 60);
     assert_eq!(config.net.max_p2p_tasks, 128);
-    assert_eq!(config.net.max_connections_in, 200);
-    assert_eq!(config.net.max_connections_out, 800);
+    assert_eq!(config.net.connection_manager_low_water, 200);
+    assert_eq!(config.net.connection_manager_high_water, 800);
+    assert_eq!(config.net.connection_manager_grace_period_ms, 10_000);
     assert_eq!(config.net.max_connections_per_peer, 8);
     assert_eq!(config.net.p2p_rate_limit_burst, 32);
     assert_eq!(config.net.p2p_rate_limit_rate, 4.5);
