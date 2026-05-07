@@ -64,9 +64,14 @@ pub fn open_file_keyring(dir: impl AsRef<std::path::Path>) -> Result<FileKeyring
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::env;
 
+    // These tests mutate the process-global KEYRING_SECRET_ENV; #[serial] keeps
+    // them from racing each other (and any other test that touches the same var).
+
     #[test]
+    #[serial]
     fn test_load_secret_from_env() {
         let test_secret = "my-test-secret";
 
@@ -78,6 +83,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_load_secret_from_env_not_set() {
         env::remove_var(KEYRING_SECRET_ENV);
         let result = load_secret_from_env();
@@ -85,6 +91,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_open_file_keyring_with_env() {
         let temp_dir = tempfile::tempdir().unwrap();
         let test_secret = "test-keyring-secret";

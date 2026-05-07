@@ -274,7 +274,7 @@ impl super::Planner {
                                 .filter
                                 .as_ref()
                                 .map(Filter::max_depth)
-                                .unwrap_or(query_types::DEFAULT_MAX_FILTER_DEPTH);
+                                .unwrap_or(self.query_limits.max_filter_depth);
                             cs.filter = Some(Filter::from_conditions_with_max_depth(
                                 conditions, max_depth,
                             ));

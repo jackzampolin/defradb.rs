@@ -267,6 +267,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             collections_map.values().map(|c| (**c).clone()).collect();
 
         let mut planner = Planner::new(collections)
+            .with_query_limits(self.query_limits)
             .with_fetcher(Arc::new(fetcher_arc))
             .with_acp(self.acp.clone(), identity);
         if let Some(ref lens_store) = self.lens_store {

@@ -7,8 +7,22 @@ use schema::CollectionVersion;
 
 use crate::SchemaOps;
 
+pub(crate) struct DbSchemaOps<S: storage::corekv::Store + 'static> {
+    database: Arc<db::DB<S>>,
+    query_limits: query::QueryLimits,
+}
+
+impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
+    pub(crate) fn new(database: Arc<db::DB<S>>, query_limits: query::QueryLimits) -> Self {
+        Self {
+            database,
+            query_limits,
+        }
+    }
+}
+
 #[async_trait::async_trait]
-impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
+impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
     async fn add_schema(&self, sdl: &str) -> anyhow::Result<()> {
         let collections =
             query::parse_sdl(sdl).map_err(|e| anyhow::anyhow!("SDL parse error: {}", e))?;
@@ -17,7 +31,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
             .map_err(|e| anyhow::anyhow!("schema validation error: {}", e))?;
 
         for collection in collections {
-            db::DB::create_collection(self, collection)
+            db::DB::create_collection(&self.database, collection)
                 .await
                 .map_err(|e| anyhow::anyhow!("create collection error: {}", e))?;
         }
@@ -25,16 +39,17 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
     }
 
     async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()> {
-        let known_types: std::collections::HashSet<String> = db::DB::list_collections(self)
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        let known_types: std::collections::HashSet<String> =
+            db::DB::list_collections(&self.database)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
 
         let mut collections = query::parse_sdl_with_known_types(target_sdl, known_types)
             .map_err(|e| anyhow::anyhow!("view SDL parse error: {}", e))?;
 
         let wrapped_query = format!("query {{ {} }}", source_query.trim());
-        let selects = query::parse_query(&wrapped_query)
+        let selects = query::parse_query_with_limits(&wrapped_query, None, self.query_limits)
             .map_err(|e| anyhow::anyhow!("view query parse error: {}", e))?;
         let select = selects
             .into_iter()
@@ -48,7 +63,8 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
         for collection in &mut collections {
             if collection.downsample_interval.is_some() {
                 collection.downsample_source = Some(query_source.clone());
-                self.validate_downsample_collection(collection)
+                self.database
+                    .validate_downsample_collection(collection)
                     .map_err(|e| anyhow::anyhow!("invalid downsample definition: {}", e))?;
             } else {
                 collection.query = Some(query_source.clone());
@@ -66,20 +82,23 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
             }
         }
 
-        self.create_collections_atomic(collections)
+        self.database
+            .create_collections_atomic(collections)
             .await
             .map_err(|e| anyhow::anyhow!("create view collection error: {}", e))?;
 
         if !materialized_names.is_empty() {
-            self.refresh_views(Some(db::RefreshViewsOptions::with_names(
-                materialized_names,
-            )))
-            .await
-            .map_err(|e| anyhow::anyhow!("refresh materialized views error: {}", e))?;
+            self.database
+                .refresh_views(Some(db::RefreshViewsOptions::with_names(
+                    materialized_names,
+                )))
+                .await
+                .map_err(|e| anyhow::anyhow!("refresh materialized views error: {}", e))?;
         }
 
         if !downsample_names.is_empty() {
-            self.bootstrap_downsamples(Some(&downsample_names))
+            self.database
+                .bootstrap_downsamples(Some(&downsample_names))
                 .await
                 .map_err(|e| anyhow::anyhow!("bootstrap downsample collections error: {}", e))?;
         }
@@ -92,29 +111,29 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
         collection_name: &str,
         patch: &str,
     ) -> anyhow::Result<CollectionVersion> {
-        db::DB::patch_collection(self, collection_name, patch)
+        db::DB::patch_collection(&self.database, collection_name, patch)
             .await
             .map_err(anyhow::Error::new)
     }
 
     async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()> {
-        db::DB::set_active_collection_version(self, version_id)
+        db::DB::set_active_collection_version(&self.database, version_id)
             .await
             .map_err(anyhow::Error::new)
     }
 
     async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
-        db::DB::set_migration(self, config)
+        db::DB::set_migration(&self.database, config)
             .await
             .map_err(anyhow::Error::new)
     }
 
     fn list_collections(&self) -> anyhow::Result<Vec<String>> {
-        db::DB::list_collections(self).map_err(anyhow::Error::new)
+        db::DB::list_collections(&self.database).map_err(anyhow::Error::new)
     }
 
     fn get_collection(&self, name: &str) -> anyhow::Result<Option<CollectionVersion>> {
-        Ok(db::DB::get_collection(self, name)
+        Ok(db::DB::get_collection(&self.database, name)
             .map_err(anyhow::Error::new)?
             .map(|collection| collection.schema().clone()))
     }
@@ -123,14 +142,16 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
         &self,
         version_id: &str,
     ) -> anyhow::Result<Option<CollectionVersion>> {
-        Ok(db::DB::get_collection_by_version_id_full(self, version_id)
-            .await
-            .map_err(anyhow::Error::new)?
-            .map(|collection| collection.schema().clone()))
+        Ok(
+            db::DB::get_collection_by_version_id_full(&self.database, version_id)
+                .await
+                .map_err(anyhow::Error::new)?
+                .map(|collection| collection.schema().clone()),
+        )
     }
 
     async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>> {
-        db::DB::get_all_collection_versions(self)
+        db::DB::get_all_collection_versions(&self.database)
             .await
             .map_err(anyhow::Error::new)
     }

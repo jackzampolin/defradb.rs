@@ -663,7 +663,7 @@ impl Planner {
                     .filter
                     .as_ref()
                     .map(Filter::max_depth)
-                    .unwrap_or(query_types::DEFAULT_MAX_FILTER_DEPTH);
+                    .unwrap_or(self.query_limits.max_filter_depth);
                 // Create a filter: _docID IN [...]
                 if doc_ids.len() == 1 {
                     // Single ID: _docID == "..."

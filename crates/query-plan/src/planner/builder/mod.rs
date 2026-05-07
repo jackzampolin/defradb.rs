@@ -24,6 +24,7 @@ use crate::plan::{IndexScanNode, PermissionFilterNode, SEFilterNode, ScanNode, S
 use crate::planner::index_selection::IndexScanParams;
 use crate::planner::PlanNode;
 use query_types::error::{QueryError, Result};
+use query_types::limits::QueryLimits;
 use query_types::mapper::{Requestable, Select};
 
 /// Maximum allowed nesting depth for nested queries (0-indexed).
@@ -76,6 +77,8 @@ pub struct Planner {
     identity_did: Option<Did>,
     /// Pre-computed FTS scores: output_name → (doc_id → score)
     pub(crate) fts_scores: HashMap<String, HashMap<String, f64>>,
+    /// Query parsing and filter evaluation guardrails.
+    pub(crate) query_limits: QueryLimits,
 }
 
 impl Planner {
@@ -113,6 +116,7 @@ impl Planner {
             acp: None,
             identity_did: None,
             fts_scores: HashMap::new(),
+            query_limits: QueryLimits::default(),
         }
     }
 
@@ -134,6 +138,12 @@ impl Planner {
     /// Set pre-computed FTS scores for BM25 nodes.
     pub fn with_fts_scores(mut self, scores: HashMap<String, HashMap<String, f64>>) -> Self {
         self.fts_scores = scores;
+        self
+    }
+
+    /// Set query parsing and filter evaluation limits.
+    pub fn with_query_limits(mut self, limits: QueryLimits) -> Self {
+        self.query_limits = limits;
         self
     }
 

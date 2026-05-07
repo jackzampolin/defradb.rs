@@ -17,6 +17,7 @@ use tower_http::trace::TraceLayer;
 
 use query::executor::QueryExecutor;
 use query::rest::RestOperations;
+use query::QueryLimits;
 
 use crate::error::Result;
 use crate::router::{
@@ -44,6 +45,8 @@ pub struct ServerConfig {
     pub request_timeout: u64,
     /// Max concurrent requests (0 = unlimited).
     pub max_concurrent_requests: usize,
+    /// GraphQL parsing and filter evaluation limits.
+    pub query_limits: QueryLimits,
 }
 
 impl Default for ServerConfig {
@@ -56,6 +59,7 @@ impl Default for ServerConfig {
             max_backup_size: 0,
             request_timeout: 300,
             max_concurrent_requests: 1000,
+            query_limits: QueryLimits::default(),
         }
     }
 }
@@ -353,6 +357,12 @@ impl Server {
         self
     }
 
+    /// Set GraphQL parsing and filter evaluation limits.
+    pub fn with_query_limits(mut self, limits: QueryLimits) -> Self {
+        self.config.query_limits = limits;
+        self
+    }
+
     /// Build the router with all routes and middleware.
     ///
     /// CORS configuration matches Go DefraDB behavior:
@@ -419,6 +429,7 @@ impl Server {
             builder = builder.with_signing_enabled(true);
         }
         builder = builder.with_dev_mode(self.dev_mode);
+        builder = builder.with_query_limits(self.config.query_limits);
         let state = builder.build();
         let state_for_middleware = state.clone();
         let mut router = create_router_with_state(state);

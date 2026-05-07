@@ -118,8 +118,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         });
 
         // Build and execute the plan (ACP filter is inserted inside, after Select but before aggregates)
-        let mut plan =
-            plan::build_plan(select, plan_docs, mapping.clone(), collection, acp_filter)?;
+        let mut plan = plan::build_plan(
+            select,
+            plan_docs,
+            mapping.clone(),
+            collection,
+            acp_filter,
+            self.query_limits,
+        )?;
 
         // Execute the plan and collect results
         plan.init().await?;

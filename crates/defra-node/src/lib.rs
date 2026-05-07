@@ -44,6 +44,7 @@ pub use config::{DocumentAcpConfig, SourceHubConfig};
 pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybridSearchResponse};
 pub use events::EventName;
 pub use lens::{LensConfig, LensModule, TransformId};
+pub use query::QueryLimits;
 pub use query::{QueryExecutor, QueryRequest, QueryResponse};
 pub use schema::CollectionVersion;
 
@@ -476,8 +477,20 @@ pub struct NodeBuilder {
     embedding_api_key: Option<String>,
     document_acp: DocumentAcpConfig,
     node_identity_did: Option<String>,
+    query_limits: QueryLimits,
     #[cfg(feature = "http")]
     http_config: Option<HttpConfig>,
+    #[cfg(feature = "p2p")]
+    p2p_config: Option<P2PConfig>,
+}
+
+struct StoreBuildArgs {
+    acp_store: Arc<dyn acp::AcpStore>,
+    document_acp_config: DocumentAcpConfig,
+    db_options: db::DbOptions,
+    event_bus: Arc<dyn events::Bus>,
+    node_identity_did: Option<String>,
+    query_limits: QueryLimits,
     #[cfg(feature = "p2p")]
     p2p_config: Option<P2PConfig>,
 }
@@ -533,6 +546,12 @@ impl NodeBuilder {
         self
     }
 
+    /// Set GraphQL parsing and filter evaluation limits.
+    pub fn with_query_limits(mut self, limits: QueryLimits) -> Self {
+        self.query_limits = limits;
+        self
+    }
+
     /// Enable the HTTP GraphQL server.
     #[cfg(feature = "http")]
     pub fn with_http(mut self, config: HttpConfig) -> Self {
@@ -584,6 +603,7 @@ impl NodeBuilder {
         let http_config = self.http_config;
         #[cfg(feature = "p2p")]
         let p2p_config = self.p2p_config;
+        let query_limits = self.query_limits;
 
         // 3. Storage backend + database
         let node = if let Some(path) = self.data_path {
@@ -608,13 +628,16 @@ impl NodeBuilder {
 
                     Self::build_with_store(
                         store,
-                        acp_store,
-                        self.document_acp.clone(),
-                        db_options.clone(),
-                        event_bus,
-                        node_identity_did.clone(),
-                        #[cfg(feature = "p2p")]
-                        p2p_config,
+                        StoreBuildArgs {
+                            acp_store,
+                            document_acp_config: self.document_acp.clone(),
+                            db_options: db_options.clone(),
+                            event_bus,
+                            node_identity_did: node_identity_did.clone(),
+                            query_limits,
+                            #[cfg(feature = "p2p")]
+                            p2p_config,
+                        },
                     )
                     .await?
                 }
@@ -635,13 +658,16 @@ impl NodeBuilder {
 
                     Self::build_with_store(
                         store,
-                        acp_store,
-                        self.document_acp.clone(),
-                        db_options.clone(),
-                        event_bus,
-                        node_identity_did.clone(),
-                        #[cfg(feature = "p2p")]
-                        p2p_config,
+                        StoreBuildArgs {
+                            acp_store,
+                            document_acp_config: self.document_acp.clone(),
+                            db_options: db_options.clone(),
+                            event_bus,
+                            node_identity_did: node_identity_did.clone(),
+                            query_limits,
+                            #[cfg(feature = "p2p")]
+                            p2p_config,
+                        },
                     )
                     .await?
                 }
@@ -663,13 +689,16 @@ impl NodeBuilder {
 
             Self::build_with_store(
                 store,
-                acp_store,
-                self.document_acp,
-                db_options,
-                event_bus,
-                node_identity_did.clone(),
-                #[cfg(feature = "p2p")]
-                p2p_config,
+                StoreBuildArgs {
+                    acp_store,
+                    document_acp_config: self.document_acp,
+                    db_options,
+                    event_bus,
+                    node_identity_did: node_identity_did.clone(),
+                    query_limits,
+                    #[cfg(feature = "p2p")]
+                    p2p_config,
+                },
             )
             .await?
         };
@@ -679,6 +708,7 @@ impl NodeBuilder {
         if let Some(http_cfg) = http_config {
             let server_config = defra_http::ServerConfig {
                 address: http_cfg.address,
+                query_limits,
                 ..Default::default()
             };
             let server =
@@ -741,13 +771,19 @@ impl NodeBuilder {
 
     async fn build_with_store<S: storage::corekv::Store + 'static>(
         store: Arc<S>,
-        acp_store: Arc<dyn acp::AcpStore>,
-        document_acp_config: DocumentAcpConfig,
-        db_options: db::DbOptions,
-        event_bus: Arc<dyn events::Bus>,
-        node_identity_did: Option<String>,
-        #[cfg(feature = "p2p")] p2p_config: Option<P2PConfig>,
+        args: StoreBuildArgs,
     ) -> anyhow::Result<EmbeddedNode> {
+        let StoreBuildArgs {
+            acp_store,
+            document_acp_config,
+            db_options,
+            event_bus,
+            node_identity_did,
+            query_limits,
+            #[cfg(feature = "p2p")]
+            p2p_config,
+        } = args;
+
         let embedding_config = db_options.embedding_config();
 
         // Open database
@@ -802,10 +838,12 @@ impl NodeBuilder {
             query::QueryRunner::with_arc_registry_and_provider(fetcher, provider, registry)
                 .with_mutator(mutator)
                 .with_acp(document_acp)
-                .with_lens_store(database.lens_store().clone());
+                .with_lens_store(database.lens_store().clone())
+                .with_query_limits(query_limits);
 
         let runner: Arc<dyn QueryExecutor> = Arc::new(query_runner);
-        let schema_ops: Arc<dyn SchemaOps> = Arc::new(database.clone());
+        let schema_ops: Arc<dyn SchemaOps> =
+            Arc::new(db_impls::DbSchemaOps::new(database.clone(), query_limits));
 
         #[cfg(feature = "p2p")]
         let (p2p_ops, p2p_lifecycle) = match p2p_result {

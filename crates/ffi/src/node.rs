@@ -60,6 +60,7 @@ pub(crate) async fn build_node_state(
         node_identity_did: node.node_identity_did.clone(),
         signing_enabled: node.node_identity_did.is_some(),
         sourcehub_acp: node.sourcehub_acp.clone(),
+        query_limits: node.query_limits,
         se_encryption_key: None,
     })
 }
@@ -219,6 +220,7 @@ fn resolve_embedded_config(
         transport: embedded::TransportConfig::None,
         signing,
         document_acp,
+        query_limits: query::QueryLimits::default(),
         max_concurrent_dag_fetches: if options.max_concurrent_dag_fetches > 0 {
             Some(options.max_concurrent_dag_fetches)
         } else {
