@@ -8,9 +8,8 @@ use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use super::{
-    check_and_set_dac_bypass, extract_doc_id_from_query, is_commits_subscription,
-    nac_permission_for_query, subscription_to_commits_query_with_cid,
-    subscription_to_query_with_doc_id,
+    check_and_set_dac_bypass, nac_permission_for_query, subscription_accepts_doc_id,
+    subscription_doc_ids, subscription_to_scoped_query,
 };
 
 /// Execute a GraphQL query or mutation.
@@ -53,7 +52,7 @@ pub unsafe extern "C" fn exec_request(
         try_ffi!(check_nac_for_node(rt, node_ptr, identity_did, permission));
 
         let identity_str = c_str_to_string(identity_did);
-        let op_name = c_str_to_string(operation_name);
+        let op_name = c_str_to_string(operation_name).filter(|name| !name.is_empty());
         let vars_str = c_str_to_string(variables);
         let batch_session = c_str_to_string(batch_session_id);
 
@@ -103,16 +102,25 @@ pub unsafe extern "C" fn exec_request(
                 None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
             };
 
-            // Extract any pre-existing docID filter from the subscription query
-            let subscription_doc_id = extract_doc_id_from_query(&query_str);
+            let subscription_variables = match vars_str.as_ref() {
+                Some(vars) => match serde_json::from_str::<serde_json::Value>(vars) {
+                    Ok(value) => Some(value),
+                    Err(e) => return FfiResult::error(format!("failed to parse variables: {}", e)),
+                },
+                None => None,
+            };
+            let subscription_doc_ids_filter = subscription_doc_ids(
+                &query_str,
+                subscription_variables.as_ref(),
+                op_name.as_deref(),
+            );
             let sub_query = query_str.clone();
             let sub_identity = did.clone();
+            let sub_operation_name = op_name.clone();
+            let sub_variables = subscription_variables.clone();
 
             // Create result channel for buffering processed subscription results
             let (result_tx, result_rx) = tokio::sync::mpsc::channel::<String>(256);
-
-            // Detect if this is a _commits subscription (uses CID-based queries)
-            let is_commits = is_commits_subscription(&query_str);
 
             // Capture signing config and DAC bypass before spawning.
             // The thread-locals were set on this thread (lines 63-116) but the
@@ -127,26 +135,36 @@ pub unsafe extern "C" fn exec_request(
                     if let Some(update) = message.as_update() {
                         let event_doc_id = update.doc_id.clone();
 
-                        // Check subscription docID filter
-                        if let Some(ref sub_doc) = subscription_doc_id {
-                            if event_doc_id != *sub_doc {
-                                continue;
-                            }
+                        if !subscription_accepts_doc_id(
+                            subscription_doc_ids_filter.as_deref(),
+                            &event_doc_id,
+                        ) {
+                            continue;
                         }
 
-                        // Convert subscription to a query scoped to the changed document.
-                        // For _commits subscriptions, use the event's CID to get just the
-                        // composite commit. For regular subscriptions, use docID.
-                        let query_text = if is_commits {
-                            let cid_str = update.cid.to_string();
-                            subscription_to_commits_query_with_cid(&sub_query, &cid_str)
-                        } else {
-                            subscription_to_query_with_doc_id(&sub_query, &event_doc_id)
+                        let cid_str = update.cid.to_string();
+                        let query_text = match subscription_to_scoped_query(
+                            &sub_query,
+                            &event_doc_id,
+                            &cid_str,
+                            sub_operation_name.as_deref(),
+                        ) {
+                            Ok(query) => query,
+                            Err(error) => {
+                                tracing::warn!(error = %error, "failed to scope subscription query");
+                                continue;
+                            }
                         };
 
                         let mut request = query::QueryRequest::new(query_text);
                         if sub_identity.is_some() {
                             request = request.with_identity(sub_identity.clone());
+                        }
+                        if let Some(ref op_name) = sub_operation_name {
+                            request = request.with_operation_name(op_name.clone());
+                        }
+                        if let Some(ref vars) = sub_variables {
+                            request = request.with_variables(vars.clone());
                         }
 
                         // Execute inside spawn_blocking to pin thread-locals, matching

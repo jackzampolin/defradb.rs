@@ -1,174 +1,178 @@
-//! Shared subscription helpers for converting subscription queries to scoped queries.
+//! Shared subscription helpers for converting live subscription events into scoped queries.
 //!
 //! Used by both FFI and HTTP code paths to process subscription events.
 
+use std::collections::HashMap;
+
+use graphql_parser::query::{
+    Definition, Field, OperationDefinition, Query as GqlQuery, Selection, SelectionSet,
+    Subscription, Value,
+};
+use serde_json::Value as JsonValue;
+
+use crate::error::{QueryError, Result};
+use crate::query_parse::{parse_request_with_variables, ParsedOperation};
 use crate::QueryResponse;
 
-/// Extract a docID value from a GraphQL query string.
-///
-/// Looks for patterns like `docID: "bae-xxx"` or `docID:"bae-xxx"` in the query.
-/// Returns None if no docID is found.
-pub fn extract_doc_id_from_query(query: &str) -> Option<String> {
-    let doc_id_marker = "docID:";
-    let pos = query.find(doc_id_marker)?;
-    let after = &query[pos + doc_id_marker.len()..];
-    let after = after.trim_start();
+/// Check whether the provided request resolves to a subscription operation.
+pub fn is_subscription_operation(
+    query: &str,
+    variables: Option<&JsonValue>,
+    operation_name: Option<&str>,
+) -> bool {
+    let variable_map = variables_to_map(variables);
+    matches!(
+        parse_request_with_variables(query, variable_map.as_ref(), operation_name),
+        Ok(ParsedOperation::Subscription { .. })
+    )
+}
 
-    if after.starts_with('"') {
-        let value_start = 1;
-        let value_end = after[value_start..].find('"')?;
-        Some(after[value_start..value_start + value_end].to_string())
-    } else {
-        None
+/// Extract the parsed docID/docIDs filter from a subscription root field.
+pub fn subscription_doc_ids(
+    query: &str,
+    variables: Option<&JsonValue>,
+    operation_name: Option<&str>,
+) -> Option<Vec<String>> {
+    let variable_map = variables_to_map(variables);
+    match parse_request_with_variables(query, variable_map.as_ref(), operation_name).ok()? {
+        ParsedOperation::Subscription { select } => select.doc_ids.clone(),
+        _ => None,
     }
 }
 
-/// Convert a subscription query to a regular query scoped to a specific docID.
-///
-/// Transforms: `subscription { User(filter: ...) { fields } }`
-/// Into: `{ User(docID: "bae-xxx", filter: ...) { fields } }`
-pub fn subscription_to_query_with_doc_id(subscription_query: &str, doc_id: &str) -> String {
-    // Step 1: Remove "subscription" keyword
-    let trimmed = subscription_query.trim_start();
-    let query = if let Some(after) = trimmed.strip_prefix("subscription") {
-        let after = after.trim_start();
-        if after.starts_with('{') {
-            after.to_string()
-        } else if let Some(brace_pos) = after.find('{') {
-            after[brace_pos..].to_string()
-        } else {
-            after.to_string()
-        }
-    } else {
-        trimmed.to_string()
-    };
-
-    // Step 2: Find the root field name and inject docID
-    let brace_pos = match query.find('{') {
-        Some(p) => p,
-        None => return query,
-    };
-
-    let after_brace = &query[brace_pos + 1..];
-    let ws_len = after_brace.len() - after_brace.trim_start().len();
-    let field_start_in_q = brace_pos + 1 + ws_len;
-
-    let rest = &query[field_start_in_q..];
-    let field_end = rest
-        .find(|c: char| !c.is_alphanumeric() && c != '_')
-        .unwrap_or(rest.len());
-    let after_field = field_start_in_q + field_end;
-
-    let post_field = query[after_field..].trim_start();
-    if post_field.starts_with('(') {
-        let paren_idx = match query[after_field..].find('(') {
-            Some(offset) => after_field + offset,
-            None => return query,
-        };
-
-        if extract_doc_id_from_query(&query).is_some() {
-            query
-        } else {
-            format!(
-                "{}docID: \"{}\", {}",
-                &query[..paren_idx + 1],
-                doc_id,
-                &query[paren_idx + 1..]
-            )
-        }
-    } else {
-        format!(
-            "{}(docID: \"{}\"){}",
-            &query[..after_field],
-            doc_id,
-            &query[after_field..]
-        )
-    }
+/// Return whether a live update belongs to the subscription's explicit docID filter.
+pub fn subscription_accepts_doc_id(doc_ids: Option<&[String]>, event_doc_id: &str) -> bool {
+    doc_ids
+        .map(|ids| ids.iter().any(|id| id == event_doc_id))
+        .unwrap_or(true)
 }
 
-/// Check if a subscription query targets the `_commits` root field.
-pub fn is_commits_subscription(query: &str) -> bool {
-    let trimmed = query.trim_start();
-    let after_sub = trimmed.strip_prefix("subscription").unwrap_or(trimmed);
-    let brace_pos = match after_sub.find('{') {
-        Some(p) => p,
-        None => return false,
-    };
-    let after_brace = after_sub[brace_pos + 1..].trim_start();
-    after_brace.starts_with("_commits")
-}
-
-/// Convert a _commits subscription to a query scoped to a specific CID.
+/// Convert a subscription operation into a query scoped to the live update's docID and CID.
 ///
-/// Transforms: `subscription { _commits(docID: "...") { fields } }`
-/// Into: `{ _commits(cid: ["bafyrei-xxx"]) { fields } }`
-pub fn subscription_to_commits_query_with_cid(subscription_query: &str, cid: &str) -> String {
-    // Step 1: Remove "subscription" keyword
-    let trimmed = subscription_query.trim_start();
-    let query = if let Some(after) = trimmed.strip_prefix("subscription") {
-        let after = after.trim_start();
-        if after.starts_with('{') {
-            after.to_string()
-        } else if let Some(brace_pos) = after.find('{') {
-            after[brace_pos..].to_string()
-        } else {
-            after.to_string()
-        }
-    } else {
-        trimmed.to_string()
-    };
+/// Normal collection subscriptions are narrowed by both `docID` and `cid`, matching Go's
+/// `Select.ToSubscriptionSelect(docID, cid)` semantics. `_commits` subscriptions preserve
+/// the original arguments and replace only `cid`, matching Go's commit subscription path.
+pub fn subscription_to_scoped_query(
+    subscription_query: &str,
+    event_doc_id: &str,
+    event_cid: &str,
+    operation_name: Option<&str>,
+) -> Result<String> {
+    let document = graphql_parser::parse_query::<String>(subscription_query)
+        .map_err(|err| QueryError::parse(err.to_string()))?
+        .into_static();
 
-    // Step 2: Find the root field name (_commits)
-    let brace_pos = match query.find('{') {
-        Some(p) => p,
-        None => return query,
-    };
+    let mut fragments = Vec::new();
+    let mut scoped_operation = None;
 
-    let after_brace = &query[brace_pos + 1..];
-    let ws_len = after_brace.len() - after_brace.trim_start().len();
-    let field_start_in_q = brace_pos + 1 + ws_len;
-
-    let rest = &query[field_start_in_q..];
-    let field_end = rest
-        .find(|c: char| !c.is_alphanumeric() && c != '_')
-        .unwrap_or(rest.len());
-    let after_field = field_start_in_q + field_end;
-
-    // Step 3: Replace or inject cid argument
-    let post_field = query[after_field..].trim_start();
-    if post_field.starts_with('(') {
-        let paren_start_abs = match query[after_field..].find('(') {
-            Some(offset) => after_field + offset,
-            None => return query,
-        };
-        let mut depth = 0;
-        let mut close_paren_abs = paren_start_abs;
-        for (i, c) in query[paren_start_abs..].char_indices() {
-            if c == '(' {
-                depth += 1;
-            }
-            if c == ')' {
-                depth -= 1;
-                if depth == 0 {
-                    close_paren_abs = paren_start_abs + i;
-                    break;
+    for definition in document.definitions {
+        match definition {
+            Definition::Operation(OperationDefinition::Subscription(subscription))
+                if operation_matches(&subscription.name, operation_name) =>
+            {
+                if scoped_operation.is_some() {
+                    return Err(QueryError::parse(
+                        "operation name is required when multiple subscriptions are present",
+                    ));
                 }
+                scoped_operation = Some(Definition::Operation(OperationDefinition::Query(
+                    scoped_subscription_query(subscription, event_doc_id, event_cid)?,
+                )));
             }
+            Definition::Fragment(fragment) => fragments.push(Definition::Fragment(fragment)),
+            _ => {}
         }
-        format!(
-            "{}(cid: [\"{}\"]){}",
-            &query[..paren_start_abs],
-            cid,
-            &query[close_paren_abs + 1..]
-        )
-    } else {
-        format!(
-            "{}(cid: [\"{}\"]){}",
-            &query[..after_field],
-            cid,
-            &query[after_field..]
-        )
     }
+
+    let Some(operation) = scoped_operation else {
+        return Err(QueryError::parse("subscription operation not found"));
+    };
+
+    let mut definitions = Vec::with_capacity(1 + fragments.len());
+    definitions.push(operation);
+    definitions.extend(fragments);
+
+    Ok(graphql_parser::query::Document { definitions }.to_string())
+}
+
+fn variables_to_map(variables: Option<&JsonValue>) -> Option<HashMap<String, JsonValue>> {
+    variables.and_then(|value| {
+        value.as_object().map(|map| {
+            map.iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+    })
+}
+
+fn operation_matches(name: &Option<String>, operation_name: Option<&str>) -> bool {
+    operation_name
+        .map(|target| name.as_deref() == Some(target))
+        .unwrap_or(true)
+}
+
+fn scoped_subscription_query(
+    subscription: Subscription<'static, String>,
+    event_doc_id: &str,
+    event_cid: &str,
+) -> Result<GqlQuery<'static, String>> {
+    let mut selection_set = subscription.selection_set;
+    scope_root_selection(&mut selection_set, event_doc_id, event_cid)?;
+
+    Ok(GqlQuery {
+        position: subscription.position,
+        name: subscription.name,
+        variable_definitions: subscription.variable_definitions,
+        directives: subscription.directives,
+        selection_set,
+    })
+}
+
+fn scope_root_selection(
+    selection_set: &mut SelectionSet<'static, String>,
+    event_doc_id: &str,
+    event_cid: &str,
+) -> Result<()> {
+    if selection_set.items.len() != 1 {
+        return Err(QueryError::parse(
+            "subscription must have exactly one root field",
+        ));
+    }
+
+    let Selection::Field(field) = &mut selection_set.items[0] else {
+        return Err(QueryError::parse(
+            "subscription root selection must be a field",
+        ));
+    };
+
+    scope_root_field(field, event_doc_id, event_cid);
+    Ok(())
+}
+
+fn scope_root_field(field: &mut Field<'static, String>, event_doc_id: &str, event_cid: &str) {
+    if field.name == "_commits" {
+        replace_argument(field, "cid", cid_argument(event_cid));
+    } else {
+        remove_argument(field, "docID");
+        remove_argument(field, "docIDs");
+        replace_argument(field, "cid", cid_argument(event_cid));
+        field
+            .arguments
+            .push(("docID".to_string(), Value::String(event_doc_id.to_string())));
+    }
+}
+
+fn replace_argument(field: &mut Field<'static, String>, name: &str, value: Value<'static, String>) {
+    remove_argument(field, name);
+    field.arguments.push((name.to_string(), value));
+}
+
+fn remove_argument(field: &mut Field<'static, String>, name: &str) {
+    field.arguments.retain(|(arg_name, _)| arg_name != name);
+}
+
+fn cid_argument(cid: &str) -> Value<'static, String> {
+    Value::List(vec![Value::String(cid.to_string())])
 }
 
 /// Check if a query response has any non-empty data.
@@ -186,4 +190,96 @@ pub fn response_has_data(response: &QueryResponse) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn parse_scoped_select(
+        query: &str,
+        variables: Option<&JsonValue>,
+        operation_name: Option<&str>,
+    ) -> crate::Select {
+        match parse_request_with_variables(
+            query,
+            variables_to_map(variables).as_ref(),
+            operation_name,
+        )
+        .expect("scoped query should parse")
+        {
+            ParsedOperation::Query { mut selects, .. } => {
+                assert_eq!(selects.len(), 1);
+                selects.remove(0)
+            }
+            other => panic!("expected scoped query, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scopes_collection_subscription_by_event_doc_id_and_cid() {
+        let scoped = subscription_to_scoped_query(
+            r#"subscription { User(docID: "old-doc", filter: {active: {_eq: true}}) { _docID name } }"#,
+            "event-doc",
+            "event-cid",
+            None,
+        )
+        .expect("subscription should scope");
+
+        let select = parse_scoped_select(&scoped, None, None);
+        assert_eq!(select.collection_name, "User");
+        assert_eq!(select.doc_ids, Some(vec!["event-doc".to_string()]));
+        assert_eq!(select.cid, Some(vec!["event-cid".to_string()]));
+        assert!(select.filter.is_some());
+    }
+
+    #[test]
+    fn scopes_commits_subscription_by_cid_without_dropping_doc_id() {
+        let scoped = subscription_to_scoped_query(
+            r#"subscription { _commits(docID: ["target-doc"], cid: ["old-cid"], depth: 3) { cid docID } }"#,
+            "ignored-doc",
+            "event-cid",
+            None,
+        )
+        .expect("commit subscription should scope");
+
+        let select = parse_scoped_select(&scoped, None, None);
+        assert_eq!(select.collection_name, "_commits");
+        assert_eq!(select.doc_ids, Some(vec!["target-doc".to_string()]));
+        assert_eq!(select.cid, Some(vec!["event-cid".to_string()]));
+        assert_eq!(select.depth, Some(3));
+    }
+
+    #[test]
+    fn resolves_subscription_doc_ids_from_variables() {
+        let query = r#"
+            subscription WatchUser($id: ID!, $active: Boolean!) {
+                User(docID: $id, filter: {active: {_eq: $active}}) {
+                    _docID
+                }
+            }
+        "#;
+        let variables = json!({"id": "target-doc", "active": true});
+
+        assert!(is_subscription_operation(
+            query,
+            Some(&variables),
+            Some("WatchUser"),
+        ));
+        assert_eq!(
+            subscription_doc_ids(query, Some(&variables), Some("WatchUser")),
+            Some(vec!["target-doc".to_string()])
+        );
+
+        let scoped =
+            subscription_to_scoped_query(query, "event-doc", "event-cid", Some("WatchUser"))
+                .expect("subscription should scope");
+        let select = parse_scoped_select(&scoped, Some(&variables), Some("WatchUser"));
+
+        assert_eq!(select.doc_ids, Some(vec!["event-doc".to_string()]));
+        assert_eq!(select.cid, Some(vec!["event-cid".to_string()]));
+        assert!(select.filter.is_some());
+    }
 }

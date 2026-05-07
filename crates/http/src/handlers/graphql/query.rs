@@ -24,8 +24,8 @@ where
     Ok(opt.filter(|s| !s.is_empty()))
 }
 use query::subscription::{
-    extract_doc_id_from_query, is_commits_subscription, response_has_data,
-    subscription_to_commits_query_with_cid, subscription_to_query_with_doc_id,
+    is_subscription_operation, response_has_data, subscription_accepts_doc_id,
+    subscription_doc_ids, subscription_to_scoped_query,
 };
 use query::{parse_request, ParsedOperation};
 
@@ -263,9 +263,10 @@ pub async fn graphql_transactional(
     // Fast path: skip the full GraphQL parse for mutations/queries (the common case).
     // Only do the full parse when the query might be a subscription.
     if might_be_subscription(&request.query)
-        && matches!(
-            parse_request(&request.query),
-            Ok(ParsedOperation::Subscription { .. })
+        && is_subscription_operation(
+            &request.query,
+            request.variables.as_ref(),
+            request.operation_name.as_deref(),
         )
     {
         if !wants_sse(&headers) {
@@ -335,14 +336,16 @@ async fn graphql_sse(
 
     let mut subscription = event_bus.subscribe(&[events::EventName::Update]);
     let query_str = request.query;
+    let operation_name = request.operation_name;
+    let variables = request.variables;
     let did = identity.did().cloned();
 
     // Resolve signing config and DAC bypass once at subscription setup time
     let signing_config = crate::query_context::resolve_signing_config(&state, &identity);
     let dac_bypass = crate::query_context::resolve_dac_bypass(&state, &identity).await;
 
-    let subscription_doc_id = extract_doc_id_from_query(&query_str);
-    let is_commits = is_commits_subscription(&query_str);
+    let subscription_doc_ids_filter =
+        subscription_doc_ids(&query_str, variables.as_ref(), operation_name.as_deref());
 
     let executor = state.executor.clone();
 
@@ -351,24 +354,36 @@ async fn graphql_sse(
             if let Some(update) = message.as_update() {
                 let event_doc_id = update.doc_id.clone();
 
-                // Check subscription docID filter
-                if let Some(ref sub_doc) = subscription_doc_id {
-                    if event_doc_id != *sub_doc {
-                        continue;
-                    }
+                if !subscription_accepts_doc_id(
+                    subscription_doc_ids_filter.as_deref(),
+                    &event_doc_id,
+                ) {
+                    continue;
                 }
 
-                // Convert subscription to a scoped query
-                let query_text = if is_commits {
-                    let cid_str = update.cid.to_string();
-                    subscription_to_commits_query_with_cid(&query_str, &cid_str)
-                } else {
-                    subscription_to_query_with_doc_id(&query_str, &event_doc_id)
+                let cid_str = update.cid.to_string();
+                let query_text = match subscription_to_scoped_query(
+                    &query_str,
+                    &event_doc_id,
+                    &cid_str,
+                    operation_name.as_deref(),
+                ) {
+                    Ok(query) => query,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "failed to scope subscription query");
+                        continue;
+                    }
                 };
 
                 let mut req = QueryRequest::new(query_text);
                 if did.is_some() {
                     req = req.with_identity(did.clone());
+                }
+                if let Some(ref op_name) = operation_name {
+                    req = req.with_operation_name(op_name.clone());
+                }
+                if let Some(ref vars) = variables {
+                    req = req.with_variables(vars.clone());
                 }
                 let response = execute_with_resolved_context(
                     executor.clone(),
