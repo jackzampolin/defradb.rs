@@ -72,6 +72,9 @@ const MAX_PENDING_OUTGOING_CONNECTIONS: u32 = 400;
 /// go-libp2p-pubsub@v0.15.0 pubsub.go:1356 uses raw `from || seqno` bytes.
 /// rust-libp2p's default uses base58/decimal strings, which breaks cross-impl
 /// IHAVE/IWANT parity.
+///
+/// This requires message authenticity modes that populate source and sequence
+/// number; anonymous messages would all collapse to the empty ID.
 pub fn go_compatible_gossipsub_message_id(message: &gossipsub::Message) -> MessageId {
     let mut id = Vec::with_capacity(GO_MESSAGE_ID_CAPACITY);
     if let Some(peer_id) = message.source {
@@ -250,8 +253,7 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(1))
                 .validation_mode(ValidationMode::Strict)
-                // Match go-libp2p-pubsub@v0.15.0 pubsub.go:1356 for
-                // cross-impl IHAVE/IWANT parity.
+                // See `go_compatible_gossipsub_message_id`.
                 .message_id_fn(go_compatible_gossipsub_message_id)
                 // Enable peer exchange (PX) in PRUNE messages — matches Go's
                 // pubsub.WithPeerExchange(true). Allows peers sharing a topic
@@ -361,8 +363,7 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(1))
                 .validation_mode(ValidationMode::Permissive)
-                // Match go-libp2p-pubsub@v0.15.0 pubsub.go:1356 for
-                // cross-impl IHAVE/IWANT parity.
+                // See `go_compatible_gossipsub_message_id`.
                 .message_id_fn(go_compatible_gossipsub_message_id)
                 .build()
                 .map_err(|e| crate::error::Error::GossipSubConfig(e.to_string()))?;
