@@ -44,7 +44,7 @@ const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Periodic DHT refresh interval.
 const DHT_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// Delay used to coalesce connection-triggered DHT bootstrap requests.
+/// Delay used to coalesce the one-time first-connection DHT bootstrap.
 const DHT_BOOTSTRAP_DEBOUNCE: Duration = Duration::from_secs(30);
 
 /// Go libp2p connection manager grace period before pruning new connections.
@@ -53,9 +53,17 @@ const DEFAULT_CONNECTION_MANAGER_GRACE_PERIOD: Duration = Duration::from_secs(20
 /// Frequency for checking whether the active connection set should be pruned.
 const CONNECTION_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Tracks the one-time first-connection bootstrap that complements periodic DHT refresh.
+///
+/// Go wires periodic DHT refresh through `bootstrap.Bootstrap(...)`
+/// (`go-p2p/peer.go:149`). Rust keeps that periodic refresh in the host loop
+/// and adds a one-shot kickstart so the first query does not wait for the
+/// longer Rust interval. The kickstart is debounced and consumed once so
+/// inbound connection bursts cannot repeatedly trigger DHT query bursts.
 #[derive(Debug)]
 struct BootstrapScheduler {
     pending: bool,
+    has_fired: bool,
     debounce: Duration,
 }
 
@@ -63,6 +71,7 @@ impl BootstrapScheduler {
     fn new(debounce: Duration) -> Self {
         Self {
             pending: false,
+            has_fired: false,
             debounce,
         }
     }
@@ -71,8 +80,8 @@ impl BootstrapScheduler {
         self.pending
     }
 
-    fn schedule(&mut self, now: Instant) -> Option<Instant> {
-        if self.pending {
+    fn schedule_first_connection(&mut self, now: Instant) -> Option<Instant> {
+        if self.pending || self.has_fired {
             return None;
         }
 
@@ -82,6 +91,9 @@ impl BootstrapScheduler {
 
     fn mark_fired(&mut self) {
         self.pending = false;
+        // Consume the kickstart after one attempt, even if Kademlia skips it
+        // because no peers remain; periodic refresh is the retry path.
+        self.has_fired = true;
     }
 }
 
@@ -475,11 +487,11 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
 
                 event = self.swarm.select_next_some() => {
                     if self.handle_swarm_event(event).await {
-                        if let Some(deadline) = bootstrap_scheduler.schedule(Instant::now()) {
+                        if let Some(deadline) = bootstrap_scheduler.schedule_first_connection(Instant::now()) {
                             bootstrap_deadline.as_mut().reset(deadline);
                             debug!(
                                 delay_ms = DHT_BOOTSTRAP_DEBOUNCE.as_millis() as u64,
-                                "Scheduled debounced Kademlia bootstrap"
+                                "Scheduled first-connection Kademlia bootstrap"
                             );
                         }
                     }
@@ -504,7 +516,7 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
                 }
                 _ = &mut bootstrap_deadline, if bootstrap_scheduler.is_pending() => {
                     bootstrap_scheduler.mark_fired();
-                    self.run_kademlia_bootstrap("debounced connection");
+                    self.run_kademlia_bootstrap("first connection");
                 }
                 _ = bootstrap_interval.tick() => {
                     self.run_kademlia_bootstrap("periodic");
@@ -587,19 +599,24 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_scheduler_debounces_pending_connection_triggers() {
+    fn bootstrap_scheduler_does_not_fire_per_connection() {
         let mut scheduler = BootstrapScheduler::new(Duration::from_secs(30));
         let now = Instant::now();
 
-        assert_eq!(scheduler.schedule(now), Some(now + Duration::from_secs(30)));
+        let scheduled: Vec<_> = (0..5)
+            .filter_map(|offset| {
+                scheduler.schedule_first_connection(now + Duration::from_secs(offset))
+            })
+            .collect();
+
+        assert_eq!(scheduled, vec![now + Duration::from_secs(30)]);
         assert!(scheduler.is_pending());
-        assert_eq!(scheduler.schedule(now + Duration::from_secs(1)), None);
 
         scheduler.mark_fired();
         assert!(!scheduler.is_pending());
         assert_eq!(
-            scheduler.schedule(now + Duration::from_secs(31)),
-            Some(now + Duration::from_secs(61))
+            scheduler.schedule_first_connection(now + Duration::from_secs(31)),
+            None
         );
     }
 }
