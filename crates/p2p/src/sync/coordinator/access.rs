@@ -1,11 +1,11 @@
 //! Access control for the sync coordinator.
 //!
-//! The actual decision lives in [`super::authorizer::RuntimeAuthorizer`]
-//! so the pubsub_rpc handlers (which don't have easy access to the
-//! generic `SyncCoordinator`) can make the same decision. These helpers
-//! adapt the shared boolean authorizer into the `Result<()>` shape the
-//! two-stream event handlers expect, including the log/`AccessDenied`
-//! error details.
+//! Most decisions live in [`super::authorizer::RuntimeAuthorizer`] so the
+//! pubsub_rpc handlers (which don't have easy access to the generic
+//! `SyncCoordinator`) can make the same decision. These helpers adapt the
+//! shared boolean authorizer into the `Result<()>` shape the event handlers
+//! expect, and layer in local collection-subscription ingress where the sync
+//! API explicitly opts this node into receiving collection updates.
 
 use blockstore::Blockstore;
 
@@ -16,6 +16,46 @@ use crate::error::{Error, Result};
 use crate::transport::{P2PTransport, PeerId};
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
+    /// Returns true when this node has joined the collection's sync topic.
+    pub(super) async fn is_locally_subscribed_collection(&self, collection_id: &str) -> bool {
+        self.subscriptions
+            .subscribed_collections
+            .read()
+            .await
+            .contains(collection_id)
+    }
+
+    /// Check if a peer (by string ID) has direct PushLog access to sync a collection.
+    ///
+    /// Direct PushLog is the delivery path used by one-way replicators. A local
+    /// collection subscription means this node has explicitly opted into
+    /// receiving updates for that collection; merge-time ACP still decides
+    /// whether the document content is acceptable.
+    pub(super) async fn check_pushlog_access_str(
+        &self,
+        peer_id_str: &str,
+        collection_id: &str,
+    ) -> Result<()> {
+        if self
+            .authorizer
+            .peer_authorized_for_collection(peer_id_str, collection_id)
+            .await
+            || self.is_locally_subscribed_collection(collection_id).await
+        {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            peer_id = %peer_id_str,
+            collection_id = %collection_id,
+            "Access denied: peer is not authorized for direct PushLog on this collection"
+        );
+        Err(Error::AccessDenied {
+            peer_id: peer_id_str.to_string(),
+            collection_id: collection_id.to_string(),
+        })
+    }
+
     /// Check if a peer (by string ID) has access to sync a collection.
     ///
     /// Returns `Ok(())` if access is granted, or `Err(Error::AccessDenied)` if denied.
