@@ -184,6 +184,18 @@ pub struct StartArgs {
     #[arg(long)]
     pub query_timeout: Option<u64>,
 
+    /// Max GraphQL selection nesting depth (0 = unlimited, default: 20)
+    #[arg(long)]
+    pub query_max_depth: Option<usize>,
+
+    /// Max fields at any GraphQL selection level (0 = unlimited, default: 100)
+    #[arg(long)]
+    pub query_max_width: Option<usize>,
+
+    /// Max recursive filter nesting depth (0 = unlimited, default: 50)
+    #[arg(long)]
+    pub query_max_filter_depth: Option<usize>,
+
     /// Per-peer rate limit burst capacity (max tokens). Default: 500.
     #[arg(long)]
     pub p2p_rate_limit_burst: Option<u32>,
@@ -474,6 +486,15 @@ impl StartArgs {
         }
         if let Some(timeout) = self.query_timeout {
             config.api.query_timeout = timeout;
+        }
+        if let Some(depth) = self.query_max_depth {
+            config.api.query_max_depth = depth;
+        }
+        if let Some(width) = self.query_max_width {
+            config.api.query_max_width = width;
+        }
+        if let Some(depth) = self.query_max_filter_depth {
+            config.api.query_max_filter_depth = depth;
         }
         if let Some(ref addr) = self.pg_address {
             config.api.pg_address = addr.clone();

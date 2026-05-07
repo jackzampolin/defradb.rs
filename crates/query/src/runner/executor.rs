@@ -11,9 +11,7 @@ use identity::Did;
 
 use crate::error::{Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
-use crate::query_parse::{
-    parse_request_with_variables, validate_parsed_operation, ParsedOperation,
-};
+use crate::query_parse::{parse_request_with_limits, validate_parsed_operation, ParsedOperation};
 use crate::txn::{GetTransactionResult, TransactionHandle, TransactionRegistry};
 
 use super::{DocFetcher, QueryRunner};
@@ -112,10 +110,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         let variables = convert_variables(&request.variables);
 
         // First, parse the request to determine if it's a query or mutation
-        let parsed = match parse_request_with_variables(
+        let parsed = match parse_request_with_limits(
             &request.query,
             variables.as_ref(),
             request.operation_name.as_deref(),
+            self.query_limits,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -305,10 +304,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         let variables = convert_variables(&request.variables);
 
         // Parse the request to determine if it's a query or mutation
-        let parsed = match parse_request_with_variables(
+        let parsed = match parse_request_with_limits(
             &request.query,
             variables.as_ref(),
             request.operation_name.as_deref(),
+            self.query_limits,
         ) {
             Ok(p) => p,
             Err(e) => {

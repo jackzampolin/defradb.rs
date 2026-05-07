@@ -231,7 +231,7 @@ pub(crate) fn build_plan(
                                     }
                                 })
                                 .or_insert(serde_json::json!({"_neq": serde_json::Value::Null}));
-                            Filter::from_conditions(merged)
+                            Filter::from_conditions_with_max_depth(merged, existing.max_depth())
                         }
                         None => {
                             let mut conditions = serde_json::Map::new();
@@ -378,7 +378,14 @@ pub(crate) fn build_plan(
                             .or_insert(serde_json::json!({
                                 "_neq": serde_json::Value::Null
                             }));
-                        cs.filter = Some(Filter::from_conditions(conditions));
+                        let max_depth = cs
+                            .filter
+                            .as_ref()
+                            .map(Filter::max_depth)
+                            .unwrap_or(query_types::DEFAULT_MAX_FILTER_DEPTH);
+                        cs.filter = Some(Filter::from_conditions_with_max_depth(
+                            conditions, max_depth,
+                        ));
                     }
                 }
             }

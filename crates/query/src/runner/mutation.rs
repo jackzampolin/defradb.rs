@@ -11,7 +11,7 @@ use crate::mapper::{Mutation, MutationType, Requestable};
 use crate::mutator::DocMutator;
 use crate::plan::{CreateNode, DeleteNode, UpdateNode, UpsertNode};
 use crate::planner::PlanNode;
-use crate::query_parse::parse_mutations_with_variables;
+use crate::query_parse::parse_mutations_with_limits;
 use crate::txn::TransactionRegistry;
 
 use super::{DocFetcher, QueryRunner};
@@ -122,7 +122,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         variables: Option<&std::collections::HashMap<String, JsonValue>>,
         fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     ) -> Result<JsonValue> {
-        let mutations = parse_mutations_with_variables(mutation_str, variables)?;
+        let mutations = parse_mutations_with_limits(mutation_str, variables, self.query_limits)?;
         self.execute_parsed_mutations(mutations, mutator, caller_identity, fetcher_override)
             .await
     }

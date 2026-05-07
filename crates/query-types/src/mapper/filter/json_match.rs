@@ -15,6 +15,12 @@ impl Filter {
     ///
     /// Null values don't match comparison filters (they are excluded from aggregation).
     pub fn matches_scalar_value(&self, value: &JsonValue) -> Result<bool> {
+        self.matches_scalar_value_at_depth(value, 0)
+    }
+
+    fn matches_scalar_value_at_depth(&self, value: &JsonValue, depth: usize) -> Result<bool> {
+        self.check_depth(depth)?;
+
         if self.conditions().is_empty() {
             return Ok(true);
         }
@@ -33,8 +39,11 @@ impl Filter {
                             let sub = item.as_object().ok_or_else(|| {
                                 QueryError::invalid_filter("_and items must be objects")
                             })?;
-                            let f = Filter::from_conditions(sub.clone());
-                            if !f.matches_scalar_value(value)? {
+                            let f = Filter::from_conditions_with_max_depth(
+                                sub.clone(),
+                                self.max_depth(),
+                            );
+                            if !f.matches_scalar_value_at_depth(value, depth + 1)? {
                                 return Ok(false);
                             }
                         }
@@ -48,8 +57,11 @@ impl Filter {
                             let sub = item.as_object().ok_or_else(|| {
                                 QueryError::invalid_filter("_or items must be objects")
                             })?;
-                            let f = Filter::from_conditions(sub.clone());
-                            if f.matches_scalar_value(value)? {
+                            let f = Filter::from_conditions_with_max_depth(
+                                sub.clone(),
+                                self.max_depth(),
+                            );
+                            if f.matches_scalar_value_at_depth(value, depth + 1)? {
                                 any_match = true;
                                 break;
                             }
@@ -62,8 +74,9 @@ impl Filter {
                         let sub = expected
                             .as_object()
                             .ok_or_else(|| QueryError::invalid_filter("_not requires object"))?;
-                        let f = Filter::from_conditions(sub.clone());
-                        if f.matches_scalar_value(value)? {
+                        let f =
+                            Filter::from_conditions_with_max_depth(sub.clone(), self.max_depth());
+                        if f.matches_scalar_value_at_depth(value, depth + 1)? {
                             return Ok(false);
                         }
                     }
@@ -94,6 +107,12 @@ impl Filter {
     /// - Operator-only conditions: `{_gt: 4.8}` (falls back to matches_scalar_value)
     /// - Compound conditions: `{_and: [...]}`, `{_or: [...]}`, `{_not: {...}}`
     pub fn matches_json_object(&self, obj: &JsonValue) -> Result<bool> {
+        self.matches_json_object_at_depth(obj, 0)
+    }
+
+    fn matches_json_object_at_depth(&self, obj: &JsonValue, depth: usize) -> Result<bool> {
+        self.check_depth(depth)?;
+
         if self.conditions().is_empty() {
             return Ok(true);
         }
@@ -110,8 +129,11 @@ impl Filter {
                             let sub = item.as_object().ok_or_else(|| {
                                 QueryError::invalid_filter("_and items must be objects")
                             })?;
-                            let f = Filter::from_conditions(sub.clone());
-                            if !f.matches_json_object(obj)? {
+                            let f = Filter::from_conditions_with_max_depth(
+                                sub.clone(),
+                                self.max_depth(),
+                            );
+                            if !f.matches_json_object_at_depth(obj, depth + 1)? {
                                 return Ok(false);
                             }
                         }
@@ -125,8 +147,11 @@ impl Filter {
                             let sub = item.as_object().ok_or_else(|| {
                                 QueryError::invalid_filter("_or items must be objects")
                             })?;
-                            let f = Filter::from_conditions(sub.clone());
-                            if f.matches_json_object(obj)? {
+                            let f = Filter::from_conditions_with_max_depth(
+                                sub.clone(),
+                                self.max_depth(),
+                            );
+                            if f.matches_json_object_at_depth(obj, depth + 1)? {
                                 any_match = true;
                                 break;
                             }
@@ -139,8 +164,9 @@ impl Filter {
                         let sub = expected
                             .as_object()
                             .ok_or_else(|| QueryError::invalid_filter("_not requires object"))?;
-                        let f = Filter::from_conditions(sub.clone());
-                        if f.matches_json_object(obj)? {
+                        let f =
+                            Filter::from_conditions_with_max_depth(sub.clone(), self.max_depth());
+                        if f.matches_json_object_at_depth(obj, depth + 1)? {
                             return Ok(false);
                         }
                     }
@@ -165,15 +191,18 @@ impl Filter {
                     // If they're field-based, recursively use matches_json_object
                     let has_field_conditions =
                         conditions_obj.keys().any(|k| FilterOp::parse(k).is_none());
-                    let f = Filter::from_conditions(conditions_obj.clone());
+                    let f = Filter::from_conditions_with_max_depth(
+                        conditions_obj.clone(),
+                        self.max_depth(),
+                    );
                     if has_field_conditions {
                         // Nested field access - recursively match
-                        if !f.matches_json_object(field_value)? {
+                        if !f.matches_json_object_at_depth(field_value, depth + 1)? {
                             return Ok(false);
                         }
                     } else {
                         // Operator conditions on the field value
-                        if !f.matches_scalar_value(field_value)? {
+                        if !f.matches_scalar_value_at_depth(field_value, depth + 1)? {
                             return Ok(false);
                         }
                     }

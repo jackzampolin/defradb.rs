@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
+use query::{DEFAULT_MAX_FILTER_DEPTH, DEFAULT_MAX_QUERY_DEPTH, DEFAULT_MAX_QUERY_WIDTH};
 use storage::backends::DurabilityMode;
 
 use super::types::{
@@ -66,6 +67,15 @@ pub struct ApiConfig {
     /// Query execution timeout in seconds (0 = no timeout). Default: 30.
     #[serde(default = "default_query_timeout")]
     pub query_timeout: u64,
+    /// Max GraphQL selection nesting depth (0 = unlimited). Default: 20.
+    #[serde(default = "default_query_max_depth")]
+    pub query_max_depth: usize,
+    /// Max fields at any GraphQL selection level (0 = unlimited). Default: 100.
+    #[serde(default = "default_query_max_width")]
+    pub query_max_width: usize,
+    /// Max recursive filter nesting depth (0 = unlimited). Default: 50.
+    #[serde(default = "default_query_max_filter_depth")]
+    pub query_max_filter_depth: usize,
     /// Postgres wire protocol address (empty = disabled). Default: "" (disabled).
     #[serde(default)]
     pub pg_address: String,
@@ -83,6 +93,18 @@ fn default_query_timeout() -> u64 {
     30
 }
 
+fn default_query_max_depth() -> usize {
+    DEFAULT_MAX_QUERY_DEPTH
+}
+
+fn default_query_max_width() -> usize {
+    DEFAULT_MAX_QUERY_WIDTH
+}
+
+fn default_query_max_filter_depth() -> usize {
+    DEFAULT_MAX_FILTER_DEPTH
+}
+
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
@@ -96,6 +118,9 @@ impl Default for ApiConfig {
             request_timeout: default_request_timeout(),
             max_concurrent_requests: default_max_concurrent(),
             query_timeout: default_query_timeout(),
+            query_max_depth: default_query_max_depth(),
+            query_max_width: default_query_max_width(),
+            query_max_filter_depth: default_query_max_filter_depth(),
             pg_address: String::new(),
         }
     }

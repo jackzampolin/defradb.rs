@@ -62,13 +62,19 @@ impl Filter {
         let scalar = if scalar_conditions.is_empty() {
             None
         } else {
-            Some(Filter::from_conditions(scalar_conditions))
+            Some(Filter::from_conditions_with_max_depth(
+                scalar_conditions,
+                self.max_depth(),
+            ))
         };
 
         let relation = if relation_conditions.is_empty() {
             None
         } else {
-            Some(Filter::from_conditions(relation_conditions))
+            Some(Filter::from_conditions_with_max_depth(
+                relation_conditions,
+                self.max_depth(),
+            ))
         };
 
         (scalar, relation)
@@ -98,13 +104,19 @@ impl Filter {
         let non_alias_filter = if non_alias.is_empty() {
             None
         } else {
-            Some(Filter::from_conditions(non_alias))
+            Some(Filter::from_conditions_with_max_depth(
+                non_alias,
+                self.max_depth(),
+            ))
         };
 
         let alias_filter = if alias_only.is_empty() {
             None
         } else {
-            Some(Filter::from_conditions(alias_only))
+            Some(Filter::from_conditions_with_max_depth(
+                alias_only,
+                self.max_depth(),
+            ))
         };
 
         (non_alias_filter, alias_filter)
@@ -140,6 +152,9 @@ impl Filter {
             new_conditions.insert(key.clone(), value.clone());
         }
 
-        (Filter::from_conditions(new_conditions), has_aggregate_alias)
+        (
+            Filter::from_conditions_with_max_depth(new_conditions, self.max_depth()),
+            has_aggregate_alias,
+        )
     }
 }

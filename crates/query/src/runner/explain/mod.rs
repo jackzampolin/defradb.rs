@@ -7,7 +7,7 @@ use identity::Did;
 use serde_json::Value as JsonValue;
 
 use crate::error::Result;
-use crate::query_parse::{parse_query_with_variables, ExplainType};
+use crate::query_parse::{parse_query_with_limits, ExplainType};
 use crate::txn::TransactionRegistry;
 
 use super::{DocFetcher, QueryRunner};
@@ -56,7 +56,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         match explain_type {
             ExplainType::Simple | ExplainType::Debug => {
                 // Simple and Debug modes: explain without execution
-                let mut selects = parse_query_with_variables(query, variables)?;
+                let mut selects = parse_query_with_limits(query, variables, self.query_limits)?;
                 if query.contains("@exhaustive") {
                     for s in &mut selects {
                         s.exhaustive = true;
@@ -113,12 +113,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         caller_identity: Option<Did>,
         explain_type: ExplainType,
     ) -> Result<JsonValue> {
-        use crate::query_parse::parse_mutations;
+        use crate::query_parse::parse_mutations_with_limits;
 
         match explain_type {
             ExplainType::Simple | ExplainType::Debug => {
                 // Simple and Debug modes: explain without execution
-                let mutations = parse_mutations(mutation_str)?;
+                let mutations = parse_mutations_with_limits(mutation_str, None, self.query_limits)?;
                 let mut operation_children: Vec<JsonValue> = Vec::new();
 
                 for mutation in mutations {

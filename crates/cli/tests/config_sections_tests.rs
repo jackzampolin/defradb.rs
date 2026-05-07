@@ -25,6 +25,12 @@ fn test_api_config_defaults() {
     assert!(config.allowed_origins.is_empty());
     assert!(config.pubkey_path.is_empty());
     assert!(config.privkey_path.is_empty());
+    assert_eq!(config.query_max_depth, query::DEFAULT_MAX_QUERY_DEPTH);
+    assert_eq!(config.query_max_width, query::DEFAULT_MAX_QUERY_WIDTH);
+    assert_eq!(
+        config.query_max_filter_depth,
+        query::DEFAULT_MAX_FILTER_DEPTH
+    );
 }
 
 #[test]

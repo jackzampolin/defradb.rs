@@ -45,6 +45,9 @@ fn default_start_args() -> StartArgs {
         p2p_rate_limit_rate: None,
         max_merge_depth: None,
         query_timeout: None,
+        query_max_depth: None,
+        query_max_width: None,
+        query_max_filter_depth: None,
         p2p_transport: None,
         pg_address: None,
         acp_cache_ttl: None,
@@ -134,6 +137,9 @@ fn test_apply_to_config_all_flags() {
         p2p_rate_limit_rate: Some(4.5),
         max_merge_depth: Some(2048),
         query_timeout: Some(45),
+        query_max_depth: Some(12),
+        query_max_width: Some(64),
+        query_max_filter_depth: Some(24),
         p2p_transport: None,
         pg_address: None,
         acp_cache_ttl: None,
@@ -181,6 +187,9 @@ fn test_apply_to_config_all_flags() {
     assert!(config.datastore.no_searchable_encryption);
     assert_eq!(config.replicator_retry_intervals, vec![10, 20, 30]);
     assert_eq!(config.api.query_timeout, 45);
+    assert_eq!(config.api.query_max_depth, 12);
+    assert_eq!(config.api.query_max_width, 64);
+    assert_eq!(config.api.query_max_filter_depth, 24);
     assert_eq!(config.embedding.url, "http://localhost:11434/v1");
     assert_eq!(config.embedding.model, "nomic-embed-text");
     assert_eq!(config.embedding.api_key_env, "CUSTOM_EMBEDDING_KEY");

@@ -8,6 +8,7 @@ pub mod doc;
 pub mod document;
 pub mod error;
 pub mod json_convert;
+pub mod limits;
 pub mod mapper;
 
 // Re-export primary types
@@ -15,4 +16,7 @@ pub use collection_provider::{CollectionProvider, StaticCollectionProvider};
 pub use doc::{Doc, DocFields, DocStatus};
 pub use document::{DocumentMapping, RenderKey};
 pub use error::{QueryError, Result, TransactionError};
+pub use limits::{
+    QueryLimits, DEFAULT_MAX_FILTER_DEPTH, DEFAULT_MAX_QUERY_DEPTH, DEFAULT_MAX_QUERY_WIDTH,
+};
 pub use mapper::{Filter, Mutation, MutationType, Select};

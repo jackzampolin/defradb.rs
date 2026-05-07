@@ -23,7 +23,8 @@ mod variables;
 // Re-export everything from parser for backwards compatibility
 pub use limits::{MAX_QUERY_DEPTH, MAX_QUERY_WIDTH};
 pub use parser::{
-    parse_mutations, parse_mutations_with_variables, parse_query, parse_query_with_variables,
-    parse_request, parse_request_with_variables, ExplainType, ParsedOperation,
+    parse_mutations, parse_mutations_with_limits, parse_mutations_with_variables, parse_query,
+    parse_query_with_limits, parse_query_with_variables, parse_request, parse_request_with_limits,
+    parse_request_with_variables, ExplainType, ParsedOperation,
 };
 pub use validation::validate_parsed_operation;

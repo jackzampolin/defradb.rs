@@ -14,7 +14,7 @@ use tracing::instrument;
 
 use crate::error::Result;
 use crate::mapper::Select;
-use crate::query_parse::parse_query_with_variables;
+use crate::query_parse::parse_query_with_limits;
 use crate::txn::TransactionRegistry;
 
 use super::{DocFetcher, QueryRunner};
@@ -74,7 +74,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         caller_identity: Option<Did>,
         variables: Option<&std::collections::HashMap<String, JsonValue>>,
     ) -> Result<JsonValue> {
-        let selects = parse_query_with_variables(query, variables)?;
+        let selects = parse_query_with_limits(query, variables, self.query_limits)?;
 
         let mut results = Map::new();
 

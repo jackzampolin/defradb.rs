@@ -13,12 +13,15 @@ impl Filter {
     /// Evaluate alias-based filter conditions.
     /// Alias filters allow filtering by render key names instead of field names.
     /// Supports logical operators (_and, _or, _not) within the alias block.
-    pub(crate) fn eval_alias_conditions(
+    pub(crate) fn eval_alias_conditions_at_depth(
         &self,
         conditions: &Map<String, JsonValue>,
         fields: &[Option<JsonValue>],
         mapping: &DocumentMapping,
+        depth: usize,
     ) -> Result<bool> {
+        self.check_depth(depth)?;
+
         for (key, value) in conditions {
             // Check for logical operators within alias block
             if let Some(op) = FilterOp::parse(key) {
@@ -31,7 +34,12 @@ impl Filter {
                             let sub_conditions = item.as_object().ok_or_else(|| {
                                 QueryError::invalid_filter("_and items must be objects in _alias")
                             })?;
-                            if !self.eval_alias_conditions(sub_conditions, fields, mapping)? {
+                            if !self.eval_alias_conditions_at_depth(
+                                sub_conditions,
+                                fields,
+                                mapping,
+                                depth + 1,
+                            )? {
                                 return Ok(false);
                             }
                         }
@@ -46,7 +54,12 @@ impl Filter {
                             let sub_conditions = item.as_object().ok_or_else(|| {
                                 QueryError::invalid_filter("_or items must be objects in _alias")
                             })?;
-                            if self.eval_alias_conditions(sub_conditions, fields, mapping)? {
+                            if self.eval_alias_conditions_at_depth(
+                                sub_conditions,
+                                fields,
+                                mapping,
+                                depth + 1,
+                            )? {
                                 any_match = true;
                                 break;
                             }
@@ -60,7 +73,12 @@ impl Filter {
                         let sub_conditions = value.as_object().ok_or_else(|| {
                             QueryError::invalid_filter("_not requires object in _alias")
                         })?;
-                        if self.eval_alias_conditions(sub_conditions, fields, mapping)? {
+                        if self.eval_alias_conditions_at_depth(
+                            sub_conditions,
+                            fields,
+                            mapping,
+                            depth + 1,
+                        )? {
                             return Ok(false);
                         }
                         continue;
