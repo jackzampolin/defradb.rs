@@ -45,8 +45,7 @@ pub async fn get_document(
         .await
     {
         Ok(Some(doc)) => Ok(Json(doc)),
-        // Go DefraDB returns 400 Bad Request for document not found (combines with permission error)
-        Ok(None) => Err(HttpError::BadRequest(format!(
+        Ok(None) => Err(HttpError::NotFound(format!(
             "document not found or not authorized: {}",
             doc_id
         ))),

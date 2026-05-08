@@ -8,7 +8,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, IndexInfo, NodePermission};
@@ -95,7 +95,7 @@ pub async fn create_index(
             request.unique,
         )
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(index))
 }
@@ -165,7 +165,7 @@ pub async fn delete_index(
     index_ops
         .delete_index(&query.collection, &query.name)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(()))
 }

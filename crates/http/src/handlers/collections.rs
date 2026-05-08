@@ -12,7 +12,7 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
@@ -97,7 +97,7 @@ pub async fn patch_collection(
     collection_mgmt
         .patch_collection(&name, &patch_str)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(StatusCode::OK)
 }
@@ -151,7 +151,7 @@ pub async fn set_active(
     collection_mgmt
         .set_active_version(version_id.trim())
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(StatusCode::OK)
 }
@@ -176,7 +176,7 @@ pub async fn truncate_collection(
     collection_mgmt
         .truncate_collection(&name)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(()))
 }
@@ -207,7 +207,7 @@ pub async fn describe_collection(
             "collection '{}' not found",
             name
         ))),
-        Err(e) => Err(HttpError::BadRequest(e)),
+        Err(e) => Err(http_error_from_backend_message(e)),
     }
 }
 
@@ -230,7 +230,7 @@ pub async fn collection_exists(
     let exists = collection_mgmt
         .has_collection(&name)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(serde_json::json!({ "exists": exists })))
 }
@@ -258,7 +258,7 @@ pub async fn find_collection_by_id(
             Ok(Json(val))
         }
         Ok(None) => Ok(Json(serde_json::Value::Null)),
-        Err(e) => Err(HttpError::BadRequest(e)),
+        Err(e) => Err(http_error_from_backend_message(e)),
     }
 }
 
@@ -285,7 +285,7 @@ pub async fn get_collection_by_version_id(
             Ok(Json(val))
         }
         Ok(None) => Ok(Json(serde_json::Value::Null)),
-        Err(e) => Err(HttpError::BadRequest(e)),
+        Err(e) => Err(http_error_from_backend_message(e)),
     }
 }
 
@@ -308,7 +308,7 @@ pub async fn delete_collection_versions(
     collection_mgmt
         .delete_collection_versions(version_ids)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(serde_json::json!({})))
 }
@@ -331,7 +331,7 @@ pub async fn get_all_collections(
     let collections = collection_mgmt
         .get_all_collections()
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(collections))
 }
@@ -355,7 +355,7 @@ pub async fn delete_collection(
     collection_mgmt
         .delete_collection(&name)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(serde_json::json!({})))
 }

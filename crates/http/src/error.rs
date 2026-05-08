@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use db::Error as DbError;
-use query::error::QueryError;
+use query::error::{QueryError, TransactionError};
 use query::rest::RestError;
 use serde::Serialize;
 use thiserror::Error;
@@ -27,14 +27,9 @@ pub enum HttpError {
     #[error("unprocessable entity: {0}")]
     UnprocessableEntity(String),
 
-    /// 401 Unauthorized - Used for NAC permission denials.
-    /// Matches Go DefraDB's CollectionMiddleware which returns 401 for
-    /// `ErrNotAuthorizedToPerformOperation`.
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
-    /// 403 Forbidden - Used for invalid/expired tokens.
-    /// Matches Go DefraDB's AuthMiddleware which returns 403 for token errors.
     #[error("forbidden: {0}")]
     Forbidden(String),
 
@@ -212,8 +207,7 @@ fn http_error_from_query_error(err: &QueryError) -> HttpError {
         | QueryError::AcpRegistrationFailed { .. }
         | QueryError::AcpCheckFailed { .. }
         | QueryError::AcpRegistrationCheckFailed { .. } => HttpError::Unauthorized(message),
-        QueryError::Execution(message) => http_error_from_backend_message(message.clone())
-            .unwrap_or(HttpError::BadRequest(message.clone())),
+        QueryError::Execution(message) => http_error_from_backend_message(message.clone()),
         _ => HttpError::BadRequest(message),
     }
 }
@@ -244,19 +238,35 @@ fn http_status_from_db_error(err: &DbError) -> HttpError {
         DbError::Query(source) => http_error_from_query_error(source),
         DbError::Other(message) | DbError::Acp(message) | DbError::Lens(message) => {
             http_error_from_backend_message(message.clone())
-                .unwrap_or(HttpError::BadRequest(message.clone()))
         }
         _ => HttpError::BadRequest(message),
     }
 }
 
-pub(crate) fn http_error_from_backend_message(message: String) -> Option<HttpError> {
-    classify_backend_message(&message).map(|status| http_error_from_status(status, message))
+pub(crate) fn http_error_from_backend_message(message: String) -> HttpError {
+    match classify_backend_message(&message) {
+        Some(status) => http_error_from_status(status, message),
+        None => HttpError::BadRequest(message),
+    }
 }
 
 impl From<DbError> for HttpError {
     fn from(err: DbError) -> Self {
         http_status_from_db_error(&err)
+    }
+}
+
+impl From<TransactionError> for HttpError {
+    fn from(err: TransactionError) -> Self {
+        let message = err.to_string();
+
+        match err {
+            TransactionError::NotFound(_) => HttpError::NotFound(message),
+            TransactionError::AlreadyFinalized(_) => HttpError::Conflict(message),
+            TransactionError::Execution(message) => http_error_from_backend_message(message),
+            TransactionError::LockPoisoned(_) => HttpError::Internal(message),
+            TransactionError::NotSupported(_) => HttpError::BadRequest(message),
+        }
     }
 }
 
@@ -273,9 +283,11 @@ impl From<RestError> for HttpError {
                 HttpError::BadRequest(format!("Invalid document ID: {}", id))
             }
             RestError::InvalidInput(msg) => HttpError::BadRequest(msg),
-            // Use Unauthorized (401) for permission denied to match Go DefraDB behavior
             RestError::PermissionDenied(msg) => HttpError::Unauthorized(msg),
-            RestError::Internal(msg) => HttpError::Internal(msg),
+            RestError::Internal(msg) => match classify_backend_message(&msg) {
+                Some(status) => http_error_from_status(status, msg),
+                None => HttpError::Internal(msg),
+            },
         }
     }
 }
@@ -360,5 +372,24 @@ mod tests {
             ))),
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[test]
+    fn transaction_errors_map_to_status_buckets() {
+        let cases = [
+            (TransactionError::not_found("1"), StatusCode::NOT_FOUND),
+            (
+                TransactionError::already_finalized("1"),
+                StatusCode::CONFLICT,
+            ),
+            (
+                TransactionError::execution("transaction conflict. Please retry"),
+                StatusCode::CONFLICT,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(status(HttpError::from(error)), expected);
+        }
     }
 }

@@ -16,7 +16,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AcpLightClientStatus, AppState, NodePermission, PolicyInfo};
@@ -53,7 +53,10 @@ pub async fn add_policy(
         return Err(HttpError::BadRequest("policy data can not be empty".into()));
     }
 
-    let policy_id = acp.add_policy(&body).await.map_err(HttpError::BadRequest)?;
+    let policy_id = acp
+        .add_policy(&body)
+        .await
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(AddPolicyResponse { policy_id }))
 }
@@ -183,7 +186,7 @@ pub async fn add_doc_relationship(
             &body.relation,
         )
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(DocRelationshipResponse {
         existed_already: !is_new,
@@ -234,7 +237,7 @@ pub async fn remove_doc_relationship(
             &body.relation,
         )
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(DocRelationshipResponse {
         existed_already: !was_removed,

@@ -10,7 +10,7 @@ use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
@@ -52,7 +52,7 @@ pub async fn set_migration_in_txn(
     let transform_id = txn_ops
         .set_migration_in_txn(&txn_id, &body.config)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(serde_json::json!({ "lensId": transform_id })))
 }
@@ -79,7 +79,7 @@ pub async fn get_collections_in_txn(
     let collections = txn_ops
         .get_collections_in_txn(&txn_id)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(collections))
 }
@@ -111,7 +111,7 @@ pub async fn add_schema_in_txn(
     let collections = txn_ops
         .add_schema_in_txn(&txn_id, &body)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(collections))
 }

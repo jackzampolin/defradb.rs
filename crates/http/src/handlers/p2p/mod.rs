@@ -9,7 +9,7 @@
 //!
 //! All endpoints enforce NAC permissions when NAC is enabled.
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::router::P2PError;
 
 mod collections;
@@ -19,10 +19,10 @@ mod replicators;
 
 fn map_p2p_bad_request(error: P2PError) -> HttpError {
     match error {
-        P2PError::InvalidInput(message) => HttpError::BadRequest(message),
+        P2PError::InvalidInput(message) => http_error_from_backend_message(message),
         P2PError::NotFound(message) => HttpError::NotFound(message),
         P2PError::Unsupported(message) => HttpError::NotImplemented(message),
-        P2PError::Transport(message) => HttpError::BadRequest(message),
+        P2PError::Transport(message) => http_error_from_backend_message(message),
         P2PError::Internal(message) => HttpError::Internal(message),
     }
 }

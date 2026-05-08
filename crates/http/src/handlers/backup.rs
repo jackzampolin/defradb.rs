@@ -22,7 +22,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, ImportResult, NodePermission};
@@ -136,7 +136,7 @@ pub async fn export(
     let data = backup
         .export(collections, request.pretty)
         .await
-        .map_err(HttpError::Internal)?;
+        .map_err(http_error_from_backend_message)?;
 
     // Return as JSON with appropriate content type
     // Go returns empty body (writes to file), but we return data in response
@@ -244,7 +244,7 @@ pub async fn import(
     let _result = backup
         .import(&body_str)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     // Return empty body to match Go DefraDB behavior
     Ok(StatusCode::OK)

@@ -13,7 +13,7 @@ use axum::extract::State;
 use axum::Json;
 use serde::Serialize;
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
@@ -71,7 +71,7 @@ pub async fn set_migration(
     let lens_id = lens
         .set_migration(&body)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(SetMigrationResponse { lens_id }))
 }
@@ -135,7 +135,10 @@ pub async fn add_lens(
             .map_err(|e| HttpError::BadRequest(e.to_string()))?;
     }
 
-    let lens_id = lens.add(&config_str).await.map_err(HttpError::BadRequest)?;
+    let lens_id = lens
+        .add(&config_str)
+        .await
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(SetMigrationResponse { lens_id }))
 }

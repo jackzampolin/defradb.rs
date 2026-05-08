@@ -64,13 +64,7 @@ pub async fn tx_begin(
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to begin transaction");
-            (
-                StatusCode::BAD_REQUEST,
-                Json(crate::error::ErrorResponse {
-                    error: format!("Failed to begin transaction: {}", e),
-                }),
-            )
-                .into_response()
+            HttpError::from(e).into_response()
         }
     })
 }
@@ -99,13 +93,7 @@ pub async fn tx_begin_concurrent(
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to begin concurrent transaction");
-            (
-                StatusCode::BAD_REQUEST,
-                Json(crate::error::ErrorResponse {
-                    error: format!("Failed to begin transaction: {}", e),
-                }),
-            )
-                .into_response()
+            HttpError::from(e).into_response()
         }
     })
 }
@@ -140,13 +128,7 @@ pub async fn tx_commit(
         }
         Err(e) => {
             tracing::error!(txn_id = %handle, error = %e, "Failed to commit transaction");
-            Ok((
-                StatusCode::BAD_REQUEST,
-                Json(crate::error::ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-                .into_response())
+            Ok(HttpError::from(e).into_response())
         }
     }
 }
@@ -182,13 +164,7 @@ pub async fn tx_discard(
         }
         Err(e) => {
             tracing::error!(txn_id = %handle, error = %e, "Failed to discard transaction");
-            Ok((
-                StatusCode::BAD_REQUEST,
-                Json(crate::error::ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-                .into_response())
+            Ok(HttpError::from(e).into_response())
         }
     }
 }
