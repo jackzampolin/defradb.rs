@@ -10,6 +10,8 @@ mod downsample;
 mod downsample_gc;
 #[path = "query/explain_nested.rs"]
 mod explain_nested;
+#[path = "query/gql_list_args.rs"]
+mod gql_list_args;
 #[path = "query/index_management.rs"]
 mod index_management;
 #[path = "query/lens.rs"]

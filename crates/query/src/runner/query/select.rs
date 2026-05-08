@@ -44,7 +44,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         });
 
         // Handle CID-based time-travel queries
-        if select.cid.is_some() {
+        if let Some(ref cids) = select.cid {
+            if cids.is_empty() {
+                return Ok(JsonValue::Array(vec![]));
+            }
             return self
                 .execute_cid_query_with_version(select, fetcher, caller_identity, version_selection)
                 .await;
