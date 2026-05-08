@@ -110,7 +110,6 @@ pub enum ClientCommand {
     /// Interact with blocks
     Block(BlockArgs),
     /// Interact with collections
-    #[command(alias = "schema")]
     Collection(CollectionArgs),
     /// Interact with documents
     Document(DocumentArgs),

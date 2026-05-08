@@ -21,7 +21,7 @@ pub struct CollectionArgs {
     #[arg(long, global = true)]
     pub collection_id: Option<String>,
 
-    /// Schema version ID
+    /// Collection version ID
     #[arg(long, global = true)]
     pub version_id: Option<String>,
 
@@ -37,16 +37,14 @@ pub struct CollectionArgs {
 #[derive(Subcommand, Debug)]
 #[non_exhaustive]
 pub enum CollectionCommand {
-    /// Add a new collection from a schema definition (SDL)
+    /// Add a new collection from an SDL definition
     Add(CollectionAddArgs),
-    /// Describe a collection's schema
+    /// Describe a collection
     Describe(CollectionDescribeArgs),
     /// List all collections
     List(CollectionListArgs),
-    /// Patch a collection schema
+    /// Patch a collection
     Patch(CollectionPatchArgs),
-    /// Display the full GraphQL schema
-    Schema(CollectionSchemaArgs),
     /// Set a collection as active
     SetActive(SetActiveArgs),
     /// Truncate a collection
@@ -56,11 +54,11 @@ pub enum CollectionCommand {
 /// Arguments for collection add (schema definition) command
 #[derive(Args, Debug)]
 pub struct CollectionAddArgs {
-    /// The schema definition (SDL format)
+    /// The collection definition (SDL format)
     #[arg(value_name = "SDL")]
-    pub schema: Option<String>,
+    pub sdl: Option<String>,
 
-    /// Read schema from file(s)
+    /// Read collection definition from file(s)
     #[arg(long, short = 'f', value_name = "FILE")]
     pub file: Vec<PathBuf>,
 }
@@ -101,10 +99,6 @@ pub struct SetActiveArgs {
     pub version_id: Option<String>,
 }
 
-/// Arguments for displaying the full GraphQL schema
-#[derive(Args, Debug)]
-pub struct CollectionSchemaArgs {}
-
 /// Arguments for truncate command
 #[derive(Args, Debug)]
 pub struct TruncateArgs {}
@@ -113,8 +107,8 @@ impl CollectionAddArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         let mut sdl_parts = Vec::new();
 
-        if let Some(ref schema) = self.schema {
-            sdl_parts.push(schema.clone());
+        if let Some(ref sdl) = self.sdl {
+            sdl_parts.push(sdl.clone());
         }
 
         for path in &self.file {
@@ -143,18 +137,6 @@ impl CollectionAddArgs {
     }
 }
 
-impl CollectionSchemaArgs {
-    /// Execute the collection schema command
-    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
-        let client = super::http_client::HttpClient::new(&ctx.url)?
-            .with_auth_token(ctx.auth_token.clone())
-            .with_verbose(ctx.verbose);
-        let schema = client.schema().await?;
-        println!("{schema}");
-        Ok(())
-    }
-}
-
 impl CollectionArgs {
     /// Execute the collection command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
@@ -163,7 +145,6 @@ impl CollectionArgs {
             CollectionCommand::Describe(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::List(args) => args.execute(ctx).await,
             CollectionCommand::Patch(args) => args.execute(ctx).await,
-            CollectionCommand::Schema(args) => args.execute(ctx).await,
             CollectionCommand::SetActive(args) => args.execute(ctx).await,
             CollectionCommand::Truncate(args) => args.execute(ctx, self.name.as_deref()).await,
         }
