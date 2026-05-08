@@ -186,6 +186,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let ctx = self
             .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+        let action_lock = ctx.action_lock();
+        let _action_guard = action_lock.lock().await;
 
         ctx.doc_fetcher()
             .get_all(collection_name)
@@ -206,6 +208,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let ctx = self
             .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+        let action_lock = ctx.action_lock();
+        let _action_guard = action_lock.lock().await;
 
         ctx.doc_fetcher()
             .get_by_ids(collection_name, doc_ids)
@@ -258,6 +262,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                     age_secs = ?now.duration_since(ctx.created_at()).as_secs(),
                     "Cleaning up stale transaction (leaked TransactionGuard?)"
                 );
+
+                let action_lock = ctx.action_lock();
+                let _action_guard = action_lock.lock().await;
 
                 // Try to take and discard the transaction
                 if let Some(txn) = ctx.take_txn().await {
@@ -314,6 +321,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let ctx = self
             .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+        let action_lock = ctx.action_lock();
+        let _action_guard = action_lock.lock().await;
 
         // Get the shared transaction from the fetcher
         let shared_txn = ctx.fetcher_shared_txn();
@@ -396,6 +405,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let ctx = self
             .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+        let action_lock = ctx.action_lock();
+        let _action_guard = action_lock.lock().await;
 
         let shared_txn = ctx.fetcher_shared_txn();
         let mut txn_guard = shared_txn.lock().await;
@@ -442,6 +453,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let ctx = self
             .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+        let action_lock = ctx.action_lock();
+        let _action_guard = action_lock.lock().await;
 
         let shared_txn = ctx.fetcher_shared_txn();
         let mut txn_guard = shared_txn.lock().await;
@@ -490,6 +503,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let ctx = self
             .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+        let action_lock = ctx.action_lock();
+        let _action_guard = action_lock.lock().await;
 
         let shared_txn = ctx.fetcher_shared_txn();
         let txn_guard = shared_txn.lock().await;
@@ -516,6 +531,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let ctx = self
             .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+        let action_lock = ctx.action_lock();
+        let _action_guard = action_lock.lock().await;
 
         ctx.lens_store()
             .list()
@@ -535,6 +552,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let ctx = self
             .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+        let action_lock = ctx.action_lock();
+        let _action_guard = action_lock.lock().await;
 
         let shared_txn = ctx.fetcher_shared_txn();
         let txn_guard = shared_txn.lock().await;
@@ -655,6 +674,8 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             .ok_or_else(|| {
                 TransactionError::not_found(format!("transaction '{}' not found", handle))
             })?;
+        let action_lock = ctx.action_lock();
+        let _action_guard = action_lock.lock().await;
 
         let txn = ctx.take_txn().await.ok_or_else(|| {
             TransactionError::already_finalized(format!(
@@ -685,6 +706,8 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             .ok_or_else(|| {
                 TransactionError::not_found(format!("transaction '{}' not found", handle))
             })?;
+        let action_lock = ctx.action_lock();
+        let _action_guard = action_lock.lock().await;
 
         let txn = ctx.take_txn().await.ok_or_else(|| {
             TransactionError::already_finalized(format!(

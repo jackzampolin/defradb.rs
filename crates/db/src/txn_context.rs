@@ -25,6 +25,7 @@ pub struct DbTransactionContext<S: Store> {
     readonly: bool,
     fetcher: Arc<LensedDocFetcher<S>>,
     deferred_acp_mutations: Arc<DeferredAcpMutations>,
+    action_lock: Arc<async_lock::Mutex<()>>,
     created_at: Instant,
 }
 
@@ -43,6 +44,7 @@ impl<S: Store> DbTransactionContext<S> {
             readonly,
             fetcher,
             deferred_acp_mutations,
+            action_lock: Arc::new(async_lock::Mutex::new(())),
             created_at: Instant::now(),
         }
     }
@@ -99,6 +101,10 @@ impl<S: Store + 'static> DbTransactionContext<S> {
     pub(crate) fn lens_store(&self) -> Arc<dyn lens::TransformStore> {
         self.fetcher.lens_store()
     }
+
+    pub(crate) fn action_lock(&self) -> Arc<async_lock::Mutex<()>> {
+        self.action_lock.clone()
+    }
 }
 
 impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
@@ -131,5 +137,9 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
 
     fn deferred_acp_mutations(&self) -> Option<Arc<DeferredAcpMutations>> {
         Some(self.deferred_acp_mutations.clone())
+    }
+
+    fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
+        Some(self.action_lock.clone())
     }
 }
