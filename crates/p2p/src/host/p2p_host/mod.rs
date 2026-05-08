@@ -519,12 +519,24 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
     }
 
     fn run_kademlia_bootstrap(&mut self, reason: &'static str) {
-        match self.swarm.behaviour_mut().kademlia.bootstrap() {
-            Ok(query_id) => {
-                debug!(?query_id, reason, "Started Kademlia bootstrap");
-            }
-            Err(error) => {
-                debug!(?error, reason, "Skipped Kademlia bootstrap");
+        for (network, result) in self.swarm.behaviour_mut().kademlia.bootstrap() {
+            match result {
+                Ok(query_id) => {
+                    debug!(
+                        ?query_id,
+                        dht = network.as_str(),
+                        reason,
+                        "Started Kademlia bootstrap"
+                    );
+                }
+                Err(error) => {
+                    debug!(
+                        ?error,
+                        dht = network.as_str(),
+                        reason,
+                        "Skipped Kademlia bootstrap"
+                    );
+                }
             }
         }
     }
