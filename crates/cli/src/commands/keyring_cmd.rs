@@ -171,6 +171,8 @@ pub struct GetArgs {
 
 impl GetArgs {
     pub fn execute(self, config: Config) -> Result<()> {
+        require_development(&config)?;
+
         let keyring = super::open_keyring(&config)?;
 
         let key = keyring
@@ -203,6 +205,8 @@ pub struct AddArgs {
 
 impl AddArgs {
     pub fn execute(self, config: Config) -> Result<()> {
+        require_development(&config)?;
+
         let keyring = super::open_keyring(&config)?;
 
         let key = if let Some(ref hex_str) = self.key_hex {
@@ -248,8 +252,44 @@ impl ListArgs {
     }
 }
 
+fn require_development(config: &Config) -> Result<()> {
+    if config.development {
+        Ok(())
+    } else {
+        Err(Error::OperationRequiresDeveloperMode)
+    }
+}
+
 fn hex_encode(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_requires_development_mode() {
+        let args = AddArgs {
+            name: "test-key".to_string(),
+            key_hex: Some("deadbeef".to_string()),
+            stdin: false,
+        };
+
+        let err = args.execute(Config::default()).unwrap_err();
+        assert!(matches!(err, Error::OperationRequiresDeveloperMode));
+    }
+
+    #[test]
+    fn get_requires_development_mode() {
+        let args = GetArgs {
+            name: "test-key".to_string(),
+            raw: false,
+        };
+
+        let err = args.execute(Config::default()).unwrap_err();
+        assert!(matches!(err, Error::OperationRequiresDeveloperMode));
+    }
 }
 
 fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, String> {

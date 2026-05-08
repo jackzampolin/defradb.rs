@@ -211,6 +211,7 @@ fn test_client_context_with_identity() {
         auth_token: auth_token.clone(),
         identity_key_bytes: None,
         tx_id: None,
+        development: false,
         verbose: false,
     };
 
@@ -230,6 +231,7 @@ fn test_client_context_without_identity() {
         auth_token: None,
         identity_key_bytes: None,
         tx_id: None,
+        development: false,
         verbose: false,
     };
 
@@ -244,6 +246,7 @@ fn test_client_context_with_tx() {
         auth_token: None,
         identity_key_bytes: None,
         tx_id: Some("12345".to_string()),
+        development: false,
         verbose: false,
     };
 

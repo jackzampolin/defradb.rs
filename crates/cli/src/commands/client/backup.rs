@@ -62,6 +62,8 @@ impl BackupArgs {
 impl BackupExportArgs {
     /// Execute the backup export command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        require_development(ctx)?;
+
         // Validate collection names before making the request
         for col in &self.collections {
             validate_identifier(col)?;
@@ -94,6 +96,8 @@ impl BackupExportArgs {
 impl BackupImportArgs {
     /// Execute the backup import command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        require_development(ctx)?;
+
         let data = tokio::fs::read_to_string(&self.file)
             .await
             .map_err(|e| Error::ReadFile {
@@ -112,9 +116,28 @@ impl BackupImportArgs {
     }
 }
 
+fn require_development(ctx: &ClientContext) -> Result<()> {
+    if ctx.development {
+        Ok(())
+    } else {
+        Err(Error::OperationRequiresDeveloperMode)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_context(development: bool) -> ClientContext {
+        ClientContext {
+            url: "http://localhost:9181".to_string(),
+            auth_token: None,
+            identity_key_bytes: None,
+            tx_id: None,
+            development,
+            verbose: false,
+        }
+    }
 
     #[test]
     fn test_backup_export_args() {
@@ -145,5 +168,27 @@ mod tests {
             file: PathBuf::from("backup.json"),
         };
         assert_eq!(args.file, PathBuf::from("backup.json"));
+    }
+
+    #[tokio::test]
+    async fn export_requires_development_mode() {
+        let args = BackupExportArgs {
+            file: PathBuf::from("backup.json"),
+            collections: vec![],
+            pretty: false,
+        };
+
+        let err = args.execute(&test_context(false)).await.unwrap_err();
+        assert!(matches!(err, Error::OperationRequiresDeveloperMode));
+    }
+
+    #[tokio::test]
+    async fn import_requires_development_mode() {
+        let args = BackupImportArgs {
+            file: PathBuf::from("missing.json"),
+        };
+
+        let err = args.execute(&test_context(false)).await.unwrap_err();
+        assert!(matches!(err, Error::OperationRequiresDeveloperMode));
     }
 }

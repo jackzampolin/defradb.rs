@@ -185,6 +185,9 @@ impl Config {
         if let Some(ref secret_file) = cli.secret_file {
             self.secret_file = secret_file.clone();
         }
+        if let Some(development) = cli.development {
+            self.development = development;
+        }
 
         // ACP
         if let Some(node_enable) = cli.acp_node_enable {
