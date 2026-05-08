@@ -1,5 +1,5 @@
-use integration_test::node::{DefraNode, RustNode};
-use integration_test::{generate_identity, users_schema_with_policy, USER_ACP_POLICY};
+use integration_test::node::RustNode;
+use integration_test::{users_schema_with_policy, USER_ACP_POLICY};
 
 use super::helpers;
 
@@ -10,10 +10,10 @@ use super::helpers;
 /// 3. Creates a protected document as Jack (owner)
 /// 4. Jack sees the document, anonymous sees nothing
 #[tokio::test]
+#[serial_test::serial]
 async fn rust_hubrs_smoke() {
-    let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
-    let jack = generate_identity(&binary).expect("failed to generate Jack identity");
+    let jack = helpers::funded_identity(0);
 
     let hub = helpers::start_hub_cluster().await;
     let hub_rpc_url = hub.node(0).rpc_url();

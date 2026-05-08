@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use integration_test::node::{DefraNode, RustNode};
-use integration_test::{generate_identity, users_schema_with_policy, USER_ACP_POLICY};
+use integration_test::node::RustNode;
+use integration_test::{users_schema_with_policy, USER_ACP_POLICY};
 
 use super::helpers;
 
@@ -11,10 +11,10 @@ use super::helpers;
 /// A document created on node 0 replicates to node 1.
 /// The owner can read on both nodes; anonymous cannot read on either.
 #[tokio::test]
+#[serial_test::serial]
 async fn rust_hubrs_p2p_acp() {
-    let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
-    let jack = generate_identity(&binary).expect("Jack identity");
+    let jack = helpers::funded_identity(0);
 
     let hub = helpers::start_hub_cluster().await;
     let hub_rpc_url = hub.node(0).rpc_url();
@@ -38,12 +38,6 @@ async fn rust_hubrs_p2p_acp() {
     node0
         .schema_add_with_identity(&schema, &jack.private_key_hex)
         .expect("schema on node0");
-
-    // Node 1 also needs the policy cached locally for ACP evaluation
-    node1
-        .acp_policy_add(USER_ACP_POLICY, &jack.private_key_hex)
-        .expect("add policy on node1");
-    tokio::time::sleep(Duration::from_secs(2)).await;
 
     node1
         .schema_add_with_identity(&schema, &jack.private_key_hex)

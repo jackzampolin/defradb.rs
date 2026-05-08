@@ -12,10 +12,11 @@ use super::helpers;
 /// 5. Grant/revoke relationships (on-chain transactions via EVM)
 /// 6. Verify access changes propagate
 #[tokio::test]
+#[serial_test::serial]
 async fn rust_hubrs_policy_lifecycle() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
-    let alice = generate_identity(&binary).expect("Alice identity");
+    let alice = helpers::funded_identity(0);
 
     let hub = helpers::start_hub_cluster().await;
     let hub_rpc_url = hub.node(0).rpc_url();
