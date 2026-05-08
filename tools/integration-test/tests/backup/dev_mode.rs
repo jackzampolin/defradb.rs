@@ -17,11 +17,7 @@ async fn export_requires_dev_mode_test(cluster: TestCluster) {
     );
 
     let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("development mode"),
-        "error should mention development mode, got: {}",
-        err_msg
-    );
+    assert_operation_requires_developer_mode(&err_msg);
 }
 
 async fn import_requires_dev_mode_test(cluster: TestCluster) {
@@ -43,12 +39,16 @@ async fn import_requires_dev_mode_test(cluster: TestCluster) {
     );
 
     let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("development mode"),
-        "error should mention development mode, got: {}",
-        err_msg
-    );
+    assert_operation_requires_developer_mode(&err_msg);
 }
 
 for_each_runtime!(export_requires_dev_mode, export_requires_dev_mode_test);
 for_each_runtime!(import_requires_dev_mode, import_requires_dev_mode_test);
+
+fn assert_operation_requires_developer_mode(err_msg: &str) {
+    assert!(
+        err_msg.contains("operation not permitted whilst development mode is disabled"),
+        "error should match developer-mode semantics, got: {}",
+        err_msg
+    );
+}

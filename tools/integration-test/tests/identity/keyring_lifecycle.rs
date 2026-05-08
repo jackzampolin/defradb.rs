@@ -12,6 +12,10 @@ fn defra_binary() -> PathBuf {
     workspace_root().join("target/debug/defra")
 }
 
+fn is_rust_binary(binary: &Path) -> bool {
+    binary.file_name().and_then(|name| name.to_str()) == Some("defra")
+}
+
 fn go_binary() -> Option<PathBuf> {
     Command::new("defradb")
         .arg("--help")
@@ -24,27 +28,42 @@ fn go_binary() -> Option<PathBuf> {
 }
 
 fn defra_keyring(binary: &Path, keyring_dir: &Path, args: &[&str]) -> Output {
-    Command::new(binary)
-        .arg("--keyring-backend")
+    defra_keyring_with_mode(binary, keyring_dir, args, true)
+}
+
+fn defra_keyring_with_mode(
+    binary: &Path,
+    keyring_dir: &Path,
+    args: &[&str],
+    add_development_flag: bool,
+) -> Output {
+    let mut cmd = Command::new(binary);
+    cmd.arg("--keyring-backend")
         .arg("file")
         .arg("--keyring-path")
-        .arg(keyring_dir)
-        .arg("keyring")
+        .arg(keyring_dir);
+    if add_development_flag && is_rust_binary(binary) && requires_development(args) {
+        cmd.arg("--development");
+    }
+    cmd.arg("keyring")
         .args(args)
         .env("DEFRA_KEYRING_SECRET", "test-secret")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("failed to run defra binary")
+        .stderr(Stdio::piped());
+    cmd.output().expect("failed to run defra binary")
 }
 
 fn defra_keyring_stdin(binary: &Path, keyring_dir: &Path, args: &[&str], input: &str) -> Output {
     use std::io::Write;
-    let mut child = Command::new(binary)
-        .arg("--keyring-backend")
+    let mut cmd = Command::new(binary);
+    cmd.arg("--keyring-backend")
         .arg("file")
         .arg("--keyring-path")
-        .arg(keyring_dir)
+        .arg(keyring_dir);
+    if is_rust_binary(binary) && requires_development(args) {
+        cmd.arg("--development");
+    }
+    let mut child = cmd
         .arg("keyring")
         .args(args)
         .env("DEFRA_KEYRING_SECRET", "test-secret")
@@ -61,6 +80,10 @@ fn defra_keyring_stdin(binary: &Path, keyring_dir: &Path, args: &[&str], input: 
         .write_all(input.as_bytes())
         .unwrap();
     child.wait_with_output().unwrap()
+}
+
+fn requires_development(args: &[&str]) -> bool {
+    matches!(args.first().copied(), Some("add" | "get"))
 }
 
 fn stdout(output: &Output) -> String {
