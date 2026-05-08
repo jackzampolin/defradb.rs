@@ -403,11 +403,6 @@ mod tests {
             ),
             (
                 "/api/v0/collections/:name",
-                Method::GET,
-                RoutePermission::Required(NodePermission::CollectionGet),
-            ),
-            (
-                "/api/v0/collections/:name",
                 Method::POST,
                 RoutePermission::Required(NodePermission::DocumentUpdate),
             ),

@@ -324,4 +324,16 @@ mod tests {
             assert_eq!(v1_status, v0_status, "route mismatch for {path}");
         }
     }
+
+    #[tokio::test]
+    async fn collection_doc_ids_route_is_not_available() {
+        assert_eq!(
+            status_for("/api/v0/collections/Users").await,
+            axum::http::StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            status_for("/api/v1/collections/Users").await,
+            axum::http::StatusCode::METHOD_NOT_ALLOWED
+        );
+    }
 }

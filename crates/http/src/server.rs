@@ -196,12 +196,11 @@ impl Server {
     /// Set REST operations for collection/document endpoints.
     ///
     /// When REST operations are configured, the server enables additional endpoints:
-    /// - `GET /api/v0/collections` - List all collections
-    /// - `GET /api/v0/collections/{name}` - Get document IDs in collection
-    /// - `POST /api/v0/collections/{name}` - Create document(s)
-    /// - `GET /api/v0/collections/{name}/{docID}` - Get document
-    /// - `PATCH /api/v0/collections/{name}/{docID}` - Update document
-    /// - `DELETE /api/v0/collections/{name}/{docID}` - Delete document
+    /// - `GET /api/v1/collections` - List all collections
+    /// - `POST /api/v1/collections/{name}` - Create document(s)
+    /// - `GET /api/v1/collections/{name}/document/{docID}` - Get document
+    /// - `PATCH /api/v1/collections/{name}/document/{docID}` - Update document
+    /// - `DELETE /api/v1/collections/{name}/document/{docID}` - Delete document
     pub fn with_rest<R: RestOperations + 'static>(mut self, rest: R) -> Self {
         self.rest = Some(Arc::new(rest));
         self
