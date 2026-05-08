@@ -22,6 +22,7 @@ defra-core = { path = "../defra-core" }
 defra-version = { path = "../defra-version" }
 crypto = { path = "../crypto" }
 lens = { path = "../lens", default-features = false }
+db = { path = "../db", default-features = false, features = ["native"] }
 
 # Encoding
 hex = "0.4"
@@ -58,6 +59,7 @@ crypto = { path = "../crypto" }
 
 # Enable test-utils feature for integration tests
 defra-http = { path = ".", features = ["test-utils"] }
+storage = { path = "../storage" }
 
 [lints]
 workspace = true
