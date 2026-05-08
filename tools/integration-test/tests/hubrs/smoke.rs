@@ -13,7 +13,7 @@ use super::helpers;
 #[serial_test::serial]
 async fn rust_hubrs_smoke() {
     RustNode::build().expect("build rust binary");
-    let jack = helpers::funded_identity(0);
+    let jack = helpers::funded_identity();
 
     let hub = helpers::start_hub_cluster().await;
     let hub_rpc_url = hub.node(0).rpc_url();

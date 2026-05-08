@@ -103,6 +103,8 @@ fn message_contains_any(message: &str, needles: &[&str]) -> bool {
 fn classify_backend_message(message: &str) -> Option<ErrorStatus> {
     let message = message.to_ascii_lowercase();
 
+    // Fallback precedence is intentional: typed errors should be preferred,
+    // and ambiguous auth/not-found messages stay privacy-preserving 404s.
     if message_contains_any(
         &message,
         &["p2p disabled", "p2p is disabled", "database is closed"],
@@ -370,6 +372,16 @@ mod tests {
             status(HttpError::from(RestError::DocumentNotFound(
                 "bae-123".into()
             ))),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn backend_message_precedence_keeps_ambiguous_auth_not_found_as_404() {
+        assert_eq!(
+            status(http_error_from_backend_message(
+                "document not found or not authorized".into()
+            )),
             StatusCode::NOT_FOUND
         );
     }

@@ -134,6 +134,7 @@ impl TxSigner {
         let mut sequence_retries = 0;
 
         loop {
+            // Body and fee are sequence-free; retries rebuild AuthInfo/SignDoc below.
             let (account_number, sequence) = if let (Some(account_number), Some(sequence)) =
                 (state.account_number, state.next_sequence)
             {

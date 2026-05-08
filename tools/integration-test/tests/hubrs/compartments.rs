@@ -34,7 +34,7 @@ fn add_policy(node: &integration_test::DefraClient, policy: &str, identity: &str
 async fn rust_hubrs_compartments() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
-    let jack = helpers::funded_identity(0);
+    let jack = helpers::funded_identity();
 
     let hub = helpers::start_hub_cluster().await;
     let hub_rpc_url = hub.node(0).rpc_url();

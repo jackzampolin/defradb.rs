@@ -12,6 +12,7 @@ use alloy_sol_types::SolCall;
 use async_trait::async_trait;
 use events::{AcpCacheInvalidatedData, AcpHeightAdvancedData, Bus, Message};
 use k256::ecdsa::SigningKey;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use super::abi::{IAcp, ACP_ADDRESS};
@@ -24,6 +25,7 @@ use super::provider_commands::{
 use super::signer::EvmSigner;
 
 const MAX_NONCE_RETRIES: usize = 5;
+const MAX_NONCE_RESERVE_ATTEMPTS: usize = 16;
 
 pub struct HubRsProvider {
     light_client: Arc<AcpLightClient>,
@@ -124,7 +126,7 @@ impl HubRsProvider {
     }
 
     fn reserve_nonce_at_or_after(&self, chain_nonce: u64) -> u64 {
-        loop {
+        for _ in 0..MAX_NONCE_RESERVE_ATTEMPTS {
             let current = self.nonce.load(Ordering::Relaxed);
             let nonce = current.max(chain_nonce);
             if self
@@ -135,6 +137,9 @@ impl HubRsProvider {
                 return nonce;
             }
         }
+
+        let _ = self.nonce.fetch_max(chain_nonce, Ordering::Relaxed);
+        self.nonce.fetch_add(1, Ordering::Relaxed).max(chain_nonce)
     }
 
     async fn guarded_eth_call<F, Fut, T>(&self, op: F) -> Result<T, ProviderError>
@@ -174,9 +179,9 @@ impl HubRsProvider {
         if bytes.is_empty() {
             return Ok(None);
         }
-        let record: serde_json::Value = serde_json::from_slice(&bytes)
+        let record: HubRsPolicyRecord = serde_json::from_slice(&bytes)
             .map_err(|e| ProviderError::Query(format!("policy JSON: {}", e)))?;
-        Ok(record["raw_policy"].as_str().map(ToString::to_string))
+        Ok(record.raw_policy)
     }
 
     fn policy_id_to_bytes32(policy_id: &str) -> FixedBytes<32> {
@@ -254,6 +259,11 @@ impl HubRsProvider {
 fn is_nonce_error(error: &ClientError) -> bool {
     let message = error.to_string().to_ascii_lowercase();
     message.contains("nonce") || message.contains("duplicate transaction")
+}
+
+#[derive(Deserialize)]
+struct HubRsPolicyRecord {
+    raw_policy: Option<String>,
 }
 
 impl Drop for HubRsProvider {
@@ -778,5 +788,16 @@ mod tests {
             HubRsProvider::relations_for_permission("signer"),
             vec!["signer"]
         );
+    }
+
+    #[test]
+    fn nonce_errors_include_hubrs_duplicate_transaction_response() {
+        assert!(is_nonce_error(&ClientError::Rpc("nonce too low".into())));
+        assert!(is_nonce_error(&ClientError::Rpc(
+            "code -32000: duplicate transaction".into()
+        )));
+        assert!(!is_nonce_error(&ClientError::Rpc(
+            "execution reverted".into()
+        )));
     }
 }

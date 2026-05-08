@@ -3,8 +3,9 @@ use std::process::Command;
 
 #[ctor::ctor]
 fn prepare_iroh_binary() {
-    if std::env::var_os("DEFRA_IROH_BINARY").is_some()
-        && std::env::var_os("DEFRA_RUST_BINARY").is_some()
+    if std::env::var_os("DEFRA_IROH_BINARY")
+        .zip(std::env::var_os("DEFRA_RUST_BINARY"))
+        .is_some_and(|(iroh, rust)| PathBuf::from(iroh).is_file() && PathBuf::from(rust).is_file())
     {
         return;
     }

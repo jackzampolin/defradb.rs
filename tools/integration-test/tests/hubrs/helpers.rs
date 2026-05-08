@@ -3,11 +3,10 @@ use std::time::Duration;
 use identity::{Identity, IdentityKeyType, RawIdentity};
 use integration_test::{TestCluster, TestIdentity};
 
-const FUNDED_PRIVATE_KEYS: [&str; 1] =
-    ["ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"];
+const FUNDED_PRIVATE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
-pub fn funded_identity(index: usize) -> TestIdentity {
-    let private_key_hex = FUNDED_PRIVATE_KEYS[index].to_string();
+pub fn funded_identity() -> TestIdentity {
+    let private_key_hex = FUNDED_PRIVATE_KEY.to_string();
     let key_bytes = hex::decode(&private_key_hex).expect("funded key hex");
     let identity = RawIdentity::from_identity_key_type(IdentityKeyType::Secp256k1, &key_bytes)
         .expect("funded identity");
