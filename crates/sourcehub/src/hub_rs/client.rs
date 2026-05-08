@@ -61,7 +61,7 @@ impl HubRsClient {
             "jsonrpc": "2.0",
             "id": self.next_id(),
             "method": "eth_getTransactionCount",
-            "params": [format!("{:?}", address), "latest"]
+            "params": [format!("{:?}", address), "pending"]
         });
         let resp: serde_json::Value = self
             .http

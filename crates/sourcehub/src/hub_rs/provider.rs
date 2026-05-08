@@ -23,6 +23,8 @@ use super::provider_commands::{
 };
 use super::signer::EvmSigner;
 
+const MAX_NONCE_RETRIES: usize = 5;
+
 pub struct HubRsProvider {
     light_client: Arc<AcpLightClient>,
     client: HubRsClient,
@@ -87,21 +89,52 @@ impl HubRsProvider {
     }
 
     async fn send_tx(&self, data: Bytes) -> Result<serde_json::Value, ProviderError> {
-        let nonce = self.nonce.fetch_add(1, Ordering::Relaxed);
+        let mut nonce_retries = 0;
+        let tx_hash = loop {
+            let nonce = if nonce_retries == 0 {
+                self.nonce.fetch_add(1, Ordering::Relaxed)
+            } else {
+                let chain_nonce = self
+                    .client
+                    .get_nonce(self.signer.address())
+                    .await
+                    .map_err(|e| ProviderError::Config(format!("nonce: {}", e)))?;
+                self.reserve_nonce_at_or_after(chain_nonce)
+            };
 
-        let raw = self
-            .signer
-            .sign_tx(nonce, ACP_ADDRESS, data)
-            .map_err(|e| ProviderError::Transaction(format!("sign: {}", e)))?;
-        let tx_hash = self
-            .client
-            .send_raw_transaction(raw)
-            .await
-            .map_err(|e| ProviderError::Transaction(format!("send: {}", e)))?;
+            let raw = self
+                .signer
+                .sign_tx(nonce, ACP_ADDRESS, data.clone())
+                .map_err(|e| ProviderError::Transaction(format!("sign: {}", e)))?;
+
+            match self.client.send_raw_transaction(raw).await {
+                Ok(tx_hash) => break tx_hash,
+                Err(e) if nonce_retries < MAX_NONCE_RETRIES && is_nonce_error(&e) => {
+                    nonce_retries += 1;
+                    tracing::debug!(error = %e, "hub.rs transaction nonce stale; refreshing");
+                    tokio::time::sleep(Duration::from_millis(100 * nonce_retries as u64)).await;
+                }
+                Err(e) => return Err(ProviderError::Transaction(format!("send: {}", e))),
+            }
+        };
         self.client
             .wait_for_receipt(tx_hash)
             .await
             .map_err(|e| ProviderError::Transaction(format!("receipt: {}", e)))
+    }
+
+    fn reserve_nonce_at_or_after(&self, chain_nonce: u64) -> u64 {
+        loop {
+            let current = self.nonce.load(Ordering::Relaxed);
+            let nonce = current.max(chain_nonce);
+            if self
+                .nonce
+                .compare_exchange(current, nonce + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return nonce;
+            }
+        }
     }
 
     async fn guarded_eth_call<F, Fut, T>(&self, op: F) -> Result<T, ProviderError>
@@ -116,6 +149,34 @@ impl HubRsProvider {
             }
             Err(e) => Err(ProviderError::Query(e.to_string())),
         }
+    }
+
+    async fn query_policy_ids(&self) -> Result<Vec<String>, ProviderError> {
+        let call = IAcp::getPolicyIdsCall {};
+        let calldata = Bytes::from(call.abi_encode());
+        let result = self
+            .guarded_eth_call(|| self.client.eth_call(ACP_ADDRESS, calldata.clone()))
+            .await?;
+        IAcp::getPolicyIdsCall::abi_decode_returns(&result)
+            .map_err(|e| ProviderError::Query(format!("ABI decode: {}", e)))
+    }
+
+    async fn query_policy_raw(&self, policy_id: &str) -> Result<Option<String>, ProviderError> {
+        let call = IAcp::getPolicyCall {
+            policyId: Self::policy_id_to_bytes32(policy_id),
+        };
+        let calldata = Bytes::from(call.abi_encode());
+        let result = self
+            .guarded_eth_call(|| self.client.eth_call(ACP_ADDRESS, calldata.clone()))
+            .await?;
+        let bytes = IAcp::getPolicyCall::abi_decode_returns(&result)
+            .map_err(|e| ProviderError::Query(format!("ABI decode: {}", e)))?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let record: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| ProviderError::Query(format!("policy JSON: {}", e)))?;
+        Ok(record["raw_policy"].as_str().map(ToString::to_string))
     }
 
     fn policy_id_to_bytes32(policy_id: &str) -> FixedBytes<32> {
@@ -188,6 +249,11 @@ impl HubRsProvider {
         );
         Ok(allowed)
     }
+}
+
+fn is_nonce_error(error: &ClientError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("nonce") || message.contains("duplicate transaction")
 }
 
 impl Drop for HubRsProvider {
@@ -293,25 +359,18 @@ impl SourceHubProvider for HubRsProvider {
             marshalType: 1,
         };
         let calldata = Bytes::from(call.abi_encode());
-        let receipt = self.send_tx(calldata).await?;
+        self.send_tx(calldata).await?;
 
-        let logs = receipt["logs"].as_array();
-        if let Some(logs) = logs {
-            for log in logs {
-                let topics = log["topics"].as_array();
-                if let Some(topics) = topics {
-                    if topics.len() >= 2 {
-                        let topic_hex = topics[1].as_str().unwrap_or("");
-                        let topic = topic_hex.strip_prefix("0x").unwrap_or(topic_hex);
-                        return Ok(format!("0x{}", topic));
-                    }
+        let ids = self.query_policy_ids().await?;
+        for id in ids.iter().rev() {
+            if let Some(raw_policy) = self.query_policy_raw(id).await? {
+                if raw_policy.trim() == policy_yaml.trim() {
+                    return Ok(id.clone());
                 }
             }
         }
 
-        Err(ProviderError::Transaction(
-            "could not extract policy ID from receipt".into(),
-        ))
+        Err(ProviderError::Query("created policy ID not found".into()))
     }
 
     async fn register_object(
@@ -408,17 +467,11 @@ impl SourceHubProvider for HubRsProvider {
         &self,
         policy_id: &str,
     ) -> Result<Option<ProviderPolicyInfo>, ProviderError> {
-        let result = self
-            .light_client
-            .check_policy(policy_id)
-            .await
-            .map_err(|e| ProviderError::Query(format!("light client: {}", e)))?;
-
-        if result.allowed {
+        if let Some(raw_policy) = self.query_policy_raw(policy_id).await? {
             Ok(Some(ProviderPolicyInfo {
                 id: policy_id.to_string(),
                 name: policy_id.to_string(),
-                raw_policy: None,
+                raw_policy: Some(raw_policy),
             }))
         } else {
             Ok(None)
