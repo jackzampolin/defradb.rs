@@ -19,5 +19,6 @@ sol! {
         function verifyAccessRequest(bytes32 policyId, string[] resources, string[] objectIds, string[] permissions, string actor) external view returns (bool);
         function getObjectOwner(bytes32 policyId, string resource, string objectId) external view returns (bool registered, bytes record);
         function getPolicy(bytes32 policyId) external view returns (bytes);
+        function getPolicyIds() external view returns (string[]);
     }
 }

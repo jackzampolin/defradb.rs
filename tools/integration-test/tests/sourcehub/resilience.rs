@@ -3,20 +3,21 @@ use std::time::Duration;
 use integration_test::node::{DefraNode, RustNode};
 use integration_test::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
 
-/// Circuit breaker fail-closed: when SourceHub becomes unreachable after
-/// initial setup, ACP-protected queries deny ALL access (including owner).
+/// Circuit breaker fail-closed for non-node callers when SourceHub becomes unreachable.
 ///
 /// Sequence:
 /// 1. Start cluster with SourceHub, create policy + protected doc
 /// 2. Verify Jack (owner) can read during normal operation
 /// 3. Stop the SourceHub process (simulates network partition)
-/// 4. Verify Jack is DENIED (node can't verify ACP → fail-closed)
+/// 4. Verify Bob is DENIED (node can't verify ACP -> fail-closed)
 /// 5. Verify anonymous is also denied
 #[tokio::test]
+#[serial_test::serial]
 async fn rust_circuit_breaker_trip_recovery() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
     let jack = generate_identity(&binary).expect("Jack identity");
+    let bob = generate_identity(&binary).expect("Bob identity");
 
     let mut cluster = TestCluster::builder()
         .rust_nodes(1)
@@ -42,11 +43,13 @@ async fn rust_circuit_breaker_trip_recovery() {
     node.schema_add_with_identity(&schema, &jack.private_key_hex)
         .expect("add schema");
 
-    node.query_with_identity(
-        r#"mutation { add_User(input: {name: "Jack", age: 30}) { _docID } }"#,
-        &jack.private_key_hex,
-    )
-    .expect("create doc");
+    let data = node
+        .query_with_identity(
+            r#"mutation { add_User(input: {name: "Jack", age: 30}) { _docID } }"#,
+            &jack.private_key_hex,
+        )
+        .expect("create doc");
+    let doc_id = data["add_User"][0]["_docID"].as_str().expect("_docID");
 
     // Jack reads successfully
     let jack_read = node
@@ -58,6 +61,17 @@ async fn rust_circuit_breaker_trip_recovery() {
         "Jack should see 1 doc during normal operation"
     );
 
+    node.acp_relationship_add("User", doc_id, "reader", &bob.did, &jack.private_key_hex)
+        .expect("grant Bob reader");
+    let bob_read = node
+        .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
+        .expect("Bob read");
+    assert_eq!(
+        bob_read["User"].as_array().unwrap().len(),
+        1,
+        "Bob should see 1 doc during normal operation"
+    );
+
     // Phase 2: Stop SourceHub — kill the devnet process
     cluster
         .stop_source_hub()
@@ -66,15 +80,14 @@ async fn rust_circuit_breaker_trip_recovery() {
     // Give time for connections to notice the shutdown
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Phase 3: Fail-closed — even the owner is denied when SourceHub is unreachable.
-    // The node cannot verify ACP permissions without SourceHub, so it denies all access.
-    let jack_after_stop = node
-        .query_with_identity("query { User { _docID name } }", &jack.private_key_hex)
-        .expect("Jack read after SourceHub stop");
+    // Phase 3: Fail-closed for non-node callers when SourceHub is unreachable.
+    let bob_after_stop = node
+        .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
+        .expect("Bob read after SourceHub stop");
     assert_eq!(
-        jack_after_stop["User"].as_array().unwrap().len(),
+        bob_after_stop["User"].as_array().unwrap().len(),
         0,
-        "Jack should be denied when SourceHub is down (fail-closed)"
+        "Bob should be denied when SourceHub is down (fail-closed)"
     );
 
     // Anonymous is also denied
@@ -96,6 +109,7 @@ async fn rust_circuit_breaker_trip_recovery() {
 /// fast. The 5-minute TTL makes expiry impractical to test at integration
 /// level (unit tests cover expiry in policy_cache.rs).
 #[tokio::test]
+#[serial_test::serial]
 async fn rust_policy_cache_ttl_expiry() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
@@ -178,6 +192,7 @@ async fn rust_policy_cache_ttl_expiry() {
 
 /// Go runtime variant — circuit breaker behavior
 #[tokio::test]
+#[serial_test::serial]
 #[ignore = "Go node with SourceHub not yet supported"]
 async fn go_circuit_breaker_trip_recovery() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
@@ -220,6 +235,7 @@ async fn go_circuit_breaker_trip_recovery() {
 
 /// Go runtime variant — policy cache behavior
 #[tokio::test]
+#[serial_test::serial]
 #[ignore = "Go node with SourceHub not yet supported"]
 async fn go_policy_cache_ttl_expiry() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();

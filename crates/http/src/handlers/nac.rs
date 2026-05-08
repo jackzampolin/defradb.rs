@@ -11,7 +11,7 @@ use axum::{extract::State, response::IntoResponse, Json};
 use acp::nac::is_valid_nac_relation;
 
 use crate::auth_error::normalize_auth_error;
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NacStatusInfo, NodePermission};
@@ -87,7 +87,7 @@ pub async fn enable(
 
     nac.enable(&owner).await.map_err(|e| {
         tracing::warn!(error = %e, "NAC enable operation failed");
-        HttpError::BadRequest(e)
+        http_error_from_backend_message(e)
     })?;
 
     Ok(axum::http::StatusCode::OK.into_response())
@@ -255,7 +255,7 @@ pub async fn go_add_relationship(
         .map_err(|e| {
             let normalized = normalize_auth_error(e, "add-nac-relation");
             tracing::warn!(error = %normalized, "NAC add_relationship operation failed");
-            HttpError::Forbidden(normalized)
+            http_error_from_backend_message(normalized)
         })?;
 
     Ok(Json(serde_json::json!({"added": added})).into_response())
@@ -302,7 +302,7 @@ pub async fn go_remove_relationship(
         .map_err(|e| {
             let normalized = normalize_auth_error(e, "delete-nac-relation");
             tracing::warn!(error = %normalized, "NAC remove_relationship operation failed");
-            HttpError::Forbidden(normalized)
+            http_error_from_backend_message(normalized)
         })?;
 
     Ok(Json(serde_json::json!({"deleted": removed})).into_response())
@@ -326,7 +326,7 @@ pub async fn disable(
     nac.disable(&requestor).await.map_err(|e| {
         let normalized = normalize_auth_error(e, "disable-nac");
         tracing::warn!(error = %normalized, "NAC disable operation failed");
-        HttpError::Forbidden(normalized)
+        http_error_from_backend_message(normalized)
     })?;
 
     Ok(Json(()))
@@ -350,7 +350,7 @@ pub async fn re_enable(
     nac.re_enable(&requestor).await.map_err(|e| {
         let normalized = normalize_auth_error(e, "re-enable-nac");
         tracing::warn!(error = %normalized, "NAC re-enable operation failed");
-        HttpError::Forbidden(normalized)
+        http_error_from_backend_message(normalized)
     })?;
 
     Ok(Json(()))

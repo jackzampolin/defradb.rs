@@ -31,6 +31,7 @@ fn add_policy(node: &integration_test::DefraClient, policy: &str, identity: &str
 ///
 /// The node is started with Jack's identity so SourceHub transactions work.
 #[tokio::test]
+#[serial_test::serial]
 async fn rust_sourcehub_compartments() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");

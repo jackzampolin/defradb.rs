@@ -1,6 +1,23 @@
 use std::time::Duration;
 
-use integration_test::TestCluster;
+use identity::{Identity, IdentityKeyType, RawIdentity};
+use integration_test::{TestCluster, TestIdentity};
+
+const FUNDED_PRIVATE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+
+pub fn funded_identity() -> TestIdentity {
+    let private_key_hex = FUNDED_PRIVATE_KEY.to_string();
+    let key_bytes = hex::decode(&private_key_hex).expect("funded key hex");
+    let identity = RawIdentity::from_identity_key_type(IdentityKeyType::Secp256k1, &key_bytes)
+        .expect("funded identity");
+
+    TestIdentity {
+        private_key_hex,
+        did: identity.did().expect("funded identity did").to_string(),
+        public_key_hex: Some(hex::encode(identity.public_key_bytes())),
+        key_type: Some("secp256k1".to_string()),
+    }
+}
 
 /// ACP precompile address on hub.rs (0x0810).
 const ACP_PRECOMPILE: &str = "0x0000000000000000000000000000000000000810";
@@ -38,10 +55,10 @@ pub async fn build_defra_with_hub_rs(
         std::env::set_var("DEFRA_ACP_DOCUMENT_TYPE", "hub-rs");
     }
 
-    let mut builder = TestCluster::builder()
-        .rust_nodes(n_nodes)
-        .skip_build()
-        .with_identity(identity);
+    let mut builder = TestCluster::builder().rust_nodes(n_nodes).skip_build();
+    for index in 0..n_nodes {
+        builder = builder.with_node_identity(index, identity.to_string());
+    }
     if p2p {
         builder = builder.with_p2p();
     }

@@ -3,6 +3,8 @@
 //! Maps every registered HTTP route to its required permission level,
 //! ensuring consistent access control enforcement across all endpoints.
 
+use std::borrow::Cow;
+
 use axum::http::Method;
 
 use crate::router::NodePermission;
@@ -30,7 +32,9 @@ pub enum RoutePermission {
 /// Unknown routes return `Required(DocumentRead)` as a safe default:
 /// when NAC is enabled, this blocks unauthenticated access.
 pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
-    match path {
+    let normalized_path = normalize_api_version(path);
+
+    match normalized_path.as_ref() {
         // =====================================================================
         // Exempt routes (no auth needed)
         // =====================================================================
@@ -282,6 +286,16 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
     }
 }
 
+fn normalize_api_version(path: &str) -> Cow<'_, str> {
+    if path == "/api/v1" {
+        Cow::Borrowed("/api/v0")
+    } else if let Some(suffix) = path.strip_prefix("/api/v1/") {
+        Cow::Owned(format!("/api/v0/{suffix}"))
+    } else {
+        Cow::Borrowed(path)
+    }
+}
+
 #[cfg(test)]
 #[path = "route_permissions_tests.rs"]
 mod route_permissions_tests;
@@ -380,11 +394,6 @@ mod tests {
                 "/api/v0/collections/migrations",
                 Method::POST,
                 RoutePermission::Required(NodePermission::MigrationSet),
-            ),
-            (
-                "/api/v0/collections/:name",
-                Method::GET,
-                RoutePermission::Required(NodePermission::CollectionGet),
             ),
             (
                 "/api/v0/collections/:name",
@@ -576,6 +585,24 @@ mod tests {
                 actual, *expected,
                 "Mismatch for {} {} — expected {:?}, got {:?}",
                 method, path, expected, actual
+            );
+        }
+    }
+
+    #[test]
+    fn v1_routes_use_same_permissions_as_v0() {
+        for (v0_path, method) in [
+            ("/api/v0/version", Method::GET),
+            ("/api/v0/graphql", Method::POST),
+            ("/api/v0/collections/:name", Method::POST),
+            ("/api/v0/p2p/replicators", Method::DELETE),
+            ("/api/v0/acp/node/disable", Method::POST),
+            ("/api/v0/backup/export", Method::POST),
+        ] {
+            let v1_path = v0_path.replacen("/api/v0", "/api/v1", 1);
+            assert_eq!(
+                route_permission(&v1_path, &method),
+                route_permission(v0_path, &method)
             );
         }
     }

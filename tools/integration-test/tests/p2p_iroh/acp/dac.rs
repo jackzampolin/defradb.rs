@@ -17,6 +17,8 @@ use integration_test::{
 };
 use serial_test::serial;
 
+use crate::support;
+
 const P2P_TIMEOUT: Duration = Duration::from_secs(15);
 
 const ACP_POLICY: &str = r#"name: test-dac-policy
@@ -65,7 +67,12 @@ fn extract_doc_id(data: &serde_json::Value, mutation_name: &str) -> String {
 
 /// Helper: set up a 2-node SourceHub cluster with ACP policy and schema.
 /// Returns (cluster, policy_id, owner identity key).
-async fn setup_sourcehub_cluster() -> (TestCluster, String, String) {
+async fn setup_sourcehub_cluster() -> Option<(TestCluster, String, String)> {
+    if !support::sourcehub_binary_available() {
+        eprintln!("skipping SourceHub-backed Iroh DAC test: sourcehubd is not available");
+        return None;
+    }
+
     let binary = integration_test::workspace_root().join("target/debug/defra");
     let owner = generate_identity(&binary).expect("generate owner identity");
     let owner_key = owner.private_key_hex.clone();
@@ -104,7 +111,7 @@ async fn setup_sourcehub_cluster() -> (TestCluster, String, String) {
         .schema_add_with_identity(&schema, &owner_key)
         .expect("schema node1");
 
-    (cluster, policy_id, owner_key)
+    Some((cluster, policy_id, owner_key))
 }
 
 /// Helper: connect two nodes and set up replicator (node0 → node1).
@@ -529,7 +536,9 @@ async fn local_relationship_revoke_replicates_to_peer() {
 #[tokio::test]
 #[serial]
 async fn subscribe_add_get_permissioned_sourcehub() {
-    let (cluster, _policy_id, owner_key) = setup_sourcehub_cluster().await;
+    let Some((cluster, _policy_id, owner_key)) = setup_sourcehub_cluster().await else {
+        return;
+    };
 
     setup_replicator(&cluster);
 
@@ -577,7 +586,9 @@ async fn subscribe_add_get_permissioned_sourcehub() {
 #[tokio::test]
 #[serial]
 async fn create_private_docs_different_nodes() {
-    let (cluster, _policy_id, owner_key) = setup_sourcehub_cluster().await;
+    let Some((cluster, _policy_id, owner_key)) = setup_sourcehub_cluster().await else {
+        return;
+    };
 
     let node0 = cluster.client(0);
     let node1 = cluster.client(1);
@@ -635,7 +646,9 @@ async fn create_private_docs_different_nodes() {
 #[tokio::test]
 #[serial]
 async fn create_private_sync_after_relationship() {
-    let (cluster, _policy_id, owner_key) = setup_sourcehub_cluster().await;
+    let Some((cluster, _policy_id, owner_key)) = setup_sourcehub_cluster().await else {
+        return;
+    };
 
     setup_replicator(&cluster);
 
@@ -696,7 +709,9 @@ async fn create_private_sync_after_relationship() {
 #[tokio::test]
 #[serial]
 async fn update_private_docs_different_nodes() {
-    let (cluster, _policy_id, owner_key) = setup_sourcehub_cluster().await;
+    let Some((cluster, _policy_id, owner_key)) = setup_sourcehub_cluster().await else {
+        return;
+    };
 
     setup_replicator(&cluster);
 
@@ -773,7 +788,9 @@ async fn update_private_docs_different_nodes() {
 #[tokio::test]
 #[serial]
 async fn delete_private_docs_different_nodes() {
-    let (cluster, _policy_id, owner_key) = setup_sourcehub_cluster().await;
+    let Some((cluster, _policy_id, owner_key)) = setup_sourcehub_cluster().await else {
+        return;
+    };
 
     setup_replicator(&cluster);
 
@@ -849,7 +866,9 @@ async fn delete_private_docs_different_nodes() {
 #[tokio::test]
 #[serial]
 async fn replicator_permissioned_sourcehub() {
-    let (cluster, _policy_id, owner_key) = setup_sourcehub_cluster().await;
+    let Some((cluster, _policy_id, owner_key)) = setup_sourcehub_cluster().await else {
+        return;
+    };
 
     setup_replicator(&cluster);
 
@@ -912,7 +931,9 @@ async fn replicator_permissioned_sourcehub() {
 #[tokio::test]
 #[serial]
 async fn subscribe_add_get_with_doc_actor_relationship() {
-    let (cluster, _policy_id, owner_key) = setup_sourcehub_cluster().await;
+    let Some((cluster, _policy_id, owner_key)) = setup_sourcehub_cluster().await else {
+        return;
+    };
 
     setup_replicator(&cluster);
 
@@ -982,7 +1003,9 @@ async fn subscribe_add_get_with_doc_actor_relationship() {
 #[tokio::test]
 #[serial]
 async fn replicator_with_doc_actor_relationship() {
-    let (cluster, _policy_id, owner_key) = setup_sourcehub_cluster().await;
+    let Some((cluster, _policy_id, owner_key)) = setup_sourcehub_cluster().await else {
+        return;
+    };
 
     setup_replicator(&cluster);
 

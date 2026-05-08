@@ -7,7 +7,7 @@
 
 use axum::{extract::State, http::HeaderMap, Json};
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::handlers::txn_header::txn_id_from_headers;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
@@ -35,7 +35,7 @@ pub async fn add_schema(
         let collections = txn_ops
             .add_schema_in_txn(txn_id, &body)
             .await
-            .map_err(HttpError::BadRequest)?;
+            .map_err(http_error_from_backend_message)?;
 
         return Ok(Json(collections));
     }
@@ -45,7 +45,7 @@ pub async fn add_schema(
     let collections = schema_ops
         .add_schema(&body)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(collections))
 }

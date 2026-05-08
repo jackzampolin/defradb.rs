@@ -3,4 +3,5 @@ mod connection;
 mod peer;
 mod replication;
 mod schema;
+mod support;
 mod sync;

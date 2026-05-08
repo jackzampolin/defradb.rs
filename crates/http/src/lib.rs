@@ -1,56 +1,58 @@
 //! HTTP server for DefraDB.
 //!
 //! Provides an Axum-based HTTP API compatible with Go DefraDB's API structure.
+//! The current API is mounted under `/api/v1`; `/api/v0` remains available for
+//! backwards compatibility.
 //!
 //! # Endpoints
 //!
 //! ## Core
 //! - `GET /health-check` - Health check
-//! - `GET /api/v0/version` - Get version info
+//! - `GET /api/v1/version` - Get version info
 //!
 //! ## GraphQL
-//! - `POST /api/v0/graphql` - Execute GraphQL queries
-//! - `GET /api/v0/graphql` - Execute GraphQL queries (via query params)
-//! - `GET /api/v0/schema` - Get GraphQL schema
+//! - `POST /api/v1/graphql` - Execute GraphQL queries
+//! - `GET /api/v1/graphql` - Execute GraphQL queries (via query params)
+//! - `GET /api/v1/schema` - Get GraphQL schema
 //!
 //! ## Transactions
-//! - `POST /api/v0/tx/begin` - Begin a transaction
-//! - `POST /api/v0/tx/commit` - Commit a transaction
-//! - `POST /api/v0/tx/rollback` - Rollback a transaction
+//! - `POST /api/v1/tx` - Begin a transaction
+//! - `POST /api/v1/tx/concurrent` - Begin a concurrent transaction
+//! - `POST /api/v1/tx/{id}` - Commit a transaction
+//! - `DELETE /api/v1/tx/{id}` - Discard a transaction
 //!
 //! ## REST Collections (requires RestOperations)
-//! - `GET /api/v0/collections` - List all collections
-//! - `GET /api/v0/collections/{name}` - Get document IDs in collection
-//! - `POST /api/v0/collections/{name}` - Create document(s)
-//! - `GET /api/v0/collections/{name}/{docID}` - Get document
-//! - `PATCH /api/v0/collections/{name}/{docID}` - Update document
-//! - `DELETE /api/v0/collections/{name}/{docID}` - Delete document
+//! - `GET /api/v1/collections` - List all collections
+//! - `POST /api/v1/collections/{name}` - Create document(s)
+//! - `GET /api/v1/collections/{name}/document/{docID}` - Get document
+//! - `PATCH /api/v1/collections/{name}/document/{docID}` - Update document
+//! - `DELETE /api/v1/collections/{name}/document/{docID}` - Delete document
 //!
 //! ## P2P (requires P2POperations)
-//! - `GET /api/v0/p2p/info` - Get P2P node info
-//! - `GET /api/v0/p2p/shareable-address` - Get the single best shareable P2P address
-//! - `GET /api/v0/p2p/peers` - List connected peers
-//! - `POST /api/v0/p2p/peers` - Connect to peer
-//! - `GET /api/v0/p2p/replicator` - List replicators
-//! - `POST /api/v0/p2p/replicator` - Add replicator
-//! - `DELETE /api/v0/p2p/replicator` - Remove replicator
-//! - `GET /api/v0/p2p/collections` - List P2P collections
-//! - `POST /api/v0/p2p/collections` - Add P2P collections
-//! - `DELETE /api/v0/p2p/collections` - Remove P2P collections
+//! - `GET /api/v1/p2p/info` - Get P2P node info
+//! - `GET /api/v1/p2p/shareable-address` - Get the single best shareable P2P address
+//! - `GET /api/v1/p2p/peers` - List connected peers
+//! - `POST /api/v1/p2p/peers` - Connect to peer
+//! - `GET /api/v1/p2p/replicator` - List replicators
+//! - `POST /api/v1/p2p/replicator` - Add replicator
+//! - `DELETE /api/v1/p2p/replicator` - Remove replicator
+//! - `GET /api/v1/p2p/collections` - List P2P collections
+//! - `POST /api/v1/p2p/collections` - Add P2P collections
+//! - `DELETE /api/v1/p2p/collections` - Remove P2P collections
 //!
 //! ## ACP (requires AcpOperations)
-//! - `POST /api/v0/acp/policy` - Add policy
-//! - `GET /api/v0/acp/policy` - List policies
-//! - `GET /api/v0/acp/policy/{id}` - Get policy by ID
+//! - `POST /api/v1/acp/policy` - Add policy
+//! - `GET /api/v1/acp/policy` - List policies
+//! - `GET /api/v1/acp/policy/{id}` - Get policy by ID
 //!
 //! ## Index (requires IndexOperations)
-//! - `POST /api/v0/index` - Create index
-//! - `GET /api/v0/index` - List indexes
-//! - `DELETE /api/v0/index` - Drop index
+//! - `POST /api/v1/index` - Create index
+//! - `GET /api/v1/index` - List indexes
+//! - `DELETE /api/v1/index` - Drop index
 //!
 //! ## Backup (requires BackupOperations)
-//! - `GET /api/v0/backup/export` - Export database
-//! - `POST /api/v0/backup/import` - Import database
+//! - `POST /api/v1/backup/export` - Export database
+//! - `POST /api/v1/backup/import` - Import database
 //!
 //! # Example
 //!

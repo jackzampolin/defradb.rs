@@ -4,8 +4,8 @@ use crate::provider::SubjectRef;
 
 pub(crate) fn subject_to_cmd_json(subject: &SubjectRef) -> serde_json::Value {
     match subject {
-        SubjectRef::Actor(did) => serde_json::json!({ "actor": { "id": did } }),
-        SubjectRef::AllActors => serde_json::json!({ "all_actors": {} }),
+        SubjectRef::Actor(did) => serde_json::json!({ "Entity": did }),
+        SubjectRef::AllActors => serde_json::json!("Wildcard"),
     }
 }
 
@@ -32,12 +32,11 @@ pub(crate) fn encode_set_relationship_cmd(
     subject: &SubjectRef,
 ) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
-        "set_relationship_cmd": {
-            "relationship": {
-                "object": { "resource": resource, "id": object_id },
-                "relation": relation,
-                "subject": subject_to_cmd_json(subject),
-            }
+        "SetRelationship": {
+            "resource": resource,
+            "object_id": object_id,
+            "relation": relation,
+            "subject": subject_to_cmd_json(subject),
         }
     }))
     .unwrap_or_default()
@@ -50,12 +49,11 @@ pub(crate) fn encode_delete_relationship_cmd(
     subject: &SubjectRef,
 ) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
-        "delete_relationship_cmd": {
-            "relationship": {
-                "object": { "resource": resource, "id": object_id },
-                "relation": relation,
-                "subject": subject_to_cmd_json(subject),
-            }
+        "DeleteRelationship": {
+            "resource": resource,
+            "object_id": object_id,
+            "relation": relation,
+            "subject": subject_to_cmd_json(subject),
         }
     }))
     .unwrap_or_default()
@@ -86,4 +84,65 @@ pub(crate) fn resolve_registered_or_passthrough_bearer_token(
     }
 
     Ok(defra_core::signing::get_request_bearer_token(did))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+
+    use super::*;
+
+    #[test]
+    fn encodes_register_object_as_hub_rs_policy_cmd() {
+        let value: Value =
+            serde_json::from_slice(&encode_register_object_cmd("users", "doc-1")).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "RegisterObject": { "resource": "users", "id": "doc-1" }
+            })
+        );
+    }
+
+    #[test]
+    fn encodes_relationship_subjects_as_hub_rs_policy_cmds() {
+        let actor = crate::provider::SubjectRef::Actor("did:key:zActor".to_string());
+        let value: Value = serde_json::from_slice(&encode_set_relationship_cmd(
+            "users", "doc-1", "reader", &actor,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "SetRelationship": {
+                    "resource": "users",
+                    "object_id": "doc-1",
+                    "relation": "reader",
+                    "subject": { "Entity": "did:key:zActor" }
+                }
+            })
+        );
+
+        let value: Value = serde_json::from_slice(&encode_delete_relationship_cmd(
+            "users",
+            "doc-1",
+            "reader",
+            &crate::provider::SubjectRef::AllActors,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "DeleteRelationship": {
+                    "resource": "users",
+                    "object_id": "doc-1",
+                    "relation": "reader",
+                    "subject": "Wildcard"
+                }
+            })
+        );
+    }
 }

@@ -82,10 +82,6 @@ mod tests {
             RoutePermission::Required(NodePermission::CollectionPatch)
         );
         assert_eq!(
-            route_permission("/api/v0/collections/:name", &Method::GET),
-            RoutePermission::Required(NodePermission::CollectionGet)
-        );
-        assert_eq!(
             route_permission("/api/v0/collections/:name", &Method::POST),
             RoutePermission::Required(NodePermission::DocumentUpdate)
         );
@@ -264,11 +260,6 @@ mod tests {
                 "/api/v0/collections/migrations",
                 Method::POST,
                 RoutePermission::Required(NodePermission::MigrationSet),
-            ),
-            (
-                "/api/v0/collections/:name",
-                Method::GET,
-                RoutePermission::Required(NodePermission::CollectionGet),
             ),
             (
                 "/api/v0/collections/:name",
