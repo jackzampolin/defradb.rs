@@ -22,6 +22,8 @@ mod lens_persistence;
 mod limits;
 #[path = "query/planner_4656.rs"]
 mod planner_4656;
+#[path = "query/planner_4684.rs"]
+mod planner_4684;
 #[path = "query/sdl_generate.rs"]
 mod sdl_generate;
 #[path = "query/subscription_docid.rs"]
