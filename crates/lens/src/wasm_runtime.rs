@@ -7,17 +7,17 @@ use wasmtime::{
 };
 
 use super::wasm::WasmSandboxConfig;
-use crate::{Error, LensDoc, Result};
+use crate::{Error, Result};
 
 /// Host state for batch transforms that feed multiple docs via lens::next.
 pub(crate) struct BatchHostState {
-    input_docs: Vec<LensDoc>,
+    input_docs: Vec<serde_json::Value>,
     current_index: usize,
     pub(crate) limits: Option<StoreLimits>,
 }
 
 impl BatchHostState {
-    pub(crate) fn new(docs: Vec<LensDoc>, limits: Option<StoreLimits>) -> Self {
+    pub(crate) fn new(docs: Vec<serde_json::Value>, limits: Option<StoreLimits>) -> Self {
         Self {
             input_docs: docs,
             current_index: 0,
@@ -25,7 +25,7 @@ impl BatchHostState {
         }
     }
 
-    pub(crate) fn next_input(&mut self) -> Option<LensDoc> {
+    pub(crate) fn next_input(&mut self) -> Option<serde_json::Value> {
         if self.current_index < self.input_docs.len() {
             let doc = self.input_docs[self.current_index].clone();
             self.current_index += 1;
@@ -45,12 +45,12 @@ impl BatchHostState {
 pub(crate) fn execute_batch_transform(
     engine: &Engine,
     module: &Module,
-    input_docs: Vec<LensDoc>,
+    input_docs: Vec<serde_json::Value>,
     arguments: Option<serde_json::Value>,
     inverse: bool,
     limits: Option<StoreLimits>,
     sandbox: &Option<WasmSandboxConfig>,
-) -> Result<Vec<LensDoc>> {
+) -> Result<Vec<serde_json::Value>> {
     let mut store = WasmStore::new(engine, BatchHostState::new(input_docs, limits));
 
     // Apply opt-in resource limits
@@ -163,14 +163,18 @@ pub(crate) fn execute_batch_transform(
 
     // Set parameters if provided
     if let Some(params) = arguments {
-        let alloc_fn: Option<TypedFunc<i32, i32>> = instance
-            .get_typed_func(store.as_context_mut(), "alloc")
-            .ok();
-        let set_param_fn: Option<TypedFunc<i32, i32>> = instance
-            .get_typed_func(store.as_context_mut(), "set_param")
-            .ok();
+        let has_params = !matches!(&params, serde_json::Value::Object(map) if map.is_empty());
 
-        if let (Some(alloc), Some(set_param)) = (alloc_fn, set_param_fn) {
+        if has_params {
+            let alloc: TypedFunc<i32, i32> = instance
+                .get_typed_func(store.as_context_mut(), "alloc")
+                .map_err(|e| Error::WasmExecution(format!("alloc func not found: {}", e)))?;
+            let set_param: TypedFunc<i32, i32> = instance
+                .get_typed_func(store.as_context_mut(), "set_param")
+                .map_err(|_| {
+                    Error::WasmExecution("Export `set_param` does not exist".to_string())
+                })?;
+
             let param_json = serde_json::to_vec(&params)
                 .map_err(|e| Error::WasmExecution(format!("failed to serialize params: {}", e)))?;
 
@@ -192,9 +196,44 @@ pub(crate) fn execute_batch_transform(
                 .write(store.as_context_mut(), (offset + 5) as usize, &param_json)
                 .map_err(|e| Error::WasmExecution(format!("write data failed: {}", e)))?;
 
-            let _ = set_param
+            let result_offset = set_param
                 .call(store.as_context_mut(), offset)
                 .map_err(|e| Error::WasmExecution(format!("set_param failed: {}", e)))?;
+            let mut type_id_buf = [0u8; 1];
+            memory
+                .read(store.as_context(), result_offset as usize, &mut type_id_buf)
+                .map_err(|e| {
+                    Error::WasmExecution(format!("read set_param type_id failed: {}", e))
+                })?;
+
+            let type_id = type_id_buf[0] as i8;
+            if type_id < 0 {
+                let mut len_buf = [0u8; 4];
+                memory
+                    .read(
+                        store.as_context(),
+                        (result_offset + 1) as usize,
+                        &mut len_buf,
+                    )
+                    .map_err(|e| {
+                        Error::WasmExecution(format!("read set_param error len failed: {}", e))
+                    })?;
+                let len = u32::from_le_bytes(len_buf) as usize;
+
+                let mut error_bytes = vec![0u8; len];
+                memory
+                    .read(
+                        store.as_context(),
+                        (result_offset + 5) as usize,
+                        &mut error_bytes,
+                    )
+                    .map_err(|e| {
+                        Error::WasmExecution(format!("read set_param error failed: {}", e))
+                    })?;
+
+                let error_str = String::from_utf8_lossy(&error_bytes);
+                return Err(Error::WasmExecution(format!("WASM error: {}", error_str)));
+            }
         }
     }
 
@@ -202,7 +241,13 @@ pub(crate) fn execute_batch_transform(
     let func_name = if inverse { "inverse" } else { "transform" };
     let transform_fn: TypedFunc<(), i32> = instance
         .get_typed_func(store.as_context_mut(), func_name)
-        .map_err(|e| Error::WasmExecution(format!("{} func not found: {}", func_name, e)))?;
+        .map_err(|e| {
+            if inverse && e.to_string().contains("failed to find function export") {
+                Error::WasmExecution("Export `inverse` does not exist".to_string())
+            } else {
+                Error::WasmExecution(format!("{} func not found: {}", func_name, e))
+            }
+        })?;
 
     // Call transform repeatedly until EOS to collect all output docs
     let mut output_docs = Vec::new();
@@ -252,6 +297,11 @@ pub(crate) fn execute_batch_transform(
             return Err(Error::WasmExecution(format!("WASM error: {}", error_str)));
         }
 
+        if type_id == 0 {
+            output_docs.push(serde_json::Value::Null);
+            continue;
+        }
+
         if type_id != 1 {
             return Err(Error::WasmExecution(format!(
                 "unexpected type_id: {}",
@@ -279,7 +329,7 @@ pub(crate) fn execute_batch_transform(
             )
             .map_err(|e| Error::WasmExecution(format!("read data failed: {}", e)))?;
 
-        let doc: LensDoc = serde_json::from_slice(&result_bytes)
+        let doc: serde_json::Value = serde_json::from_slice(&result_bytes)
             .map_err(|e| Error::WasmExecution(e.to_string()))?;
         output_docs.push(doc);
     }

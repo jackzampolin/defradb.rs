@@ -38,6 +38,7 @@ members = [
     "crates/wasm",
     "crates/pg-compat",
     "crates/defra-node",
+    "tools/lens-host",
     "tools/ffi-test",
     "tools/integration-test",
 ]

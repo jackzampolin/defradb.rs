@@ -6816,6 +6816,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lens-host"
+version = "0.5.0"
+dependencies = [
+ "lens",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
