@@ -41,12 +41,10 @@ pub fn create_router_with_state(state: AppState) -> Router {
     // Transaction routes (Go-compatible)
     // Go DefraDB:
     //   POST /tx - begin transaction (query param: ?read_only=true)
-    //   POST /tx/concurrent - begin concurrent transaction
     //   POST /tx/{id} - commit transaction
     //   DELETE /tx/{id} - discard transaction
     let tx_routes = Router::new()
         .route("/", post(handlers::tx_begin))
-        .route("/concurrent", post(handlers::tx_begin_concurrent))
         .route("/{id}", post(handlers::tx_commit))
         .route("/{id}", delete(handlers::tx_discard))
         .route("/{id}/lens", post(handlers::txn_ops::set_migration_in_txn))

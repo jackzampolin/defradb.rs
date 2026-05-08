@@ -124,6 +124,30 @@ async fn rust_txn_schema_add_via_header_is_scoped() {
     txn_schema_add_via_header_is_scoped(cluster).await;
 }
 
+async fn concurrent_txn_endpoint_is_not_exposed(cluster: TestCluster) {
+    let api_url = cluster.api_url(0);
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/v0/tx/concurrent", api_url))
+        .send()
+        .await
+        .expect("tx concurrent request failed");
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    assert!(
+        body.contains("invalid transaction id"),
+        "expected invalid transaction id error, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn rust_concurrent_txn_endpoint_is_not_exposed() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    concurrent_txn_endpoint_is_not_exposed(cluster).await;
+}
+
 async fn transactions_test(cluster: TestCluster) {
     let client = cluster.client(0);
 
