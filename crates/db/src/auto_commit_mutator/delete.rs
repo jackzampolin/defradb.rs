@@ -1,3 +1,4 @@
+use super::helpers::ensure_collection_is_active;
 use super::*;
 
 impl<S: Store + 'static> AutoCommitMutator<S> {
@@ -7,6 +8,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
         let collection = self.get_collection_or_err(collection_name)?;
+        ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
         // Create a write transaction
         let txn = self.db.new_txn(false).await.map_err(|e| {

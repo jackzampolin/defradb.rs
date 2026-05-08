@@ -1,5 +1,7 @@
 #[path = "basic/batch_mutations.rs"]
 mod batch_mutations;
+#[path = "basic/collection_delete_4657.rs"]
+mod collection_delete_4657;
 #[path = "basic/collection_management.rs"]
 mod collection_management;
 #[path = "basic/document_lifecycle.rs"]

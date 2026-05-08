@@ -1,3 +1,4 @@
+use super::helpers::ensure_collection_is_active;
 use super::*;
 
 use crate::block_builder::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
@@ -23,6 +24,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
 
         let collection = self.get_collection_or_err(collection_name)?;
+        ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id().to_string();

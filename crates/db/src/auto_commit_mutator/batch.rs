@@ -11,6 +11,7 @@ use std::sync::Arc;
 use storage::corekv::Store;
 use tracing::warn;
 
+use super::helpers::ensure_collection_is_active;
 use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
@@ -148,6 +149,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
     ) -> query::error::Result<CreateResult> {
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
         db_search::set_embedding(
@@ -276,6 +278,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
     ) -> query::error::Result<UpdateResult> {
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
         let generated = db_search::set_embedding(
@@ -406,6 +409,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
     ) -> query::error::Result<DeleteResult> {
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
         let existed = collection
             .delete_with_indexes(&datastore, doc_id, &index_manager)
