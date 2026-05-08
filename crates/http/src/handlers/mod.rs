@@ -23,6 +23,7 @@ pub mod lens;
 pub mod nac;
 pub mod p2p;
 pub mod schema;
+mod txn_header;
 pub mod txn_ops;
 pub mod utility;
 pub mod views;

@@ -75,6 +75,55 @@ async fn rust_txn_schema_add_and_mutate() {
     txn_schema_add_and_mutate(cluster).await;
 }
 
+async fn txn_schema_add_via_header_is_scoped(cluster: TestCluster) {
+    let client = cluster.client(0);
+    let api_url = cluster.api_url(0);
+    let tx_id = client.tx_create().expect("tx_create failed");
+
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(format!("{}/api/v0/collections", api_url))
+        .header("x-defradb-tx", &tx_id)
+        .body("type HeaderWidget { name: String }")
+        .send()
+        .await
+        .expect("schema add request failed");
+    assert!(
+        resp.status().is_success(),
+        "schema add in tx failed with status: {} body: {}",
+        resp.status(),
+        resp.text().await.unwrap_or_default()
+    );
+
+    let in_tx = client
+        .query_with_tx(
+            r#"mutation { add_HeaderWidget(input: {name: "scoped"}) { name } }"#,
+            &tx_id,
+        )
+        .expect("create HeaderWidget in tx");
+    assert_eq!(in_tx["add_HeaderWidget"][0]["name"], "scoped");
+
+    let outside = client.query("query { HeaderWidget { name } }");
+    assert!(
+        outside.is_err(),
+        "schema created with x-defradb-tx should not be visible outside the transaction"
+    );
+
+    client.tx_commit(&tx_id).expect("tx_commit failed");
+
+    let after_commit = client
+        .query("query { HeaderWidget { name } }")
+        .expect("query HeaderWidget after commit");
+    assert_eq!(after_commit["HeaderWidget"][0]["name"], "scoped");
+}
+
+#[tokio::test]
+async fn rust_txn_schema_add_via_header_is_scoped() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    txn_schema_add_via_header_is_scoped(cluster).await;
+}
+
 async fn transactions_test(cluster: TestCluster) {
     let client = cluster.client(0);
 
