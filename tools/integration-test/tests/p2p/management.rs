@@ -2,6 +2,52 @@ use std::time::Duration;
 
 use integration_test::{for_each_p2p_topology, poll_until, TestCluster};
 
+const RELAY_CLIENT_ENABLED_LOG: &str = "Relay client transport enabled";
+
+#[tokio::test]
+async fn rust_p2p_default_enables_relay_client() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+
+    // defra-harness lays each node out as <node_dir>/data and <node_dir>/logs.
+    // RunningNode exposes rootdir but not log_dir, so derive stdout from the sibling logs directory.
+    let stdout = cluster.nodes[0]
+        .rootdir
+        .parent()
+        .expect("node rootdir has parent")
+        .join("logs/stdout.log");
+
+    let metadata = std::fs::metadata(&stdout).unwrap_or_else(|error| {
+        panic!("expected node stdout log at {}: {error}", stdout.display())
+    });
+    assert!(
+        metadata.is_file(),
+        "expected node stdout log at {} to be a file",
+        stdout.display()
+    );
+
+    poll_until(
+        || {
+            std::fs::read_to_string(&stdout)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to read node stdout log at {}: {error}",
+                        stdout.display()
+                    )
+                })
+                .contains(RELAY_CLIENT_ENABLED_LOG)
+        },
+        Duration::from_secs(15),
+        Duration::from_millis(100),
+        "default Rust P2P startup did not enable the relay client",
+    )
+    .await;
+}
+
 async fn p2p_management_test(cluster: TestCluster) {
     let node0 = cluster.client(0);
     let node1 = cluster.client(1);
