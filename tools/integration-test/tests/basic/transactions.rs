@@ -148,6 +148,62 @@ async fn rust_concurrent_txn_endpoint_is_not_exposed() {
     concurrent_txn_endpoint_is_not_exposed(cluster).await;
 }
 
+async fn update_with_filter_sees_txn_scoped_state(cluster: TestCluster) {
+    let client = cluster.client(0);
+    let api_url = cluster.api_url(0);
+    let tx_id = client.tx_create().expect("tx_create failed");
+
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(format!("{}/api/v0/tx/{}/schema", api_url, tx_id))
+        .body("type TxnFilterUser { name: String  age: Int }")
+        .send()
+        .await
+        .expect("schema add in txn request failed");
+    assert!(
+        resp.status().is_success(),
+        "schema add in txn failed with status: {} body: {}",
+        resp.status(),
+        resp.text().await.unwrap_or_default()
+    );
+
+    client
+        .query_with_tx(
+            r#"mutation { add_TxnFilterUser(input: {name: "John", age: 27}) { _docID } }"#,
+            &tx_id,
+        )
+        .expect("create TxnFilterUser in tx");
+
+    let update = client
+        .query_with_tx(
+            r#"mutation { update_TxnFilterUser(filter: {name: {_eq: "John"}}, input: {name: "Chris"}) { name age } }"#,
+            &tx_id,
+        )
+        .expect("update TxnFilterUser by filter in tx");
+
+    let updated = update["update_TxnFilterUser"]
+        .as_array()
+        .expect("update result not array");
+    assert_eq!(updated.len(), 1, "expected one filtered update result");
+    assert_eq!(updated[0]["name"], "Chris");
+    assert_eq!(updated[0]["age"], 27);
+
+    client.tx_commit(&tx_id).expect("tx_commit failed");
+
+    let after_commit = client
+        .query("query { TxnFilterUser { name age } }")
+        .expect("query TxnFilterUser after commit");
+    assert_eq!(after_commit["TxnFilterUser"][0]["name"], "Chris");
+    assert_eq!(after_commit["TxnFilterUser"][0]["age"], 27);
+}
+
+#[tokio::test]
+async fn rust_update_with_filter_sees_txn_scoped_state() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    update_with_filter_sees_txn_scoped_state(cluster).await;
+}
+
 async fn transactions_test(cluster: TestCluster) {
     let client = cluster.client(0);
 
