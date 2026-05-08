@@ -12,6 +12,7 @@ use integration_test::{generate_identity, users_schema_with_policy, TestCluster,
 /// 4. Verify Bob is DENIED (node can't verify ACP -> fail-closed)
 /// 5. Verify anonymous is also denied
 #[tokio::test]
+#[serial_test::serial]
 async fn rust_circuit_breaker_trip_recovery() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
@@ -108,6 +109,7 @@ async fn rust_circuit_breaker_trip_recovery() {
 /// fast. The 5-minute TTL makes expiry impractical to test at integration
 /// level (unit tests cover expiry in policy_cache.rs).
 #[tokio::test]
+#[serial_test::serial]
 async fn rust_policy_cache_ttl_expiry() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
@@ -190,6 +192,7 @@ async fn rust_policy_cache_ttl_expiry() {
 
 /// Go runtime variant — circuit breaker behavior
 #[tokio::test]
+#[serial_test::serial]
 #[ignore = "Go node with SourceHub not yet supported"]
 async fn go_circuit_breaker_trip_recovery() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
@@ -232,6 +235,7 @@ async fn go_circuit_breaker_trip_recovery() {
 
 /// Go runtime variant — policy cache behavior
 #[tokio::test]
+#[serial_test::serial]
 #[ignore = "Go node with SourceHub not yet supported"]
 async fn go_policy_cache_ttl_expiry() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();

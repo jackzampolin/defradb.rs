@@ -6,6 +6,7 @@ use integration_test::{generate_identity, users_schema_with_policy, TestCluster,
 /// Circuit breaker with threshold=1 trips on the very first failure after
 /// SourceHub goes down, rather than requiring the default 3 failures.
 #[tokio::test]
+#[serial_test::serial]
 async fn rust_circuit_breaker_threshold_1_trips_immediately() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
@@ -91,6 +92,7 @@ async fn rust_circuit_breaker_threshold_1_trips_immediately() {
 ///
 /// This test was previously impractical with the hardcoded 300s TTL.
 #[tokio::test]
+#[serial_test::serial]
 async fn rust_cache_ttl_expiry_with_short_ttl() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
@@ -180,6 +182,7 @@ async fn rust_cache_ttl_expiry_with_short_ttl() {
 /// Short request timeout (1s) causes fast fail-closed behavior when
 /// SourceHub is slow or unreachable.
 #[tokio::test]
+#[serial_test::serial]
 async fn rust_short_request_timeout_fail_closed() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
@@ -255,6 +258,7 @@ async fn rust_short_request_timeout_fail_closed() {
 /// same documents are served from cache. Grant/revoke eagerly invalidates
 /// the cache so permission changes take effect immediately.
 #[tokio::test]
+#[serial_test::serial]
 async fn rust_access_cache_grant_revoke_invalidation() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
