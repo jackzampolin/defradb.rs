@@ -14,9 +14,23 @@ pub struct LensSetMigrationResponse {
 }
 
 impl HttpClient {
-    pub async fn lens_set_migration(&self, config: &str) -> Result<LensSetMigrationResponse> {
+    pub async fn lens_set_migration(
+        &self,
+        config: &str,
+        txn_id: Option<&str>,
+    ) -> Result<LensSetMigrationResponse> {
         let url = format!("{}/api/v0/collections/migrations", self.base_url);
-        self.request_json("POST", &url, Some(config)).await
+        if txn_id.is_none() {
+            return self.request_json("POST", &url, Some(config)).await;
+        }
+
+        let response = self.post_json_text(&url, config, txn_id).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(response.json().await?)
     }
 
     pub async fn lens_add(&self, config: &str) -> Result<LensSetMigrationResponse> {

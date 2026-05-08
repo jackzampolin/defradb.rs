@@ -393,6 +393,15 @@ pub trait TransactionContext: MaybeSendSync {
         None
     }
 
+    /// Get the mutex that serializes top-level actions on this transaction.
+    ///
+    /// Implementations that share one underlying storage transaction across
+    /// multiple public calls should override this so callers can prevent
+    /// concurrent use of that handle.
+    fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
+        None
+    }
+
     /// Check if the transaction is still active (not yet committed or rolled back).
     ///
     /// Returns `true` if the transaction can still be used for queries.

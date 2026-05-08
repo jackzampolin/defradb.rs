@@ -34,10 +34,6 @@ mod tests {
             RoutePermission::IdentityOnly
         );
         assert_eq!(
-            route_permission("/api/v0/tx/concurrent", &Method::POST),
-            RoutePermission::IdentityOnly
-        );
-        assert_eq!(
             route_permission("/api/v0/tx/:id", &Method::POST),
             RoutePermission::IdentityOnly
         );
@@ -213,11 +209,6 @@ mod tests {
             ),
             // Transactions
             ("/api/v0/tx", Method::POST, RoutePermission::IdentityOnly),
-            (
-                "/api/v0/tx/concurrent",
-                Method::POST,
-                RoutePermission::IdentityOnly,
-            ),
             (
                 "/api/v0/tx/:id",
                 Method::POST,

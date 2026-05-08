@@ -16,17 +16,6 @@ impl HttpClient {
         self.request_json("POST", &url, None).await
     }
 
-    /// Begin a new concurrent transaction.
-    ///
-    /// POST /api/v0/tx/concurrent?read_only=true
-    pub async fn tx_begin_concurrent(&self, read_only: bool) -> Result<TxBeginResponse> {
-        let mut url = format!("{}/api/v0/tx/concurrent", self.base_url);
-        if read_only {
-            url.push_str("?read_only=true");
-        }
-        self.request_json("POST", &url, None).await
-    }
-
     /// Commit a transaction.
     ///
     /// POST /api/v0/tx/{id}

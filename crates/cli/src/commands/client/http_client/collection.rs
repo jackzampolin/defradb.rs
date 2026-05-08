@@ -36,7 +36,7 @@ impl HttpClient {
     pub async fn collection_set_active(&self, version_id: Option<&str>) -> Result<()> {
         let url = format!("{}/api/v0/collections/default", self.base_url);
         let text = version_id.unwrap_or("");
-        let response = self.post_text(&url, text).await?;
+        let response = self.post_text(&url, text, None).await?;
         if !response.status().is_success() {
             return Err(Self::extract_error(response).await);
         }
