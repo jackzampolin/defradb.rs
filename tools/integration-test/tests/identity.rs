@@ -1,3 +1,5 @@
+#[path = "identity/keyring_dev_mode.rs"]
+mod keyring_dev_mode;
 #[path = "identity/keyring_lifecycle.rs"]
 mod keyring_lifecycle;
 #[path = "identity/lifecycle.rs"]

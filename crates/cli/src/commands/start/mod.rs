@@ -71,10 +71,6 @@ pub struct StartArgs {
     #[arg(long)]
     pub privkeypath: Option<String>,
 
-    /// Enables development mode features
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
-    pub development: Option<bool>,
-
     /// Skip generating an encryption key. Encryption at rest will be disabled.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub no_encryption: Option<bool>,
@@ -406,9 +402,6 @@ impl StartArgs {
         }
         if let Some(ref path) = self.privkeypath {
             config.api.privkey_path = path.clone();
-        }
-        if let Some(dev) = self.development {
-            config.development = dev;
         }
         if let Some(no_enc) = self.no_encryption {
             config.datastore.no_encryption = no_enc;

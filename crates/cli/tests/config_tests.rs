@@ -28,6 +28,7 @@ fn cli_with_defaults() -> Cli {
         source_hub_chain_id: None,
         hub_rs_address: None,
         secret_file: None,
+        development: None,
         acp_node_enable: None,
         acp_document_type: None,
         command: Command::Version(VersionArgs {
@@ -86,6 +87,7 @@ fn test_apply_cli_flags_valid_values_succeed() {
     cli.log_format = Some("json".to_string());
     cli.keyring_backend = Some("system".to_string());
     cli.url = Some("0.0.0.0:8080".to_string());
+    cli.development = Some(true);
 
     let result = config.apply_cli_flags(&cli);
     assert!(result.is_ok());
@@ -94,6 +96,7 @@ fn test_apply_cli_flags_valid_values_succeed() {
     assert_eq!(config.log.format, LogFormat::Json);
     assert_eq!(config.keyring.backend, KeyringBackend::System);
     assert_eq!(config.api.address, "0.0.0.0:8080");
+    assert!(config.development);
 }
 
 #[test]

@@ -18,17 +18,14 @@ pub struct KeyringArgs {
 #[derive(Subcommand, Debug)]
 #[non_exhaustive]
 pub enum KeyringCommand {
-    /// Generate a new key and store it in the keyring
-    #[command(alias = "generate")]
-    New(GenerateArgs),
+    /// Create new private keys
+    New(NewArgs),
 
-    /// Get (export) a key from the keyring
-    #[command(alias = "export")]
-    Get(ExportArgs),
+    /// Get a private key
+    Get(GetArgs),
 
-    /// Add (import) a key into the keyring
-    #[command(alias = "import")]
-    Add(ImportArgs),
+    /// Add a private key
+    Add(AddArgs),
 
     /// List all keys in the keyring
     List(ListArgs),
@@ -45,21 +42,21 @@ impl KeyringArgs {
     }
 }
 
-/// Generate a new cryptographic key
+/// Create a new cryptographic key
 #[derive(Args, Debug)]
-pub struct GenerateArgs {
-    /// Name of the key to generate (omit for Go-compatible mode: generates peer-key + encryption-key)
+pub struct NewArgs {
+    /// Name of the key to create (omit for Go-compatible mode: creates peer-key + encryption-key)
     pub name: Option<String>,
 
-    /// Key type to generate (ed25519, secp256k1, secp256r1, aes256) — only used with a named key
+    /// Key type to create (ed25519, secp256k1, secp256r1, aes256) — only used with a named key
     #[arg(short = 't', long = "key-type", default_value = "ed25519")]
     pub key_type: String,
 
-    /// Skip generating the encryption key (Go-compatible mode only)
+    /// Skip creating the encryption key (Go-compatible mode only)
     #[arg(long = "no-encryption")]
     pub no_encryption: bool,
 
-    /// Skip generating the peer key (Go-compatible mode only)
+    /// Skip creating the peer key (Go-compatible mode only)
     #[arg(long = "no-peer-key")]
     pub no_peer_key: bool,
 
@@ -68,7 +65,7 @@ pub struct GenerateArgs {
     pub force: bool,
 }
 
-impl GenerateArgs {
+impl NewArgs {
     pub fn execute(self, config: Config) -> Result<()> {
         use crypto::Key;
 
@@ -161,10 +158,10 @@ fn generate_key_bytes(key_type: &str) -> Result<Vec<u8>> {
     }
 }
 
-/// Export a key from the keyring
+/// Get a key from the keyring
 #[derive(Args, Debug)]
-pub struct ExportArgs {
-    /// Name of the key to export
+pub struct GetArgs {
+    /// Name of the key to get
     pub name: String,
 
     /// Output raw bytes instead of hex (Rust extension)
@@ -172,8 +169,10 @@ pub struct ExportArgs {
     pub raw: bool,
 }
 
-impl ExportArgs {
+impl GetArgs {
     pub fn execute(self, config: Config) -> Result<()> {
+        require_development(&config)?;
+
         let keyring = super::open_keyring(&config)?;
 
         let key = keyring
@@ -190,10 +189,10 @@ impl ExportArgs {
     }
 }
 
-/// Import a key into the keyring
+/// Add a key into the keyring
 #[derive(Args, Debug)]
-pub struct ImportArgs {
-    /// Name for the imported key
+pub struct AddArgs {
+    /// Name for the added key
     pub name: String,
 
     /// Hex-encoded private key (Go-compatible positional argument)
@@ -204,8 +203,10 @@ pub struct ImportArgs {
     pub stdin: bool,
 }
 
-impl ImportArgs {
+impl AddArgs {
     pub fn execute(self, config: Config) -> Result<()> {
+        require_development(&config)?;
+
         let keyring = super::open_keyring(&config)?;
 
         let key = if let Some(ref hex_str) = self.key_hex {
@@ -251,8 +252,44 @@ impl ListArgs {
     }
 }
 
+fn require_development(config: &Config) -> Result<()> {
+    if config.development {
+        Ok(())
+    } else {
+        Err(Error::OperationRequiresDeveloperMode)
+    }
+}
+
 fn hex_encode(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_requires_development_mode() {
+        let args = AddArgs {
+            name: "test-key".to_string(),
+            key_hex: Some("deadbeef".to_string()),
+            stdin: false,
+        };
+
+        let err = args.execute(Config::default()).unwrap_err();
+        assert!(matches!(err, Error::OperationRequiresDeveloperMode));
+    }
+
+    #[test]
+    fn get_requires_development_mode() {
+        let args = GetArgs {
+            name: "test-key".to_string(),
+            raw: false,
+        };
+
+        let err = args.execute(Config::default()).unwrap_err();
+        assert!(matches!(err, Error::OperationRequiresDeveloperMode));
+    }
 }
 
 fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, String> {

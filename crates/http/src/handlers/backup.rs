@@ -34,6 +34,9 @@ const MAX_IMPORT_SIZE: usize = 100 * 1024 * 1024;
 /// Maximum number of collections that can be specified in export request.
 const MAX_EXPORT_COLLECTIONS: usize = 100;
 
+const OPERATION_REQUIRES_DEVELOPER_MODE: &str =
+    "operation not permitted whilst development mode is disabled";
+
 /// Request body for export (Go-compatible format).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExportRequest {
@@ -86,8 +89,8 @@ pub async fn export(
     require_permission(&state, &identity, NodePermission::DocumentRead).await?;
 
     if !state.dev_mode {
-        return Err(HttpError::BadRequest(
-            "backup export is not permitted when development mode is disabled".into(),
+        return Err(HttpError::Forbidden(
+            OPERATION_REQUIRES_DEVELOPER_MODE.into(),
         ));
     }
 
@@ -171,8 +174,8 @@ pub async fn import(
     require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
     if !state.dev_mode {
-        return Err(HttpError::BadRequest(
-            "backup import is not permitted when development mode is disabled".into(),
+        return Err(HttpError::Forbidden(
+            OPERATION_REQUIRES_DEVELOPER_MODE.into(),
         ));
     }
 
