@@ -671,10 +671,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             if ids.is_empty() {
                 return Ok(JsonValue::Array(vec![]));
             }
-            if ids.len() > 1 {
-                return Err(crate::error::QueryError::parse(
-                    "querying by multiple docIDs is not yet supported",
-                ));
+        }
+        if let Some(ref cids) = select.cid {
+            if cids.is_empty() {
+                return Ok(JsonValue::Array(vec![]));
             }
         }
 

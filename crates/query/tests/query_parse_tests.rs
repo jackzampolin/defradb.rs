@@ -68,6 +68,62 @@ fn test_parse_query_with_doc_ids() {
 }
 
 #[test]
+fn test_parse_query_with_cid_scalar() {
+    let query = r#"{ Users(cid: "bafy-one") { _docID name } }"#;
+    let selects = parse_query(query).unwrap();
+
+    assert_eq!(selects[0].cid, Some(vec!["bafy-one".to_string()]));
+}
+
+#[test]
+fn test_parse_query_with_cid_list_of_one() {
+    let query = r#"{ Users(cid: ["bafy-one"]) { _docID name } }"#;
+    let selects = parse_query(query).unwrap();
+
+    assert_eq!(selects[0].cid, Some(vec!["bafy-one".to_string()]));
+}
+
+#[test]
+fn test_parse_query_with_multiple_cids_returns_error() {
+    let query = r#"{ Users(cid: ["bafy-one", "bafy-two"]) { _docID name } }"#;
+    let result = parse_query(query);
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("querying by multiple cids is not yet supported"));
+}
+
+#[test]
+fn test_parse_commits_with_doc_id_scalar() {
+    let query = r#"{ _commits(docID: "bae-one") { cid } }"#;
+    let selects = parse_query(query).unwrap();
+
+    assert_eq!(selects[0].doc_ids, Some(vec!["bae-one".to_string()]));
+}
+
+#[test]
+fn test_parse_commits_with_doc_id_list_of_one() {
+    let query = r#"{ _commits(docID: ["bae-one"]) { cid } }"#;
+    let selects = parse_query(query).unwrap();
+
+    assert_eq!(selects[0].doc_ids, Some(vec!["bae-one".to_string()]));
+}
+
+#[test]
+fn test_parse_commits_with_multiple_doc_ids_returns_error() {
+    let query = r#"{ _commits(docID: ["bae-one", "bae-two"]) { cid } }"#;
+    let result = parse_query(query);
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("querying by multiple docIDs is not yet supported"));
+}
+
+#[test]
 fn test_parse_query_with_alias() {
     let query = "{ allUsers: Users { _docID name } }";
     let selects = parse_query(query).unwrap();

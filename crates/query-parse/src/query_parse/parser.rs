@@ -588,6 +588,11 @@ fn parse_field_to_select(
                 // Null docIDs is valid and means "no specific docIDs" (use filter or all)
                 if !matches!(arg_value, Value::Null) {
                     let doc_ids = parse_doc_ids_value(arg_value, variables)?;
+                    if collection_name == "_commits" && doc_ids.len() > 1 {
+                        return Err(QueryError::parse(
+                            "querying by multiple docIDs is not yet supported",
+                        ));
+                    }
                     select.doc_ids = Some(doc_ids);
                 }
             }
