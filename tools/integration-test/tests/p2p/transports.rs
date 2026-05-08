@@ -319,7 +319,7 @@ async fn rust_rust_connects_over_websocket_when_websocket_multiaddr_is_dialed() 
 }
 
 #[tokio::test]
-async fn rust_go_connects_over_quic_when_quic_multiaddr_is_dialed() {
+async fn go_rust_connects_over_quic_when_quic_multiaddr_is_dialed() {
     let (_temp_dir, rust_node, go_node) = start_rust_go_quic_cluster().await;
     let rust_client = client(&rust_node);
     let go_client = client_with_kind(&go_node, NodeKind::Go);
