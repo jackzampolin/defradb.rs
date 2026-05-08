@@ -49,14 +49,16 @@ impl WasmSandboxConfig {
 /// Manages WASM module instances and executes transforms.
 pub struct WasmTransformStore {
     engine: Engine,
-    modules: RwLock<HashMap<TransformId, CompiledModule>>,
+    modules: RwLock<HashMap<TransformId, Vec<CompiledModule>>>,
     configs: RwLock<HashMap<TransformId, LensConfig>>,
     sandbox: Option<WasmSandboxConfig>,
 }
 
+#[derive(Clone)]
 struct CompiledModule {
     module: Module,
     arguments: Option<serde_json::Value>,
+    inverse: bool,
 }
 
 impl WasmTransformStore {
@@ -90,14 +92,6 @@ impl WasmTransformStore {
         })
     }
 
-    /// Build store limits when memory sandboxing is configured.
-    fn store_limits(&self) -> Option<StoreLimits> {
-        self.sandbox.as_ref().and_then(|sb| {
-            sb.max_memory_bytes
-                .map(|max| StoreLimitsBuilder::new().memory_size(max).build())
-        })
-    }
-
     /// Load a WASM module from the given lens configuration.
     ///
     /// When loading from a file path, validates the path to prevent traversal
@@ -123,6 +117,66 @@ impl WasmTransformStore {
                 "lens module must have either path or module bytes".to_string(),
             ))
         }
+    }
+
+    fn compile_modules(&self, lenses: &[LensModule]) -> Result<Vec<CompiledModule>> {
+        lenses
+            .iter()
+            .map(|lens| {
+                Ok(CompiledModule {
+                    module: self.load_module(lens)?,
+                    arguments: lens.arguments.clone(),
+                    inverse: lens.inverse,
+                })
+            })
+            .collect()
+    }
+
+    /// Transform JSON values using a registered lens pipeline.
+    ///
+    /// This mirrors the standalone host contract where top-level inputs and
+    /// outputs are JSON arrays, including `null` items.
+    pub fn transform_json(
+        &self,
+        id: &TransformId,
+        values: Vec<serde_json::Value>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let modules = self.modules.read();
+        let compiled_modules = modules
+            .get(id)
+            .cloned()
+            .ok_or_else(|| Error::TransformNotFound(id.to_string()))?;
+        drop(modules);
+
+        execute_pipeline_values(
+            &self.engine,
+            compiled_modules,
+            values,
+            self.sandbox.clone(),
+            false,
+        )
+    }
+
+    /// Inverse transform JSON values using a registered lens pipeline.
+    pub fn inverse_json(
+        &self,
+        id: &TransformId,
+        values: Vec<serde_json::Value>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let modules = self.modules.read();
+        let compiled_modules = modules
+            .get(id)
+            .cloned()
+            .ok_or_else(|| Error::TransformNotFound(id.to_string()))?;
+        drop(modules);
+
+        execute_pipeline_values(
+            &self.engine,
+            compiled_modules,
+            values,
+            self.sandbox.clone(),
+            true,
+        )
     }
 
     /// Validate a WASM module file path to prevent path traversal.
@@ -185,23 +239,11 @@ impl TransformStore for WasmTransformStore {
             }
         }
 
-        let first_lens = config.lens().cloned().unwrap_or_default();
-        info!(
-            path = ?first_lens.path,
-            has_module_bytes = first_lens.module.is_some(),
-            has_arguments = first_lens.arguments.is_some(),
-            "Loading WASM module"
-        );
-
-        let module = self.load_module(&first_lens)?;
+        info!("Loading WASM modules");
+        let compiled_modules = self.compile_modules(&config.lenses)?;
         info!(transform_id = %id, "WASM module compiled successfully");
 
-        let compiled = CompiledModule {
-            module,
-            arguments: first_lens.arguments.clone(),
-        };
-
-        self.modules.write().insert(id.clone(), compiled);
+        self.modules.write().insert(id.clone(), compiled_modules);
         self.configs.write().insert(id.clone(), config);
 
         info!(transform_id = %id, "Transform added to store");
@@ -220,15 +262,9 @@ impl TransformStore for WasmTransformStore {
             }
         }
 
-        let first_lens = config.lens().cloned().unwrap_or_default();
-        let module = self.load_module(&first_lens)?;
+        let compiled_modules = self.compile_modules(&config.lenses)?;
 
-        let compiled = CompiledModule {
-            module,
-            arguments: first_lens.arguments.clone(),
-        };
-
-        self.modules.write().insert(id.clone(), compiled);
+        self.modules.write().insert(id.clone(), compiled_modules);
         self.configs.write().insert(id.clone(), config);
 
         info!(transform_id = %id, "Transform added with explicit ID");
@@ -248,7 +284,7 @@ impl TransformStore for WasmTransformStore {
         info!(transform_id = %id, "WasmTransformStore::transform called");
 
         let modules = self.modules.read();
-        let compiled = modules.get(id).ok_or_else(|| {
+        let compiled_modules = modules.get(id).cloned().ok_or_else(|| {
             warn!(
                 transform_id = %id,
                 stored_ids = ?modules.keys().map(|k| k.to_string()).collect::<Vec<_>>(),
@@ -256,191 +292,39 @@ impl TransformStore for WasmTransformStore {
             );
             Error::TransformNotFound(id.to_string())
         })?;
-        let module = compiled.module.clone();
-        let arguments = compiled.arguments.clone();
         drop(modules);
 
         info!(
             transform_id = %id,
-            has_arguments = arguments.is_some(),
+            modules_count = compiled_modules.len(),
             "Transform found, creating execution stream"
         );
 
-        let engine = self.engine.clone();
-        let limits = self.store_limits();
-        let sandbox = self.sandbox.clone();
-
         info!(transform_id = %id, "Executing forward WASM transform (batch mode)");
-
-        enum Phase {
-            Collecting {
-                engine: Engine,
-                module: Module,
-                arguments: Option<serde_json::Value>,
-                docs: LensDocStream,
-                limits: Option<StoreLimits>,
-                sandbox: Option<WasmSandboxConfig>,
-            },
-            Yielding {
-                results: Vec<LensDoc>,
-                index: usize,
-            },
-        }
-
-        let initial = Phase::Collecting {
-            engine,
-            module,
-            arguments,
+        Ok(execute_pipeline_stream(
+            self.engine.clone(),
+            compiled_modules,
             docs,
-            limits,
-            sandbox,
-        };
-
-        Ok(Box::pin(futures::stream::unfold(initial, |phase| async {
-            match phase {
-                Phase::Collecting {
-                    engine,
-                    module,
-                    arguments,
-                    docs,
-                    limits,
-                    sandbox,
-                } => {
-                    let input_docs: Vec<LensDoc> = docs.collect().await;
-                    match execute_batch_transform(
-                        &engine, &module, input_docs, arguments, false, limits, &sandbox,
-                    ) {
-                        Ok(outputs) => {
-                            if outputs.is_empty() {
-                                None
-                            } else {
-                                let doc = outputs[0].clone();
-                                Some((
-                                    Ok(doc),
-                                    Phase::Yielding {
-                                        results: outputs,
-                                        index: 1,
-                                    },
-                                ))
-                            }
-                        }
-                        Err(e) => Some((
-                            Err(e),
-                            Phase::Yielding {
-                                results: Vec::new(),
-                                index: 0,
-                            },
-                        )),
-                    }
-                }
-                Phase::Yielding { results, index } => {
-                    if index < results.len() {
-                        let doc = results[index].clone();
-                        Some((
-                            Ok(doc),
-                            Phase::Yielding {
-                                results,
-                                index: index + 1,
-                            },
-                        ))
-                    } else {
-                        None
-                    }
-                }
-            }
-        })))
+            self.sandbox.clone(),
+            false,
+        ))
     }
 
     fn inverse(&self, id: &TransformId, docs: LensDocStream) -> Result<LensDocResultStream> {
         let modules = self.modules.read();
-        let compiled = modules
+        let compiled_modules = modules
             .get(id)
+            .cloned()
             .ok_or_else(|| Error::TransformNotFound(id.to_string()))?;
-        let module = compiled.module.clone();
-        let arguments = compiled.arguments.clone();
         drop(modules);
 
-        let engine = self.engine.clone();
-        let limits = self.store_limits();
-        let sandbox = self.sandbox.clone();
-
-        enum Phase {
-            Collecting {
-                engine: Engine,
-                module: Module,
-                arguments: Option<serde_json::Value>,
-                docs: LensDocStream,
-                limits: Option<StoreLimits>,
-                sandbox: Option<WasmSandboxConfig>,
-            },
-            Yielding {
-                results: Vec<LensDoc>,
-                index: usize,
-            },
-        }
-
-        let initial = Phase::Collecting {
-            engine,
-            module,
-            arguments,
+        Ok(execute_pipeline_stream(
+            self.engine.clone(),
+            compiled_modules,
             docs,
-            limits,
-            sandbox,
-        };
-
-        Ok(Box::pin(futures::stream::unfold(initial, |phase| async {
-            match phase {
-                Phase::Collecting {
-                    engine,
-                    module,
-                    arguments,
-                    docs,
-                    limits,
-                    sandbox,
-                } => {
-                    let input_docs: Vec<LensDoc> = docs.collect().await;
-                    match execute_batch_transform(
-                        &engine, &module, input_docs, arguments, true, limits, &sandbox,
-                    ) {
-                        Ok(outputs) => {
-                            if outputs.is_empty() {
-                                None
-                            } else {
-                                let doc = outputs[0].clone();
-                                Some((
-                                    Ok(doc),
-                                    Phase::Yielding {
-                                        results: outputs,
-                                        index: 1,
-                                    },
-                                ))
-                            }
-                        }
-                        Err(e) => Some((
-                            Err(e),
-                            Phase::Yielding {
-                                results: Vec::new(),
-                                index: 0,
-                            },
-                        )),
-                    }
-                }
-                Phase::Yielding { results, index } => {
-                    if index < results.len() {
-                        let doc = results[index].clone();
-                        Some((
-                            Ok(doc),
-                            Phase::Yielding {
-                                results,
-                                index: index + 1,
-                            },
-                        ))
-                    } else {
-                        None
-                    }
-                }
-            }
-        })))
+            self.sandbox.clone(),
+            true,
+        ))
     }
 
     fn has_transform(&self, id: &TransformId) -> bool {
@@ -453,6 +337,160 @@ impl TransformStore for WasmTransformStore {
         }
         self.configs.write().remove(id);
         Ok(())
+    }
+}
+
+fn execute_pipeline_stream(
+    engine: Engine,
+    mut modules: Vec<CompiledModule>,
+    docs: LensDocStream,
+    sandbox: Option<WasmSandboxConfig>,
+    inverse: bool,
+) -> LensDocResultStream {
+    enum Phase {
+        Collecting {
+            engine: Engine,
+            modules: Vec<CompiledModule>,
+            docs: LensDocStream,
+            sandbox: Option<WasmSandboxConfig>,
+        },
+        Yielding {
+            results: Vec<LensDoc>,
+            index: usize,
+        },
+    }
+
+    if inverse {
+        modules.reverse();
+        for module in &mut modules {
+            module.inverse = !module.inverse;
+        }
+    }
+
+    let initial = Phase::Collecting {
+        engine,
+        modules,
+        docs,
+        sandbox,
+    };
+
+    Box::pin(futures::stream::unfold(initial, |phase| async {
+        match phase {
+            Phase::Collecting {
+                engine,
+                modules,
+                docs,
+                sandbox,
+            } => {
+                let current_docs: Vec<serde_json::Value> = docs
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .map(serde_json::Value::Object)
+                    .collect();
+
+                let current_docs =
+                    match execute_pipeline_values(&engine, modules, current_docs, sandbox, false) {
+                        Ok(outputs) => outputs,
+                        Err(e) => {
+                            return Some((
+                                Err(e),
+                                Phase::Yielding {
+                                    results: Vec::new(),
+                                    index: 0,
+                                },
+                            ));
+                        }
+                    };
+
+                let mut results = Vec::with_capacity(current_docs.len());
+                for value in current_docs {
+                    match value {
+                        serde_json::Value::Object(doc) => results.push(doc),
+                        other => {
+                            return Some((
+                                Err(Error::WasmExecution(format!(
+                                    "expected JSON object output, got {}",
+                                    json_value_type(&other)
+                                ))),
+                                Phase::Yielding {
+                                    results: Vec::new(),
+                                    index: 0,
+                                },
+                            ));
+                        }
+                    }
+                }
+
+                if results.is_empty() {
+                    None
+                } else {
+                    let doc = results[0].clone();
+                    Some((Ok(doc), Phase::Yielding { results, index: 1 }))
+                }
+            }
+            Phase::Yielding { results, index } => {
+                if index < results.len() {
+                    let doc = results[index].clone();
+                    Some((
+                        Ok(doc),
+                        Phase::Yielding {
+                            results,
+                            index: index + 1,
+                        },
+                    ))
+                } else {
+                    None
+                }
+            }
+        }
+    }))
+}
+
+fn execute_pipeline_values(
+    engine: &Engine,
+    mut modules: Vec<CompiledModule>,
+    mut current_docs: Vec<serde_json::Value>,
+    sandbox: Option<WasmSandboxConfig>,
+    inverse: bool,
+) -> Result<Vec<serde_json::Value>> {
+    if inverse {
+        modules.reverse();
+        for module in &mut modules {
+            module.inverse = !module.inverse;
+        }
+    }
+
+    for module in modules {
+        current_docs = execute_batch_transform(
+            engine,
+            &module.module,
+            current_docs,
+            module.arguments,
+            module.inverse,
+            store_limits(&sandbox),
+            &sandbox,
+        )?;
+    }
+
+    Ok(current_docs)
+}
+
+fn store_limits(sandbox: &Option<WasmSandboxConfig>) -> Option<StoreLimits> {
+    sandbox.as_ref().and_then(|sb| {
+        sb.max_memory_bytes
+            .map(|max| StoreLimitsBuilder::new().memory_size(max).build())
+    })
+}
+
+fn json_value_type(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 
