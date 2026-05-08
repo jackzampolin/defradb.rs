@@ -2,6 +2,25 @@ use super::*;
 
 use crate::collection::Collection;
 
+pub(super) fn ensure_collection_is_active<S: Store>(
+    db: &DB<S>,
+    collection_name: &str,
+    collection: &Collection,
+) -> query::error::Result<()> {
+    let is_active = db
+        .find_collection_by_id(collection.collection_id())
+        .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+        .is_some();
+
+    if is_active {
+        Ok(())
+    } else {
+        Err(query::error::QueryError::collection_not_found(
+            collection_name,
+        ))
+    }
+}
+
 impl<S: Store + 'static> AutoCommitMutator<S> {
     /// Get collection from DB cache or return a not-found error.
     pub(super) fn get_collection_or_err(

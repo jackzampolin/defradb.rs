@@ -9,6 +9,7 @@ use storage::corekv::Store;
 use tracing::warn;
 
 use crate::block_builder::{write_collection_block, write_document_blocks};
+use crate::collection::Collection;
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
 use crate::txn::DbTxn;
@@ -81,6 +82,38 @@ impl<S: Store> DbDocMutator<S> {
     pub async fn is_consumed(&self) -> bool {
         self.txn.lock().await.is_none()
     }
+
+    async fn ensure_collection_can_write(
+        &self,
+        collection_name: &str,
+        collection: &Collection,
+    ) -> query::error::Result<()> {
+        let was_created_in_txn = {
+            let txn_guard = self.txn.lock().await;
+            let txn = txn_guard.as_ref().ok_or_else(|| {
+                query::error::QueryError::execution("transaction is no longer active")
+            })?;
+            txn.was_collection_created(collection.collection_id())
+        };
+
+        if was_created_in_txn {
+            return Ok(());
+        }
+
+        let is_active = self
+            .db
+            .find_collection_by_id(collection.collection_id())
+            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+            .is_some();
+
+        if is_active {
+            Ok(())
+        } else {
+            Err(query::error::QueryError::collection_not_found(
+                collection_name,
+            ))
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -93,6 +126,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     ) -> query::error::Result<CreateResult> {
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        self.ensure_collection_can_write(collection_name, &collection)
+            .await?;
 
         // Generate document ID if not present.
         // Track whether ID was just generated for blind create optimization.
@@ -193,6 +228,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     ) -> query::error::Result<UpdateResult> {
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        self.ensure_collection_can_write(collection_name, &collection)
+            .await?;
 
         self.db
             .validate_downsample_write(
@@ -228,6 +265,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     ) -> query::error::Result<DeleteResult> {
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        self.ensure_collection_can_write(collection_name, &collection)
+            .await?;
 
         // Use delete_with_indexes to maintain index consistency
         let existed = collection

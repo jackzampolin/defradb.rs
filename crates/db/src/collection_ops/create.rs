@@ -238,6 +238,7 @@ impl<S: Store> crate::database::DB<S> {
 
         // Add to transaction's cache
         txn.cache_collection(Collection::new(schema.clone()));
+        txn.mark_collection_created(collection_id.clone());
 
         tracing::info!(
             collection_name = %name,

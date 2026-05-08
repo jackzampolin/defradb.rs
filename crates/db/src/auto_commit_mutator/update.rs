@@ -1,3 +1,4 @@
+use super::helpers::ensure_collection_is_active;
 use super::*;
 
 #[allow(clippy::type_complexity)]
@@ -9,6 +10,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         modified_fields: std::collections::HashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         let collection = self.get_collection_or_err(collection_name)?;
+        ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
         // Generate embeddings if source fields were modified
         let mut doc = doc;

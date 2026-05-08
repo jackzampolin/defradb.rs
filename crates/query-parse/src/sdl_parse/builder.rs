@@ -24,11 +24,13 @@ use super::helpers::{
 };
 use super::parser::{ParsedTypeDef, SdlParser};
 
+type PrimaryDirectiveMap = std::collections::HashMap<(String, String, String), bool>;
+
 impl<'a> SdlParser<'a> {
     pub(super) fn collect_primary_directives(
         &self,
         type_names: &std::collections::HashSet<String>,
-    ) -> std::collections::HashMap<(String, String), bool> {
+    ) -> PrimaryDirectiveMap {
         let mut result = std::collections::HashMap::new();
 
         for (type_name, type_def) in &self.type_defs {
@@ -37,11 +39,12 @@ impl<'a> SdlParser<'a> {
 
                 // Only consider relations to other types in the schema
                 if type_names.contains(target) {
-                    // Key: (source_type, target_type) -> has_primary directive
-                    // Use OR logic: if ANY field in this (source, target) pair has @primary, it's true.
-                    // This handles self-referencing types where multiple fields share the same key.
+                    let relation_name = self.relation_name_for_field(type_name, field);
+                    // Key: (source_type, target_type, relation_name) -> has_primary directive.
+                    // The relation name is required because the same pair of collection types can
+                    // participate in multiple independent relations with different primary sides.
                     let entry = result
-                        .entry((type_name.clone(), target.clone()))
+                        .entry((type_name.clone(), target.clone(), relation_name))
                         .or_insert(false);
                     if field.directives.is_primary {
                         *entry = true;
@@ -51,6 +54,16 @@ impl<'a> SdlParser<'a> {
         }
 
         result
+    }
+
+    pub(super) fn relation_name_for_field(
+        &self,
+        source_type: &str,
+        field: &super::parser::ParsedField,
+    ) -> String {
+        field.directives.relation_name.clone().unwrap_or_else(|| {
+            generate_relation_name(source_type, &field.name, &field.field_type.base_type)
+        })
     }
 
     /// Validate parsed types before building collections.
@@ -140,8 +153,9 @@ impl<'a> SdlParser<'a> {
                 }
 
                 let has_primary = field.directives.is_primary;
+                let relation_name = self.relation_name_for_field(type_name, field);
                 let counterpart_has_primary = primary_directives
-                    .get(&(target.clone(), type_name.clone()))
+                    .get(&(target.clone(), type_name.clone(), relation_name))
                     .copied()
                     .unwrap_or(false);
 
@@ -335,7 +349,7 @@ impl<'a> SdlParser<'a> {
         type_names: &std::collections::HashSet<String>,
         collection_set: &std::collections::HashMap<String, (i32, usize)>,
         known_collection_ids: &std::collections::HashMap<String, String>,
-        primary_directives: &std::collections::HashMap<(String, String), bool>,
+        primary_directives: &PrimaryDirectiveMap,
         headstore: &HashMap<String, (Cid, u64)>,
     ) -> Result<CollectionVersion> {
         // collection_id will be generated after fields are created (like Go)
@@ -394,8 +408,9 @@ impl<'a> SdlParser<'a> {
                 let has_primary_directive = parsed_field.directives.is_primary;
 
                 // Check if counterpart has @primary directive
+                let relation_name = self.relation_name_for_field(&type_def.name, parsed_field);
                 let counterpart_has_primary = primary_directives
-                    .get(&(target_type.clone(), source_type.clone()))
+                    .get(&(target_type.clone(), source_type.clone(), relation_name))
                     .copied()
                     .unwrap_or(false);
 

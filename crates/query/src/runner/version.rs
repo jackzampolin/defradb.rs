@@ -108,6 +108,25 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             documents
         };
 
+        let documents = if let Some(ref filter) = select.filter {
+            let mut filtered = Vec::with_capacity(documents.len());
+            for document in documents {
+                let json_obj = JsonValue::Object(
+                    document
+                        .to_map()
+                        .map_err(|err| QueryError::internal(err.to_string()))?
+                        .into_iter()
+                        .collect(),
+                );
+                if filter.matches_json_object(&json_obj)? {
+                    filtered.push(document);
+                }
+            }
+            filtered
+        } else {
+            documents
+        };
+
         // Separate nested selects (relation fields) from scalar fields.
         // build_mapping can't handle nested selects, so we strip them and resolve relations separately.
         let mut nested_selects: Vec<&Select> = Vec::new();

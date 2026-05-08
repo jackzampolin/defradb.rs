@@ -9,6 +9,7 @@ use crate::collection_cache::CollectionCache;
 use crate::error::{Error, Result};
 use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
 use schema::CollectionVersion;
+use std::collections::HashSet;
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
@@ -39,6 +40,8 @@ pub struct DbTxn<S: Store> {
     explicit: bool,
     /// Transaction-scoped collection cache (lazy loading from SystemStore).
     collection_cache: CollectionCache,
+    /// Collection IDs created inside this transaction.
+    locally_created_collection_ids: HashSet<String>,
     /// Phantom data for the store type.
     _marker: std::marker::PhantomData<S>,
 }
@@ -50,6 +53,7 @@ impl<S: Store> DbTxn<S> {
             txn: Some(txn),
             explicit: false,
             collection_cache: CollectionCache::new(),
+            locally_created_collection_ids: HashSet::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -60,6 +64,7 @@ impl<S: Store> DbTxn<S> {
             txn: Some(txn),
             explicit: true,
             collection_cache: CollectionCache::new(),
+            locally_created_collection_ids: HashSet::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -464,6 +469,17 @@ impl<S: Store> DbTxn<S> {
     /// Use this for advanced cache manipulation (e.g., populate from snapshot).
     pub fn collection_cache_mut(&mut self) -> &mut CollectionCache {
         &mut self.collection_cache
+    }
+
+    /// Mark a collection as created inside this transaction.
+    pub fn mark_collection_created(&mut self, collection_id: impl Into<String>) {
+        self.locally_created_collection_ids
+            .insert(collection_id.into());
+    }
+
+    /// Check whether a collection was created inside this transaction.
+    pub fn was_collection_created(&self, collection_id: &str) -> bool {
+        self.locally_created_collection_ids.contains(collection_id)
     }
 
     // =========================================================================
