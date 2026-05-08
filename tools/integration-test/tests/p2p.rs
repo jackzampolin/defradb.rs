@@ -14,6 +14,8 @@ mod replication_advanced;
 mod resilience;
 #[path = "p2p/sync.rs"]
 mod sync;
+#[path = "p2p/transports.rs"]
+mod transports;
 #[path = "p2p/trust_boundary.rs"]
 mod trust_boundary;
 #[path = "p2p/write_contention.rs"]
