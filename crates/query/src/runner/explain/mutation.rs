@@ -166,8 +166,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     } else if let Some(ref doc_ids) = mutation.doc_ids {
                         node = node.with_doc_ids(doc_ids.clone());
                     }
-                    if let Some(ref filter) = mutation.filter {
-                        node = node.with_filter(filter.clone());
+                    if resolved_doc_ids.is_none() && mutation.doc_ids.is_none() {
+                        if let Some(ref filter) = mutation.filter {
+                            node = node.with_filter(filter.clone());
+                        }
                     }
                     Box::new(node)
                 }
