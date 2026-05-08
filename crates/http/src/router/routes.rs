@@ -218,7 +218,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/refresh", post(handlers::views::refresh_views))
         .route("/gc", post(handlers::views::gc_downsample_histories));
 
-    // API v0 routes
+    // Versioned API routes
     let api_routes = Router::new()
         // GraphQL endpoints
         .route("/graphql", post(handlers::graphql_transactional))
@@ -268,5 +268,60 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/node/identity", get(handlers::utility::get_node_identity))
         .with_state(state);
 
-    root_routes.nest("/api/v0", api_routes)
+    root_routes
+        .nest("/api/v0", api_routes.clone())
+        .nest("/api/v1", api_routes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mock::MockQueryExecutor;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    async fn status_for(path: &str) -> axum::http::StatusCode {
+        let router = create_router(Arc::new(MockQueryExecutor::new()));
+        router
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn version_route_resolves_under_v0_and_v1() {
+        assert_eq!(
+            status_for("/api/v0/version").await,
+            axum::http::StatusCode::OK
+        );
+        assert_eq!(
+            status_for("/api/v1/version").await,
+            axum::http::StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn v0_and_v1_resolve_same_route_set() {
+        for path in [
+            "/graphql",
+            "/schema",
+            "/collections",
+            "/p2p/info",
+            "/acp/status",
+            "/index",
+            "/encrypted-indexes",
+            "/node/identity",
+        ] {
+            let v0_status = status_for(&format!("/api/v0{path}")).await;
+            let v1_status = status_for(&format!("/api/v1{path}")).await;
+            assert_ne!(v0_status, axum::http::StatusCode::NOT_FOUND);
+            assert_eq!(v1_status, v0_status, "route mismatch for {path}");
+        }
+    }
 }
