@@ -547,10 +547,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     node = node.with_doc_ids(doc_ids.clone());
                 }
 
-                // Always pass filter: for node-level resolution when no doc_ids,
-                // and for re-filtering results after update (Go compatibility)
-                if let Some(ref filter) = mutation.filter {
-                    node = node.with_filter(filter.clone());
+                // Pass the filter only when the node still needs to resolve it.
+                // If it was already resolved to doc IDs above, the filter must
+                // not be applied again to post-update document state.
+                if resolved_doc_ids.is_none() && mutation.doc_ids.is_none() {
+                    if let Some(ref filter) = mutation.filter {
+                        node = node.with_filter(filter.clone());
+                    }
                 }
 
                 Box::new(node)

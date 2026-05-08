@@ -75,6 +75,135 @@ async fn rust_txn_schema_add_and_mutate() {
     txn_schema_add_and_mutate(cluster).await;
 }
 
+async fn txn_schema_add_via_header_is_scoped(cluster: TestCluster) {
+    let client = cluster.client(0);
+    let api_url = cluster.api_url(0);
+    let tx_id = client.tx_create().expect("tx_create failed");
+
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(format!("{}/api/v0/collections", api_url))
+        .header("x-defradb-tx", &tx_id)
+        .body("type HeaderWidget { name: String }")
+        .send()
+        .await
+        .expect("schema add request failed");
+    assert!(
+        resp.status().is_success(),
+        "schema add in tx failed with status: {} body: {}",
+        resp.status(),
+        resp.text().await.unwrap_or_default()
+    );
+
+    let in_tx = client
+        .query_with_tx(
+            r#"mutation { add_HeaderWidget(input: {name: "scoped"}) { name } }"#,
+            &tx_id,
+        )
+        .expect("create HeaderWidget in tx");
+    assert_eq!(in_tx["add_HeaderWidget"][0]["name"], "scoped");
+
+    let outside = client.query("query { HeaderWidget { name } }");
+    assert!(
+        outside.is_err(),
+        "schema created with x-defradb-tx should not be visible outside the transaction"
+    );
+
+    client.tx_commit(&tx_id).expect("tx_commit failed");
+
+    let after_commit = client
+        .query("query { HeaderWidget { name } }")
+        .expect("query HeaderWidget after commit");
+    assert_eq!(after_commit["HeaderWidget"][0]["name"], "scoped");
+}
+
+#[tokio::test]
+async fn rust_txn_schema_add_via_header_is_scoped() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    txn_schema_add_via_header_is_scoped(cluster).await;
+}
+
+async fn concurrent_txn_endpoint_is_not_exposed(cluster: TestCluster) {
+    let api_url = cluster.api_url(0);
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/v0/tx/concurrent", api_url))
+        .send()
+        .await
+        .expect("tx concurrent request failed");
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    assert!(
+        body.contains("invalid transaction id"),
+        "expected invalid transaction id error, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn rust_concurrent_txn_endpoint_is_not_exposed() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    concurrent_txn_endpoint_is_not_exposed(cluster).await;
+}
+
+async fn update_with_filter_sees_txn_scoped_state(cluster: TestCluster) {
+    let client = cluster.client(0);
+    let api_url = cluster.api_url(0);
+    let tx_id = client.tx_create().expect("tx_create failed");
+
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(format!("{}/api/v0/tx/{}/schema", api_url, tx_id))
+        .body("type TxnFilterUser { name: String  age: Int }")
+        .send()
+        .await
+        .expect("schema add in txn request failed");
+    assert!(
+        resp.status().is_success(),
+        "schema add in txn failed with status: {} body: {}",
+        resp.status(),
+        resp.text().await.unwrap_or_default()
+    );
+
+    client
+        .query_with_tx(
+            r#"mutation { add_TxnFilterUser(input: {name: "John", age: 27}) { _docID } }"#,
+            &tx_id,
+        )
+        .expect("create TxnFilterUser in tx");
+
+    let update = client
+        .query_with_tx(
+            r#"mutation { update_TxnFilterUser(filter: {name: {_eq: "John"}}, input: {name: "Chris"}) { name age } }"#,
+            &tx_id,
+        )
+        .expect("update TxnFilterUser by filter in tx");
+
+    let updated = update["update_TxnFilterUser"]
+        .as_array()
+        .expect("update result not array");
+    assert_eq!(updated.len(), 1, "expected one filtered update result");
+    assert_eq!(updated[0]["name"], "Chris");
+    assert_eq!(updated[0]["age"], 27);
+
+    client.tx_commit(&tx_id).expect("tx_commit failed");
+
+    let after_commit = client
+        .query("query { TxnFilterUser { name age } }")
+        .expect("query TxnFilterUser after commit");
+    assert_eq!(after_commit["TxnFilterUser"][0]["name"], "Chris");
+    assert_eq!(after_commit["TxnFilterUser"][0]["age"], 27);
+}
+
+#[tokio::test]
+async fn rust_update_with_filter_sees_txn_scoped_state() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    update_with_filter_sees_txn_scoped_state(cluster).await;
+}
+
 async fn transactions_test(cluster: TestCluster) {
     let client = cluster.client(0);
 

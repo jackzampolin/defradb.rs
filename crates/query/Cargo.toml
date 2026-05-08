@@ -24,6 +24,7 @@ lens = { path = "../lens", default-features = false }
 
 # Async runtime
 async-trait.workspace = true
+async-lock.workspace = true
 futures.workspace = true
 
 # Serialization

@@ -64,7 +64,6 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // Transactions (permissions enforced per-operation within tx)
         // =====================================================================
         "/api/v0/tx" => RoutePermission::IdentityOnly,
-        "/api/v0/tx/concurrent" => RoutePermission::IdentityOnly,
         "/api/v0/tx/:id" => RoutePermission::IdentityOnly,
         "/api/v0/tx/:id/lens" => RoutePermission::Required(NodePermission::CollectionPatch),
         "/api/v0/tx/:id/collections" => RoutePermission::Required(NodePermission::CollectionGet),
@@ -340,11 +339,6 @@ mod tests {
             ),
             // Transactions
             ("/api/v0/tx", Method::POST, RoutePermission::IdentityOnly),
-            (
-                "/api/v0/tx/concurrent",
-                Method::POST,
-                RoutePermission::IdentityOnly,
-            ),
             (
                 "/api/v0/tx/:id",
                 Method::POST,

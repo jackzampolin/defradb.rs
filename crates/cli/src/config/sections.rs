@@ -224,6 +224,8 @@ pub struct NetConfig {
     #[serde(default)]
     pub peers: Vec<String>,
     pub pubsub_enabled: bool,
+    /// Enable libp2p relay client support. Default: true.
+    #[serde(default = "default_true")]
     pub relay_enabled: bool,
     /// Max P2P protocol message size in bytes. Default: 16 MiB.
     #[serde(default = "default_max_msg_size")]
@@ -325,7 +327,7 @@ impl Default for NetConfig {
             p2p_addresses: vec!["/ip4/127.0.0.1/tcp/9171".to_string()],
             peers: Vec::new(),
             pubsub_enabled: true,
-            relay_enabled: false,
+            relay_enabled: true,
             max_msg_size: default_max_msg_size(),
             max_car_size: default_max_car_size(),
             stream_timeout: default_stream_timeout(),

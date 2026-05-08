@@ -1,9 +1,10 @@
 //! Protocol-specific event handlers (Identify, PushLog, GossipSub, Bitswap, Kademlia).
 
 use iroh_bitswap::{BitswapEvent, Store};
-use libp2p::{gossipsub, request_response, PeerId};
+use libp2p::{gossipsub, kad, kad::store::RecordStore, request_response, PeerId};
 use tracing::{debug, error, warn};
 
+use crate::behaviour::{DefraKademliaEvent, KademliaNetwork};
 use crate::error::Error;
 use crate::message::{PushLogBroadcast, PushLogReply, PushLogRequest};
 
@@ -321,8 +322,8 @@ impl<S: Store> P2PHost<S> {
     }
 
     /// Handle Kademlia DHT events.
-    pub(super) async fn handle_kademlia_event(&mut self, event: libp2p::kad::Event) {
-        use libp2p::kad;
+    pub(super) async fn handle_kademlia_event(&mut self, event: DefraKademliaEvent) {
+        let (network, event) = event.split();
 
         match event {
             kad::Event::RoutingUpdated {
@@ -331,36 +332,145 @@ impl<S: Store> P2PHost<S> {
                 debug!(
                     peer_id = %peer,
                     addresses = ?addresses,
+                    dht = network.as_str(),
                     "Kademlia routing table updated"
                 );
             }
 
             kad::Event::OutboundQueryProgressed { id, result, .. } => {
-                debug!(query_id = ?id, "Kademlia query progressed: {:?}", result);
+                debug!(query_id = ?id, dht = network.as_str(), "Kademlia query progressed: {:?}", result);
             }
 
             kad::Event::InboundRequest { request } => {
-                debug!("Kademlia inbound request: {:?}", request);
+                self.handle_kademlia_inbound_request(network, request);
             }
 
             kad::Event::RoutablePeer { peer, address } => {
-                debug!(peer_id = %peer, address = %address, "Found routable peer via Kademlia");
+                debug!(
+                    peer_id = %peer,
+                    address = %address,
+                    dht = network.as_str(),
+                    "Found routable peer via Kademlia"
+                );
             }
 
             kad::Event::PendingRoutablePeer { peer, address } => {
                 debug!(
                     peer_id = %peer,
                     address = %address,
+                    dht = network.as_str(),
                     "Found pending routable peer via Kademlia"
                 );
             }
 
             kad::Event::UnroutablePeer { peer } => {
-                debug!(peer_id = %peer, "Peer is unroutable via Kademlia");
+                debug!(peer_id = %peer, dht = network.as_str(), "Peer is unroutable via Kademlia");
             }
 
             kad::Event::ModeChanged { new_mode } => {
-                debug!(mode = ?new_mode, "Kademlia mode changed");
+                debug!(mode = ?new_mode, dht = network.as_str(), "Kademlia mode changed");
+            }
+        }
+    }
+
+    fn handle_kademlia_inbound_request(
+        &mut self,
+        network: KademliaNetwork,
+        request: kad::InboundRequest,
+    ) {
+        match request {
+            kad::InboundRequest::PutRecord { source, record, .. } => {
+                let Some(record) = record else {
+                    debug!(
+                        peer_id = %source,
+                        dht = network.as_str(),
+                        "Kademlia inbound put-record request"
+                    );
+                    return;
+                };
+
+                // Only /pk/ has a Rust-side validator today. Other namespaces
+                // are stored as an intentional divergence from Go's full
+                // NamespacedValidator registry.
+                if let Err(error) = crate::behaviour::validate_pk_namespaced_record(&record) {
+                    warn!(
+                        peer_id = %source,
+                        dht = network.as_str(),
+                        error = %error,
+                        "Rejected invalid Kademlia pk record"
+                    );
+                    return;
+                }
+
+                let key = record.key.clone();
+                match self
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .store_mut(network)
+                    .put(record)
+                {
+                    Ok(()) => {
+                        debug!(
+                            peer_id = %source,
+                            dht = network.as_str(),
+                            record = ?key,
+                            "Stored validated Kademlia record"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            peer_id = %source,
+                            dht = network.as_str(),
+                            record = ?key,
+                            error = %error,
+                            "Failed to store validated Kademlia record"
+                        );
+                    }
+                }
+            }
+            kad::InboundRequest::AddProvider { record } => {
+                let Some(record) = record else {
+                    debug!(
+                        dht = network.as_str(),
+                        "Kademlia inbound add-provider request"
+                    );
+                    return;
+                };
+
+                let key = record.key.clone();
+                let provider = record.provider;
+                match self
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .store_mut(network)
+                    .add_provider(record)
+                {
+                    Ok(()) => {
+                        debug!(
+                            peer_id = %provider,
+                            dht = network.as_str(),
+                            provider_key = ?key,
+                            "Stored Kademlia provider record"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            peer_id = %provider,
+                            dht = network.as_str(),
+                            provider_key = ?key,
+                            error = %error,
+                            "Failed to store Kademlia provider record"
+                        );
+                    }
+                }
+            }
+            request => {
+                debug!(
+                    dht = network.as_str(),
+                    "Kademlia inbound request: {:?}", request
+                );
             }
         }
     }

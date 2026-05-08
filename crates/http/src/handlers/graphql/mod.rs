@@ -22,6 +22,5 @@ pub use query::{
     TransactionalQueryRequest,
 };
 pub use transactions::{
-    tx_begin, tx_begin_concurrent, tx_commit, tx_discard, TxBeginQuery, TxBeginResponse,
-    TxPathParam,
+    tx_begin, tx_commit, tx_discard, TxBeginQuery, TxBeginResponse, TxPathParam,
 };

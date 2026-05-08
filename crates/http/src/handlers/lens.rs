@@ -10,10 +10,12 @@
 //! dev_mode is enabled. Only inline module bytes are allowed.
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::Json;
 use serde::Serialize;
 
 use crate::error::{http_error_from_backend_message, HttpError};
+use crate::handlers::txn_header::txn_id_from_headers;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
@@ -48,11 +50,10 @@ pub struct SetMigrationResponse {
 pub async fn set_migration(
     State(state): State<AppState>,
     identity: ExtractIdentity,
+    headers: HeaderMap,
     body: String,
 ) -> Result<Json<SetMigrationResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::MigrationSet).await?;
-
-    let lens = state.require_lens()?;
 
     if body.trim().is_empty() {
         return Err(HttpError::BadRequest(
@@ -68,10 +69,18 @@ pub async fn set_migration(
             .map_err(|e| HttpError::BadRequest(e.to_string()))?;
     }
 
-    let lens_id = lens
-        .set_migration(&body)
-        .await
-        .map_err(http_error_from_backend_message)?;
+    let lens_id = if let Some(txn_id) = txn_id_from_headers(&headers)? {
+        let txn_ops = state.require_txn_ops()?;
+        txn_ops
+            .set_migration_in_txn(txn_id, &body)
+            .await
+            .map_err(http_error_from_backend_message)?
+    } else {
+        let lens = state.require_lens()?;
+        lens.set_migration(&body)
+            .await
+            .map_err(http_error_from_backend_message)?
+    };
 
     Ok(Json(SetMigrationResponse { lens_id }))
 }
@@ -164,6 +173,15 @@ pub async fn list_lenses(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, HeaderValue};
+    use query::executor::QueryExecutor;
+    use std::sync::Arc;
+
+    use crate::handlers::graphql::TX_HEADER_NAME;
+    use crate::identity_extractor::ExtractIdentity;
+    use crate::mock::{MockQueryExecutor, MockTransactionOperations};
+    use crate::router::AppStateBuilder;
 
     #[test]
     fn test_set_migration_response_serialize() {
@@ -173,5 +191,27 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("lensId"));
         assert!(json.contains("lens-123"));
+    }
+
+    #[tokio::test]
+    async fn set_migration_uses_tx_header_without_global_lens_ops() {
+        let state =
+            AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
+                .with_txn_ops(Arc::new(MockTransactionOperations::new()))
+                .build();
+        let mut headers = HeaderMap::new();
+        headers.insert(TX_HEADER_NAME, HeaderValue::from_static("txn-123"));
+
+        let response = set_migration(
+            State(state),
+            ExtractIdentity::anonymous(),
+            headers,
+            r#"{"SourceCollectionVersionID":"v1","DestinationCollectionVersionID":"v2","Lenses":[]}"#
+                .to_string(),
+        )
+        .await
+        .expect("set migration via transaction header should succeed");
+
+        assert_eq!(response.0.lens_id, "mock-transform-id");
     }
 }

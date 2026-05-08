@@ -18,6 +18,7 @@ use libp2p::{
     identity::Keypair, noise, request_response, swarm::behaviour::toggle::Toggle, tcp, yamux,
     Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
+use sysinfo::{RefreshKind, System, SystemExt};
 use tokio::{
     sync::mpsc,
     time::{self, Instant, MissedTickBehavior},
@@ -44,7 +45,7 @@ const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Periodic DHT refresh interval.
 const DHT_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// Delay used to coalesce connection-triggered DHT bootstrap requests.
+/// Delay used to coalesce the one-time first-connection DHT bootstrap.
 const DHT_BOOTSTRAP_DEBOUNCE: Duration = Duration::from_secs(30);
 
 /// Go libp2p connection manager grace period before pruning new connections.
@@ -53,9 +54,103 @@ const DEFAULT_CONNECTION_MANAGER_GRACE_PERIOD: Duration = Duration::from_secs(20
 /// Frequency for checking whether the active connection set should be pruned.
 const CONNECTION_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Go ResourceManager minimum FD cap. See go-libp2p resource-manager defaults.
+const GO_RESOURCE_MANAGER_MIN_FD_LIMIT: u64 = 256;
+
+/// Go ResourceManager minimum memory budget.
+const GO_RESOURCE_MANAGER_MIN_MEMORY_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Go DefraDB gives libp2p half of system RAM by default.
+const GO_RESOURCE_MANAGER_SYSTEM_MEMORY_DIVISOR: u64 = 2;
+
+/// Go's transient ResourceManager scope is capped at 25% of the system scope.
+const GO_RESOURCE_MANAGER_TRANSIENT_MEMORY_DIVISOR: u64 = 4;
+
+#[derive(Debug, Clone, Copy)]
+struct ResourceManagerRuntimeLimits {
+    fd_limit: u64,
+    system_memory_budget_bytes: u64,
+}
+
+impl ResourceManagerRuntimeLimits {
+    fn detect() -> Result<Self> {
+        let fd_limit = current_fd_limit()?;
+        let system_memory_budget_bytes =
+            total_system_memory_bytes() / GO_RESOURCE_MANAGER_SYSTEM_MEMORY_DIVISOR;
+        validate_resource_manager_startup_limits(fd_limit, system_memory_budget_bytes)?;
+
+        Ok(Self {
+            fd_limit,
+            system_memory_budget_bytes,
+        })
+    }
+
+    fn transient_memory_budget_bytes(&self) -> u64 {
+        self.system_memory_budget_bytes / GO_RESOURCE_MANAGER_TRANSIENT_MEMORY_DIVISOR
+    }
+
+    fn system_memory_budget_usize(&self) -> usize {
+        self.system_memory_budget_bytes
+            .try_into()
+            .unwrap_or(usize::MAX)
+    }
+}
+
+fn total_system_memory_bytes() -> u64 {
+    let system = System::new_with_specifics(RefreshKind::new().with_memory());
+    system.total_memory()
+}
+
+#[cfg(unix)]
+fn current_fd_limit() -> Result<u64> {
+    let (soft_limit, _) = rlimit::Resource::NOFILE.get().map_err(|error| {
+        Error::InvalidConfig(format!(
+            "failed to read NOFILE resource limit for libp2p ResourceManager validation: {error}"
+        ))
+    })?;
+    Ok(soft_limit)
+}
+
+#[cfg(windows)]
+fn current_fd_limit() -> Result<u64> {
+    Ok(u64::from(rlimit::getmaxstdio()))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn current_fd_limit() -> Result<u64> {
+    Ok(GO_RESOURCE_MANAGER_MIN_FD_LIMIT)
+}
+
+fn validate_resource_manager_startup_limits(fd_limit: u64, memory_budget_bytes: u64) -> Result<()> {
+    if fd_limit < GO_RESOURCE_MANAGER_MIN_FD_LIMIT {
+        return Err(Error::InvalidConfig(format!(
+            "libp2p ResourceManager requires at least {} file descriptors; current soft limit is {fd_limit}; raise the soft limit with `ulimit -n 1024` or an equivalent service/container limit",
+            GO_RESOURCE_MANAGER_MIN_FD_LIMIT
+        )));
+    }
+
+    if memory_budget_bytes < GO_RESOURCE_MANAGER_MIN_MEMORY_BYTES {
+        return Err(Error::InvalidConfig(format!(
+            "libp2p ResourceManager requires at least {} MiB memory budget; computed budget is {} MiB",
+            GO_RESOURCE_MANAGER_MIN_MEMORY_BYTES / 1024 / 1024,
+            memory_budget_bytes / 1024 / 1024
+        )));
+    }
+
+    Ok(())
+}
+
+/// Tracks the one-time first-connection bootstrap that complements periodic DHT refresh.
+///
+/// Go wires periodic DHT refresh through `bootstrap.Bootstrap(...)`
+/// (`go-p2p/peer.go:149`). Rust keeps that periodic refresh in the host loop
+/// and adds a one-shot kickstart so the first query does not wait for the
+/// longer Rust interval. The kickstart is debounced and consumed once so
+/// inbound connection bursts cannot repeatedly trigger DHT query bursts.
 #[derive(Debug)]
 struct BootstrapScheduler {
     pending: bool,
+    has_fired: bool,
     debounce: Duration,
 }
 
@@ -63,6 +158,7 @@ impl BootstrapScheduler {
     fn new(debounce: Duration) -> Self {
         Self {
             pending: false,
+            has_fired: false,
             debounce,
         }
     }
@@ -71,8 +167,8 @@ impl BootstrapScheduler {
         self.pending
     }
 
-    fn schedule(&mut self, now: Instant) -> Option<Instant> {
-        if self.pending {
+    fn schedule_first_connection(&mut self, now: Instant) -> Option<Instant> {
+        if self.pending || self.has_fired {
             return None;
         }
 
@@ -82,6 +178,9 @@ impl BootstrapScheduler {
 
     fn mark_fired(&mut self) {
         self.pending = false;
+        // Consume the kickstart after one attempt, even if Kademlia skips it
+        // because no peers remain; periodic refresh is the retry path.
+        self.has_fired = true;
     }
 }
 
@@ -280,6 +379,15 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
 
         info!("Local peer ID: {}", local_peer_id);
 
+        let resource_limits = ResourceManagerRuntimeLimits::detect()?;
+        info!(
+            fd_limit = resource_limits.fd_limit,
+            system_memory_budget_mib = resource_limits.system_memory_budget_bytes / 1024 / 1024,
+            transient_memory_budget_mib =
+                resource_limits.transient_memory_budget_bytes() / 1024 / 1024,
+            "Configured libp2p ResourceManager parity limits"
+        );
+
         // Replicator registry is constructed up-front because the Bitswap
         // access filter (installed at behaviour construction time) needs
         // the same Arc that SyncCoordinator will later populate.
@@ -295,6 +403,7 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
             Arc::clone(&replicators),
             config.enable_pubsub,
             &config,
+            resource_limits.system_memory_budget_usize(),
         )
         .await?;
 
@@ -475,11 +584,11 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
 
                 event = self.swarm.select_next_some() => {
                     if self.handle_swarm_event(event).await {
-                        if let Some(deadline) = bootstrap_scheduler.schedule(Instant::now()) {
+                        if let Some(deadline) = bootstrap_scheduler.schedule_first_connection(Instant::now()) {
                             bootstrap_deadline.as_mut().reset(deadline);
                             debug!(
                                 delay_ms = DHT_BOOTSTRAP_DEBOUNCE.as_millis() as u64,
-                                "Scheduled debounced Kademlia bootstrap"
+                                "Scheduled first-connection Kademlia bootstrap"
                             );
                         }
                     }
@@ -504,7 +613,7 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
                 }
                 _ = &mut bootstrap_deadline, if bootstrap_scheduler.is_pending() => {
                     bootstrap_scheduler.mark_fired();
-                    self.run_kademlia_bootstrap("debounced connection");
+                    self.run_kademlia_bootstrap("first connection");
                 }
                 _ = bootstrap_interval.tick() => {
                     self.run_kademlia_bootstrap("periodic");
@@ -519,12 +628,24 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
     }
 
     fn run_kademlia_bootstrap(&mut self, reason: &'static str) {
-        match self.swarm.behaviour_mut().kademlia.bootstrap() {
-            Ok(query_id) => {
-                debug!(?query_id, reason, "Started Kademlia bootstrap");
-            }
-            Err(error) => {
-                debug!(?error, reason, "Skipped Kademlia bootstrap");
+        for (network, result) in self.swarm.behaviour_mut().kademlia.bootstrap() {
+            match result {
+                Ok(query_id) => {
+                    debug!(
+                        ?query_id,
+                        dht = network.as_str(),
+                        reason,
+                        "Started Kademlia bootstrap"
+                    );
+                }
+                Err(error) => {
+                    debug!(
+                        ?error,
+                        dht = network.as_str(),
+                        reason,
+                        "Skipped Kademlia bootstrap"
+                    );
+                }
             }
         }
     }
@@ -587,19 +708,61 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_scheduler_debounces_pending_connection_triggers() {
+    fn resource_manager_startup_validation_rejects_low_fd_limit() {
+        let err = validate_resource_manager_startup_limits(
+            GO_RESOURCE_MANAGER_MIN_FD_LIMIT - 1,
+            GO_RESOURCE_MANAGER_MIN_MEMORY_BYTES,
+        )
+        .expect_err("fd limits below the Go minimum must fail startup validation");
+
+        assert!(
+            err.to_string().contains("file descriptors"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resource_manager_startup_validation_rejects_low_memory_budget() {
+        let err = validate_resource_manager_startup_limits(
+            GO_RESOURCE_MANAGER_MIN_FD_LIMIT,
+            GO_RESOURCE_MANAGER_MIN_MEMORY_BYTES - 1,
+        )
+        .expect_err("memory below the Go minimum must fail startup validation");
+
+        assert!(
+            err.to_string().contains("memory budget"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resource_manager_startup_validation_accepts_go_minimums() {
+        validate_resource_manager_startup_limits(
+            GO_RESOURCE_MANAGER_MIN_FD_LIMIT,
+            GO_RESOURCE_MANAGER_MIN_MEMORY_BYTES,
+        )
+        .expect("Go minimum FD and memory limits must be accepted");
+    }
+
+    #[test]
+    fn bootstrap_scheduler_does_not_fire_per_connection() {
         let mut scheduler = BootstrapScheduler::new(Duration::from_secs(30));
         let now = Instant::now();
 
-        assert_eq!(scheduler.schedule(now), Some(now + Duration::from_secs(30)));
+        let scheduled: Vec<_> = (0..5)
+            .filter_map(|offset| {
+                scheduler.schedule_first_connection(now + Duration::from_secs(offset))
+            })
+            .collect();
+
+        assert_eq!(scheduled, vec![now + Duration::from_secs(30)]);
         assert!(scheduler.is_pending());
-        assert_eq!(scheduler.schedule(now + Duration::from_secs(1)), None);
 
         scheduler.mark_fired();
         assert!(!scheduler.is_pending());
         assert_eq!(
-            scheduler.schedule(now + Duration::from_secs(31)),
-            Some(now + Duration::from_secs(61))
+            scheduler.schedule_first_connection(now + Duration::from_secs(31)),
+            None
         );
     }
 }

@@ -52,7 +52,7 @@ fn test_net_config_defaults() {
     assert_eq!(config.p2p_addresses, vec!["/ip4/127.0.0.1/tcp/9171"]);
     assert!(config.peers.is_empty());
     assert!(config.pubsub_enabled);
-    assert!(!config.relay_enabled);
+    assert!(config.relay_enabled);
 }
 
 #[test]
