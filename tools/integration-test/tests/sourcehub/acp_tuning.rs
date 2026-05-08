@@ -10,6 +10,7 @@ async fn rust_circuit_breaker_threshold_1_trips_immediately() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
     let jack = generate_identity(&binary).expect("Jack identity");
+    let bob = generate_identity(&binary).expect("Bob identity");
 
     let mut cluster = TestCluster::builder()
         .rust_nodes(1)
@@ -37,11 +38,13 @@ async fn rust_circuit_breaker_threshold_1_trips_immediately() {
     node.schema_add_with_identity(&schema, &jack.private_key_hex)
         .expect("add schema");
 
-    node.query_with_identity(
-        r#"mutation { add_User(input: {name: "Jack", age: 30}) { _docID } }"#,
-        &jack.private_key_hex,
-    )
-    .expect("create doc");
+    let data = node
+        .query_with_identity(
+            r#"mutation { add_User(input: {name: "Jack", age: 30}) { _docID } }"#,
+            &jack.private_key_hex,
+        )
+        .expect("create doc");
+    let doc_id = data["add_User"][0]["_docID"].as_str().expect("_docID");
 
     // Verify reads work during normal operation
     let jack_read = node
@@ -53,6 +56,17 @@ async fn rust_circuit_breaker_threshold_1_trips_immediately() {
         "Jack should see 1 doc during normal operation"
     );
 
+    node.acp_relationship_add("User", doc_id, "reader", &bob.did, &jack.private_key_hex)
+        .expect("grant Bob reader");
+    let bob_read = node
+        .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
+        .expect("Bob read");
+    assert_eq!(
+        bob_read["User"].as_array().unwrap().len(),
+        1,
+        "Bob should see 1 doc during normal operation"
+    );
+
     // Kill SourceHub
     cluster
         .stop_source_hub()
@@ -62,13 +76,13 @@ async fn rust_circuit_breaker_threshold_1_trips_immediately() {
 
     // With threshold=1, the very first failed ACP check should trip the breaker.
     // All subsequent requests are denied immediately without even attempting SourceHub.
-    let jack_after_stop = node
-        .query_with_identity("query { User { _docID name } }", &jack.private_key_hex)
-        .expect("Jack read after stop");
+    let bob_after_stop = node
+        .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
+        .expect("Bob read after stop");
     assert_eq!(
-        jack_after_stop["User"].as_array().unwrap().len(),
+        bob_after_stop["User"].as_array().unwrap().len(),
         0,
-        "threshold=1: Jack denied after SourceHub down (fail-closed)"
+        "threshold=1: Bob denied after SourceHub down (fail-closed)"
     );
 }
 
@@ -170,6 +184,7 @@ async fn rust_short_request_timeout_fail_closed() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
     let jack = generate_identity(&binary).expect("Jack identity");
+    let bob = generate_identity(&binary).expect("Bob identity");
 
     let mut cluster = TestCluster::builder()
         .rust_nodes(1)
@@ -197,11 +212,16 @@ async fn rust_short_request_timeout_fail_closed() {
     node.schema_add_with_identity(&schema, &jack.private_key_hex)
         .expect("add schema");
 
-    node.query_with_identity(
-        r#"mutation { add_User(input: {name: "Jack", age: 30}) { _docID } }"#,
-        &jack.private_key_hex,
-    )
-    .expect("create doc");
+    let data = node
+        .query_with_identity(
+            r#"mutation { add_User(input: {name: "Jack", age: 30}) { _docID } }"#,
+            &jack.private_key_hex,
+        )
+        .expect("create doc");
+    let doc_id = data["add_User"][0]["_docID"].as_str().expect("_docID");
+
+    node.acp_relationship_add("User", doc_id, "reader", &bob.did, &jack.private_key_hex)
+        .expect("grant Bob reader");
 
     // Kill SourceHub
     cluster
@@ -212,15 +232,15 @@ async fn rust_short_request_timeout_fail_closed() {
 
     // With 1s timeout + threshold=1, the node should fail-closed very quickly
     let start = std::time::Instant::now();
-    let jack_read = node
-        .query_with_identity("query { User { _docID name } }", &jack.private_key_hex)
-        .expect("Jack read after stop");
+    let bob_read = node
+        .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
+        .expect("Bob read after stop");
     let elapsed = start.elapsed();
 
     assert_eq!(
-        jack_read["User"].as_array().unwrap().len(),
+        bob_read["User"].as_array().unwrap().len(),
         0,
-        "Jack denied with short timeout (fail-closed)"
+        "Bob denied with short timeout (fail-closed)"
     );
 
     // The request should complete quickly (within timeout + overhead)
