@@ -20,6 +20,8 @@ mod lens;
 mod lens_persistence;
 #[path = "query/limits.rs"]
 mod limits;
+#[path = "query/index_fallback_4633.rs"]
+mod index_fallback_4633;
 #[path = "query/planner_4656.rs"]
 mod planner_4656;
 #[path = "query/planner_4684.rs"]
