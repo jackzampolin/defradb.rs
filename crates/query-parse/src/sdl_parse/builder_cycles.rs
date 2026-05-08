@@ -2,6 +2,8 @@
 
 use super::parser::SdlParser;
 
+type PrimaryDirectiveMap = std::collections::HashMap<(String, String, String), bool>;
+
 impl<'a> SdlParser<'a> {
     /// Detect types that form circular relation sets.
     /// Returns a map from type name to its sorted index within its connected cycle group.
@@ -17,44 +19,53 @@ impl<'a> SdlParser<'a> {
     pub(super) fn detect_collection_set(
         &self,
         type_names: &std::collections::HashSet<String>,
-        primary_directives: &std::collections::HashMap<(String, String), bool>,
+        primary_directives: &PrimaryDirectiveMap,
     ) -> (
         std::collections::HashMap<String, (i32, usize)>,
         Vec<Vec<String>>,
     ) {
         // Helper to check if a relation field from source->target is actually primary
         // (will be included in CID calculation)
-        let is_field_primary = |source: &str, target: &str, is_array: bool| -> bool {
-            if is_array {
-                // Arrays are always secondary
-                return false;
-            }
+        let is_field_primary =
+            |source: &str, target: &str, relation_name: &str, is_array: bool| -> bool {
+                if is_array {
+                    // Arrays are always secondary
+                    return false;
+                }
 
-            // Check if this field has @primary directive
-            let has_primary = primary_directives
-                .get(&(source.to_string(), target.to_string()))
-                .copied()
-                .unwrap_or(false);
+                // Check if this field has @primary directive
+                let has_primary = primary_directives
+                    .get(&(
+                        source.to_string(),
+                        target.to_string(),
+                        relation_name.to_string(),
+                    ))
+                    .copied()
+                    .unwrap_or(false);
 
-            if has_primary {
-                return true;
-            }
+                if has_primary {
+                    return true;
+                }
 
-            // Check if the counterpart (target->source) has @primary
-            // If it does, this side is SECONDARY
-            let counterpart_has_primary = primary_directives
-                .get(&(target.to_string(), source.to_string()))
-                .copied()
-                .unwrap_or(false);
+                // Check if the counterpart (target->source) has @primary
+                // If it does, this side is SECONDARY
+                let counterpart_has_primary = primary_directives
+                    .get(&(
+                        target.to_string(),
+                        source.to_string(),
+                        relation_name.to_string(),
+                    ))
+                    .copied()
+                    .unwrap_or(false);
 
-            if counterpart_has_primary {
-                // Counterpart has @primary, so this side is secondary
-                return false;
-            }
+                if counterpart_has_primary {
+                    // Counterpart has @primary, so this side is secondary
+                    return false;
+                }
 
-            // Neither side has @primary - single-object relation defaults to primary
-            true
-        };
+                // Neither side has @primary - single-object relation defaults to primary
+                true
+            };
 
         // Build relation graph: which types reference which other types via PRIMARY relations only
         let mut references: std::collections::HashMap<String, std::collections::HashSet<String>> =
@@ -67,8 +78,9 @@ impl<'a> SdlParser<'a> {
                 // Only consider relations to other types that are:
                 // 1. In the current schema (type_names)
                 // 2. Actually PRIMARY (will be included in CID)
+                let relation_name = self.relation_name_for_field(type_name, field);
                 if type_names.contains(target)
-                    && is_field_primary(type_name, target, field.field_type.is_list)
+                    && is_field_primary(type_name, target, &relation_name, field.field_type.is_list)
                 {
                     refs.insert(target.clone());
                 }

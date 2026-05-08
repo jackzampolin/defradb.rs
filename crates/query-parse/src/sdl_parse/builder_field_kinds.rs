@@ -36,8 +36,21 @@ impl<'a> SdlParser<'a> {
 
         // Check if it's a self-reference (same type or "Self" keyword)
         if base == current_type || base == "Self" {
-            // For self-references (type pointing to itself), Go ALWAYS uses empty RelativeID
-            // The RelativeID indices are only used for cross-type references within a collection set
+            // Single-collection self-ref sets omit RelativeID, but a self-reference inside
+            // a multi-collection set must use this collection's relative ID so nested
+            // self-relations resolve against the correct collection-set member.
+            if let Some(&(relative_id, group_idx)) = collection_set.get(current_type) {
+                let is_multi_collection_set =
+                    collection_set.iter().any(|(name, &(_, other_group_idx))| {
+                        name != current_type && other_group_idx == group_idx
+                    });
+                if is_multi_collection_set {
+                    return Ok(FieldKind::self_ref(
+                        relative_id.to_string(),
+                        parsed_type.is_list,
+                    ));
+                }
+            }
             return Ok(FieldKind::self_ref("", parsed_type.is_list));
         }
 

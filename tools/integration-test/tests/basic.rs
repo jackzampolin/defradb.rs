@@ -8,6 +8,8 @@ mod collection_management;
 mod document_lifecycle;
 #[path = "basic/multi_collection.rs"]
 mod multi_collection;
+#[path = "basic/self_ref_relations_4712.rs"]
+mod self_ref_relations_4712;
 #[path = "basic/smoke.rs"]
 mod smoke;
 #[path = "basic/transactions.rs"]
