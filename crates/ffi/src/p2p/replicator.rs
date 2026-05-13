@@ -45,6 +45,9 @@ pub unsafe extern "C" fn p2p_add_replicator(
                     Some(p2p) => p2p,
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
+                state
+                    .sync_replicator_push_options()
+                    .map_err(FfiP2PError::internal)?;
 
                 let addr = addr_str.clone();
                 let collections = collections.clone();

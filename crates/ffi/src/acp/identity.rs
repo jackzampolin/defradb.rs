@@ -260,16 +260,18 @@ pub extern "C" fn node_set_default_identity(node_ptr: usize, did: *const c_char)
             } else {
                 Some(did_str.clone())
             };
+            state.sync_replicator_push_options()
         });
 
         match updated {
-            Some(()) => {
+            Some(Ok(())) => {
                 if did_str.is_empty() {
                     FfiResult::success("{}".to_string())
                 } else {
                     FfiResult::success(serde_json::json!({ "did": did_str }).to_string())
                 }
             }
+            Some(Err(error)) => FfiResult::error(error),
             None => FfiResult::error(crate::ERR_INVALID_NODE_HANDLE),
         }
     }

@@ -9,6 +9,7 @@ use crate::transport_version_syncer::TransportVersionSyncer;
 use crate::{
     ExplicitReplayCapabilityInput, P2PError, P2PErrorExt as _, P2POperations, P2PResult,
     P2pDocumentInfo, P2pDocumentRequest, ReplicatorInfo, ReplicatorPushOptions,
+    ReplicatorPushOptionsState,
 };
 
 use p2p::iroh::{
@@ -25,7 +26,7 @@ pub struct IrohP2PAdapter<B: Blockstore + 'static> {
     doc_pusher: Option<Arc<dyn TransportDocPusher>>,
     event_bus: Option<Arc<dyn events::Bus>>,
     version_syncer: Option<Arc<dyn TransportVersionSyncer>>,
-    replicator_push_options: ReplicatorPushOptions,
+    replicator_push_options: ReplicatorPushOptionsState,
     peer_addresses: Arc<std::sync::RwLock<HashMap<String, String>>>,
     tracked_documents: Arc<std::sync::RwLock<HashSet<String>>>,
 }
@@ -76,13 +77,21 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
             doc_pusher: Some(doc_pusher),
             event_bus: Some(event_bus),
             version_syncer,
-            replicator_push_options: ReplicatorPushOptions::default(),
+            replicator_push_options: ReplicatorPushOptionsState::default(),
             peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
             tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
     }
 
     pub fn with_replicator_push_options(mut self, options: ReplicatorPushOptions) -> Self {
+        self.replicator_push_options = ReplicatorPushOptionsState::new(options);
+        self
+    }
+
+    pub fn with_replicator_push_options_state(
+        mut self,
+        options: ReplicatorPushOptionsState,
+    ) -> Self {
         self.replicator_push_options = options;
         self
     }
@@ -323,7 +332,8 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                 let push_pusher = Arc::clone(pusher);
                 let push_event_bus = self.event_bus.clone();
                 let push_peer = peer_id;
-                let push_se_key = self.replicator_push_options.se_encryption_key.clone();
+                let push_options = self.replicator_push_options.load();
+                let push_se_key = push_options.se_encryption_key;
 
                 tracing::info!(
                     peer_id = %push_peer,

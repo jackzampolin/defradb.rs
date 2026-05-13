@@ -123,6 +123,26 @@ pub struct NodeState {
     pub se_encryption_key: Option<Zeroizing<Vec<u8>>>,
 }
 
+impl NodeState {
+    pub fn replicator_push_options(&self) -> embedded::ReplicatorPushOptions {
+        embedded::ReplicatorPushOptions {
+            se_encryption_key: self.se_encryption_key.as_ref().map(|key| key.to_vec()),
+            se_identity_pubkey: self
+                .node_identity_did
+                .as_ref()
+                .map(|identity| identity.as_bytes().to_vec()),
+        }
+    }
+
+    pub fn sync_replicator_push_options(&self) -> Result<(), String> {
+        let Some(p2p) = &self.p2p else {
+            return Ok(());
+        };
+        p2p.system
+            .set_replicator_push_options(self.replicator_push_options())
+    }
+}
+
 /// State held for each FFI subscription.
 pub struct SubscriptionState {
     /// The underlying events subscription.
