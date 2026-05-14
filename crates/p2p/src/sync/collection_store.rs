@@ -6,52 +6,12 @@
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
-use storage::corekv::{IterOptions, Iterator, Key, Reader, Store};
+use storage::corekv::{IterOptions, Key, Reader, Store};
+use storage::keys::systemstore::P2PCollectionKey;
+use storage::stores::Systemstore;
 
 /// Marker byte for collection subscription (matches Go's marker = byte(0xff))
 const COLLECTION_MARKER: u8 = 0xff;
-
-/// Prefix for P2P collection keys
-const P2P_COLLECTION_PREFIX: &[u8] = b"/p2p/collection/";
-
-/// Key for P2P collection subscriptions.
-///
-/// Structure: /p2p/collection/{collectionID}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct P2PCollectionKey {
-    pub collection_id: String,
-}
-
-impl P2PCollectionKey {
-    /// Create a new P2PCollectionKey
-    pub fn new(collection_id: impl Into<String>) -> Self {
-        Self {
-            collection_id: collection_id.into(),
-        }
-    }
-
-    /// Parse a collection ID from a key
-    pub fn parse_collection_id(key: &[u8]) -> Option<String> {
-        if key.starts_with(P2P_COLLECTION_PREFIX) {
-            let id_bytes = &key[P2P_COLLECTION_PREFIX.len()..];
-            String::from_utf8(id_bytes.to_vec()).ok()
-        } else {
-            None
-        }
-    }
-}
-
-impl Key for P2PCollectionKey {
-    fn bytes(&self) -> Vec<u8> {
-        let mut key = P2P_COLLECTION_PREFIX.to_vec();
-        key.extend(self.collection_id.as_bytes());
-        key
-    }
-
-    fn to_string(&self) -> String {
-        format!("/p2p/collection/{}", self.collection_id)
-    }
-}
 
 /// Trait for P2P collection storage operations.
 #[async_trait]
@@ -71,13 +31,15 @@ pub trait P2PCollectionStorage: Send + Sync {
 
 /// Implementation of P2P collection storage backed by a key-value store.
 pub struct P2PCollectionStore<S: Store> {
-    store: Arc<S>,
+    systemstore: Systemstore<S>,
 }
 
 impl<S: Store> P2PCollectionStore<S> {
     /// Create a new P2P collection store.
     pub fn new(store: Arc<S>) -> Self {
-        Self { store }
+        Self {
+            systemstore: Systemstore::new(store),
+        }
     }
 }
 
@@ -86,7 +48,7 @@ impl<S: Store + 'static> P2PCollectionStorage for P2PCollectionStore<S> {
     async fn add_collection(&self, collection_id: &str) -> Result<()> {
         let key = P2PCollectionKey::new(collection_id);
         let mut txn = self
-            .store
+            .systemstore
             .new_txn(false)
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
@@ -105,7 +67,7 @@ impl<S: Store + 'static> P2PCollectionStorage for P2PCollectionStore<S> {
     async fn remove_collection(&self, collection_id: &str) -> Result<()> {
         let key = P2PCollectionKey::new(collection_id);
         let mut txn = self
-            .store
+            .systemstore
             .new_txn(false)
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
@@ -123,7 +85,7 @@ impl<S: Store + 'static> P2PCollectionStorage for P2PCollectionStore<S> {
 
     async fn get_all_collections(&self) -> Result<Vec<String>> {
         let txn = self
-            .store
+            .systemstore
             .new_txn(true)
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
@@ -131,7 +93,7 @@ impl<S: Store + 'static> P2PCollectionStorage for P2PCollectionStore<S> {
         let mut collections = Vec::new();
 
         // Iterate over all keys with the P2P collection prefix
-        let opts = IterOptions::new().with_prefix(P2P_COLLECTION_PREFIX.to_vec());
+        let opts = IterOptions::new().with_prefix(P2PCollectionKey::p2p_collection_prefix());
         let mut iter = txn
             .iterator(opts)
             .await
@@ -142,7 +104,7 @@ impl<S: Store + 'static> P2PCollectionStorage for P2PCollectionStore<S> {
             .await
             .map_err(|e| Error::Storage(e.to_string()))?
         {
-            if let Some(collection_id) = P2PCollectionKey::parse_collection_id(&kv.key) {
+            if let Some(collection_id) = parse_collection_id(&kv.key) {
                 collections.push(collection_id);
             }
         }
@@ -157,7 +119,7 @@ impl<S: Store + 'static> P2PCollectionStorage for P2PCollectionStore<S> {
     async fn is_subscribed(&self, collection_id: &str) -> Result<bool> {
         let key = P2PCollectionKey::new(collection_id);
         let txn = self
-            .store
+            .systemstore
             .new_txn(true)
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
@@ -169,6 +131,13 @@ impl<S: Store + 'static> P2PCollectionStorage for P2PCollectionStore<S> {
 
         Ok(value.is_some())
     }
+}
+
+fn parse_collection_id(key: &[u8]) -> Option<String> {
+    let prefix = P2PCollectionKey::p2p_collection_prefix();
+    key.strip_prefix(prefix.as_slice())
+        .and_then(|id_bytes| String::from_utf8(id_bytes.to_vec()).ok())
+        .filter(|id| !id.is_empty())
 }
 
 /// No-op implementation for when persistent storage is not available.
@@ -206,10 +175,65 @@ mod tests {
 
     #[test]
     fn test_parse_collection_id() {
-        let id = P2PCollectionKey::parse_collection_id(b"/p2p/collection/users");
+        let id = parse_collection_id(b"/p2p/collection/users");
         assert_eq!(id, Some("users".to_string()));
 
-        let id = P2PCollectionKey::parse_collection_id(b"/other/key");
+        let id = parse_collection_id(b"/other/key");
         assert_eq!(id, None);
+    }
+
+    #[tokio::test]
+    async fn stores_collection_state_in_systemstore_namespace() {
+        use storage::backends::MemoryStore;
+
+        let store = Arc::new(MemoryStore::new());
+        let p2p_store = P2PCollectionStore::new(store.clone());
+
+        p2p_store.add_collection("users").await.unwrap();
+
+        let systemstore = Systemstore::new(store.clone());
+        let system_txn = systemstore.new_txn(true).await.unwrap();
+        assert_eq!(
+            system_txn
+                .get(&P2PCollectionKey::new("users").bytes())
+                .await
+                .unwrap(),
+            Some(vec![COLLECTION_MARKER])
+        );
+
+        let root_txn = store.new_txn(true).await.unwrap();
+        assert_eq!(
+            root_txn
+                .get(&P2PCollectionKey::new("users").bytes())
+                .await
+                .unwrap(),
+            None,
+            "Go-compatible P2P collection state must live in Systemstore, not the raw root store"
+        );
+    }
+
+    #[tokio::test]
+    async fn loads_collection_state_written_like_go_systemstore() {
+        use storage::backends::MemoryStore;
+
+        let store = Arc::new(MemoryStore::new());
+        let systemstore = Systemstore::new(store.clone());
+        let mut system_txn = systemstore.new_txn(false).await.unwrap();
+        system_txn
+            .set(
+                &P2PCollectionKey::new("users").bytes(),
+                &[COLLECTION_MARKER],
+            )
+            .await
+            .unwrap();
+        system_txn.commit().await.unwrap();
+
+        let p2p_store = P2PCollectionStore::new(store);
+
+        assert!(p2p_store.is_subscribed("users").await.unwrap());
+        assert_eq!(
+            p2p_store.get_all_collections().await.unwrap(),
+            vec!["users".to_string()]
+        );
     }
 }

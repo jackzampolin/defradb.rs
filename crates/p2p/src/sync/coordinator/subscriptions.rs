@@ -65,25 +65,29 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     /// Unsubscribe from a collection.
     pub async fn unsubscribe_collection(&self, collection_id: &str) -> Result<bool> {
+        let mut subscribed_collections = self.subscriptions.subscribed_collections.write().await;
+
+        // Persist the desired unsubscribe intent first. If the live transport
+        // leave fails, the in-process topic may linger until retry or restart,
+        // but durable restore must not re-install it.
+        self.subscriptions
+            .collection_store
+            .remove_collection(collection_id)
+            .await?;
+
         let result = self
             .runtime
             .broadcaster
             .unsubscribe_collection(collection_id)
-            .await?;
+            .await;
+        subscribed_collections.remove(collection_id);
+
+        let result = result?;
+
         if result {
-            self.subscriptions
-                .collection_store
-                .remove_collection(collection_id)
-                .await?;
-
-            self.subscriptions
-                .subscribed_collections
-                .write()
-                .await
-                .remove(collection_id);
-
             tracing::debug!(collection_id = %collection_id, "Unsubscribed from collection (persisted)");
         }
+
         Ok(result)
     }
 
@@ -99,6 +103,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     }
 
     /// Load and subscribe to all persisted P2P collections.
+    ///
+    /// This can run before pubsub_rpc services start: collection topic
+    /// subscription is a transport-level operation independent of the base
+    /// doc-sync / sync-branchable service topics.
     pub async fn load_p2p_collections(&self) -> Result<usize> {
         let collections = self
             .subscriptions
@@ -172,5 +180,341 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Get all unmerged block CIDs.
     pub async fn get_unmerged(&self) -> Result<Vec<Cid>> {
         self.manager.get_unmerged().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use blockstore::DefraBlockstore;
+    use cid::Cid;
+    use storage::backends::MemoryStore;
+
+    use crate::bitswap::AccessMode;
+    use crate::message::{
+        BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
+        PushLogReply, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
+        QuerySEArtifactsRequest,
+    };
+    use crate::sync::collection_store::P2PCollectionStore;
+    use crate::sync::manager::SyncConfig;
+    use crate::topics::DefraTopic;
+    use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId};
+    use crate::{QueryId, ReplicatorInfo};
+
+    use super::SyncCoordinator;
+
+    type TestBlockstore = DefraBlockstore<MemoryStore>;
+
+    #[derive(Clone)]
+    struct RecordingTransport {
+        peer_id: PeerId,
+        pubkey: Vec<u8>,
+        subscribed: Arc<Mutex<HashSet<String>>>,
+        replicators: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    }
+
+    impl RecordingTransport {
+        fn new(peer_id: &str) -> Self {
+            Self {
+                peer_id: PeerId::new(peer_id.to_string()),
+                pubkey: vec![1, 2, 3],
+                subscribed: Arc::new(Mutex::new(HashSet::new())),
+                replicators: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+
+        fn subscribed_topics(&self) -> Vec<String> {
+            let mut topics: Vec<_> = self.subscribed.lock().unwrap().iter().cloned().collect();
+            topics.sort();
+            topics
+        }
+    }
+
+    #[async_trait]
+    impl P2PTransport for RecordingTransport {
+        type ResponseToken = ();
+
+        fn local_peer_id(&self) -> &PeerId {
+            &self.peer_id
+        }
+
+        fn local_public_key_proto(&self) -> &[u8] {
+            &self.pubkey
+        }
+
+        fn sign(&self, _data: &[u8]) -> crate::Result<Vec<u8>> {
+            Ok(vec![0])
+        }
+
+        async fn dial(&self, _peer_id: &PeerId, _addrs: Vec<PeerAddr>) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn listen(&self, _addr: PeerAddr) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn connected_peers(&self) -> crate::Result<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
+        async fn listen_addresses(&self) -> crate::Result<Vec<PeerAddr>> {
+            Ok(Vec::new())
+        }
+
+        async fn poll_until_connected(
+            &self,
+            _peer_id: &PeerId,
+            _timeout: Duration,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn peer_addresses(&self) -> crate::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn subscribe(&self, topic: DefraTopic) -> crate::Result<bool> {
+            Ok(self.subscribed.lock().unwrap().insert(topic.topic_string()))
+        }
+
+        async fn unsubscribe(&self, topic: DefraTopic) -> crate::Result<bool> {
+            Ok(self
+                .subscribed
+                .lock()
+                .unwrap()
+                .remove(&topic.topic_string()))
+        }
+
+        async fn publish(
+            &self,
+            _topic: DefraTopic,
+            _msg: PushLogBroadcast,
+        ) -> crate::Result<MessageId> {
+            Ok(MessageId::new("message".to_string()))
+        }
+
+        async fn topic_peers(&self, _topic: DefraTopic) -> crate::Result<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
+        async fn send_pushlog_response(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: PushLogReply,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_two_stream_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: PushLogRequest,
+        ) -> crate::Result<PushLogReply> {
+            Ok(PushLogReply::success("ok"))
+        }
+
+        async fn send_two_stream_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: PushLogReply,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: DocSyncRequest,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: DocSyncReply,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: BranchableSyncRequest,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: BranchableSyncReply,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_car_request(&self, _peer_id: &PeerId, _root_cid: Cid) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_car_response(
+            &self,
+            _peer_id: &PeerId,
+            _car_data: Vec<u8>,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_car_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _car_data: Vec<u8>,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: DocSyncReply,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: BranchableSyncReply,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_se_artifacts(
+            &self,
+            _peer_id: &PeerId,
+            _req: PushSEArtifactsRequest,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_se_query_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: QuerySEArtifactsRequest,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_se_query_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: QuerySEArtifactsReply,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn sync_blocks(
+            &self,
+            _root: Cid,
+            _providers: Vec<PeerId>,
+            _missing: Vec<Cid>,
+        ) -> crate::Result<QueryId> {
+            Ok(QueryId(1))
+        }
+
+        async fn cancel_sync(&self, _query_id: QueryId) -> crate::Result<bool> {
+            Ok(true)
+        }
+
+        async fn create_replicator(
+            &self,
+            peer_id: &PeerId,
+            collections: Vec<String>,
+        ) -> crate::Result<()> {
+            self.replicators
+                .lock()
+                .unwrap()
+                .insert(peer_id.to_string(), collections);
+            Ok(())
+        }
+
+        async fn delete_replicator(&self, peer_id: &PeerId) -> crate::Result<()> {
+            self.replicators.lock().unwrap().remove(peer_id.as_str());
+            Ok(())
+        }
+
+        async fn list_replicators(&self) -> crate::Result<Vec<ReplicatorInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_replicator(&self, _peer_id: &PeerId) -> crate::Result<Option<ReplicatorInfo>> {
+            Ok(None)
+        }
+
+        async fn remove_replicator_collections(
+            &self,
+            _peer_id: &PeerId,
+            _collections: Vec<String>,
+        ) -> crate::Result<bool> {
+            Ok(false)
+        }
+
+        async fn shutdown(&self) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn new_test_coordinator(
+        store: Arc<MemoryStore>,
+        transport: RecordingTransport,
+    ) -> SyncCoordinator<TestBlockstore, RecordingTransport> {
+        let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
+        let collection_store = Arc::new(P2PCollectionStore::new(store));
+        let (coordinator, _events) = SyncCoordinator::with_collection_store(
+            transport,
+            blockstore,
+            SyncConfig::default(),
+            AccessMode::Controlled,
+            collection_store,
+        )
+        .await
+        .unwrap();
+        coordinator
+    }
+
+    #[tokio::test]
+    async fn load_p2p_collections_reinstalls_subscriptions_after_restart() {
+        let store = Arc::new(MemoryStore::new());
+        let initial_transport = RecordingTransport::new("initial-peer");
+        let initial = new_test_coordinator(store.clone(), initial_transport.clone()).await;
+
+        assert!(initial.subscribe_collection("users").await.unwrap());
+        assert_eq!(initial_transport.subscribed_topics(), vec!["users"]);
+
+        let restarted_transport = RecordingTransport::new("restarted-peer");
+        let restarted = new_test_coordinator(store, restarted_transport.clone()).await;
+        assert!(
+            restarted
+                .get_subscribed_collections()
+                .await
+                .unwrap()
+                .is_empty(),
+            "a fresh coordinator starts with an empty in-memory subscription cache"
+        );
+
+        let restored = restarted.load_p2p_collections().await.unwrap();
+
+        assert_eq!(restored, 1);
+        assert_eq!(restarted_transport.subscribed_topics(), vec!["users"]);
+        assert_eq!(
+            restarted.get_subscribed_collections().await.unwrap(),
+            vec!["users".to_string()]
+        );
     }
 }
