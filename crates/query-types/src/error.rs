@@ -268,6 +268,49 @@ impl QueryError {
     pub fn introspection(msg: impl Into<String>) -> Self {
         Self::Introspection(msg.into())
     }
+
+    // ---- Cursor pagination errors (Go-exact surface strings) ----
+
+    /// `"invalid cursor"` — invalid base64, invalid JSON, or empty doc ID.
+    /// Mirrors Go's `internal/cursor/errors.go::errInvalidCursor`.
+    pub fn cursor_invalid() -> Self {
+        Self::execution("invalid cursor")
+    }
+
+    /// `"_cursor block must contain exactly one collection query"`.
+    /// Mirrors Go's `client/request/errors.go::errCursorMustContainQuery`.
+    pub fn cursor_must_contain_query() -> Self {
+        Self::execution("_cursor block must contain exactly one collection query")
+    }
+
+    /// `"_cursor block cannot contain multiple collection queries"`.
+    /// Mirrors Go's `errMultipleQueriesInCursor`.
+    pub fn cursor_multiple_queries() -> Self {
+        Self::execution("_cursor block cannot contain multiple collection queries")
+    }
+
+    /// `"first must be non-negative"`.
+    pub fn cursor_first_must_be_non_negative() -> Self {
+        Self::execution("first must be non-negative")
+    }
+
+    /// `"last must be non-negative"`.
+    pub fn cursor_last_must_be_non_negative() -> Self {
+        Self::execution("last must be non-negative")
+    }
+
+    /// `"forward parameters (first/after) cannot be combined with backward parameters (last/before)"`.
+    pub fn cursor_forward_backward_conflict() -> Self {
+        Self::execution(
+            "forward parameters (first/after) cannot be combined with backward parameters (last/before)",
+        )
+    }
+
+    /// `"no supporting index for cursor order field"` — order fields not covered by any index.
+    /// Mirrors Go's `internal/planner/errors.go::errNoSupportingIndexForCursor`.
+    pub fn cursor_no_supporting_index() -> Self {
+        Self::execution("no supporting index for cursor order field")
+    }
 }
 
 #[cfg(test)]
@@ -346,5 +389,55 @@ mod tests {
 
         let err = TransactionError::lock_poisoned("panic occurred");
         assert_eq!(err.to_string(), "lock poisoned: panic occurred");
+    }
+}
+
+#[cfg(test)]
+mod cursor_error_tests {
+    use super::QueryError;
+
+    #[test]
+    fn invalid_cursor_message_matches_go() {
+        let e = QueryError::cursor_invalid();
+        assert_eq!(e.to_string(), "invalid cursor");
+    }
+
+    #[test]
+    fn no_supporting_index_message_matches_go() {
+        let e = QueryError::cursor_no_supporting_index();
+        assert_eq!(e.to_string(), "no supporting index for cursor order field");
+    }
+
+    #[test]
+    fn cursor_must_contain_query_message() {
+        let e = QueryError::cursor_must_contain_query();
+        assert_eq!(e.to_string(), "_cursor block must contain exactly one collection query");
+    }
+
+    #[test]
+    fn multiple_queries_in_cursor_message() {
+        let e = QueryError::cursor_multiple_queries();
+        assert_eq!(e.to_string(), "_cursor block cannot contain multiple collection queries");
+    }
+
+    #[test]
+    fn first_negative_message() {
+        let e = QueryError::cursor_first_must_be_non_negative();
+        assert_eq!(e.to_string(), "first must be non-negative");
+    }
+
+    #[test]
+    fn last_negative_message() {
+        let e = QueryError::cursor_last_must_be_non_negative();
+        assert_eq!(e.to_string(), "last must be non-negative");
+    }
+
+    #[test]
+    fn forward_backward_conflict_message() {
+        let e = QueryError::cursor_forward_backward_conflict();
+        assert_eq!(
+            e.to_string(),
+            "forward parameters (first/after) cannot be combined with backward parameters (last/before)"
+        );
     }
 }
