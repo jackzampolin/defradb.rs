@@ -108,6 +108,18 @@ pub trait IndexIterator: MaybeSend {
     /// Reset the iterator to the beginning.
     async fn reset(&mut self) -> Result<()>;
 
+    /// Seek the iterator to the given raw storage key.
+    ///
+    /// Positions the iterator at the first entry at or after `key` (forward)
+    /// or at or before `key` (reverse). Returns `true` if a valid position
+    /// was found, `false` if no entries remain after seeking.
+    ///
+    /// Used by cursor pagination to skip directly into an index without
+    /// scanning from the beginning. Default implementation returns `Ok(false)`.
+    async fn seek(&mut self, _key: &[u8]) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Collect all remaining entries into a Vec.
     ///
     /// Consumes the iterator. Use with caution for large result sets.
@@ -143,6 +155,10 @@ impl IndexIterator for Box<dyn IndexIterator> {
 
     async fn reset(&mut self) -> Result<()> {
         (**self).reset().await
+    }
+
+    async fn seek(&mut self, key: &[u8]) -> Result<bool> {
+        (**self).seek(key).await
     }
 }
 

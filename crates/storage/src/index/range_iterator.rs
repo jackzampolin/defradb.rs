@@ -215,6 +215,41 @@ impl RangeIterator {
         })
     }
 
+    /// Apply a cursor seek to position the iterator for cursor-based pagination.
+    ///
+    /// Positions the underlying KV iterator at `seek_key`, then sets the bound
+    /// so that the existing `is_key_within_bounds` filter enforces inclusivity:
+    ///
+    /// - Forward inclusive (`!reversed`, `inclusive`): lower bound = seek_key inclusive
+    /// - Forward exclusive (`!reversed`, `!inclusive`): lower bound = seek_key exclusive
+    /// - Reverse inclusive (`reversed`, `inclusive`): upper bound = seek_key inclusive
+    /// - Reverse exclusive (`reversed`, `!inclusive`): upper bound = seek_key exclusive
+    ///
+    /// For reverse seeks, the actual storage seek uses `seek_key` appended with `0xFF` so
+    /// that entries whose full key starts with `seek_key` (e.g. `[seek_key][doc_id]`) are
+    /// included in the initial seek position.
+    pub async fn apply_cursor_seek(&mut self, seek_key: Vec<u8>, inclusive: bool) -> Result<()> {
+        if self.reverse {
+            // For reverse iteration, seek_key is an upper bound.
+            // Set the upper bound so is_key_within_bounds enforces inclusivity.
+            self.upper_bound_key = Some(seek_key.clone());
+            self.upper_inclusive = inclusive;
+            // When seeking in reverse, we want to land at or before the last key that
+            // starts with seek_key. Since keys have the form [seek_key][doc_id], appending
+            // 0xFF (max byte) ensures the storage seek finds those keys.
+            let mut seek_bytes = seek_key;
+            seek_bytes.push(0xFF);
+            self.inner.seek(&seek_bytes).await?;
+        } else {
+            // For forward iteration, seek_key is a lower bound.
+            // Set the lower bound so is_key_within_bounds enforces inclusivity.
+            self.lower_bound_key = Some(seek_key.clone());
+            self.lower_inclusive = inclusive;
+            self.inner.seek(&seek_key).await?;
+        }
+        Ok(())
+    }
+
     /// Extract document ID and field values from an index key.
     fn extract_entry(&self, key: &[u8], value: &[u8]) -> Result<IndexEntry> {
         // Decode field values and get remaining bytes (doc_id suffix)
@@ -415,6 +450,13 @@ impl IndexIterator for RangeIterator {
         self.exhausted = false;
         Ok(())
     }
+
+    async fn seek(&mut self, key: &[u8]) -> Result<bool> {
+        if self.exhausted {
+            return Ok(false);
+        }
+        self.inner.seek(key).await
+    }
 }
 
 #[cfg(test)]
@@ -609,5 +651,96 @@ mod tests {
         let entries = iter.collect_all().await.unwrap();
         // Should include 40, 50, 60, 70
         assert_eq!(entries.len(), 4);
+    }
+
+    /// Build an encoded seek key for an integer value on the test index (collection=1, index=1).
+    fn build_age_seek_key(age: i64) -> Vec<u8> {
+        let key_prefix = IndexDataStoreKey::index_prefix(1, 1);
+        encode_field_value(key_prefix, &NormalValue::Int(age), false).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_cursor_seek_forward_exclusive_skips_boundary() {
+        // Setup: age index with alice=20, bob=30, carol=40.
+        // Forward exclusive seek at age=30 → should return only carol (age=40).
+        let store = MemoryStore::new();
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        let desc = test_index_description();
+        let index = SimpleIndex::new(1, desc.clone());
+
+        index
+            .save(&mut txn, "alice", &[NormalValue::Int(20)])
+            .await
+            .unwrap();
+        index
+            .save(&mut txn, "bob", &[NormalValue::Int(30)])
+            .await
+            .unwrap();
+        index
+            .save(&mut txn, "carol", &[NormalValue::Int(40)])
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        let txn = store.new_txn(true).await.unwrap();
+        let mut iter = RangeIterator::new_scan(txn.as_ref(), 1, &desc, false, false)
+            .await
+            .unwrap();
+
+        // Seek to age=30 exclusive (forward): iterator should land at carol (age=40).
+        let seek_key = build_age_seek_key(30);
+        iter.apply_cursor_seek(seek_key, false).await.unwrap();
+
+        let entries = iter.collect_all().await.unwrap();
+        let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
+
+        assert!(!doc_ids.contains(&"alice"), "alice should be before the cursor");
+        assert!(!doc_ids.contains(&"bob"), "bob is the exclusive boundary and must be skipped");
+        assert!(doc_ids.contains(&"carol"), "carol must be included (after boundary)");
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cursor_seek_backward_inclusive_starts_at_boundary() {
+        // Setup: age index with alice=20, bob=30, carol=40.
+        // Backward inclusive seek at age=30 → should return bob then alice.
+        let store = MemoryStore::new();
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        let desc = test_index_description();
+        let index = SimpleIndex::new(1, desc.clone());
+
+        index
+            .save(&mut txn, "alice", &[NormalValue::Int(20)])
+            .await
+            .unwrap();
+        index
+            .save(&mut txn, "bob", &[NormalValue::Int(30)])
+            .await
+            .unwrap();
+        index
+            .save(&mut txn, "carol", &[NormalValue::Int(40)])
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        let txn = store.new_txn(true).await.unwrap();
+        let mut iter = RangeIterator::new_scan(txn.as_ref(), 1, &desc, false, true)
+            .await
+            .unwrap();
+
+        // Seek to age=30 inclusive (reverse): iterator should include bob and alice.
+        // The seek_key encodes age=30; for a reverse scan the storage seek lands at or before it.
+        let seek_key = build_age_seek_key(30);
+        iter.apply_cursor_seek(seek_key, true).await.unwrap();
+
+        let entries = iter.collect_all().await.unwrap();
+        let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
+
+        assert!(!doc_ids.contains(&"carol"), "carol is after the cursor and must be excluded");
+        assert!(doc_ids.contains(&"bob"), "bob is the inclusive boundary and must be included");
+        assert!(doc_ids.contains(&"alice"), "alice must be included (before boundary in reverse)");
+        assert_eq!(entries.len(), 2);
     }
 }
