@@ -40,14 +40,15 @@ pub unsafe extern "C" fn set_se_encryption_key(
         // valid for 32 bytes.
         let key = Zeroizing::new(std::slice::from_raw_parts(key_ptr, key_len).to_vec());
 
-        let found = NODES.get_mut(node_ptr, |state| {
+        let result = NODES.get_mut(node_ptr, |state| {
             state.se_encryption_key = Some(key);
+            state.sync_replicator_push_options()
         });
 
-        if found.is_none() {
-            return FfiResult::error(crate::ERR_INVALID_NODE_HANDLE);
+        match result {
+            Some(Ok(())) => FfiResult::ok(),
+            Some(Err(error)) => FfiResult::error(error),
+            None => FfiResult::error(crate::ERR_INVALID_NODE_HANDLE),
         }
-
-        FfiResult::ok()
     }
 }

@@ -350,7 +350,6 @@ pub(crate) fn spawn_libp2p_retry_loop<S: storage::corekv::Store + 'static>(
 #[cfg(feature = "iroh")]
 pub(crate) fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
     store: Arc<S>,
-    transport: p2p::iroh::IrohTransport,
     doc_pusher: Arc<dyn defra_p2p_adapter::TransportDocPusher>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {

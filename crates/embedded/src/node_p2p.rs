@@ -11,7 +11,9 @@ use crate::node_tasks::{
     spawn_replication_loop,
 };
 use crate::{Libp2pConfig, ManagedP2PSystem, TransportKind};
-use defra_p2p_adapter::{DbDocPusher, DbVersionSyncer, DocPusher, P2PAdapter};
+use defra_p2p_adapter::{
+    DbDocPusher, DbVersionSyncer, DocPusher, P2PAdapter, ReplicatorPushOptionsState,
+};
 
 pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     pub system: Arc<ManagedP2PSystem>,
@@ -154,17 +156,19 @@ where
     restore_libp2p_replicators(&handle, &restore_peerstore).await;
     let restored_doc_ids = restore_libp2p_documents(&handle, &restore_peerstore).await;
 
+    let replicator_push_options = ReplicatorPushOptionsState::default();
     let adapter = P2PAdapter::with_full_context(
         handle.clone(),
         coordinator.clone(),
         doc_pusher,
         event_bus,
         version_syncer,
-    );
+    )
+    .with_replicator_push_options_state(replicator_push_options.clone());
     adapter.set_initial_tracked_documents(restored_doc_ids);
     let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
-    let system = Arc::new(ManagedP2PSystem::new(
+    let system = Arc::new(ManagedP2PSystem::with_replicator_push_options(
         TransportKind::Libp2p,
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
         crate::node::ShutdownHandle::libp2p(
@@ -177,6 +181,7 @@ where
                 retry_loop_task.abort_handle(),
             ],
         ),
+        replicator_push_options,
     ));
 
     Ok(P2PSetup {
@@ -278,24 +283,25 @@ where
         database.clone(),
         transport.clone(),
     ));
-    let retry_loop_task =
-        spawn_iroh_retry_loop(store.clone(), transport.clone(), doc_pusher.clone());
+    let retry_loop_task = spawn_iroh_retry_loop(store.clone(), doc_pusher.clone());
 
     let restore_peerstore = Peerstore::new(store.clone());
     restore_iroh_replicators(&coordinator, &restore_peerstore).await;
     let restored_doc_ids = restore_iroh_documents(&transport, &restore_peerstore).await;
 
+    let replicator_push_options = ReplicatorPushOptionsState::default();
     let adapter = IrohP2PAdapter::with_full_context(
         transport.clone(),
         coordinator.clone(),
         doc_pusher,
         event_bus,
         version_syncer,
-    );
+    )
+    .with_replicator_push_options_state(replicator_push_options.clone());
     adapter.set_initial_tracked_documents(restored_doc_ids);
     let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
-    let system = Arc::new(ManagedP2PSystem::new(
+    let system = Arc::new(ManagedP2PSystem::with_replicator_push_options(
         TransportKind::Iroh,
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
         crate::node::ShutdownHandle::iroh(
@@ -309,6 +315,7 @@ where
                 retry_loop_task.abort_handle(),
             ],
         ),
+        replicator_push_options,
     ));
 
     Ok(P2PSetup {

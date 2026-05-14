@@ -8,6 +8,7 @@ mod node_tasks;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+pub use defra_p2p_adapter::{ReplicatorPushOptions, ReplicatorPushOptionsState};
 
 pub use node::{build_with_store, EmbeddedNode, NodeBuilder};
 pub use node_tasks::BackgroundTasks;
@@ -117,6 +118,7 @@ pub enum TransportKind {
 pub struct ManagedP2PSystem {
     kind: TransportKind,
     ops: Arc<dyn defra_http::P2POperations>,
+    replicator_push_options: ReplicatorPushOptionsState,
     shutdown: node::ShutdownHandle,
 }
 
@@ -126,9 +128,24 @@ impl ManagedP2PSystem {
         ops: Arc<dyn defra_http::P2POperations>,
         shutdown: node::ShutdownHandle,
     ) -> Self {
+        Self::with_replicator_push_options(
+            kind,
+            ops,
+            shutdown,
+            ReplicatorPushOptionsState::default(),
+        )
+    }
+
+    pub fn with_replicator_push_options(
+        kind: TransportKind,
+        ops: Arc<dyn defra_http::P2POperations>,
+        shutdown: node::ShutdownHandle,
+        replicator_push_options: ReplicatorPushOptionsState,
+    ) -> Self {
         Self {
             kind,
             ops,
+            replicator_push_options,
             shutdown,
         }
     }
@@ -139,6 +156,17 @@ impl ManagedP2PSystem {
 
     pub fn ops(&self) -> &Arc<dyn defra_http::P2POperations> {
         &self.ops
+    }
+
+    pub fn set_replicator_push_options(
+        &self,
+        options: ReplicatorPushOptions,
+    ) -> Result<(), String> {
+        self.replicator_push_options.store(options)
+    }
+
+    pub fn replicator_push_options(&self) -> ReplicatorPushOptions {
+        self.replicator_push_options.load()
     }
 
     pub async fn shutdown(&self) {

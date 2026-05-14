@@ -3819,6 +3819,7 @@ dependencies = [
  "storage",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
