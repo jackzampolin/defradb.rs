@@ -9935,7 +9935,6 @@ dependencies = [
  "ciborium",
  "cid 0.10.1",
  "crdt",
- "cursor",
  "defra-core",
  "document",
  "futures",
