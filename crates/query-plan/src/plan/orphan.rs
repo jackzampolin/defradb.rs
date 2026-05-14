@@ -166,6 +166,7 @@ impl PlanNode for OrphanNode {
                                 limit: Some(1),
                                 offset: 0,
                                 value_filter: None,
+                                cursor_seek: None,
                             },
                         )
                         .await?;

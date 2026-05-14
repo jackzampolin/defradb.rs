@@ -385,6 +385,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                         limit: None,
                         offset: 0,
                         value_filter: None,
+                        cursor_seek: None,
                     };
                     let branch_result = self
                         .get_by_index_scan(collection_name, &branch_params)
