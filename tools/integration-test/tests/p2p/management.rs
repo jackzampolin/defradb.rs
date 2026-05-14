@@ -215,3 +215,79 @@ async fn p2p_management_test(cluster: TestCluster) {
 }
 
 for_each_p2p_topology!(p2p_management, p2p_management_test, .with_p2p());
+
+async fn p2p_collection_subscription_persists_after_restart_test(mut cluster: TestCluster) {
+    let timeout = Duration::from_secs(15);
+    cluster
+        .wait_for_log(0, "p2p_listening", timeout)
+        .await
+        .expect("node0 P2P listener did not start");
+    cluster
+        .wait_for_log(1, "p2p_listening", timeout)
+        .await
+        .expect("node1 P2P listener did not start");
+
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0
+        .schema_add("type Users { name: String }")
+        .expect("schema add node0");
+    node1
+        .schema_add("type Users { name: String }")
+        .expect("schema add node1");
+
+    let info1 = node1.p2p_info().expect("p2p_info node1");
+    let addr1 = info1
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .expect("node1 has no P2P address")
+        .to_string();
+    node0.p2p_connect(&[&addr1]).expect("p2p_connect");
+
+    node1
+        .p2p_collection_add(&["Users"])
+        .expect("p2p_collection_add node1");
+    let before_restart = node1
+        .p2p_collection_list()
+        .expect("p2p_collection_list before restart");
+    assert_eq!(
+        before_restart
+            .as_array()
+            .expect("collection_list not array")
+            .len(),
+        1,
+        "expected receiver collection subscription before restart"
+    );
+
+    cluster
+        .restart_node(1, Duration::from_secs(30))
+        .await
+        .expect("restart node1");
+    cluster
+        .wait_for_log(1, "p2p_listening", timeout)
+        .await
+        .expect("node1 P2P listener did not restart");
+
+    let node1_after_restart = cluster.client(1);
+    let after_restart = node1_after_restart
+        .p2p_collection_list()
+        .expect("p2p_collection_list after restart");
+    assert_eq!(
+        after_restart
+            .as_array()
+            .expect("collection_list not array")
+            .len(),
+        1,
+        "receiver collection subscription should persist across restart"
+    );
+}
+
+for_each_p2p_topology!(
+    p2p_collection_subscription_persists_after_restart,
+    p2p_collection_subscription_persists_after_restart_test,
+    // This macro runs Rust and Go topologies with one store string. Go requires
+    // badger, and Rust accepts badger as its persistent redb-compatible alias.
+    .with_p2p().with_store("badger")
+);
