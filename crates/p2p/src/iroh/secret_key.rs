@@ -21,7 +21,7 @@ pub async fn load_or_generate_secret_key(
             Ok(iroh::SecretKey::from_bytes(&array))
         }
         Some(path) => {
-            let key = iroh::SecretKey::generate(&mut rand::rng());
+            let key = iroh::SecretKey::generate();
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await.with_context(|| {
                     format!("failed to create iroh key directory '{}'", parent.display())
@@ -41,6 +41,6 @@ pub async fn load_or_generate_secret_key(
             }
             Ok(key)
         }
-        None => Ok(iroh::SecretKey::generate(&mut rand::rng())),
+        None => Ok(iroh::SecretKey::generate()),
     }
 }

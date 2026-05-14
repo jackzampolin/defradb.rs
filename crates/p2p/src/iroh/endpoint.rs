@@ -110,7 +110,7 @@ pub async fn spawn_endpoint(
     alpns.push(iroh_gossip::net::GOSSIP_ALPN.to_vec());
 
     let relay_mode = relay_mode_from_config(&config.relay_mode)?;
-    let mut builder = Endpoint::empty_builder()
+    let mut builder = Endpoint::builder(iroh::endpoint::presets::Minimal)
         .relay_mode(relay_mode)
         .secret_key(config.secret_key.clone())
         .alpns(alpns);

@@ -846,7 +846,7 @@ impl Node {
             })?;
             Ok(iroh_net::SecretKey::from_bytes(&seed))
         } else {
-            Ok(iroh_net::SecretKey::generate(&mut rand::rng()))
+            Ok(iroh_net::SecretKey::generate())
         }
     }
 
