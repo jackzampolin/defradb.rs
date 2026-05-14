@@ -126,7 +126,10 @@ pub struct NodeState {
 impl NodeState {
     pub fn replicator_push_options(&self) -> embedded::ReplicatorPushOptions {
         embedded::ReplicatorPushOptions {
-            se_encryption_key: self.se_encryption_key.as_ref().map(|key| key.to_vec()),
+            se_encryption_key: self
+                .se_encryption_key
+                .as_ref()
+                .map(|key| Zeroizing::new(key.to_vec())),
             se_identity_pubkey: self
                 .node_identity_did
                 .as_ref()

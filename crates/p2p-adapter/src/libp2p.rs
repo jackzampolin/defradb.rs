@@ -373,7 +373,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                             &push_handle,
                             peer_id,
                             &new_collection_names,
-                            push_se_key.as_deref(),
+                            push_se_key.as_ref().map(|key| key.as_slice()),
                             push_identity.as_deref(),
                         )
                         .await

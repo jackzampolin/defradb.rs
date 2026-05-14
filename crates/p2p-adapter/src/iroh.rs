@@ -346,7 +346,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                         .push_existing_docs(
                             &push_peer,
                             &new_collection_names,
-                            push_se_key.as_deref(),
+                            push_se_key.as_ref().map(|key| key.as_slice()),
                         )
                         .await
                     {
