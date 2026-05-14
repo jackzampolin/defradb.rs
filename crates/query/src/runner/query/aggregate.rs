@@ -258,6 +258,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             exhaustive: false,
             selection_type: crate::mapper::SelectionType::Object,
             document_mapping: crate::document::DocumentMapping::default(),
+            is_cursor: false,
+            cursor_params: None,
+            cursor_page_info: crate::mapper::CursorPageInfoFields::default(),
+            cursor_aliases: crate::mapper::CursorAliases::default(),
         };
 
         // Execute with the planner to get filtered documents
