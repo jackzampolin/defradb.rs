@@ -178,6 +178,16 @@ impl IndexIterator for ExactMatchIterator {
         self.exhausted = false;
         Ok(())
     }
+
+    async fn seek(&mut self, key: &[u8]) -> Result<bool> {
+        if self.exhausted {
+            return Ok(false);
+        }
+        if let Some(ref mut iter) = self.inner {
+            return iter.seek(key).await;
+        }
+        Ok(false)
+    }
 }
 
 /// Build IndexedField structs from values and index description.

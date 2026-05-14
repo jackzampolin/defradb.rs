@@ -15,4 +15,6 @@ pub use conditions::{
     can_be_ordered_by_index, can_use_index, extract_field_conditions, select_best_index,
 };
 pub use filter_to_scan::{can_or_filter_use_index, filter_to_index_scan, or_filter_to_index_scan};
-pub use types::{ConditionValue, FieldCondition, IndexScanParams, IndexScanType, ScanValueFilter};
+pub use types::{
+    ConditionValue, CursorSeek, FieldCondition, IndexScanParams, IndexScanType, ScanValueFilter,
+};
