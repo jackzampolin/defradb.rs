@@ -3,9 +3,9 @@
 use std::collections::HashSet;
 
 use defra_core::thread_bounds::MaybeBoxFuture;
-use query::planner::index_selection::{IndexScanParams, IndexScanType};
+use query::planner::index_selection::{CursorSeek, IndexScanParams, IndexScanType};
 use storage::corekv::Store;
-use storage::index::IndexIterator;
+use storage::index::{IndexIterator, RangeIterator};
 
 use crate::index_manager::IndexManager;
 
@@ -57,6 +57,20 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
 
         let limit = params.limit;
         let offset = params.offset;
+
+        async fn apply_seek(
+            iter: &mut RangeIterator,
+            cursor_seek: &Option<CursorSeek>,
+        ) -> Result<(), query::error::QueryError> {
+            if let Some(ref seek) = cursor_seek {
+                iter.apply_cursor_seek(seek.seek_key.clone(), seek.inclusive)
+                    .await
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!("cursor seek error: {}", e))
+                    })?;
+            }
+            Ok(())
+        }
 
         async fn collect_with_limit<I: IndexIterator>(
             iter: &mut I,
@@ -171,6 +185,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
+                apply_seek(&mut iter, &params.cursor_seek).await?;
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::RangeScan {
@@ -191,6 +206,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
+                apply_seek(&mut iter, &params.cursor_seek).await?;
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::OrScan { branches } => {

@@ -5,9 +5,11 @@ use async_trait::async_trait;
 use document::Document;
 use query::fetcher::CommitsQueryOptions;
 use query::planner::index_selection::{IndexScanParams, IndexScanType};
+use query::planner::index_selection::CursorSeek;
 use query::runner::{DocFetcher, FetchByIdsResult};
 use std::sync::Arc;
 use storage::corekv::Store;
+use storage::index::RangeIterator;
 use tracing::warn;
 
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
@@ -226,6 +228,21 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         let limit = params.limit;
         let offset = params.offset;
 
+        // Helper: apply cursor seek to a RangeIterator when cursor_seek is set.
+        async fn apply_seek(
+            iter: &mut RangeIterator,
+            cursor_seek: &Option<CursorSeek>,
+        ) -> Result<(), query::error::QueryError> {
+            if let Some(ref seek) = cursor_seek {
+                iter.apply_cursor_seek(seek.seek_key.clone(), seek.inclusive)
+                    .await
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!("cursor seek error: {}", e))
+                    })?;
+            }
+            Ok(())
+        }
+
         // Helper to collect entries with optional early termination and value filtering.
         // Returns (doc_ids, total_iterated) where total_iterated counts ALL entries
         // including those filtered out (for indexFetches metrics).
@@ -353,6 +370,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
+                apply_seek(&mut iter, &params.cursor_seek).await?;
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::RangeScan {
@@ -373,6 +391,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
+                apply_seek(&mut iter, &params.cursor_seek).await?;
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::OrScan { branches } => {
