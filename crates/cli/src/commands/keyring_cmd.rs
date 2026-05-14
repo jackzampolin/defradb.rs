@@ -293,7 +293,7 @@ mod tests {
 }
 
 fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(format!("hex string has odd length: {}", s.len()));
     }
     hex::decode(s).map_err(|e| e.to_string())

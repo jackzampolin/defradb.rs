@@ -18,7 +18,7 @@ pub use crate::encoding_cbor::{cbor_to_normal_value, normal_value_to_cbor};
 /// - No nanoseconds: "2017-07-23T03:46:56-05:00"
 /// - With nanoseconds: "2017-07-23T03:46:56.123456789-05:00"
 pub fn format_time_rfc3339_nano(t: &DateTime<FixedOffset>) -> String {
-    if t.nanosecond() % 1_000_000_000 == 0 {
+    if t.nanosecond() == 0 {
         // No fractional seconds - use Secs format
         t.to_rfc3339_opts(SecondsFormat::Secs, true)
     } else {
