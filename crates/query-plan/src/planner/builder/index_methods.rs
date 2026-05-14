@@ -81,6 +81,7 @@ impl super::Planner {
                         limit,
                         offset,
                         value_filter: None,
+                        cursor_seek: None,
                     };
                     return Some((params, true));
                 }
@@ -137,6 +138,7 @@ impl super::Planner {
                             limit: None,
                             offset: 0,
                             value_filter: None,
+                            cursor_seek: None,
                         },
                         true,
                     ));
