@@ -434,6 +434,7 @@ pub fn filter_to_index_scan(
         limit: if index_provides_ordering { limit } else { None },
         offset: if index_provides_ordering { offset } else { 0 },
         value_filter: scan_value_filter,
+        cursor_seek: None,
     })
 }
 
@@ -511,6 +512,7 @@ pub fn or_filter_to_index_scan(
                 limit: None,
                 offset: 0,
                 value_filter: None,
+                cursor_seek: None,
             });
         }
     }
