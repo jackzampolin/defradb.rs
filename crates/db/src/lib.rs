@@ -74,6 +74,7 @@ pub mod event_emission;
 pub use event_emission::{TxnBroadcastEvent, TxnBroadcaster};
 // Index manager extracted to standalone db-index crate.
 pub use db_index as index_manager;
+pub(crate) mod index_seek;
 pub(crate) mod json_patch;
 #[allow(dead_code)]
 pub(crate) mod lens_utils;
