@@ -23,7 +23,7 @@ pub struct IrohEndpointConfig {
 impl Default for IrohEndpointConfig {
     fn default() -> Self {
         Self {
-            secret_key: SecretKey::generate(&mut rand::rng()),
+            secret_key: SecretKey::generate(),
             relay_mode: IrohRelayModeConfig::default(),
             discovery: IrohDiscoveryConfig::default(),
             bind_port: None,
