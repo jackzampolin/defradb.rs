@@ -69,8 +69,7 @@ pub(super) fn parse_cursor_wrapper<'a>(
         .arguments
         .retain(|(name, _)| !matches!(name.as_str(), "first" | "after" | "last" | "before"));
 
-    let mut select =
-        parse_field_to_select(&inner_field_clean, variables, fragments, visiting)?;
+    let mut select = parse_field_to_select(&inner_field_clean, variables, fragments, visiting)?;
 
     select.is_cursor = true;
     select.cursor_params = Some(cursor_params);
@@ -146,8 +145,7 @@ mod tests {
 
     #[test]
     fn forward_and_backward_args_conflict() {
-        let query =
-            r#"{ _cursor { User(first: 10, last: 5, order: {age: ASC}) { name } } }"#;
+        let query = r#"{ _cursor { User(first: 10, last: 5, order: {age: ASC}) { name } } }"#;
         let err = parse(query).unwrap_err();
         assert_eq!(
             err.to_string(),
@@ -157,8 +155,7 @@ mod tests {
 
     #[test]
     fn after_with_last_conflict() {
-        let query =
-            r#"{ _cursor { User(after: "abc", last: 5, order: {age: ASC}) { name } } }"#;
+        let query = r#"{ _cursor { User(after: "abc", last: 5, order: {age: ASC}) { name } } }"#;
         let err = parse(query).unwrap_err();
         assert_eq!(
             err.to_string(),
