@@ -13,7 +13,7 @@ use schema::{CollectionVersion, IndexDescription};
 use storage::field_value::encode_field_value;
 use storage::keys::IndexDataStoreKey;
 
-use crate::planner::index_selection::json_to_normal_value;
+use crate::planner::index_selection::{json_to_normal_value, normalize_for_index_field};
 
 /// Wrap a plan tree with `CursorNode`, configure any scan in the tree
 /// with `cursor_seek`, and validate that ordering is supported by an
@@ -239,7 +239,10 @@ fn build_cursor_seek_key(
         let Some(json_val) = cursor.keys.get(field_name) else {
             return Err(QueryError::cursor_invalid());
         };
-        let normal = json_to_normal_value(json_val).ok_or_else(QueryError::cursor_invalid)?;
+        let raw = json_to_normal_value(json_val).ok_or_else(QueryError::cursor_invalid)?;
+        // Normalize to the schema field's encoding type so the seek key bytes
+        // match what the index actually stores (e.g., Float64 JSON → Float32).
+        let normal = normalize_for_index_field(raw, field_name, &collection.fields);
 
         // Use the index's descending flag for this field position, if available.
         let descending = idx.fields.get(i).map(|f| f.descending).unwrap_or(false);
@@ -378,5 +381,43 @@ mod tests {
         let order = order_asc("age");
         let (_reversed, matched) = validate_cursor_index(&coll, &order).unwrap();
         assert!(matched.is_some());
+    }
+
+    // P2.2: build_cursor_seek_key must normalize JSON values against field schema type.
+    // A JSON number for a Float32 field arrives as Float64 from serde_json; without
+    // normalization the encoded bytes won't match the index (which stores Float32).
+    #[test]
+    fn seek_key_normalizes_float64_to_float32_for_float32_field() {
+        use document::NormalValue;
+        use schema::{FieldDescription, FieldKind};
+        use storage::field_value::encode_field_value;
+        use storage::keys::IndexDataStoreKey;
+
+        let idx = make_index("idx_score", vec![("score", false)], true);
+
+        // Build a collection whose "score" field is Float32.
+        let float32_field = FieldDescription::new("1", "score", FieldKind::float32());
+        let mut coll = CollectionVersion::new("test", "v1", "coll_test_001", vec![float32_field]);
+        coll.indexes = vec![idx.clone()];
+
+        // Cursor token with "score" as a JSON float (arrives as Float64).
+        let mut keys = std::collections::BTreeMap::new();
+        keys.insert("score".to_string(), serde_json::json!(1.5));
+        let cursor = Cursor {
+            keys,
+            doc_id: "bae-test".to_string(),
+        };
+        let order = order_asc("score");
+
+        let key = build_cursor_seek_key(&cursor, &order, &coll, &idx).unwrap();
+
+        // Verify the key is non-empty and matches what a Float32-encoded value produces.
+        let prefix = IndexDataStoreKey::index_prefix(coll.resolved_root_id(), idx.id);
+        let expected = encode_field_value(prefix, &NormalValue::Float32(1.5_f32), false).unwrap();
+        // For a unique index, no doc_id suffix is appended.
+        assert_eq!(
+            key, expected,
+            "seek key must use Float32 encoding to match index bytes"
+        );
     }
 }

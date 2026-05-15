@@ -704,7 +704,9 @@ mod tests {
 
         // Seek to age=30 exclusive (forward): iterator should land at carol (age=40).
         let seek_key = build_age_seek_key(30);
-        iter.apply_cursor_seek(seek_key, false, false).await.unwrap();
+        iter.apply_cursor_seek(seek_key, false, false)
+            .await
+            .unwrap();
 
         let entries = iter.collect_all().await.unwrap();
         let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
@@ -829,7 +831,10 @@ mod tests {
             "reversed=true must NOT set lower_bound_key"
         );
         assert_eq!(iter.upper_bound_key.as_deref(), Some(seek_key.as_slice()));
-        assert!(iter.upper_inclusive, "inclusive=true must set upper_inclusive");
+        assert!(
+            iter.upper_inclusive,
+            "inclusive=true must set upper_inclusive"
+        );
 
         // Behavioral check: bob and alice returned (inclusive at 30, exclude carol > 30).
         let entries = iter.collect_all().await.unwrap();
@@ -838,7 +843,10 @@ mod tests {
             !doc_ids.contains(&"carol"),
             "carol is above the cursor boundary"
         );
-        assert!(doc_ids.contains(&"bob"), "bob is at the boundary (inclusive)");
+        assert!(
+            doc_ids.contains(&"bob"),
+            "bob is at the boundary (inclusive)"
+        );
         assert!(doc_ids.contains(&"alice"), "alice is before boundary");
         assert_eq!(entries.len(), 2);
     }
