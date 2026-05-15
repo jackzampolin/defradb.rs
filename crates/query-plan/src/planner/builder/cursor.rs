@@ -248,6 +248,21 @@ fn build_cursor_seek_key(
             .map_err(|e| QueryError::execution(format!("failed to encode cursor seek key: {e}")))?;
     }
 
+    // For non-unique indexes the on-disk key format is:
+    //   [index_prefix][encoded_field_values][doc_id_bytes]
+    // (see range_iterator.rs extract_doc_id_from_key / extract_entry).
+    //
+    // Without the doc_id suffix the seek key matches the prefix of EVERY row sharing
+    // those field values. An exclusive forward seek at that prefix would reject all
+    // of them — not just the boundary doc — causing the query to skip every row with
+    // the same indexed values (the duplicate-keys bug).
+    //
+    // For unique indexes the doc_id is stored in the VALUE, not the key, so a
+    // seek_key without doc_id correctly identifies one row and no suffix is needed.
+    if !idx.unique {
+        key.extend_from_slice(cursor.doc_id.as_bytes());
+    }
+
     Ok(key)
 }
 
