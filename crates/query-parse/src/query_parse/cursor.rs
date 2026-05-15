@@ -25,12 +25,14 @@ pub(super) fn parse_cursor_wrapper<'a>(
 ) -> Result<Select> {
     let mut inner_field: Option<&'a Field<'a, String>> = None;
     let mut page_info_fields = CursorPageInfoFields::default();
+    let mut page_info_alias: Option<String> = None;
     let mut inner_count = 0usize;
 
     for selection in &field.selection_set.items {
         match selection {
             Selection::Field(child) => {
                 if child.name == "_pageInfo" {
+                    page_info_alias = child.alias.clone();
                     page_info_fields = parse_page_info_selection(child)?;
                 } else {
                     inner_count += 1;
@@ -76,6 +78,7 @@ pub(super) fn parse_cursor_wrapper<'a>(
     select.cursor_page_info = page_info_fields;
     select.cursor_aliases = CursorAliases {
         wrapper_alias: field.alias.clone(),
+        page_info_alias,
     };
 
     Ok(select)
@@ -130,19 +133,26 @@ fn extract_cursor_params<'a>(
 fn parse_page_info_selection(field: &Field<'_, String>) -> Result<CursorPageInfoFields> {
     let mut fields = CursorPageInfoFields::default();
     for selection in &field.selection_set.items {
-        if let Selection::Field(child) = selection {
-            // Output key: alias if provided, else the field's canonical name.
-            let output_key = child.alias.clone().unwrap_or_else(|| child.name.clone());
-            match child.name.as_str() {
-                "hasNext" => fields.has_next = Some(output_key),
-                "hasPrev" => fields.has_prev = Some(output_key),
-                "startCursor" => fields.start_cursor = Some(output_key),
-                "endCursor" => fields.end_cursor = Some(output_key),
-                other => {
-                    return Err(QueryError::parse(format!(
-                        "Cannot query field \"{other}\" on type \"PageInfo\"."
-                    )));
+        match selection {
+            Selection::Field(child) => {
+                // Output key: alias if provided, else the field's canonical name.
+                let output_key = child.alias.clone().unwrap_or_else(|| child.name.clone());
+                match child.name.as_str() {
+                    "hasNext" => fields.has_next = Some(output_key),
+                    "hasPrev" => fields.has_prev = Some(output_key),
+                    "startCursor" => fields.start_cursor = Some(output_key),
+                    "endCursor" => fields.end_cursor = Some(output_key),
+                    other => {
+                        return Err(QueryError::parse(format!(
+                            "Cannot query field \"{other}\" on type \"PageInfo\"."
+                        )));
+                    }
                 }
+            }
+            Selection::FragmentSpread(_) | Selection::InlineFragment(_) => {
+                return Err(QueryError::parse(
+                    "_pageInfo block does not support fragments".to_string(),
+                ));
             }
         }
     }
@@ -267,6 +277,36 @@ mod tests {
         assert!(
             err.contains("PageInfo") || err.contains("bogus"),
             "should mention the bad field or type: {err}"
+        );
+    }
+
+    #[test]
+    fn page_info_wrapper_alias_is_captured() {
+        let query = r#"
+            { _cursor {
+                User(first: 5, order: [{age: ASC}]) { name }
+                info: _pageInfo { hasNext }
+            } }
+        "#;
+        let selects = parse(query).unwrap();
+        let aliases = &selects[0].cursor_aliases;
+        assert_eq!(aliases.page_info_alias.as_deref(), Some("info"));
+        assert_eq!(aliases.wrapper_alias, None);
+    }
+
+    #[test]
+    fn fragments_in_page_info_rejected() {
+        let query = r#"
+            fragment F on PageInfo { hasNext }
+            { _cursor {
+                User(first: 5, order: [{age: ASC}]) { name }
+                _pageInfo { ...F }
+            } }
+        "#;
+        let err = parse(query).unwrap_err().to_string();
+        assert!(
+            err.contains("fragment") || err.contains("_pageInfo"),
+            "got: {err}"
         );
     }
 

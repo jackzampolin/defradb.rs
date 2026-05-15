@@ -50,6 +50,10 @@ pub struct CursorAliases {
     /// Alias on `_cursor` (e.g., `{ paged: _cursor { ... } }` => Some("paged")).
     /// None => emit under the literal key `_cursor`.
     pub wrapper_alias: Option<String>,
+    /// Alias on the inner `_pageInfo` selection
+    /// (e.g., `{ _cursor { ... info: _pageInfo { ... } } }` => Some("info")).
+    /// None => emit under the literal key `_pageInfo`.
+    pub page_info_alias: Option<String>,
 }
 
 #[cfg(test)]

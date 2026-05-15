@@ -222,7 +222,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             .unwrap_or(JsonValue::Null),
                     );
                 }
-                cursor_obj.insert("_pageInfo".into(), JsonValue::Object(pageinfo));
+                let page_info_key = select
+                    .cursor_aliases
+                    .page_info_alias
+                    .as_deref()
+                    .unwrap_or("_pageInfo")
+                    .to_string();
+                cursor_obj.insert(page_info_key, JsonValue::Object(pageinfo));
             }
             return Ok(JsonValue::Object(cursor_obj));
         }
