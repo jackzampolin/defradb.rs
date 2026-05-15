@@ -82,8 +82,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let result = self
                 .execute_select_internal(&select, fetcher, caller_identity.clone())
                 .await?;
-            let key = select.field.output_name();
-            results.insert(key.to_string(), result);
+            let key = if select.is_cursor {
+                select
+                    .cursor_aliases
+                    .wrapper_alias
+                    .as_deref()
+                    .unwrap_or("_cursor")
+                    .to_string()
+            } else {
+                select.field.output_name().to_string()
+            };
+            results.insert(key, result);
         }
 
         Ok(JsonValue::Object(results))
@@ -107,8 +116,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let result = self
                 .execute_select_internal(&select, fetcher, caller_identity.clone())
                 .await?;
-            let key = select.field.output_name();
-            results.insert(key.to_string(), result);
+            let key = if select.is_cursor {
+                select
+                    .cursor_aliases
+                    .wrapper_alias
+                    .as_deref()
+                    .unwrap_or("_cursor")
+                    .to_string()
+            } else {
+                select.field.output_name().to_string()
+            };
+            results.insert(key, result);
         }
 
         Ok(JsonValue::Object(results))

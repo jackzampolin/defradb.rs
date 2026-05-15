@@ -333,6 +333,10 @@ impl PlanNode for OrderByNode {
         self.source.set_cursor_seek(seek)
     }
 
+    fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
+        self.source.page_info()
+    }
+
     fn exec_info(&self) -> ExecInfo {
         self.exec_info.clone()
     }

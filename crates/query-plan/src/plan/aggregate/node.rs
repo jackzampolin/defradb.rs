@@ -330,6 +330,10 @@ impl<Op: AggregateOp> PlanNode for AggregateNode<Op> {
         self.source.set_cursor_seek(seek)
     }
 
+    fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
+        self.source.page_info()
+    }
+
     fn is_grouped_source(&self) -> bool {
         self.source.is_grouped_source()
     }
