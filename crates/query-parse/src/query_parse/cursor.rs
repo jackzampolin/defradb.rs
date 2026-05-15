@@ -25,14 +25,22 @@ pub(super) fn parse_cursor_wrapper<'a>(
 ) -> Result<Select> {
     let mut inner_field: Option<&'a Field<'a, String>> = None;
     let mut page_info_fields = CursorPageInfoFields::default();
-    let mut page_info_alias: Option<String> = None;
+    let mut page_info_alias: Option<Box<String>> = None;
+    let mut page_info_seen = false;
     let mut inner_count = 0usize;
 
     for selection in &field.selection_set.items {
         match selection {
             Selection::Field(child) => {
                 if child.name == "_pageInfo" {
-                    page_info_alias = child.alias.clone();
+                    if page_info_seen {
+                        return Err(QueryError::parse(
+                            "_cursor block cannot contain multiple _pageInfo selections"
+                                .to_string(),
+                        ));
+                    }
+                    page_info_seen = true;
+                    page_info_alias = child.alias.clone().map(Box::new);
                     page_info_fields = parse_page_info_selection(child)?;
                 } else {
                     inner_count += 1;
@@ -290,7 +298,10 @@ mod tests {
         "#;
         let selects = parse(query).unwrap();
         let aliases = &selects[0].cursor_aliases;
-        assert_eq!(aliases.page_info_alias.as_deref(), Some("info"));
+        assert_eq!(
+            aliases.page_info_alias.as_deref().map(String::as_str),
+            Some("info")
+        );
         assert_eq!(aliases.wrapper_alias, None);
     }
 
@@ -307,6 +318,22 @@ mod tests {
         assert!(
             err.contains("fragment") || err.contains("_pageInfo"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn multiple_page_info_selections_rejected() {
+        let query = r#"
+            { _cursor {
+                User(first: 5, order: [{age: ASC}]) { name }
+                _pageInfo { hasNext }
+                info: _pageInfo { hasPrev }
+            } }
+        "#;
+        let err = parse(query).unwrap_err().to_string();
+        assert!(
+            err.contains("multiple _pageInfo"),
+            "should reject duplicate _pageInfo: {err}"
         );
     }
 
