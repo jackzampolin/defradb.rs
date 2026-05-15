@@ -358,3 +358,38 @@ async fn rust_page_info_aliases_preserved_in_response() {
         "unselected 'endCursor' must not appear: {pi}"
     );
 }
+
+#[tokio::test]
+async fn rust_page_info_wrapper_alias_emitted_in_response() {
+    // PR#961 round-5 P2: aliased _pageInfo block must appear under the alias key, not "_pageInfo".
+    let (_cluster, node) = setup_indexed_cluster().await;
+    seed_users(&node, &[("a", 20), ("b", 30)]).await;
+
+    let result: Value = node
+        .query(
+            r#"{ _cursor {
+            User(first: 1, order: [{age: ASC}]) { name }
+            info: _pageInfo { hasNext }
+        } }"#,
+        )
+        .expect("query with aliased _pageInfo block");
+
+    let cursor = &result["_cursor"];
+
+    // The aliased _pageInfo must appear under "info", not "_pageInfo".
+    assert!(
+        cursor.get("info").is_some(),
+        "aliased _pageInfo should appear as 'info': {cursor}"
+    );
+    assert!(
+        cursor.get("_pageInfo").is_none(),
+        "canonical '_pageInfo' must NOT appear when aliased as 'info': {cursor}"
+    );
+
+    // And the aliased child fields work too.
+    let info = &cursor["info"];
+    assert!(
+        info.get("hasNext").is_some(),
+        "hasNext must be present inside aliased info block: {info}"
+    );
+}
