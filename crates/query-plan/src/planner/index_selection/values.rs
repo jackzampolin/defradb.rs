@@ -107,7 +107,7 @@ fn normalize_value_for_field(value: NormalValue, field_kind: &FieldKind) -> Norm
 }
 
 /// Normalize a NormalValue for a named index field using collection field metadata.
-pub(super) fn normalize_for_index_field(
+pub(crate) fn normalize_for_index_field(
     value: NormalValue,
     field_name: &str,
     collection_fields: &[schema::FieldDescription],
