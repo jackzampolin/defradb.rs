@@ -201,10 +201,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             if pi.fields.any_selected() {
                 let mut pageinfo = serde_json::Map::new();
                 if pi.fields.has_next {
-                    pageinfo.insert("hasNextPage".into(), JsonValue::Bool(pi.has_next));
+                    pageinfo.insert("hasNext".into(), JsonValue::Bool(pi.has_next));
                 }
                 if pi.fields.has_prev {
-                    pageinfo.insert("hasPreviousPage".into(), JsonValue::Bool(pi.has_prev));
+                    pageinfo.insert("hasPrev".into(), JsonValue::Bool(pi.has_prev));
                 }
                 if pi.fields.start_cursor {
                     pageinfo.insert(
