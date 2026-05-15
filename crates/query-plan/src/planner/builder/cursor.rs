@@ -244,9 +244,8 @@ fn build_cursor_seek_key(
         // Use the index's descending flag for this field position, if available.
         let descending = idx.fields.get(i).map(|f| f.descending).unwrap_or(false);
 
-        key = encode_field_value(key, &normal, descending).map_err(|e| {
-            QueryError::execution(format!("failed to encode cursor seek key: {e}"))
-        })?;
+        key = encode_field_value(key, &normal, descending)
+            .map_err(|e| QueryError::execution(format!("failed to encode cursor seek key: {e}")))?;
     }
 
     Ok(key)
@@ -306,11 +305,8 @@ mod tests {
 
     #[test]
     fn matching_unique_index_returns_ok() {
-        let coll = make_collection_with_indexes(vec![make_index(
-            "idx_age",
-            vec![("age", false)],
-            true,
-        )]);
+        let coll =
+            make_collection_with_indexes(vec![make_index("idx_age", vec![("age", false)], true)]);
         let order = order_asc("age");
         let (reversed, matched) = validate_cursor_index(&coll, &order).unwrap();
         assert!(!reversed);
@@ -319,11 +315,8 @@ mod tests {
 
     #[test]
     fn matching_asc_index_with_desc_order_returns_reversed() {
-        let coll = make_collection_with_indexes(vec![make_index(
-            "idx_age",
-            vec![("age", false)],
-            true,
-        )]);
+        let coll =
+            make_collection_with_indexes(vec![make_index("idx_age", vec![("age", false)], true)]);
         let order = order_desc("age");
         let (reversed, matched) = validate_cursor_index(&coll, &order).unwrap();
         assert!(reversed);
@@ -332,14 +325,14 @@ mod tests {
 
     #[test]
     fn no_matching_index_returns_error() {
-        let coll = make_collection_with_indexes(vec![make_index(
-            "idx_age",
-            vec![("age", false)],
-            false,
-        )]);
+        let coll =
+            make_collection_with_indexes(vec![make_index("idx_age", vec![("age", false)], false)]);
         let order = order_asc("name");
         let err = validate_cursor_index(&coll, &order).unwrap_err();
-        assert_eq!(err.to_string(), "no supporting index for cursor order field");
+        assert_eq!(
+            err.to_string(),
+            "no supporting index for cursor order field"
+        );
     }
 
     #[test]
@@ -352,7 +345,10 @@ mod tests {
         )]);
         let order = order_asc("age");
         let err = validate_cursor_index(&coll, &order).unwrap_err();
-        assert_eq!(err.to_string(), "no supporting index for cursor order field");
+        assert_eq!(
+            err.to_string(),
+            "no supporting index for cursor order field"
+        );
     }
 
     #[test]

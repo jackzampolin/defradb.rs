@@ -109,9 +109,8 @@ fn parse_selection_to_selects<'a>(
             }
             // Cursor wrapper — descend into _cursor { ... }
             if field.name == "_cursor" {
-                let select = super::cursor::parse_cursor_wrapper(
-                    field, variables, fragments, visiting,
-                )?;
+                let select =
+                    super::cursor::parse_cursor_wrapper(field, variables, fragments, visiting)?;
                 selects.push(select);
                 return Ok(());
             }

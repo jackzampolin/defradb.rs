@@ -318,9 +318,7 @@ impl super::Planner {
             if select.is_cursor {
                 let collection = self
                     .get_collection(&select.collection_name)
-                    .ok_or_else(|| {
-                        QueryError::collection_not_found(&select.collection_name)
-                    })?;
+                    .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
                 plan = super::expand_cursor_plan(select, &collection, plan)?;
             } else if let Some(ref limit) = select.limit {
                 let effective_limit = match limit.limit {
@@ -379,9 +377,7 @@ impl super::Planner {
             if select.is_cursor {
                 let collection = self
                     .get_collection(&select.collection_name)
-                    .ok_or_else(|| {
-                        QueryError::collection_not_found(&select.collection_name)
-                    })?;
+                    .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
                 plan = super::expand_cursor_plan(select, &collection, plan)?;
             } else if let Some(ref limit) = select.limit {
                 let effective_limit = match limit.limit {
