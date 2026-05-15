@@ -61,10 +61,7 @@ pub fn gen_cursor_collection_field(collection_name: &str) -> GqlField {
         GqlType::list(GqlType::non_null(GqlType::id())),
     ));
     args.push(GqlArg::new("cid", GqlType::string()));
-    args.push(GqlArg::new(
-        "filter",
-        GqlType::named(filter_type_name),
-    ));
+    args.push(GqlArg::new("filter", GqlType::named(filter_type_name)));
     args.push(GqlArg::new(
         "groupBy",
         GqlType::list(GqlType::non_null(GqlType::named(group_by_type_name))),
@@ -233,32 +230,32 @@ mod tests {
 
         assert_eq!(args.len(), 4);
 
-        let first = args.iter().find(|a| a.name == "first").expect("first missing");
-        assert!(
-            !is_non_null(&first.arg_type),
-            "first must be nullable"
-        );
+        let first = args
+            .iter()
+            .find(|a| a.name == "first")
+            .expect("first missing");
+        assert!(!is_non_null(&first.arg_type), "first must be nullable");
         assert!(is_named(&first.arg_type, "Int"));
 
-        let after = args.iter().find(|a| a.name == "after").expect("after missing");
-        assert!(
-            !is_non_null(&after.arg_type),
-            "after must be nullable"
-        );
+        let after = args
+            .iter()
+            .find(|a| a.name == "after")
+            .expect("after missing");
+        assert!(!is_non_null(&after.arg_type), "after must be nullable");
         assert!(is_named(&after.arg_type, "String"));
 
-        let last = args.iter().find(|a| a.name == "last").expect("last missing");
-        assert!(
-            !is_non_null(&last.arg_type),
-            "last must be nullable"
-        );
+        let last = args
+            .iter()
+            .find(|a| a.name == "last")
+            .expect("last missing");
+        assert!(!is_non_null(&last.arg_type), "last must be nullable");
         assert!(is_named(&last.arg_type, "Int"));
 
-        let before = args.iter().find(|a| a.name == "before").expect("before missing");
-        assert!(
-            !is_non_null(&before.arg_type),
-            "before must be nullable"
-        );
+        let before = args
+            .iter()
+            .find(|a| a.name == "before")
+            .expect("before missing");
+        assert!(!is_non_null(&before.arg_type), "before must be nullable");
         assert!(is_named(&before.arg_type, "String"));
     }
 }
