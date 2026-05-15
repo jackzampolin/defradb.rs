@@ -8,11 +8,28 @@ use async_trait::async_trait;
 use cursor::Cursor;
 use query_types::doc::Doc;
 use query_types::document::DocumentMapping;
-use query_types::error::Result;
+use query_types::error::{QueryError, Result};
 use query_types::mapper::{CursorPageInfoFields, OrderCondition};
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::planner::{ExecInfo, PlanNode};
+
+/// Returns true when the order is either empty or only orders by `_docID`.
+///
+/// The slow-path comparisons in `SkippingUntilAfter` and `populate_backward_buffer_slow`
+/// compare rows against cursor boundaries using only the doc_id string. This is only
+/// correct when the ORDER BY is `_docID` (or absent, which also sorts by doc_id).
+/// For any other field ordering the comparison must account for the full order tuple,
+/// which requires knowing the field values of each row — not just the doc_id.
+///
+/// When this returns false and the slow path is taken, the caller must return an error
+/// rather than silently returning wrong results.
+fn is_doc_id_or_empty_order(order_fields: &[OrderCondition]) -> bool {
+    order_fields.is_empty()
+        || order_fields
+            .iter()
+            .all(|c| c.fields.first().map(String::as_str) == Some("_docID"))
+}
 
 /// Direction of cursor pagination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,6 +225,19 @@ impl CursorNode {
                     // Slow path: no index seek. Pull rows from the child until
                     // we find the first row whose docID is strictly greater
                     // than the `after` cursor's docID.
+                    //
+                    // This comparison is only correct for doc_id or empty ordering.
+                    // For other field orderings, the cursor boundary is determined by
+                    // the full (field_values, doc_id) tuple, not just doc_id — and
+                    // extracting named field values from a Doc requires index-to-name
+                    // mapping that is not available here. Return an error so callers
+                    // notice the limitation rather than silently returning wrong pages.
+                    if !is_doc_id_or_empty_order(&self.order_fields) {
+                        return Err(QueryError::execution(
+                            "cursor slow path (no index seek) does not support non-docID ordering; \
+                             ensure the collection has an index covering the ORDER BY fields",
+                        ));
+                    }
                     let after_doc_id = self.after.as_ref().map(|c| c.doc_id.clone());
                     if self.inner.next().await? {
                         let doc = self.inner.value().deep_clone(); // ONE clone per row
@@ -304,7 +334,17 @@ impl CursorNode {
 
     /// Slow path: scan forward; keep a sliding window of the last `page_size + 1`
     /// docs, stopping at (but not including) the `before` boundary doc_id when set.
+    ///
+    /// The boundary comparison uses only doc_id, which is only correct for doc_id
+    /// or empty ordering. For other field orderings return an error instead of
+    /// silently returning wrong results (see `is_doc_id_or_empty_order`).
     async fn populate_backward_buffer_slow(&mut self) -> Result<()> {
+        if !is_doc_id_or_empty_order(&self.order_fields) {
+            return Err(QueryError::execution(
+                "cursor slow path (no index seek) does not support non-docID ordering; \
+                 ensure the collection has an index covering the ORDER BY fields",
+            ));
+        }
         let before_doc_id = self.before.as_ref().map(|c| c.doc_id.clone());
         let window_size = self.page_size as usize + 1; // +1 to detect has_prev
         while self.inner.next().await? {
