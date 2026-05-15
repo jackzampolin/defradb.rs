@@ -212,4 +212,28 @@ mod tests {
         assert_eq!(select.cursor_aliases.wrapper_alias, None);
         assert_eq!(select.field.name, "User");
     }
+
+    #[test]
+    fn negative_last_rejected() {
+        let query = r#"{ _cursor { User(last: -1, order: {age: ASC}) { name } } }"#;
+        let err = parse(query).unwrap_err();
+        assert_eq!(err.to_string(), "last must be non-negative");
+    }
+
+    #[test]
+    fn wrapper_alias_is_captured() {
+        let query = r#"{ paged: _cursor { User(first: 5, order: {age: ASC}) { name } } }"#;
+        let selects = parse(query).unwrap();
+        assert_eq!(selects.len(), 1);
+        let select = &selects[0];
+        assert!(select.is_cursor);
+        assert_eq!(
+            select.cursor_aliases.wrapper_alias,
+            Some("paged".to_string()),
+            "wrapper alias must be captured from `{{ paged: _cursor {{ ... }} }}`"
+        );
+        // Inner collection is still User (not aliased), so select.field.name == "User"
+        // and select.field.alias is None.
+        assert_eq!(select.field.name, "User");
+    }
 }
