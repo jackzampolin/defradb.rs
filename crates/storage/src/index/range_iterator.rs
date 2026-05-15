@@ -229,20 +229,23 @@ impl RangeIterator {
     /// that entries whose full key starts with `seek_key` (e.g. `[seek_key][doc_id]`) are
     /// included in the initial seek position.
     ///
-    /// `reversed` overrides `self.reverse`. The scan's pre-existing direction is set by
-    /// the ORDER BY field direction, but cursor backward pagination (`last`/`before`) is
-    /// independent — it must iterate in reverse regardless of ORDER BY direction.
+    /// `reversed` must match `self.reverse`. The planner sets `IndexScanType::PrefixScan.reverse`
+    /// (or `RangeScan.reverse`) to the cursor direction before the KV iterator is created by
+    /// `scan_prefix` / `scan_range`. By the time this method runs, the inner KV iterator's
+    /// direction is already baked in and cannot be changed. `reversed` here is used only to
+    /// select which bound slot (lower vs upper) to fill.
     pub async fn apply_cursor_seek(
         &mut self,
         seek_key: Vec<u8>,
         inclusive: bool,
         reversed: bool,
     ) -> Result<()> {
-        // Override the iterator direction for cursor seeks. The scan's pre-existing
-        // `self.reverse` reflects the ORDER BY direction; `reversed` here is set by
-        // whether the cursor is paginating backward (`last`/`before`), which is
-        // orthogonal to ORDER direction.
-        self.reverse = reversed;
+        // The planner must have already set the scan direction correctly before the
+        // KV iterator was created. Asserts help catch regressions during development.
+        debug_assert_eq!(
+            self.reverse, reversed,
+            "cursor reversed must match scan reverse (set_cursor_seek must mutate scan_type.reverse before iterator creation)"
+        );
         if reversed {
             // For reverse iteration, seek_key is an upper bound.
             // Set the upper bound so is_key_within_bounds enforces inclusivity.

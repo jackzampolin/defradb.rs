@@ -199,13 +199,31 @@ fn configure_scan_for_cursor(
         return Ok((plan, false));
     };
 
+    // Unique composite prefix case: cursor.keys covers only some of idx.fields.
+    // The seek key encodes only the prefix, which identifies every row sharing
+    // those prefix values — not a single boundary row. An exclusive seek would
+    // skip ALL rows with those prefix values, not just the boundary one.
+    // For non-unique indexes the doc_id suffix in build_cursor_seek_key
+    // disambiguates, but unique indexes store doc_id in the value, not the key,
+    // so the suffix trick doesn't apply. Fall back to the slow path.
+    if idx.unique && cursor_token.keys.len() < idx.fields.len() {
+        return Ok((plan, false));
+    }
+
     let seek_key = build_cursor_seek_key(cursor_token, order_fields, collection, idx)?;
     let seek = CursorSeek {
         seek_key,
-        // Forward: skip the boundary (exclusive).
-        // Backward: include the boundary, iterate backward (inclusive).
-        inclusive: matches!(direction, CursorDirection::Backward),
-        reversed,
+        // Both `after` (forward) and `before` (backward) identify the boundary
+        // row that should NOT appear in the page — both are exclusive.
+        inclusive: false,
+        // `reversed` from validate_cursor_index means "must scan in reverse to
+        // satisfy ORDER BY". For a forward cursor we keep that direction; for a
+        // backward cursor we flip it so we scan against the ORDER BY direction
+        // (i.e., iterate from the boundary toward the beginning of the order).
+        reversed: match direction {
+            CursorDirection::Forward => reversed,
+            CursorDirection::Backward => !reversed,
+        },
     };
 
     let applied = plan.set_cursor_seek(seek);
