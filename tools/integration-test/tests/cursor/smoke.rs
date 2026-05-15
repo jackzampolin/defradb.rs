@@ -156,3 +156,161 @@ async fn rust_pagination_round_trip() {
     assert_eq!(users2[0]["name"], "carol");
     assert_eq!(users2[1]["name"], "dave");
 }
+
+#[tokio::test]
+async fn rust_forward_first_after_doc_id_desc() {
+    // Regression: forward slow path with _docID DESC used `row > after` (ASC comparison).
+    // For DESC order, smaller doc_ids come next, so the correct comparison is `row < after`.
+    let cluster = integration_test::TestCluster::builder()
+        .rust_nodes(1)
+        .build()
+        .await
+        .unwrap();
+    let node = cluster.client(0);
+    node.schema_add(super::common::USER_SCHEMA)
+        .expect("schema");
+
+    for name in ["a", "b", "c", "d", "e"] {
+        node.query(&format!(
+            r#"mutation {{ add_User(input: {{ name: "{name}" }}) {{ _docID }} }}"#
+        ))
+        .expect("seed");
+    }
+
+    // Page 1: first 2 in _docID DESC.
+    let p1: Value = node
+        .query(
+            r#"{ _cursor {
+            User(first: 2, order: [{_docID: DESC}]) { _docID name }
+            _pageInfo { endCursor hasNext }
+        } }"#,
+        )
+        .expect("page 1 _docID DESC");
+
+    let p1_users = p1["_cursor"]["User"]
+        .as_array()
+        .expect("_cursor.User page 1");
+    assert_eq!(p1_users.len(), 2);
+    assert_eq!(
+        p1["_cursor"]["_pageInfo"]["hasNext"],
+        Value::Bool(true),
+        "hasNext must be true with 5 users and page size 2"
+    );
+
+    let end_cursor = p1["_cursor"]["_pageInfo"]["endCursor"]
+        .as_str()
+        .expect("endCursor present")
+        .to_string();
+
+    let p1_ids: Vec<String> = p1_users
+        .iter()
+        .map(|u| u["_docID"].as_str().unwrap().to_string())
+        .collect();
+
+    // Page 2: must return rows with SMALLER doc_ids (DESC order) than the endCursor row.
+    let p2: Value = node
+        .query(&format!(
+            r#"{{ _cursor {{
+            User(first: 2, after: "{end_cursor}", order: [{{_docID: DESC}}]) {{ _docID name }}
+        }} }}"#
+        ))
+        .expect("page 2 _docID DESC");
+
+    let p2_users = p2["_cursor"]["User"]
+        .as_array()
+        .expect("_cursor.User page 2");
+    assert_eq!(p2_users.len(), 2);
+
+    let p2_ids: Vec<String> = p2_users
+        .iter()
+        .map(|u| u["_docID"].as_str().unwrap().to_string())
+        .collect();
+
+    // Every id on page 2 must be strictly less than every id on page 1 (DESC).
+    for id2 in &p2_ids {
+        for id1 in &p1_ids {
+            assert!(
+                id2 < id1,
+                "page 2 _docID {id2} must be < page 1 _docID {id1} (DESC order)"
+            );
+        }
+    }
+
+    // Combined 4 ids must be distinct (no overlap).
+    let mut all: Vec<String> = p1_ids.into_iter().chain(p2_ids).collect();
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), 4, "pages must not overlap; got: {all:?}");
+}
+
+#[tokio::test]
+async fn rust_backward_last_before_doc_id_desc() {
+    // Regression: backward slow path with _docID DESC used `>= boundary` (ASC stop condition).
+    // For DESC order the iterator yields larger doc_ids first; stop when `<= boundary`.
+    let cluster = integration_test::TestCluster::builder()
+        .rust_nodes(1)
+        .build()
+        .await
+        .unwrap();
+    let node = cluster.client(0);
+    node.schema_add(super::common::USER_SCHEMA)
+        .expect("schema");
+
+    for name in ["a", "b", "c", "d", "e"] {
+        node.query(&format!(
+            r#"mutation {{ add_User(input: {{ name: "{name}" }}) {{ _docID }} }}"#
+        ))
+        .expect("seed");
+    }
+
+    // Get a middle cursor: first 3 in _docID DESC.
+    let p1: Value = node
+        .query(
+            r#"{ _cursor {
+            User(first: 3, order: [{_docID: DESC}]) { _docID }
+            _pageInfo { endCursor }
+        } }"#,
+        )
+        .expect("page 1 _docID DESC");
+
+    let end_cursor = p1["_cursor"]["_pageInfo"]["endCursor"]
+        .as_str()
+        .expect("endCursor present")
+        .to_string();
+
+    let p1_ids: Vec<String> = p1["_cursor"]["User"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["_docID"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(p1_ids.len(), 3, "page 1 must have 3 rows");
+    let boundary_id = &p1_ids[2]; // the smallest id on page 1 (last in DESC)
+
+    // last:2 + before:<cursor for 3rd row> in DESC order.
+    // The 2 rows that come BEFORE the boundary in DESC order are the 2 largest doc_ids
+    // on page 1 (rows 0 and 1).
+    let result: Value = node
+        .query(&format!(
+            r#"{{ _cursor {{
+            User(last: 2, before: "{end_cursor}", order: [{{_docID: DESC}}]) {{ _docID }}
+        }} }}"#
+        ))
+        .expect("backward _docID DESC");
+
+    let rows: Vec<String> = result["_cursor"]["User"]
+        .as_array()
+        .expect("_cursor.User")
+        .iter()
+        .map(|u| u["_docID"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(rows.len(), 2, "expected exactly 2 rows before the cursor");
+
+    // All returned rows must have strictly larger doc_ids than the boundary (DESC order).
+    for row_id in &rows {
+        assert!(
+            row_id > boundary_id,
+            "row {row_id} must be > boundary {boundary_id} in DESC order"
+        );
+    }
+}

@@ -9,7 +9,7 @@ use cursor::Cursor;
 use query_types::doc::Doc;
 use query_types::document::DocumentMapping;
 use query_types::error::{QueryError, Result};
-use query_types::mapper::{CursorPageInfoFields, OrderCondition};
+use query_types::mapper::{CursorPageInfoFields, OrderCondition, OrderDirection};
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::planner::{ExecInfo, PlanNode};
@@ -29,6 +29,19 @@ fn is_doc_id_or_empty_order(order_fields: &[OrderCondition]) -> bool {
         || order_fields
             .iter()
             .all(|c| c.fields.first().map(String::as_str) == Some("_docID"))
+}
+
+/// Returns the iteration direction implied by the first `_docID` order condition.
+///
+/// Returns `Asc` when `order_fields` is empty (natural doc_id order is ascending).
+/// Caller must have already verified order is `_docID`-only or empty via
+/// `is_doc_id_or_empty_order` before calling this.
+fn doc_id_order_direction(order_fields: &[OrderCondition]) -> OrderDirection {
+    order_fields
+        .first()
+        .filter(|c| c.fields.first().map(String::as_str) == Some("_docID"))
+        .map(|c| c.direction)
+        .unwrap_or(OrderDirection::Asc)
 }
 
 /// Direction of cursor pagination.
@@ -239,27 +252,33 @@ impl CursorNode {
                         ));
                     }
                     let after_doc_id = self.after.as_ref().map(|c| c.doc_id.clone());
+                    let dir = doc_id_order_direction(&self.order_fields);
                     if self.inner.next().await? {
                         let doc = self.inner.value().deep_clone(); // ONE clone per row
                         let row_id = doc.doc_id().map(|s| s.to_string());
-                        match (after_doc_id.as_deref(), row_id.as_deref()) {
-                            (Some(after), Some(row)) if row > after => {
-                                // Found the first row past the boundary.
-                                self.state = CursorState::Collecting;
-                                let map = self.inner.document_map();
-                                let snap = Self::snapshot_from_doc(&doc, map, &self.order_fields);
-                                // First collected row is both the start and end of the page so far.
-                                self.last_snapshot = Some(CursorSnapshot {
-                                    doc_id: snap.doc_id.clone(),
-                                    keys: snap.keys.clone(),
-                                });
-                                self.first_snapshot = Some(snap);
-                                self.current_doc = doc;
-                                self.emitted += 1;
-                                return Ok(true);
-                            }
-                            _ => continue, // still skipping
+                        let past_boundary = match (after_doc_id.as_deref(), row_id.as_deref()) {
+                            (Some(after), Some(row)) => match dir {
+                                OrderDirection::Asc => row > after,
+                                OrderDirection::Desc => row < after,
+                            },
+                            _ => false,
+                        };
+                        if past_boundary {
+                            // Found the first row past the boundary.
+                            self.state = CursorState::Collecting;
+                            let map = self.inner.document_map();
+                            let snap = Self::snapshot_from_doc(&doc, map, &self.order_fields);
+                            // First collected row is both the start and end of the page so far.
+                            self.last_snapshot = Some(CursorSnapshot {
+                                doc_id: snap.doc_id.clone(),
+                                keys: snap.keys.clone(),
+                            });
+                            self.first_snapshot = Some(snap);
+                            self.current_doc = doc;
+                            self.emitted += 1;
+                            return Ok(true);
                         }
+                        // still skipping
                     } else {
                         // Exhausted before finding the boundary.
                         self.state = CursorState::Drained;
@@ -350,13 +369,22 @@ impl CursorNode {
             ));
         }
         let window_size = self.page_size as usize + 1; // +1 to detect has_prev
+        let dir = doc_id_order_direction(&self.order_fields);
         while self.inner.next().await? {
             let value = self.inner.value();
             if let Some(boundary) = before_doc_id.as_deref() {
                 // Stop at (not past) the boundary: the `before` doc itself is excluded
-                // from output, matching Go's semantics. Using `>=` instead of `>` ensures
-                // the boundary row triggers `break` before being added to the buffer.
-                if value.doc_id().unwrap_or("") >= boundary {
+                // from output, matching Go's semantics.
+                //
+                // For ASC order the iterator sees rows in ascending doc_id order;
+                // stop when we reach or pass the boundary: `>=`.
+                // For DESC order the iterator sees rows in descending doc_id order
+                // (larger IDs first); stop when we reach or go below the boundary: `<=`.
+                let stop = match dir {
+                    OrderDirection::Asc => value.doc_id().unwrap_or("") >= boundary,
+                    OrderDirection::Desc => value.doc_id().unwrap_or("") <= boundary,
+                };
+                if stop {
                     break;
                 }
             }
