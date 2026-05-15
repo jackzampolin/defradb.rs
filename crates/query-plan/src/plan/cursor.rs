@@ -51,6 +51,8 @@ pub struct CursorNode {
     order_fields: Vec<OrderCondition>,
 
     state: CursorState,
+    /// True once `populate_backward_buffer` has run for the backward path.
+    buffer_populated: bool,
     /// Buffer used by the backward path: populated on the first `next()` call.
     buffer: VecDeque<Doc>,
     current_doc: Doc,
@@ -79,8 +81,8 @@ impl CursorNode {
     ) -> Self {
         // Forward: if the index already positions us past `after`, or there is
         // no `after` token, start collecting immediately.
-        // Backward: always start in SkippingUntilAfter (repurposed as "buffer not yet
-        // populated"). The first next() call drains the inner plan into `self.buffer`.
+        // Backward: always start in Collecting; `buffer_populated` tracks whether
+        // the first-call buffer fill has happened.
         let initial_state = match direction {
             CursorDirection::Forward => {
                 if index_seek_active || after.is_none() {
@@ -89,7 +91,7 @@ impl CursorNode {
                     CursorState::SkippingUntilAfter
                 }
             }
-            CursorDirection::Backward => CursorState::SkippingUntilAfter,
+            CursorDirection::Backward => CursorState::Collecting,
         };
         Self {
             inner,
@@ -100,6 +102,7 @@ impl CursorNode {
             page_info_fields,
             order_fields,
             state: initial_state,
+            buffer_populated: false,
             buffer: VecDeque::new(),
             current_doc: Doc::default(),
             first_snapshot: None,
@@ -240,11 +243,10 @@ impl CursorNode {
     }
 
     async fn next_backward(&mut self) -> Result<bool> {
-        // On the very first call (state == SkippingUntilAfter), drain the inner
-        // plan into self.buffer, then switch to Collecting for subsequent calls.
-        if self.state == CursorState::SkippingUntilAfter {
+        // On the very first call, drain the inner plan into self.buffer.
+        if !self.buffer_populated {
             self.populate_backward_buffer().await?;
-            self.state = CursorState::Collecting;
+            self.buffer_populated = true;
         }
 
         match self.state {
@@ -259,67 +261,78 @@ impl CursorNode {
                 }
             },
             CursorState::Drained => Ok(false),
-            // SkippingUntilAfter is only used as the "uninitialised" sentinel for
-            // the backward path (handled above) — it cannot appear here.
-            CursorState::SkippingUntilAfter => unreachable!(),
+            CursorState::SkippingUntilAfter => unreachable!("SkippingUntilAfter is forward-only"),
         }
     }
 
-    /// Drain the inner plan into `self.buffer` according to backward semantics.
-    ///
-    /// Slow path (no index seek): iterate the inner plan forward, keep a sliding
-    /// window of the last `page_size + 1` docs, stopping at (but not including)
-    /// the `before` boundary doc_id when set.
-    ///
-    /// Fast path (index_seek_active): the inner plan already iterates in reverse
-    /// from the `before` boundary. Collect up to `page_size + 1` docs and reverse
-    /// them so callers receive docs in logical (ascending) order.
+    /// Drain the inner plan into `self.buffer` according to backward semantics,
+    /// then compute snapshots and page-info flags.
     async fn populate_backward_buffer(&mut self) -> Result<()> {
+        if self.index_seek_active {
+            self.populate_backward_buffer_fast().await?;
+        } else {
+            self.populate_backward_buffer_slow().await?;
+        }
+        self.populate_snapshots_after_buffer();
+        Ok(())
+    }
+
+    /// Fast path: the inner plan already iterates in reverse from the `before`
+    /// boundary. Collect up to `page_size + 1` docs and reverse them so callers
+    /// receive docs in logical (ascending) order.
+    async fn populate_backward_buffer_fast(&mut self) -> Result<()> {
+        let window_size = self.page_size as usize + 1; // +1 to detect has_prev
+        let mut collected: Vec<Doc> = Vec::with_capacity(window_size);
+        while self.inner.next().await? {
+            let doc = self.inner.value().deep_clone();
+            collected.push(doc);
+            if collected.len() >= window_size {
+                break;
+            }
+        }
+        // Reverse so the buffer holds docs in ascending (logical) order.
+        collected.reverse();
+        if collected.len() > self.page_size as usize {
+            self.has_prev = true;
+            collected.remove(0); // drop the extra doc at the front
+        }
+        for doc in collected {
+            self.buffer.push_back(doc);
+        }
+        Ok(())
+    }
+
+    /// Slow path: scan forward; keep a sliding window of the last `page_size + 1`
+    /// docs, stopping at (but not including) the `before` boundary doc_id when set.
+    async fn populate_backward_buffer_slow(&mut self) -> Result<()> {
         let before_doc_id = self.before.as_ref().map(|c| c.doc_id.clone());
         let window_size = self.page_size as usize + 1; // +1 to detect has_prev
-
-        if self.index_seek_active {
-            // Fast path: inner iterates in reverse; collect then reverse for logical order.
-            let mut collected: Vec<Doc> = Vec::with_capacity(window_size);
-            while self.inner.next().await? {
-                let doc = self.inner.value().deep_clone();
-                collected.push(doc);
-                if collected.len() > window_size {
+        while self.inner.next().await? {
+            let value = self.inner.value();
+            if let Some(boundary) = before_doc_id.as_deref() {
+                // Stop at (not past) the boundary: the `before` doc itself is excluded
+                // from output, matching Go's semantics. Using `>=` instead of `>` ensures
+                // the boundary row triggers `break` before being added to the buffer.
+                if value.doc_id().unwrap_or("") >= boundary {
                     break;
                 }
             }
-            // Reverse so the buffer holds docs in ascending (logical) order.
-            collected.reverse();
-            if collected.len() > self.page_size as usize {
-                self.has_prev = true;
-                collected.remove(0); // drop the extra doc at the front
-            }
-            for doc in collected {
-                self.buffer.push_back(doc);
-            }
-        } else {
-            // Slow path: scan forward; keep a sliding window of the last window_size docs.
-            // Stop at the `before` boundary (exclusive).
-            while self.inner.next().await? {
-                let value = self.inner.value();
-                if let Some(boundary) = before_doc_id.as_deref() {
-                    if value.doc_id().unwrap_or("") >= boundary {
-                        break;
-                    }
-                }
-                let doc = value.deep_clone();
-                self.buffer.push_back(doc);
-                if self.buffer.len() > window_size {
-                    self.buffer.pop_front();
-                }
-            }
-            if self.buffer.len() > self.page_size as usize {
-                self.has_prev = true;
+            let doc = value.deep_clone();
+            self.buffer.push_back(doc);
+            if self.buffer.len() > window_size {
                 self.buffer.pop_front();
             }
         }
+        if self.buffer.len() > self.page_size as usize {
+            self.has_prev = true;
+            self.buffer.pop_front();
+        }
+        Ok(())
+    }
 
-        // Capture snapshots for start/end cursor encoding.
+    /// Capture first/last snapshots from the buffer and set `has_next`.
+    /// Called after either fast or slow population.
+    fn populate_snapshots_after_buffer(&mut self) {
         let map = self.inner.document_map();
         if let Some(first) = self.buffer.front() {
             self.first_snapshot = Some(Self::snapshot_from_doc(first, map, &self.order_fields));
@@ -327,13 +340,10 @@ impl CursorNode {
         if let Some(last) = self.buffer.back() {
             self.last_snapshot = Some(Self::snapshot_from_doc(last, map, &self.order_fields));
         }
-
         // has_next is always true when a `before` token was provided, because the
         // caller of this page knows there are rows on the next (forward) page.
         self.has_next = self.before.is_some();
-
         self.finalize_page_info();
-        Ok(())
     }
 }
 
@@ -358,6 +368,7 @@ impl PlanNode for CursorNode {
         self.start_cursor = None;
         self.end_cursor = None;
         self.buffer.clear();
+        self.buffer_populated = false;
         self.state = match self.direction {
             CursorDirection::Forward => {
                 if self.index_seek_active || self.after.is_none() {
@@ -366,8 +377,7 @@ impl PlanNode for CursorNode {
                     CursorState::SkippingUntilAfter
                 }
             }
-            // SkippingUntilAfter is repurposed for backward as "buffer not populated yet".
-            CursorDirection::Backward => CursorState::SkippingUntilAfter,
+            CursorDirection::Backward => CursorState::Collecting,
         };
         self.exec_info = ExecInfo::default();
         self.inner.init().await
@@ -656,5 +666,43 @@ mod tests {
         let info = node.page_info();
         assert!(info.has_prev, "has_prev because after token was set");
         assert!(!info.has_next, "has_next false: no rows remain after d");
+    }
+
+    #[tokio::test]
+    async fn backward_last_index_seek_fast_path_emits_in_order() {
+        // index_seek_active = true means the inner plan already iterates in reverse.
+        // FakePlan with [d, c, b, a] simulates that (inner = reverse logical order).
+        let inner = FakePlan::new(vec![
+            doc_with_id("d"),
+            doc_with_id("c"),
+            doc_with_id("b"),
+            doc_with_id("a"),
+        ]);
+        let mut node = CursorNode::new(
+            Box::new(inner),
+            CursorDirection::Backward,
+            2,
+            None,
+            None,
+            CursorPageInfoFields {
+                has_next: true,
+                has_prev: true,
+                ..Default::default()
+            },
+            vec![],
+            true, // index_seek_active — fast path
+        );
+        node.init().await.unwrap();
+        // Buffer: collected reverse = [d, c, b]; len=3 == window_size → break.
+        // Reverse for logical order = [b, c, d]; len=3 > page_size=2 → has_prev=true, drop b.
+        // Final buffer = [c, d]. Output: c, d.
+        assert!(node.next().await.unwrap());
+        assert_eq!(current_id(&node), "c");
+        assert!(node.next().await.unwrap());
+        assert_eq!(current_id(&node), "d");
+        assert!(!node.next().await.unwrap());
+        let info = node.page_info();
+        assert!(info.has_prev, "page_size+1 < total => has_prev=true");
+        assert!(!info.has_next, "before is None => has_next=false");
     }
 }
