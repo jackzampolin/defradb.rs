@@ -68,7 +68,7 @@ pub(crate) fn expand_cursor_plan(
         page_size,
         after,
         before,
-        select.cursor_page_info,
+        select.cursor_page_info.clone(),
         order_fields,
         index_seek_active,
     )))
@@ -206,7 +206,20 @@ fn configure_scan_for_cursor(
     // For non-unique indexes the doc_id suffix in build_cursor_seek_key
     // disambiguates, but unique indexes store doc_id in the value, not the key,
     // so the suffix trick doesn't apply. Fall back to the slow path.
-    if idx.unique && cursor_token.keys.len() < idx.fields.len() {
+    // Build the set of expected field names from the index.
+    let index_field_names: std::collections::HashSet<&str> =
+        idx.fields.iter().map(|f| f.name.as_str()).collect();
+
+    // Count cursor keys that match an actual index field. Uses the count of
+    // MATCHING keys, not the raw cursor.keys.len(), since a malicious or stale
+    // token could carry extra unrelated keys that would bypass this check.
+    let cursor_index_keys_count = cursor_token
+        .keys
+        .keys()
+        .filter(|k| index_field_names.contains(k.as_str()))
+        .count();
+
+    if idx.unique && cursor_index_keys_count < idx.fields.len() {
         return Ok((plan, false));
     }
 
@@ -224,6 +237,7 @@ fn configure_scan_for_cursor(
             CursorDirection::Forward => reversed,
             CursorDirection::Backward => !reversed,
         },
+        expected_index_name: idx.name.clone(),
     };
 
     let applied = plan.set_cursor_seek(seek);
@@ -282,7 +296,15 @@ fn build_cursor_seek_key(
     // For unique indexes with non-null values, the doc_id is stored in the VALUE so
     // the key alone identifies one row. But when any cursor key is null, the on-disk
     // format appends doc_id to the key (same as non-unique), so we must include it.
-    let has_null_value = cursor.keys.values().any(|v| v.is_null());
+    // Only consider the values that correspond to actual index fields.
+    // Checking all cursor.keys.values() would be vulnerable to extra unrelated
+    // keys in a malicious or stale token triggering (or suppressing) the doc_id
+    // suffix incorrectly.
+    let has_null_value = idx
+        .fields
+        .iter()
+        .filter_map(|f| cursor.keys.get(&f.name))
+        .any(|v| v.is_null());
     if !idx.unique || has_null_value {
         key.extend_from_slice(cursor.doc_id.as_bytes());
     }

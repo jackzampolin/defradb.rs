@@ -278,6 +278,12 @@ impl PlanNode for IndexScanNode {
 
     fn set_cursor_seek(&mut self, seek: CursorSeek) -> bool {
         use crate::planner::index_selection::IndexScanType;
+        // Reject if the seek was built for a different index than this scan uses.
+        // Seek key bytes encode field positions specific to one index — applying
+        // them to a different scan's index produces incoherent results.
+        if self.index_params.index_name != seek.expected_index_name {
+            return false;
+        }
         match &mut self.index_params.scan_type {
             IndexScanType::PrefixScan { reverse, .. } => {
                 // Propagate the cursor's desired iteration direction into the scan type
@@ -357,6 +363,7 @@ mod tests {
             seek_key: vec![0, 1, 2],
             inclusive: false,
             reversed: false,
+            expected_index_name: "idx_test".to_string(),
         }
     }
 
@@ -444,6 +451,7 @@ mod tests {
             seek_key: vec![0, 1, 2],
             inclusive: false,
             reversed: true, // cursor wants backward iteration
+            expected_index_name: "idx_test".to_string(),
         };
         let applied = node.set_cursor_seek(seek);
         assert!(applied, "PrefixScan must return true");
@@ -471,6 +479,7 @@ mod tests {
             seek_key: vec![0, 1, 2],
             inclusive: false,
             reversed: true, // cursor wants backward iteration
+            expected_index_name: "idx_test".to_string(),
         };
         let applied = node.set_cursor_seek(seek);
         assert!(applied, "RangeScan must return true");
@@ -483,5 +492,31 @@ mod tests {
             }
             _ => panic!("expected RangeScan"),
         }
+    }
+
+    #[test]
+    fn set_cursor_seek_returns_false_for_mismatched_index_name() {
+        // If the seek was built for a different index than this scan uses,
+        // set_cursor_seek must reject it so that bytes encoded for one index's
+        // field positions are never applied to a different index scan.
+        let mut node = make_index_scan_node(IndexScanType::PrefixScan {
+            prefix_values: vec![],
+            reverse: false,
+        });
+        let seek = CursorSeek {
+            seek_key: vec![0, 1, 2],
+            inclusive: false,
+            reversed: false,
+            expected_index_name: "idx_different".to_string(), // does not match "idx_test"
+        };
+        let applied = node.set_cursor_seek(seek);
+        assert!(
+            !applied,
+            "seek for wrong index must be rejected (expected_index_name mismatch)"
+        );
+        assert!(
+            node.index_params.cursor_seek.is_none(),
+            "cursor_seek must not be stored when index name mismatches"
+        );
     }
 }

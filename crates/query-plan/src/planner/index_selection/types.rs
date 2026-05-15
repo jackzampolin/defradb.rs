@@ -41,6 +41,13 @@ pub struct CursorSeek {
     pub inclusive: bool,
     /// Iterate the index in reverse order.
     pub reversed: bool,
+    /// Name of the index this seek was built for. The fetcher must reject
+    /// the seek if its scan uses a different index — otherwise seek bytes
+    /// encoded for one index's field positions would be applied to another
+    /// index, corrupting pagination. This catches the case where
+    /// `try_select_index` chose a filter-only index that doesn't match the
+    /// order-supporting index validated by `validate_cursor_index`.
+    pub expected_index_name: String,
 }
 
 /// Value-level filter applied to individual index entries during scan iteration.
