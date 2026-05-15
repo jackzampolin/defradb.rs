@@ -336,16 +336,19 @@ impl CursorNode {
     /// docs, stopping at (but not including) the `before` boundary doc_id when set.
     ///
     /// The boundary comparison uses only doc_id, which is only correct for doc_id
-    /// or empty ordering. For other field orderings return an error instead of
-    /// silently returning wrong results (see `is_doc_id_or_empty_order`).
+    /// or empty ordering. When a `before` cursor is present and the order is not
+    /// doc_id-only, return an error instead of silently returning wrong results
+    /// (see `is_doc_id_or_empty_order`). When there is no `before` cursor, no
+    /// boundary comparison happens — the slow path just slides a window — so any
+    /// ordering is safe.
     async fn populate_backward_buffer_slow(&mut self) -> Result<()> {
-        if !is_doc_id_or_empty_order(&self.order_fields) {
+        let before_doc_id = self.before.as_ref().map(|c| c.doc_id.clone());
+        if before_doc_id.is_some() && !is_doc_id_or_empty_order(&self.order_fields) {
             return Err(QueryError::execution(
                 "cursor slow path (no index seek) does not support non-docID ordering; \
                  ensure the collection has an index covering the ORDER BY fields",
             ));
         }
-        let before_doc_id = self.before.as_ref().map(|c| c.doc_id.clone());
         let window_size = self.page_size as usize + 1; // +1 to detect has_prev
         while self.inner.next().await? {
             let value = self.inner.value();
