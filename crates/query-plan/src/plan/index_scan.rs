@@ -352,8 +352,7 @@ mod tests {
 
     #[test]
     fn set_cursor_seek_returns_false_for_exact_match() {
-        let mut node =
-            make_index_scan_node(IndexScanType::ExactMatch { values: vec![] });
+        let mut node = make_index_scan_node(IndexScanType::ExactMatch { values: vec![] });
         let applied = node.set_cursor_seek(make_seek());
         assert!(
             !applied,
