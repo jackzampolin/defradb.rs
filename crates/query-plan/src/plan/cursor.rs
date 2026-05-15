@@ -154,7 +154,7 @@ impl CursorNode {
             has_prev: self.has_prev,
             start_cursor: self.start_cursor.clone(),
             end_cursor: self.end_cursor.clone(),
-            fields: self.page_info_fields,
+            fields: self.page_info_fields.clone(),
         }
     }
 
@@ -190,12 +190,12 @@ impl CursorNode {
     }
 
     fn finalize_page_info(&mut self) {
-        if self.page_info_fields.start_cursor {
+        if self.page_info_fields.start_cursor.is_some() {
             if let Some(snap) = self.first_snapshot.as_ref() {
                 self.start_cursor = Some(Self::build_cursor_from_snapshot(snap).encode());
             }
         }
-        if self.page_info_fields.end_cursor {
+        if self.page_info_fields.end_cursor.is_some() {
             if let Some(snap) = self.last_snapshot.as_ref() {
                 self.end_cursor = Some(Self::build_cursor_from_snapshot(snap).encode());
             }
@@ -610,7 +610,7 @@ mod tests {
             None, // no after token
             None,
             CursorPageInfoFields {
-                has_next: true,
+                has_next: Some("hasNext".to_string()),
                 ..Default::default()
             },
             vec![],
@@ -649,8 +649,8 @@ mod tests {
             None,
             None,
             CursorPageInfoFields {
-                has_next: true,
-                has_prev: true,
+                has_next: Some("hasNext".to_string()),
+                has_prev: Some("hasPrev".to_string()),
                 ..Default::default()
             },
             vec![],
@@ -689,8 +689,8 @@ mod tests {
             None,
             Some(before),
             CursorPageInfoFields {
-                has_next: true,
-                has_prev: true,
+                has_next: Some("hasNext".to_string()),
+                has_prev: Some("hasPrev".to_string()),
                 ..Default::default()
             },
             vec![],
@@ -724,8 +724,8 @@ mod tests {
             Some(after),
             None,
             CursorPageInfoFields {
-                has_next: true,
-                has_prev: true,
+                has_next: Some("hasNext".to_string()),
+                has_prev: Some("hasPrev".to_string()),
                 ..Default::default()
             },
             vec![],
@@ -763,8 +763,8 @@ mod tests {
             None,
             None,
             CursorPageInfoFields {
-                has_next: true,
-                has_prev: true,
+                has_next: Some("hasNext".to_string()),
+                has_prev: Some("hasPrev".to_string()),
                 ..Default::default()
             },
             vec![],

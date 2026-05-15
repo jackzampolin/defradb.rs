@@ -21,19 +21,23 @@ impl CursorParams {
     }
 }
 
-/// Which `_pageInfo` fields the client selected. Used to gate
-/// response emission so we don't compute or serialize unrequested fields.
-#[derive(Debug, Clone, Copy, Default)]
+/// Which `_pageInfo` fields the client selected, and the output key to emit them under.
+/// `None` means the field was not selected; `Some(key)` means it was selected and should
+/// appear in the response under that key (the alias if provided, else the canonical name).
+#[derive(Debug, Clone, Default)]
 pub struct CursorPageInfoFields {
-    pub has_next: bool,
-    pub has_prev: bool,
-    pub start_cursor: bool,
-    pub end_cursor: bool,
+    pub has_next: Option<String>,
+    pub has_prev: Option<String>,
+    pub start_cursor: Option<String>,
+    pub end_cursor: Option<String>,
 }
 
 impl CursorPageInfoFields {
     pub fn any_selected(&self) -> bool {
-        self.has_next || self.has_prev || self.start_cursor || self.end_cursor
+        self.has_next.is_some()
+            || self.has_prev.is_some()
+            || self.start_cursor.is_some()
+            || self.end_cursor.is_some()
     }
 }
 
@@ -75,7 +79,7 @@ mod tests {
         assert!(!p.any_selected());
 
         let p = CursorPageInfoFields {
-            has_next: true,
+            has_next: Some("hasNext".to_string()),
             ..Default::default()
         };
         assert!(p.any_selected());
