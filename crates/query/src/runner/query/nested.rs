@@ -124,9 +124,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         let plan_exec_info = plan.exec_info();
         // Capture cursor page-info BEFORE close() releases plan resources.
-        // Non-cursor selects don't use page_info and calling it unconditionally
-        // triggers stack overflow on @exhaustive relation-order queries whose
-        // OrphanNode forwards page_info() recursively without a base case.
+        // Non-cursor selects don't need it, so skip the wrapper-node traversal
+        // entirely — it would just return `None` after walking the plan tree.
         let cursor_page_info = if select.is_cursor {
             plan.page_info()
         } else {
