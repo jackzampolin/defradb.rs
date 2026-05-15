@@ -125,17 +125,24 @@ fn extract_cursor_params<'a>(
     Ok(params)
 }
 
-/// Parse `_pageInfo { hasNext hasPrev startCursor endCursor }` — returns which fields were selected.
-fn parse_page_info_selection<'a>(field: &'a Field<'a, String>) -> Result<CursorPageInfoFields> {
+/// Parse `_pageInfo { hasNext hasPrev startCursor endCursor }` — returns which fields were
+/// selected and the output key to use for each (alias if provided, else canonical name).
+fn parse_page_info_selection(field: &Field<'_, String>) -> Result<CursorPageInfoFields> {
     let mut fields = CursorPageInfoFields::default();
     for selection in &field.selection_set.items {
         if let Selection::Field(child) = selection {
+            // Output key: alias if provided, else the field's canonical name.
+            let output_key = child.alias.clone().unwrap_or_else(|| child.name.clone());
             match child.name.as_str() {
-                "hasNext" => fields.has_next = true,
-                "hasPrev" => fields.has_prev = true,
-                "startCursor" => fields.start_cursor = true,
-                "endCursor" => fields.end_cursor = true,
-                _ => continue,
+                "hasNext" => fields.has_next = Some(output_key),
+                "hasPrev" => fields.has_prev = Some(output_key),
+                "startCursor" => fields.start_cursor = Some(output_key),
+                "endCursor" => fields.end_cursor = Some(output_key),
+                other => {
+                    return Err(QueryError::parse(format!(
+                        "Cannot query field \"{other}\" on type \"PageInfo\"."
+                    )));
+                }
             }
         }
     }
@@ -209,10 +216,13 @@ mod tests {
         let params = select.cursor_params.as_ref().unwrap();
         assert_eq!(params.first, Some(10));
         assert_eq!(params.after, Some("abc".to_string()));
-        assert!(select.cursor_page_info.has_next);
-        assert!(select.cursor_page_info.start_cursor);
-        assert!(!select.cursor_page_info.has_prev);
-        assert!(!select.cursor_page_info.end_cursor);
+        assert_eq!(select.cursor_page_info.has_next.as_deref(), Some("hasNext"));
+        assert_eq!(
+            select.cursor_page_info.start_cursor.as_deref(),
+            Some("startCursor")
+        );
+        assert!(select.cursor_page_info.has_prev.is_none());
+        assert!(select.cursor_page_info.end_cursor.is_none());
         assert_eq!(select.cursor_aliases.wrapper_alias, None);
         assert_eq!(select.field.name, "User");
     }
@@ -236,6 +246,28 @@ mod tests {
         let query = r#"{ _cursor { User(first: 5, offset: 3, order: {age: ASC}) { name } } }"#;
         let err = parse(query).unwrap_err().to_string();
         assert!(err.contains("offset"), "error should mention offset: {err}");
+    }
+
+    #[test]
+    fn page_info_field_aliases_are_preserved() {
+        let query = r#"{ _cursor { User(first: 5, order: [{age: ASC}]) { name } _pageInfo { next: hasNext } } }"#;
+        let selects = parse(query).unwrap();
+        let pi = &selects[0].cursor_page_info;
+        assert_eq!(pi.has_next.as_deref(), Some("next"));
+        assert!(pi.has_prev.is_none());
+        assert!(pi.start_cursor.is_none());
+        assert!(pi.end_cursor.is_none());
+    }
+
+    #[test]
+    fn unknown_page_info_field_rejected() {
+        let query =
+            r#"{ _cursor { User(first: 5, order: [{age: ASC}]) { name } _pageInfo { bogus } } }"#;
+        let err = parse(query).unwrap_err().to_string();
+        assert!(
+            err.contains("PageInfo") || err.contains("bogus"),
+            "should mention the bad field or type: {err}"
+        );
     }
 
     #[test]
