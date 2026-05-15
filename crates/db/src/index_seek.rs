@@ -12,7 +12,7 @@ pub(crate) async fn apply_cursor_seek_to_iterator(
     cursor_seek: &Option<CursorSeek>,
 ) -> Result<(), query::error::QueryError> {
     if let Some(ref seek) = cursor_seek {
-        iter.apply_cursor_seek(seek.seek_key.clone(), seek.inclusive)
+        iter.apply_cursor_seek(seek.seek_key.clone(), seek.inclusive, seek.reversed)
             .await
             .map_err(|e| {
                 query::error::QueryError::execution(format!("cursor seek error: {}", e))
