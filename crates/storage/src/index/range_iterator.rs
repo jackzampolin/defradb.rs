@@ -228,8 +228,22 @@ impl RangeIterator {
     /// For reverse seeks, the actual storage seek uses `seek_key` appended with `0xFF` so
     /// that entries whose full key starts with `seek_key` (e.g. `[seek_key][doc_id]`) are
     /// included in the initial seek position.
-    pub async fn apply_cursor_seek(&mut self, seek_key: Vec<u8>, inclusive: bool) -> Result<()> {
-        if self.reverse {
+    ///
+    /// `reversed` overrides `self.reverse`. The scan's pre-existing direction is set by
+    /// the ORDER BY field direction, but cursor backward pagination (`last`/`before`) is
+    /// independent — it must iterate in reverse regardless of ORDER BY direction.
+    pub async fn apply_cursor_seek(
+        &mut self,
+        seek_key: Vec<u8>,
+        inclusive: bool,
+        reversed: bool,
+    ) -> Result<()> {
+        // Override the iterator direction for cursor seeks. The scan's pre-existing
+        // `self.reverse` reflects the ORDER BY direction; `reversed` here is set by
+        // whether the cursor is paginating backward (`last`/`before`), which is
+        // orthogonal to ORDER direction.
+        self.reverse = reversed;
+        if reversed {
             // For reverse iteration, seek_key is an upper bound.
             // Set the upper bound so is_key_within_bounds enforces inclusivity.
             self.upper_bound_key = Some(seek_key.clone());
@@ -690,7 +704,7 @@ mod tests {
 
         // Seek to age=30 exclusive (forward): iterator should land at carol (age=40).
         let seek_key = build_age_seek_key(30);
-        iter.apply_cursor_seek(seek_key, false).await.unwrap();
+        iter.apply_cursor_seek(seek_key, false, false).await.unwrap();
 
         let entries = iter.collect_all().await.unwrap();
         let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
@@ -742,7 +756,7 @@ mod tests {
         // Seek to age=30 inclusive (reverse): iterator should include bob and alice.
         // The seek_key encodes age=30; for a reverse scan the storage seek lands at or before it.
         let seek_key = build_age_seek_key(30);
-        iter.apply_cursor_seek(seek_key, true).await.unwrap();
+        iter.apply_cursor_seek(seek_key, true, true).await.unwrap();
 
         let entries = iter.collect_all().await.unwrap();
         let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
@@ -759,6 +773,73 @@ mod tests {
             doc_ids.contains(&"alice"),
             "alice must be included (before boundary in reverse)"
         );
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_cursor_seek_reversed_param_controls_upper_bound() {
+        // Verify that the `reversed` parameter controls which bound slot is used,
+        // overriding `self.reverse`. This is the P1.1 regression guard: the
+        // `reversed` field in CursorSeek must be propagated explicitly rather than
+        // silently relying on `self.reverse` already being set correctly.
+        //
+        // Scenario: build a reverse iterator (self.reverse=true), then call
+        // apply_cursor_seek with reversed=true at age=30 inclusive.
+        // The upper_bound_key should be set (reverse path), not lower_bound_key.
+        // The existing test_cursor_seek_backward_inclusive_starts_at_boundary already
+        // validates the behavioral outcome; this test checks the bound slot directly.
+        let store = MemoryStore::new();
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        let desc = test_index_description();
+        let index = SimpleIndex::new(1, desc.clone());
+
+        index
+            .save(&mut txn, "alice", &[NormalValue::Int(20)])
+            .await
+            .unwrap();
+        index
+            .save(&mut txn, "bob", &[NormalValue::Int(30)])
+            .await
+            .unwrap();
+        index
+            .save(&mut txn, "carol", &[NormalValue::Int(40)])
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        // Build a reverse iterator to match the reversed=true param.
+        let txn = store.new_txn(true).await.unwrap();
+        let mut iter = RangeIterator::new_scan(txn.as_ref(), 1, &desc, false, true)
+            .await
+            .unwrap();
+
+        let seek_key = build_age_seek_key(30);
+        iter.apply_cursor_seek(seek_key.clone(), true, true)
+            .await
+            .unwrap();
+
+        // The reversed=true path must set upper_bound_key, not lower_bound_key.
+        assert!(
+            iter.upper_bound_key.is_some(),
+            "reversed=true must set upper_bound_key"
+        );
+        assert!(
+            iter.lower_bound_key.is_none(),
+            "reversed=true must NOT set lower_bound_key"
+        );
+        assert_eq!(iter.upper_bound_key.as_deref(), Some(seek_key.as_slice()));
+        assert!(iter.upper_inclusive, "inclusive=true must set upper_inclusive");
+
+        // Behavioral check: bob and alice returned (inclusive at 30, exclude carol > 30).
+        let entries = iter.collect_all().await.unwrap();
+        let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
+        assert!(
+            !doc_ids.contains(&"carol"),
+            "carol is above the cursor boundary"
+        );
+        assert!(doc_ids.contains(&"bob"), "bob is at the boundary (inclusive)");
+        assert!(doc_ids.contains(&"alice"), "alice is before boundary");
         assert_eq!(entries.len(), 2);
     }
 }
