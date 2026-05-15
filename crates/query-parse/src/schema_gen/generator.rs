@@ -69,19 +69,19 @@ impl GqlType {
     }
 }
 
-/// A GraphQL field definition
+/// A GraphQL argument definition (for field arguments)
 #[derive(Debug, Clone)]
-pub struct GqlField {
+pub struct GqlArg {
     pub name: String,
-    pub field_type: GqlType,
+    pub arg_type: GqlType,
     pub description: Option<String>,
 }
 
-impl GqlField {
-    pub fn new(name: impl Into<String>, field_type: GqlType) -> Self {
+impl GqlArg {
+    pub fn new(name: impl Into<String>, arg_type: GqlType) -> Self {
         Self {
             name: name.into(),
-            field_type,
+            arg_type,
             description: None,
         }
     }
@@ -93,12 +93,63 @@ impl GqlField {
 
     /// Convert to GraphQL SDL string
     pub fn to_sdl(&self) -> String {
+        format!("{}: {}", self.name, self.arg_type.to_sdl())
+    }
+}
+
+/// A GraphQL field definition
+#[derive(Debug, Clone)]
+pub struct GqlField {
+    pub name: String,
+    pub field_type: GqlType,
+    pub args: Vec<GqlArg>,
+    pub description: Option<String>,
+}
+
+impl GqlField {
+    pub fn new(name: impl Into<String>, field_type: GqlType) -> Self {
+        Self {
+            name: name.into(),
+            field_type,
+            args: Vec::new(),
+            description: None,
+        }
+    }
+
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        self.description = Some(desc.into());
+        self
+    }
+
+    pub fn with_arg(mut self, arg: GqlArg) -> Self {
+        self.args.push(arg);
+        self
+    }
+
+    pub fn with_args(mut self, args: Vec<GqlArg>) -> Self {
+        self.args.extend(args);
+        self
+    }
+
+    /// Convert to GraphQL SDL string
+    pub fn to_sdl(&self) -> String {
         let desc = self
             .description
             .as_ref()
             .map(|d| format!("  \"{}\"\n", d))
             .unwrap_or_default();
-        format!("{}  {}: {}", desc, self.name, self.field_type.to_sdl())
+        if self.args.is_empty() {
+            format!("{}  {}: {}", desc, self.name, self.field_type.to_sdl())
+        } else {
+            let args: Vec<String> = self.args.iter().map(|a| a.to_sdl()).collect();
+            format!(
+                "{}  {}({}): {}",
+                desc,
+                self.name,
+                args.join(", "),
+                self.field_type.to_sdl()
+            )
+        }
     }
 }
 
