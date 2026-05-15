@@ -4,8 +4,10 @@
 //! - A non-unique composite index requires ordering by ALL its fields (cursor errors otherwise).
 //! - A unique composite index allows ordering by a prefix of its fields.
 //!
-//! Also validates that cursor pagination correctly handles non-unique index entries where
-//! multiple documents share the same indexed field value (P1.2 duplicate-keys regression).
+//! Also validates:
+//! - Non-unique index entries with duplicate field values (P1.2 duplicate-keys regression).
+//! - `before` cursor is exclusive on the fast path (PR#961 round-2 Fix 2 regression).
+//! - Unique composite prefix cursors fall back to the slow path safely (PR#961 round-2 Fix 4).
 
 use integration_test::TestCluster;
 use serde_json::Value;
@@ -185,5 +187,122 @@ async fn rust_cursor_paginates_through_duplicate_index_keys() {
         all_names,
         vec!["alice", "bob", "carol", "dave"],
         "pages 1 and 2 must cover all 4 users with no duplicates or missing entries"
+    );
+}
+
+/// Regression: `before` cursor must be EXCLUSIVE on the fast path (index seek active).
+///
+/// Before PR#961 round-2 Fix 2, `inclusive: matches!(direction, CursorDirection::Backward)`
+/// made the `before` boundary inclusive — the boundary row appeared in the result.
+#[tokio::test]
+async fn rust_backward_before_excludes_boundary() {
+    let cluster = integration_test::TestCluster::builder()
+        .rust_nodes(1)
+        .build()
+        .await
+        .unwrap();
+    let node = cluster.client(0);
+
+    node.schema_add(super::common::USER_SCHEMA)
+        .expect("add schema");
+    node.index_create("User", &["age"], Some("idx_age"), false)
+        .expect("create age index");
+
+    for (name, age) in [("a", 20), ("b", 30), ("c", 40), ("d", 50)] {
+        let mutation = format!(
+            r#"mutation {{ add_User(input: {{ name: "{name}", age: {age} }}) {{ _docID }} }}"#
+        );
+        node.query(&mutation).expect("seed");
+    }
+
+    // Get the cursor for "c" (age=40) — the last row of a first:3 page.
+    let page1: serde_json::Value = node
+        .query(
+            r#"{ _cursor {
+            User(first: 3, order: [{age: ASC}]) { name age }
+            _pageInfo { endCursor }
+        } }"#,
+        )
+        .expect("page 1");
+    let c_cursor = page1["_cursor"]["_pageInfo"]["endCursor"]
+        .as_str()
+        .expect("endCursor")
+        .to_string();
+
+    // last:2, before:<cursor for c (age=40)> — must return [a(20), b(30)].
+    // The boundary c MUST NOT appear in the result.
+    let result: serde_json::Value = node
+        .query(&format!(
+            r#"{{ _cursor {{
+            User(last: 2, before: "{c_cursor}", order: [{{age: ASC}}]) {{ name age }}
+        }} }}"#
+        ))
+        .expect("backward before query");
+
+    let users = result["_cursor"]["User"]
+        .as_array()
+        .expect("_cursor.User is an array");
+    let names: Vec<&str> = users
+        .iter()
+        .map(|u| u["name"].as_str().expect("name"))
+        .collect();
+    assert!(
+        !names.contains(&"c"),
+        "boundary row 'c' (age=40) must be excluded by `before` cursor; got {:?}",
+        names
+    );
+    assert_eq!(
+        names,
+        vec!["a", "b"],
+        "expected [a, b] before the cursor at c(40)"
+    );
+}
+
+/// Regression: unique composite prefix cursor must fall back to slow path, not corrupt results.
+///
+/// A unique index on (age, name) with ORDER BY age only is a "unique composite prefix" case.
+/// Before PR#961 round-2 Fix 4, the planner built a seek key covering only the `age` prefix,
+/// which is ambiguous for unique indexes (doc_id is in the value, not the key). The fix makes
+/// the planner fall back to the slow path, which uses doc_id comparison and works correctly
+/// when ordering is docID/empty (no `after`/`before` token with non-empty keys).
+#[tokio::test]
+async fn rust_unique_composite_prefix_falls_back_to_slow_path() {
+    let cluster = integration_test::TestCluster::builder()
+        .rust_nodes(1)
+        .build()
+        .await
+        .unwrap();
+    let node = cluster.client(0);
+
+    node.schema_add(USER_COMPOSITE_SCHEMA)
+        .expect("add composite schema");
+    // Unique composite index on (age, name).
+    node.index_create("User", &["age", "score"], Some("idx_age_score"), true)
+        .expect("create unique composite index");
+
+    seed_composite_users(
+        &node,
+        &[("alice", 20, 90), ("bob", 30, 80), ("carol", 40, 70)],
+    )
+    .await;
+
+    // ORDER BY age only (prefix of unique composite index). Page 1 works without a cursor token.
+    let result: serde_json::Value = node
+        .query(r#"{ _cursor { User(first: 2, order: [{age: ASC}]) { name } } }"#)
+        .expect("unique composite prefix first page");
+
+    let users = result["_cursor"]["User"]
+        .as_array()
+        .expect("_cursor.User is an array");
+    assert_eq!(users.len(), 2, "expected 2 users on page 1");
+    // Alice and bob have the two lowest ages.
+    let names: Vec<&str> = users
+        .iter()
+        .map(|u| u["name"].as_str().expect("name"))
+        .collect();
+    assert!(
+        names.contains(&"alice") && names.contains(&"bob"),
+        "expected alice and bob on page 1, got {:?}",
+        names
     );
 }
