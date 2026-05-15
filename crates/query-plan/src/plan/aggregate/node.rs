@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::marker::PhantomData;
 
-use crate::planner::{Doc, ExecInfo, PlanNode};
+use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
 use query_types::document::DocumentMapping;
 use query_types::error::Result;
 use query_types::mapper::{Filter, Limit};
@@ -324,6 +324,10 @@ impl<Op: AggregateOp> PlanNode for AggregateNode<Op> {
 
     fn current_group_docs(&self) -> Option<&[Doc]> {
         self.source.current_group_docs()
+    }
+
+    fn set_cursor_seek(&mut self, seek: CursorSeek) -> bool {
+        self.source.set_cursor_seek(seek)
     }
 
     fn is_grouped_source(&self) -> bool {

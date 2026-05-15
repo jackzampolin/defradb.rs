@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 
-use crate::planner::{Doc, ExecInfo, PlanNode};
+use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
 use query_types::document::DocumentMapping;
 use query_types::error::{QueryError, Result};
 
@@ -145,6 +145,10 @@ impl PlanNode for SimilarityNode {
 
     fn document_map(&self) -> &DocumentMapping {
         &self.document_mapping
+    }
+
+    fn set_cursor_seek(&mut self, seek: CursorSeek) -> bool {
+        self.source.set_cursor_seek(seek)
     }
 
     fn kind(&self) -> &'static str {

@@ -24,8 +24,8 @@ fn load_fixtures() -> Vec<Fixture> {
 #[test]
 fn decode_matches_go() {
     for f in load_fixtures() {
-        let decoded = Cursor::decode(&f.token)
-            .unwrap_or_else(|e| panic!("{}: decode failed: {}", f.name, e));
+        let decoded =
+            Cursor::decode(&f.token).unwrap_or_else(|e| panic!("{}: decode failed: {}", f.name, e));
         assert_eq!(decoded.doc_id, f.decoded.d, "{}: doc_id mismatch", f.name);
         assert_eq!(decoded.keys, f.decoded.k, "{}: keys mismatch", f.name);
     }
