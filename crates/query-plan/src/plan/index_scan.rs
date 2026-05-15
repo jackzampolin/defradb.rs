@@ -277,8 +277,18 @@ impl PlanNode for IndexScanNode {
     }
 
     fn set_cursor_seek(&mut self, seek: CursorSeek) -> bool {
-        self.index_params.cursor_seek = Some(seek);
-        true
+        use crate::planner::index_selection::IndexScanType;
+        match self.index_params.scan_type {
+            IndexScanType::PrefixScan { .. } | IndexScanType::RangeScan { .. } => {
+                self.index_params.cursor_seek = Some(seek);
+                true
+            }
+            // ExactMatch, InScan, and OrScan fetchers intentionally ignore cursor_seek
+            // (they lack a RangeIterator to seek). Returning false makes CursorNode take
+            // the slow path (skip-until-after / sliding-window) instead of trusting an
+            // index seek that never happens, which would cause page 2 to repeat page 1.
+            _ => false,
+        }
     }
 
     fn exec_info(&self) -> ExecInfo {
@@ -308,5 +318,106 @@ impl PlanNode for IndexScanNode {
         );
 
         serde_json::Value::Object(obj)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::index_selection::{CursorSeek, IndexScanParams, IndexScanType};
+    use query_types::document::DocumentMapping;
+    use schema::CollectionVersion;
+
+    fn make_index_scan_node(scan_type: IndexScanType) -> IndexScanNode {
+        let collection = CollectionVersion::new("test", "v1", "coll_test_001", vec![]);
+        let document_mapping = DocumentMapping::new();
+        let params = IndexScanParams {
+            index_name: "idx_test".to_string(),
+            scan_type,
+            limit: None,
+            offset: 0,
+            value_filter: None,
+            cursor_seek: None,
+        };
+        IndexScanNode::new(collection, document_mapping, params)
+    }
+
+    fn make_seek() -> CursorSeek {
+        CursorSeek {
+            seek_key: vec![0, 1, 2],
+            inclusive: false,
+            reversed: false,
+        }
+    }
+
+    #[test]
+    fn set_cursor_seek_returns_false_for_exact_match() {
+        let mut node =
+            make_index_scan_node(IndexScanType::ExactMatch { values: vec![] });
+        let applied = node.set_cursor_seek(make_seek());
+        assert!(
+            !applied,
+            "ExactMatch must return false (fetcher ignores cursor_seek)"
+        );
+        assert!(
+            node.index_params.cursor_seek.is_none(),
+            "cursor_seek must not be stored for ExactMatch"
+        );
+    }
+
+    #[test]
+    fn set_cursor_seek_returns_false_for_in_scan() {
+        let mut node = make_index_scan_node(IndexScanType::InScan {
+            values: vec![],
+            suffix_values: vec![],
+        });
+        let applied = node.set_cursor_seek(make_seek());
+        assert!(
+            !applied,
+            "InScan must return false (fetcher ignores cursor_seek)"
+        );
+        assert!(node.index_params.cursor_seek.is_none());
+    }
+
+    #[test]
+    fn set_cursor_seek_returns_false_for_or_scan() {
+        let mut node = make_index_scan_node(IndexScanType::OrScan { branches: vec![] });
+        let applied = node.set_cursor_seek(make_seek());
+        assert!(
+            !applied,
+            "OrScan must return false (fetcher ignores cursor_seek)"
+        );
+        assert!(node.index_params.cursor_seek.is_none());
+    }
+
+    #[test]
+    fn set_cursor_seek_returns_true_for_prefix_scan() {
+        let mut node = make_index_scan_node(IndexScanType::PrefixScan {
+            prefix_values: vec![],
+            reverse: false,
+        });
+        let applied = node.set_cursor_seek(make_seek());
+        assert!(applied, "PrefixScan must return true");
+        assert!(
+            node.index_params.cursor_seek.is_some(),
+            "cursor_seek must be stored for PrefixScan"
+        );
+    }
+
+    #[test]
+    fn set_cursor_seek_returns_true_for_range_scan() {
+        use storage::index::Bound;
+        let mut node = make_index_scan_node(IndexScanType::RangeScan {
+            prefix_values: vec![],
+            lower: Bound::Unbounded,
+            upper: Bound::Unbounded,
+            reverse: false,
+        });
+        let applied = node.set_cursor_seek(make_seek());
+        assert!(applied, "RangeScan must return true");
+        assert!(
+            node.index_params.cursor_seek.is_some(),
+            "cursor_seek must be stored for RangeScan"
+        );
     }
 }
