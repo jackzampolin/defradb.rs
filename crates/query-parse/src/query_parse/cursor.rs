@@ -83,8 +83,9 @@ pub(super) fn parse_cursor_wrapper<'a>(
 
 /// Extract `first`/`after`/`last`/`before` from a field's arguments.
 ///
-/// Validates non-negative for `first` and `last`. Other args are left untouched
-/// (they remain in the field for downstream parsing).
+/// Validates non-negative for `first` and `last`. Rejects `limit` and `offset`
+/// because they are not valid arguments on cursor collection fields. Other args
+/// are left untouched (they remain in the field for downstream parsing).
 fn extract_cursor_params<'a>(
     field: &'a Field<'a, String>,
     variables: Option<&HashMap<String, JsonValue>>,
@@ -111,6 +112,12 @@ fn extract_cursor_params<'a>(
             }
             "before" => {
                 params.before = Some(resolve_string_value(value, variables, "before")?);
+            }
+            "limit" | "offset" => {
+                return Err(QueryError::parse(format!(
+                    "Unknown argument \"{name}\" on field \"{}\".",
+                    field.name
+                )));
             }
             _ => continue,
         }
@@ -215,6 +222,20 @@ mod tests {
         let query = r#"{ _cursor { User(last: -1, order: {age: ASC}) { name } } }"#;
         let err = parse(query).unwrap_err();
         assert_eq!(err.to_string(), "last must be non-negative");
+    }
+
+    #[test]
+    fn limit_arg_rejected_in_cursor_wrapper() {
+        let query = r#"{ _cursor { User(first: 5, limit: 10, order: {age: ASC}) { name } } }"#;
+        let err = parse(query).unwrap_err().to_string();
+        assert!(err.contains("limit"), "error should mention limit: {err}");
+    }
+
+    #[test]
+    fn offset_arg_rejected_in_cursor_wrapper() {
+        let query = r#"{ _cursor { User(first: 5, offset: 3, order: {age: ASC}) { name } } }"#;
+        let err = parse(query).unwrap_err().to_string();
+        assert!(err.contains("offset"), "error should mention offset: {err}");
     }
 
     #[test]
