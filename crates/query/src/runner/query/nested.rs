@@ -123,6 +123,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         let plan_exec_info = plan.exec_info();
+        // Capture cursor page-info BEFORE close() releases plan resources.
+        let cursor_page_info = plan.page_info();
         let plan_close_start = Instant::now();
         plan.close().await?;
         profile.plan_close_elapsed = plan_close_start.elapsed();
@@ -190,6 +192,40 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             result_count = profile.result_count,
             "nested query profile"
         );
+
+        // For cursor queries, wrap results in the cursor response envelope.
+        if let Some(pi) = cursor_page_info {
+            let inner_key = select.field.output_name().to_string();
+            let mut cursor_obj = serde_json::Map::new();
+            cursor_obj.insert(inner_key, JsonValue::Array(results));
+            if pi.fields.any_selected() {
+                let mut pageinfo = serde_json::Map::new();
+                if pi.fields.has_next {
+                    pageinfo.insert("hasNextPage".into(), JsonValue::Bool(pi.has_next));
+                }
+                if pi.fields.has_prev {
+                    pageinfo.insert("hasPreviousPage".into(), JsonValue::Bool(pi.has_prev));
+                }
+                if pi.fields.start_cursor {
+                    pageinfo.insert(
+                        "startCursor".into(),
+                        pi.start_cursor
+                            .map(JsonValue::String)
+                            .unwrap_or(JsonValue::Null),
+                    );
+                }
+                if pi.fields.end_cursor {
+                    pageinfo.insert(
+                        "endCursor".into(),
+                        pi.end_cursor
+                            .map(JsonValue::String)
+                            .unwrap_or(JsonValue::Null),
+                    );
+                }
+                cursor_obj.insert("_pageInfo".into(), JsonValue::Object(pageinfo));
+            }
+            return Ok(JsonValue::Object(cursor_obj));
+        }
 
         Ok(JsonValue::Array(results))
     }

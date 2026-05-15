@@ -7,6 +7,7 @@ use storage::corekv::MaybeSendSync;
 use query_types::document::DocumentMapping;
 use query_types::error::Result;
 
+use crate::plan::CursorPageInfo;
 use crate::planner::index_selection::CursorSeek;
 
 // Doc, DocStatus, DocFields extracted to query-types crate.
@@ -84,6 +85,16 @@ pub trait PlanNode: MaybeSendSync {
     /// Default: no-op, returns `false`.
     fn set_cursor_seek(&mut self, _seek: CursorSeek) -> bool {
         false
+    }
+
+    /// Returns cursor page-info if this node is (or wraps) a `CursorNode`.
+    ///
+    /// Called after iteration is complete. `CursorNode` returns `Some(...)`;
+    /// wrapper nodes forward to their child. Terminal nodes return `None`.
+    ///
+    /// Default: `None`.
+    fn page_info(&self) -> Option<CursorPageInfo> {
+        None
     }
 
     /// Generate an explanation of this node for EXPLAIN queries.

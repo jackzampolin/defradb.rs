@@ -377,6 +377,10 @@ impl PlanNode for SelectNode {
         self.source.set_cursor_seek(seek)
     }
 
+    fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
+        self.source.page_info()
+    }
+
     fn exec_info(&self) -> ExecInfo {
         let mut info = self.exec_info.clone();
         // Propagate storage-level metrics from source (e.g., IndexScanNode wrapped by this SelectNode).

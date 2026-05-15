@@ -105,6 +105,10 @@ impl PlanNode for AllDocsNode {
         self.source.set_cursor_seek(seek)
     }
 
+    fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
+        self.source.page_info()
+    }
+
     fn kind(&self) -> &'static str {
         "allDocsNode"
     }

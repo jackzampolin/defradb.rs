@@ -118,7 +118,7 @@ impl CursorNode {
     }
 
     /// Return page-info computed after the last `next()` call returned false.
-    pub fn page_info(&self) -> CursorPageInfo {
+    pub fn page_info_data(&self) -> CursorPageInfo {
         CursorPageInfo {
             has_next: self.has_next,
             has_prev: self.has_prev,
@@ -419,6 +419,10 @@ impl PlanNode for CursorNode {
         self.exec_info.clone()
     }
 
+    fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
+        Some(self.page_info_data())
+    }
+
     fn explain_inner(&self) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
         obj.insert(
@@ -554,7 +558,7 @@ mod tests {
             "should be done after page_size"
         );
 
-        let info = node.page_info();
+        let info = node.page_info_data();
         assert!(info.has_next, "has_next should be true: c and d remain");
     }
 
@@ -589,9 +593,12 @@ mod tests {
         assert_eq!(current_id(&node), "d");
         assert!(!node.next().await.unwrap());
 
-        let info = node.page_info();
+        let info = node.page_info_data();
         assert!(!info.has_next, "before is None => has_next=false");
-        assert!(info.has_prev, "we dropped rows from the front => has_prev=true");
+        assert!(
+            info.has_prev,
+            "we dropped rows from the front => has_prev=true"
+        );
     }
 
     #[tokio::test]
@@ -626,7 +633,7 @@ mod tests {
         assert_eq!(current_id(&node), "b");
         assert!(!node.next().await.unwrap());
 
-        let info = node.page_info();
+        let info = node.page_info_data();
         assert!(info.has_next, "before.is_some() => has_next=true");
     }
 
@@ -663,7 +670,7 @@ mod tests {
 
         assert!(!node.next().await.unwrap());
 
-        let info = node.page_info();
+        let info = node.page_info_data();
         assert!(info.has_prev, "has_prev because after token was set");
         assert!(!info.has_next, "has_next false: no rows remain after d");
     }
@@ -701,7 +708,7 @@ mod tests {
         assert!(node.next().await.unwrap());
         assert_eq!(current_id(&node), "d");
         assert!(!node.next().await.unwrap());
-        let info = node.page_info();
+        let info = node.page_info_data();
         assert!(info.has_prev, "page_size+1 < total => has_prev=true");
         assert!(!info.has_next, "before is None => has_next=false");
     }
