@@ -407,6 +407,10 @@ impl PlanNode for GroupByNode {
         self.source.set_cursor_seek(seek)
     }
 
+    fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
+        self.source.page_info()
+    }
+
     fn current_group_docs(&self) -> Option<&[Doc]> {
         // Position is incremented after next(), so position-1 is the current group
         if self.position > 0 && self.position <= self.groups.len() {
