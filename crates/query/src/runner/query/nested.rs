@@ -124,7 +124,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         let plan_exec_info = plan.exec_info();
         // Capture cursor page-info BEFORE close() releases plan resources.
-        let cursor_page_info = plan.page_info();
+        // Non-cursor selects don't use page_info and calling it unconditionally
+        // triggers stack overflow on @exhaustive relation-order queries whose
+        // OrphanNode forwards page_info() recursively without a base case.
+        let cursor_page_info = if select.is_cursor {
+            plan.page_info()
+        } else {
+            None
+        };
         let plan_close_start = Instant::now();
         plan.close().await?;
         profile.plan_close_elapsed = plan_close_start.elapsed();
@@ -226,6 +233,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     .cursor_aliases
                     .page_info_alias
                     .as_deref()
+                    .map(String::as_str)
                     .unwrap_or("_pageInfo")
                     .to_string();
                 cursor_obj.insert(page_info_key, JsonValue::Object(pageinfo));

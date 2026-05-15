@@ -199,27 +199,14 @@ fn configure_scan_for_cursor(
         return Ok((plan, false));
     };
 
-    // Unique composite prefix case: cursor.keys covers only some of idx.fields.
-    // The seek key encodes only the prefix, which identifies every row sharing
-    // those prefix values — not a single boundary row. An exclusive seek would
-    // skip ALL rows with those prefix values, not just the boundary one.
-    // For non-unique indexes the doc_id suffix in build_cursor_seek_key
-    // disambiguates, but unique indexes store doc_id in the value, not the key,
-    // so the suffix trick doesn't apply. Fall back to the slow path.
-    // Build the set of expected field names from the index.
-    let index_field_names: std::collections::HashSet<&str> =
-        idx.fields.iter().map(|f| f.name.as_str()).collect();
-
-    // Count cursor keys that match an actual index field. Uses the count of
-    // MATCHING keys, not the raw cursor.keys.len(), since a malicious or stale
-    // token could carry extra unrelated keys that would bypass this check.
-    let cursor_index_keys_count = cursor_token
-        .keys
-        .keys()
-        .filter(|k| index_field_names.contains(k.as_str()))
-        .count();
-
-    if idx.unique && cursor_index_keys_count < idx.fields.len() {
+    // Unique composite-prefix case: the seek key encodes only `order_fields`
+    // (see `build_cursor_seek_key`), so when `order_fields` covers fewer fields
+    // than the unique index, the seek key is ambiguous within that prefix tier
+    // and forward-exclusive can drop the whole tier. Fall back to slow path.
+    // The check uses `order_fields.len()` rather than `cursor.keys.len()`
+    // because the latter is untrusted client input — a stale or malicious
+    // token could carry extra unrelated keys and bypass this guard.
+    if idx.unique && order_fields.len() < idx.fields.len() {
         return Ok((plan, false));
     }
 

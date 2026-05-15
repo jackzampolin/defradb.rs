@@ -53,7 +53,10 @@ pub struct CursorAliases {
     /// Alias on the inner `_pageInfo` selection
     /// (e.g., `{ _cursor { ... info: _pageInfo { ... } } }` => Some("info")).
     /// None => emit under the literal key `_pageInfo`.
-    pub page_info_alias: Option<String>,
+    /// Boxed to keep the size of `CursorAliases` (and therefore `Select`)
+    /// minimal; deeply nested non-cursor plans were stack-overflowing when
+    /// `Select` grew beyond ~120 bytes.
+    pub page_info_alias: Option<Box<String>>,
 }
 
 #[cfg(test)]
