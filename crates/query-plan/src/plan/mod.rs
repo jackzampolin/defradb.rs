@@ -2,6 +2,7 @@
 
 pub mod aggregate;
 mod alldocs;
+mod cursor;
 mod bm25;
 mod cached_view_fetcher;
 pub mod groupby;
@@ -26,6 +27,7 @@ pub use aggregate::{
     MinSourceMeta, SumNode, SumSourceMeta,
 };
 pub use alldocs::AllDocsNode;
+pub use cursor::{CursorDirection, CursorNode, CursorPageInfo};
 pub use bm25::BM25Node;
 pub use cached_view_fetcher::CachedViewFetcher;
 pub use groupby::{ChildSelectMeta, DocumentGroup, GroupAlias, GroupByNode, InnerAggregateDef};
