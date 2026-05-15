@@ -118,11 +118,8 @@ pub(super) async fn handle_command(
             let peers = subscriptions
                 .get(&topic_str)
                 .map(|sub| {
-                    sub.neighbors
-                        .lock()
-                        .iter()
-                        .map(endpoint_id_to_peer_id)
-                        .collect()
+                    let snapshot: Vec<_> = sub.neighbors.lock().iter().copied().collect();
+                    snapshot.iter().map(endpoint_id_to_peer_id).collect()
                 })
                 .unwrap_or_default();
             let _ = reply.send(Ok(peers));

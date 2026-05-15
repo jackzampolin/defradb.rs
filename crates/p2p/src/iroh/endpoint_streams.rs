@@ -364,6 +364,8 @@ async fn dispatch_stream(
         x if x == protocols::ALPN_SE => {
             let request: crate::message::PushSEArtifactsRequest =
                 protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
+            verify_iroh_message(&request)?;
+            ensure_iroh_signed_sender(peer_id, request.sender_id.as_str())?;
             debug!(
                 peer_id = %peer_id,
                 collection_id = %request.collection_id,

@@ -15,10 +15,13 @@ Iroh therefore maps request/response traffic onto dedicated ALPNs:
 
 - `/defra-iroh/docsync/0.1` and `/defra-iroh/docsync/0.1/resp`
 - `/defra-iroh/branchable/0.1` and `/defra-iroh/branchable/0.1/resp`
+- `/defra-iroh/se/0.1`
 - `/defra-iroh/se-query/0.1/req` and `/defra-iroh/se-query/0.1/resp`
 
 The CBOR message structs stay shared with libp2p; only the transport envelope is
-Iroh-specific.
+Iroh-specific. Iroh SE push and SE query messages are signed with the sending
+transport identity and are verified against the QUIC peer that opened the stream
+before transport events are emitted.
 
 ## Libp2p-only transport methods
 
@@ -35,7 +38,9 @@ not-supported/no-op behavior on Iroh.
 gossipsub for all peers known for a topic. `iroh-gossip` exposes the direct
 neighbors of a joined topic, so Iroh returns those topic-scoped neighbors rather
 than all connected peers. This keeps the result topic-specific, but callers must
-not treat it as complete topic membership.
+not treat it as complete topic membership. If the local node has not subscribed
+to the topic, Iroh returns an empty list; callers that relied on the previous
+all-connected fallback should subscribe first or use `connected_peers()`.
 
 ## Audit follow-up references
 

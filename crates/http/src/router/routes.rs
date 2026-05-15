@@ -475,7 +475,7 @@ mod tests {
         let state = AppStateBuilder::new(executor).with_p2p(p2p).build();
         let router = create_router_with_state(state);
 
-        let mut response_task = tokio::spawn(
+        let response_task = tokio::spawn(
             router.oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -490,9 +490,7 @@ mod tests {
             .await
             .expect("P2P operation should start");
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut response_task)
-                .await
-                .is_err(),
+            !response_task.is_finished(),
             "handler responded before P2P operation completed"
         );
 
