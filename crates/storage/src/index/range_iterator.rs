@@ -695,9 +695,18 @@ mod tests {
         let entries = iter.collect_all().await.unwrap();
         let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
 
-        assert!(!doc_ids.contains(&"alice"), "alice should be before the cursor");
-        assert!(!doc_ids.contains(&"bob"), "bob is the exclusive boundary and must be skipped");
-        assert!(doc_ids.contains(&"carol"), "carol must be included (after boundary)");
+        assert!(
+            !doc_ids.contains(&"alice"),
+            "alice should be before the cursor"
+        );
+        assert!(
+            !doc_ids.contains(&"bob"),
+            "bob is the exclusive boundary and must be skipped"
+        );
+        assert!(
+            doc_ids.contains(&"carol"),
+            "carol must be included (after boundary)"
+        );
         assert_eq!(entries.len(), 1);
     }
 
@@ -738,9 +747,18 @@ mod tests {
         let entries = iter.collect_all().await.unwrap();
         let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
 
-        assert!(!doc_ids.contains(&"carol"), "carol is after the cursor and must be excluded");
-        assert!(doc_ids.contains(&"bob"), "bob is the inclusive boundary and must be included");
-        assert!(doc_ids.contains(&"alice"), "alice must be included (before boundary in reverse)");
+        assert!(
+            !doc_ids.contains(&"carol"),
+            "carol is after the cursor and must be excluded"
+        );
+        assert!(
+            doc_ids.contains(&"bob"),
+            "bob is the inclusive boundary and must be included"
+        );
+        assert!(
+            doc_ids.contains(&"alice"),
+            "alice must be included (before boundary in reverse)"
+        );
         assert_eq!(entries.len(), 2);
     }
 }

@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::planner::{Doc, ExecInfo, PlanNode};
+use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
 use query_types::document::DocumentMapping;
 use query_types::error::Result;
 
@@ -144,6 +144,10 @@ impl PlanNode for LimitNode {
         }
 
         serde_json::Value::Object(obj)
+    }
+
+    fn set_cursor_seek(&mut self, seek: CursorSeek) -> bool {
+        self.source.set_cursor_seek(seek)
     }
 
     fn exec_info(&self) -> ExecInfo {

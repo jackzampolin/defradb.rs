@@ -411,13 +411,19 @@ mod cursor_error_tests {
     #[test]
     fn cursor_must_contain_query_message() {
         let e = QueryError::cursor_must_contain_query();
-        assert_eq!(e.to_string(), "_cursor block must contain exactly one collection query");
+        assert_eq!(
+            e.to_string(),
+            "_cursor block must contain exactly one collection query"
+        );
     }
 
     #[test]
     fn multiple_queries_in_cursor_message() {
         let e = QueryError::cursor_multiple_queries();
-        assert_eq!(e.to_string(), "_cursor block cannot contain multiple collection queries");
+        assert_eq!(
+            e.to_string(),
+            "_cursor block cannot contain multiple collection queries"
+        );
     }
 
     #[test]
