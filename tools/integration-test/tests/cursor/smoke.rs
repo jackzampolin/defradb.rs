@@ -167,8 +167,7 @@ async fn rust_forward_first_after_doc_id_desc() {
         .await
         .unwrap();
     let node = cluster.client(0);
-    node.schema_add(super::common::USER_SCHEMA)
-        .expect("schema");
+    node.schema_add(super::common::USER_SCHEMA).expect("schema");
 
     for name in ["a", "b", "c", "d", "e"] {
         node.query(&format!(
@@ -253,8 +252,7 @@ async fn rust_backward_last_before_doc_id_desc() {
         .await
         .unwrap();
     let node = cluster.client(0);
-    node.schema_add(super::common::USER_SCHEMA)
-        .expect("schema");
+    node.schema_add(super::common::USER_SCHEMA).expect("schema");
 
     for name in ["a", "b", "c", "d", "e"] {
         node.query(&format!(
@@ -313,4 +311,50 @@ async fn rust_backward_last_before_doc_id_desc() {
             "row {row_id} must be > boundary {boundary_id} in DESC order"
         );
     }
+}
+
+#[tokio::test]
+async fn rust_page_info_aliases_preserved_in_response() {
+    // PR#961 round-4 P2.2: aliased _pageInfo fields must appear under the alias in the response.
+    let (_cluster, node) = setup_indexed_cluster().await;
+    seed_users(&node, &[("a", 20), ("b", 30)]).await;
+
+    let result: Value = node
+        .query(
+            r#"{ _cursor {
+            User(first: 1, order: [{age: ASC}]) { name }
+            _pageInfo {
+                next: hasNext
+                start: startCursor
+            }
+        } }"#,
+        )
+        .expect("query with aliased _pageInfo fields");
+
+    let pi = &result["_cursor"]["_pageInfo"];
+    assert!(
+        pi.get("next").is_some(),
+        "aliased hasNext should appear as 'next': {pi}"
+    );
+    assert!(
+        pi.get("hasNext").is_none(),
+        "canonical 'hasNext' must NOT appear when aliased as 'next': {pi}"
+    );
+    assert!(
+        pi.get("start").is_some(),
+        "aliased startCursor should appear as 'start': {pi}"
+    );
+    assert!(
+        pi.get("startCursor").is_none(),
+        "canonical 'startCursor' must NOT appear when aliased as 'start': {pi}"
+    );
+    // hasPrev / endCursor were not selected — must be absent.
+    assert!(
+        pi.get("hasPrev").is_none(),
+        "unselected 'hasPrev' must not appear: {pi}"
+    );
+    assert!(
+        pi.get("endCursor").is_none(),
+        "unselected 'endCursor' must not appear: {pi}"
+    );
 }
