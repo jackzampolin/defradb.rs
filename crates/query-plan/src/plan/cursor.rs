@@ -31,6 +31,15 @@ enum CursorState {
     Drained,
 }
 
+/// Cursor keys extracted from a document at emit time (doc_id + order field values).
+///
+/// Storing only what's needed for cursor encoding avoids keeping a full Doc clone alive
+/// solely for page_info computation.
+struct CursorSnapshot {
+    doc_id: String,
+    keys: BTreeMap<String, serde_json::Value>,
+}
+
 /// Plan node that implements cursor pagination above any child plan.
 pub struct CursorNode {
     inner: Box<dyn PlanNode>,
@@ -44,8 +53,8 @@ pub struct CursorNode {
 
     state: CursorState,
     current_doc: Doc,
-    first_doc: Option<Doc>,
-    last_doc: Option<Doc>,
+    first_snapshot: Option<CursorSnapshot>,
+    last_snapshot: Option<CursorSnapshot>,
     has_next: bool,
     has_prev: bool,
     index_seek_active: bool,
@@ -90,8 +99,8 @@ impl CursorNode {
             order_fields,
             state: initial_state,
             current_doc: Doc::default(),
-            first_doc: None,
-            last_doc: None,
+            first_snapshot: None,
+            last_snapshot: None,
             has_next: false,
             has_prev: false,
             index_seek_active,
@@ -113,36 +122,46 @@ impl CursorNode {
         }
     }
 
-    /// Build a `Cursor` from the current doc using the configured order fields.
+    /// Extract the cursor snapshot from a doc using the configured order fields.
     ///
-    /// Order field values are looked up by name through the document mapping.
-    fn build_cursor_from_doc(&self, doc: &Doc) -> Cursor {
+    /// Captures only the doc_id and order-field values needed to encode a cursor,
+    /// avoiding a full Doc clone for the page_info path.
+    fn snapshot_from_doc(
+        doc: &Doc,
+        document_map: &DocumentMapping,
+        order_fields: &[OrderCondition],
+    ) -> CursorSnapshot {
         let doc_id = doc.doc_id().unwrap_or("").to_string();
-        let mapping = self.inner.document_map();
         let mut keys = BTreeMap::new();
-        for cond in &self.order_fields {
+        for cond in order_fields {
             if let Some(field_name) = cond.fields.first() {
-                if let Some(idx) = mapping.first_index_of_name(field_name) {
+                if let Some(idx) = document_map.first_index_of_name(field_name) {
                     if let Some(value) = doc.get(idx) {
                         keys.insert(field_name.to_string(), value.clone());
                     }
                 }
             }
         }
-        Cursor { doc_id, keys }
+        CursorSnapshot { doc_id, keys }
+    }
+
+    /// Build a `Cursor` from a previously captured snapshot.
+    fn build_cursor_from_snapshot(snapshot: &CursorSnapshot) -> Cursor {
+        Cursor {
+            doc_id: snapshot.doc_id.clone(),
+            keys: snapshot.keys.clone(),
+        }
     }
 
     fn finalize_page_info(&mut self) {
         if self.page_info_fields.start_cursor {
-            if let Some(doc) = self.first_doc.take() {
-                self.start_cursor = Some(self.build_cursor_from_doc(&doc).encode());
-                self.first_doc = Some(doc);
+            if let Some(snap) = self.first_snapshot.as_ref() {
+                self.start_cursor = Some(Self::build_cursor_from_snapshot(snap).encode());
             }
         }
         if self.page_info_fields.end_cursor {
-            if let Some(doc) = self.last_doc.take() {
-                self.end_cursor = Some(self.build_cursor_from_doc(&doc).encode());
-                self.last_doc = Some(doc);
+            if let Some(snap) = self.last_snapshot.as_ref() {
+                self.end_cursor = Some(Self::build_cursor_from_snapshot(snap).encode());
             }
         }
     }
@@ -160,11 +179,14 @@ impl CursorNode {
                         return Ok(false);
                     }
                     if self.inner.next().await? {
-                        let doc = self.inner.value().deep_clone();
-                        if self.first_doc.is_none() {
-                            self.first_doc = Some(doc.deep_clone());
+                        let doc = self.inner.value().deep_clone(); // ONE clone per row
+                        let map = self.inner.document_map();
+                        if self.first_snapshot.is_none() {
+                            self.first_snapshot =
+                                Some(Self::snapshot_from_doc(&doc, map, &self.order_fields));
                         }
-                        self.last_doc = Some(doc.deep_clone());
+                        self.last_snapshot =
+                            Some(Self::snapshot_from_doc(&doc, map, &self.order_fields));
                         self.current_doc = doc;
                         self.emitted += 1;
                         return Ok(true);
@@ -182,14 +204,20 @@ impl CursorNode {
                     // than the `after` cursor's docID.
                     let after_doc_id = self.after.as_ref().map(|c| c.doc_id.clone());
                     if self.inner.next().await? {
-                        let doc = self.inner.value().deep_clone();
+                        let doc = self.inner.value().deep_clone(); // ONE clone per row
                         let row_id = doc.doc_id().map(|s| s.to_string());
                         match (after_doc_id.as_deref(), row_id.as_deref()) {
                             (Some(after), Some(row)) if row > after => {
                                 // Found the first row past the boundary.
                                 self.state = CursorState::Collecting;
-                                self.first_doc = Some(doc.deep_clone());
-                                self.last_doc = Some(doc.deep_clone());
+                                let map = self.inner.document_map();
+                                let snap = Self::snapshot_from_doc(&doc, map, &self.order_fields);
+                                // First collected row is both the start and end of the page so far.
+                                self.last_snapshot = Some(CursorSnapshot {
+                                    doc_id: snap.doc_id.clone(),
+                                    keys: snap.keys.clone(),
+                                });
+                                self.first_snapshot = Some(snap);
                                 self.current_doc = doc;
                                 self.emitted += 1;
                                 return Ok(true);
@@ -230,8 +258,8 @@ pub struct CursorPageInfo {
 impl PlanNode for CursorNode {
     async fn init(&mut self) -> Result<()> {
         self.emitted = 0;
-        self.first_doc = None;
-        self.last_doc = None;
+        self.first_snapshot = None;
+        self.last_snapshot = None;
         self.has_next = false;
         self.has_prev = false;
         self.start_cursor = None;
@@ -416,7 +444,10 @@ mod tests {
         assert_eq!(current_id(&node), "b");
 
         // Third call should drain and return false.
-        assert!(!node.next().await.unwrap(), "should be done after page_size");
+        assert!(
+            !node.next().await.unwrap(),
+            "should be done after page_size"
+        );
 
         let info = node.page_info();
         assert!(info.has_next, "has_next should be true: c and d remain");
