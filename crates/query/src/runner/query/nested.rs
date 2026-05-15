@@ -200,23 +200,23 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             cursor_obj.insert(inner_key, JsonValue::Array(results));
             if pi.fields.any_selected() {
                 let mut pageinfo = serde_json::Map::new();
-                if pi.fields.has_next {
-                    pageinfo.insert("hasNext".into(), JsonValue::Bool(pi.has_next));
+                if let Some(key) = pi.fields.has_next.as_ref() {
+                    pageinfo.insert(key.clone(), JsonValue::Bool(pi.has_next));
                 }
-                if pi.fields.has_prev {
-                    pageinfo.insert("hasPrev".into(), JsonValue::Bool(pi.has_prev));
+                if let Some(key) = pi.fields.has_prev.as_ref() {
+                    pageinfo.insert(key.clone(), JsonValue::Bool(pi.has_prev));
                 }
-                if pi.fields.start_cursor {
+                if let Some(key) = pi.fields.start_cursor.as_ref() {
                     pageinfo.insert(
-                        "startCursor".into(),
+                        key.clone(),
                         pi.start_cursor
                             .map(JsonValue::String)
                             .unwrap_or(JsonValue::Null),
                     );
                 }
-                if pi.fields.end_cursor {
+                if let Some(key) = pi.fields.end_cursor.as_ref() {
                     pageinfo.insert(
-                        "endCursor".into(),
+                        key.clone(),
                         pi.end_cursor
                             .map(JsonValue::String)
                             .unwrap_or(JsonValue::Null),
