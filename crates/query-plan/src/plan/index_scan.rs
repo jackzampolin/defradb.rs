@@ -278,8 +278,18 @@ impl PlanNode for IndexScanNode {
 
     fn set_cursor_seek(&mut self, seek: CursorSeek) -> bool {
         use crate::planner::index_selection::IndexScanType;
-        match self.index_params.scan_type {
-            IndexScanType::PrefixScan { .. } | IndexScanType::RangeScan { .. } => {
+        match &mut self.index_params.scan_type {
+            IndexScanType::PrefixScan { reverse, .. } => {
+                // Propagate the cursor's desired iteration direction into the scan type
+                // BEFORE the KV iterator is created. scan_prefix() reads *reverse at
+                // iterator-creation time; mutating it here ensures the storage seek
+                // and bound logic run in the correct direction.
+                *reverse = seek.reversed;
+                self.index_params.cursor_seek = Some(seek);
+                true
+            }
+            IndexScanType::RangeScan { reverse, .. } => {
+                *reverse = seek.reversed;
                 self.index_params.cursor_seek = Some(seek);
                 true
             }
@@ -418,5 +428,60 @@ mod tests {
             node.index_params.cursor_seek.is_some(),
             "cursor_seek must be stored for RangeScan"
         );
+    }
+
+    #[test]
+    fn set_cursor_seek_propagates_reversed_into_prefix_scan() {
+        // Regression: set_cursor_seek must mutate scan_type.reverse so that
+        // scan_prefix() (called at iterator-creation time, before apply_cursor_seek)
+        // uses the cursor's direction. Without this mutation the KV iterator is
+        // created in the wrong direction and apply_cursor_seek's debug_assert fires.
+        let mut node = make_index_scan_node(IndexScanType::PrefixScan {
+            prefix_values: vec![],
+            reverse: false, // initially forward
+        });
+        let seek = CursorSeek {
+            seek_key: vec![0, 1, 2],
+            inclusive: false,
+            reversed: true, // cursor wants backward iteration
+        };
+        let applied = node.set_cursor_seek(seek);
+        assert!(applied, "PrefixScan must return true");
+        match &node.index_params.scan_type {
+            IndexScanType::PrefixScan { reverse, .. } => {
+                assert!(
+                    *reverse,
+                    "scan_type.reverse must be updated to match seek.reversed"
+                );
+            }
+            _ => panic!("expected PrefixScan"),
+        }
+    }
+
+    #[test]
+    fn set_cursor_seek_propagates_reversed_into_range_scan() {
+        use storage::index::Bound;
+        let mut node = make_index_scan_node(IndexScanType::RangeScan {
+            prefix_values: vec![],
+            lower: Bound::Unbounded,
+            upper: Bound::Unbounded,
+            reverse: false, // initially forward
+        });
+        let seek = CursorSeek {
+            seek_key: vec![0, 1, 2],
+            inclusive: false,
+            reversed: true, // cursor wants backward iteration
+        };
+        let applied = node.set_cursor_seek(seek);
+        assert!(applied, "RangeScan must return true");
+        match &node.index_params.scan_type {
+            IndexScanType::RangeScan { reverse, .. } => {
+                assert!(
+                    *reverse,
+                    "scan_type.reverse must be updated to match seek.reversed"
+                );
+            }
+            _ => panic!("expected RangeScan"),
+        }
     }
 }
