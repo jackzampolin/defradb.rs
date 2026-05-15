@@ -6,7 +6,8 @@ use tokio::sync::oneshot;
 
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
-    PushLogReply, PushLogRequest, PushSEArtifactsRequest,
+    PushLogReply, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
+    QuerySEArtifactsRequest,
 };
 use crate::replicator::ReplicatorInfo;
 use crate::transport::{MessageId, PeerAddr, PeerId};
@@ -50,6 +51,10 @@ pub enum IrohCommand {
         topic: crate::topics::DefraTopic,
         msg: PushLogBroadcast,
         reply: oneshot::Sender<crate::error::Result<MessageId>>,
+    },
+    TopicPeers {
+        topic: crate::topics::DefraTopic,
+        reply: oneshot::Sender<crate::error::Result<Vec<PeerId>>>,
     },
 
     // Messaging
@@ -111,6 +116,16 @@ pub enum IrohCommand {
     SendSEArtifacts {
         peer_id: PeerId,
         request: PushSEArtifactsRequest,
+        reply: oneshot::Sender<crate::error::Result<()>>,
+    },
+    SendSEQueryRequest {
+        peer_id: PeerId,
+        request: QuerySEArtifactsRequest,
+        reply: oneshot::Sender<crate::error::Result<()>>,
+    },
+    SendSEQueryResponse {
+        peer_id: PeerId,
+        reply_msg: QuerySEArtifactsReply,
         reply: oneshot::Sender<crate::error::Result<()>>,
     },
 

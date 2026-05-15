@@ -215,6 +215,7 @@ mod tests {
         peer_id: PeerId,
         pubkey: Vec<u8>,
         subscribed: Arc<Mutex<HashSet<String>>>,
+        fail_subscribe: Arc<Mutex<HashSet<String>>>,
         replicators: Arc<Mutex<HashMap<String, Vec<String>>>>,
     }
 
@@ -224,8 +225,17 @@ mod tests {
                 peer_id: PeerId::new(peer_id.to_string()),
                 pubkey: vec![1, 2, 3],
                 subscribed: Arc::new(Mutex::new(HashSet::new())),
+                fail_subscribe: Arc::new(Mutex::new(HashSet::new())),
                 replicators: Arc::new(Mutex::new(HashMap::new())),
             }
+        }
+
+        fn fail_subscribe(self, topic: &str) -> Self {
+            self.fail_subscribe
+                .lock()
+                .unwrap()
+                .insert(topic.to_string());
+            self
         }
 
         fn subscribed_topics(&self) -> Vec<String> {
@@ -280,7 +290,13 @@ mod tests {
         }
 
         async fn subscribe(&self, topic: DefraTopic) -> crate::Result<bool> {
-            Ok(self.subscribed.lock().unwrap().insert(topic.topic_string()))
+            let topic = topic.topic_string();
+            if self.fail_subscribe.lock().unwrap().contains(&topic) {
+                return Err(crate::error::Error::Transport(format!(
+                    "injected subscribe failure for {topic}"
+                )));
+            }
+            Ok(self.subscribed.lock().unwrap().insert(topic))
         }
 
         async fn unsubscribe(&self, topic: DefraTopic) -> crate::Result<bool> {
@@ -515,6 +531,45 @@ mod tests {
         assert_eq!(
             restarted.get_subscribed_collections().await.unwrap(),
             vec!["users".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_collection_rolls_back_persistence_when_transport_subscribe_fails() {
+        let store = Arc::new(MemoryStore::new());
+        let failing_transport = RecordingTransport::new("failing-peer").fail_subscribe("users");
+        let failing = new_test_coordinator(store.clone(), failing_transport.clone()).await;
+
+        let error = failing
+            .subscribe_collection("users")
+            .await
+            .expect_err("transport subscribe failure should be returned");
+
+        assert!(
+            error.to_string().contains("injected subscribe failure"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            failing
+                .get_subscribed_collections()
+                .await
+                .unwrap()
+                .is_empty(),
+            "failed subscription should not remain in memory"
+        );
+        assert!(
+            failing_transport.subscribed_topics().is_empty(),
+            "failing transport should not record a subscription"
+        );
+
+        let restarted_transport = RecordingTransport::new("restarted-peer");
+        let restarted = new_test_coordinator(store, restarted_transport.clone()).await;
+        let restored = restarted.load_p2p_collections().await.unwrap();
+
+        assert_eq!(restored, 0, "rolled-back subscription must not reload");
+        assert!(
+            restarted_transport.subscribed_topics().is_empty(),
+            "rolled-back subscription must not persist"
         );
     }
 }

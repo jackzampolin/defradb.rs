@@ -5,7 +5,7 @@
 //! - Gossip events from iroh-gossip
 //! - Commands from the `IrohTransport` facade
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use iroh::{Endpoint, EndpointId};
@@ -34,6 +34,7 @@ const MAX_COMMAND_BATCH: usize = 16;
 pub(super) struct TopicSubscription {
     pub(super) sender: iroh_gossip::api::GossipSender,
     pub(super) reader_task: JoinHandle<()>,
+    pub(super) neighbors: Arc<parking_lot::Mutex<HashSet<EndpointId>>>,
 }
 
 pub(super) type SubscriptionSenders = Vec<(String, iroh_gossip::api::GossipSender)>;

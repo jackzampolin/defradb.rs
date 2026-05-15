@@ -64,6 +64,52 @@ async fn collection_add_get_single() {
     assert_eq!(arr.len(), 1, "should have 1 collection");
 }
 
+#[tokio::test]
+#[serial]
+async fn collection_subscription_persists_after_restart() {
+    let mut cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_iroh_transport()
+        .with_store("badger")
+        .build()
+        .await
+        .unwrap();
+    cluster
+        .wait_for_log(0, "p2p_listening", P2P_TIMEOUT)
+        .await
+        .expect("P2P listener did not start");
+
+    let node = cluster.client(0);
+    node.schema_add(SCHEMA_USERS).expect("schema Users");
+    node.p2p_collection_add(&["Users"]).expect("add Users");
+
+    let before = node.p2p_collection_list().expect("list before restart");
+    assert_eq!(
+        before.as_array().expect("not array").len(),
+        1,
+        "collection should be subscribed before restart"
+    );
+
+    cluster
+        .restart_node(0, Duration::from_secs(30))
+        .await
+        .expect("restart node");
+    cluster
+        .wait_for_log(0, "p2p_listening", P2P_TIMEOUT)
+        .await
+        .expect("P2P listener did not restart");
+
+    let node_after_restart = cluster.client(0);
+    let after = node_after_restart
+        .p2p_collection_list()
+        .expect("list after restart");
+    assert_eq!(
+        after.as_array().expect("not array").len(),
+        1,
+        "collection subscription should persist across restart"
+    );
+}
+
 /// Port: TestP2PCollectionAddGetMultiple
 /// Add and verify multiple collection subscriptions.
 #[tokio::test]
