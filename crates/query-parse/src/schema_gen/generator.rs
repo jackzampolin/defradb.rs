@@ -390,7 +390,23 @@ pub fn generate_query_type(collections: &[&CollectionVersion]) -> GqlObjectType 
         ));
     }
 
+    // Add _cursor field — nullable per spec (Go schema.go:82)
+    query = query.with_field(
+        GqlField::new("_cursor", GqlType::named("CursorQuery"))
+            .with_description("Cursor-based pagination wrapper"),
+    );
+
     query
+}
+
+/// Build the `CursorQuery` type with `_pageInfo` plus one field per collection.
+pub fn generate_cursor_query_type(collections: &[&CollectionVersion]) -> GqlObjectType {
+    let mut cq = crate::schema_gen::cursor::gen_cursor_query_type();
+    for collection in collections {
+        let field = crate::schema_gen::cursor::gen_cursor_collection_field(&collection.name);
+        cq = cq.with_field(field);
+    }
+    cq
 }
 
 /// Generate Mutation type with all collection mutations
@@ -516,6 +532,138 @@ mod tests {
         assert_eq!(query.name, "Query");
         let user_query = query.fields.iter().find(|f| f.name == "user");
         assert!(user_query.is_some());
+    }
+
+    #[test]
+    fn test_generate_query_type_has_cursor_field_nullable() {
+        let collection = make_test_collection();
+        let collections: Vec<&CollectionVersion> = vec![&collection];
+
+        let query = generate_query_type(&collections);
+
+        let cursor_field = query.fields.iter().find(|f| f.name == "_cursor");
+        assert!(
+            cursor_field.is_some(),
+            "_cursor field must be present on Query"
+        );
+
+        let cursor_field = cursor_field.unwrap();
+        // Must be Named("CursorQuery") — NOT NonNull
+        assert!(
+            matches!(&cursor_field.field_type, GqlType::Named(n) if n == "CursorQuery"),
+            "_cursor must be Named(CursorQuery) (nullable), got {:?}",
+            cursor_field.field_type
+        );
+    }
+
+    #[test]
+    fn test_generate_query_type_sdl_cursor_not_nonnull() {
+        let collection = make_test_collection();
+        let collections: Vec<&CollectionVersion> = vec![&collection];
+
+        let query = generate_query_type(&collections);
+        let sdl = query.to_sdl();
+
+        // Must appear as "_cursor: CursorQuery" without trailing "!"
+        assert!(
+            sdl.contains("_cursor: CursorQuery"),
+            "SDL must contain '_cursor: CursorQuery', got:\n{}",
+            sdl
+        );
+        assert!(
+            !sdl.contains("_cursor: CursorQuery!"),
+            "SDL must NOT contain '_cursor: CursorQuery!' (must be nullable), got:\n{}",
+            sdl
+        );
+    }
+
+    #[test]
+    fn test_generate_cursor_query_type_has_page_info_and_collection() {
+        let collection = make_test_collection();
+        let collections: Vec<&CollectionVersion> = vec![&collection];
+
+        let cq = generate_cursor_query_type(&collections);
+
+        assert_eq!(cq.name, "CursorQuery");
+
+        // Must have _pageInfo
+        let page_info = cq.fields.iter().find(|f| f.name == "_pageInfo");
+        assert!(page_info.is_some(), "_pageInfo must be on CursorQuery");
+        let page_info = page_info.unwrap();
+        assert!(
+            matches!(&page_info.field_type, GqlType::Named(n) if n == "PageInfo"),
+            "_pageInfo must be Named(PageInfo), got {:?}",
+            page_info.field_type
+        );
+
+        // Must have per-collection field "User"
+        let user_field = cq.fields.iter().find(|f| f.name == "User");
+        assert!(user_field.is_some(), "User field must be on CursorQuery");
+    }
+
+    #[test]
+    fn test_full_schema_sdl_contains_cursor_types() {
+        let collection = make_test_collection();
+        let collections: Vec<&CollectionVersion> = vec![&collection];
+
+        // Simulate what sdl.rs does: generate all types and join
+        let mut parts: Vec<String> = Vec::new();
+
+        let schema = generate_schema(&collection, &collections).unwrap();
+        parts.push(schema.object_type.to_sdl());
+        parts.push(schema.create_input.to_sdl());
+        parts.push(schema.update_input.to_sdl());
+        parts.push(schema.filter_input.to_sdl());
+        parts.push(schema.order_input.to_sdl());
+
+        let page_info = crate::schema_gen::cursor::gen_page_info_type();
+        let cursor_query = generate_cursor_query_type(&collections);
+        let query = generate_query_type(&collections);
+        let mutation = generate_mutation_type(&collections);
+        parts.push(page_info.to_sdl());
+        parts.push(cursor_query.to_sdl());
+        parts.push(query.to_sdl());
+        parts.push(mutation.to_sdl());
+
+        let sdl = parts.join("\n\n");
+
+        assert!(
+            sdl.contains("type PageInfo"),
+            "SDL must contain type PageInfo:\n{}",
+            sdl
+        );
+        assert!(
+            sdl.contains("type CursorQuery"),
+            "SDL must contain type CursorQuery:\n{}",
+            sdl
+        );
+        assert!(
+            sdl.contains("_cursor: CursorQuery"),
+            "SDL must contain '_cursor: CursorQuery':\n{}",
+            sdl
+        );
+        assert!(
+            !sdl.contains("_cursor: CursorQuery!"),
+            "SDL must NOT contain '_cursor: CursorQuery!' (nullable):\n{}",
+            sdl
+        );
+        // PageInfo fields must be nullable
+        assert!(
+            !sdl.contains("hasNext: Boolean!"),
+            "hasNext must be nullable (no '!'), got:\n{}",
+            sdl
+        );
+        assert!(
+            !sdl.contains("hasPrev: Boolean!"),
+            "hasPrev must be nullable (no '!'), got:\n{}",
+            sdl
+        );
+        // CursorQuery must have per-collection User field with cursor args
+        assert!(
+            sdl.contains("User(first: Int"),
+            "CursorQuery.User field must have 'first: Int' arg:\n{}",
+            sdl
+        );
     }
 
     #[test]
