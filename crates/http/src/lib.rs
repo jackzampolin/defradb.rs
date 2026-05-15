@@ -29,16 +29,28 @@
 //! - `DELETE /api/v1/collections/{name}/document/{docID}` - Delete document
 //!
 //! ## P2P (requires P2POperations)
-//! - `GET /api/v1/p2p/info` - Get P2P node info
-//! - `GET /api/v1/p2p/shareable-address` - Get the single best shareable P2P address
-//! - `GET /api/v1/p2p/peers` - List connected peers
-//! - `POST /api/v1/p2p/peers` - Connect to peer
-//! - `GET /api/v1/p2p/replicator` - List replicators
-//! - `POST /api/v1/p2p/replicator` - Add replicator
-//! - `DELETE /api/v1/p2p/replicator` - Remove replicator
-//! - `GET /api/v1/p2p/collections` - List P2P collections
-//! - `POST /api/v1/p2p/collections` - Add P2P collections
-//! - `DELETE /api/v1/p2p/collections` - Remove P2P collections
+//! The same routes are mounted under `/api/v0` for backwards compatibility.
+//! - `GET /api/v1/p2p/info` - Get P2P node info (`handlers/p2p/peers.rs`)
+//! - `GET /api/v1/p2p/shareable-address` - Get the single best shareable P2P address (`handlers/p2p/peers.rs`)
+//! - `GET /api/v1/p2p/active-peers` - List connected peers in Go-compatible format (`handlers/p2p/peers.rs`)
+//! - `POST /api/v1/p2p/connect` - Connect to peers in Go-compatible format (`handlers/p2p/peers.rs`)
+//! - `GET /api/v1/p2p/peers` - List connected peers (`handlers/p2p/peers.rs`)
+//! - `POST /api/v1/p2p/peers` - Connect to peer (`handlers/p2p/peers.rs`)
+//! - `GET /api/v1/p2p/replicators` - List replicators (`handlers/p2p/replicators.rs`)
+//! - `POST /api/v1/p2p/replicators` - Add replicator (`handlers/p2p/replicators.rs`)
+//! - `DELETE /api/v1/p2p/replicators` - Remove replicator (`handlers/p2p/replicators.rs`)
+//! - `GET /api/v1/p2p/replicator` - Legacy alias for listing replicators (`handlers/p2p/replicators.rs`)
+//! - `POST /api/v1/p2p/replicator` - Legacy alias for adding a replicator (`handlers/p2p/replicators.rs`)
+//! - `DELETE /api/v1/p2p/replicator` - Legacy alias for removing a replicator (`handlers/p2p/replicators.rs`)
+//! - `GET /api/v1/p2p/collections` - List P2P collections (`handlers/p2p/collections.rs`)
+//! - `POST /api/v1/p2p/collections` - Add P2P collections (`handlers/p2p/collections.rs`)
+//! - `DELETE /api/v1/p2p/collections` - Remove P2P collections (`handlers/p2p/collections.rs`)
+//! - `POST /api/v1/p2p/collections/sync-versions` - Sync collection versions (`handlers/p2p/collections.rs`)
+//! - `POST /api/v1/p2p/collections/sync-branchable` - Sync branchable collection heads (`handlers/p2p/collections.rs`)
+//! - `GET /api/v1/p2p/documents` - List P2P documents (`handlers/p2p/documents.rs`)
+//! - `POST /api/v1/p2p/documents` - Add P2P documents (`handlers/p2p/documents.rs`)
+//! - `DELETE /api/v1/p2p/documents` - Remove P2P documents (`handlers/p2p/documents.rs`)
+//! - `POST /api/v1/p2p/documents/sync` - Sync specific documents (`handlers/p2p/documents.rs`)
 //!
 //! ## ACP (requires AcpOperations)
 //! - `POST /api/v1/acp/policy` - Add policy

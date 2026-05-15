@@ -14,7 +14,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::error::{Error, Result};
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
-    PushLogReply, PushLogRequest, PushSEArtifactsRequest,
+    PushLogReply, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
+    QuerySEArtifactsRequest,
 };
 use crate::replicator::ReplicatorInfo;
 use crate::topics::DefraTopic;
@@ -68,6 +69,117 @@ impl IrohTransport {
     pub async fn network_change(&self) -> Result<()> {
         self.send_command(|reply| IrohCommand::NetworkChange { reply })
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    use crate::iroh::{spawn_endpoint, IrohDiscoveryConfig, IrohEndpointConfig};
+    use crate::message::{QuerySEArtifactsReply, QuerySEArtifactsRequest, SEFieldQuery};
+    use crate::signing::sign_with_transport;
+    use crate::transport::{P2PTransport, TransportEvent};
+
+    use super::*;
+
+    fn test_config(secret_key: SecretKey) -> IrohEndpointConfig {
+        IrohEndpointConfig {
+            secret_key,
+            relay_mode: crate::iroh::IrohRelayModeConfig::Disabled,
+            discovery: IrohDiscoveryConfig::Disabled,
+            bind_port: None,
+            bind_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        }
+    }
+
+    #[tokio::test]
+    async fn se_query_roundtrip_emits_request_and_reply_events() {
+        let key0 = SecretKey::generate();
+        let key1 = SecretKey::generate();
+        let (command_tx0, mut events0, _replicators0, task0) =
+            spawn_endpoint(test_config(key0.clone())).await.unwrap();
+        let (command_tx1, mut events1, _replicators1, task1) =
+            spawn_endpoint(test_config(key1.clone())).await.unwrap();
+        let transport0 = IrohTransport::new(command_tx0, key0);
+        let transport1 = IrohTransport::new(command_tx1, key1);
+
+        transport0
+            .dial(
+                transport1.local_peer_id(),
+                transport1.listen_addresses().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        transport0
+            .poll_until_connected(transport1.local_peer_id(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        transport1
+            .poll_until_connected(transport0.local_peer_id(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let mut request = QuerySEArtifactsRequest::new(
+            "collection1",
+            vec![SEFieldQuery::new("name", "name", vec![1, 2, 3])],
+        );
+        sign_with_transport(&transport0, &mut request).unwrap();
+        let request_message_id = request.message_id.clone();
+
+        transport0
+            .send_se_query_request(transport1.local_peer_id(), request)
+            .await
+            .unwrap();
+
+        let received_request = loop {
+            let event = timeout(Duration::from_secs(5), events1.recv())
+                .await
+                .expect("timed out waiting for SE query request")
+                .expect("iroh event channel closed");
+            if let TransportEvent::SEQueryRequest { peer_id, request } = event {
+                assert_eq!(peer_id, *transport0.local_peer_id());
+                break request;
+            }
+        };
+        assert_eq!(received_request.message_id, request_message_id);
+        assert_eq!(
+            received_request.sender_id,
+            transport0.local_peer_id().to_string()
+        );
+        assert_eq!(received_request.collection_id, "collection1");
+        assert_eq!(received_request.queries.len(), 1);
+        assert_eq!(received_request.queries[0].search_tag, vec![1, 2, 3]);
+
+        let mut reply =
+            QuerySEArtifactsReply::success(&request_message_id, vec!["doc1".into(), "doc2".into()]);
+        sign_with_transport(&transport1, &mut reply).unwrap();
+        transport1
+            .send_se_query_response(transport0.local_peer_id(), reply)
+            .await
+            .unwrap();
+
+        loop {
+            let event = timeout(Duration::from_secs(5), events0.recv())
+                .await
+                .expect("timed out waiting for SE query reply")
+                .expect("iroh event channel closed");
+            if let TransportEvent::SEQueryReply { peer_id, reply } = event {
+                assert_eq!(peer_id, *transport1.local_peer_id());
+                assert_eq!(reply.message_id, request_message_id);
+                assert_eq!(reply.sender_id, transport1.local_peer_id().to_string());
+                assert_eq!(reply.doc_ids, vec!["doc1".to_string(), "doc2".to_string()]);
+                break;
+            }
+        }
+
+        transport0.shutdown().await.unwrap();
+        transport1.shutdown().await.unwrap();
+        task0.await.unwrap();
+        task1.await.unwrap();
     }
 }
 
@@ -131,10 +243,9 @@ impl P2PTransport for IrohTransport {
             .await
     }
 
-    async fn topic_peers(&self, _topic: DefraTopic) -> Result<Vec<PeerId>> {
-        // Iroh doesn't have topic-based peer tracking like GossipSub.
-        // Return connected peers as best-effort approximation.
-        self.connected_peers().await
+    async fn topic_peers(&self, topic: DefraTopic) -> Result<Vec<PeerId>> {
+        self.send_command(|reply| IrohCommand::TopicPeers { topic, reply })
+            .await
     }
 
     async fn subscribe(&self, topic: DefraTopic) -> Result<bool> {
@@ -298,6 +409,32 @@ impl P2PTransport for IrohTransport {
         self.send_command(|reply| IrohCommand::SendSEArtifacts {
             peer_id: peer_id.clone(),
             request: req,
+            reply,
+        })
+        .await
+    }
+
+    async fn send_se_query_request(
+        &self,
+        peer_id: &PeerId,
+        req: QuerySEArtifactsRequest,
+    ) -> Result<()> {
+        self.send_command(|reply| IrohCommand::SendSEQueryRequest {
+            peer_id: peer_id.clone(),
+            request: req,
+            reply,
+        })
+        .await
+    }
+
+    async fn send_se_query_response(
+        &self,
+        peer_id: &PeerId,
+        reply_msg: QuerySEArtifactsReply,
+    ) -> Result<()> {
+        self.send_command(|reply| IrohCommand::SendSEQueryResponse {
+            peer_id: peer_id.clone(),
+            reply_msg,
             reply,
         })
         .await
