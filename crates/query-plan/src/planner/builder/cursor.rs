@@ -4,18 +4,20 @@
 //! defradb's `internal/planner/planner.go` (PR #4617, branch pr-4617).
 
 use crate::plan::{CursorDirection, CursorNode};
+use crate::planner::index_selection::CursorSeek;
 use crate::planner::PlanNode;
 use cursor::Cursor;
 use query_types::error::{QueryError, Result};
 use query_types::mapper::{OrderCondition, OrderDirection, Select};
 use schema::{CollectionVersion, IndexDescription};
+use storage::field_value::encode_field_value;
+use storage::keys::IndexDataStoreKey;
+
+use crate::planner::index_selection::json_to_normal_value;
 
 /// Wrap a plan tree with `CursorNode`, configure any scan in the tree
-/// with `cursor_seek` (deferred to Task 11), and validate that ordering
-/// is supported by an index when the ordering is non-empty and not
-/// docID-only.
-// Task 11 will call this from groupby.rs; allow dead_code until then.
-#[allow(dead_code)]
+/// with `cursor_seek`, and validate that ordering is supported by an
+/// index when the ordering is non-empty and not docID-only.
 pub(crate) fn expand_cursor_plan(
     select: &Select,
     collection: &CollectionVersion,
@@ -33,7 +35,7 @@ pub(crate) fn expand_cursor_plan(
         .unwrap_or_default();
 
     // Validate index coverage; may error with cursor_no_supporting_index.
-    let (reversed, _matched_index) = validate_cursor_index(collection, &order_fields)?;
+    let (reversed, matched_index) = validate_cursor_index(collection, &order_fields)?;
 
     // Decode tokens (empty/whitespace tokens are treated as no token).
     let after = decode_optional(&params.after)?;
@@ -46,7 +48,8 @@ pub(crate) fn expand_cursor_plan(
         (CursorDirection::Forward, params.first.unwrap_or(0))
     };
 
-    // Configure scan for cursor seek — stubbed; Task 11 implements the tree walk.
+    // Configure scan for cursor seek — walks the plan tree to set cursor_seek
+    // on any IndexScanNode found inside.
     let (plan, index_seek_active) = configure_scan_for_cursor(
         plan,
         &after,
@@ -54,6 +57,8 @@ pub(crate) fn expand_cursor_plan(
         direction,
         reversed,
         &order_fields,
+        collection,
+        matched_index.as_ref(),
     )?;
 
     // Wrap with CursorNode.
@@ -69,7 +74,6 @@ pub(crate) fn expand_cursor_plan(
     )))
 }
 
-#[allow(dead_code)]
 fn decode_optional(token: &Option<String>) -> Result<Option<Cursor>> {
     match token {
         Some(s) if !s.is_empty() => Cursor::decode(s)
@@ -82,8 +86,6 @@ fn decode_optional(token: &Option<String>) -> Result<Option<Cursor>> {
 /// Mirrors Go's `validateCursorIndex` at `planner.go:313-337` on branch pr-4617.
 /// Returns `(reversed, matched_index)`. When `order_fields` is empty or only
 /// orders by `_docID`, returns `(false, None)` — **no index required**.
-// Task 11 will call this from groupby.rs; allow dead_code until then.
-#[allow(dead_code)]
 pub(crate) fn validate_cursor_index(
     collection: &CollectionVersion,
     order_fields: &[OrderCondition],
@@ -109,7 +111,6 @@ pub(crate) fn validate_cursor_index(
     Ok((reversed, Some(idx)))
 }
 
-#[allow(dead_code)]
 fn is_doc_id_order(order_fields: &[OrderCondition]) -> bool {
     matches!(
         order_fields
@@ -123,7 +124,6 @@ fn is_doc_id_order(order_fields: &[OrderCondition]) -> bool {
 /// Return `(index, reversed)` for the first index that supports the requested
 /// ordering. `reversed` means iteration must run in reverse to produce the
 /// requested order.
-#[allow(dead_code)]
 fn find_matching_index(
     indexes: &[IndexDescription],
     order_fields: &[OrderCondition],
@@ -138,7 +138,6 @@ fn find_matching_index(
 /// - if all conditions match the index direction exactly, reversed=false
 /// - if all conditions are the opposite, reversed=true
 /// - mixed → no match (None)
-#[allow(dead_code)]
 fn index_covers_ordering(idx: &IndexDescription, order_fields: &[OrderCondition]) -> Option<bool> {
     if idx.fields.len() < order_fields.len() {
         return None;
@@ -161,18 +160,96 @@ fn index_covers_ordering(idx: &IndexDescription, order_fields: &[OrderCondition]
     Some(required_reversed.unwrap_or(false))
 }
 
-/// Stub: Task 11 will implement the plan-tree walk that sets `cursor_seek`
-/// on the IndexScanNode. For now, always return `(plan, false)` — slow path.
-#[allow(dead_code)]
+/// Walk the plan tree to configure cursor seek on the underlying `IndexScanNode`.
+///
+/// Returns `(plan, applied)` where `applied` is `true` when a seek was
+/// successfully set on an `IndexScanNode` inside the plan tree.
+///
+/// Falls back to `(plan, false)` — the slow path — when:
+/// - No cursor token is present.
+/// - The cursor token has no keys.
+/// - No index is matched (doc-ID order or empty order).
+/// - The plan tree has no `IndexScanNode` (full scan).
+#[allow(clippy::too_many_arguments)]
 fn configure_scan_for_cursor(
-    plan: Box<dyn PlanNode>,
-    _after: &Option<Cursor>,
-    _before: &Option<Cursor>,
-    _direction: CursorDirection,
-    _reversed: bool,
-    _order_fields: &[OrderCondition],
+    mut plan: Box<dyn PlanNode>,
+    after: &Option<Cursor>,
+    before: &Option<Cursor>,
+    direction: CursorDirection,
+    reversed: bool,
+    order_fields: &[OrderCondition],
+    collection: &CollectionVersion,
+    matched_index: Option<&IndexDescription>,
 ) -> Result<(Box<dyn PlanNode>, bool)> {
-    Ok((plan, false))
+    let active_cursor = match direction {
+        CursorDirection::Forward => after.as_ref(),
+        CursorDirection::Backward => before.as_ref(),
+    };
+
+    // No cursor token → slow path.
+    let Some(cursor_token) = active_cursor else {
+        return Ok((plan, false));
+    };
+    if cursor_token.keys.is_empty() {
+        return Ok((plan, false));
+    }
+
+    // No matched index → no index seek possible.
+    let Some(idx) = matched_index else {
+        return Ok((plan, false));
+    };
+
+    let seek_key = build_cursor_seek_key(cursor_token, order_fields, collection, idx)?;
+    let seek = CursorSeek {
+        seek_key,
+        // Forward: skip the boundary (exclusive).
+        // Backward: include the boundary, iterate backward (inclusive).
+        inclusive: matches!(direction, CursorDirection::Backward),
+        reversed,
+    };
+
+    let applied = plan.set_cursor_seek(seek);
+    Ok((plan, applied))
+}
+
+/// Build the storage-encoded seek key for a cursor token.
+///
+/// The key format matches the one used by `RangeIterator` bounds:
+///   `IndexDataStoreKey::index_prefix(collection_short_id, index_id)`
+///   + `encode_field_value(...)` for each ordered field.
+///
+/// Field values are extracted from `cursor.keys` in the order given by
+/// `order_fields` and encoded using the same direction (ascending/descending)
+/// as the matched index fields.
+fn build_cursor_seek_key(
+    cursor: &Cursor,
+    order_fields: &[OrderCondition],
+    collection: &CollectionVersion,
+    idx: &IndexDescription,
+) -> Result<Vec<u8>> {
+    let collection_short_id = collection.resolved_root_id();
+    let index_id = idx.id;
+
+    let mut key = IndexDataStoreKey::index_prefix(collection_short_id, index_id);
+
+    for (i, cond) in order_fields.iter().enumerate() {
+        let Some(field_name) = cond.fields.first() else {
+            continue;
+        };
+        let Some(json_val) = cursor.keys.get(field_name) else {
+            return Err(QueryError::cursor_invalid());
+        };
+        let normal = json_to_normal_value(json_val).ok_or_else(QueryError::cursor_invalid)?;
+
+        // Use the index's descending flag for this field position, if available.
+        let descending = idx.fields.get(i).map(|f| f.descending).unwrap_or(false);
+
+        key = encode_field_value(key, &normal, descending).map_err(|e| {
+            QueryError::execution(format!("failed to encode cursor seek key: {e}"))
+        })?;
+    }
+
+    Ok(key)
 }
 
 #[cfg(test)]

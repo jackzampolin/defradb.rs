@@ -2,9 +2,9 @@
 
 pub mod aggregate;
 mod alldocs;
-mod cursor;
 mod bm25;
 mod cached_view_fetcher;
+mod cursor;
 pub mod groupby;
 mod index_scan;
 pub mod lens_node;
@@ -27,9 +27,9 @@ pub use aggregate::{
     MinSourceMeta, SumNode, SumSourceMeta,
 };
 pub use alldocs::AllDocsNode;
-pub use cursor::{CursorDirection, CursorNode, CursorPageInfo};
 pub use bm25::BM25Node;
 pub use cached_view_fetcher::CachedViewFetcher;
+pub use cursor::{CursorDirection, CursorNode, CursorPageInfo};
 pub use groupby::{ChildSelectMeta, DocumentGroup, GroupAlias, GroupByNode, InnerAggregateDef};
 pub use index_scan::IndexScanNode;
 pub use lens_node::LensNode;

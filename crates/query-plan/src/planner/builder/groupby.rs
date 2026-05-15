@@ -8,7 +8,7 @@ use crate::plan::{
 };
 use crate::planner::PlanNode;
 use query_types::document::DocumentMapping;
-use query_types::error::Result;
+use query_types::error::{QueryError, Result};
 use query_types::mapper::{AggregateType, Filter, Requestable, Select};
 
 impl super::Planner {
@@ -314,8 +314,15 @@ impl super::Planner {
                 }
             }
 
-            // 7. Apply limit/offset
-            if let Some(ref limit) = select.limit {
+            // 7. Apply limit/offset (or cursor pagination node)
+            if select.is_cursor {
+                let collection = self
+                    .get_collection(&select.collection_name)
+                    .ok_or_else(|| {
+                        QueryError::collection_not_found(&select.collection_name)
+                    })?;
+                plan = super::expand_cursor_plan(select, &collection, plan)?;
+            } else if let Some(ref limit) = select.limit {
                 let effective_limit = match limit.limit {
                     Some(0) => None, // limit: 0 means no limit (Go compatibility)
                     other => other,
@@ -368,8 +375,15 @@ impl super::Planner {
             // 7. Add aggregate nodes (for top-level aggregates without GROUP BY)
             plan = self.add_aggregate_nodes(plan, select, scan_mapping)?;
 
-            // 8. Apply limit/offset (AFTER aggregates, matching Go behavior)
-            if let Some(ref limit) = select.limit {
+            // 8. Apply limit/offset or cursor pagination node (AFTER aggregates, matching Go behavior)
+            if select.is_cursor {
+                let collection = self
+                    .get_collection(&select.collection_name)
+                    .ok_or_else(|| {
+                        QueryError::collection_not_found(&select.collection_name)
+                    })?;
+                plan = super::expand_cursor_plan(select, &collection, plan)?;
+            } else if let Some(ref limit) = select.limit {
                 let effective_limit = match limit.limit {
                     Some(0) => None, // limit: 0 means no limit (Go compatibility)
                     other => other,

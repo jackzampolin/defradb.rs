@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tracing::debug;
 
 use crate::fetcher::DocFetcher;
-use crate::planner::index_selection::IndexScanParams;
+use crate::planner::index_selection::{CursorSeek, IndexScanParams};
 use crate::planner::{Doc, ExecInfo, PlanNode};
 use query_types::document::{documents_to_plan_docs, DocumentMapping};
 use query_types::error::Result;
@@ -274,6 +274,11 @@ impl PlanNode for IndexScanNode {
         }
 
         serde_json::Value::Object(obj)
+    }
+
+    fn set_cursor_seek(&mut self, seek: CursorSeek) -> bool {
+        self.index_params.cursor_seek = Some(seek);
+        true
     }
 
     fn exec_info(&self) -> ExecInfo {

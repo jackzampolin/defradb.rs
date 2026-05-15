@@ -5,7 +5,7 @@ use schema::{FieldKind, ScalarKind};
 use serde_json::Value as JsonValue;
 
 /// Convert JSON value to NormalValue.
-pub(super) fn json_to_normal_value(value: &JsonValue) -> Option<NormalValue> {
+pub(crate) fn json_to_normal_value(value: &JsonValue) -> Option<NormalValue> {
     match value {
         JsonValue::Null => Some(NormalValue::Null),
         JsonValue::Bool(b) => Some(NormalValue::Bool(*b)),

@@ -7,6 +7,8 @@ use storage::corekv::MaybeSendSync;
 use query_types::document::DocumentMapping;
 use query_types::error::Result;
 
+use crate::planner::index_selection::CursorSeek;
+
 // Doc, DocStatus, DocFields extracted to query-types crate.
 // Re-exported from planner/mod.rs for backwards compatibility.
 use query_types::doc::Doc;
@@ -70,6 +72,17 @@ pub trait PlanNode: MaybeSendSync {
     /// Without this, aggregates would fall through to non-grouped mode
     /// and yield a synthetic result instead of returning empty.
     fn is_grouped_source(&self) -> bool {
+        false
+    }
+
+    /// Configure cursor seek on this node's underlying index scan, if any.
+    ///
+    /// Walks down the plan tree until it reaches an `IndexScanNode`, sets
+    /// `params.cursor_seek`, and returns `true`. Wrapper nodes forward to
+    /// their inner source. Non-index terminal nodes return `false`.
+    ///
+    /// Default: no-op, returns `false`.
+    fn set_cursor_seek(&mut self, _seek: CursorSeek) -> bool {
         false
     }
 
