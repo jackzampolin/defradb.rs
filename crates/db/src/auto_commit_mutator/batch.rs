@@ -86,9 +86,9 @@ impl<S: Store + 'static> BatchMutator<S> {
 impl<S: Store + 'static> MutationBatchController for BatchMutator<S> {
     async fn commit(&self) -> query::error::Result<()> {
         let txn = self.take_txn().await?;
-        txn.commit().await.map_err(|e| {
-            query::error::QueryError::execution(format!("commit error: {}", e))
-        })
+        txn.commit()
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("commit error: {}", e)))
     }
 
     async fn rollback(&self) -> query::error::Result<()> {

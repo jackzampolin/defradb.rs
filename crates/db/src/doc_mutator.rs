@@ -308,9 +308,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
 
             let schema_version_id = collection.version_id();
-            let enc_config = get_encryption_config().or_else(|| {
-                doc.id().and_then(|id| get_doc_encryption(&id.to_string()))
-            });
+            let enc_config = get_encryption_config()
+                .or_else(|| doc.id().and_then(|id| get_doc_encryption(&id.to_string())));
             let sign_config = get_signing_config();
 
             match write_document_blocks(
@@ -514,7 +513,9 @@ mod tests {
     #[tokio::test]
     async fn create_in_tx_publishes_event_on_commit() {
         let (db, bus) = make_test_db_with_bus().await;
-        db.create_collection(test_collection()).await.expect("schema");
+        db.create_collection(test_collection())
+            .await
+            .expect("schema");
 
         let mut sub = bus.subscribe(&[EventName::Update]);
 
@@ -534,13 +535,10 @@ mod tests {
         txn.commit().await.expect("commit");
 
         // After commit: one Update event arrives
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            sub.recv(),
-        )
-        .await
-        .expect("event arrived within timeout")
-        .expect("subscription not closed");
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv())
+            .await
+            .expect("event arrived within timeout")
+            .expect("subscription not closed");
 
         let update = msg.as_update().expect("expected Update message");
         assert_eq!(update.doc_id, result.doc_id.to_string());
@@ -550,7 +548,9 @@ mod tests {
     #[tokio::test]
     async fn create_in_tx_publishes_no_event_on_discard() {
         let (db, bus) = make_test_db_with_bus().await;
-        db.create_collection(test_collection()).await.expect("schema");
+        db.create_collection(test_collection())
+            .await
+            .expect("schema");
 
         let mut sub = bus.subscribe(&[EventName::Update]);
 
@@ -565,9 +565,6 @@ mod tests {
 
         // Allow a brief window for any (unexpected) async delivery
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(
-            sub.try_recv().is_err(),
-            "discard should not publish events"
-        );
+        assert!(sub.try_recv().is_err(), "discard should not publish events");
     }
 }

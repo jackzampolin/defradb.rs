@@ -384,7 +384,8 @@ async fn txn_commit_publishes_update_events(cluster: TestCluster) {
         let observed = events.lock().unwrap();
         let count_after_writes = observed.len();
         assert_eq!(
-            count_after_writes, baseline,
+            count_after_writes,
+            baseline,
             "no update events should fire before tx commit; got {} new events",
             count_after_writes.saturating_sub(baseline)
         );
@@ -420,13 +421,25 @@ async fn txn_commit_publishes_update_events(cluster: TestCluster) {
         .filter_map(|e| e.pointer("/data/doc_id").and_then(|v| v.as_str()))
         .map(String::from)
         .collect();
-    assert!(observed_doc_ids.contains(&doc_a), "missing event for doc_a={doc_a}");
-    assert!(observed_doc_ids.contains(&doc_b), "missing event for doc_b={doc_b}");
-    assert!(observed_doc_ids.contains(&doc_c), "missing event for doc_c={doc_c}");
+    assert!(
+        observed_doc_ids.contains(&doc_a),
+        "missing event for doc_a={doc_a}"
+    );
+    assert!(
+        observed_doc_ids.contains(&doc_b),
+        "missing event for doc_b={doc_b}"
+    );
+    assert!(
+        observed_doc_ids.contains(&doc_c),
+        "missing event for doc_c={doc_c}"
+    );
 
     // Also validate cids are non-default (catches missing block writes)
     for event in &new_events {
-        let cid = event.pointer("/data/cid").and_then(|v| v.as_str()).unwrap_or("");
+        let cid = event
+            .pointer("/data/cid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert!(!cid.is_empty(), "event cid should not be empty: {event:?}");
     }
 

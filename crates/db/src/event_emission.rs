@@ -33,14 +33,7 @@ pub(crate) fn register_update_event_callback<S: Store + 'static>(
     txn.on_success_async(Box::new(move || {
         Box::pin(async move {
             let subject_doc_id = doc_id.clone();
-            let update = Update::new(
-                doc_id,
-                cid,
-                collection_id.clone(),
-                vec![],
-                false,
-                false,
-            );
+            let update = Update::new(doc_id, cid, collection_id.clone(), vec![], false, false);
             bus.publish(Message::update(update));
 
             if branchable {
