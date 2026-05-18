@@ -434,13 +434,27 @@ async fn txn_commit_publishes_update_events(cluster: TestCluster) {
         "missing event for doc_c={doc_c}"
     );
 
-    // Also validate cids are non-default (catches missing block writes)
+    // Also validate cids are non-default. Cid::default().to_string() is
+    // "baeaaaaa" (non-empty), so an is_empty() check would silently pass the
+    // pre-fix bug where a failed block write emitted an event with a default
+    // cid. Compare against the parsed default explicitly.
+    let default_cid = cid::Cid::default();
     for event in &new_events {
-        let cid = event
+        let cid_str = event
             .pointer("/data/cid")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        assert!(!cid.is_empty(), "event cid should not be empty: {event:?}");
+        assert!(
+            !cid_str.is_empty(),
+            "event cid should not be empty: {event:?}"
+        );
+        let parsed: cid::Cid = cid_str.parse().unwrap_or_else(|e| {
+            panic!("event cid should parse as a real Cid (got {cid_str:?}): {e}")
+        });
+        assert_ne!(
+            parsed, default_cid,
+            "event cid should not be Cid::default() (would indicate the block write failed): {event:?}"
+        );
     }
 
     sse_handle.abort();

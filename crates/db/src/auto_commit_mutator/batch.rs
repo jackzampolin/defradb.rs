@@ -56,9 +56,10 @@ impl<S: Store + 'static> BatchMutator<S> {
     async fn register_update_callback(
         &self,
         collection_id: String,
-        branchable: bool,
         doc_id: String,
-        cid: Cid,
+        doc_cid: Cid,
+        doc_block: Vec<u8>,
+        collection_block: Option<(Cid, Vec<u8>)>,
     ) -> query::error::Result<()> {
         let mut txn_guard = self.txn.lock().await;
         let txn = txn_guard.as_mut().ok_or_else(|| {
@@ -68,9 +69,10 @@ impl<S: Store + 'static> BatchMutator<S> {
             txn,
             self.db.event_bus(),
             collection_id,
-            branchable,
             doc_id,
-            cid,
+            doc_cid,
+            doc_block,
+            collection_block,
         )
         .map_err(|e| {
             query::error::QueryError::execution(format!(
@@ -147,10 +149,10 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let enc_config = get_encryption_config();
         let sign_config = get_signing_config();
 
-        let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
+        let (doc_cid, doc_block, col_block_data) = {
             let (blockstore, headstore) = self.block_and_head_stores().await?;
 
-            match write_document_blocks(
+            let block_result = write_document_blocks(
                 &blockstore,
                 &headstore,
                 &doc,
@@ -160,71 +162,60 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 sign_config.as_ref(),
             )
             .await
-            {
-                Ok(block_result) => {
-                    if let Some(ref config) = enc_config {
-                        store_doc_encryption(&doc_id.to_string(), config.clone());
-                    }
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to write document blocks for create on collection {}: {}",
+                    collection_name, e
+                ))
+            })?;
 
-                    let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-                    if collection.schema().is_branchable {
-                        match write_collection_block(
-                            &blockstore,
-                            &headstore,
-                            short_id,
-                            schema_version_id,
-                            block_result.cid,
-                            sign_config.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok((col_cid, col_bytes)) => {
-                                col_block_data = Some((col_cid, col_bytes));
-                            }
-                            Err(e) => {
-                                warn!(
-                                    collection = %collection_name,
-                                    error = %e,
-                                    "Failed to write collection block for branchable create"
-                                );
-                            }
-                        }
-                    }
+            if let Some(ref config) = enc_config {
+                store_doc_encryption(&doc_id.to_string(), config.clone());
+            }
 
-                    Some((block_result.cid, block_result.block, col_block_data))
-                }
-                Err(e) => {
-                    warn!(
-                        collection = %collection_name,
-                        error = %e,
-                        "Failed to write document blocks - commits queries may not work"
-                    );
-                    None
+            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
+            if collection.schema().is_branchable {
+                match write_collection_block(
+                    &blockstore,
+                    &headstore,
+                    short_id,
+                    schema_version_id,
+                    block_result.cid,
+                    sign_config.as_ref(),
+                )
+                .await
+                {
+                    Ok((col_cid, col_bytes)) => {
+                        col_block_data = Some((col_cid, col_bytes));
+                    }
+                    Err(e) => {
+                        warn!(
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to write collection block for branchable create"
+                        );
+                    }
                 }
             }
+
+            (block_result.cid, block_result.block, col_block_data)
         };
 
-        if let Some((cid, _, _)) = commit_result.as_ref() {
-            self.register_update_callback(
-                collection.collection_id().to_string(),
-                collection.schema().is_branchable,
-                doc_id.to_string(),
-                *cid,
-            )
-            .await?;
-        }
+        self.register_update_callback(
+            collection.collection_id().to_string(),
+            doc_id.to_string(),
+            doc_cid,
+            doc_block.clone(),
+            col_block_data.clone(),
+        )
+        .await?;
 
-        match commit_result {
-            Some((cid, block, col_data)) => {
-                let mut result = CreateResult::with_commit(doc_id, doc, cid, block);
-                if let Some((col_cid, col_bytes)) = col_data {
-                    result.broadcast_cid = Some(col_cid);
-                    result.broadcast_block = Some(col_bytes);
-                }
-                Ok(result)
-            }
-            None => Ok(CreateResult::new(doc_id, doc)),
+        let mut result = CreateResult::with_commit(doc_id, doc, doc_cid, doc_block);
+        if let Some((col_cid, col_bytes)) = col_block_data {
+            result.broadcast_cid = Some(col_cid);
+            result.broadcast_block = Some(col_bytes);
         }
+        Ok(result)
     }
 
     async fn update(
@@ -278,10 +269,10 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .or_else(|| doc.id().and_then(|id| get_doc_encryption(&id.to_string())));
         let sign_config = get_signing_config();
 
-        let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
+        let (doc_cid, doc_block, col_block_data) = {
             let (blockstore, headstore) = self.block_and_head_stores().await?;
 
-            match write_document_blocks(
+            let block_result = write_document_blocks(
                 &blockstore,
                 &headstore,
                 &doc,
@@ -291,68 +282,59 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 sign_config.as_ref(),
             )
             .await
-            {
-                Ok(block_result) => {
-                    let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-                    if collection.schema().is_branchable {
-                        match write_collection_block(
-                            &blockstore,
-                            &headstore,
-                            short_id,
-                            schema_version_id,
-                            block_result.cid,
-                            sign_config.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok((col_cid, col_bytes)) => {
-                                col_block_data = Some((col_cid, col_bytes));
-                            }
-                            Err(e) => {
-                                warn!(
-                                    collection = %collection_name,
-                                    error = %e,
-                                    "Failed to write collection block for branchable update"
-                                );
-                            }
-                        }
-                    }
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to write document blocks for update on collection {}: {}",
+                    collection_name, e
+                ))
+            })?;
 
-                    Some((block_result.cid, block_result.block, col_block_data))
-                }
-                Err(e) => {
-                    warn!(
-                        collection = %collection_name,
-                        error = %e,
-                        "Failed to write document blocks - commits queries may not work"
-                    );
-                    None
+            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
+            if collection.schema().is_branchable {
+                match write_collection_block(
+                    &blockstore,
+                    &headstore,
+                    short_id,
+                    schema_version_id,
+                    block_result.cid,
+                    sign_config.as_ref(),
+                )
+                .await
+                {
+                    Ok((col_cid, col_bytes)) => {
+                        col_block_data = Some((col_cid, col_bytes));
+                    }
+                    Err(e) => {
+                        warn!(
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to write collection block for branchable update"
+                        );
+                    }
                 }
             }
+
+            (block_result.cid, block_result.block, col_block_data)
         };
 
-        if let (Some(doc_id), Some((cid, _, _))) = (doc.id(), commit_result.as_ref()) {
+        if let Some(doc_id) = doc.id() {
             self.register_update_callback(
                 collection.collection_id().to_string(),
-                collection.schema().is_branchable,
                 doc_id.to_string(),
-                *cid,
+                doc_cid,
+                doc_block.clone(),
+                col_block_data.clone(),
             )
             .await?;
         }
 
         let fields_modified = doc.values().len();
-        match commit_result {
-            Some((cid, block, col_data)) => {
-                let mut result = UpdateResult::with_commit(doc, fields_modified, cid, block);
-                if let Some((col_cid, col_bytes)) = col_data {
-                    result.broadcast_cid = Some(col_cid);
-                    result.broadcast_block = Some(col_bytes);
-                }
-                Ok(result)
-            }
-            None => Ok(UpdateResult::new(doc, fields_modified)),
+        let mut result = UpdateResult::with_commit(doc, fields_modified, doc_cid, doc_block);
+        if let Some((col_cid, col_bytes)) = col_block_data {
+            result.broadcast_cid = Some(col_cid);
+            result.broadcast_block = Some(col_bytes);
         }
+        Ok(result)
     }
 
     async fn delete(
@@ -369,14 +351,18 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))?;
 
+        if !existed {
+            return Ok(DeleteResult::new(doc_id.clone(), existed));
+        }
+
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
         let sign_config = get_signing_config();
 
-        let commit_result: Option<(Cid, Vec<u8>)> = {
+        let (doc_cid, doc_block, col_block_data) = {
             let (blockstore, headstore) = self.block_and_head_stores().await?;
 
-            match write_delete_block(
+            let block_result = write_delete_block(
                 &blockstore,
                 &headstore,
                 &doc_id.to_string(),
@@ -384,62 +370,58 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 sign_config.as_ref(),
             )
             .await
-            {
-                Ok(block_result) => {
-                    let composite_cid = block_result.cid;
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to write delete block for collection {}: {}",
+                    collection_name, e
+                ))
+            })?;
 
-                    if collection.schema().is_branchable {
-                        if let Err(e) = write_collection_block(
-                            &blockstore,
-                            &headstore,
-                            short_id,
-                            schema_version_id,
-                            composite_cid,
-                            sign_config.as_ref(),
-                        )
-                        .await
-                        .map(|_| ())
-                        {
-                            warn!(
-                                collection = %collection_name,
-                                error = %e,
-                                "Failed to write collection block for branchable delete"
-                            );
-                        }
+            let composite_cid = block_result.cid;
+
+            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
+            if collection.schema().is_branchable {
+                match write_collection_block(
+                    &blockstore,
+                    &headstore,
+                    short_id,
+                    schema_version_id,
+                    composite_cid,
+                    sign_config.as_ref(),
+                )
+                .await
+                {
+                    Ok((col_cid, col_bytes)) => {
+                        col_block_data = Some((col_cid, col_bytes));
                     }
-
-                    Some((composite_cid, block_result.block))
-                }
-                Err(e) => {
-                    warn!(
-                        collection = %collection_name,
-                        error = %e,
-                        "Failed to write delete block - commits queries may not work"
-                    );
-                    None
+                    Err(e) => {
+                        warn!(
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to write collection block for branchable delete"
+                        );
+                    }
                 }
             }
+
+            (composite_cid, block_result.block, col_block_data)
         };
 
-        if let Some((cid, _)) = commit_result.as_ref() {
-            self.register_update_callback(
-                collection.collection_id().to_string(),
-                collection.schema().is_branchable,
-                doc_id.to_string(),
-                *cid,
-            )
-            .await?;
-        }
+        self.register_update_callback(
+            collection.collection_id().to_string(),
+            doc_id.to_string(),
+            doc_cid,
+            doc_block.clone(),
+            col_block_data,
+        )
+        .await?;
 
-        match commit_result {
-            Some((cid, block)) => Ok(DeleteResult::with_commit(
-                doc_id.clone(),
-                existed,
-                cid,
-                block,
-            )),
-            None => Ok(DeleteResult::new(doc_id.clone(), existed)),
-        }
+        Ok(DeleteResult::with_commit(
+            doc_id.clone(),
+            existed,
+            doc_cid,
+            doc_block,
+        ))
     }
 
     async fn exists(&self, collection_name: &str, doc_id: &DocID) -> query::error::Result<bool> {
@@ -529,6 +511,10 @@ mod tests {
         let update = msg.as_update().expect("expected Update message");
         assert_eq!(update.doc_id, result.doc_id.to_string());
         assert_ne!(update.cid, cid::Cid::default(), "cid should be populated");
+        assert!(
+            !update.block.is_empty(),
+            "block bytes should be populated (matches Go's sendUpdate)"
+        );
     }
 
     #[tokio::test]
@@ -548,5 +534,41 @@ mod tests {
         // If the sealed constraint is relaxed in the future, replace this comment
         // with a real assertion: subscribe to the bus, run a create against a
         // faulty store, and assert no Update event arrives.
+    }
+
+    #[tokio::test]
+    async fn batch_delete_missing_doc_publishes_no_event_and_writes_no_block() {
+        // DeleteNode treats existed==false as a no-op; the mutator must not
+        // create a tombstone commit or fire an Update event for a missing doc.
+        let (db, bus) = make_test_db_with_bus().await;
+        db.create_collection(test_collection())
+            .await
+            .expect("schema");
+
+        let mut sub = bus.subscribe(&[EventName::Update]);
+
+        let txn = db.new_txn(false).await.expect("new_txn");
+        let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
+        let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc));
+
+        let mut placeholder = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
+        placeholder
+            .generate_and_set_doc_id()
+            .expect("generate doc id");
+        let missing_doc_id = placeholder.id().cloned().expect("doc id");
+
+        let result = mutator
+            .delete("TestDoc", &missing_doc_id)
+            .await
+            .expect("delete should succeed even on missing doc");
+        assert!(!result.existed, "doc should not have existed");
+
+        mutator.commit().await.expect("commit");
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            sub.try_recv().is_err(),
+            "deleting a non-existent doc should not publish an Update event"
+        );
     }
 }

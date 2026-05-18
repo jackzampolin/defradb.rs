@@ -122,9 +122,10 @@ impl<S: Store + 'static> DbDocMutator<S> {
     async fn register_update_callback(
         &self,
         collection_id: String,
-        branchable: bool,
         doc_id: String,
-        cid: Cid,
+        doc_cid: Cid,
+        doc_block: Vec<u8>,
+        collection_block: Option<(Cid, Vec<u8>)>,
     ) -> query::error::Result<()> {
         let mut txn_guard = self.txn.lock().await;
         let txn = txn_guard.as_mut().ok_or_else(|| {
@@ -134,9 +135,10 @@ impl<S: Store + 'static> DbDocMutator<S> {
             txn,
             self.db.event_bus(),
             collection_id,
-            branchable,
             doc_id,
-            cid,
+            doc_cid,
+            doc_block,
+            collection_block,
         )
         .map_err(|e| {
             query::error::QueryError::execution(format!(
@@ -185,7 +187,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| crate::error::index_write_query_error("create", e))?;
 
-        let commit_cid: Option<Cid> = {
+        let (doc_cid, doc_block, col_block_data) = {
             let txn_guard = self.txn.lock().await;
             let txn = txn_guard.as_ref().ok_or_else(|| {
                 query::error::QueryError::execution("transaction is no longer active")
@@ -202,7 +204,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             let enc_config = get_encryption_config();
             let sign_config = get_signing_config();
 
-            match write_document_blocks(
+            let block_result = write_document_blocks(
                 &blockstore,
                 &headstore,
                 &doc,
@@ -212,53 +214,54 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 sign_config.as_ref(),
             )
             .await
-            {
-                Ok(block_result) => {
-                    if let Some(ref config) = enc_config {
-                        store_doc_encryption(&doc_id.to_string(), config.clone());
-                    }
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to write document blocks for transaction create on collection {}: {}",
+                    collection_name, e
+                ))
+            })?;
 
-                    if collection.schema().is_branchable {
-                        let short_id = collection.resolved_root_id();
-                        if let Err(error) = write_collection_block(
-                            &blockstore,
-                            &headstore,
-                            short_id,
-                            schema_version_id,
-                            block_result.cid,
-                            sign_config.as_ref(),
-                        )
-                        .await
-                        {
-                            warn!(
-                                collection = %collection_name,
-                                error = %error,
-                                "Failed to write collection block for transaction create"
-                            );
-                        }
+            if let Some(ref config) = enc_config {
+                store_doc_encryption(&doc_id.to_string(), config.clone());
+            }
+
+            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
+            if collection.schema().is_branchable {
+                let short_id = collection.resolved_root_id();
+                match write_collection_block(
+                    &blockstore,
+                    &headstore,
+                    short_id,
+                    schema_version_id,
+                    block_result.cid,
+                    sign_config.as_ref(),
+                )
+                .await
+                {
+                    Ok((col_cid, col_bytes)) => {
+                        col_block_data = Some((col_cid, col_bytes));
                     }
-                    Some(block_result.cid)
-                }
-                Err(error) => {
-                    warn!(
-                        collection = %collection_name,
-                        error = %error,
-                        "Failed to write document blocks for transaction create"
-                    );
-                    None
+                    Err(error) => {
+                        warn!(
+                            collection = %collection_name,
+                            error = %error,
+                            "Failed to write collection block for transaction create"
+                        );
+                    }
                 }
             }
+
+            (block_result.cid, block_result.block, col_block_data)
         };
 
-        if let Some(cid) = commit_cid {
-            self.register_update_callback(
-                collection.collection_id().to_string(),
-                collection.schema().is_branchable,
-                doc_id.to_string(),
-                cid,
-            )
-            .await?;
-        }
+        self.register_update_callback(
+            collection.collection_id().to_string(),
+            doc_id.to_string(),
+            doc_cid,
+            doc_block,
+            col_block_data,
+        )
+        .await?;
 
         Ok(CreateResult::new(doc_id, doc))
     }
@@ -294,7 +297,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 other => crate::error::index_write_query_error("update", other),
             })?;
 
-        let commit_cid: Option<Cid> = {
+        let (doc_cid, doc_block, col_block_data) = {
             let txn_guard = self.txn.lock().await;
             let txn = txn_guard.as_ref().ok_or_else(|| {
                 query::error::QueryError::execution("transaction is no longer active")
@@ -312,7 +315,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 .or_else(|| doc.id().and_then(|id| get_doc_encryption(&id.to_string())));
             let sign_config = get_signing_config();
 
-            match write_document_blocks(
+            let block_result = write_document_blocks(
                 &blockstore,
                 &headstore,
                 &doc,
@@ -322,46 +325,49 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 sign_config.as_ref(),
             )
             .await
-            {
-                Ok(block_result) => {
-                    if collection.schema().is_branchable {
-                        let short_id = collection.resolved_root_id();
-                        if let Err(error) = write_collection_block(
-                            &blockstore,
-                            &headstore,
-                            short_id,
-                            schema_version_id,
-                            block_result.cid,
-                            sign_config.as_ref(),
-                        )
-                        .await
-                        {
-                            warn!(
-                                collection = %collection_name,
-                                error = %error,
-                                "Failed to write collection block for transaction update"
-                            );
-                        }
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to write document blocks for transaction update on collection {}: {}",
+                    collection_name, e
+                ))
+            })?;
+
+            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
+            if collection.schema().is_branchable {
+                let short_id = collection.resolved_root_id();
+                match write_collection_block(
+                    &blockstore,
+                    &headstore,
+                    short_id,
+                    schema_version_id,
+                    block_result.cid,
+                    sign_config.as_ref(),
+                )
+                .await
+                {
+                    Ok((col_cid, col_bytes)) => {
+                        col_block_data = Some((col_cid, col_bytes));
                     }
-                    Some(block_result.cid)
-                }
-                Err(error) => {
-                    warn!(
-                        collection = %collection_name,
-                        error = %error,
-                        "Failed to write document blocks for transaction update"
-                    );
-                    None
+                    Err(error) => {
+                        warn!(
+                            collection = %collection_name,
+                            error = %error,
+                            "Failed to write collection block for transaction update"
+                        );
+                    }
                 }
             }
+
+            (block_result.cid, block_result.block, col_block_data)
         };
 
-        if let (Some(doc_id), Some(cid)) = (doc.id().cloned(), commit_cid) {
+        if let Some(doc_id) = doc.id().cloned() {
             self.register_update_callback(
                 collection.collection_id().to_string(),
-                collection.schema().is_branchable,
                 doc_id.to_string(),
-                cid,
+                doc_cid,
+                doc_block,
+                col_block_data,
             )
             .await?;
         }
@@ -385,7 +391,11 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))?;
 
-        let commit_cid: Option<Cid> = {
+        if !existed {
+            return Ok(DeleteResult::new(doc_id.clone(), existed));
+        }
+
+        let (doc_cid, doc_block, col_block_data) = {
             let txn_guard = self.txn.lock().await;
             let txn = txn_guard.as_ref().ok_or_else(|| {
                 query::error::QueryError::execution("transaction is no longer active")
@@ -401,7 +411,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             let schema_version_id = collection.version_id();
             let sign_config = get_signing_config();
 
-            match write_delete_block(
+            let block_result = write_delete_block(
                 &blockstore,
                 &headstore,
                 &doc_id.to_string(),
@@ -409,49 +419,50 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 sign_config.as_ref(),
             )
             .await
-            {
-                Ok(block_result) => {
-                    if collection.schema().is_branchable {
-                        let short_id = collection.resolved_root_id();
-                        if let Err(error) = write_collection_block(
-                            &blockstore,
-                            &headstore,
-                            short_id,
-                            schema_version_id,
-                            block_result.cid,
-                            sign_config.as_ref(),
-                        )
-                        .await
-                        {
-                            warn!(
-                                collection = %collection_name,
-                                error = %error,
-                                "Failed to write collection block for transaction delete"
-                            );
-                        }
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to write delete block for transaction delete on collection {}: {}",
+                    collection_name, e
+                ))
+            })?;
+
+            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
+            if collection.schema().is_branchable {
+                let short_id = collection.resolved_root_id();
+                match write_collection_block(
+                    &blockstore,
+                    &headstore,
+                    short_id,
+                    schema_version_id,
+                    block_result.cid,
+                    sign_config.as_ref(),
+                )
+                .await
+                {
+                    Ok((col_cid, col_bytes)) => {
+                        col_block_data = Some((col_cid, col_bytes));
                     }
-                    Some(block_result.cid)
-                }
-                Err(error) => {
-                    warn!(
-                        collection = %collection_name,
-                        error = %error,
-                        "Failed to write delete block for transaction delete"
-                    );
-                    None
+                    Err(error) => {
+                        warn!(
+                            collection = %collection_name,
+                            error = %error,
+                            "Failed to write collection block for transaction delete"
+                        );
+                    }
                 }
             }
+
+            (block_result.cid, block_result.block, col_block_data)
         };
 
-        if let Some(cid) = commit_cid {
-            self.register_update_callback(
-                collection.collection_id().to_string(),
-                collection.schema().is_branchable,
-                doc_id.to_string(),
-                cid,
-            )
-            .await?;
-        }
+        self.register_update_callback(
+            collection.collection_id().to_string(),
+            doc_id.to_string(),
+            doc_cid,
+            doc_block,
+            col_block_data,
+        )
+        .await?;
 
         Ok(DeleteResult::new(doc_id.clone(), existed))
     }
@@ -543,6 +554,10 @@ mod tests {
         let update = msg.as_update().expect("expected Update message");
         assert_eq!(update.doc_id, result.doc_id.to_string());
         assert_ne!(update.cid, cid::Cid::default(), "cid should be populated");
+        assert!(
+            !update.block.is_empty(),
+            "block bytes should be populated (matches Go's sendUpdate)"
+        );
     }
 
     #[tokio::test]
@@ -566,5 +581,41 @@ mod tests {
         // Allow a brief window for any (unexpected) async delivery
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(sub.try_recv().is_err(), "discard should not publish events");
+    }
+
+    #[tokio::test]
+    async fn delete_missing_doc_publishes_no_event_and_writes_no_block() {
+        // DeleteNode treats existed==false as a no-op; the mutator must not
+        // create a tombstone commit or fire an Update event for a missing doc.
+        let (db, bus) = make_test_db_with_bus().await;
+        db.create_collection(test_collection())
+            .await
+            .expect("schema");
+
+        let mut sub = bus.subscribe(&[EventName::Update]);
+
+        let txn = db.new_txn(false).await.expect("new_txn");
+        let mutator = DbDocMutator::new(Arc::clone(&db), txn);
+
+        let mut placeholder = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
+        placeholder
+            .generate_and_set_doc_id()
+            .expect("generate doc id");
+        let missing_doc_id = placeholder.id().cloned().expect("doc id");
+
+        let result = mutator
+            .delete("TestDoc", &missing_doc_id)
+            .await
+            .expect("delete should succeed even on missing doc");
+        assert!(!result.existed, "doc should not have existed");
+
+        let txn = mutator.take_txn().await.expect("take txn");
+        txn.commit().await.expect("commit");
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            sub.try_recv().is_err(),
+            "deleting a non-existent doc should not publish an Update event"
+        );
     }
 }

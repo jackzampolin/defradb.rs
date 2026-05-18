@@ -13,18 +13,22 @@ use crate::error::Result;
 use crate::txn::DbTxn;
 
 /// Register an `on_success_async` callback that publishes an Update event
-/// (and, for branchable collections, a second collection-level Update event).
+/// with the document block bytes, and — when `collection_block` is `Some` —
+/// a second collection-level Update with the collection block's own cid and bytes.
 ///
 /// If `bus` is `None`, no callback is registered — there's no subscriber to notify.
 ///
-/// Mirrors Go's `db.sendUpdate` callback registration at `internal/db/collection.go:755`.
+/// Mirrors Go's `db.sendUpdate` callback registration at
+/// `internal/db/collection.go:755` and the branchable collection event at
+/// `internal/db/collection.go:789`, both of which publish the actual block bytes.
 pub(crate) fn register_update_event_callback<S: Store + 'static>(
     txn: &mut DbTxn<S>,
     bus: Option<&Arc<dyn Bus>>,
     collection_id: String,
-    branchable: bool,
     doc_id: String,
-    cid: Cid,
+    doc_cid: Cid,
+    doc_block: Vec<u8>,
+    collection_block: Option<(Cid, Vec<u8>)>,
 ) -> Result<()> {
     let Some(bus) = bus else {
         return Ok(());
@@ -33,16 +37,23 @@ pub(crate) fn register_update_event_callback<S: Store + 'static>(
     txn.on_success_async(Box::new(move || {
         Box::pin(async move {
             let subject_doc_id = doc_id.clone();
-            let update = Update::new(doc_id, cid, collection_id.clone(), vec![], false, false);
+            let update = Update::new(
+                doc_id,
+                doc_cid,
+                collection_id.clone(),
+                doc_block,
+                false,
+                false,
+            );
             bus.publish(Message::update(update));
 
-            if branchable {
+            if let Some((col_cid, col_block)) = collection_block {
                 let collection_update = Update::new_with_subject_doc_id(
                     String::new(),
                     subject_doc_id,
-                    cid,
+                    col_cid,
                     collection_id,
-                    vec![],
+                    col_block,
                     false,
                     false,
                 );
