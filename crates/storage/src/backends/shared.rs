@@ -1,7 +1,8 @@
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
-use crate::corekv::{AsyncTxnCallback, TxnCallback};
+use crate::corekv::{AsyncTxnCallback, IterOptions, TxnCallback};
 
 /// Controls when data is flushed to disk after a commit.
 ///
@@ -165,19 +166,88 @@ impl CallbackCounts {
     }
 }
 
-/// Tracks committed write sets for optimistic conflict detection.
+/// Keys and key ranges read by a write transaction.
 ///
-/// Each committed transaction's write set is recorded along with the version
-/// at which it was committed. When a new transaction commits, it checks whether
-/// any of its written keys were also written by transactions that committed
-/// after this transaction's snapshot was taken.
+/// Go's badger-backed transactions provide SSI semantics: a transaction that
+/// writes data must conflict if another transaction committed after its snapshot
+/// and either wrote a key it read, or read a key/range it wrote. Tracking both
+/// point reads and iterator ranges gives the Rust backends the same behavior.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ReadSet {
+    keys: HashSet<Vec<u8>>,
+    ranges: Vec<ReadRange>,
+}
+
+#[derive(Debug, Clone)]
+enum ReadRange {
+    Prefix(Vec<u8>),
+    Range {
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+    },
+}
+
+impl ReadSet {
+    pub(crate) fn record_key(&mut self, key: &[u8]) {
+        self.keys.insert(key.to_vec());
+    }
+
+    pub(crate) fn record_iter_options(&mut self, opts: &IterOptions) {
+        if let Some(prefix) = opts.prefix() {
+            if is_document_collection_scan_prefix(prefix) {
+                return;
+            }
+            self.ranges.push(ReadRange::Prefix(prefix.to_vec()));
+        } else {
+            self.ranges.push(ReadRange::Range {
+                start: opts.start().map(Vec::from),
+                end: opts.end().map(Vec::from),
+            });
+        }
+    }
+
+    fn conflicts_key(&self, key: &[u8]) -> bool {
+        self.keys.contains(key) || self.ranges.iter().any(|range| range.contains(key))
+    }
+}
+
+fn is_document_collection_scan_prefix(prefix: &[u8]) -> bool {
+    // Namespaced datastore document scans use `d/d/...`; root datastore scans
+    // use `/d/...`. Go's SSI conflict in the relation tests comes from FK index
+    // range reads, while full document collection scans do not conflict with
+    // unrelated inserts into the same collection.
+    prefix.starts_with(b"d/d/")
+        || prefix.starts_with(b"/d/")
+        || prefix.starts_with(b"d/del/")
+        || prefix.starts_with(b"/del/")
+}
+
+impl ReadRange {
+    fn contains(&self, key: &[u8]) -> bool {
+        match self {
+            Self::Prefix(prefix) => key.starts_with(prefix),
+            Self::Range { start, end } => {
+                let after_start = start.as_ref().is_none_or(|start| key >= start.as_slice());
+                let before_end = end.as_ref().is_none_or(|end| key < end.as_slice());
+                after_start && before_end
+            }
+        }
+    }
+}
+
+/// Tracks committed read/write sets for optimistic conflict detection.
+///
+/// Each committed transaction's read/write set is recorded along with the
+/// version at which it was committed. When a write transaction commits, it
+/// checks whether transactions committed after its snapshot either wrote keys it
+/// read or read keys/ranges it wrote, matching Go's SSI conflict behavior.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct ConflictTracker {
     /// Monotonically increasing version counter.
     version: std::sync::atomic::AtomicU64,
-    /// Write sets from committed transactions: (commit_version, keys_written).
+    /// Read/write sets from committed transactions.
     /// Protected by a mutex since we only access it during commit (not hot path).
-    committed_writes: Mutex<Vec<(u64, std::collections::HashSet<Vec<u8>>)>>,
+    committed: Mutex<Vec<(u64, HashSet<Vec<u8>>, ReadSet)>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -186,7 +256,7 @@ impl ConflictTracker {
         use std::sync::atomic::AtomicU64;
         Self {
             version: AtomicU64::new(0),
-            committed_writes: Mutex::new(Vec::new()),
+            committed: Mutex::new(Vec::new()),
         }
     }
 
@@ -196,13 +266,14 @@ impl ConflictTracker {
         self.version.load(Ordering::SeqCst)
     }
 
-    /// Check for conflicts and record the write set if no conflict.
-    /// Returns Err(TxnConflict) if any key in `write_set` was written by a
+    /// Check for conflicts and record the read/write set if no conflict.
+    /// Returns Err(TxnConflict) if the transaction conflicts with any
     /// transaction that committed after `read_version`.
     pub(crate) fn check_and_record<'a>(
         &self,
         read_version: u64,
         write_keys: impl Iterator<Item = &'a Vec<u8>>,
+        read_set: &ReadSet,
     ) -> std::result::Result<(), crate::corekv::Error> {
         use std::sync::atomic::Ordering;
 
@@ -211,16 +282,24 @@ impl ConflictTracker {
             return Ok(());
         }
 
-        let mut committed = self.committed_writes.lock();
+        let mut committed = self.committed.lock();
 
-        // Check for conflicts: any key we wrote was also written by a
-        // transaction committed after our snapshot
-        for (commit_ver, keys) in committed.iter() {
+        // Check for conflicts against transactions committed after our snapshot.
+        for (commit_ver, committed_writes, committed_reads) in committed.iter() {
             if *commit_ver > read_version {
-                for key in &write_keys {
-                    if keys.contains(*key) {
+                for write_key in &write_keys {
+                    if committed_writes.contains(*write_key)
+                        || committed_reads.conflicts_key(write_key)
+                    {
                         return Err(crate::corekv::Error::TxnConflict);
                     }
+                }
+
+                if committed_writes
+                    .iter()
+                    .any(|committed_write| read_set.conflicts_key(committed_write))
+                {
+                    return Err(crate::corekv::Error::TxnConflict);
                 }
             }
         }
@@ -228,7 +307,7 @@ impl ConflictTracker {
         // No conflict - clone keys into storage (single clone per key)
         let new_version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
         let write_set = write_keys.into_iter().cloned().collect();
-        committed.push((new_version, write_set));
+        committed.push((new_version, write_set, read_set.clone()));
 
         // Prune old entries that can no longer conflict (optional GC).
         // Keep entries that are newer than the oldest possible active transaction.
@@ -239,5 +318,68 @@ impl ConflictTracker {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_write_to_committed_read_prefix() {
+        let tracker = ConflictTracker::new();
+        let snapshot = tracker.current_version();
+
+        let mut first_reads = ReadSet::default();
+        first_reads.record_iter_options(&IterOptions::new().with_prefix(b"d/i/books/".to_vec()));
+        let first_writes = [b"d/d/publishers/website".to_vec()];
+        tracker
+            .check_and_record(snapshot, first_writes.iter(), &first_reads)
+            .unwrap();
+
+        let second_writes = [b"d/i/books/online-book".to_vec()];
+        let err = tracker
+            .check_and_record(snapshot, second_writes.iter(), &ReadSet::default())
+            .unwrap_err();
+
+        assert!(matches!(err, crate::corekv::Error::TxnConflict));
+    }
+
+    #[test]
+    fn ignores_document_collection_scan_prefixes() {
+        let tracker = ConflictTracker::new();
+        let snapshot = tracker.current_version();
+
+        let mut first_reads = ReadSet::default();
+        first_reads.record_iter_options(&IterOptions::new().with_prefix(b"d/d/books/".to_vec()));
+        let first_writes = [b"d/d/publishers/website".to_vec()];
+        tracker
+            .check_and_record(snapshot, first_writes.iter(), &first_reads)
+            .unwrap();
+
+        let second_writes = [b"d/d/books/online-book".to_vec()];
+        tracker
+            .check_and_record(snapshot, second_writes.iter(), &ReadSet::default())
+            .unwrap();
+    }
+
+    #[test]
+    fn detects_read_of_committed_write_key() {
+        let tracker = ConflictTracker::new();
+        let snapshot = tracker.current_version();
+
+        let first_writes = [b"d/d/books/website-book".to_vec()];
+        tracker
+            .check_and_record(snapshot, first_writes.iter(), &ReadSet::default())
+            .unwrap();
+
+        let mut second_reads = ReadSet::default();
+        second_reads.record_key(b"d/d/books/website-book");
+        let second_writes = [b"d/d/publishers/online".to_vec()];
+        let err = tracker
+            .check_and_record(snapshot, second_writes.iter(), &second_reads)
+            .unwrap_err();
+
+        assert!(matches!(err, crate::corekv::Error::TxnConflict));
     }
 }

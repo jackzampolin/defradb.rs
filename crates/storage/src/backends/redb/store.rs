@@ -317,6 +317,7 @@ impl Store for RedbStore {
             read_version,
             read_txn,
             pending: Mutex::new(BTreeMap::new()),
+            read_set: Mutex::new(crate::backends::shared::ReadSet::default()),
             readonly,
             durability: self.durability,
             discarded: AtomicBool::new(false),

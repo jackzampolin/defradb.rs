@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::iterator::MemoryIterator;
-use crate::backends::shared::{CallbackManager, ConflictTracker};
+use crate::backends::shared::{CallbackManager, ConflictTracker, ReadSet};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
@@ -31,6 +31,9 @@ pub(crate) struct MemoryTxn {
 
     /// Pending changes (Some(value) = set, None = delete)
     pub(crate) pending: Mutex<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
+
+    /// Point keys and ranges read by this transaction.
+    pub(crate) read_set: Mutex<ReadSet>,
 
     /// Whether this is a read-only transaction
     pub(crate) readonly: bool,
@@ -84,6 +87,7 @@ impl Reader for MemoryTxn {
             return Err(Error::EmptyKey);
         }
 
+        self.read_set.lock().record_key(key);
         Ok(self.get_internal(key))
     }
 
@@ -96,6 +100,7 @@ impl Reader for MemoryTxn {
             return Err(Error::EmptyKey);
         }
 
+        self.read_set.lock().record_key(key);
         Ok(self.has_internal(key))
     }
 
@@ -108,6 +113,7 @@ impl Reader for MemoryTxn {
             return Err(Error::EmptyKey);
         }
 
+        self.read_set.lock().record_key(key);
         Ok(self.get_internal(key).map(|v| v.len()))
     }
 
@@ -115,6 +121,8 @@ impl Reader for MemoryTxn {
         if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
+
+        self.read_set.lock().record_iter_options(&opts);
 
         // Merge snapshot and pending changes
         let mut merged = self.snapshot.clone();
@@ -192,12 +200,13 @@ impl Txn for MemoryTxn {
 
         // Clone pending changes before awaiting (can't hold MutexGuard across await)
         let pending = self.pending.lock().clone();
+        let read_set = self.read_set.lock().clone();
 
         // Check for write-write conflicts before applying
         if !pending.is_empty() {
-            if let Err(e) = self
-                .conflict_tracker
-                .check_and_record(self.read_version, pending.keys())
+            if let Err(e) =
+                self.conflict_tracker
+                    .check_and_record(self.read_version, pending.keys(), &read_set)
             {
                 CallbackManager::execute_callbacks(self.callbacks.take_error());
                 CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;

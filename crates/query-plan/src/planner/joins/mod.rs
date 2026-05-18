@@ -1163,10 +1163,10 @@ impl Planner {
                             )
                     })?;
                     // Check if any index covers this FK field
-                    let index = target_collection.indexes.iter().find(|idx| {
-                        !idx.auto_generated
-                            && idx.fields.first().is_some_and(|f| f.name == fk_field.name)
-                    })?;
+                    let index = target_collection
+                        .indexes
+                        .iter()
+                        .find(|idx| idx.fields.first().is_some_and(|f| f.name == fk_field.name))?;
                     Some((fk_field.name.clone(), index.name.clone()))
                 });
                 let has_child_fk_index = child_fk_index_info.is_some();
@@ -1215,7 +1215,7 @@ impl Planner {
                 {
                     if can_use_direct_indexed_child_cache(nested_select)
                         && !has_filter_child_plan
-                        && !self.has_acp()
+                        && target_collection.policy.is_none()
                         && !select.show_deleted
                     {
                         join_many = join_many.with_indexed_child_fetch(
@@ -1474,6 +1474,36 @@ impl Planner {
                         child_side,
                         mapping.clone(),
                     );
+                    if let (Some(fetcher), Some(target_relation_field)) =
+                        (self.fetcher.clone(), target_relation_field)
+                    {
+                        if target_relation_field.is_primary
+                            && can_use_direct_indexed_child_cache(nested_select)
+                            && target_collection.policy.is_none()
+                            && !select.show_deleted
+                        {
+                            let child_fk_field_name =
+                                schema::CollectionVersion::relation_id_field_name(
+                                    &target_relation_field.name,
+                                );
+                            if let Some(child_fk_index_name) = target_collection
+                                .indexes
+                                .iter()
+                                .find(|idx| {
+                                    idx.fields
+                                        .first()
+                                        .is_some_and(|f| f.name == child_fk_field_name)
+                                })
+                                .map(|idx| idx.name.clone())
+                            {
+                                join = join.with_indexed_inverted_child_fetch(
+                                    fetcher,
+                                    target_collection.name.clone(),
+                                    child_fk_index_name,
+                                );
+                            }
+                        }
+                    }
                     if let Some(rel_filter) = relation_filter {
                         join = join.with_relation_filter(rel_filter);
                     }

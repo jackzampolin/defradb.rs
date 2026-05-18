@@ -253,10 +253,11 @@ impl Txn for FjallTxn {
 
         if !pending.is_empty() {
             // Check conflicts
-            if let Err(e) = self
-                .conflict_tracker
-                .check_and_record(self.read_version, pending.keys())
-            {
+            if let Err(e) = self.conflict_tracker.check_and_record(
+                self.read_version,
+                pending.keys(),
+                &crate::backends::shared::ReadSet::default(),
+            ) {
                 CallbackManager::execute_callbacks(self.callbacks.take_error());
                 CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
                 return Err(e);
