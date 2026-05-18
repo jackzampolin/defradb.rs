@@ -2,7 +2,6 @@ use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use cid::Cid;
 use document::{DocID, Document};
-use events::{Message, Update};
 use query::mutator::{
     CreateResult, DeleteResult, DocMutator, MutationBatchController, UpdateResult,
 };
@@ -15,30 +14,19 @@ use super::helpers::ensure_collection_is_active;
 use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
+use crate::event_emission::register_update_event_callback;
 use crate::txn::DbTxn;
 use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
 use defra_core::signing::get_signing_config;
 
-struct PendingUpdateEvent {
-    collection_id: String,
-    branchable: bool,
-    doc_id: String,
-    cid: Cid,
-}
-
 pub struct BatchMutator<S: Store> {
     db: Arc<DB<S>>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
-    pending_events: TokioMutex<Vec<PendingUpdateEvent>>,
 }
 
 impl<S: Store> BatchMutator<S> {
     pub fn new(db: Arc<DB<S>>, txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
-        Self {
-            db,
-            txn,
-            pending_events: TokioMutex::new(Vec::new()),
-        }
+        Self { db, txn }
     }
 
     async fn block_and_head_stores(
@@ -62,48 +50,34 @@ impl<S: Store> BatchMutator<S> {
             query::error::QueryError::execution("mutation batch transaction is no longer active")
         })
     }
+}
 
-    async fn queue_update_event(
+impl<S: Store + 'static> BatchMutator<S> {
+    async fn register_update_callback(
         &self,
         collection_id: String,
         branchable: bool,
         doc_id: String,
         cid: Cid,
-    ) {
-        self.pending_events.lock().await.push(PendingUpdateEvent {
+    ) -> query::error::Result<()> {
+        let mut txn_guard = self.txn.lock().await;
+        let txn = txn_guard.as_mut().ok_or_else(|| {
+            query::error::QueryError::execution("mutation batch transaction is no longer active")
+        })?;
+        register_update_event_callback(
+            txn,
+            self.db.event_bus(),
             collection_id,
             branchable,
             doc_id,
             cid,
-        });
-    }
-
-    fn emit_update_event(&self, event: PendingUpdateEvent) {
-        if let Some(bus) = self.db.event_bus() {
-            let subject_doc_id = event.doc_id.clone();
-            let update = Update::new(
-                event.doc_id,
-                event.cid,
-                event.collection_id.clone(),
-                vec![],
-                false,
-                false,
-            );
-            bus.publish(Message::update(update));
-
-            if event.branchable {
-                let collection_update = Update::new_with_subject_doc_id(
-                    String::new(),
-                    subject_doc_id,
-                    event.cid,
-                    event.collection_id,
-                    vec![],
-                    false,
-                    false,
-                );
-                bus.publish(Message::update(collection_update));
-            }
-        }
+        )
+        .map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to register tx update callback: {}",
+                e
+            ))
+        })
     }
 }
 
@@ -112,27 +86,13 @@ impl<S: Store> BatchMutator<S> {
 impl<S: Store + 'static> MutationBatchController for BatchMutator<S> {
     async fn commit(&self) -> query::error::Result<()> {
         let txn = self.take_txn().await?;
-
-        if let Err(e) = txn.commit().await {
-            self.pending_events.lock().await.clear();
-            return Err(query::error::QueryError::execution(format!(
-                "commit error: {}",
-                e
-            )));
-        }
-
-        let pending_events = std::mem::take(&mut *self.pending_events.lock().await);
-        for event in pending_events {
-            self.emit_update_event(event);
-        }
-
-        Ok(())
+        txn.commit().await.map_err(|e| {
+            query::error::QueryError::execution(format!("commit error: {}", e))
+        })
     }
 
     async fn rollback(&self) -> query::error::Result<()> {
         let txn = self.take_txn().await?;
-        self.pending_events.lock().await.clear();
-
         txn.discard()
             .map_err(|e| query::error::QueryError::execution(format!("discard error: {}", e)))
     }
@@ -141,7 +101,6 @@ impl<S: Store + 'static> MutationBatchController for BatchMutator<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocMutator for BatchMutator<S> {
-    #[allow(clippy::type_complexity)]
     async fn create(
         &self,
         collection_name: &str,
@@ -245,17 +204,15 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             }
         };
 
-        let cid = commit_result
-            .as_ref()
-            .map(|(cid, _, _)| *cid)
-            .unwrap_or_default();
-        self.queue_update_event(
-            collection.collection_id().to_string(),
-            collection.schema().is_branchable,
-            doc_id.to_string(),
-            cid,
-        )
-        .await;
+        if let Some((cid, _, _)) = commit_result.as_ref() {
+            self.register_update_callback(
+                collection.collection_id().to_string(),
+                collection.schema().is_branchable,
+                doc_id.to_string(),
+                *cid,
+            )
+            .await?;
+        }
 
         match commit_result {
             Some((cid, block, col_data)) => {
@@ -374,18 +331,14 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             }
         };
 
-        if let Some(doc_id) = doc.id() {
-            let cid = commit_result
-                .as_ref()
-                .map(|(cid, _, _)| *cid)
-                .unwrap_or_default();
-            self.queue_update_event(
+        if let (Some(doc_id), Some((cid, _, _))) = (doc.id(), commit_result.as_ref()) {
+            self.register_update_callback(
                 collection.collection_id().to_string(),
                 collection.schema().is_branchable,
                 doc_id.to_string(),
-                cid,
+                *cid,
             )
-            .await;
+            .await?;
         }
 
         let fields_modified = doc.values().len();
@@ -468,17 +421,15 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             }
         };
 
-        let cid = commit_result
-            .as_ref()
-            .map(|(cid, _)| *cid)
-            .unwrap_or_default();
-        self.queue_update_event(
-            collection.collection_id().to_string(),
-            collection.schema().is_branchable,
-            doc_id.to_string(),
-            cid,
-        )
-        .await;
+        if let Some((cid, _)) = commit_result.as_ref() {
+            self.register_update_callback(
+                collection.collection_id().to_string(),
+                collection.schema().is_branchable,
+                doc_id.to_string(),
+                *cid,
+            )
+            .await?;
+        }
 
         match commit_result {
             Some((cid, block)) => Ok(DeleteResult::with_commit(

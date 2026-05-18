@@ -18,7 +18,6 @@ use crate::txn::DbTxn;
 /// If `bus` is `None`, no callback is registered — there's no subscriber to notify.
 ///
 /// Mirrors Go's `db.sendUpdate` callback registration at `internal/db/collection.go:755`.
-#[allow(dead_code)]
 pub(crate) fn register_update_event_callback<S: Store + 'static>(
     txn: &mut DbTxn<S>,
     bus: Option<&Arc<dyn Bus>>,
