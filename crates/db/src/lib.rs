@@ -70,7 +70,8 @@ pub(crate) mod doc_mutator;
 pub mod downsample;
 pub(crate) mod dump;
 pub mod error;
-pub(crate) mod event_emission;
+pub mod event_emission;
+pub use event_emission::{TxnBroadcastEvent, TxnBroadcaster};
 // Index manager extracted to standalone db-index crate.
 pub use db_index as index_manager;
 pub(crate) mod json_patch;

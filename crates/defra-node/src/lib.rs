@@ -821,7 +821,17 @@ impl NodeBuilder {
         let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
         let provider: Arc<dyn query::CollectionProvider> =
             db::DbCollectionProvider::new_arc(database.clone());
-        let registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
+
+        #[cfg(feature = "p2p")]
+        let txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>> =
+            p2p_result.as_ref().map(|r| r.txn_broadcaster.clone());
+        #[cfg(not(feature = "p2p"))]
+        let txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>> = None;
+
+        let registry = Arc::new(match txn_broadcaster {
+            Some(b) => db::DbTransactionRegistry::with_broadcaster(database.clone(), b),
+            None => db::DbTransactionRegistry::new(database.clone()),
+        });
         let (document_acp, _strict_replicated_doc_access) =
             node_acp::create_document_acp(acp_store, &document_acp_config).await?;
 
@@ -1011,6 +1021,7 @@ impl NodeBuilder {
                 doc_pusher_for_acp.set_document_acp(acp.clone());
                 broadcast_mutator_for_acp.set_document_acp(acp);
             })),
+            txn_broadcaster: replication.txn_broadcaster,
         })
     }
 
@@ -1282,6 +1293,7 @@ struct P2PSetupResult {
     lifecycle: Option<P2PLifecycle>,
     mutator: Arc<dyn query::DocMutator>,
     wire_document_acp: Option<WireDocumentAcpCallback>,
+    txn_broadcaster: Arc<dyn db::event_emission::TxnBroadcaster>,
 }
 
 #[cfg(test)]

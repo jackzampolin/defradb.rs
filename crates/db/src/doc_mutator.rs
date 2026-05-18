@@ -48,6 +48,7 @@ use defra_core::signing::get_signing_config;
 pub struct DbDocMutator<S: Store> {
     db: Arc<DB<S>>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+    broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
 }
 
 impl<S: Store> DbDocMutator<S> {
@@ -58,15 +59,24 @@ impl<S: Store> DbDocMutator<S> {
         Self {
             db,
             txn: Arc::new(TokioMutex::new(Some(txn))),
+            broadcaster: None,
         }
     }
 
-    /// Create a mutator that shares a transaction with an existing component.
-    ///
-    /// This is used by `DbTransactionContext` to create a mutator that shares
-    /// the same transaction as the `DbDocFetcher`.
-    pub(crate) fn from_shared_txn(db: Arc<DB<S>>, txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
-        Self { db, txn }
+    /// Create a mutator that shares a transaction and (optionally) forwards
+    /// committed writes to a `TxnBroadcaster`. When `broadcaster` is `Some`,
+    /// each per-mutation `on_success_async` callback both publishes to the
+    /// local event bus and asks the broadcaster to push to P2P peers.
+    pub(crate) fn from_shared_txn_with_broadcaster(
+        db: Arc<DB<S>>,
+        txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+        broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
+    ) -> Self {
+        Self {
+            db,
+            txn,
+            broadcaster,
+        }
     }
 
     /// Take the transaction out of the mutator (for commit/rollback).
@@ -119,8 +129,10 @@ impl<S: Store> DbDocMutator<S> {
 }
 
 impl<S: Store + 'static> DbDocMutator<S> {
+    #[allow(clippy::too_many_arguments)]
     async fn register_update_callback(
         &self,
+        collection_name: String,
         collection_id: String,
         doc_id: String,
         doc_cid: Cid,
@@ -131,14 +143,18 @@ impl<S: Store + 'static> DbDocMutator<S> {
         let txn = txn_guard.as_mut().ok_or_else(|| {
             query::error::QueryError::execution("transaction is no longer active")
         })?;
+        let creator_did = defra_core::signing::get_broadcast_creator_did();
         register_update_event_callback(
             txn,
             self.db.event_bus(),
+            self.broadcaster.as_ref(),
+            collection_name,
             collection_id,
             doc_id,
             doc_cid,
             doc_block,
             collection_block,
+            creator_did,
         )
         .map_err(|e| {
             query::error::QueryError::execution(format!(
@@ -255,6 +271,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         };
 
         self.register_update_callback(
+            collection_name.to_string(),
             collection.collection_id().to_string(),
             doc_id.to_string(),
             doc_cid,
@@ -363,6 +380,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
         if let Some(doc_id) = doc.id().cloned() {
             self.register_update_callback(
+                collection_name.to_string(),
                 collection.collection_id().to_string(),
                 doc_id.to_string(),
                 doc_cid,
@@ -456,6 +474,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         };
 
         self.register_update_callback(
+            collection_name.to_string(),
             collection.collection_id().to_string(),
             doc_id.to_string(),
             doc_cid,
@@ -616,6 +635,103 @@ mod tests {
         assert!(
             sub.try_recv().is_err(),
             "deleting a non-existent doc should not publish an Update event"
+        );
+    }
+
+    /// `TxnBroadcaster` test double: captures every event it's asked to
+    /// broadcast for inspection.
+    struct CapturingBroadcaster {
+        events: Arc<std::sync::Mutex<Vec<crate::event_emission::TxnBroadcastEvent>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::event_emission::TxnBroadcaster for CapturingBroadcaster {
+        async fn broadcast_update(&self, event: crate::event_emission::TxnBroadcastEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_in_tx_forwards_to_broadcaster_on_commit() {
+        // F1 regression: a tx with a TxnBroadcaster wired in must invoke
+        // broadcast_update for each committed mutation so P2P peers see
+        // transactional writes (Go: db.sendUpdate → p2p.SendUpdate).
+        let (db, _bus) = make_test_db_with_bus().await;
+        db.create_collection(test_collection())
+            .await
+            .expect("schema");
+
+        let captured: Arc<std::sync::Mutex<Vec<crate::event_emission::TxnBroadcastEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let broadcaster: Arc<dyn crate::event_emission::TxnBroadcaster> =
+            Arc::new(CapturingBroadcaster {
+                events: Arc::clone(&captured),
+            });
+
+        let txn = db.new_txn(false).await.expect("new_txn");
+        let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
+        let mutator = DbDocMutator::from_shared_txn_with_broadcaster(
+            Arc::clone(&db),
+            txn_arc,
+            Some(broadcaster),
+        );
+
+        let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
+        let result = mutator.create("TestDoc", doc).await.expect("create");
+
+        // Broadcaster must NOT see anything before commit
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "no broadcast before commit"
+        );
+
+        let txn = mutator.take_txn().await.expect("take txn");
+        txn.commit().await.expect("commit");
+
+        // Wait briefly for the on_success_async callback to fire
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let events = captured.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "exactly one broadcast after commit");
+        let event = &events[0];
+        assert_eq!(event.doc_id, result.doc_id.to_string());
+        assert_eq!(event.collection_name, "TestDoc");
+        assert_ne!(event.doc_cid, cid::Cid::default(), "doc_cid populated");
+        assert!(!event.doc_block.is_empty(), "doc_block populated");
+    }
+
+    #[tokio::test]
+    async fn create_in_tx_does_not_broadcast_on_discard() {
+        let (db, _bus) = make_test_db_with_bus().await;
+        db.create_collection(test_collection())
+            .await
+            .expect("schema");
+
+        let captured: Arc<std::sync::Mutex<Vec<crate::event_emission::TxnBroadcastEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let broadcaster: Arc<dyn crate::event_emission::TxnBroadcaster> =
+            Arc::new(CapturingBroadcaster {
+                events: Arc::clone(&captured),
+            });
+
+        let txn = db.new_txn(false).await.expect("new_txn");
+        let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
+        let mutator = DbDocMutator::from_shared_txn_with_broadcaster(
+            Arc::clone(&db),
+            txn_arc,
+            Some(broadcaster),
+        );
+
+        let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
+        mutator.create("TestDoc", doc).await.expect("create");
+
+        let txn = mutator.take_txn().await.expect("take txn");
+        txn.discard().expect("discard");
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "discard should not trigger broadcast"
         );
     }
 }

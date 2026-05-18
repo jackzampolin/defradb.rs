@@ -49,6 +49,9 @@ pub(super) struct P2PSetup {
     pub(super) http_adapter: Option<Arc<dyn defra_http::router::P2POperations>>,
     pub(super) wire_merge_acp: WireDocumentAcp,
     pub(super) wire_doc_pusher_acp: WireDocumentAcp,
+    /// Hook for forwarding committed `/tx` writes to P2P peers. `Some` when the
+    /// P2P stack is up; `None` for the non-P2P fallback path.
+    pub(super) txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>>,
 }
 
 impl Node {
@@ -95,6 +98,7 @@ impl Node {
             http_adapter: None,
             wire_merge_acp: None,
             wire_doc_pusher_acp: None,
+            txn_broadcaster: None,
         }
     }
 
@@ -170,6 +174,7 @@ impl Node {
         let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();
         let broadcast_mutator = replication.broadcast_mutator.clone();
         let merge_handler_for_acp = replication.merge_handler.clone();
+        let txn_broadcaster = replication.txn_broadcaster.clone();
 
         let coordinator_for_replication = coordinator.clone();
         let replication_task = tokio::spawn(async move {
@@ -475,6 +480,7 @@ impl Node {
             wire_doc_pusher_acp: Some(Box::new(move |acp| {
                 doc_pusher_for_acp.set_document_acp(acp);
             })),
+            txn_broadcaster: Some(txn_broadcaster),
         })
     }
 
@@ -559,6 +565,7 @@ impl Node {
         let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();
         let broadcast_mutator = replication.broadcast_mutator.clone();
         let merge_handler_for_acp = replication.merge_handler.clone();
+        let txn_broadcaster = replication.txn_broadcaster.clone();
 
         let coordinator_for_replication = coordinator.clone();
         let replication_task = tokio::spawn(async move {
@@ -812,6 +819,7 @@ impl Node {
             }),
             mutator: broadcast_mutator,
             http_adapter: Some(Arc::new(adapter)),
+            txn_broadcaster: Some(txn_broadcaster),
             wire_merge_acp: Some(Box::new(move |acp| {
                 coordinator_for_acp.set_document_acp(acp.clone());
                 merge_handler_for_acp.set_document_acp(acp);
