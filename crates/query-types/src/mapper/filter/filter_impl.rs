@@ -149,6 +149,9 @@ impl Filter {
         for (key, value) in conditions {
             match FilterOp::parse(key) {
                 Some(FilterOp::And | FilterOp::Or) => {
+                    if value.is_null() {
+                        continue;
+                    }
                     let items = value.as_array().ok_or_else(|| {
                         QueryError::invalid_filter(format!("{} requires array", key))
                     })?;
@@ -160,6 +163,9 @@ impl Filter {
                     }
                 }
                 Some(FilterOp::Not) => {
+                    if value.is_null() {
+                        continue;
+                    }
                     let sub_conditions = value
                         .as_object()
                         .ok_or_else(|| QueryError::invalid_filter("_not requires object"))?;
