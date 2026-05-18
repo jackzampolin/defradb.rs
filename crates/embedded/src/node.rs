@@ -422,7 +422,13 @@ where
     let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
     let collection_provider: Arc<dyn query::CollectionProvider> =
         db::DbCollectionProvider::new_arc(database.clone());
-    let txn_registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
+    let txn_broadcaster = p2p_setup
+        .as_ref()
+        .map(|setup| setup.txn_broadcaster.clone());
+    let txn_registry = Arc::new(match txn_broadcaster {
+        Some(b) => db::DbTransactionRegistry::with_broadcaster(database.clone(), b),
+        None => db::DbTransactionRegistry::new(database.clone()),
+    });
 
     let query_runner = query::QueryRunner::with_arc_registry_and_provider(
         fetcher,

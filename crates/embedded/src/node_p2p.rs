@@ -20,6 +20,10 @@ pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     pub mutator: Arc<dyn query::DocMutator>,
     pub merge_handler: Arc<EmbeddedMergeHandler<S>>,
     pub wire_document_acp: Option<WireDocumentAcpCallback>,
+    /// Forwards committed `/tx` writes to P2P peers; mirrors what the CLI
+    /// `P2PSetup` exposes. Without this, transactional writes commit locally
+    /// but never replicate.
+    pub txn_broadcaster: Arc<dyn db::event_emission::TxnBroadcaster>,
 }
 
 pub(crate) async fn setup_libp2p<S>(
@@ -188,6 +192,7 @@ where
         system,
         mutator: replication.broadcast_mutator,
         merge_handler: replication.merge_handler,
+        txn_broadcaster: replication.txn_broadcaster,
         wire_document_acp: Some(Box::new(move |acp| {
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());
@@ -322,6 +327,7 @@ where
         system,
         mutator: replication.broadcast_mutator,
         merge_handler: replication.merge_handler,
+        txn_broadcaster: replication.txn_broadcaster,
         wire_document_acp: Some(Box::new(move |acp| {
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());

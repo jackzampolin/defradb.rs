@@ -45,6 +45,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             Ok(existed) => {
                 // DeleteNode treats existed==false as a no-op; don't write a
                 // tombstone block or emit an event for a missing doc.
+                // Propagate any commit error so callers see the same failure
+                // surface they get on the normal commit path (Go returns the
+                // commit error on a no-op delete too).
                 if !existed {
                     if let Err(e) = txn.commit().await {
                         warn!(
@@ -52,6 +55,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             error = %e,
                             "Failed to commit transaction after no-op delete"
                         );
+                        return Err(query::error::QueryError::execution(format!(
+                            "commit error: {}",
+                            e
+                        )));
                     }
                     return Ok(DeleteResult::new(doc_id.clone(), existed));
                 }

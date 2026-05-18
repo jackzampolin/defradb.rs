@@ -579,6 +579,13 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         // Execute the delete mutation
         let result = self.inner.delete(collection_name, doc_id).await?;
 
+        // No-op delete (missing doc): the inner mutator wrote nothing, so
+        // there's no tombstone block to read or broadcast. Returning here
+        // also avoids re-broadcasting the previous (stale) head.
+        if !result.existed {
+            return Ok(result);
+        }
+
         // Read the delete composite block that was written during the mutation.
         let doc_id_str = doc_id.to_string();
         let block_result = match read_latest_composite_block(&self.db, &doc_id_str).await {
