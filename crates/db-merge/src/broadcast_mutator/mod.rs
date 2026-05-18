@@ -608,6 +608,22 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         // Read broadcast creator DID before spawning (reads thread-local state).
         let creator_did = defra_core::signing::get_broadcast_creator_did();
 
+        // For branchable collections, capture the collection-level head block
+        // so we can broadcast it alongside the composite delete (Go emits two
+        // updates for branchable mutations; see internal/db/collection.go:789).
+        let branchable_data = if let (Some(col_cid), Some(col_block)) =
+            (result.broadcast_cid, result.broadcast_block.as_ref())
+        {
+            Some(BlockResult {
+                cid: col_cid,
+                block: col_block.clone(),
+                doc_id: block_result.doc_id.clone(),
+                field_cids: vec![],
+            })
+        } else {
+            None
+        };
+
         // Capture everything for the spawned task by value.
         let sync = self.sync.clone();
         let collection_name_owned = collection_name.to_string();
@@ -638,6 +654,28 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 )
                 .await,
             );
+
+            // For branchable collections, also broadcast the collection block.
+            if let Some(col_block_result) = branchable_data {
+                sync.push_to_replicators_with_creator(
+                    &col_block_result.cid,
+                    &col_block_result.block,
+                    &col_block_result.doc_id,
+                    &collection_id,
+                    creator_ref,
+                )
+                .await;
+                log_broadcast_failure(
+                    &broadcast_with_retry_with_creator(
+                        &sync,
+                        &col_block_result,
+                        &collection_id,
+                        &collection_name_owned,
+                        creator_ref,
+                    )
+                    .await,
+                );
+            }
         });
 
         Ok(DeleteResult::with_broadcast(

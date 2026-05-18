@@ -422,16 +422,16 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             doc_id.to_string(),
             doc_cid,
             doc_block.clone(),
-            col_block_data,
+            col_block_data.clone(),
         )
         .await?;
 
-        Ok(DeleteResult::with_commit(
-            doc_id.clone(),
-            existed,
-            doc_cid,
-            doc_block,
-        ))
+        let mut result = DeleteResult::with_commit(doc_id.clone(), existed, doc_cid, doc_block);
+        if let Some((col_cid, col_bytes)) = col_block_data {
+            result.broadcast_cid = Some(col_cid);
+            result.broadcast_block = Some(col_bytes);
+        }
+        Ok(result)
     }
 
     async fn exists(&self, collection_name: &str, doc_id: &DocID) -> query::error::Result<bool> {
@@ -486,6 +486,19 @@ mod tests {
                 FieldDescription::new("2", "x", FieldKind::int()),
             ],
         )
+    }
+
+    fn branchable_test_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "TestBranchable",
+            "v1",
+            "col-test-branchable",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "x", FieldKind::int()),
+            ],
+        )
+        .as_branchable()
     }
 
     #[tokio::test]
@@ -580,5 +593,61 @@ mod tests {
             sub.try_recv().is_err(),
             "deleting a non-existent doc should not publish an Update event"
         );
+    }
+
+    #[tokio::test]
+    async fn batch_delete_branchable_surfaces_collection_block_for_broadcast() {
+        // Go emits two updates for branchable deletes: the document composite
+        // block AND the collection head block. DeleteResult must surface the
+        // collection block so BroadcastMutator can re-broadcast it (matches
+        // create/update's broadcast_cid/broadcast_block plumbing).
+        let (db, _bus) = make_test_db_with_bus().await;
+        db.create_collection(branchable_test_collection())
+            .await
+            .expect("schema");
+
+        let txn = db.new_txn(false).await.expect("new_txn");
+        let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
+        let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc));
+
+        let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
+        let create_result = mutator
+            .create("TestBranchable", doc)
+            .await
+            .expect("create");
+        let doc_id = create_result.doc_id.clone();
+
+        let delete_result = mutator
+            .delete("TestBranchable", &doc_id)
+            .await
+            .expect("delete");
+
+        assert!(delete_result.existed, "doc should have existed");
+        assert!(
+            delete_result.commit_cid.is_some(),
+            "composite delete cid should be set"
+        );
+        assert!(
+            delete_result.commit_block.is_some(),
+            "composite delete block should be set"
+        );
+        assert!(
+            delete_result.broadcast_cid.is_some(),
+            "branchable collection cid should be surfaced for broadcast"
+        );
+        assert!(
+            delete_result
+                .broadcast_block
+                .as_ref()
+                .map(|b| !b.is_empty())
+                .unwrap_or(false),
+            "branchable collection block bytes should be surfaced for broadcast"
+        );
+        assert_ne!(
+            delete_result.commit_cid, delete_result.broadcast_cid,
+            "collection head cid must differ from the document composite cid"
+        );
+
+        mutator.commit().await.expect("commit");
     }
 }

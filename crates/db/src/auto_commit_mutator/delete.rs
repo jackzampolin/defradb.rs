@@ -159,12 +159,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 }
 
                 match commit_result {
-                    Some((cid, block, _col_data)) => Ok(DeleteResult::with_commit(
-                        doc_id.clone(),
-                        existed,
-                        cid,
-                        block,
-                    )),
+                    Some((cid, block, col_data)) => {
+                        let mut result =
+                            DeleteResult::with_commit(doc_id.clone(), existed, cid, block);
+                        if let Some((col_cid, col_bytes)) = col_data {
+                            result.broadcast_cid = Some(col_cid);
+                            result.broadcast_block = Some(col_bytes);
+                        }
+                        Ok(result)
+                    }
                     None => Ok(DeleteResult::new(doc_id.clone(), existed)),
                 }
             }
