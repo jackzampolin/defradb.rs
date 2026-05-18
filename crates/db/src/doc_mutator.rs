@@ -8,7 +8,7 @@ use std::sync::Arc;
 use storage::corekv::Store;
 use tracing::warn;
 
-use crate::block_builder::{write_collection_block, write_document_blocks};
+use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
 use crate::collection::Collection;
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
@@ -330,11 +330,70 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
-        // Use delete_with_indexes to maintain index consistency
         let existed = collection
             .delete_with_indexes(&datastore, doc_id, &index_manager)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))?;
+
+        let commit_cid: Option<cid::Cid> = {
+            let txn_guard = self.txn.lock().await;
+            let txn = txn_guard.as_ref().ok_or_else(|| {
+                query::error::QueryError::execution("transaction is no longer active")
+            })?;
+
+            let blockstore = txn.blockstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
+            })?;
+            let headstore = txn.headstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get headstore: {}", e))
+            })?;
+
+            let schema_version_id = collection.version_id();
+            let sign_config = get_signing_config();
+
+            match write_delete_block(
+                &blockstore,
+                &headstore,
+                &doc_id.to_string(),
+                schema_version_id,
+                sign_config.as_ref(),
+            )
+            .await
+            {
+                Ok(block_result) => {
+                    if collection.schema().is_branchable {
+                        let short_id = collection.resolved_root_id();
+                        if let Err(error) = write_collection_block(
+                            &blockstore,
+                            &headstore,
+                            short_id,
+                            schema_version_id,
+                            block_result.cid,
+                            sign_config.as_ref(),
+                        )
+                        .await
+                        {
+                            warn!(
+                                collection = %collection_name,
+                                error = %error,
+                                "Failed to write collection block for transaction delete"
+                            );
+                        }
+                    }
+                    Some(block_result.cid)
+                }
+                Err(error) => {
+                    warn!(
+                        collection = %collection_name,
+                        error = %error,
+                        "Failed to write delete block for transaction delete"
+                    );
+                    None
+                }
+            }
+        };
+
+        let _ = commit_cid;
 
         Ok(DeleteResult::new(doc_id.clone(), existed))
     }
