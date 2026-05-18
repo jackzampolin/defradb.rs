@@ -13,7 +13,7 @@ use crate::collection::Collection;
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
 use crate::txn::DbTxn;
-use defra_core::encryption::{get_encryption_config, store_doc_encryption};
+use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
 use defra_core::signing::get_signing_config;
 
 /// Document mutator that uses a database transaction.
@@ -241,7 +241,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-        // Use update_with_indexes to maintain index consistency
         collection
             .update_with_indexes(&datastore, &doc, &index_manager)
             .await
@@ -252,9 +251,72 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 other => crate::error::index_write_query_error("update", other),
             })?;
 
-        // Return count of actually modified fields
-        let fields_modified = modified_fields.len();
+        let commit_cid: Option<cid::Cid> = {
+            let txn_guard = self.txn.lock().await;
+            let txn = txn_guard.as_ref().ok_or_else(|| {
+                query::error::QueryError::execution("transaction is no longer active")
+            })?;
 
+            let blockstore = txn.blockstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
+            })?;
+            let headstore = txn.headstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get headstore: {}", e))
+            })?;
+
+            let schema_version_id = collection.version_id();
+            let enc_config = get_encryption_config().or_else(|| {
+                doc.id().and_then(|id| get_doc_encryption(&id.to_string()))
+            });
+            let sign_config = get_signing_config();
+
+            match write_document_blocks(
+                &blockstore,
+                &headstore,
+                &doc,
+                schema_version_id,
+                Some(&modified_fields),
+                enc_config.as_ref(),
+                sign_config.as_ref(),
+            )
+            .await
+            {
+                Ok(block_result) => {
+                    if collection.schema().is_branchable {
+                        let short_id = collection.resolved_root_id();
+                        if let Err(error) = write_collection_block(
+                            &blockstore,
+                            &headstore,
+                            short_id,
+                            schema_version_id,
+                            block_result.cid,
+                            sign_config.as_ref(),
+                        )
+                        .await
+                        {
+                            warn!(
+                                collection = %collection_name,
+                                error = %error,
+                                "Failed to write collection block for transaction update"
+                            );
+                        }
+                    }
+                    Some(block_result.cid)
+                }
+                Err(error) => {
+                    warn!(
+                        collection = %collection_name,
+                        error = %error,
+                        "Failed to write document blocks for transaction update"
+                    );
+                    None
+                }
+            }
+        };
+
+        let _ = commit_cid;
+
+        let fields_modified = modified_fields.len();
         Ok(UpdateResult::new(doc, fields_modified))
     }
 
