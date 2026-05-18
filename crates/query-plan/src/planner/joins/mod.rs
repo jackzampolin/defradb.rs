@@ -1215,6 +1215,7 @@ impl Planner {
                 {
                     if can_use_direct_indexed_child_cache(nested_select)
                         && !has_filter_child_plan
+                        && multi_level_paths_for_relation.is_empty()
                         && target_collection.policy.is_none()
                         && !select.show_deleted
                     {
@@ -1479,6 +1480,7 @@ impl Planner {
                     {
                         if target_relation_field.is_primary
                             && can_use_direct_indexed_child_cache(nested_select)
+                            && multi_level_paths_for_relation.is_empty()
                             && target_collection.policy.is_none()
                             && !select.show_deleted
                         {
