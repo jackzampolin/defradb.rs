@@ -1,5 +1,5 @@
 use document::{JsonPathPart, JsonScalarValue, NormalValue};
-use schema::{IndexDescription, IndexedFieldDescription};
+use schema::{FieldDescription, FieldKind, IndexDescription, IndexedFieldDescription, ScalarKind};
 use serde_json::{json, Map, Value as JsonValue};
 use storage::index::Bound;
 
@@ -519,6 +519,29 @@ fn test_filter_to_scan_json_path_range() {
                 },
                 _ => panic!("expected Exclusive upper bound with PathMax"),
             }
+        }
+        _ => panic!("expected RangeScan scan type"),
+    }
+}
+
+#[test]
+fn test_filter_to_scan_top_level_json_lte_null_uses_index() {
+    // Go uses the JSON index for top-level {custom: {_leq: null}} because
+    // explicit nulls and missing JSON fields are both indexed as null.
+    let filter = make_filter(map([("custom".to_string(), json!({"_leq": null}))]));
+    let index = single_field_index("custom");
+    let fields = vec![FieldDescription::new(
+        "custom",
+        "custom",
+        FieldKind::Scalar(ScalarKind::Json),
+    )];
+
+    let params = filter_to_index_scan(&filter, &index, None, &fields, None, 0).unwrap();
+
+    match params.scan_type {
+        IndexScanType::RangeScan { lower, upper, .. } => {
+            assert!(lower.is_unbounded());
+            assert_eq!(upper, Bound::Inclusive(NormalValue::Null));
         }
         _ => panic!("expected RangeScan scan type"),
     }
