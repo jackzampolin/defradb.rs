@@ -237,11 +237,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // Emit events and build results
         let mut create_results = Vec::with_capacity(results.len());
         for (doc_id, doc, commit_result) in results {
-            let cid = commit_result
-                .as_ref()
-                .map(|(c, _, _)| *c)
-                .unwrap_or_default();
-            self.emit_update_events(&collection, &doc_id.to_string(), cid);
+            if let Some((cid, block, col_data)) = commit_result.as_ref() {
+                self.emit_update_events(
+                    &collection,
+                    &doc_id.to_string(),
+                    *cid,
+                    block.clone(),
+                    col_data.clone(),
+                );
+            }
 
             match commit_result {
                 Some((cid, block, col_data)) => {

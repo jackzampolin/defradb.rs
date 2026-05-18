@@ -6031,6 +6031,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "cid 0.10.1",
  "crypto",
  "ctor",
  "defra-harness",

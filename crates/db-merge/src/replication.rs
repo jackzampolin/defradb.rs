@@ -17,11 +17,17 @@ use crate::acp_merge_handler::AcpMergeHandler;
 use crate::broadcast_mutator::BroadcastMutator;
 use crate::head_provider::DbHeadProvider;
 use crate::merge_handler::DbMergeHandler;
+use crate::txn_broadcaster::SyncTxnBroadcaster;
+use db::event_emission::TxnBroadcaster;
 
 pub struct ReplicationStack<S: Store, B: Blockstore + Send + Sync, T: P2PTransport> {
     pub merge_handler_inner: Arc<DbMergeHandler<S, B>>,
     pub merge_handler: Arc<AcpMergeHandler<S, B>>,
     pub broadcast_mutator: Arc<BroadcastMutator<S, B, T>>,
+    /// Broadcaster for transactional writes. Wire this into
+    /// `DbTransactionRegistry::with_broadcaster` so committed `/tx` mutations
+    /// reach P2P peers just like single-mutation auto-commit writes do.
+    pub txn_broadcaster: Arc<dyn TxnBroadcaster>,
 }
 
 pub fn create_head_provider<S: Store>(db: Arc<DB<S>>) -> DbHeadProvider<S> {
@@ -51,7 +57,7 @@ pub fn create_broadcast_mutator<S: Store, B: Blockstore + 'static, T: P2PTranspo
 pub fn create_replication_stack<
     S: Store,
     B: Blockstore + Send + Sync + 'static,
-    T: P2PTransport,
+    T: P2PTransport + 'static,
 >(
     db: Arc<DB<S>>,
     blockstore: Arc<B>,
@@ -59,12 +65,14 @@ pub fn create_replication_stack<
 ) -> ReplicationStack<S, B, T> {
     let merge_handler_inner = Arc::new(create_merge_handler(db.clone(), blockstore));
     let merge_handler = Arc::new(create_acp_merge_handler(merge_handler_inner.clone()));
-    let broadcast_mutator = Arc::new(create_broadcast_mutator(db, sync));
+    let broadcast_mutator = Arc::new(create_broadcast_mutator(db, sync.clone()));
+    let txn_broadcaster: Arc<dyn TxnBroadcaster> = Arc::new(SyncTxnBroadcaster::new(sync));
 
     ReplicationStack {
         merge_handler_inner,
         merge_handler,
         broadcast_mutator,
+        txn_broadcaster,
     }
 }
 

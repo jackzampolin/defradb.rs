@@ -25,18 +25,21 @@ pub struct DbTransactionContext<S: Store> {
     readonly: bool,
     fetcher: Arc<LensedDocFetcher<S>>,
     deferred_acp_mutations: Arc<DeferredAcpMutations>,
+    broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
     action_lock: Arc<async_lock::Mutex<()>>,
     created_at: Instant,
 }
 
 impl<S: Store> DbTransactionContext<S> {
-    /// Create a new transaction context.
-    pub(crate) fn new(
+    /// Create a transaction context. Pass `Some(broadcaster)` to forward
+    /// committed writes to P2P peers; pass `None` for the non-P2P case.
+    pub(crate) fn new_with_broadcaster(
         db: Arc<DB<S>>,
         id: String,
         readonly: bool,
         fetcher: Arc<LensedDocFetcher<S>>,
         deferred_acp_mutations: Arc<DeferredAcpMutations>,
+        broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
     ) -> Self {
         Self {
             db,
@@ -44,6 +47,7 @@ impl<S: Store> DbTransactionContext<S> {
             readonly,
             fetcher,
             deferred_acp_mutations,
+            broadcaster,
             action_lock: Arc::new(async_lock::Mutex::new(())),
             created_at: Instant::now(),
         }
@@ -84,9 +88,10 @@ impl<S: Store + 'static> DbTransactionContext<S> {
     /// Should only be called on non-readonly transactions. Attempting to mutate
     /// via the returned mutator on a readonly transaction will fail.
     pub fn doc_mutator(&self) -> Arc<dyn DocMutator> {
-        Arc::new(DbDocMutator::from_shared_txn(
+        Arc::new(DbDocMutator::from_shared_txn_with_broadcaster(
             self.db.clone(),
             self.fetcher.shared_txn(),
+            self.broadcaster.clone(),
         ))
     }
 

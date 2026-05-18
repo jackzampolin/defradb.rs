@@ -579,27 +579,63 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         // Execute the delete mutation
         let result = self.inner.delete(collection_name, doc_id).await?;
 
-        // Read the delete composite block that was written during the mutation.
+        // No-op delete (missing doc): the inner mutator wrote nothing, so
+        // there's no tombstone block to read or broadcast. Returning here
+        // also avoids re-broadcasting the previous (stale) head.
+        if !result.existed {
+            return Ok(result);
+        }
+
+        // Prefer the delete block the inner mutator just wrote — re-reading
+        // the "latest" composite head via storage would race with concurrent
+        // writes on the same doc and broadcast the wrong block. Fall back to
+        // reading from storage only when commit artifacts are missing.
         let doc_id_str = doc_id.to_string();
-        let block_result = match read_latest_composite_block(&self.db, &doc_id_str).await {
-            Ok(br) => br,
-            Err(e) => {
-                tracing::error!(
-                    doc_id = %doc_id,
-                    collection = %collection_name,
-                    error = %e,
-                    "Failed to read delete composite block for P2P broadcast"
-                );
-                return Ok(DeleteResult::with_broadcast(
-                    result.doc_id,
-                    result.existed,
-                    BroadcastStatus::Failed(format!("Block read failed: {}", e)),
-                ));
-            }
-        };
+        let block_result =
+            if let (Some(cid), Some(block)) = (result.commit_cid, result.commit_block.as_ref()) {
+                BlockResult {
+                    cid,
+                    block: block.clone(),
+                    doc_id: doc_id_str,
+                    field_cids: vec![],
+                }
+            } else {
+                match read_latest_composite_block(&self.db, &doc_id_str).await {
+                    Ok(br) => br,
+                    Err(e) => {
+                        tracing::error!(
+                            doc_id = %doc_id,
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to read delete composite block for P2P broadcast"
+                        );
+                        return Ok(DeleteResult::with_broadcast(
+                            result.doc_id,
+                            result.existed,
+                            BroadcastStatus::Failed(format!("Block read failed: {}", e)),
+                        ));
+                    }
+                }
+            };
 
         // Read broadcast creator DID before spawning (reads thread-local state).
         let creator_did = defra_core::signing::get_broadcast_creator_did();
+
+        // For branchable collections, capture the collection-level head block
+        // so we can broadcast it alongside the composite delete (Go emits two
+        // updates for branchable mutations; see internal/db/collection.go:789).
+        let branchable_data = if let (Some(col_cid), Some(col_block)) =
+            (result.broadcast_cid, result.broadcast_block.as_ref())
+        {
+            Some(BlockResult {
+                cid: col_cid,
+                block: col_block.clone(),
+                doc_id: block_result.doc_id.clone(),
+                field_cids: vec![],
+            })
+        } else {
+            None
+        };
 
         // Capture everything for the spawned task by value.
         let sync = self.sync.clone();
@@ -631,6 +667,28 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 )
                 .await,
             );
+
+            // For branchable collections, also broadcast the collection block.
+            if let Some(col_block_result) = branchable_data {
+                sync.push_to_replicators_with_creator(
+                    &col_block_result.cid,
+                    &col_block_result.block,
+                    &col_block_result.doc_id,
+                    &collection_id,
+                    creator_ref,
+                )
+                .await;
+                log_broadcast_failure(
+                    &broadcast_with_retry_with_creator(
+                        &sync,
+                        &col_block_result,
+                        &collection_id,
+                        &collection_name_owned,
+                        creator_ref,
+                    )
+                    .await,
+                );
+            }
         });
 
         Ok(DeleteResult::with_broadcast(

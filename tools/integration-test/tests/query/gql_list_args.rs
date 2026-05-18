@@ -206,40 +206,20 @@ async fn gql_list_args_single_value_compat_test(cluster: TestCluster) {
 }
 
 async fn gql_list_args_multi_value_errors_test(cluster: TestCluster) {
+    // Multi-cid query (`User(cid: [...])`, `_commits(cid: [...])`) used to
+    // return "querying by multiple cids is not yet supported" on Go. Go shipped
+    // real multi-cid support in sourcenetwork/defradb#4794, so those
+    // assertions are intentionally omitted here; defradb.rs#972 tracks the
+    // matching Rust port. Once that lands, restore the multi-cid cases as
+    // positive (returns-results) assertions on both runtimes.
+    //
+    // Multi-docID query (`_commits(docID: [...])`) still returns
+    // "querying by multiple docIDs is not yet supported" on Go, so we keep
+    // asserting it.
+
     let node = cluster.client(0);
     let api_url = cluster.api_url(0).to_string();
     node.schema_add(SCHEMA).expect("add schema");
-
-    let cid_error = graphql_raw(
-        &api_url,
-        r#"query {
-                User(cid: [
-                    "bafyreifldhofx6cwi6ashk24rcefsuiqje5a2rziwcyte54z27wmgv4pey"
-                    "bafyreic2vrbl344kkc7h5d7e2hpnwvffta4ck73bvjs5acgjtvqubvvioe"
-                ]) {
-                    _docID
-                }
-            }"#,
-    )
-    .await;
-    assert_graphql_error(&cid_error, "querying by multiple cids is not yet supported");
-
-    let commit_cid_error = graphql_raw(
-        &api_url,
-        r#"query {
-                _commits(cid: [
-                    "bafyreifldhofx6cwi6ashk24rcefsuiqje5a2rziwcyte54z27wmgv4pey"
-                    "bafyreic2vrbl344kkc7h5d7e2hpnwvffta4ck73bvjs5acgjtvqubvvioe"
-                ]) {
-                    cid
-                }
-            }"#,
-    )
-    .await;
-    assert_graphql_error(
-        &commit_cid_error,
-        "querying by multiple cids is not yet supported",
-    );
 
     let doc_id_error = graphql_raw(
         &api_url,
