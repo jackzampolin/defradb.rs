@@ -205,21 +205,98 @@ async fn gql_list_args_single_value_compat_test(cluster: TestCluster) {
     }
 }
 
-async fn gql_list_args_multi_value_errors_test(cluster: TestCluster) {
-    // Multi-cid query (`User(cid: [...])`, `_commits(cid: [...])`) used to
-    // return "querying by multiple cids is not yet supported" on Go. Go shipped
-    // real multi-cid support in sourcenetwork/defradb#4794, so those
-    // assertions are intentionally omitted here; defradb.rs#972 tracks the
-    // matching Rust port. Once that lands, restore the multi-cid cases as
-    // positive (returns-results) assertions on both runtimes.
-    //
-    // Multi-docID query (`_commits(docID: [...])`) still returns
-    // "querying by multiple docIDs is not yet supported" on Go, so we keep
-    // asserting it.
-
+async fn gql_list_args_multi_value_test(cluster: TestCluster) {
     let node = cluster.client(0);
     let api_url = cluster.api_url(0).to_string();
     node.schema_add(SCHEMA).expect("add schema");
+
+    let alice = node
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID } }"#)
+        .expect("create alice");
+    let alice_id = extract_doc_id(&alice, "add_User");
+
+    let bob = node
+        .query(r#"mutation { add_User(input: {name: "Bob", age: 31}) { _docID } }"#)
+        .expect("create bob");
+    let bob_id = extract_doc_id(&bob, "add_User");
+
+    let alice_commits = node
+        .query(&format!(
+            r#"query {{
+                _commits(docID: ["{alice_id}"], filter: {{fieldName: {{_eq: "_C"}}}}) {{
+                    cid
+                    height
+                    docID
+                }}
+            }}"#,
+        ))
+        .expect("query alice commits");
+    let alice_cid = commit_cid(&alice_commits);
+
+    let bob_commits = node
+        .query(&format!(
+            r#"query {{
+                _commits(docID: ["{bob_id}"], filter: {{fieldName: {{_eq: "_C"}}}}) {{
+                    cid
+                    height
+                    docID
+                }}
+            }}"#,
+        ))
+        .expect("query bob commits");
+    let bob_cid = commit_cid(&bob_commits);
+
+    let users_by_cid = node
+        .query(&format!(
+            r#"query {{
+                User(cid: ["{alice_cid}", "{bob_cid}"]) {{
+                    _docID
+                    name
+                }}
+            }}"#,
+        ))
+        .expect("query users by multiple cids");
+    let user_names: std::collections::BTreeSet<_> = rows(&users_by_cid, "User")
+        .iter()
+        .map(|user| {
+            user["name"]
+                .as_str()
+                .expect("missing user name")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        user_names,
+        ["Alice".to_string(), "Bob".to_string()]
+            .into_iter()
+            .collect(),
+        "unexpected User(cid: [...]) result: {users_by_cid}"
+    );
+
+    let commits_by_cid = node
+        .query(&format!(
+            r#"query {{
+                _commits(cid: ["{alice_cid}", "{bob_cid}"]) {{
+                    cid
+                    docID
+                }}
+            }}"#,
+        ))
+        .expect("query commits by multiple cids");
+    let commit_cids: std::collections::BTreeSet<_> = rows(&commits_by_cid, "_commits")
+        .iter()
+        .map(|commit| {
+            commit["cid"]
+                .as_str()
+                .expect("missing commit cid")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        commit_cids,
+        [alice_cid.clone(), bob_cid.clone()].into_iter().collect(),
+        "unexpected _commits(cid: [...]) result: {commits_by_cid}"
+    );
 
     let doc_id_error = graphql_raw(
         &api_url,
@@ -244,7 +321,4 @@ for_each_runtime!(
     gql_list_args_single_value_compat,
     gql_list_args_single_value_compat_test
 );
-for_each_runtime!(
-    gql_list_args_multi_value_errors,
-    gql_list_args_multi_value_errors_test
-);
+for_each_runtime!(gql_list_args_multi_value, gql_list_args_multi_value_test);

@@ -10,6 +10,7 @@
 use document::Document;
 use identity::Did;
 use serde_json::Value as JsonValue;
+use std::collections::HashSet;
 
 use crate::error::Result;
 use crate::mapper::{Aggregate, AggregateType, Requestable, Select};
@@ -689,9 +690,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         // Build options from the select
-        let options = CommitsQueryOptions {
+        let base_options = CommitsQueryOptions {
             doc_id: select.doc_ids.as_ref().and_then(|ids| ids.first().cloned()),
-            cid: select.cid.as_ref().and_then(|cids| cids.first().cloned()),
+            cid: None,
             depth: select.depth,
             height_start: match &height_range {
                 HeightRangeExtraction::Range(range) => Some(range.start),
@@ -705,7 +706,33 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         // Fetch commits using the fetcher
-        let mut commits = self.fetcher.get_commits(&options).await?;
+        let mut commits = Vec::new();
+        if let Some(ref cids) = select.cid {
+            let mut seen_commit_cids = HashSet::new();
+            let mut seen_input_cids = HashSet::new();
+
+            for cid in cids {
+                if !seen_input_cids.insert(cid.clone()) {
+                    continue;
+                }
+
+                let options = CommitsQueryOptions {
+                    cid: Some(cid.clone()),
+                    ..base_options.clone()
+                };
+                for commit in self.fetcher.get_commits(&options).await? {
+                    let Some(commit_cid) = commit.get("cid").and_then(|value| value.as_str())
+                    else {
+                        continue;
+                    };
+                    if seen_commit_cids.insert(commit_cid.to_string()) {
+                        commits.push(commit);
+                    }
+                }
+            }
+        } else {
+            commits = self.fetcher.get_commits(&base_options).await?;
+        }
 
         // ACP filtering: check read permission for each commit's document.
         // _commits must enforce the same ACP rules as regular document queries.
