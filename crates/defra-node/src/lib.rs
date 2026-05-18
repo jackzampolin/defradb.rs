@@ -1061,6 +1061,7 @@ mod p2p_tests {
     use std::sync::Once;
     use std::time::{Duration, Instant};
 
+    use query::QueryResponse;
     use serde_json::Value as JsonValue;
 
     use super::{EmbeddedNode, P2PConfig};
@@ -1102,6 +1103,14 @@ mod p2p_tests {
         }
     }
 
+    fn desktop_like_streaming_p2p_config() -> P2PConfig {
+        let mut config = test_p2p_config();
+        config.max_concurrent_push_tasks = 32;
+        config.rate_limit_burst = 5_000;
+        config.rate_limit_rate = 500.0;
+        config
+    }
+
     async fn wait_for_listen_addr(node: &EmbeddedNode) -> String {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -1109,7 +1118,8 @@ mod p2p_tests {
                 .p2p()
                 .expect("P2P should be enabled")
                 .listen_addresses()
-                .await;
+                .await
+                .expect("listen_addresses should succeed");
             if let Some(addr) = addrs.first() {
                 return addr.clone();
             }
@@ -1148,6 +1158,134 @@ mod p2p_tests {
             .unwrap_or(0)
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct StreamDocState {
+        phase: String,
+        body: String,
+        final_chunk_count: Option<i64>,
+    }
+
+    fn json_string_literal(value: &str) -> String {
+        serde_json::to_string(value).expect("serialize GraphQL string literal")
+    }
+
+    fn build_stream_body(chunk_count: usize) -> String {
+        let mut body = String::new();
+        for chunk in 1..=chunk_count {
+            body.push_str(&format!(
+                "chunk-{chunk:03}: {}\n",
+                "x".repeat(160 + (chunk % 11))
+            ));
+        }
+        body
+    }
+
+    fn extract_created_doc_id(response: &QueryResponse, field_name: &str) -> String {
+        response
+            .data
+            .as_ref()
+            .and_then(|data| data.get(field_name))
+            .and_then(|value| value.as_array())
+            .and_then(|rows| rows.first())
+            .and_then(|row| row.get("_docID"))
+            .and_then(|value| value.as_str())
+            .expect("mutation response missing _docID")
+            .to_string()
+    }
+
+    fn stream_doc_query(doc_id: &str) -> String {
+        format!(
+            "query {{ StreamedTurn(filter: {{_docID: {{_eq: {doc_id}}}}}) {{ _docID phase body finalChunkCount }} }}",
+            doc_id = json_string_literal(doc_id),
+        )
+    }
+
+    async fn fetch_stream_doc_state(node: &EmbeddedNode, doc_id: &str) -> Option<StreamDocState> {
+        let response = node.execute(&stream_doc_query(doc_id)).await;
+        assert!(
+            response.errors.is_empty(),
+            "stream query returned errors: {:?}",
+            response.errors
+        );
+
+        response
+            .data
+            .as_ref()
+            .and_then(|data| data.get("StreamedTurn"))
+            .and_then(|rows| rows.as_array())
+            .and_then(|rows| rows.first())
+            .map(|row| StreamDocState {
+                phase: row
+                    .get("phase")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                body: row
+                    .get("body")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                final_chunk_count: row.get("finalChunkCount").and_then(|value| value.as_i64()),
+            })
+    }
+
+    async fn wait_for_stream_doc_state(
+        node: &EmbeddedNode,
+        doc_id: &str,
+        expected: &StreamDocState,
+        timeout: Duration,
+    ) -> Option<StreamDocState> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(current) = fetch_stream_doc_state(node, doc_id).await {
+                if current == *expected {
+                    return Some(current);
+                }
+                if Instant::now() >= deadline {
+                    return Some(current);
+                }
+            } else if Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    async fn wait_for_tool_call_count(
+        node: &EmbeddedNode,
+        turn_doc_id: &str,
+        expected: usize,
+        timeout: Duration,
+    ) -> usize {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let response = node
+                .execute(&format!(
+                    "query {{ ToolCall(filter: {{turnDocID: {{_eq: {turn_doc_id}}}}}) {{ _docID index }} }}",
+                    turn_doc_id = json_string_literal(turn_doc_id),
+                ))
+                .await;
+            assert!(
+                response.errors.is_empty(),
+                "tool call query returned errors: {:?}",
+                response.errors
+            );
+
+            let count = response
+                .data
+                .as_ref()
+                .and_then(|data| data.get("ToolCall"))
+                .and_then(|rows| rows.as_array())
+                .map(|rows| rows.len())
+                .unwrap_or(0);
+            if count >= expected || Instant::now() >= deadline {
+                return count;
+            }
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     async fn wait_for_collection_len(node: &EmbeddedNode, collection: &str, expected: usize) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
@@ -1183,12 +1321,12 @@ mod p2p_tests {
         init_tracing();
 
         let node0 = EmbeddedNode::builder()
-            .with_p2p(test_p2p_config())
+            .with_p2p(desktop_like_streaming_p2p_config())
             .build()
             .await
             .expect("build node0");
         let node1 = EmbeddedNode::builder()
-            .with_p2p(test_p2p_config())
+            .with_p2p(desktop_like_streaming_p2p_config())
             .build()
             .await
             .expect("build node1");
@@ -1213,14 +1351,13 @@ mod p2p_tests {
         wait_for_connected_peer(&node0).await;
         wait_for_connected_peer(&node1).await;
 
-        p2p0.subscribe_collection("User")
+        p2p0.add_collections(vec!["User".to_string()])
             .await
             .expect("subscribe node0 User");
-        p2p1.subscribe_collection("User")
+        p2p1.add_collections(vec!["User".to_string()])
             .await
             .expect("subscribe node1 User");
-
-        p2p0.set_replicator(&addr1, vec!["User".to_string()])
+        p2p0.add_replicator(vec!["User".to_string()], Some(&addr1), Vec::new(), None)
             .await
             .expect("set replicator node0 -> node1");
 
@@ -1236,6 +1373,363 @@ mod p2p_tests {
         );
 
         wait_for_collection_len(&node1, "User", 1).await;
+
+        node0.shutdown().await;
+        node1.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn live_replicator_keeps_up_with_repeated_branchable_updates_to_same_doc() {
+        init_tracing();
+
+        const STREAM_SDL: &str = r#"
+            type StreamedTurn @branchable {
+                name: String
+                phase: String
+                body: String
+                finalChunkCount: Int
+            }
+        "#;
+        const TOTAL_CHUNKS: usize = 64;
+
+        let node0 = EmbeddedNode::builder()
+            .with_p2p(test_p2p_config())
+            .build()
+            .await
+            .expect("build node0");
+        let node1 = EmbeddedNode::builder()
+            .with_p2p(test_p2p_config())
+            .build()
+            .await
+            .expect("build node1");
+
+        node0.add_schema(STREAM_SDL).await.expect("schema on node0");
+        node1.add_schema(STREAM_SDL).await.expect("schema on node1");
+
+        let stream_collection_id = node0
+            .get_collection("StreamedTurn")
+            .expect("get StreamedTurn collection")
+            .expect("StreamedTurn collection should exist")
+            .collection_id
+            .to_string();
+
+        let addr1 = wait_for_listen_addr(&node1).await;
+
+        let p2p0 = node0.p2p().expect("node0 p2p");
+        let p2p1 = node1.p2p().expect("node1 p2p");
+
+        p2p0.connect_peer(&addr1)
+            .await
+            .expect("connect node0 -> node1");
+        wait_for_connected_peer(&node0).await;
+        wait_for_connected_peer(&node1).await;
+
+        p2p0.add_collections(vec!["StreamedTurn".to_string()])
+            .await
+            .expect("add StreamedTurn to node0 p2p collections");
+        p2p1.add_collections(vec!["StreamedTurn".to_string()])
+            .await
+            .expect("add StreamedTurn to node1 p2p collections");
+        p2p0.add_replicator(
+            vec!["StreamedTurn".to_string()],
+            Some(&addr1),
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("set node0 -> node1 replicator");
+
+        let initial_body = build_stream_body(1);
+        let created = node0
+            .execute(&format!(
+                "mutation {{ add_StreamedTurn(input: {{name: {name}, phase: {phase}, body: {body}}}) {{ _docID }} }}",
+                name = json_string_literal("amy"),
+                phase = json_string_literal("streaming"),
+                body = json_string_literal(&initial_body),
+            ))
+            .await;
+        assert!(
+            created.errors.is_empty(),
+            "create StreamedTurn returned errors: {:?}",
+            created.errors
+        );
+        let doc_id = extract_created_doc_id(&created, "add_StreamedTurn");
+
+        let expected_initial = StreamDocState {
+            phase: "streaming".to_string(),
+            body: initial_body.clone(),
+            final_chunk_count: None,
+        };
+        let initial_remote =
+            wait_for_stream_doc_state(&node1, &doc_id, &expected_initial, Duration::from_secs(20))
+                .await;
+        assert_eq!(
+            initial_remote,
+            Some(expected_initial.clone()),
+            "replicator never delivered the initial StreamedTurn doc: {:?}",
+            initial_remote
+        );
+
+        for chunk_count in 2..=TOTAL_CHUNKS {
+            let body = build_stream_body(chunk_count);
+            let phase = if chunk_count == TOTAL_CHUNKS {
+                "complete"
+            } else {
+                "streaming"
+            };
+            let final_chunk_field = if chunk_count == TOTAL_CHUNKS {
+                format!("finalChunkCount: {chunk_count}")
+            } else {
+                String::new()
+            };
+
+            let response = node0
+                .execute(&format!(
+                    "mutation {{ update_StreamedTurn(filter: {{_docID: {{_eq: {doc_id}}}}}, input: {{phase: {phase}, body: {body}{final_chunk_field}}}) {{ _docID phase body finalChunkCount }} }}",
+                    doc_id = json_string_literal(&doc_id),
+                    phase = json_string_literal(phase),
+                    body = json_string_literal(&body),
+                    final_chunk_field = if final_chunk_field.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!(", {final_chunk_field}")
+                    },
+                ))
+                .await;
+            assert!(
+                response.errors.is_empty(),
+                "update at chunk {chunk_count} returned errors: {:?}",
+                response.errors
+            );
+        }
+
+        let expected_final = StreamDocState {
+            phase: "complete".to_string(),
+            body: build_stream_body(TOTAL_CHUNKS),
+            final_chunk_count: Some(TOTAL_CHUNKS as i64),
+        };
+
+        let remote_before_sync =
+            wait_for_stream_doc_state(&node1, &doc_id, &expected_final, Duration::from_secs(20))
+                .await;
+        if remote_before_sync != Some(expected_final.clone()) {
+            p2p1.sync_branchable_collection(&stream_collection_id)
+                .await
+                .expect("sync branchable StreamedTurn collection");
+        }
+        let remote_after_sync =
+            wait_for_stream_doc_state(&node1, &doc_id, &expected_final, Duration::from_secs(10))
+                .await;
+
+        assert_eq!(
+            remote_after_sync,
+            Some(expected_final.clone()),
+            "same-doc branchable stream tail failed to converge; before_sync={:?} after_sync={:?} expected_phase={} expected_len={} expected_final_chunk_count={:?}",
+            remote_before_sync,
+            remote_after_sync,
+            expected_final.phase,
+            expected_final.body.len(),
+            expected_final.final_chunk_count,
+        );
+
+        node0.shutdown().await;
+        node1.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn live_replicator_keeps_up_with_interleaved_branchable_updates_and_sideband_creates() {
+        init_tracing();
+
+        const STREAM_SDL: &str = r#"
+            type StreamedTurn @branchable {
+                name: String
+                phase: String
+                body: String
+                finalChunkCount: Int
+            }
+
+            type ToolCall {
+                turnDocID: String
+                index: Int
+                kind: String
+                payload: String
+            }
+        "#;
+        const TOTAL_CHUNKS: usize = 48;
+
+        let node0 = EmbeddedNode::builder()
+            .with_p2p(test_p2p_config())
+            .build()
+            .await
+            .expect("build node0");
+        let node1 = EmbeddedNode::builder()
+            .with_p2p(test_p2p_config())
+            .build()
+            .await
+            .expect("build node1");
+
+        node0.add_schema(STREAM_SDL).await.expect("schema on node0");
+        node1.add_schema(STREAM_SDL).await.expect("schema on node1");
+
+        let addr1 = wait_for_listen_addr(&node1).await;
+
+        let p2p0 = node0.p2p().expect("node0 p2p");
+        let p2p1 = node1.p2p().expect("node1 p2p");
+
+        p2p0.connect_peer(&addr1)
+            .await
+            .expect("connect node0 -> node1");
+        wait_for_connected_peer(&node0).await;
+        wait_for_connected_peer(&node1).await;
+
+        p2p0.add_collections(vec!["StreamedTurn".to_string(), "ToolCall".to_string()])
+            .await
+            .expect("add collections to node0 p2p");
+        p2p1.add_collections(vec!["StreamedTurn".to_string(), "ToolCall".to_string()])
+            .await
+            .expect("add collections to node1 p2p");
+        p2p0.add_replicator(
+            vec!["StreamedTurn".to_string(), "ToolCall".to_string()],
+            Some(&addr1),
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("set node0 -> node1 replicator");
+
+        let stream_collection_id = node0
+            .get_collection("StreamedTurn")
+            .expect("get StreamedTurn collection")
+            .expect("StreamedTurn collection should exist")
+            .collection_id
+            .to_string();
+
+        let initial_body = build_stream_body(1);
+        let created = node0
+            .execute(&format!(
+                "mutation {{ add_StreamedTurn(input: {{name: {name}, phase: {phase}, body: {body}}}) {{ _docID }} }}",
+                name = json_string_literal("amy"),
+                phase = json_string_literal("streaming"),
+                body = json_string_literal(&initial_body),
+            ))
+            .await;
+        assert!(
+            created.errors.is_empty(),
+            "create StreamedTurn returned errors: {:?}",
+            created.errors
+        );
+        let doc_id = extract_created_doc_id(&created, "add_StreamedTurn");
+
+        let expected_initial = StreamDocState {
+            phase: "streaming".to_string(),
+            body: initial_body.clone(),
+            final_chunk_count: None,
+        };
+        let initial_remote =
+            wait_for_stream_doc_state(&node1, &doc_id, &expected_initial, Duration::from_secs(20))
+                .await;
+        assert_eq!(
+            initial_remote,
+            Some(expected_initial.clone()),
+            "replicator never delivered the initial StreamedTurn doc: {:?}",
+            initial_remote
+        );
+
+        for chunk_count in 2..=TOTAL_CHUNKS {
+            let body = build_stream_body(chunk_count);
+            let phase = if chunk_count == TOTAL_CHUNKS {
+                "complete"
+            } else {
+                "streaming"
+            };
+            let final_chunk_field = if chunk_count == TOTAL_CHUNKS {
+                format!("finalChunkCount: {chunk_count}")
+            } else {
+                String::new()
+            };
+
+            let update_response = node0
+                .execute(&format!(
+                    "mutation {{ update_StreamedTurn(filter: {{_docID: {{_eq: {doc_id}}}}}, input: {{phase: {phase}, body: {body}{final_chunk_field}}}) {{ _docID phase body finalChunkCount }} }}",
+                    doc_id = json_string_literal(&doc_id),
+                    phase = json_string_literal(phase),
+                    body = json_string_literal(&body),
+                    final_chunk_field = if final_chunk_field.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!(", {final_chunk_field}")
+                    },
+                ))
+                .await;
+            assert!(
+                update_response.errors.is_empty(),
+                "update at chunk {chunk_count} returned errors: {:?}",
+                update_response.errors
+            );
+
+            let tool_call_response = node0
+                .execute(&format!(
+                    "mutation {{ add_ToolCall(input: {{turnDocID: {turn_doc_id}, index: {index}, kind: {kind}, payload: {payload}}}) {{ _docID }} }}",
+                    turn_doc_id = json_string_literal(&doc_id),
+                    index = chunk_count,
+                    kind = json_string_literal("search"),
+                    payload = json_string_literal(&format!("rg turn-{chunk_count} src")),
+                ))
+                .await;
+            assert!(
+                tool_call_response.errors.is_empty(),
+                "tool call create at chunk {chunk_count} returned errors: {:?}",
+                tool_call_response.errors
+            );
+        }
+
+        let expected_final = StreamDocState {
+            phase: "complete".to_string(),
+            body: build_stream_body(TOTAL_CHUNKS),
+            final_chunk_count: Some(TOTAL_CHUNKS as i64),
+        };
+
+        let remote_before_sync =
+            wait_for_stream_doc_state(&node1, &doc_id, &expected_final, Duration::from_secs(20))
+                .await;
+        let tool_calls_before_sync =
+            wait_for_tool_call_count(&node1, &doc_id, TOTAL_CHUNKS - 1, Duration::from_secs(20))
+                .await;
+        if remote_before_sync != Some(expected_final.clone())
+            || tool_calls_before_sync < TOTAL_CHUNKS - 1
+        {
+            p2p1.sync_branchable_collection(&stream_collection_id)
+                .await
+                .expect("sync branchable StreamedTurn collection");
+        }
+
+        let remote_after_sync =
+            wait_for_stream_doc_state(&node1, &doc_id, &expected_final, Duration::from_secs(10))
+                .await;
+        let tool_calls_after_sync =
+            wait_for_tool_call_count(&node1, &doc_id, TOTAL_CHUNKS - 1, Duration::from_secs(10))
+                .await;
+
+        assert_eq!(
+            remote_after_sync,
+            Some(expected_final.clone()),
+            "interleaved branchable stream tail failed to converge; before_sync={:?} after_sync={:?} tool_calls_before_sync={} tool_calls_after_sync={} expected_phase={} expected_len={} expected_final_chunk_count={:?}",
+            remote_before_sync,
+            remote_after_sync,
+            tool_calls_before_sync,
+            tool_calls_after_sync,
+            expected_final.phase,
+            expected_final.body.len(),
+            expected_final.final_chunk_count,
+        );
+        assert_eq!(
+            tool_calls_after_sync,
+            TOTAL_CHUNKS - 1,
+            "sideband ToolCall docs did not fully converge; before_sync={} after_sync={} expected={}",
+            tool_calls_before_sync,
+            tool_calls_after_sync,
+            TOTAL_CHUNKS - 1,
+        );
 
         node0.shutdown().await;
         node1.shutdown().await;
