@@ -2,6 +2,7 @@
 
 use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
+use cid::Cid;
 use document::{DocID, Document};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use crate::block_builder::{write_collection_block, write_delete_block, write_doc
 use crate::collection::Collection;
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
+use crate::event_emission::register_update_event_callback;
 use crate::txn::DbTxn;
 use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
 use defra_core::signing::get_signing_config;
@@ -116,6 +118,35 @@ impl<S: Store> DbDocMutator<S> {
     }
 }
 
+impl<S: Store + 'static> DbDocMutator<S> {
+    async fn register_update_callback(
+        &self,
+        collection_id: String,
+        branchable: bool,
+        doc_id: String,
+        cid: Cid,
+    ) -> query::error::Result<()> {
+        let mut txn_guard = self.txn.lock().await;
+        let txn = txn_guard.as_mut().ok_or_else(|| {
+            query::error::QueryError::execution("transaction is no longer active")
+        })?;
+        register_update_event_callback(
+            txn,
+            self.db.event_bus(),
+            collection_id,
+            branchable,
+            doc_id,
+            cid,
+        )
+        .map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to register tx update callback: {}",
+                e
+            ))
+        })
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
@@ -154,7 +185,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| crate::error::index_write_query_error("create", e))?;
 
-        {
+        let commit_cid: Option<Cid> = {
             let txn_guard = self.txn.lock().await;
             let txn = txn_guard.as_ref().ok_or_else(|| {
                 query::error::QueryError::execution("transaction is no longer active")
@@ -206,6 +237,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                             );
                         }
                     }
+                    Some(block_result.cid)
                 }
                 Err(error) => {
                     warn!(
@@ -213,8 +245,19 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                         error = %error,
                         "Failed to write document blocks for transaction create"
                     );
+                    None
                 }
             }
+        };
+
+        if let Some(cid) = commit_cid {
+            self.register_update_callback(
+                collection.collection_id().to_string(),
+                collection.schema().is_branchable,
+                doc_id.to_string(),
+                cid,
+            )
+            .await?;
         }
 
         Ok(CreateResult::new(doc_id, doc))
@@ -251,7 +294,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 other => crate::error::index_write_query_error("update", other),
             })?;
 
-        let commit_cid: Option<cid::Cid> = {
+        let commit_cid: Option<Cid> = {
             let txn_guard = self.txn.lock().await;
             let txn = txn_guard.as_ref().ok_or_else(|| {
                 query::error::QueryError::execution("transaction is no longer active")
@@ -314,7 +357,15 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             }
         };
 
-        let _ = commit_cid;
+        if let (Some(doc_id), Some(cid)) = (doc.id().cloned(), commit_cid) {
+            self.register_update_callback(
+                collection.collection_id().to_string(),
+                collection.schema().is_branchable,
+                doc_id.to_string(),
+                cid,
+            )
+            .await?;
+        }
 
         let fields_modified = modified_fields.len();
         Ok(UpdateResult::new(doc, fields_modified))
@@ -335,7 +386,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))?;
 
-        let commit_cid: Option<cid::Cid> = {
+        let commit_cid: Option<Cid> = {
             let txn_guard = self.txn.lock().await;
             let txn = txn_guard.as_ref().ok_or_else(|| {
                 query::error::QueryError::execution("transaction is no longer active")
@@ -393,7 +444,15 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             }
         };
 
-        let _ = commit_cid;
+        if let Some(cid) = commit_cid {
+            self.register_update_callback(
+                collection.collection_id().to_string(),
+                collection.schema().is_branchable,
+                doc_id.to_string(),
+                cid,
+            )
+            .await?;
+        }
 
         Ok(DeleteResult::new(doc_id.clone(), existed))
     }
