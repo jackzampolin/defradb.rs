@@ -51,4 +51,21 @@ impl HttpClient {
         );
         self.request_void("DELETE", &url, None).await
     }
+
+    /// Delete one or more collections by name via Go-compatible
+    /// `DELETE /collections?name=Users,Books&active-only=true`.
+    pub async fn collection_delete(&self, names: &[String], active_only: bool) -> Result<()> {
+        let joined = names
+            .iter()
+            .map(|n| n.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let url = format!(
+            "{}/api/v0/collections?name={}&active-only={}",
+            self.base_url,
+            encode(&joined),
+            active_only
+        );
+        self.request_void("DELETE", &url, None).await
+    }
 }

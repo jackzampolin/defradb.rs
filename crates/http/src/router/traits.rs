@@ -550,6 +550,14 @@ pub trait CollectionManagementOperations: Send + Sync {
 
     /// Delete a collection by name.
     async fn delete_collection(&self, name: &str) -> Result<(), String>;
+
+    /// Delete one or more collections by name (Go #4688 parity).
+    ///
+    /// When `active_only` is true, only the active head version of each named
+    /// collection is removed. When false (Go's default), every version of each
+    /// named collection is removed.
+    async fn delete_collections(&self, names: Vec<String>, active_only: bool)
+        -> Result<(), String>;
 }
 
 /// Trait for lens migration operations.
