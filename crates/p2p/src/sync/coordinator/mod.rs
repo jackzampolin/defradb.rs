@@ -54,6 +54,7 @@ mod subscriptions;
 
 pub use result_types::{CreateReplicatorResult, LoadReplicatorsResult};
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,10 +63,11 @@ use acp::DocumentACP;
 use blockstore::Blockstore;
 use cid::Cid;
 use parking_lot::Mutex;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
-use crate::transport::P2PTransport;
+use crate::transport::{P2PTransport, PeerId};
 
 use super::broadcaster::Broadcaster;
 use super::collection_store::P2PCollectionStorage;
@@ -95,6 +97,64 @@ struct SyncShutdownState {
 }
 
 const BACKGROUND_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Shared limiter for poll-based DAG fetches.
+///
+/// The global semaphore bounds total resource usage, while the per-peer
+/// semaphore prevents one source peer from queueing enough fetches to occupy
+/// every global permit.
+#[derive(Clone)]
+pub(crate) struct DagFetchLimiter {
+    global: Arc<Semaphore>,
+    per_peer: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+    peer_limit: usize,
+}
+
+pub(crate) struct DagFetchPermits {
+    _global: OwnedSemaphorePermit,
+    _peer: OwnedSemaphorePermit,
+}
+
+impl DagFetchLimiter {
+    pub(crate) fn new(global_limit: usize) -> Self {
+        let global_limit = global_limit.max(1);
+        Self {
+            global: Arc::new(Semaphore::new(global_limit)),
+            per_peer: Arc::new(Mutex::new(HashMap::new())),
+            peer_limit: global_limit.saturating_sub(1).max(1),
+        }
+    }
+
+    pub(crate) async fn acquire(&self, source_peer: &PeerId) -> Option<DagFetchPermits> {
+        let peer_key = source_peer.to_string();
+        let peer_semaphore = {
+            let mut per_peer = self.per_peer.lock();
+            per_peer
+                .entry(peer_key)
+                .or_insert_with(|| Arc::new(Semaphore::new(self.peer_limit)))
+                .clone()
+        };
+
+        let Ok(peer_permit) = peer_semaphore.acquire_owned().await else {
+            return None;
+        };
+        let Ok(global_permit) = self.global.clone().acquire_owned().await else {
+            return None;
+        };
+
+        Some(DagFetchPermits {
+            _global: global_permit,
+            _peer: peer_permit,
+        })
+    }
+
+    fn close(&self) {
+        self.global.close();
+        for semaphore in self.per_peer.lock().values() {
+            semaphore.close();
+        }
+    }
+}
 
 /// Shared shutdown state for coordinator-owned background replication work.
 #[derive(Clone)]
@@ -183,8 +243,8 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
     /// Channel for reporting push failures to the FFI layer for retry tracking.
     pub(super) failure_tx: Option<tokio::sync::mpsc::Sender<PushFailure>>,
 
-    /// Semaphore limiting concurrent DAG fetch tasks (configurable via SyncConfig).
-    pub(super) dag_fetch_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Limiter for concurrent DAG fetch tasks (configurable via SyncConfig).
+    pub(super) dag_fetch_limiter: DagFetchLimiter,
 
     /// Semaphore limiting concurrent push tasks (configurable via SyncConfig).
     pub(super) push_semaphore: Arc<tokio::sync::Semaphore>,
@@ -276,7 +336,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 );
             }
         }
-        self.runtime.dag_fetch_semaphore.close();
+        self.runtime.dag_fetch_limiter.close();
         self.runtime.push_semaphore.close();
         self.runtime.shutdown.shutdown().await;
     }
@@ -310,6 +370,41 @@ pub type IrohSyncCoordinator<B> = SyncCoordinator<B, crate::iroh::IrohTransport>
 
 #[cfg(test)]
 mod access_tests;
+
+#[cfg(test)]
+mod dag_fetch_limiter_tests {
+    use super::DagFetchLimiter;
+    use crate::transport::PeerId;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn single_peer_cannot_hold_every_global_permit() {
+        let limiter = DagFetchLimiter::new(4);
+        let flooder = PeerId::new("flooder".to_string());
+        let legitimate = PeerId::new("legitimate".to_string());
+
+        let mut flooder_permits = Vec::new();
+        for _ in 0..3 {
+            flooder_permits.push(limiter.acquire(&flooder).await.expect("flooder permit"));
+        }
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), limiter.acquire(&flooder))
+                .await
+                .is_err(),
+            "one peer should be capped below the global limit"
+        );
+
+        let legitimate_permit =
+            tokio::time::timeout(Duration::from_millis(20), limiter.acquire(&legitimate))
+                .await
+                .expect("legitimate peer should get reserved capacity")
+                .expect("limiter open");
+
+        drop(legitimate_permit);
+        drop(flooder_permits);
+    }
+}
 
 #[cfg(test)]
 mod shutdown_tests {

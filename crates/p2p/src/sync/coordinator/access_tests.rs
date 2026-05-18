@@ -35,7 +35,7 @@ use parking_lot::RwLock;
 
 use super::authorizer::RuntimeAuthorizer;
 use super::{
-    SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState,
+    DagFetchLimiter, SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState,
     DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
 };
 
@@ -139,9 +139,7 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
             transport,
             broadcaster,
             failure_tx: None,
-            dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(
-                DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
-            )),
+            dag_fetch_limiter: DagFetchLimiter::new(DEFAULT_MAX_CONCURRENT_DAG_FETCHES),
             push_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
             )),

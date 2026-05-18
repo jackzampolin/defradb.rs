@@ -5,7 +5,7 @@ use std::sync::Arc;
 use acp::{DocumentACP, ReplicatedDocActorRelationships};
 use blockstore::Blockstore;
 
-use super::{SyncCoordinator, SyncShutdownHandle};
+use super::{DagFetchLimiter, SyncCoordinator, SyncShutdownHandle};
 use crate::bitswap::ReplicatorRegistry;
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::manager::SyncManager;
@@ -46,6 +46,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Get the shutdown handle for coordinator-owned background tasks.
     pub fn background_shutdown_handle(&self) -> SyncShutdownHandle {
         self.runtime.shutdown.clone()
+    }
+
+    /// Get the shared DAG fetch limiter.
+    pub(crate) fn dag_fetch_limiter(&self) -> DagFetchLimiter {
+        self.runtime.dag_fetch_limiter.clone()
     }
 
     /// Get the sync manager reference.

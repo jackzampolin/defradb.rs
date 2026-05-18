@@ -353,7 +353,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let transport = self.runtime.transport.clone();
             let blockstore = self.manager.blockstore().clone();
             let event_tx = self.manager.event_sender();
-            let semaphore = self.runtime.dag_fetch_semaphore.clone();
+            let limiter = self.runtime.dag_fetch_limiter.clone();
 
             for (root_cid, doc_id) in cids_to_fetch {
                 tracing::debug!(
@@ -365,13 +365,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 let transport = transport.clone();
                 let blockstore = blockstore.clone();
                 let event_tx = event_tx.clone();
-                let semaphore = semaphore.clone();
+                let limiter = limiter.clone();
                 let source_peer = peer_id.clone();
                 let explicit_replicator_collections =
                     self.access.replicators.get_collections(peer_id.as_str());
 
                 self.spawn_background_task("doc_sync_reply_fetch_dag", async move {
-                    let Ok(_permit) = semaphore.acquire_owned().await else {
+                    let Some(_permits) = limiter.acquire(&source_peer).await else {
                         return;
                     };
                     super::super::dag_fetcher::poll_fetch_dag(

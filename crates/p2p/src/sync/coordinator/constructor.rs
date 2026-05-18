@@ -7,7 +7,9 @@ use blockstore::Blockstore;
 use tokio::sync::mpsc;
 
 use super::authorizer::{AccessAuthorizer, RuntimeAuthorizer};
-use super::{SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState};
+use super::{
+    DagFetchLimiter, SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState,
+};
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Result;
 use crate::sync::broadcaster::Broadcaster;
@@ -129,7 +131,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     transport,
                     broadcaster,
                     failure_tx: None,
-                    dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(max_dag_fetches)),
+                    dag_fetch_limiter: DagFetchLimiter::new(max_dag_fetches),
                     push_semaphore: Arc::new(tokio::sync::Semaphore::new(max_push_tasks)),
                     rate_limiter: Arc::new(PeerRateLimiter::with_backoff_steps(
                         rate_limit_burst,

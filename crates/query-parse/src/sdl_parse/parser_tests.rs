@@ -669,6 +669,25 @@ fn test_collection_ids_are_deterministic() {
 }
 
 #[test]
+fn test_collection_id_matches_go_when_link_string_order_differs_from_cid_order() {
+    let collections = parse_sdl(
+        r#"
+        type Block {
+            data: String
+            idx: Int
+        }
+    "#,
+    )
+    .unwrap();
+
+    let block = &collections[0];
+    assert_eq!(
+        block.collection_id,
+        "bafyreiajfzj23wjpiiborrteeh3h6fmazttq2svb6vzmhxu3n3o2jyk4me",
+    );
+}
+
+#[test]
 fn test_field_ids_are_deterministic() {
     let string_kind = FieldKind::Scalar(ScalarKind::String);
     let id1 = generate_field_id("name", &string_kind, CType::LwwRegister);

@@ -393,26 +393,38 @@ fn test_block_new_sorts_links_by_cid_string() {
 }
 
 #[test]
-fn test_cid_order_matches_string_order_for_block_sort_inputs() {
-    let mut sorted_by_cid = vec![
-        test_cid(),
-        test_cid2(),
-        Cid::from_str(GO_LWW_SIMPLE_CID).unwrap(),
-        Cid::from_str(GO_LWW_HIGH_PRIORITY_CID).unwrap(),
-        Cid::from_str(GO_COUNTER_CID).unwrap(),
-        Cid::from_str(GO_COMPOSITE_ACTIVE_CID).unwrap(),
-        Cid::from_str(GO_COMPOSITE_DELETED_CID).unwrap(),
-        Cid::from_str(GO_COLLECTION_CID).unwrap(),
-        Cid::from_str(GO_LWW_DELETION_CID).unwrap(),
-        Cid::from_str(GO_BLOCK_WITH_ONE_HEAD_CID).unwrap(),
-        Cid::from_str(GO_COMPOSITE_BLOCK_WITH_LINKS_CID).unwrap(),
-    ];
-    let mut sorted_by_string = sorted_by_cid.clone();
+fn test_block_new_uses_string_order_when_cid_byte_order_differs() {
+    let doc_id =
+        Cid::from_str("bafyreihqzhiz3iwro4jozp6kphq4sosg6ccoqcbiaf7rg5dmvea7aux55a").unwrap();
+    let data =
+        Cid::from_str("bafyreih2uk7uwfnwfmffmokgrecoikhuk2sxsfwilwpcazzsi2u37m3tmu").unwrap();
+    let idx = Cid::from_str("bafyreibqvnx5ibtgidcmcpljhzrcct76sxtgxctxiatmnakz2zeztss3ru").unwrap();
 
-    sorted_by_cid.sort_unstable();
-    sorted_by_string.sort_by_cached_key(|cid| cid.to_string());
+    let mut by_bytes = [doc_id, data, idx];
+    by_bytes.sort_unstable();
+    assert_ne!(
+        by_bytes,
+        [idx, data, doc_id],
+        "fixture should cover a CID set where native byte order differs from Go string order",
+    );
 
-    assert_eq!(sorted_by_cid, sorted_by_string);
+    let block = Block::new(
+        test_lww_delta(),
+        vec![data, idx, doc_id],
+        vec![
+            DAGLink::new("_docID", doc_id),
+            DAGLink::new("data", data),
+            DAGLink::new("idx", idx),
+        ],
+    );
+
+    let heads = block.heads.unwrap();
+    assert_eq!(heads, vec![idx, data, doc_id]);
+
+    let links = block.links.unwrap();
+    assert_eq!(links[0].link, idx);
+    assert_eq!(links[1].link, data);
+    assert_eq!(links[2].link, doc_id);
 }
 
 #[test]
