@@ -253,8 +253,8 @@ pub async fn get_all_field_heads(
         }
     }
 
-    // Sort by CID string representation to match Go's Block.New() sorting
-    entries.sort_by_key(|a| a.cid.to_bytes());
+    // Sort by CID string representation to match Go's Block.New() sorting.
+    entries.sort_by_cached_key(|a| a.cid.to_string());
     Ok(entries)
 }
 
@@ -313,7 +313,7 @@ impl DocHeadsSnapshot {
 
         // Sort each field's entries by CID string to match Go's deterministic ordering.
         for entries in entries_by_field.values_mut() {
-            entries.sort_by_key(|a| a.cid.to_bytes());
+            entries.sort_by_cached_key(|a| a.cid.to_string());
         }
 
         Ok(Self {
