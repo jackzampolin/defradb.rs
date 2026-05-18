@@ -611,10 +611,7 @@ mod tests {
         let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc));
 
         let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-        let create_result = mutator
-            .create("TestBranchable", doc)
-            .await
-            .expect("create");
+        let create_result = mutator.create("TestBranchable", doc).await.expect("create");
         let doc_id = create_result.doc_id.clone();
 
         let delete_result = mutator

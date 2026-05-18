@@ -586,24 +586,37 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             return Ok(result);
         }
 
-        // Read the delete composite block that was written during the mutation.
+        // Prefer the delete block the inner mutator just wrote — re-reading
+        // the "latest" composite head via storage would race with concurrent
+        // writes on the same doc and broadcast the wrong block. Fall back to
+        // reading from storage only when commit artifacts are missing.
         let doc_id_str = doc_id.to_string();
-        let block_result = match read_latest_composite_block(&self.db, &doc_id_str).await {
-            Ok(br) => br,
-            Err(e) => {
-                tracing::error!(
-                    doc_id = %doc_id,
-                    collection = %collection_name,
-                    error = %e,
-                    "Failed to read delete composite block for P2P broadcast"
-                );
-                return Ok(DeleteResult::with_broadcast(
-                    result.doc_id,
-                    result.existed,
-                    BroadcastStatus::Failed(format!("Block read failed: {}", e)),
-                ));
-            }
-        };
+        let block_result =
+            if let (Some(cid), Some(block)) = (result.commit_cid, result.commit_block.as_ref()) {
+                BlockResult {
+                    cid,
+                    block: block.clone(),
+                    doc_id: doc_id_str,
+                    field_cids: vec![],
+                }
+            } else {
+                match read_latest_composite_block(&self.db, &doc_id_str).await {
+                    Ok(br) => br,
+                    Err(e) => {
+                        tracing::error!(
+                            doc_id = %doc_id,
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to read delete composite block for P2P broadcast"
+                        );
+                        return Ok(DeleteResult::with_broadcast(
+                            result.doc_id,
+                            result.existed,
+                            BroadcastStatus::Failed(format!("Block read failed: {}", e)),
+                        ));
+                    }
+                }
+            };
 
         // Read broadcast creator DID before spawning (reads thread-local state).
         let creator_did = defra_core::signing::get_broadcast_creator_did();
