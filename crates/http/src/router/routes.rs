@@ -61,7 +61,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
             "/",
             get(handlers::list_collections)
                 .post(handlers::schema::add_schema)
-                .patch(handlers::patch_collection),
+                .patch(handlers::patch_collection)
+                .delete(handlers::delete_collections_by_names),
         )
         .route("/default", post(handlers::set_active))
         .route(

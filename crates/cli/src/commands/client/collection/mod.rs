@@ -39,6 +39,8 @@ pub struct CollectionArgs {
 pub enum CollectionCommand {
     /// Add a new collection from an SDL definition
     Add(CollectionAddArgs),
+    /// Delete one or more collections by name
+    Delete(CollectionDeleteArgs),
     /// Describe a collection
     Describe(CollectionDescribeArgs),
     /// List all collections
@@ -103,6 +105,23 @@ pub struct SetActiveArgs {
 #[derive(Args, Debug)]
 pub struct TruncateArgs {}
 
+/// Arguments for delete command (Go #4688 parity).
+#[derive(Args, Debug)]
+pub struct CollectionDeleteArgs {
+    /// One or more collection names. A single name, or a comma-separated list
+    /// (e.g. `Users,Books`) may be provided. All named collections are removed
+    /// atomically in a single operation, which lets you delete collections that
+    /// reference each other via relations.
+    #[arg(value_name = "COLLECTION_NAMES")]
+    pub names: String,
+
+    /// Delete only the active head version of each named collection, keeping
+    /// earlier versions intact. By default, every version of each named
+    /// collection is deleted.
+    #[arg(long)]
+    pub active_only: bool,
+}
+
 impl CollectionAddArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         let mut sdl_parts = Vec::new();
@@ -142,6 +161,7 @@ impl CollectionArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
             CollectionCommand::Add(args) => args.execute(ctx).await,
+            CollectionCommand::Delete(args) => args.execute(ctx).await,
             CollectionCommand::Describe(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::List(args) => args.execute(ctx).await,
             CollectionCommand::Patch(args) => args.execute(ctx).await,

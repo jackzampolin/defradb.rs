@@ -82,4 +82,12 @@ impl CollectionManagementOperations for MockCollectionManagementOperations {
     async fn delete_collection(&self, _name: &str) -> Result<(), String> {
         Ok(())
     }
+
+    async fn delete_collections(
+        &self,
+        _names: Vec<String>,
+        _active_only: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }

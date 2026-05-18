@@ -127,4 +127,15 @@ impl<S: Store + 'static> CollectionManagementOperations for CollectionManagement
             .await
             .map_err(|e| format!("{}", e))
     }
+
+    async fn delete_collections(
+        &self,
+        names: Vec<String>,
+        active_only: bool,
+    ) -> Result<(), String> {
+        self.database
+            .delete_collections(names, active_only)
+            .await
+            .map_err(|e| format!("{}", e))
+    }
 }

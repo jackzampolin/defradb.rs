@@ -5,8 +5,10 @@
 //!
 //! All endpoints enforce NAC permissions when NAC is enabled.
 
+use std::collections::HashMap;
+
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -358,6 +360,58 @@ pub async fn delete_collection(
         .map_err(http_error_from_backend_message)?;
 
     Ok(Json(serde_json::json!({})))
+}
+
+/// Delete one or more collections by name (Go #4688 parity).
+///
+/// DELETE /api/v0/collections?name=Users,Books&active-only=true
+///
+/// Query parameters:
+/// - `name` (required): comma-separated list of collection names.
+/// - `active-only` (optional, default false): if true, deletes only the active
+///   head version of each named collection; if false, deletes every version.
+///
+/// Requires `CollectionPatch` permission when NAC is enabled.
+pub async fn delete_collections_by_names(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<StatusCode, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
+
+    let raw_names = params
+        .get("name")
+        .ok_or_else(|| HttpError::BadRequest("missing required 'name' query parameter".into()))?;
+
+    let names: Vec<String> = raw_names
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if names.is_empty() {
+        return Err(HttpError::BadRequest(
+            "'name' query parameter must contain at least one non-empty name".into(),
+        ));
+    }
+
+    let active_only = match params.get("active-only") {
+        Some(raw) => raw.parse::<bool>().map_err(|_| {
+            HttpError::BadRequest(format!(
+                "'active-only' must be true or false, got '{}'",
+                raw
+            ))
+        })?,
+        None => false,
+    };
+
+    let collection_mgmt = state.require_collection_mgmt()?;
+    collection_mgmt
+        .delete_collections(names, active_only)
+        .await
+        .map_err(http_error_from_backend_message)?;
+
+    Ok(StatusCode::OK)
 }
 
 #[cfg(test)]
