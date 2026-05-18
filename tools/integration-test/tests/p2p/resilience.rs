@@ -281,7 +281,8 @@ for_each_p2p_topology_3_ignored!(rate_limiter_saturation, rate_limiter_saturatio
 /// (node2) to still get its document fetched promptly.
 ///
 /// Topology: node1 → node0 ← node2
-/// 16+ concurrent DAG fetches from node1 must not starve node2.
+/// A burst exceeding the Rust DAG-fetch concurrency limit from node1 must not
+/// starve node2.
 async fn dag_semaphore_exhaustion_test(cluster: TestCluster) {
     let node0 = cluster.client(0);
     let node1 = cluster.client(1);
@@ -297,8 +298,8 @@ async fn dag_semaphore_exhaustion_test(cluster: TestCluster) {
     // node2 → node0: legitimate peer pushes into target
     setup_replication_link(&cluster, 2, 0, &["Block"]).await;
 
-    // Create 20 documents on node1 rapidly — exceeds MAX_CONCURRENT_DAG_FETCHES=16
-    // to ensure the semaphore is fully occupied when node2's doc arrives.
+    // Create 20 documents on node1 rapidly — exceeds Rust's default DAG-fetch
+    // concurrency limit to ensure the limiter is occupied when node2's doc arrives.
     const FLOOD_COUNT: usize = 20;
     for i in 0..FLOOD_COUNT {
         node1

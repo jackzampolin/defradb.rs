@@ -44,8 +44,8 @@ pub struct SyncConfig {
 
     /// Maximum number of concurrent DAG fetch tasks spawned by the coordinator.
     ///
-    /// Caps fan-out from DocSync and BranchableSync replies to prevent resource
-    /// exhaustion from a peer advertising a large number of head CIDs.
+    /// Caps fan-out from DocSync, BranchableSync, and push-driven DAG recovery to
+    /// prevent resource exhaustion from a peer advertising a large number of head CIDs.
     pub max_concurrent_dag_fetches: usize,
 
     /// Maximum number of concurrent push tasks for sending blocks to replicators.
