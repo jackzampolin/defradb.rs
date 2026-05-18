@@ -1,4 +1,6 @@
-use integration_test::{for_each_runtime, TestCluster};
+use std::time::Duration;
+
+use integration_test::{for_each_runtime, open_events_sse, poll_until, TestCluster};
 
 async fn txn_schema_add_and_mutate(cluster: TestCluster) {
     let client = cluster.client(0);
@@ -325,3 +327,158 @@ async fn transactions_test(cluster: TestCluster) {
 }
 
 for_each_runtime!(transactions, transactions_test);
+
+async fn txn_commit_publishes_update_events(cluster: TestCluster) {
+    let client = cluster.client(0);
+    let api_url = cluster.api_url(0);
+
+    // Schema first (auto-commit, generates events we don't care about)
+    client
+        .schema_add("type TxEvent { name: String value: Int }")
+        .expect("schema add");
+
+    // Open SSE stream BEFORE the tx so we capture every emitted event
+    let (sse_handle, events) = open_events_sse(api_url, "update").await;
+
+    // Drain any startup events from schema add
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let baseline = events.lock().unwrap().len();
+
+    // Open a transaction and do three writes inside it
+    let tx_id = client.tx_create().expect("tx_create failed");
+
+    let create_a = client
+        .query_with_tx(
+            r#"mutation { add_TxEvent(input: {name: "a", value: 1}) { _docID } }"#,
+            &tx_id,
+        )
+        .expect("create a in tx");
+    let create_b = client
+        .query_with_tx(
+            r#"mutation { add_TxEvent(input: {name: "b", value: 2}) { _docID } }"#,
+            &tx_id,
+        )
+        .expect("create b in tx");
+    let create_c = client
+        .query_with_tx(
+            r#"mutation { add_TxEvent(input: {name: "c", value: 3}) { _docID } }"#,
+            &tx_id,
+        )
+        .expect("create c in tx");
+    let doc_a = create_a["add_TxEvent"][0]["_docID"]
+        .as_str()
+        .expect("missing _docID for TxEvent a")
+        .to_string();
+    let doc_b = create_b["add_TxEvent"][0]["_docID"]
+        .as_str()
+        .expect("missing _docID for TxEvent b")
+        .to_string();
+    let doc_c = create_c["add_TxEvent"][0]["_docID"]
+        .as_str()
+        .expect("missing _docID for TxEvent c")
+        .to_string();
+
+    // Critical assertion: zero events while tx is uncommitted
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    {
+        let observed = events.lock().unwrap();
+        let count_after_writes = observed.len();
+        assert_eq!(
+            count_after_writes, baseline,
+            "no update events should fire before tx commit; got {} new events",
+            count_after_writes.saturating_sub(baseline)
+        );
+    }
+
+    // Commit the transaction
+    client.tx_commit(&tx_id).expect("tx_commit failed");
+
+    // After commit: exactly three events should arrive, one per doc
+    poll_until(
+        || {
+            let observed = events.lock().unwrap();
+            let new_events: Vec<_> = observed.iter().skip(baseline).collect();
+            new_events.len() >= 3
+        },
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        "three update events should arrive after tx commit",
+    )
+    .await;
+
+    // Validate doc_ids match
+    let observed = events.lock().unwrap();
+    let new_events: Vec<_> = observed.iter().skip(baseline).collect();
+    assert_eq!(
+        new_events.len(),
+        3,
+        "expected exactly 3 update events after commit; got {}",
+        new_events.len()
+    );
+    let observed_doc_ids: std::collections::HashSet<String> = new_events
+        .iter()
+        .filter_map(|e| e.pointer("/data/doc_id").and_then(|v| v.as_str()))
+        .map(String::from)
+        .collect();
+    assert!(observed_doc_ids.contains(&doc_a), "missing event for doc_a={doc_a}");
+    assert!(observed_doc_ids.contains(&doc_b), "missing event for doc_b={doc_b}");
+    assert!(observed_doc_ids.contains(&doc_c), "missing event for doc_c={doc_c}");
+
+    // Also validate cids are non-default (catches missing block writes)
+    for event in &new_events {
+        let cid = event.pointer("/data/cid").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(!cid.is_empty(), "event cid should not be empty: {event:?}");
+    }
+
+    sse_handle.abort();
+}
+
+#[tokio::test]
+async fn rust_txn_commit_publishes_update_events() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    txn_commit_publishes_update_events(cluster).await;
+}
+
+async fn txn_discard_publishes_no_events(cluster: TestCluster) {
+    let client = cluster.client(0);
+    let api_url = cluster.api_url(0);
+
+    client
+        .schema_add("type TxDiscard { name: String }")
+        .expect("schema add");
+
+    let (sse_handle, events) = open_events_sse(api_url, "update").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let baseline = events.lock().unwrap().len();
+
+    let tx_id = client.tx_create().expect("tx_create failed");
+    client
+        .query_with_tx(
+            r#"mutation { add_TxDiscard(input: {name: "doomed"}) { _docID } }"#,
+            &tx_id,
+        )
+        .expect("create in tx");
+
+    // Discard, not commit
+    client.tx_discard(&tx_id).expect("tx_discard failed");
+
+    // Wait long enough that an event would have arrived if it were going to
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let observed = events.lock().unwrap();
+    assert_eq!(
+        observed.len(),
+        baseline,
+        "no events should fire on discard; got {} new events",
+        observed.len().saturating_sub(baseline)
+    );
+
+    sse_handle.abort();
+}
+
+#[tokio::test]
+async fn rust_txn_discard_publishes_no_events() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    txn_discard_publishes_no_events(cluster).await;
+}
