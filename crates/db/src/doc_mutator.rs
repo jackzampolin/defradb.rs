@@ -483,3 +483,91 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use events::{Bus, ChannelBus, EventName};
+    use query::mutator::DocMutator;
+    use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use storage::backends::MemoryStore;
+
+    async fn make_test_db_with_bus() -> (Arc<DB<MemoryStore>>, Arc<dyn Bus>) {
+        let bus: Arc<dyn Bus> = Arc::new(ChannelBus::new());
+        let mut db = DB::new(MemoryStore::new()).expect("create db");
+        db.set_event_bus(Arc::clone(&bus));
+        (Arc::new(db), bus)
+    }
+
+    fn test_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "TestDoc",
+            "v1",
+            "col-test-doc",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "x", FieldKind::int()),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn create_in_tx_publishes_event_on_commit() {
+        let (db, bus) = make_test_db_with_bus().await;
+        db.create_collection(test_collection()).await.expect("schema");
+
+        let mut sub = bus.subscribe(&[EventName::Update]);
+
+        let txn = db.new_txn(false).await.expect("new_txn");
+        let mutator = DbDocMutator::new(Arc::clone(&db), txn);
+
+        let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
+        let result = mutator.create("TestDoc", doc).await.expect("create");
+
+        // Before commit: no event should have fired
+        assert!(
+            sub.try_recv().is_err(),
+            "no event should fire before commit"
+        );
+
+        let txn = mutator.take_txn().await.expect("take txn");
+        txn.commit().await.expect("commit");
+
+        // After commit: one Update event arrives
+        let msg = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            sub.recv(),
+        )
+        .await
+        .expect("event arrived within timeout")
+        .expect("subscription not closed");
+
+        let update = msg.as_update().expect("expected Update message");
+        assert_eq!(update.doc_id, result.doc_id.to_string());
+        assert_ne!(update.cid, cid::Cid::default(), "cid should be populated");
+    }
+
+    #[tokio::test]
+    async fn create_in_tx_publishes_no_event_on_discard() {
+        let (db, bus) = make_test_db_with_bus().await;
+        db.create_collection(test_collection()).await.expect("schema");
+
+        let mut sub = bus.subscribe(&[EventName::Update]);
+
+        let txn = db.new_txn(false).await.expect("new_txn");
+        let mutator = DbDocMutator::new(Arc::clone(&db), txn);
+
+        let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
+        mutator.create("TestDoc", doc).await.expect("create");
+
+        let txn = mutator.take_txn().await.expect("take txn");
+        txn.discard().expect("discard");
+
+        // Allow a brief window for any (unexpected) async delivery
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            sub.try_recv().is_err(),
+            "discard should not publish events"
+        );
+    }
+}
