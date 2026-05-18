@@ -1830,3 +1830,48 @@ fn test_secondary_relation_is_primary_false() {
         "one-to-one primary relation should auto-create a unique FK index"
     );
 }
+
+#[test]
+fn test_one_to_many_collection_ids_match_go() {
+    let sdl = r#"
+        type Book {
+            name: String
+            rating: Float
+            author: Author
+        }
+        type Author {
+            name: String
+            age: Int
+            verified: Boolean
+            published: [Book]
+        }
+    "#;
+
+    let collections = parse_sdl(sdl).unwrap();
+    let book = collections.iter().find(|c| c.name == "Book").unwrap();
+    let author = collections.iter().find(|c| c.name == "Author").unwrap();
+
+    assert_eq!(
+        book.collection_id,
+        "bafyreihpq2q7a7bgpmp54uwzpwomrmzar77qu4ncjrukumbj66pxomrlsq",
+    );
+    assert_eq!(
+        author.collection_id,
+        "bafyreibsjnlzaqfu6lq2njqjfgot2p4lwjhoxp63karkxzfu7flft4fohy",
+    );
+    assert_eq!(
+        book.field_by_name("author")
+            .unwrap()
+            .kind
+            .relation_collection_id(),
+        Some(author.collection_id.as_str()),
+    );
+    assert_eq!(
+        author
+            .field_by_name("published")
+            .unwrap()
+            .kind
+            .relation_collection_id(),
+        Some(book.collection_id.as_str()),
+    );
+}

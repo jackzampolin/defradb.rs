@@ -428,6 +428,44 @@ fn test_block_new_uses_string_order_when_cid_byte_order_differs() {
 }
 
 #[test]
+fn test_block_new_sorts_heads_and_links_by_cid_string_with_base32_digits() {
+    let verified =
+        Cid::from_str("bafyreia2kmnlqm63352ye3sqtvy2bwdtv2a2sybejjikurxsh4v5vliemy").unwrap();
+    let name =
+        Cid::from_str("bafyreiaezc5g33yzhyzcgbyiv476lovyztyoliotzksdfogoep5ktgpedq").unwrap();
+    let age = Cid::from_str("bafyreiefugdbpc563kqcjoe4pjrgavtv3ysbhpzp5smdwb4stxeldmronm").unwrap();
+    let doc_id =
+        Cid::from_str("bafyreihqzhiz3iwro4jozp6kphq4sosg6ccoqcbiaf7rg5dmvea7aux55a").unwrap();
+
+    let block = Block::new(
+        test_lww_delta(),
+        vec![doc_id, verified, age, name],
+        vec![
+            DAGLink::new("_docID", doc_id),
+            DAGLink::new("verified", verified),
+            DAGLink::new("age", age),
+            DAGLink::new("name", name),
+        ],
+    );
+
+    assert_eq!(
+        block.heads.unwrap(),
+        vec![verified, name, age, doc_id],
+        "Go sorts block heads by CID string"
+    );
+    assert_eq!(
+        block
+            .links
+            .unwrap()
+            .into_iter()
+            .map(|link| link.link)
+            .collect::<Vec<_>>(),
+        vec![verified, name, age, doc_id],
+        "Go sorts block links by CID string"
+    );
+}
+
+#[test]
 fn test_dag_link_equality_is_unaffected_by_sorting() {
     let link = DAGLink::new("field", test_cid());
     let mut sorted = [link.clone()];
