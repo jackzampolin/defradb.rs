@@ -53,8 +53,10 @@ impl<S: Store> BatchMutator<S> {
 }
 
 impl<S: Store + 'static> BatchMutator<S> {
+    #[allow(clippy::too_many_arguments)]
     async fn register_update_callback(
         &self,
+        collection_name: String,
         collection_id: String,
         doc_id: String,
         doc_cid: Cid,
@@ -68,11 +70,16 @@ impl<S: Store + 'static> BatchMutator<S> {
         register_update_event_callback(
             txn,
             self.db.event_bus(),
+            // BatchMutator is the auto-commit-batch path; broadcast is handled
+            // by the BroadcastMutator wrapper at the per-mutation layer.
+            None,
+            collection_name,
             collection_id,
             doc_id,
             doc_cid,
             doc_block,
             collection_block,
+            None,
         )
         .map_err(|e| {
             query::error::QueryError::execution(format!(
@@ -202,6 +209,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         };
 
         self.register_update_callback(
+            collection_name.to_string(),
             collection.collection_id().to_string(),
             doc_id.to_string(),
             doc_cid,
@@ -319,6 +327,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         if let Some(doc_id) = doc.id() {
             self.register_update_callback(
+                collection_name.to_string(),
                 collection.collection_id().to_string(),
                 doc_id.to_string(),
                 doc_cid,
@@ -408,6 +417,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         };
 
         self.register_update_callback(
+            collection_name.to_string(),
             collection.collection_id().to_string(),
             doc_id.to_string(),
             doc_cid,

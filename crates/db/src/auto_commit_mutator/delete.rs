@@ -43,8 +43,21 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         match result {
             Ok(existed) => {
+                // DeleteNode treats existed==false as a no-op; don't write a
+                // tombstone block or emit an event for a missing doc.
+                if !existed {
+                    if let Err(e) = txn.commit().await {
+                        warn!(
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to commit transaction after no-op delete"
+                        );
+                    }
+                    return Ok(DeleteResult::new(doc_id.clone(), existed));
+                }
+
                 // Build delete block (composite with status=2) in a scoped block
-                let commit_result: Option<(Cid, Vec<u8>)> = {
+                let commit_result: Option<CommitArtifacts> = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
                             "failed to get blockstore: {}",
@@ -75,10 +88,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         Ok(block_result) => {
                             let composite_cid = block_result.cid;
 
-                            // For branchable collections, also create a collection-level block
+                            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
                             if collection.schema().is_branchable {
                                 let short_id = collection.resolved_root_id();
-                                if let Err(e) = write_collection_block(
+                                match write_collection_block(
                                     &blockstore,
                                     &headstore,
                                     short_id,
@@ -87,17 +100,21 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                                     sign_config.as_ref(),
                                 )
                                 .await
-                                .map(|_| ())
                                 {
-                                    warn!(
-                                        collection = %collection_name,
-                                        error = %e,
-                                        "Failed to write collection block for branchable delete"
-                                    );
+                                    Ok((col_cid, col_bytes)) => {
+                                        col_block_data = Some((col_cid, col_bytes));
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            collection = %collection_name,
+                                            error = %e,
+                                            "Failed to write collection block for branchable delete"
+                                        );
+                                    }
                                 }
                             }
 
-                            Some((composite_cid, block_result.block))
+                            Some((composite_cid, block_result.block, col_block_data))
                         }
                         Err(e) => {
                             warn!(
@@ -123,12 +140,19 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     )));
                 }
 
-                // Emit update event for subscriptions (deletes are also "updates")
-                let cid = commit_result.as_ref().map(|(c, _)| *c).unwrap_or_default();
-                self.emit_update_events(&collection, &doc_id.to_string(), cid);
+                // Emit update event for subscriptions when blocks were written.
+                if let Some((cid, block, col_data)) = commit_result.as_ref() {
+                    self.emit_update_events(
+                        &collection,
+                        &doc_id.to_string(),
+                        *cid,
+                        block.clone(),
+                        col_data.clone(),
+                    );
+                }
 
                 match commit_result {
-                    Some((cid, block)) => Ok(DeleteResult::with_commit(
+                    Some((cid, block, _col_data)) => Ok(DeleteResult::with_commit(
                         doc_id.clone(),
                         existed,
                         cid,

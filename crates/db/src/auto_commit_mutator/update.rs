@@ -173,13 +173,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     )));
                 }
 
-                // Emit update event for subscriptions
-                if let Some(doc_id) = doc.id() {
-                    let cid = commit_result
-                        .as_ref()
-                        .map(|(c, _, _)| *c)
-                        .unwrap_or_default();
-                    self.emit_update_events(&collection, &doc_id.to_string(), cid);
+                // Emit update event for subscriptions when blocks were written.
+                if let (Some(doc_id), Some((cid, block, col_data))) =
+                    (doc.id(), commit_result.as_ref())
+                {
+                    self.emit_update_events(
+                        &collection,
+                        &doc_id.to_string(),
+                        *cid,
+                        block.clone(),
+                        col_data.clone(),
+                    );
                 }
 
                 // Count modified fields
