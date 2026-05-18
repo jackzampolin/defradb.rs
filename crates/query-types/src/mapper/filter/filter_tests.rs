@@ -137,6 +137,26 @@ fn test_not_filter() {
 }
 
 #[test]
+fn test_alias_null_filter_is_valid_and_matches_none() {
+    let filter = Filter::from_conditions(map([("_alias".to_string(), json!(null))]));
+    let mapping = make_mapping();
+    let fields = make_fields();
+
+    assert!(filter.validate_depth().is_ok());
+    assert!(!filter.matches(&fields, &mapping).unwrap());
+}
+
+#[test]
+fn test_alias_scalar_filter_is_valid_and_matches_none() {
+    let filter = Filter::from_conditions(map([("_alias".to_string(), json!(1))]));
+    let mapping = make_mapping();
+    let fields = make_fields();
+
+    assert!(filter.validate_depth().is_ok());
+    assert!(!filter.matches(&fields, &mapping).unwrap());
+}
+
+#[test]
 fn test_custom_filter_depth_limit() {
     let filter = Filter::from_conditions(map([(
         "_and".to_string(),
