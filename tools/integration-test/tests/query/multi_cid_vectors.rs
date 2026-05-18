@@ -150,7 +150,11 @@ async fn multi_cid_simple_multiple_cids_test(cluster: TestCluster) {
         ))
         .expect("query Users by multiple CIDs");
 
-    assert_eq!(names(&result), ["John", "Fred"]);
+    assert_eq!(
+        names(&result),
+        ["John", "Fred"],
+        "unexpected Users result for CIDs {SIMPLE_JOHN_CID}, {SIMPLE_FRED_CID}: {result}"
+    );
 }
 
 async fn multi_cid_simple_duplicate_cids_for_same_doc_test(cluster: TestCluster) {
@@ -170,7 +174,11 @@ async fn multi_cid_simple_duplicate_cids_for_same_doc_test(cluster: TestCluster)
         ))
         .expect("query Users by duplicate CIDs");
 
-    assert_eq!(names(&result), ["John"]);
+    assert_eq!(
+        names(&result),
+        ["John"],
+        "unexpected Users result for duplicate CID {SIMPLE_JOHN_CID}: {result}"
+    );
 }
 
 async fn multi_cid_simple_multiple_cids_for_same_doc_test(cluster: TestCluster) {
@@ -195,7 +203,11 @@ async fn multi_cid_simple_multiple_cids_for_same_doc_test(cluster: TestCluster) 
         ))
         .expect("query Users by multiple CIDs for one doc");
 
-    assert_eq!(names(&result), ["John", "Johnnn"]);
+    assert_eq!(
+        names(&result),
+        ["John", "Johnnn"],
+        "unexpected Users result for CIDs {SIMPLE_JOHN_CID}, {SIMPLE_JOHNNN_CID}: {result}"
+    );
 }
 
 async fn multi_cid_commits_different_docs_test(cluster: TestCluster) {
@@ -219,7 +231,11 @@ async fn multi_cid_commits_different_docs_test(cluster: TestCluster) {
         ))
         .expect("query _commits by multiple CIDs");
 
-    assert_eq!(commit_cids(&result), [john_cid, fred_cid]);
+    assert_eq!(
+        commit_cids(&result),
+        [john_cid, fred_cid],
+        "unexpected _commits result: {result}"
+    );
 }
 
 async fn multi_cid_commits_same_doc_test(cluster: TestCluster) {
@@ -245,7 +261,42 @@ async fn multi_cid_commits_same_doc_test(cluster: TestCluster) {
         ))
         .expect("query _commits by multiple CIDs for one doc");
 
-    assert_eq!(commit_cids(&result), [create_cid, update_cid]);
+    assert_eq!(
+        commit_cids(&result),
+        [create_cid, update_cid],
+        "unexpected _commits result: {result}"
+    );
+}
+
+async fn multi_cid_commits_overlapping_depth_dedups_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    node.schema_add(COMMIT_USERS_SCHEMA).expect("add schema");
+
+    let created = add_commit_user(&node, "John", 21);
+    let john_id = extract_doc_id(&created, "add_Users");
+    node.query(&format!(
+        r#"mutation {{ update_Users(docID: "{john_id}", input: {{age: 22}}) {{ _docID age }} }}"#
+    ))
+    .expect("update John");
+
+    let age_create_cid = commit_cid_for_doc_field(&node, &john_id, "age", 1);
+    let age_update_cid = commit_cid_for_doc_field(&node, &john_id, "age", 2);
+
+    let result = node
+        .query(&format!(
+            r#"query {{
+                _commits(cid: ["{age_update_cid}", "{age_create_cid}"], depth: 2) {{
+                    cid
+                }}
+            }}"#
+        ))
+        .expect("query _commits by overlapping CIDs");
+
+    assert_eq!(
+        commit_cids(&result),
+        [age_update_cid, age_create_cid],
+        "unexpected _commits overlap result: {result}"
+    );
 }
 
 async fn multi_cid_commits_filters_unreadable_cid_test(cluster: TestCluster) {
@@ -299,7 +350,11 @@ async fn multi_cid_commits_filters_unreadable_cid_test(cluster: TestCluster) {
         ))
         .expect("query _commits with unreadable CID");
 
-    assert_eq!(commit_cids(&result), [public_cid]);
+    assert_eq!(
+        commit_cids(&result),
+        [public_cid],
+        "unexpected _commits ACP-filtered result: {result}"
+    );
 }
 
 for_each_runtime!(
@@ -319,6 +374,10 @@ for_each_runtime!(
     multi_cid_commits_different_docs_test
 );
 for_each_runtime!(multi_cid_commits_same_doc, multi_cid_commits_same_doc_test);
+for_each_runtime!(
+    multi_cid_commits_overlapping_depth_dedups,
+    multi_cid_commits_overlapping_depth_dedups_test
+);
 for_each_runtime!(
     multi_cid_commits_filters_unreadable_cid,
     multi_cid_commits_filters_unreadable_cid_test,
