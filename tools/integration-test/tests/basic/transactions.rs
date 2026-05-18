@@ -455,6 +455,24 @@ async fn txn_commit_publishes_update_events(cluster: TestCluster) {
             parsed, default_cid,
             "event cid should not be Cid::default() (would indicate the block write failed): {event:?}"
         );
+
+        // The block field carries hex-encoded composite commit bytes. It
+        // must reach SSE subscribers so downstream consumers (e.g. defra-agent)
+        // can traverse the DAG without an extra round-trip.
+        let block_hex = event
+            .pointer("/data/block")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("event missing /data/block: {event:?}"));
+        assert!(
+            !block_hex.is_empty(),
+            "event block hex should not be empty: {event:?}"
+        );
+        let block_bytes = hex::decode(block_hex)
+            .unwrap_or_else(|e| panic!("block field should be valid hex ({block_hex:?}): {e}"));
+        assert!(
+            !block_bytes.is_empty(),
+            "decoded block bytes should not be empty: {event:?}"
+        );
     }
 
     sse_handle.abort();
