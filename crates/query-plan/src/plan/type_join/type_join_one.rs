@@ -813,6 +813,12 @@ impl TypeJoinOne {
                 None => continue,
             };
 
+            if let Some(ref filter) = self.parent_residual_filter {
+                if !filter.matches(parent_doc.fields(), parent_mapping)? {
+                    continue;
+                }
+            }
+
             // Apply relation filter if present
             if let Some(ref rel_filter) = self.relation_filter {
                 if !self.check_relation_filter(&Some(child_doc.deep_clone()), rel_filter)? {

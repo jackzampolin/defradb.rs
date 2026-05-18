@@ -100,6 +100,8 @@ impl super::Planner {
         filter: Option<&Filter>,
         order_by: Option<&OrderBy>,
         collection: &CollectionVersion,
+        limit: Option<u64>,
+        offset: u64,
     ) -> Option<(IndexScanParams, bool)> {
         if collection.indexes.is_empty() {
             return None;
@@ -115,9 +117,14 @@ impl super::Planner {
         // Try filter-based index first
         if let Some(filter) = filter {
             if let Some(best_index) = select_best_index(filter, &collection.indexes) {
-                if let Some(params) =
-                    filter_to_index_scan(filter, best_index, None, &collection.fields, None, 0)
-                {
+                if let Some(params) = filter_to_index_scan(
+                    filter,
+                    best_index,
+                    order_by,
+                    &collection.fields,
+                    limit,
+                    offset,
+                ) {
                     return Some((params, true));
                 }
             }
@@ -134,8 +141,8 @@ impl super::Planner {
                                 prefix_values: vec![],
                                 reverse: needs_reverse,
                             },
-                            limit: None,
-                            offset: 0,
+                            limit,
+                            offset,
                             value_filter: None,
                         },
                         true,

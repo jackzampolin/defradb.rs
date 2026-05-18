@@ -112,6 +112,29 @@ fn test_can_use_index_like() {
 }
 
 #[test]
+fn test_filter_to_scan_like_sets_value_filter() {
+    let filter = make_filter(map([("name".to_string(), json!({"_like": "%alice%"}))]));
+    let index = single_field_index("name");
+
+    let params = filter_to_index_scan(&filter, &index, None, &[], Some(1), 0).unwrap();
+
+    assert!(matches!(
+        params.value_filter,
+        Some(ScanValueFilter::Like(ref pattern)) if pattern == "%alice%"
+    ));
+    assert!(params
+        .value_filter
+        .as_ref()
+        .unwrap()
+        .matches_value(&NormalValue::NillableString(Some("malice".to_string()))));
+    assert!(params
+        .value_filter
+        .as_ref()
+        .unwrap()
+        .matches_value(&NormalValue::Bytes(b"malice".to_vec())));
+}
+
+#[test]
 fn test_filter_to_scan_exact_match() {
     let filter = make_filter(map([("name".to_string(), json!({"_eq": "alice"}))]));
     let index = single_field_index("name");
