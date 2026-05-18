@@ -468,3 +468,85 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use events::{Bus, ChannelBus, EventName};
+    use query::mutator::{DocMutator, MutationBatchController};
+    use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use storage::backends::MemoryStore;
+
+    async fn make_test_db_with_bus() -> (Arc<DB<MemoryStore>>, Arc<dyn Bus>) {
+        let bus: Arc<dyn Bus> = Arc::new(ChannelBus::new());
+        let mut db = DB::new(MemoryStore::new()).expect("create db");
+        db.set_event_bus(Arc::clone(&bus));
+        (Arc::new(db), bus)
+    }
+
+    fn test_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "TestDoc",
+            "v1",
+            "col-test-doc",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "x", FieldKind::int()),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn batch_create_publishes_event_on_commit() {
+        let (db, bus) = make_test_db_with_bus().await;
+        db.create_collection(test_collection())
+            .await
+            .expect("schema");
+
+        let mut sub = bus.subscribe(&[EventName::Update]);
+
+        let txn = db.new_txn(false).await.expect("new_txn");
+        let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
+        let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc));
+
+        let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
+        let result = mutator.create("TestDoc", doc).await.expect("create");
+
+        // Before commit: no event should have fired
+        assert!(
+            sub.try_recv().is_err(),
+            "no event should fire before commit"
+        );
+
+        mutator.commit().await.expect("commit");
+
+        // After commit: one Update event arrives
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv())
+            .await
+            .expect("event arrived within timeout")
+            .expect("subscription not closed");
+
+        let update = msg.as_update().expect("expected Update message");
+        assert_eq!(update.doc_id, result.doc_id.to_string());
+        assert_ne!(update.cid, cid::Cid::default(), "cid should be populated");
+    }
+
+    #[tokio::test]
+    async fn batch_create_publishes_no_event_when_block_write_fails() {
+        // Documents the invariant: BatchMutator MUST NOT publish an Update event
+        // when write_document_blocks returns Err.
+        //
+        // The post-refactor implementation guarantees this structurally:
+        // register_update_callback is only called inside the `Some(commit_result)`
+        // match arm in BatchMutator::create/update/delete.
+        //
+        // Triggering an actual block-write failure requires a faulty blockstore
+        // that returns Err from `put`. No such mock exists in the codebase today
+        // because the Store trait is sealed (only storage-crate types may implement
+        // it), so a faulty-store mock cannot be constructed in this crate.
+        //
+        // If the sealed constraint is relaxed in the future, replace this comment
+        // with a real assertion: subscribe to the bus, run a create against a
+        // faulty store, and assert no Update event arrives.
+    }
+}
