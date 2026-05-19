@@ -175,11 +175,15 @@ async fn branchable_sync_against_go_defradb() {
 
     eprintln!("issuing pubsub_sync_branchable_collection for {collection_id}");
     let reply = coord
-        .pubsub_sync_branchable_collection(collection_id.clone(), Some(Duration::from_secs(8)))
+        .pubsub_sync_branchable_collection(
+            collection_id.clone(),
+            Some(Duration::from_secs(8)),
+            Some(1),
+        )
         .await
         .expect("call succeeded");
 
-    match &reply {
+    match reply.first() {
         Some((peer, r)) => eprintln!(
             "reply from {peer}: collection={} heads={} sender={}",
             r.collection_id,
@@ -189,7 +193,7 @@ async fn branchable_sync_against_go_defradb() {
         None => eprintln!("no reply"),
     }
 
-    let (_peer, r) = reply.expect("expected a reply from Go peer");
+    let (_peer, r) = reply.first().expect("expected a reply from Go peer");
     assert_eq!(r.collection_id, collection_id);
     assert!(
         !r.heads.is_empty(),

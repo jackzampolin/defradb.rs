@@ -126,25 +126,25 @@ struct HandlerContext {
 
 impl HandlerContext {
     /// Returns `true` when `peer` is authorised to ask for doc-sync heads.
-    /// Delegates to the shared authorizer so the pubsub_rpc path and the
-    /// two-stream `SyncCoordinator::check_peer_is_replicator` make the
-    /// same decision, including the transport replicator-state fallback
-    /// used to close registry cache-miss windows.
+    /// Mirrors Go's `doc-sync` pubsub handler: connected peers may ask for
+    /// heads, with ACP enforced by block serving and merge/read policy.
     async fn peer_may_doc_sync(&self, peer: &libp2p::PeerId) -> bool {
-        self.authorizer
-            .peer_authorized_for_any(&peer.to_string())
-            .await
+        self.authorizer.peer_connected(&peer.to_string())
+            || self
+                .authorizer
+                .peer_authorized_for_any(&peer.to_string())
+                .await
     }
 
     /// Returns `true` when `peer` is authorised to ask for branchable heads
-    /// of `collection_id`. Mirrors Go: subscription is RX-side only, so
-    /// we still serve heads for collections we haven't locally subscribed
-    /// to. The sync-level gate here is just "is this peer allowed to ask
-    /// us"; per-document ACP still applies at merge/read time elsewhere.
+    /// of `collection_id`. Mirrors Go: connected peers may request the
+    /// collection heads; per-document ACP still applies at merge/read time.
     async fn peer_may_branchable_sync(&self, peer: &libp2p::PeerId, collection_id: &str) -> bool {
-        self.authorizer
-            .peer_authorized_for_collection(&peer.to_string(), collection_id)
-            .await
+        self.authorizer.peer_connected(&peer.to_string())
+            || self
+                .authorizer
+                .peer_authorized_for_collection(&peer.to_string(), collection_id)
+                .await
     }
 }
 
@@ -251,6 +251,10 @@ mod tests {
 
     #[async_trait]
     impl AccessAuthorizer for AllowAllAuthorizer {
+        fn peer_connected(&self, _peer_id_str: &str) -> bool {
+            true
+        }
+
         async fn peer_authorized_for_any(&self, _peer_id_str: &str) -> bool {
             true
         }
@@ -267,6 +271,10 @@ mod tests {
 
     #[async_trait]
     impl AccessAuthorizer for DenyAllAuthorizer {
+        fn peer_connected(&self, _peer_id_str: &str) -> bool {
+            false
+        }
+
         async fn peer_authorized_for_any(&self, _peer_id_str: &str) -> bool {
             false
         }
@@ -300,6 +308,10 @@ mod tests {
 
     #[async_trait]
     impl AccessAuthorizer for RecordingAuthorizer {
+        fn peer_connected(&self, _peer_id_str: &str) -> bool {
+            false
+        }
+
         async fn peer_authorized_for_any(&self, _peer_id_str: &str) -> bool {
             self.allow_any.load(Ordering::SeqCst)
         }

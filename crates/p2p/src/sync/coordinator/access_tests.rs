@@ -673,13 +673,8 @@ async fn doc_sync_controlled_mode_allows_replicator() {
     );
 }
 
-// #838: in Controlled mode, a merely-connected peer must not pass
-// `check_peer_is_replicator`. Registry membership or an observed data-topic
-// subscription is required. The previous behaviour silently accepted any
-// authenticated-by-transport peer, which defeats the collection authorization
-// layer.
 #[tokio::test]
-async fn doc_sync_controlled_mode_rejects_non_replicator_connected_peer() {
+async fn doc_sync_controlled_mode_allows_connected_peer() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
 
@@ -694,8 +689,8 @@ async fn doc_sync_controlled_mode_rejects_non_replicator_connected_peer() {
         .await;
 
     assert!(
-        matches!(&result, Err(Error::AccessDenied { .. })),
-        "Connected-but-not-registered peer must be denied in Controlled mode, got {:?}",
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "Connected peer should be allowed for Go-compatible DocSync, got {:?}",
         result
     );
 }
@@ -962,11 +957,8 @@ async fn branchable_sync_controlled_mode_allows_replicator() {
     );
 }
 
-// #838: BranchableSync is collection-scoped on the wire, so a merely
-// connected peer must not pass the per-collection access check if they
-// aren't registered for that specific collection.
 #[tokio::test]
-async fn branchable_sync_controlled_mode_rejects_non_replicator_connected_peer() {
+async fn branchable_sync_controlled_mode_allows_connected_peer() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
 
@@ -981,8 +973,8 @@ async fn branchable_sync_controlled_mode_rejects_non_replicator_connected_peer()
         .await;
 
     assert!(
-        matches!(&result, Err(Error::AccessDenied { .. })),
-        "Connected-but-not-registered peer must be denied in Controlled mode, got {:?}",
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "Connected peer should be allowed for Go-compatible BranchableSync, got {:?}",
         result
     );
 }

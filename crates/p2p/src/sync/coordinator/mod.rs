@@ -35,10 +35,10 @@
 //! - **Document-level ACP** remains the authoritative policy boundary for whether
 //!   replicated document content is actually mergeable/readable locally.
 //!
-//! Collection-scoped access checks are also used for protocols that ask the
-//! receiver to actively serve or enumerate state. Unscoped fetch protocols
-//! (DocSync/CAR) admit registered replicators and observed data-topic
-//! subscribers while still denying peers that are merely connected.
+//! Pull-sync protocols that mirror Go's `doc-sync` / `sync-branchable` RPCs
+//! may be served to connected peers. Document-level ACP remains the
+//! authoritative policy boundary for whether replicated document content is
+//! mergeable/readable locally.
 
 mod access;
 mod accessors;
