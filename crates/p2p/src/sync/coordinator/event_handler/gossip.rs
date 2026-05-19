@@ -24,15 +24,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         );
 
         let topic_matches_collection = topic == message.collection_id;
+        let topic_matches_document = !message.doc_id.is_empty() && topic == message.doc_id;
         let is_subscribed = self
             .is_locally_subscribed_collection(&message.collection_id)
             .await;
         let is_outbound_replicator_target =
             self.is_registered_replicator(propagation_source.as_str(), &message.collection_id);
 
-        if !topic_matches_collection
-            || is_outbound_replicator_target
-            || (!self.access.access_mode.is_open() && !is_subscribed)
+        if (!topic_matches_collection && !topic_matches_document)
+            || (is_outbound_replicator_target && !topic_matches_document)
+            || (!self.access.access_mode.is_open() && !is_subscribed && !topic_matches_document)
         {
             tracing::warn!(
                 peer_id = %propagation_source,
@@ -40,6 +41,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 collection_id = %message.collection_id,
                 doc_id = %message.doc_id,
                 topic_matches_collection,
+                topic_matches_document,
                 is_subscribed,
                 is_outbound_replicator_target,
                 "Dropping GossipSub message outside accepted replication direction"

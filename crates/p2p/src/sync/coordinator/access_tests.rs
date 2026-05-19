@@ -1275,6 +1275,25 @@ async fn gossip_controlled_mode_allows_subscribed_collection() {
 }
 
 #[tokio::test]
+async fn gossip_controlled_mode_allows_document_topic() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(gossip_event_on_topic(peer, "doc1", "collection1"))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "gossip on a subscribed document topic must be accepted, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
 async fn gossip_controlled_mode_rejects_mismatched_topic_and_payload_collection() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
@@ -1296,6 +1315,25 @@ async fn gossip_controlled_mode_rejects_mismatched_topic_and_payload_collection(
     assert!(
         matches!(&result, Err(Error::AccessDenied { .. })),
         "gossip payload collection must match the received topic, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gossip_controlled_mode_rejects_mismatched_document_topic() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(gossip_event_on_topic(peer, "doc2", "collection1"))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "gossip document topic must match the payload document id, got {:?}",
         result
     );
 }
@@ -1328,6 +1366,31 @@ async fn gossip_controlled_mode_rejects_outbound_replicator_target() {
     assert!(
         matches!(&result, Err(Error::AccessDenied { .. })),
         "outbound replicator targets must not be accepted as gossip sources, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gossip_document_topic_allows_outbound_replicator_target() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    peer_state.peer_connected(peer.as_str());
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .create_replicator(&peer, vec!["collection1".to_string()], false)
+        .await
+        .unwrap();
+
+    let result = coordinator
+        .handle_transport_event(gossip_event_on_topic(peer, "doc1", "collection1"))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "document-topic subscriptions must accept updates from outbound replicator targets, got {:?}",
         result
     );
 }
