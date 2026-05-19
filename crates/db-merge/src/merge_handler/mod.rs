@@ -1409,6 +1409,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn composite_parent_replay_updates_headstore_for_merged_parent() {
+        let (handler, blockstore, _bus) = make_handler_with_schema_and_bus().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-users")
+            .unwrap()
+            .expect("users collection should exist");
+
+        let mut doc = Document::new();
+        doc.set("name", NormalValue::String("John".to_string()));
+        doc.generate_and_set_doc_id().unwrap();
+        doc.set_schema_version_id("v1");
+        let doc_id = doc.id().unwrap().clone();
+        let doc_id_str = doc_id.to_string();
+
+        let local_blocks = {
+            let txn = handler.db.new_txn(false).await.unwrap();
+            let blocks = {
+                let datastore = txn.datastore().unwrap();
+                let headstore = txn.headstore().unwrap();
+                let raw_blockstore = txn.blockstore().unwrap();
+                collection
+                    .save_with_datastore(&datastore, &doc)
+                    .await
+                    .unwrap();
+                db_blocks::write_document_blocks(
+                    &raw_blockstore,
+                    &headstore,
+                    &doc,
+                    "v1",
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            };
+            txn.force_commit().await.unwrap();
+            blocks
+        };
+
+        let build_update =
+            |name: &str, priority: u64, field_heads: Vec<Cid>, composite_heads: Vec<Cid>| {
+                let mut data = Vec::new();
+                ciborium::into_writer(&NormalValue::String(name.to_string()), &mut data).unwrap();
+                let field_payload = LwwDeltaPayload {
+                    doc_id: doc_id_str.as_bytes().to_vec(),
+                    field_name: "name".to_string(),
+                    schema_version_id: "v1".to_string(),
+                    priority,
+                    data,
+                };
+                let field_block = Block::new(CrdtDelta::Lww(field_payload), field_heads, vec![]);
+                let field_cid = field_block.generate_cid().unwrap();
+                let field_data = field_block.to_dag_cbor().unwrap();
+
+                let composite_payload = CompositeDeltaPayload {
+                    doc_id: doc_id_str.as_bytes().to_vec(),
+                    schema_version_id: "v1".to_string(),
+                    priority,
+                    status: 1,
+                };
+                let composite_block = Block::new(
+                    CrdtDelta::Composite(composite_payload.clone()),
+                    composite_heads,
+                    vec![DAGLink::new("name", field_cid)],
+                );
+                let composite_cid = composite_block.generate_cid().unwrap();
+                let composite_data = composite_block.to_dag_cbor().unwrap();
+
+                (
+                    field_cid,
+                    field_data,
+                    composite_cid,
+                    composite_block,
+                    composite_payload,
+                    composite_data,
+                )
+            };
+
+        let (
+            parent_field_cid,
+            parent_field_data,
+            parent_cid,
+            _parent_block,
+            _parent_payload,
+            parent_data,
+        ) = build_update(
+            "Shahzad",
+            2,
+            local_blocks.field_cids.clone(),
+            vec![local_blocks.cid],
+        );
+        blockstore
+            .put(&parent_field_cid, &parent_field_data)
+            .await
+            .unwrap();
+        blockstore.put(&parent_cid, &parent_data).await.unwrap();
+
+        let (child_field_cid, child_field_data, child_cid, child_block, child_payload, child_data) =
+            build_update("Chris", 3, vec![parent_field_cid], vec![parent_cid]);
+        blockstore
+            .put(&child_field_cid, &child_field_data)
+            .await
+            .unwrap();
+        blockstore.put(&child_cid, &child_data).await.unwrap();
+
+        let metadata = BlockMetadata::normal(
+            &doc_id_str,
+            "col-users",
+            "did:key:z6MkrCompositeParentReplay",
+            None,
+            false,
+        );
+        let outcome = handler
+            .process_composite_delta(
+                &child_cid,
+                &child_block,
+                &child_payload,
+                &metadata,
+                false,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, MergeOutcome::Merged);
+
+        let txn = handler.db.new_txn(true).await.unwrap();
+        let head_keys = {
+            let headstore = txn.headstore().unwrap();
+            let mut iter = headstore
+                .iterator(storage::corekv::IterOptions::new().with_prefix(
+                    storage::keys::headstore::HeadstoreDocKey::field_prefix(&doc_id_str, "name"),
+                ))
+                .await
+                .unwrap();
+            let mut keys = Vec::new();
+            while let Some(pair) = iter.next().await.unwrap() {
+                keys.push(pair.key);
+            }
+            iter.close().await.unwrap();
+            keys
+        };
+        txn.force_discard().unwrap();
+
+        assert_eq!(
+            head_keys,
+            vec![storage::keys::headstore::HeadstoreDocKey::new(
+                &doc_id_str,
+                "name",
+                child_field_cid
+            )
+            .bytes()]
+        );
+    }
+
+    #[tokio::test]
     async fn composite_skip_field_does_not_mark_unreadable_linked_counter_merged() {
         let (handler, blockstore) = make_handler_with_counter_schema().await;
         let mut doc = Document::new();
