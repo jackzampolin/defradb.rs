@@ -1126,27 +1126,68 @@ async fn pushlog_registered_replicator_is_marked_explicit_replicator() {
     }
 }
 
-// #838: two-stream PushLog ingress must reject connected-only peers that
-// aren't registered for the target collection.
+// Go parity: the direct replicator protocol skips the receiver-side
+// collection access gate. The sending node's replicator registry selects the
+// target; merge-time ACP still applies downstream.
 #[tokio::test]
-async fn two_stream_controlled_mode_rejects_non_replicator_connected_peer() {
+async fn two_stream_controlled_mode_accepts_replicator_protocol_without_local_registration() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
     peer_state.peer_connected(peer.as_str());
 
-    let (coordinator, _events) =
+    let (coordinator, mut events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
 
-    let result = coordinator
-        .handle_transport_event(two_stream_event(peer, "collection1", false))
-        .await;
+    coordinator
+        .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
+        .await
+        .unwrap();
 
-    assert!(
-        matches!(&result, Err(Error::AccessDenied { .. })),
-        "Connected-but-not-registered peer must be denied on two-stream ingress, got {:?}",
-        result
-    );
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+            assert!(
+                !is_explicit_replicator,
+                "ordinary direct replicator pushes should not imply explicit replay trust"
+            );
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn two_stream_controlled_mode_accepts_unknown_peer() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
+        .await
+        .unwrap();
+
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+            assert!(
+                !is_explicit_replicator,
+                "two-stream transport auth and explicit replay trust remain separate"
+            );
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
 }
 
 #[tokio::test]

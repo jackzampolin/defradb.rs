@@ -25,7 +25,9 @@
 //! - **Replicator registration** expresses outbound replay intent and explicit
 //!   replay trust. It controls what we push and which peers are treated as
 //!   explicit replicators.
-//! - **Inbound PushLog acceptance** requires collection replicator membership,
+//! - **Direct replicator PushLog acceptance** follows Go's replicator comm
+//!   channel and skips receiver-side collection access before merge.
+//! - **Pubsub PushLog acceptance** requires collection replicator membership,
 //!   a local collection subscription, or explicit replay authorization.
 //! - **Inbound Gossip acceptance** is topic-scoped to local collection
 //!   subscriptions and rejects outbound replicator targets so one-way
