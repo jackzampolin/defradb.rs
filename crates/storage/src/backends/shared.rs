@@ -242,12 +242,15 @@ impl ReadRange {
 /// checks whether transactions committed after its snapshot either wrote keys it
 /// read or read keys/ranges it wrote, matching Go's SSI conflict behavior.
 #[cfg(not(target_arch = "wasm32"))]
+type CommittedTxnRecord = (u64, HashSet<Vec<u8>>, ReadSet);
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct ConflictTracker {
     /// Monotonically increasing version counter.
     version: std::sync::atomic::AtomicU64,
     /// Read/write sets from committed transactions.
     /// Protected by a mutex since we only access it during commit (not hot path).
-    committed: Mutex<Vec<(u64, HashSet<Vec<u8>>, ReadSet)>>,
+    committed: Mutex<Vec<CommittedTxnRecord>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]

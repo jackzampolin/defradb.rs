@@ -13,6 +13,9 @@ pub use defra_p2p_adapter::{ReplicatorPushOptions, ReplicatorPushOptionsState};
 pub use node::{build_with_store, EmbeddedNode, NodeBuilder};
 pub use node_tasks::BackgroundTasks;
 
+type ReplicatorPushOptionsCallback =
+    Arc<dyn Fn(ReplicatorPushOptions) -> Result<(), String> + Send + Sync>;
+
 /// Storage persistence hints for ACP/NAC setup.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -119,8 +122,7 @@ pub struct ManagedP2PSystem {
     kind: TransportKind,
     ops: Arc<dyn defra_http::P2POperations>,
     replicator_push_options: ReplicatorPushOptionsState,
-    on_replicator_push_options:
-        Option<Arc<dyn Fn(ReplicatorPushOptions) -> Result<(), String> + Send + Sync>>,
+    on_replicator_push_options: Option<ReplicatorPushOptionsCallback>,
     shutdown: node::ShutdownHandle,
 }
 
@@ -158,9 +160,7 @@ impl ManagedP2PSystem {
         ops: Arc<dyn defra_http::P2POperations>,
         shutdown: node::ShutdownHandle,
         replicator_push_options: ReplicatorPushOptionsState,
-        on_replicator_push_options: Option<
-            Arc<dyn Fn(ReplicatorPushOptions) -> Result<(), String> + Send + Sync>,
-        >,
+        on_replicator_push_options: Option<ReplicatorPushOptionsCallback>,
     ) -> Self {
         Self {
             kind,
