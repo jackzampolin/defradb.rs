@@ -25,6 +25,7 @@ impl<S: Store> crate::database::DB<S> {
                 old_schema.fields.iter().map(|f| f.name.as_str()).collect();
             for field in &mut new_schema.fields {
                 if !old_field_names.contains(field.name.as_str())
+                    && !field.kind.is_relation()
                     && field.crdt_type == schema::CType::None
                 {
                     field.crdt_type = schema::CType::LwwRegister;
