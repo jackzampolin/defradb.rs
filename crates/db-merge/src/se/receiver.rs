@@ -98,6 +98,13 @@ pub async fn receive_and_store<S: Writer>(
         })
         .collect();
 
+    let doc_ids = valid_artifacts
+        .iter()
+        .map(|artifact| artifact.doc_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
     if !valid_artifacts.is_empty() {
         store_artifacts(store, &valid_artifacts)
             .await
@@ -109,6 +116,7 @@ pub async fn receive_and_store<S: Writer>(
         collection_id: batch.collection_id,
         stored,
         rejected,
+        doc_ids,
     })
 }
 
@@ -118,12 +126,14 @@ pub struct ReceiveResult {
     pub collection_id: String,
     pub stored: usize,
     pub rejected: usize,
+    pub doc_ids: Vec<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crypto::se::SEARCH_TAG_SIZE;
+    use storage::Store;
 
     fn build_cbor_request(collection_id: &str, artifacts: Vec<(&str, &str, Vec<u8>)>) -> Vec<u8> {
         use serde::Serialize;
@@ -193,5 +203,24 @@ mod tests {
 
         let batch = deserialize_artifacts(&data).unwrap();
         assert_eq!(batch.artifacts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_receive_and_store_reports_stored_doc_ids() {
+        let tag = vec![0u8; SEARCH_TAG_SIZE];
+        let data = build_cbor_request(
+            "users",
+            vec![("doc2", "age", tag.clone()), ("doc1", "age", tag.clone())],
+        );
+        let store = storage::MemoryStore::new();
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        let result = receive_and_store(&mut txn, &data).await.unwrap();
+        txn.commit().await.unwrap();
+
+        assert_eq!(result.collection_id, "users");
+        assert_eq!(result.stored, 2);
+        assert_eq!(result.rejected, 0);
+        assert_eq!(result.doc_ids, vec!["doc1".to_string(), "doc2".to_string()]);
     }
 }

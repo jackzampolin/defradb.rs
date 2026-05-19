@@ -27,6 +27,7 @@ impl Drop for BackgroundTasks {
 pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
     mut events: tokio::sync::mpsc::Receiver<p2p::HostEvent>,
     coordinator: Arc<p2p::sync::Libp2pSyncCoordinator<B>>,
+    store: Arc<impl storage::corekv::Store + 'static>,
     event_bus: Arc<dyn events::Bus>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -54,7 +55,19 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
                 _ => {}
             }
 
-            let transport_event = p2p::convert_host_event(event);
+            let transport_event = match p2p::convert_host_event(event) {
+                p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
+                    handle_se_artifacts_received(
+                        store.clone(),
+                        event_bus.clone(),
+                        peer_id.to_string(),
+                        data,
+                    )
+                    .await;
+                    continue;
+                }
+                other => other,
+            };
             if transport_event.requires_inline_ordering() {
                 if let Err(error) = coordinator.handle_transport_event(transport_event).await {
                     tracing::error!(error = %error, "error handling libp2p event");
@@ -80,6 +93,7 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
         p2p::TransportEvent<<p2p::iroh::IrohTransport as P2PTransport>::ResponseToken>,
     >,
     coordinator: Arc<p2p::sync::IrohSyncCoordinator<B>>,
+    store: Arc<impl storage::corekv::Store + 'static>,
     event_bus: Arc<dyn events::Bus>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -107,6 +121,19 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
                 _ => {}
             }
 
+            let event = match event {
+                p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
+                    handle_se_artifacts_received(
+                        store.clone(),
+                        event_bus.clone(),
+                        peer_id.to_string(),
+                        data,
+                    )
+                    .await;
+                    continue;
+                }
+                other => other,
+            };
             if event.requires_inline_ordering() {
                 if let Err(error) = coordinator.handle_transport_event(event).await {
                     tracing::error!(error = %error, "error handling iroh event");
@@ -124,6 +151,48 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
             });
         }
     })
+}
+
+async fn handle_se_artifacts_received<S: storage::corekv::Store + 'static>(
+    store: Arc<S>,
+    event_bus: Arc<dyn events::Bus>,
+    peer_id: String,
+    data: Vec<u8>,
+) {
+    let mut txn = match store.new_txn(false).await {
+        Ok(txn) => txn,
+        Err(error) => {
+            tracing::warn!(peer_id = %peer_id, error = %error, "failed to create SE artifact transaction");
+            return;
+        }
+    };
+
+    let result = match db_merge::se::receive_and_store(&mut txn, &data).await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(peer_id = %peer_id, error = %error, "failed to receive SE artifacts");
+            return;
+        }
+    };
+
+    if let Err(error) = txn.commit().await {
+        tracing::warn!(peer_id = %peer_id, error = %error, "failed to commit SE artifacts");
+        return;
+    }
+
+    tracing::debug!(
+        peer_id = %peer_id,
+        collection_id = %result.collection_id,
+        stored = result.stored,
+        rejected = result.rejected,
+        "stored incoming SE artifacts"
+    );
+
+    for doc_id in result.doc_ids {
+        event_bus.publish(events::Message::se_artifact_received(
+            events::SEArtifactReceivedData { doc_id },
+        ));
+    }
 }
 
 pub(crate) fn spawn_replication_loop<B, T, S>(
