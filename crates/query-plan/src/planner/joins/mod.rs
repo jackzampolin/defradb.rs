@@ -786,24 +786,38 @@ impl Planner {
             // but the render_keys at THIS level were already correctly set when child_scan_mapping
             // was built. Reassigning would lose those render_keys, causing empty selection items
             // when both an aggregate and selection target the same relation.
-            let nested_joins_result = self.apply_joins(
-                child_plan,
-                nested_select,
-                &target_collection,
-                child_scan_mapping.clone(),
-                depth + 1,
-                ancestor_exhaustive || select.exhaustive,
-                None, // Nested relation filters handled differently
-                &{
-                    let mut child_scope_path = scope_path.to_vec();
-                    child_scope_path.push(output_name.to_string());
-                    child_scope_path
-                },
-            )?;
-            child_plan = nested_joins_result.0;
-            let child_plan_provides_ordering = nested_joins_result.3;
-            // Merge nested aggregate internal keys into our collection
-            aggregate_internal_keys.extend(nested_joins_result.2);
+            // Leaf relation selects have no recursive join work; skipping the
+            // full planner call keeps nested synthetic order dependencies from
+            // burning another large synchronous planner stack frame.
+            let needs_recursive_joins =
+                nested_select.fields.iter().any(|field| {
+                    matches!(field, Requestable::Select(_) | Requestable::Aggregate(_))
+                }) || nested_select
+                    .order_by
+                    .as_ref()
+                    .is_some_and(|order| order.has_relation_order());
+            let child_plan_provides_ordering = if needs_recursive_joins {
+                let nested_joins_result = self.apply_joins(
+                    child_plan,
+                    nested_select,
+                    &target_collection,
+                    child_scan_mapping.clone(),
+                    depth + 1,
+                    ancestor_exhaustive || select.exhaustive,
+                    None, // Nested relation filters handled differently
+                    &{
+                        let mut child_scope_path = scope_path.to_vec();
+                        child_scope_path.push(output_name.to_string());
+                        child_scope_path
+                    },
+                )?;
+                child_plan = nested_joins_result.0;
+                // Merge nested aggregate internal keys into our collection
+                aggregate_internal_keys.extend(nested_joins_result.2);
+                nested_joins_result.3
+            } else {
+                false
+            };
 
             // Apply sub-joins for order_by references to relation fields within this nested select.
             // For example, if the nested select is `book(order: {publisher: {yearOpened: ASC}})`,
