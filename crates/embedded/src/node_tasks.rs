@@ -185,13 +185,14 @@ where
                     reason,
                     terminal,
                 } => {
-                    if *terminal
-                        && !doc_id.is_empty()
+                    let is_document_terminal_skip = !doc_id.is_empty()
                         && matches!(
                             reason.as_str(),
                             "already applied" | "nonce already applied" | "already merged"
-                        )
-                    {
+                        );
+                    let is_collection_terminal_skip =
+                        doc_id.is_empty() && reason == "no linked composites needed merging";
+                    if *terminal && (is_document_terminal_skip || is_collection_terminal_skip) {
                         event_bus.publish(events::Message::merge_complete(
                             events::MergeCompleteData {
                                 doc_id: doc_id.clone(),

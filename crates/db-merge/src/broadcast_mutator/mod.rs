@@ -204,7 +204,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             Some(BlockResult {
                 cid: col_cid,
                 block: col_block.clone(),
-                doc_id: block_result.doc_id.clone(),
+                doc_id: String::new(),
                 field_cids: vec![],
             })
         } else {
@@ -346,7 +346,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 Some(BlockResult {
                     cid: col_cid,
                     block: col_block.clone(),
-                    doc_id: block_result.doc_id.clone(),
+                    doc_id: String::new(),
                     field_cids: vec![],
                 })
             } else {
@@ -494,7 +494,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             Some(BlockResult {
                 cid: col_cid,
                 block: col_block.clone(),
-                doc_id: block_result.doc_id.clone(),
+                doc_id: String::new(),
                 field_cids: vec![],
             })
         } else {
@@ -630,7 +630,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             Some(BlockResult {
                 cid: col_cid,
                 block: col_block.clone(),
-                doc_id: block_result.doc_id.clone(),
+                doc_id: String::new(),
                 field_cids: vec![],
             })
         } else {

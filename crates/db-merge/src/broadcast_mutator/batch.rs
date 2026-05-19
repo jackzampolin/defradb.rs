@@ -187,7 +187,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             let col_block_result = BlockResult {
                 cid: col_cid,
                 block: col_block,
-                doc_id,
+                doc_id: String::new(),
                 field_cids: vec![],
             };
             sync.push_to_replicators_with_creator(
