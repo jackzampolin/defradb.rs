@@ -630,7 +630,7 @@ Please inspect the query plan, explain output, and relation join path.\n",
         )
     } else {
         format!(
-            "I profiled the nested coding-session query and the hot path is still dominated by join work before scoring.\n\
+            "I profiled the nested coding-session query and relation narrowing before scoring is still dominated by join work.\n\
 \n\
 Plan:\n\
 1. Narrow one-to-many children with the foreign-key index.\n\
@@ -675,10 +675,10 @@ fn action_command(config: &CodingSessionFixtureConfig, kind: SessionKind, index:
     let target_bytes = config.action_target_bytes(kind);
     let base = match index % 6 {
         0 => "cargo test -p query nested:: -- --nocapture",
-        1 => "cargo bench -p defra-node --features rocksdb --bin coding-session-bench",
+        1 => "rg pushdown crates/query/src/planner/joins/mod.rs",
         2 => "rg bm25 crates/query/src/runner/query/nested.rs",
         3 => "cargo clippy --all -- -D warnings",
-        4 => "rg pushdown crates/query/src/planner/joins/mod.rs",
+        4 => "cargo bench -p defra-node --features rocksdb --bin coding-session-bench",
         _ => "cargo test -p query type_join_many:: -- --nocapture",
     };
     let suffix = match kind {
@@ -712,17 +712,25 @@ fn primary_focus(index: usize) -> &'static str {
 }
 
 fn rare_terms(index: usize) -> String {
-    [
-        (29, "wand"),
-        (31, "pushdown"),
-        (37, "candidate"),
-        (43, "turbo"),
-        (47, "bm25"),
-    ]
-    .into_iter()
-    .filter_map(|(divisor, term)| index.is_multiple_of(divisor).then_some(term))
-    .collect::<Vec<_>>()
-    .join(" ")
+    let mut terms = match index {
+        1 => vec!["pushdown"],
+        2 => vec!["wand"],
+        3 => vec!["candidate"],
+        _ => Vec::new(),
+    };
+
+    terms.extend(
+        [
+            (29, "wand"),
+            (31, "pushdown"),
+            (37, "candidate"),
+            (43, "turbo"),
+            (47, "bm25"),
+        ]
+        .into_iter()
+        .filter_map(|(divisor, term)| index.is_multiple_of(divisor).then_some(term)),
+    );
+    terms.join(" ")
 }
 
 fn pad_message_payload(

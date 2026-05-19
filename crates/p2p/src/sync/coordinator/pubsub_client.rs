@@ -161,13 +161,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     }
 
     /// Publish a BranchableSync request for `collection_id` and wait up
-    /// to `timeout` (default 5s) for the first reply. Matches Go's
-    /// `SyncBranchableCollection`.
+    /// to `timeout` (default 5s) for peer replies. Matches Go's
+    /// `SyncBranchableCollection`, which processes all replies that arrive
+    /// before the wait context expires.
     pub async fn pubsub_sync_branchable_collection(
         &self,
         collection_id: String,
         timeout: Option<Duration>,
-    ) -> Result<Option<(String, wire::BranchableSyncReply)>> {
+        expected_responses: Option<usize>,
+    ) -> Result<Vec<(String, wire::BranchableSyncReply)>> {
         let Some(services) = self.pubsub_services.as_ref() else {
             return Err(Error::Transport(
                 "pubsub_rpc BranchableSync is not available on this transport".into(),
@@ -186,9 +188,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         )
         .map_err(|e| Error::CborSerialization(e.to_string()))?;
 
-        let mut prep = services
-            .branchable_sync
-            .prepare_publish(req_bytes, PublishOptions::default());
+        let mut prep = services.branchable_sync.prepare_publish(
+            req_bytes,
+            PublishOptions {
+                multi_response: true,
+                ..Default::default()
+            },
+        );
 
         if let Err(e) = self
             .runtime
@@ -201,34 +207,51 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         let wait = timeout.unwrap_or(DEFAULT_PUBSUB_SYNC_TIMEOUT);
-        match tokio::time::timeout(wait, prep.responses.recv()).await {
-            Ok(Some(resp)) => {
-                let peer_str = resp.from.to_string();
-                let parsed = parse_branchable_sync_response(&resp);
-                if let Some(reply) = &parsed {
-                    // Feed through the two-stream handler so DAG fetches
-                    // schedule the same way.
-                    let converted = TwoStreamBranchableSyncReply {
-                        version: crate::protocol::MESSAGE_VERSION.to_string(),
-                        message_id: String::new(),
-                        sender_id: reply.sender.clone(),
-                        pubkey: Vec::new(),
-                        signature: None,
-                        err_message: None,
-                        collection_id: reply.collection_id.clone(),
-                        heads: reply.heads.clone(),
-                    };
-                    if let Err(e) = self
-                        .handle_branchable_sync_reply(PeerId::new(peer_str.clone()), converted)
-                        .await
-                    {
-                        warn!(from = %peer_str, error = %e, "sync-branchable: reply processing failed");
-                    }
-                }
-                Ok(parsed.map(|reply| (peer_str, reply)))
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut out = Vec::new();
+        loop {
+            if expected_responses.is_some_and(|expected| out.len() >= expected) {
+                break;
             }
-            _ => Ok(None),
+
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                break;
+            };
+
+            let Ok(Some(resp)) = tokio::time::timeout(remaining, prep.responses.recv()).await
+            else {
+                break;
+            };
+
+            let peer_str = resp.from.to_string();
+            let Some(reply) = parse_branchable_sync_response(&resp) else {
+                continue;
+            };
+
+            // Feed through the two-stream handler so DAG fetches
+            // schedule the same way.
+            let converted = TwoStreamBranchableSyncReply {
+                version: crate::protocol::MESSAGE_VERSION.to_string(),
+                message_id: String::new(),
+                sender_id: reply.sender.clone(),
+                pubkey: Vec::new(),
+                signature: None,
+                err_message: None,
+                collection_id: reply.collection_id.clone(),
+                heads: reply.heads.clone(),
+            };
+            if let Err(e) = self
+                .handle_branchable_sync_reply(PeerId::new(peer_str.clone()), converted)
+                .await
+            {
+                warn!(from = %peer_str, error = %e, "sync-branchable: reply processing failed");
+            } else {
+                out.push((peer_str, reply));
+            }
         }
+
+        Ok(out)
     }
 }
 

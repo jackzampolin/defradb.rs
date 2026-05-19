@@ -99,8 +99,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 .access
                 .peer_state
                 .peer_subscribed_to_collection(peer_id.as_str(), &collection_id);
+            let is_connected_peer = self.access.peer_state.is_connected(peer_id.as_str());
 
-            if is_collection_replicator || is_collection_subscriber {
+            if is_connected_peer || is_collection_replicator || is_collection_subscriber {
                 authorized.push(cid);
             } else {
                 tracing::debug!(
@@ -108,6 +109,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     doc_id = %doc_id,
                     cid = %cid,
                     collection_id = %collection_id,
+                    is_connected_peer,
                     is_collection_replicator,
                     is_collection_subscriber,
                     "Skipping DocSync head for unauthorized collection"

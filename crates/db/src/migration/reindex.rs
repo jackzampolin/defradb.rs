@@ -58,8 +58,9 @@ impl<S: Store> DB<S> {
 
     /// Reindex a collection after the active version changes (e.g., via patch).
     ///
-    /// If the new active version's history contains any migrations, rebuild
-    /// all secondary indexes with lens-migrated document values.
+    /// Version switches can preserve index definitions while changing the active
+    /// schema. Rebuild entries for the active schema, applying lens migrations
+    /// where the history contains transforms.
     pub(crate) async fn maybe_reindex_on_version_switch(
         &self,
         collection_name: &str,
@@ -70,23 +71,6 @@ impl<S: Store> DB<S> {
         };
 
         if collection.get_indexes().is_empty() {
-            return Ok(());
-        }
-
-        let collection_id = collection.collection_id().to_string();
-        let target_version_id = collection.version_id().to_string();
-
-        let read_txn = self.new_txn(true).await?;
-        let systemstore = read_txn.systemstore()?;
-        let versions = get_collections_by_collection_id(&systemstore, &collection_id).await?;
-        let _ = read_txn.discard();
-
-        let history = crate::lens_utils::build_collection_history(&versions, &target_version_id);
-        let has_migrations = history
-            .as_ref()
-            .is_some_and(|h| h.values().any(|link| link.transform.is_some()));
-
-        if !has_migrations {
             return Ok(());
         }
 
@@ -149,11 +133,6 @@ impl<S: Store> DB<S> {
                 None => return Ok(()),
             }
         };
-
-        let has_migrations = history.values().any(|link| link.transform.is_some());
-        if !has_migrations {
-            return Ok(());
-        }
 
         let write_txn = self.new_txn(false).await?;
 
@@ -234,7 +213,7 @@ impl<S: Store> DB<S> {
                 collection = %collection_name,
                 doc_count = migrated_docs.len(),
                 index_count = collection.get_indexes().len(),
-                "Rebuilt indexes after migration"
+                "Rebuilt indexes after version switch"
             );
         }
 

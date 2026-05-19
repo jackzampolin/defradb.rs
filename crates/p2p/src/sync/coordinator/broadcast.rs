@@ -10,7 +10,7 @@ use cid::Cid;
 
 use super::SyncCoordinator;
 use crate::error::{is_rate_limited_message, Result};
-use crate::message::PushLogRequest;
+use crate::message::{PushLogRequest, PushSEArtifactsRequest, SEArtifact};
 use crate::signing::sign_with_transport;
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::BroadcastResult;
@@ -326,6 +326,45 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     );
                 }
             });
+        }
+    }
+
+    /// Push searchable-encryption artifacts for a committed document to
+    /// replicators of the collection. This mirrors Go's SE coordinator, which
+    /// listens to committed update events independently of document access.
+    pub async fn push_se_artifacts_to_replicators(
+        &self,
+        collection_id: &str,
+        artifacts: Vec<SEArtifact>,
+    ) {
+        if artifacts.is_empty() {
+            return;
+        }
+
+        let Some(replicators) = self.list_replicators_for_push().await else {
+            return;
+        };
+
+        for rep in replicators {
+            if !rep.collections.iter().any(|id| id == collection_id) {
+                continue;
+            }
+
+            let peer_id = PeerId::new(rep.id.clone());
+            let request = PushSEArtifactsRequest::new(collection_id.to_string(), artifacts.clone());
+            if let Err(error) = self
+                .runtime
+                .transport
+                .send_se_artifacts(&peer_id, request)
+                .await
+            {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    collection_id,
+                    error = %error,
+                    "Failed to push SE artifacts to replicator"
+                );
+            }
         }
     }
 

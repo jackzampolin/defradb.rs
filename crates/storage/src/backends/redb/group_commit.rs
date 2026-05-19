@@ -7,13 +7,14 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::config::DurabilityMode;
 use super::KV_TABLE;
-use crate::backends::shared::{CallbackManager, ConflictTracker};
+use crate::backends::shared::{CallbackManager, ConflictTracker, ReadSet};
 use crate::corekv::{AsyncTxnCallback, Error, Result, TxnCallback};
 
 /// Payload for a single transaction's pending commit.
 pub(crate) struct PendingCommit {
     pub changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     pub read_version: u64,
+    pub read_set: ReadSet,
     pub result_tx: oneshot::Sender<Result<()>>,
     pub on_success: Vec<TxnCallback>,
     pub on_success_async: Vec<AsyncTxnCallback>,
@@ -108,7 +109,11 @@ async fn flush_loop(
         let mut failed: Vec<(PendingCommit, Error)> = Vec::new();
 
         for commit in batch {
-            match conflict_tracker.check_and_record(commit.read_version, commit.changes.keys()) {
+            match conflict_tracker.check_and_record(
+                commit.read_version,
+                commit.changes.keys(),
+                &commit.read_set,
+            ) {
                 Ok(()) => passed.push(commit),
                 Err(e) => failed.push((commit, e)),
             }

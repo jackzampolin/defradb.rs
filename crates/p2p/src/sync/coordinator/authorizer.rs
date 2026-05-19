@@ -22,6 +22,9 @@ use crate::transport::{P2PTransport, PeerId};
 /// transport.
 #[async_trait]
 pub(super) trait AccessAuthorizer: Send + Sync {
+    /// Returns `true` when the transport has observed the peer as connected.
+    fn peer_connected(&self, peer_id_str: &str) -> bool;
+
     /// Returns `true` when the peer is allowed to send an any-collection
     /// sync request (DocSync/CAR fetch).
     async fn peer_authorized_for_any(&self, peer_id_str: &str) -> bool;
@@ -80,8 +83,15 @@ impl<T: P2PTransport> RuntimeAuthorizer<T> {
 
 #[async_trait]
 impl<T: P2PTransport> AccessAuthorizer for RuntimeAuthorizer<T> {
+    fn peer_connected(&self, peer_id_str: &str) -> bool {
+        self.peer_state.is_connected(peer_id_str)
+    }
+
     async fn peer_authorized_for_any(&self, peer_id_str: &str) -> bool {
         if self.access_mode.is_open() {
+            return true;
+        }
+        if self.peer_connected(peer_id_str) {
             return true;
         }
         if self.replicators.is_any_replicator(peer_id_str) {

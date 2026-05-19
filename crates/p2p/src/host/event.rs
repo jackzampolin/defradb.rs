@@ -86,8 +86,8 @@ pub enum HostEvent {
     /// Invariant (#838): `is_explicit_replicator` must only be set to
     /// `true` by the two-stream transport after verifying the remote peer via
     /// the signed explicit-replicator handshake. The sync coordinator treats
-    /// this flag as an authenticated claim and skips the `ReplicatorRegistry`
-    /// membership check when it is `true`.
+    /// this flag as merge-time explicit replay trust, separate from the
+    /// direct replicator protocol's Go-compatible pre-merge acceptance.
     TwoStreamRequest {
         peer_id: PeerId,
         request: crate::message::PushLogRequest,

@@ -269,6 +269,13 @@ impl<S: Store> crate::database::DB<S> {
                 }
             }
         }
+        let mut deleting_versions: std::collections::HashSet<&str> =
+            also_deleting.iter().map(String::as_str).collect();
+        deleting_versions.insert(version_id);
+        let is_deleting_last_local_version = all_versions.iter().all(|version| {
+            version.collection_id != collection_id
+                || deleting_versions.contains(version.version_id.as_str())
+        });
 
         // Validate: no documents exist
         if target_schema.is_active {
@@ -333,6 +340,9 @@ impl<S: Store> crate::database::DB<S> {
             if let Ok(mut cache) = self.collections.write() {
                 cache.remove(&name);
             }
+        }
+        if is_deleting_last_local_version {
+            self.forbid_collection_id(&collection_id)?;
         }
 
         tracing::info!(

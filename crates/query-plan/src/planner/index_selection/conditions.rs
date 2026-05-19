@@ -51,6 +51,7 @@ pub(super) fn should_fallback_to_full_scan(
             cond.op,
             FilterOp::Gt | FilterOp::Gte | FilterOp::Lt | FilterOp::Lte
         ) && !is_numeric_filter_value(&cond.value)
+            && !(cond.op == FilterOp::Lte && is_null && !has_nested_path)
         {
             return true;
         }

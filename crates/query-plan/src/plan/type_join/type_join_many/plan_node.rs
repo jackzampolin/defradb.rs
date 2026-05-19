@@ -86,9 +86,13 @@ impl PlanNode for TypeJoinMany {
             );
         }
 
-        // Add filter child plan's index_fetches to the display child's
-        if let Some(fetches) = filter_index_fetches {
-            self.go_child_metrics.index_fetches += fetches;
+        // Go's relation-filter path accounts the indexed filter scan together
+        // with the display child scan in the subType metrics.
+        if let Some(info) = filter_index_fetches {
+            self.go_child_metrics.iterations += info.iterations;
+            self.go_child_metrics.doc_fetches += info.docs_fetched;
+            self.go_child_metrics.field_fetches += info.fields_fetched;
+            self.go_child_metrics.index_fetches += info.indexes_fetched;
         }
 
         self.initialized = true;

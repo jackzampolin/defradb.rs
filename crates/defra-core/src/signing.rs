@@ -250,29 +250,39 @@ pub fn find_remote_signer_did() -> Option<String> {
     })
 }
 
-/// Resolve signing config for a request identity.
+/// Resolve signing config for a request identity when signing is enabled.
 ///
 /// When an explicit identity DID is provided, uses that identity's signing config
 /// (falling back to node identity for JWT-authenticated users without local keys).
+///
+/// Callers that need to respect a runtime signing flag should use
+/// [`resolve_signing_config_with_flag`].
+pub fn resolve_signing_config(
+    identity_did: Option<&str>,
+    node_identity_did: Option<&str>,
+) -> Option<SigningConfig> {
+    resolve_signing_config_with_flag(identity_did, node_identity_did, true)
+}
+
+/// Resolve signing config for a request identity.
+///
+/// When signing is enabled and an explicit identity DID is provided, uses that
+/// identity's signing config (falling back to node identity for JWT-authenticated
+/// users without local keys).
 ///
 /// When no identity is provided (anonymous request):
 /// - If signing is enabled on the node, uses the node identity to sign
 ///   (matching Go's `!signingDisabled` check)
 /// - Otherwise, produces unsigned blocks
-pub fn resolve_signing_config(
-    identity_did: Option<&str>,
-    node_identity_did: Option<&str>,
-) -> Option<SigningConfig> {
-    resolve_signing_config_with_flag(identity_did, node_identity_did, false)
-}
-
-/// Like `resolve_signing_config` but with explicit signing-enabled flag.
-/// When `signing_enabled` is true, anonymous requests still sign with the node identity.
 pub fn resolve_signing_config_with_flag(
     identity_did: Option<&str>,
     node_identity_did: Option<&str>,
     signing_enabled: bool,
 ) -> Option<SigningConfig> {
+    if !signing_enabled {
+        return None;
+    }
+
     match identity_did {
         Some(did) if !did.is_empty() => {
             get_identity(did).or_else(|| node_identity_did.and_then(get_identity))
@@ -354,6 +364,10 @@ mod tests {
         clear_identity_store();
         store_identity("did:key:request", make_config("request"));
         store_identity("did:key:node", make_config("node"));
+
+        let disabled =
+            resolve_signing_config_with_flag(Some("did:key:request"), Some("did:key:node"), false);
+        assert!(disabled.is_none());
 
         let resolved = resolve_signing_config(Some("did:key:request"), Some("did:key:node"))
             .expect("request identity should resolve");

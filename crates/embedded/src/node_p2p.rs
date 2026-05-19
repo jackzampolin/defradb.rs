@@ -12,7 +12,8 @@ use crate::node_tasks::{
 };
 use crate::{Libp2pConfig, ManagedP2PSystem, TransportKind};
 use defra_p2p_adapter::{
-    DbDocPusher, DbVersionSyncer, DocPusher, P2PAdapter, ReplicatorPushOptionsState,
+    DbDocPusher, DbVersionSyncer, DocPusher, P2PAdapter, ReplicatorPushOptions,
+    ReplicatorPushOptionsState,
 };
 
 pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
@@ -135,8 +136,12 @@ where
         tracing::warn!(error = %error, "failed to start pubsub_rpc services");
     }
 
-    let host_event_task =
-        spawn_libp2p_event_handler(event_rx, coordinator.clone(), event_bus.clone());
+    let host_event_task = spawn_libp2p_event_handler(
+        event_rx,
+        coordinator.clone(),
+        store.clone(),
+        event_bus.clone(),
+    );
     let replication_task = spawn_replication_loop(
         coordinator.clone(),
         sync_events_rx,
@@ -172,7 +177,14 @@ where
     adapter.set_initial_tracked_documents(restored_doc_ids);
     let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
-    let system = Arc::new(ManagedP2PSystem::with_replicator_push_options(
+    let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
+    let se_options_callback = Arc::new(move |options: ReplicatorPushOptions| {
+        broadcast_mutator_for_se.set_se_options(db_merge::BroadcastSeOptions {
+            encryption_key: options.se_encryption_key,
+            identity_pubkey: options.se_identity_pubkey,
+        })
+    });
+    let system = Arc::new(ManagedP2PSystem::with_replicator_push_options_callback(
         TransportKind::Libp2p,
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
         crate::node::ShutdownHandle::libp2p(
@@ -186,6 +198,7 @@ where
             ],
         ),
         replicator_push_options,
+        Some(se_options_callback),
     ));
 
     Ok(P2PSetup {
@@ -266,8 +279,12 @@ where
         Err(error) => tracing::warn!(error = %error, "failed to load persisted P2P collections"),
     }
 
-    let event_handler_task =
-        spawn_iroh_event_handler(event_rx, coordinator.clone(), event_bus.clone());
+    let event_handler_task = spawn_iroh_event_handler(
+        event_rx,
+        coordinator.clone(),
+        store.clone(),
+        event_bus.clone(),
+    );
     let replication_task = spawn_replication_loop(
         coordinator.clone(),
         sync_events_rx,
@@ -306,7 +323,14 @@ where
     adapter.set_initial_tracked_documents(restored_doc_ids);
     let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
-    let system = Arc::new(ManagedP2PSystem::with_replicator_push_options(
+    let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
+    let se_options_callback = Arc::new(move |options: ReplicatorPushOptions| {
+        broadcast_mutator_for_se.set_se_options(db_merge::BroadcastSeOptions {
+            encryption_key: options.se_encryption_key,
+            identity_pubkey: options.se_identity_pubkey,
+        })
+    });
+    let system = Arc::new(ManagedP2PSystem::with_replicator_push_options_callback(
         TransportKind::Iroh,
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
         crate::node::ShutdownHandle::iroh(
@@ -321,6 +345,7 @@ where
             ],
         ),
         replicator_push_options,
+        Some(se_options_callback),
     ));
 
     Ok(P2PSetup {

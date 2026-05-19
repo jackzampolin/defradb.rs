@@ -673,13 +673,8 @@ async fn doc_sync_controlled_mode_allows_replicator() {
     );
 }
 
-// #838: in Controlled mode, a merely-connected peer must not pass
-// `check_peer_is_replicator`. Registry membership or an observed data-topic
-// subscription is required. The previous behaviour silently accepted any
-// authenticated-by-transport peer, which defeats the collection authorization
-// layer.
 #[tokio::test]
-async fn doc_sync_controlled_mode_rejects_non_replicator_connected_peer() {
+async fn doc_sync_controlled_mode_allows_connected_peer() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
 
@@ -694,8 +689,8 @@ async fn doc_sync_controlled_mode_rejects_non_replicator_connected_peer() {
         .await;
 
     assert!(
-        matches!(&result, Err(Error::AccessDenied { .. })),
-        "Connected-but-not-registered peer must be denied in Controlled mode, got {:?}",
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "Connected peer should be allowed for Go-compatible DocSync, got {:?}",
         result
     );
 }
@@ -962,11 +957,8 @@ async fn branchable_sync_controlled_mode_allows_replicator() {
     );
 }
 
-// #838: BranchableSync is collection-scoped on the wire, so a merely
-// connected peer must not pass the per-collection access check if they
-// aren't registered for that specific collection.
 #[tokio::test]
-async fn branchable_sync_controlled_mode_rejects_non_replicator_connected_peer() {
+async fn branchable_sync_controlled_mode_allows_connected_peer() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
 
@@ -981,8 +973,8 @@ async fn branchable_sync_controlled_mode_rejects_non_replicator_connected_peer()
         .await;
 
     assert!(
-        matches!(&result, Err(Error::AccessDenied { .. })),
-        "Connected-but-not-registered peer must be denied in Controlled mode, got {:?}",
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "Connected peer should be allowed for Go-compatible BranchableSync, got {:?}",
         result
     );
 }
@@ -1126,27 +1118,68 @@ async fn pushlog_registered_replicator_is_marked_explicit_replicator() {
     }
 }
 
-// #838: two-stream PushLog ingress must reject connected-only peers that
-// aren't registered for the target collection.
+// Go parity: the direct replicator protocol skips the receiver-side
+// collection access gate. The sending node's replicator registry selects the
+// target; merge-time ACP still applies downstream.
 #[tokio::test]
-async fn two_stream_controlled_mode_rejects_non_replicator_connected_peer() {
+async fn two_stream_controlled_mode_accepts_replicator_protocol_without_local_registration() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
     peer_state.peer_connected(peer.as_str());
 
-    let (coordinator, _events) =
+    let (coordinator, mut events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
 
-    let result = coordinator
-        .handle_transport_event(two_stream_event(peer, "collection1", false))
-        .await;
+    coordinator
+        .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
+        .await
+        .unwrap();
 
-    assert!(
-        matches!(&result, Err(Error::AccessDenied { .. })),
-        "Connected-but-not-registered peer must be denied on two-stream ingress, got {:?}",
-        result
-    );
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+            assert!(
+                !is_explicit_replicator,
+                "ordinary direct replicator pushes should not imply explicit replay trust"
+            );
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn two_stream_controlled_mode_accepts_unknown_peer() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
+        .await
+        .unwrap();
+
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+            assert!(
+                !is_explicit_replicator,
+                "two-stream transport auth and explicit replay trust remain separate"
+            );
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
 }
 
 #[tokio::test]
@@ -1234,6 +1267,25 @@ async fn gossip_controlled_mode_allows_subscribed_collection() {
 }
 
 #[tokio::test]
+async fn gossip_controlled_mode_allows_document_topic() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(gossip_event_on_topic(peer, "doc1", "collection1"))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "gossip on a subscribed document topic must be accepted, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
 async fn gossip_controlled_mode_rejects_mismatched_topic_and_payload_collection() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
@@ -1255,6 +1307,25 @@ async fn gossip_controlled_mode_rejects_mismatched_topic_and_payload_collection(
     assert!(
         matches!(&result, Err(Error::AccessDenied { .. })),
         "gossip payload collection must match the received topic, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gossip_controlled_mode_rejects_mismatched_document_topic() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(gossip_event_on_topic(peer, "doc2", "collection1"))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "gossip document topic must match the payload document id, got {:?}",
         result
     );
 }
@@ -1287,6 +1358,31 @@ async fn gossip_controlled_mode_rejects_outbound_replicator_target() {
     assert!(
         matches!(&result, Err(Error::AccessDenied { .. })),
         "outbound replicator targets must not be accepted as gossip sources, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gossip_document_topic_allows_outbound_replicator_target() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    peer_state.peer_connected(peer.as_str());
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .create_replicator(&peer, vec!["collection1".to_string()], false)
+        .await
+        .unwrap();
+
+    let result = coordinator
+        .handle_transport_event(gossip_event_on_topic(peer, "doc1", "collection1"))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "document-topic subscriptions must accept updates from outbound replicator targets, got {:?}",
         result
     );
 }

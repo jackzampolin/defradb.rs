@@ -87,9 +87,16 @@ impl<S: Store> crate::database::DB<S> {
         let version_id = &schema.version_id.clone();
         let collection_id = &schema.collection_id.clone();
 
-        // Check if collection exists in txn cache or store
-        if txn.get_collection(&name).await?.is_some() {
-            return Err(Error::CollectionAlreadyExists(name));
+        // Check if collection exists in txn cache or store. Go's collection
+        // repository forbids a collection as soon as its last local version is
+        // deleted, even for transactions whose storage snapshot still contains
+        // the old schema. Allow those transactions to redeclare it.
+        if let Some(existing) = txn.get_collection(&name).await?.cloned() {
+            if self.is_collection_forbidden(existing.collection_id())? {
+                txn.uncache_collection(&name);
+            } else {
+                return Err(Error::CollectionAlreadyExists(name));
+            }
         }
 
         let systemstore = txn.systemstore()?;
@@ -263,6 +270,7 @@ impl<S: Store> crate::database::DB<S> {
         let finalized_schema = self.create_collection_with_txn(&mut txn, schema).await?;
 
         txn.commit().await?;
+        self.unforbid_collection_id(finalized_schema.collection_id.as_str())?;
 
         // Update the process-wide cache after successful commit
         let mut cache = self.collections.write().map_err(|e| {
@@ -365,6 +373,9 @@ impl<S: Store> crate::database::DB<S> {
         }
 
         txn.commit().await?;
+        for schema in &finalized_schemas {
+            self.unforbid_collection_id(schema.collection_id.as_str())?;
+        }
 
         // Update the process-wide cache after successful commit
         let mut cache = self.collections.write().map_err(|e| {
