@@ -454,6 +454,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let db = self.db.clone();
         let schemas_for_cache = finalized.clone();
         txn.on_success(Box::new(move || {
+            for schema in &schemas_for_cache {
+                let _ = db.unforbid_collection_id(&schema.collection_id);
+            }
             if let Ok(mut cache) = db.collections.write() {
                 for schema in &schemas_for_cache {
                     cache.insert(schema.name.clone(), Collection::new(schema.clone()));
@@ -586,7 +589,15 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let mut versions = Vec::new();
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
             match serde_json::from_slice::<schema::CollectionVersion>(&pair.value) {
-                Ok(col) => versions.push(col),
+                Ok(mut col) => {
+                    crate::collection::populate_collection_root_id(&systemstore, &mut col).await?;
+                    if self.db.is_collection_forbidden(&col.collection_id)?
+                        && !txn.was_collection_created(&col.collection_id)
+                    {
+                        continue;
+                    }
+                    versions.push(col);
+                }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,

@@ -103,6 +103,44 @@ impl<S: Store> crate::database::DB<S> {
             .cloned())
     }
 
+    pub(crate) fn forbid_collection_id(&self, collection_id: &str) -> Result<()> {
+        let mut forbidden = self.forbidden_collection_ids.write().map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                collection_id = %collection_id,
+                "Forbidden collection lock poisoned during forbid"
+            );
+            Error::LockPoisoned("forbidden collection lock poisoned during forbid".into())
+        })?;
+        forbidden.insert(collection_id.to_string());
+        Ok(())
+    }
+
+    pub(crate) fn unforbid_collection_id(&self, collection_id: &str) -> Result<()> {
+        let mut forbidden = self.forbidden_collection_ids.write().map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                collection_id = %collection_id,
+                "Forbidden collection lock poisoned during unforbid"
+            );
+            Error::LockPoisoned("forbidden collection lock poisoned during unforbid".into())
+        })?;
+        forbidden.remove(collection_id);
+        Ok(())
+    }
+
+    pub(crate) fn is_collection_forbidden(&self, collection_id: &str) -> Result<bool> {
+        let forbidden = self.forbidden_collection_ids.read().map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                collection_id = %collection_id,
+                "Forbidden collection lock poisoned during lookup"
+            );
+            Error::LockPoisoned("forbidden collection lock poisoned during lookup".into())
+        })?;
+        Ok(forbidden.contains(collection_id))
+    }
+
     /// Get a snapshot of all collections (for use by DbTransactionRegistry).
     ///
     /// Returns an immutable snapshot that provides snapshot isolation for transactions.

@@ -17,7 +17,7 @@ use lens::MemoryTransformStore;
 use lens::TransformStore;
 #[cfg(feature = "native")]
 use lens::WasmTransformStore;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use storage::corekv::Store;
@@ -149,6 +149,11 @@ pub struct DB<S: Store> {
     /// Emulates Go's persistent headstore for CID computation during patching.
     /// Key: collection name, Value: (sorted heads as CIDs, max height)
     pub(crate) schema_heads: RwLock<HashMap<String, (Vec<Cid>, u64)>>,
+    /// Collection IDs whose last local version has been deleted.
+    ///
+    /// Go's collection repository forbids these immediately, including for
+    /// transactions that started before the deletion committed.
+    pub(crate) forbidden_collection_ids: RwLock<HashSet<String>>,
 }
 
 impl<S: Store> DB<S> {
@@ -176,6 +181,7 @@ impl<S: Store> DB<S> {
             lens_store,
             pending_migrations: RwLock::new(HashMap::new()),
             schema_heads: RwLock::new(HashMap::new()),
+            forbidden_collection_ids: RwLock::new(HashSet::new()),
         })
     }
 
@@ -225,6 +231,7 @@ impl<S: Store> DB<S> {
             lens_store,
             pending_migrations: RwLock::new(HashMap::new()),
             schema_heads: RwLock::new(HashMap::new()),
+            forbidden_collection_ids: RwLock::new(HashSet::new()),
         })
     }
 
