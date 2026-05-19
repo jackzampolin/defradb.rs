@@ -88,7 +88,15 @@ pub async fn write_document_blocks(
 
             let (value_bytes, encryption_cid) = if let Some(enc) = encryption_config {
                 if enc.should_encrypt_field(field_name) {
-                    let key = defra_core::encryption::generate_encryption_key();
+                    let key_field_name = if enc.should_encrypt_individual_field(field_name) {
+                        Some(field_name.as_str())
+                    } else {
+                        None
+                    };
+                    let key = defra_core::encryption::generate_encryption_key_for(
+                        &doc_id_str,
+                        key_field_name,
+                    );
                     let encrypted = encrypt_delta(&value_bytes, &key)?;
 
                     tracing::debug!(
@@ -97,14 +105,9 @@ pub async fn write_document_blocks(
                         "Encrypted field delta"
                     );
 
-                    let is_field_level = enc.encrypt_fields.iter().any(|f| f == field_name);
                     let enc_block = Encryption {
                         doc_id: doc_id_bytes.clone(),
-                        field_name: if is_field_level {
-                            Some(field_name.clone())
-                        } else {
-                            None
-                        },
+                        field_name: key_field_name.map(ToOwned::to_owned),
                         key: key.to_vec(),
                     };
                     let enc_bytes = enc_block
@@ -255,7 +258,7 @@ pub async fn write_document_blocks(
 
     let composite_encryption_cid = if let Some(enc) = encryption_config {
         if enc.encrypt_doc {
-            let key = defra_core::encryption::generate_encryption_key();
+            let key = defra_core::encryption::generate_encryption_key_for(&doc_id_str, None);
             let enc_block = Encryption {
                 doc_id: doc_id_str.as_bytes().to_vec(),
                 field_name: None,
