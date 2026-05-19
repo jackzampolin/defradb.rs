@@ -537,9 +537,13 @@ impl<'a> SdlParser<'a> {
                             .map(|f| !f.field_type.is_list)
                             .unwrap_or(false);
 
-                        // Track primary FK fields for potential auto-index creation.
+                        // Track primary one-to-one FK fields for potential auto-index creation.
+                        // Go does not auto-create one-to-many FK indexes; those require
+                        // an explicit @index on the relation field.
                         // We defer coverage checks until all user-defined indexes exist.
-                        auto_fk_indexes.push((id_field_name.clone(), is_one_to_one));
+                        if is_one_to_one {
+                            auto_fk_indexes.push((id_field_name.clone(), true));
+                        }
                     }
                     fields.push(id_field);
                 }

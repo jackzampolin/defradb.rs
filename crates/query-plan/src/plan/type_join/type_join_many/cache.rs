@@ -19,7 +19,7 @@ impl TypeJoinMany {
     pub(super) async fn build_filter_child_cache(
         &mut self,
         parent_scope: Option<&HashSet<String>>,
-    ) -> Result<Option<u64>> {
+    ) -> Result<Option<ExecInfo>> {
         let Some(filter_plan) = self.filter_child_plan.as_mut() else {
             return Ok(None);
         };
@@ -44,10 +44,10 @@ impl TypeJoinMany {
             }
         }
 
-        let fetches = filter_plan.exec_info().indexes_fetched;
+        let info = filter_plan.exec_info();
         filter_plan.close().await?;
 
-        Ok(Some(fetches))
+        Ok(Some(info))
     }
 
     pub(super) fn filter_child_doc_count(&self) -> usize {

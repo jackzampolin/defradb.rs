@@ -125,18 +125,13 @@ fn test_parse_relation() {
     assert!(author_field.kind.is_relation());
     assert!(!author_field.kind.is_array());
 
-    let author_idx = post
-        .indexes
-        .iter()
-        .find(|idx| {
-            idx.fields
+    assert!(
+        post.indexes.iter().all(|idx| {
+            !idx.fields
                 .first()
                 .is_some_and(|field| field.name == "_authorID")
-        })
-        .expect("expected auto-created FK index on _authorID");
-    assert!(
-        !author_idx.unique,
-        "one-to-many relation should auto-create a non-unique FK index"
+        }),
+        "one-to-many relation FK indexes require an explicit @index"
     );
 }
 

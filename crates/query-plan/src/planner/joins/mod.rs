@@ -801,6 +801,7 @@ impl Planner {
                 },
             )?;
             child_plan = nested_joins_result.0;
+            let child_plan_provides_ordering = nested_joins_result.3;
             // Merge nested aggregate internal keys into our collection
             aggregate_internal_keys.extend(nested_joins_result.2);
 
@@ -1171,10 +1172,10 @@ impl Planner {
                             )
                     })?;
                     // Check if any index covers this FK field
-                    let index = target_collection
-                        .indexes
-                        .iter()
-                        .find(|idx| idx.fields.first().is_some_and(|f| f.name == fk_field.name))?;
+                    let index = target_collection.indexes.iter().find(|idx| {
+                        !idx.auto_generated
+                            && idx.fields.first().is_some_and(|f| f.name == fk_field.name)
+                    })?;
                     Some((fk_field.name.clone(), index.name.clone()))
                 });
                 let has_child_fk_index = child_fk_index_info.is_some();
@@ -1215,6 +1216,13 @@ impl Planner {
                         .is_some_and(|order| order.has_relation_order())
                 {
                     join_many = join_many.with_preserve_ordered_orphans();
+                }
+                if nested_order_by
+                    .as_ref()
+                    .is_some_and(|order| order.has_relation_order())
+                    && child_plan_provides_ordering
+                {
+                    join_many = join_many.with_child_plan_provides_ordering();
                 }
                 if use_per_parent {
                     join_many = join_many.with_per_parent_child_scan();
