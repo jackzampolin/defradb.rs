@@ -12,6 +12,14 @@ use crate::error::{Error, Result};
 use crate::identity::Identity;
 use crate::permission::DocumentPermission;
 
+fn actor_subject(actor: &Did) -> Subject {
+    if actor.is_wildcard() {
+        Subject::Wildcard
+    } else {
+        Subject::Entity(actor.clone())
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S> {
@@ -106,20 +114,9 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
             return Ok(true);
         }
 
-        let did = match identity {
-            Identity::Authenticated(did) => did,
-            Identity::Anonymous => {
-                tracing::info!(
-                    target: "acp::audit",
-                    event = "permission_denied",
-                    subject = "anonymous",
-                    permission = ?permission,
-                    collection = %resource_name,
-                    doc_id = %doc_id,
-                    "Permission denied: anonymous cannot access registered docs"
-                );
-                return Ok(false);
-            }
+        let subject = match identity {
+            Identity::Authenticated(did) => did.clone(),
+            Identity::Anonymous => Did::wildcard(),
         };
 
         self.ensure_policy(policy_id, resource_name).await?;
@@ -131,7 +128,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
             let mut result = false;
             for perm in DocumentPermission::implies_read_permissions() {
                 match engine
-                    .check(policy_id, resource_name, doc_id, perm.as_str(), did)
+                    .check(policy_id, resource_name, doc_id, perm.as_str(), &subject)
                     .await
                 {
                     Ok(true) => {
@@ -147,7 +144,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
             let relation = Self::permission_to_relation(permission);
             let engine = self.engine.read().await;
             engine
-                .check(policy_id, resource_name, doc_id, relation, did)
+                .check(policy_id, resource_name, doc_id, relation, &subject)
                 .await?
         };
 
@@ -155,7 +152,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
             tracing::debug!(
                 target: "acp::audit",
                 event = "permission_granted",
-                subject = %did,
+                subject = %subject,
                 permission = ?permission,
                 collection = %resource_name,
                 doc_id = %doc_id,
@@ -165,7 +162,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
             tracing::info!(
                 target: "acp::audit",
                 event = "permission_denied",
-                subject = %did,
+                subject = %subject,
                 permission = ?permission,
                 collection = %resource_name,
                 doc_id = %doc_id,
@@ -204,15 +201,10 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         )
         .await?;
 
+        let subject = actor_subject(target);
         let has = self
             .store
-            .has_relationship(
-                policy_id,
-                collection_id,
-                doc_id,
-                relation,
-                &Subject::Entity(target.clone()),
-            )
+            .has_relationship(policy_id, collection_id, doc_id, relation, &subject)
             .await?;
 
         if has {
@@ -229,7 +221,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
             return Ok(false);
         }
 
-        let rel = Relationship::with_entity(collection_id, doc_id, relation, target.clone());
+        let rel = Relationship::new(collection_id, doc_id, relation, subject);
         self.store.store_relationship(policy_id, &rel).await?;
 
         tracing::info!(
@@ -274,7 +266,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         )
         .await?;
 
-        let rel = Relationship::with_entity(collection_id, doc_id, relation, target.clone());
+        let rel = Relationship::new(collection_id, doc_id, relation, actor_subject(target));
         let deleted = self.store.delete_relationship(policy_id, &rel).await?;
 
         if deleted {
