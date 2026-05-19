@@ -56,6 +56,21 @@ pub(crate) struct CompositeMergeState {
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
+    async fn is_composite_block_already_merged(&self, cid: &Cid) -> bool {
+        match self.blockstore.is_merged(cid).await {
+            Ok(true) => true,
+            Ok(false) => false,
+            Err(e) => {
+                tracing::debug!(
+                    cid = %cid,
+                    error = %e,
+                    "Failed to check composite merge status"
+                );
+                false
+            }
+        }
+    }
+
     /// Process a Composite delta from a block.
     ///
     /// Composite deltas contain links to the actual field LWW/Counter blocks.
@@ -163,6 +178,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         );
                         continue;
                     }
+                }
+                if self.is_composite_block_already_merged(head_cid).await {
+                    tracing::debug!(
+                        parent_cid = %head_cid,
+                        child_cid = %cid,
+                        "Parent composite already merged in blockstore, skipping recursive processing"
+                    );
+                    continue;
                 }
 
                 let head_data = match self.blockstore.get(head_cid).await {
@@ -486,6 +509,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if batch_merged_guard.contains(head_cid) {
                         continue;
                     }
+                }
+                if self.is_composite_block_already_merged(head_cid).await {
+                    continue;
                 }
 
                 let head_data = match self.blockstore.get(head_cid).await {
