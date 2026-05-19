@@ -242,6 +242,14 @@ fn build_env(ctx: &WorktreeContext) -> HashMap<String, String> {
     // Enable Rust FFI client
     env.insert("DEFRA_CLIENT_RUST_FFI".to_string(), "true".to_string());
 
+    // Permit deterministic encryption key/nonce mode only for this Go test
+    // process. The release FFI library refuses to enable the hidden
+    // Go-compatibility crypto switches without this explicit test gate.
+    env.insert(
+        "DEFRA_ALLOW_DETERMINISTIC_TEST_CRYPTO".to_string(),
+        "1".to_string(),
+    );
+
     // Enable vector embedding tests
     env.insert("DEFRA_VECTOR_EMBEDDING".to_string(), "true".to_string());
 

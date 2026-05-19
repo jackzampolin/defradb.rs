@@ -1286,6 +1286,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn counter_standalone_skips_already_merged_block() {
+        let (handler, blockstore) = make_handler_with_counter_schema().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-counters")
+            .unwrap()
+            .expect("counter collection should exist");
+        let mut doc = Document::new();
+        doc.generate_and_set_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().clone();
+        let doc_id_str = doc_id.to_string();
+
+        let mut delta_data = Vec::new();
+        ciborium::into_writer(&5_i64, &mut delta_data).unwrap();
+
+        let payload = CounterDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            field_name: "score".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            data: delta_data,
+            nonce: 999,
+        };
+        let block = Block {
+            delta: CrdtDelta::Counter(payload.clone()),
+            heads: None,
+            links: None,
+            encryption: None,
+            signature: None,
+        };
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+        blockstore.put(&cid, &block_data).await.unwrap();
+        blockstore.mark_as_merged(&cid).await.unwrap();
+
+        let metadata = BlockMetadata::normal(
+            &doc_id_str,
+            "col-counters",
+            "did:key:z6MkrCounterReplayTest",
+            None,
+            false,
+        );
+        let outcome = handler
+            .process_counter_delta(&cid, &payload, &metadata)
+            .await
+            .unwrap();
+        assert!(outcome.is_terminal_skip());
+
+        let txn = handler.db.new_txn(true).await.unwrap();
+        let stored = {
+            let datastore = txn.datastore().unwrap();
+            collection
+                .get_with_datastore(&datastore, &doc_id)
+                .await
+                .unwrap()
+        };
+        txn.force_discard().unwrap();
+        assert!(
+            stored.is_none(),
+            "standalone re-delivery must not materialize an already-merged counter block"
+        );
+    }
+
+    #[tokio::test]
     async fn composite_merge_skips_locally_merged_counter_parent() {
         let (handler, blockstore) = make_handler_with_counter_schema().await;
         let collection = handler

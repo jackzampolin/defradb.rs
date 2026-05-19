@@ -68,8 +68,24 @@ use std::ffi::{c_char, CString};
 /// Error message for invalid node handle.
 pub const ERR_INVALID_NODE_HANDLE: &str = "invalid node handle";
 
+const DETERMINISTIC_TEST_CRYPTO_ENV: &str = "DEFRA_ALLOW_DETERMINISTIC_TEST_CRYPTO";
+
+fn deterministic_test_crypto_env_enabled() -> bool {
+    matches!(
+        std::env::var(DETERMINISTIC_TEST_CRYPTO_ENV).as_deref(),
+        Ok("1")
+    )
+}
+
 fn should_use_deterministic_test_crypto_for_arg(arg0: &str) -> bool {
-    arg0.ends_with(".test") || arg0.contains("/defradb/tests/") || arg0.contains("/__debug_bin")
+    should_use_deterministic_test_crypto(deterministic_test_crypto_env_enabled(), arg0)
+}
+
+fn should_use_deterministic_test_crypto(env_enabled: bool, arg0: &str) -> bool {
+    env_enabled
+        && (arg0.ends_with(".test")
+            || arg0.contains("/defradb/tests/")
+            || arg0.contains("/__debug_bin"))
 }
 
 /// Extract a human-readable message from a caught panic payload.
@@ -297,16 +313,25 @@ mod tests {
 
     #[test]
     fn test_go_test_binary_detection_for_deterministic_test_crypto() {
-        assert!(should_use_deterministic_test_crypto_for_arg(
+        assert!(
+            !should_use_deterministic_test_crypto(false, "/tmp/go-build123/tests.test"),
+            "release FFI test crypto requires the explicit environment gate"
+        );
+
+        assert!(should_use_deterministic_test_crypto(
+            true,
             "/tmp/go-build123/tests.test"
         ));
-        assert!(should_use_deterministic_test_crypto_for_arg(
+        assert!(should_use_deterministic_test_crypto(
+            true,
             "/Users/me/defradb/tests/integration.test"
         ));
-        assert!(should_use_deterministic_test_crypto_for_arg(
+        assert!(should_use_deterministic_test_crypto(
+            true,
             "/private/tmp/__debug_bin123"
         ));
-        assert!(!should_use_deterministic_test_crypto_for_arg(
+        assert!(!should_use_deterministic_test_crypto(
+            true,
             "/usr/local/bin/defradb"
         ));
     }

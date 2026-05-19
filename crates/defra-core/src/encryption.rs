@@ -19,6 +19,11 @@
 //! incompatible with Go (different key bytes) and cryptographically
 //! weaker (one master-key compromise revealed every past, present, and
 //! future document). See #651 for the audit trail.
+//!
+//! Deterministic encryption keys are retained only for Go-compatibility tests
+//! that assert exact encrypted CIDs. Release builds require
+//! `DEFRA_ALLOW_DETERMINISTIC_TEST_CRYPTO=1` before the hidden test switch can
+//! be enabled; production deployments must never set that variable.
 
 use rand::RngCore;
 use std::cell::RefCell;
@@ -26,6 +31,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+const DETERMINISTIC_TEST_CRYPTO_ENV: &str = "DEFRA_ALLOW_DETERMINISTIC_TEST_CRYPTO";
 
 /// Wrapper for encryption key bytes with zeroization on drop.
 ///
@@ -131,7 +138,10 @@ pub fn generate_encryption_key_for(doc_id: &str, field_name: Option<&str>) -> [u
 
 #[doc(hidden)]
 pub fn set_deterministic_encryption_key(enabled: bool) {
-    USE_DETERMINISTIC_ENCRYPTION_KEY.store(enabled, Ordering::Release);
+    USE_DETERMINISTIC_ENCRYPTION_KEY.store(
+        enabled && deterministic_test_crypto_allowed(),
+        Ordering::Release,
+    );
 }
 
 #[doc(hidden)]
@@ -150,6 +160,14 @@ fn generate_deterministic_encryption_key(doc_id: &str, field_name: Option<&str>)
     let mut key = [0u8; 32];
     key.copy_from_slice(&bytes[..32]);
     key
+}
+
+fn deterministic_test_crypto_allowed() -> bool {
+    cfg!(debug_assertions)
+        || matches!(
+            std::env::var(DETERMINISTIC_TEST_CRYPTO_ENV).as_deref(),
+            Ok("1")
+        )
 }
 
 thread_local! {

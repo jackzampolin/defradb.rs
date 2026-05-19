@@ -19,6 +19,15 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             "Processing Counter delta"
         );
 
+        if self.blockstore.is_merged(cid).await.unwrap_or(false) {
+            tracing::debug!(
+                cid = %cid,
+                field_name = %payload.field_name,
+                "Counter delta already marked merged, skipping standalone replay"
+            );
+            return Ok(MergeOutcome::terminal_skip("already merged"));
+        }
+
         // Look up the collection to determine field kind and counter type,
         // with fallback to metadata's collection_id for cross-version sync
         let collection = self

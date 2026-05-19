@@ -1091,6 +1091,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_stream_pushlog_merge_denial_leaves_block_unmerged() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let cid = make_cid(b"two-stream-acp-denied");
+        blockstore
+            .put(&cid, b"two-stream-acp-denied")
+            .await
+            .unwrap();
+
+        let (coordinator, _events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                NoopTransport::new(),
+                blockstore.clone(),
+                crate::sync::SyncConfig::default(),
+                AccessMode::Controlled,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            )
+            .await
+            .unwrap();
+
+        // Two-stream PushLog ingress intentionally trusts the transport enough
+        // to accept the block, but document ACP is still enforced by the merge
+        // handler. A merge-time denial must leave the block unmerged so it can
+        // be retried only if policy state changes.
+        let handler = TestMergeHandler::new(false, false);
+        let result = handle_block_received(
+            &coordinator,
+            &handler,
+            &ReplicationConfig::default(),
+            cid,
+            BlockMetadata::normal(
+                "doc1",
+                "collection1",
+                "did:key:z6MkrUnauthorizedPush",
+                Some("unauthorized-peer"),
+                false,
+            ),
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, ReplicationResult::Failed { .. }));
+        assert_eq!(handler.calls(), 1);
+        assert!(
+            !blockstore.is_merged(&cid).await.unwrap(),
+            "merge-time ACP denial must not mark a two-stream PushLog block as merged"
+        );
+    }
+
+    #[tokio::test]
     async fn test_recovery_forwards_handler_recovered_metadata() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));

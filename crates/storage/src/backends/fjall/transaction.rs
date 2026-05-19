@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::compute_range_bounds;
 use super::iterator::MergingIterator;
 use crate::backends::shared::DurabilityMode;
-use crate::backends::shared::{CallbackCounts, CallbackManager, ConflictTracker};
+use crate::backends::shared::{CallbackCounts, CallbackManager, ConflictTracker, ReadSet};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
@@ -22,6 +22,8 @@ pub(crate) struct FjallTxn {
     pub(crate) snapshot: fjall::Snapshot,
     /// Pending changes (Some(value) = set, None = delete)
     pub(crate) pending: Mutex<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
+    /// Point keys and ranges read by this transaction.
+    pub(crate) read_set: Mutex<ReadSet>,
     pub(crate) readonly: bool,
     pub(crate) discarded: AtomicBool,
     pub(crate) committed: AtomicBool,
@@ -102,6 +104,7 @@ impl Reader for FjallTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
+        self.read_set.lock().record_key(key);
         self.get_internal(key)
     }
 
@@ -112,6 +115,7 @@ impl Reader for FjallTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
+        self.read_set.lock().record_key(key);
         self.has_internal(key)
     }
 
@@ -122,6 +126,7 @@ impl Reader for FjallTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
+        self.read_set.lock().record_key(key);
         Ok(self.get_internal(key)?.map(|v| v.len()))
     }
 
@@ -130,6 +135,7 @@ impl Reader for FjallTxn {
             return Err(Error::DiscardedTxn);
         }
 
+        self.read_set.lock().record_iter_options(&opts);
         let (start_bound, end_bound) = compute_range_bounds(&opts);
         let keys_only = opts.keys_only();
 
@@ -250,14 +256,14 @@ impl Txn for FjallTxn {
         }
 
         let pending = std::mem::take(&mut *self.pending.lock());
+        let read_set = self.read_set.lock().clone();
 
         if !pending.is_empty() {
             // Check conflicts
-            if let Err(e) = self.conflict_tracker.check_and_record(
-                self.read_version,
-                pending.keys(),
-                &crate::backends::shared::ReadSet::default(),
-            ) {
+            if let Err(e) =
+                self.conflict_tracker
+                    .check_and_record(self.read_version, pending.keys(), &read_set)
+            {
                 CallbackManager::execute_callbacks(self.callbacks.take_error());
                 CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
                 return Err(e);

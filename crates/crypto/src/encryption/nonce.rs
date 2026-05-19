@@ -2,7 +2,9 @@
 //!
 //! This module provides nonce generation for AES-GCM authenticated encryption.
 //! In production, nonces are generated using cryptographically secure random numbers.
-//! In tests, deterministic nonces can be used for reproducibility.
+//! Deterministic nonces are only for Go-compatibility tests. Release builds
+//! require `DEFRA_ALLOW_DETERMINISTIC_TEST_CRYPTO=1` before the hidden test
+//! switch can be enabled; production deployments must never set that variable.
 
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -11,6 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use defra_core::Result;
 
 use crate::types::AES_NONCE_SIZE;
+
+const DETERMINISTIC_TEST_CRYPTO_ENV: &str = "DEFRA_ALLOW_DETERMINISTIC_TEST_CRYPTO";
 
 #[doc(hidden)]
 static USE_DETERMINISTIC_NONCE: AtomicBool = AtomicBool::new(false);
@@ -61,13 +65,27 @@ pub fn generate_deterministic_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
 /// Control whether to use deterministic nonces in test/debug builds.
 ///
 /// **WARNING: This should NEVER be set to true in production.**
-/// Only use for testing with reproducible nonces.
+/// Only use for testing with reproducible nonces. In release builds this
+/// function refuses to enable deterministic mode unless
+/// `DEFRA_ALLOW_DETERMINISTIC_TEST_CRYPTO=1` is present in the process
+/// environment.
 #[doc(hidden)]
 pub fn set_deterministic_nonce(enabled: bool) {
-    USE_DETERMINISTIC_NONCE.store(enabled, Ordering::Release);
+    USE_DETERMINISTIC_NONCE.store(
+        enabled && deterministic_test_crypto_allowed(),
+        Ordering::Release,
+    );
 }
 
 #[doc(hidden)]
 pub fn deterministic_nonce_enabled() -> bool {
     USE_DETERMINISTIC_NONCE.load(Ordering::Acquire)
+}
+
+fn deterministic_test_crypto_allowed() -> bool {
+    cfg!(debug_assertions)
+        || matches!(
+            std::env::var(DETERMINISTIC_TEST_CRYPTO_ENV).as_deref(),
+            Ok("1")
+        )
 }
