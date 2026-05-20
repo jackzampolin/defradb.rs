@@ -150,6 +150,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/policy", post(handlers::acp::add_policy))
         .route("/policy", get(handlers::acp::list_policies))
         .route("/policy/{id}", get(handlers::acp::get_policy))
+        .route("/document/decide", post(handlers::acp::decide_doc_access))
         .route(
             "/document/relationship",
             post(handlers::acp::add_doc_relationship),
@@ -275,12 +276,13 @@ pub fn create_router_with_state(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mock::{FailingMockP2POperations, MockQueryExecutor};
+    use crate::mock::{FailingMockP2POperations, MockDocumentAcpOperations, MockQueryExecutor};
     use crate::router::{
-        P2POperations, P2PResult, P2pDocumentInfo, P2pDocumentRequest, ReplicatorInfo,
+        DocumentAcpOperations, P2POperations, P2PResult, P2pDocumentInfo, P2pDocumentRequest,
+        ReplicatorInfo,
     };
     use axum::{
-        body::Body,
+        body::{to_bytes, Body},
         http::{Method, Request, StatusCode},
     };
     use std::time::Duration;
@@ -462,6 +464,41 @@ mod tests {
             status_for_p2p_request(Method::POST, "/api/v0/p2p/collections", r#"["Users"]"#).await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn document_acp_decide_route_returns_decision() {
+        let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
+        let doc_acp = Arc::new(MockDocumentAcpOperations::with_allowed(false))
+            as Arc<dyn DocumentAcpOperations>;
+        let state = AppStateBuilder::new(executor).with_doc_acp(doc_acp).build();
+        let router = create_router_with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v0/acp/document/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{
+                            "actor":"did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+                            "permission":"read",
+                            "policy_id":"policy",
+                            "resource_name":"resource",
+                            "doc_id":"doc"
+                        }"#,
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should be readable");
+        assert_eq!(&body[..], br#"{"allowed":false}"#);
     }
 
     #[tokio::test]

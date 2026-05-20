@@ -93,6 +93,26 @@ impl<S: Store + 'static> DocumentAcpAdapter<S> {
 
 #[async_trait]
 impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
+    async fn check_doc_access(
+        &self,
+        actor: &identity::Did,
+        permission: acp::DocumentPermission,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<bool, String> {
+        self.acp
+            .check_doc_access(
+                &acp::Identity::Authenticated(actor.clone()),
+                permission,
+                policy_id,
+                resource_name,
+                doc_id,
+            )
+            .await
+            .map_err(|e| format!("{}", e))
+    }
+
     async fn add_doc_relationship(
         &self,
         requestor: &identity::Did,
