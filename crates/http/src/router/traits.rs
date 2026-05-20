@@ -596,6 +596,19 @@ pub trait LensOperations: Send + Sync {
 /// read or write access to a specific document).
 #[async_trait::async_trait]
 pub trait DocumentAcpOperations: Send + Sync {
+    /// Check whether an actor has a document permission.
+    ///
+    /// This is a read-only preview of the current document ACP decision and
+    /// does not create or remove relationships.
+    async fn check_doc_access(
+        &self,
+        actor: &identity::Did,
+        permission: acp::DocumentPermission,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<bool, String>;
+
     /// Add an actor relationship to a document.
     ///
     /// Grants the `target_actor` the specified `relation` on the document
