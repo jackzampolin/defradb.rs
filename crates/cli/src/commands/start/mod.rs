@@ -184,6 +184,14 @@ pub struct StartArgs {
     #[arg(long)]
     pub query_timeout: Option<u64>,
 
+    /// Max idle age for explicit HTTP transactions in seconds (0 = disabled, default: 600)
+    #[arg(long)]
+    pub transaction_idle_timeout: Option<u64>,
+
+    /// Interval between explicit HTTP transaction cleanup sweeps in seconds (default: 60)
+    #[arg(long)]
+    pub transaction_cleanup_interval: Option<u64>,
+
     /// Max GraphQL selection nesting depth (0 = unlimited, default: 20)
     #[arg(long)]
     pub query_max_depth: Option<usize>,
@@ -487,6 +495,12 @@ impl StartArgs {
         if let Some(timeout) = self.query_timeout {
             config.api.query_timeout = timeout;
         }
+        if let Some(timeout) = self.transaction_idle_timeout {
+            config.api.transaction_idle_timeout = timeout;
+        }
+        if let Some(interval) = self.transaction_cleanup_interval {
+            config.api.transaction_cleanup_interval = interval;
+        }
         if let Some(depth) = self.query_max_depth {
             config.api.query_max_depth = depth;
         }
@@ -523,6 +537,7 @@ impl StartArgs {
         if let Some(ref api_key_env) = self.embedding_api_key_env {
             config.embedding.api_key_env = api_key_env.clone();
         }
+        config.api.validate()?;
         Ok(())
     }
 }

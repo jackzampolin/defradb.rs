@@ -4,8 +4,8 @@ use query::fetcher::CollectionProvider;
 use query::mutator::DocMutator;
 use query::runner::DocFetcher;
 use query::txn::{DeferredAcpMutations, TransactionContext};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use storage::corekv::Store;
 
 use crate::collection_provider::TxnCollectionProvider;
@@ -28,6 +28,7 @@ pub struct DbTransactionContext<S: Store> {
     broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
     action_lock: Arc<async_lock::Mutex<()>>,
     created_at: Instant,
+    last_request_seen: Mutex<Instant>,
 }
 
 impl<S: Store> DbTransactionContext<S> {
@@ -41,6 +42,7 @@ impl<S: Store> DbTransactionContext<S> {
         deferred_acp_mutations: Arc<DeferredAcpMutations>,
         broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
     ) -> Self {
+        let now = Instant::now();
         Self {
             db,
             id,
@@ -49,13 +51,40 @@ impl<S: Store> DbTransactionContext<S> {
             deferred_acp_mutations,
             broadcaster,
             action_lock: Arc::new(async_lock::Mutex::new(())),
-            created_at: Instant::now(),
+            created_at: now,
+            last_request_seen: Mutex::new(now),
         }
     }
 
     /// Get the instant when this transaction was created.
     pub fn created_at(&self) -> Instant {
         self.created_at
+    }
+
+    /// Mark that a request used this transaction.
+    pub(crate) fn touch(&self) {
+        match self.last_request_seen.lock() {
+            Ok(mut last_request_seen) => {
+                *last_request_seen = Instant::now();
+            }
+            Err(poisoned) => {
+                let mut last_request_seen = poisoned.into_inner();
+                *last_request_seen = Instant::now();
+            }
+        }
+    }
+
+    /// Get the instant when this transaction last saw a request.
+    pub fn last_request_seen(&self) -> Instant {
+        match self.last_request_seen.lock() {
+            Ok(last_request_seen) => *last_request_seen,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    /// Get how long this transaction has been idle.
+    pub fn idle_for(&self, now: Instant) -> Duration {
+        now.duration_since(self.last_request_seen())
     }
 }
 

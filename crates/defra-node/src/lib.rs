@@ -23,6 +23,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "p2p")]
 use std::sync::Mutex;
+#[cfg(feature = "http")]
+use std::time::Duration;
 
 use defra_core::signing::SigningConfig;
 use identity::{Identity as _, IdentityKeyType, RawIdentity};
@@ -76,6 +78,8 @@ pub struct EmbeddedNode {
     schema_ops: Arc<dyn SchemaOps>,
     embedding_config: db::EmbeddingClientConfig,
     node_identity_did: Option<String>,
+    #[cfg(feature = "http")]
+    txn_cleanup_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     #[cfg(feature = "p2p")]
     p2p_ops: Option<Arc<dyn defra_http::P2POperations>>,
     #[cfg(feature = "p2p")]
@@ -116,6 +120,13 @@ impl P2PLifecycle {
             inner.shutdown().await;
         }
     }
+}
+
+#[cfg(feature = "http")]
+#[derive(Clone, Copy)]
+struct TransactionCleanupConfig {
+    max_idle_age: Duration,
+    sweep_interval: Duration,
 }
 
 #[cfg(feature = "p2p")]
@@ -375,6 +386,12 @@ impl EmbeddedNode {
 
     /// Gracefully stop background services owned by this embedded node.
     pub async fn shutdown(&self) {
+        #[cfg(feature = "http")]
+        if let Some(task) = self.txn_cleanup_task.lock().await.take() {
+            task.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+        }
+
         #[cfg(feature = "p2p")]
         if let Some(lifecycle) = &self.p2p_lifecycle {
             lifecycle.shutdown().await;
@@ -491,6 +508,8 @@ struct StoreBuildArgs {
     event_bus: Arc<dyn events::Bus>,
     node_identity_did: Option<String>,
     query_limits: QueryLimits,
+    #[cfg(feature = "http")]
+    transaction_cleanup_config: Option<TransactionCleanupConfig>,
     #[cfg(feature = "p2p")]
     p2p_config: Option<P2PConfig>,
 }
@@ -601,6 +620,23 @@ impl NodeBuilder {
         // 2. Extract configs before moving self
         #[cfg(feature = "http")]
         let http_config = self.http_config;
+        #[cfg(feature = "http")]
+        let transaction_cleanup_config = match http_config.as_ref() {
+            Some(config) if config.transaction_idle_timeout.is_zero() => None,
+            Some(config) => {
+                if config.transaction_cleanup_interval.is_zero() {
+                    anyhow::bail!(
+                        "transaction cleanup interval must be non-zero when idle cleanup is enabled"
+                    );
+                }
+
+                Some(TransactionCleanupConfig {
+                    max_idle_age: config.transaction_idle_timeout,
+                    sweep_interval: config.transaction_cleanup_interval,
+                })
+            }
+            None => None,
+        };
         #[cfg(feature = "p2p")]
         let p2p_config = self.p2p_config;
         let query_limits = self.query_limits;
@@ -635,6 +671,8 @@ impl NodeBuilder {
                             event_bus,
                             node_identity_did: node_identity_did.clone(),
                             query_limits,
+                            #[cfg(feature = "http")]
+                            transaction_cleanup_config,
                             #[cfg(feature = "p2p")]
                             p2p_config,
                         },
@@ -665,6 +703,8 @@ impl NodeBuilder {
                             event_bus,
                             node_identity_did: node_identity_did.clone(),
                             query_limits,
+                            #[cfg(feature = "http")]
+                            transaction_cleanup_config,
                             #[cfg(feature = "p2p")]
                             p2p_config,
                         },
@@ -696,6 +736,8 @@ impl NodeBuilder {
                     event_bus,
                     node_identity_did: node_identity_did.clone(),
                     query_limits,
+                    #[cfg(feature = "http")]
+                    transaction_cleanup_config,
                     #[cfg(feature = "p2p")]
                     p2p_config,
                 },
@@ -780,6 +822,8 @@ impl NodeBuilder {
             event_bus,
             node_identity_did,
             query_limits,
+            #[cfg(feature = "http")]
+            transaction_cleanup_config,
             #[cfg(feature = "p2p")]
             p2p_config,
         } = args;
@@ -832,6 +876,17 @@ impl NodeBuilder {
             Some(b) => db::DbTransactionRegistry::with_broadcaster(database.clone(), b),
             None => db::DbTransactionRegistry::new(database.clone()),
         });
+
+        #[cfg(feature = "http")]
+        let txn_cleanup_task = transaction_cleanup_config.map(|cleanup| {
+            tracing::info!(
+                max_idle_age_secs = cleanup.max_idle_age.as_secs(),
+                sweep_interval_secs = cleanup.sweep_interval.as_secs(),
+                "Transaction idle cleanup worker enabled"
+            );
+            registry.start_stale_transaction_cleanup(cleanup.max_idle_age, cleanup.sweep_interval)
+        });
+
         let (document_acp, _strict_replicated_doc_access) =
             node_acp::create_document_acp(acp_store, &document_acp_config).await?;
 
@@ -867,6 +922,8 @@ impl NodeBuilder {
             schema_ops,
             embedding_config,
             node_identity_did,
+            #[cfg(feature = "http")]
+            txn_cleanup_task: tokio::sync::Mutex::new(txn_cleanup_task),
             #[cfg(feature = "p2p")]
             p2p_ops,
             #[cfg(feature = "p2p")]
@@ -1313,10 +1370,16 @@ mod tests {
     #[cfg(feature = "http")]
     #[test]
     fn http_config_accepts_extra_routes() {
+        use std::time::Duration;
+
         let config = HttpConfig::new(9182)
+            .with_transaction_idle_timeout(Duration::from_secs(900))
+            .with_transaction_cleanup_interval(Duration::from_secs(30))
             .with_extra_routes(Router::new().route("/healthz", get(|| async { "ok" })));
 
         assert_eq!(config.address.port(), 9182);
+        assert_eq!(config.transaction_idle_timeout, Duration::from_secs(900));
+        assert_eq!(config.transaction_cleanup_interval, Duration::from_secs(30));
         assert!(config.extra_routes.is_some());
     }
 
