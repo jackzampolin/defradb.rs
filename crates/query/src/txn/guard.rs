@@ -13,9 +13,9 @@ use super::TransactionHandle;
 ///
 /// If dropped without explicit `commit()` or `rollback()`, the guard will log
 /// an error but **cannot perform async rollback**. The transaction will remain
-/// in the registry until cleaned up by `cleanup_stale_transactions()`. Always
-/// ensure you call `commit()` or `rollback()` explicitly before the guard goes
-/// out of scope.
+/// in the registry until cleaned up by the idle transaction cleanup policy.
+/// Always ensure you call `commit()` or `rollback()` explicitly before the
+/// guard goes out of scope.
 ///
 /// # Example
 ///
@@ -108,8 +108,8 @@ impl<E: crate::QueryExecutor + ?Sized> Drop for TransactionGuard<'_, E> {
         if let Some(handle) = &self.handle {
             // Transaction was not finalized - this is a bug in user code.
             // We can't do async rollback in drop, so we log an error.
-            // The transaction will remain in the registry until it times out
-            // or is explicitly cleaned up.
+            // The transaction will remain in the registry until idle cleanup
+            // or explicit cleanup removes it.
             tracing::error!(
                 txn_id = %handle,
                 "TransactionGuard dropped without commit/rollback - transaction leaked! \

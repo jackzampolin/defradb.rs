@@ -129,7 +129,10 @@ pub use schema_loader::{
 };
 pub use txn::DbTxn;
 pub use txn_context::DbTransactionContext;
-pub use txn_registry::{CleanupResult, DbTransactionRegistry};
+pub use txn_registry::{
+    CleanupResult, DbTransactionRegistry, DEFAULT_TRANSACTION_CLEANUP_INTERVAL,
+    DEFAULT_TRANSACTION_IDLE_TIMEOUT,
+};
 pub use versioned_fetcher::VersionedFetcher;
 pub use view_ops::RefreshViewsOptions;
 

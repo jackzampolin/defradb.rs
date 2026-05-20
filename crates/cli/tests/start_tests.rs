@@ -45,6 +45,8 @@ fn default_start_args() -> StartArgs {
         p2p_rate_limit_rate: None,
         max_merge_depth: None,
         query_timeout: None,
+        transaction_idle_timeout: None,
+        transaction_cleanup_interval: None,
         query_max_depth: None,
         query_max_width: None,
         query_max_filter_depth: None,
@@ -80,6 +82,19 @@ fn test_apply_to_config_valid_store_succeeds() {
     let result = args.apply_to_config(&mut config);
     assert!(result.is_ok());
     assert_eq!(config.datastore.store, DatastoreType::Memory);
+}
+
+#[test]
+fn test_apply_to_config_rejects_zero_transaction_cleanup_interval_when_enabled() {
+    let mut config = Config::default();
+    let mut args = default_start_args();
+    args.transaction_idle_timeout = Some(600);
+    args.transaction_cleanup_interval = Some(0);
+
+    let result = args.apply_to_config(&mut config);
+    assert!(
+        matches!(result, Err(Error::InvalidConfig(message)) if message.contains("transaction_cleanup_interval"))
+    );
 }
 
 #[test]
@@ -137,6 +152,8 @@ fn test_apply_to_config_all_flags() {
         p2p_rate_limit_rate: Some(4.5),
         max_merge_depth: Some(2048),
         query_timeout: Some(45),
+        transaction_idle_timeout: Some(900),
+        transaction_cleanup_interval: Some(30),
         query_max_depth: Some(12),
         query_max_width: Some(64),
         query_max_filter_depth: Some(24),
@@ -187,6 +204,8 @@ fn test_apply_to_config_all_flags() {
     assert!(config.datastore.no_searchable_encryption);
     assert_eq!(config.replicator_retry_intervals, vec![10, 20, 30]);
     assert_eq!(config.api.query_timeout, 45);
+    assert_eq!(config.api.transaction_idle_timeout, 900);
+    assert_eq!(config.api.transaction_cleanup_interval, 30);
     assert_eq!(config.api.query_max_depth, 12);
     assert_eq!(config.api.query_max_width, 64);
     assert_eq!(config.api.query_max_filter_depth, 24);

@@ -791,6 +791,61 @@ async fn test_cleanup_only_old_transactions() {
 }
 
 #[tokio::test]
+async fn test_cleanup_uses_idle_age_not_creation_age() {
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db);
+
+    let txn = registry.begin(true).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    assert!(registry.get(&txn).is_found());
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let result = registry
+        .cleanup_stale_transactions(std::time::Duration::from_millis(40))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.cleaned, 0,
+        "Recently used transaction should not be cleaned by creation age"
+    );
+    assert!(registry.get(&txn).is_found());
+
+    tokio::time::sleep(std::time::Duration::from_millis(45)).await;
+
+    let result = registry
+        .cleanup_stale_transactions(std::time::Duration::from_millis(40))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.cleaned, 1,
+        "Transaction should be cleaned after it is idle past the limit"
+    );
+    assert_eq!(registry.active_transaction_count().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_periodic_cleanup_task_removes_idle_transactions() {
+    let db = test_db_with_collections().await;
+    let registry = Arc::new(DbTransactionRegistry::new(db));
+
+    let _txn = registry.begin(true).await.unwrap();
+    assert_eq!(registry.active_transaction_count().unwrap(), 1);
+
+    let cleanup_task = registry.start_stale_transaction_cleanup(
+        std::time::Duration::from_millis(100),
+        std::time::Duration::from_millis(25),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    cleanup_task.abort();
+
+    assert_eq!(registry.active_transaction_count().unwrap(), 0);
+}
+
+#[tokio::test]
 async fn test_active_transaction_count() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);

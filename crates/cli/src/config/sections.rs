@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 
+use db::{DEFAULT_TRANSACTION_CLEANUP_INTERVAL, DEFAULT_TRANSACTION_IDLE_TIMEOUT};
 use serde::{Deserialize, Serialize};
 
 use query::{DEFAULT_MAX_FILTER_DEPTH, DEFAULT_MAX_QUERY_DEPTH, DEFAULT_MAX_QUERY_WIDTH};
@@ -67,6 +68,12 @@ pub struct ApiConfig {
     /// Query execution timeout in seconds (0 = no timeout). Default: 30.
     #[serde(default = "default_query_timeout")]
     pub query_timeout: u64,
+    /// Max idle age for explicit HTTP transactions in seconds (0 = disabled). Default: 600.
+    #[serde(default = "default_transaction_idle_timeout")]
+    pub transaction_idle_timeout: u64,
+    /// Interval between explicit HTTP transaction cleanup sweeps in seconds. Default: 60.
+    #[serde(default = "default_transaction_cleanup_interval")]
+    pub transaction_cleanup_interval: u64,
     /// Max GraphQL selection nesting depth (0 = unlimited). Default: 20.
     #[serde(default = "default_query_max_depth")]
     pub query_max_depth: usize,
@@ -91,6 +98,14 @@ fn default_max_concurrent() -> usize {
 
 fn default_query_timeout() -> u64 {
     30
+}
+
+fn default_transaction_idle_timeout() -> u64 {
+    DEFAULT_TRANSACTION_IDLE_TIMEOUT.as_secs()
+}
+
+fn default_transaction_cleanup_interval() -> u64 {
+    DEFAULT_TRANSACTION_CLEANUP_INTERVAL.as_secs()
 }
 
 fn default_query_max_depth() -> usize {
@@ -118,6 +133,8 @@ impl Default for ApiConfig {
             request_timeout: default_request_timeout(),
             max_concurrent_requests: default_max_concurrent(),
             query_timeout: default_query_timeout(),
+            transaction_idle_timeout: default_transaction_idle_timeout(),
+            transaction_cleanup_interval: default_transaction_cleanup_interval(),
             query_max_depth: default_query_max_depth(),
             query_max_width: default_query_max_width(),
             query_max_filter_depth: default_query_max_filter_depth(),
@@ -137,6 +154,13 @@ impl ApiConfig {
         let has_priv = !self.privkey_path.is_empty();
         if has_pub != has_priv {
             return Err(Error::IncompleteTlsConfig);
+        }
+
+        if self.transaction_idle_timeout > 0 && self.transaction_cleanup_interval == 0 {
+            return Err(Error::InvalidConfig(
+                "api.transaction_cleanup_interval must be > 0 when transaction_idle_timeout is enabled"
+                    .to_string(),
+            ));
         }
 
         Ok(())
