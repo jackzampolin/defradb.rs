@@ -23,7 +23,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "p2p")]
 use std::sync::Mutex;
-#[cfg(feature = "http")]
 use std::time::Duration;
 
 use defra_core::signing::SigningConfig;
@@ -469,6 +468,16 @@ fn identity_key_type_from_signing_key_type(
     }
 }
 
+fn timeout_secs(timeout: Duration) -> u64 {
+    if timeout.is_zero() {
+        0
+    } else {
+        timeout
+            .as_secs()
+            .saturating_add(u64::from(timeout.subsec_nanos() > 0))
+    }
+}
+
 /// Selects which persistent storage backend to use when `data_path` is set.
 ///
 /// Defaults to `Redb` for backwards compatibility.
@@ -494,6 +503,7 @@ pub struct NodeBuilder {
     embedding_api_key: Option<String>,
     document_acp: DocumentAcpConfig,
     node_identity_did: Option<String>,
+    query_timeout: Option<Duration>,
     query_limits: QueryLimits,
     #[cfg(feature = "http")]
     http_config: Option<HttpConfig>,
@@ -507,6 +517,7 @@ struct StoreBuildArgs {
     db_options: db::DbOptions,
     event_bus: Arc<dyn events::Bus>,
     node_identity_did: Option<String>,
+    query_timeout: Option<Duration>,
     query_limits: QueryLimits,
     #[cfg(feature = "http")]
     transaction_cleanup_config: Option<TransactionCleanupConfig>,
@@ -562,6 +573,14 @@ impl NodeBuilder {
     /// remote signer such as a host Secure Enclave adapter.
     pub fn with_node_identity_did(mut self, did: impl Into<String>) -> Self {
         self.node_identity_did = Some(did.into());
+        self
+    }
+
+    /// Set the query execution timeout.
+    ///
+    /// `Duration::ZERO` disables query execution timeouts.
+    pub fn with_query_timeout(mut self, timeout: Duration) -> Self {
+        self.query_timeout = Some(timeout);
         self
     }
 
@@ -639,6 +658,7 @@ impl NodeBuilder {
         };
         #[cfg(feature = "p2p")]
         let p2p_config = self.p2p_config;
+        let query_timeout = self.query_timeout;
         let query_limits = self.query_limits;
 
         // 3. Storage backend + database
@@ -670,6 +690,7 @@ impl NodeBuilder {
                             db_options: db_options.clone(),
                             event_bus,
                             node_identity_did: node_identity_did.clone(),
+                            query_timeout,
                             query_limits,
                             #[cfg(feature = "http")]
                             transaction_cleanup_config,
@@ -702,6 +723,7 @@ impl NodeBuilder {
                             db_options: db_options.clone(),
                             event_bus,
                             node_identity_did: node_identity_did.clone(),
+                            query_timeout,
                             query_limits,
                             #[cfg(feature = "http")]
                             transaction_cleanup_config,
@@ -735,6 +757,7 @@ impl NodeBuilder {
                     db_options,
                     event_bus,
                     node_identity_did: node_identity_did.clone(),
+                    query_timeout,
                     query_limits,
                     #[cfg(feature = "http")]
                     transaction_cleanup_config,
@@ -750,6 +773,7 @@ impl NodeBuilder {
         if let Some(http_cfg) = http_config {
             let server_config = defra_http::ServerConfig {
                 address: http_cfg.address,
+                request_timeout: timeout_secs(http_cfg.request_timeout),
                 query_limits,
                 ..Default::default()
             };
@@ -821,6 +845,7 @@ impl NodeBuilder {
             db_options,
             event_bus,
             node_identity_did,
+            query_timeout,
             query_limits,
             #[cfg(feature = "http")]
             transaction_cleanup_config,
@@ -905,6 +930,11 @@ impl NodeBuilder {
                 .with_acp(document_acp)
                 .with_lens_store(database.lens_store().clone())
                 .with_query_limits(query_limits);
+        let query_runner = if let Some(timeout) = query_timeout {
+            query_runner.with_query_timeout(timeout_secs(timeout))
+        } else {
+            query_runner
+        };
 
         let runner: Arc<dyn QueryExecutor> = Arc::new(query_runner);
         let schema_ops: Arc<dyn SchemaOps> =
@@ -1373,14 +1403,32 @@ mod tests {
         use std::time::Duration;
 
         let config = HttpConfig::new(9182)
+            .with_request_timeout(Duration::from_secs(120))
             .with_transaction_idle_timeout(Duration::from_secs(900))
             .with_transaction_cleanup_interval(Duration::from_secs(30))
             .with_extra_routes(Router::new().route("/healthz", get(|| async { "ok" })));
 
         assert_eq!(config.address.port(), 9182);
+        assert_eq!(config.request_timeout, Duration::from_secs(120));
         assert_eq!(config.transaction_idle_timeout, Duration::from_secs(900));
         assert_eq!(config.transaction_cleanup_interval, Duration::from_secs(30));
         assert!(config.extra_routes.is_some());
+    }
+
+    #[test]
+    fn node_builder_accepts_query_timeout() {
+        let timeout = std::time::Duration::from_secs(45);
+        let builder = EmbeddedNode::builder().with_query_timeout(timeout);
+
+        assert_eq!(builder.query_timeout, Some(timeout));
+    }
+
+    #[test]
+    fn timeout_secs_rounds_non_zero_duration_up() {
+        assert_eq!(super::timeout_secs(std::time::Duration::ZERO), 0);
+        assert_eq!(super::timeout_secs(std::time::Duration::from_millis(1)), 1);
+        assert_eq!(super::timeout_secs(std::time::Duration::new(2, 1)), 3);
+        assert_eq!(super::timeout_secs(std::time::Duration::from_secs(5)), 5);
     }
 
     #[tokio::test]
