@@ -66,8 +66,7 @@ mod tests {
     async fn status_update_persists_first_transition_only() {
         let store = Arc::new(MemoryStore::new());
         let peerstore = storage::stores::Peerstore::new(store);
-        let peer_id = p2p::PeerId::random();
-        let info = p2p::ReplicatorInfo::new(peer_id, vec!["users".to_string()]).unwrap();
+        let info = p2p::ReplicatorInfo::new("peer-1", vec!["users".to_string()]).unwrap();
         peerstore
             .create_replicator(info.peer_id_str(), &info.to_bytes().unwrap())
             .await

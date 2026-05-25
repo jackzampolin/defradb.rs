@@ -43,12 +43,14 @@ impl fmt::Display for PeerId {
     }
 }
 
+#[cfg(feature = "libp2p-transport")]
 impl From<libp2p::PeerId> for PeerId {
     fn from(peer_id: libp2p::PeerId) -> Self {
         Self(peer_id.to_string())
     }
 }
 
+#[cfg(feature = "libp2p-transport")]
 impl From<&libp2p::PeerId> for PeerId {
     fn from(peer_id: &libp2p::PeerId) -> Self {
         Self(peer_id.to_string())
@@ -82,6 +84,7 @@ impl fmt::Display for PeerAddr {
     }
 }
 
+#[cfg(feature = "libp2p-transport")]
 impl From<libp2p::Multiaddr> for PeerAddr {
     fn from(addr: libp2p::Multiaddr) -> Self {
         Self(addr.to_string())
@@ -108,6 +111,7 @@ impl fmt::Display for MessageId {
     }
 }
 
+#[cfg(feature = "libp2p-transport")]
 impl From<libp2p::gossipsub::MessageId> for MessageId {
     fn from(id: libp2p::gossipsub::MessageId) -> Self {
         Self(id.to_string())
