@@ -501,6 +501,27 @@ fn test_decode_gossip_payload_from_postcard_broadcast() {
 }
 
 #[test]
+fn test_encode_gossip_payload_uses_cbor_broadcast() {
+    let broadcast = PushLogBroadcast::new(
+        "doc-canonical".to_string(),
+        Bytes::from(vec![1, 3, 5]),
+        "collection-canonical".to_string(),
+        "creator-canonical".to_string(),
+        Bytes::from(vec![2, 4, 6]),
+        None,
+    );
+
+    let encoded = broadcast
+        .encode_gossip_payload()
+        .expect("canonical encode should succeed");
+    let (decoded, encoding) =
+        PushLogBroadcast::decode_gossip_payload(&encoded).expect("decode failed");
+
+    assert_eq!(encoding, PushLogGossipPayloadEncoding::CborBroadcast);
+    assert_eq!(decoded, broadcast);
+}
+
+#[test]
 fn test_decode_gossip_payload_from_cbor_broadcast() {
     let broadcast = PushLogBroadcast::new(
         "doc-cbor-broadcast".to_string(),

@@ -324,9 +324,9 @@ pub struct PushLogBroadcast {
 /// Encoding variant accepted when decoding gossip payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushLogGossipPayloadEncoding {
-    PostcardBroadcast,
-    CborRequest,
     CborBroadcast,
+    CborRequest,
+    PostcardBroadcast,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,13 +452,13 @@ impl PushLogBroadcast {
 
     /// Decode a gossip payload using the set of encodings accepted across P2P transports.
     ///
-    /// We prefer the native Iroh wire encoding first, then fall back to request-shaped
-    /// payloads and the legacy CBOR variants accepted by libp2p.
+    /// CBOR is the canonical gossip encoding because it is self-describing and
+    /// tolerates added fields. Postcard remains accepted for older Iroh peers.
     pub fn decode_gossip_payload(
         payload: &[u8],
     ) -> Result<(Self, PushLogGossipPayloadEncoding), String> {
-        if let Ok(broadcast) = postcard::from_bytes::<Self>(payload) {
-            return Ok((broadcast, PushLogGossipPayloadEncoding::PostcardBroadcast));
+        if let Ok(broadcast) = serde_cbor::from_slice::<Self>(payload) {
+            return Ok((broadcast, PushLogGossipPayloadEncoding::CborBroadcast));
         }
 
         serde_cbor::from_slice::<PushLogRequest>(payload)
@@ -469,10 +469,15 @@ impl PushLogBroadcast {
                 )
             })
             .or_else(|_| {
-                serde_cbor::from_slice::<Self>(payload)
-                    .map(|broadcast| (broadcast, PushLogGossipPayloadEncoding::CborBroadcast))
+                postcard::from_bytes::<Self>(payload)
+                    .map(|broadcast| (broadcast, PushLogGossipPayloadEncoding::PostcardBroadcast))
             })
             .map_err(|error| error.to_string())
+    }
+
+    /// Encode a gossip payload using the canonical, self-describing wire format.
+    pub fn encode_gossip_payload(&self) -> Result<Vec<u8>, serde_cbor::Error> {
+        serde_cbor::to_vec(self)
     }
 
     pub(crate) fn inspect_gossip_payload(payload: &[u8]) -> PushLogGossipPayloadDebugInfo {
@@ -552,5 +557,69 @@ mod tests {
             PushLogBroadcast::decode_gossip_payload(&encoded).expect("decode via gossip path");
         assert_eq!(encoding, PushLogGossipPayloadEncoding::PostcardBroadcast);
         assert_eq!(via_decode_gossip, broadcast);
+    }
+
+    #[test]
+    fn canonical_gossip_payload_is_cbor_broadcast() {
+        let broadcast = PushLogBroadcast::new(
+            "doc-cbor".to_string(),
+            Bytes::from_static(&[1, 2, 3]),
+            "collection-cbor".to_string(),
+            "creator-cbor".to_string(),
+            Bytes::from_static(&[4, 5, 6]),
+            None,
+        );
+
+        let encoded = broadcast
+            .encode_gossip_payload()
+            .expect("canonical gossip payload should encode");
+        let (decoded, encoding) =
+            PushLogBroadcast::decode_gossip_payload(&encoded).expect("decode canonical payload");
+
+        assert_eq!(encoding, PushLogGossipPayloadEncoding::CborBroadcast);
+        assert_eq!(decoded, broadcast);
+    }
+
+    #[test]
+    fn cbor_gossip_payload_tolerates_unknown_future_fields() {
+        #[derive(Serialize)]
+        struct FutureBroadcast {
+            #[serde(rename = "DocID")]
+            doc_id: String,
+            #[serde(rename = "CID", with = "super::super::cbor::bytes_as_cbor")]
+            cid: Bytes,
+            #[serde(rename = "CollectionID")]
+            collection_id: String,
+            #[serde(rename = "Creator")]
+            creator: String,
+            #[serde(rename = "Block", with = "super::super::cbor::bytes_as_cbor")]
+            block: Bytes,
+            #[serde(rename = "ACPActorRelationships")]
+            acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
+            #[serde(rename = "FutureField")]
+            future_field: String,
+        }
+
+        let future = FutureBroadcast {
+            doc_id: "doc-future".to_string(),
+            cid: Bytes::from_static(&[9, 8, 7]),
+            collection_id: "collection-future".to_string(),
+            creator: "creator-future".to_string(),
+            block: Bytes::from_static(&[6, 5, 4]),
+            acp_actor_relationships: None,
+            future_field: "ignored by older decoders".to_string(),
+        };
+
+        let encoded = serde_cbor::to_vec(&future).expect("future payload should encode");
+        let (decoded, encoding) = PushLogBroadcast::decode_gossip_payload(&encoded)
+            .expect("future payload should decode as broadcast");
+
+        assert_eq!(encoding, PushLogGossipPayloadEncoding::CborBroadcast);
+        assert_eq!(decoded.doc_id, future.doc_id);
+        assert_eq!(decoded.collection_id, future.collection_id);
+        assert_eq!(decoded.creator, future.creator);
+        assert_eq!(decoded.cid, future.cid);
+        assert_eq!(decoded.block, future.block);
+        assert!(decoded.acp_actor_relationships.is_none());
     }
 }

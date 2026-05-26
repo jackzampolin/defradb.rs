@@ -65,7 +65,8 @@ impl<S: Store> P2PHost<S> {
         response: tokio::sync::oneshot::Sender<Result<libp2p::gossipsub::MessageId>>,
     ) {
         let ident_topic = topic.to_ident_topic();
-        let result = serde_cbor::to_vec(&message)
+        let result = message
+            .encode_gossip_payload()
             .map_err(|e| Error::CborSerialization(e.to_string()))
             .and_then(|data| {
                 self.swarm
