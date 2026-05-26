@@ -5,10 +5,11 @@ use crate::mock::{
     MockRestOperations,
 };
 use crate::router::{AppStateBuilder, CollectionManagementOperations};
-use axum::body::Body;
+use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request, StatusCode};
 use query::executor::QueryExecutor;
 use query::rest::RestOperations;
+use serde_json::json;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -61,6 +62,85 @@ fn router_with_collection_mgmt() -> axum::Router {
             as Arc<dyn CollectionManagementOperations>)
         .build();
     crate::router::create_router_with_state(state)
+}
+
+fn router_with_rest() -> axum::Router {
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
+        .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
+        .build();
+    crate::router::create_router_with_state(state)
+}
+
+#[tokio::test]
+async fn collection_doc_ids_returns_paginated_metadata() {
+    let router = router_with_rest();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/v0/collections/Users?limit=1&offset=0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "doc_ids": ["bae-123"],
+            "total": 2,
+            "has_more": true,
+            "offset": 0,
+            "limit": 1
+        })
+    );
+}
+
+#[tokio::test]
+async fn collection_doc_ids_uses_default_limit() {
+    let router = router_with_rest();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/v0/collections/Users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["doc_ids"], json!(["bae-123", "bae-456"]));
+    assert_eq!(value["total"], json!(2));
+    assert_eq!(value["has_more"], json!(false));
+    assert_eq!(value["offset"], json!(0));
+    assert_eq!(value["limit"], json!(100));
+}
+
+#[tokio::test]
+async fn collection_doc_ids_rejects_limit_above_max() {
+    let router = router_with_rest();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/v0/collections/Users?limit=1001")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

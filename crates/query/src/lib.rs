@@ -72,7 +72,10 @@ pub use query_parse::{
     parse_mutations, parse_mutations_with_limits, parse_query, parse_query_with_limits,
     parse_request, parse_request_with_limits, ExplainType, ParsedOperation,
 };
-pub use rest::{RestError, RestOperations, RestOperationsImpl, RestResult};
+pub use rest::{
+    CollectionDocIdsPage, CollectionDocIdsPagination, RestError, RestOperations,
+    RestOperationsImpl, RestResult,
+};
 pub use runner::{DocFetcher, FetchByIdsResult, NacChecker, QueryRunner};
 pub use sdl_parse::{parse_sdl, parse_sdl_with_known_types};
 pub use select_convert::select_to_go_json;

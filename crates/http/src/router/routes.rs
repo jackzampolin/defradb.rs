@@ -79,7 +79,9 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/indexes", get(handlers::index::go_list_all_indexes))
         .route(
             "/{name}",
-            post(handlers::create_document).delete(handlers::delete_collection),
+            get(handlers::get_collection_doc_ids)
+                .post(handlers::create_document)
+                .delete(handlers::delete_collection),
         )
         .route("/{name}/describe", get(handlers::describe_collection))
         .route("/{name}/exists", get(handlers::collection_exists))
@@ -276,7 +278,9 @@ pub fn create_router_with_state(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mock::{FailingMockP2POperations, MockDocumentAcpOperations, MockQueryExecutor};
+    use crate::mock::{
+        FailingMockP2POperations, MockDocumentAcpOperations, MockQueryExecutor, MockRestOperations,
+    };
     use crate::router::{
         DocumentAcpOperations, P2POperations, P2PResult, P2pDocumentInfo, P2pDocumentRequest,
         ReplicatorInfo,
@@ -447,15 +451,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collection_doc_ids_route_is_not_available() {
-        assert_eq!(
-            status_for("/api/v0/collections/Users").await,
-            axum::http::StatusCode::METHOD_NOT_ALLOWED
-        );
-        assert_eq!(
-            status_for("/api/v1/collections/Users").await,
-            axum::http::StatusCode::METHOD_NOT_ALLOWED
-        );
+    async fn collection_doc_ids_route_is_available_with_rest() {
+        let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
+        let rest = Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>;
+        let router = create_router_with_rest(executor, rest);
+
+        for path in ["/api/v0/collections/Users", "/api/v1/collections/Users"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("router should respond");
+
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+        }
     }
 
     #[tokio::test]

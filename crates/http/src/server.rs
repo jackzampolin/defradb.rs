@@ -198,6 +198,7 @@ impl Server {
     /// When REST operations are configured, the server enables additional endpoints:
     /// - `GET /api/v1/collections` - List all collections
     /// - `POST /api/v1/collections/{name}` - Create document(s)
+    /// - `GET /api/v1/collections/{name}` - List collection document IDs
     /// - `GET /api/v1/collections/{name}/document/{docID}` - Get document
     /// - `PATCH /api/v1/collections/{name}/document/{docID}` - Update document
     /// - `DELETE /api/v1/collections/{name}/document/{docID}` - Delete document

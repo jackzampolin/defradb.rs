@@ -9,7 +9,7 @@ mod trait_def;
 
 pub use error::{RestError, RestResult};
 pub use operations::RestOperationsImpl;
-pub use trait_def::RestOperations;
+pub use trait_def::{CollectionDocIdsPage, CollectionDocIdsPagination, RestOperations};
 
 #[cfg(test)]
 mod tests;
