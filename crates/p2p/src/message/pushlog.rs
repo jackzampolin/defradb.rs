@@ -453,20 +453,22 @@ impl PushLogBroadcast {
     /// Decode a gossip payload using the set of encodings accepted across P2P transports.
     ///
     /// CBOR is the canonical gossip encoding because it is self-describing and
-    /// tolerates added fields. Postcard remains accepted for older Iroh peers.
+    /// tolerates added fields. Request-shaped CBOR must be checked before the
+    /// lighter broadcast shape because serde ignores unknown map fields.
+    /// Postcard remains accepted for older Iroh peers.
     pub fn decode_gossip_payload(
         payload: &[u8],
     ) -> Result<(Self, PushLogGossipPayloadEncoding), String> {
-        if let Ok(broadcast) = serde_cbor::from_slice::<Self>(payload) {
-            return Ok((broadcast, PushLogGossipPayloadEncoding::CborBroadcast));
-        }
-
         serde_cbor::from_slice::<PushLogRequest>(payload)
             .map(|request| {
                 (
                     Self::from_request(&request),
                     PushLogGossipPayloadEncoding::CborRequest,
                 )
+            })
+            .or_else(|_| {
+                serde_cbor::from_slice::<Self>(payload)
+                    .map(|broadcast| (broadcast, PushLogGossipPayloadEncoding::CborBroadcast))
             })
             .or_else(|_| {
                 postcard::from_bytes::<Self>(payload)
