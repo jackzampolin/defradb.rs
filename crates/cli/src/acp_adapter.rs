@@ -27,6 +27,21 @@ impl AcpAdapter {
     }
 }
 
+fn allow_full_zanzibar_policies() -> bool {
+    std::env::var("DEFRA_ACP_ALLOW_FULL_ZANZIBAR_POLICIES")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn policy_store_options() -> StorePolicyOptions {
+    let options = StorePolicyOptions::new().with_validation();
+    if allow_full_zanzibar_policies() {
+        options
+    } else {
+        options.with_dpi_enforcement()
+    }
+}
+
 /// Convert a Zanzibar Policy to an HTTP PolicyInfo.
 fn policy_to_info(policy: &Policy) -> PolicyInfo {
     let resources = serde_json::to_value(&policy.resources).ok();
@@ -56,9 +71,7 @@ impl AcpOperations for AcpAdapter {
             .map_err(|e| format!("invalid policy: {}", e))?;
         let policy_id = policy.id.clone();
 
-        let options = StorePolicyOptions::new()
-            .with_validation()
-            .with_dpi_enforcement();
+        let options = policy_store_options();
 
         self.store
             .store_policy_with_options(&policy, &options)
