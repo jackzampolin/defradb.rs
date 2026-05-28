@@ -91,6 +91,10 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// When set, the merge handler generates SE artifacts after merging documents
     /// that belong to collections with encrypted indexes.
     se_enc_key: std::sync::OnceLock<Zeroizing<Vec<u8>>>,
+    /// Optional KMS service. When set, `decrypt_block_data` routes DEK
+    /// retrieval through the KMS (NAC/DAC-gated, cross-peer fetch) instead
+    /// of reading the raw key directly from the Encryption block.
+    kms: std::sync::OnceLock<Arc<dyn kms::KmsService>>,
     /// Per-document merge serialization queue.
     ///
     /// Ensures concurrent P2P merges for the same document are processed one
@@ -108,6 +112,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             merged_composites: std::sync::Mutex::new(HashSet::new()),
             merged_collections: std::sync::Mutex::new(HashSet::new()),
             se_enc_key: std::sync::OnceLock::new(),
+            kms: std::sync::OnceLock::new(),
             merge_queue: Arc::new(MergeQueue::new()),
         }
     }
@@ -129,6 +134,16 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     /// Get the SE encryption key, if configured.
     pub(crate) fn se_enc_key(&self) -> Option<&[u8]> {
         self.se_enc_key.get().map(|k| k.as_slice())
+    }
+
+    /// Set the KMS service. Routes `decrypt_block_data` through the KMS once set.
+    pub fn set_kms(&self, kms: Arc<dyn kms::KmsService>) {
+        let _ = self.kms.set(kms);
+    }
+
+    /// Get the KMS service, if configured.
+    pub(crate) fn kms(&self) -> Option<Arc<dyn kms::KmsService>> {
+        self.kms.get().cloned()
     }
 
     /// Get reference to blockstore.
@@ -227,6 +242,28 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             None => return Ok(data.to_vec()),
         };
 
+        // KMS path: fetch the DEK through the KMS (NAC/DAC-gated). The KMS
+        // resolves the key locally or via cross-peer fetch and returns the
+        // plaintext key; we then AES-GCM decrypt the block data.
+        if let Some(kms) = self.kms() {
+            let ctx = kms::RequestContext::anonymous();
+            let results = kms
+                .get_keys(&ctx, std::slice::from_ref(enc_cid))
+                .await
+                .map_err(|e| MergeError::Storage(format!("kms get_keys: {e}")))?;
+            let map = results
+                .wait_all()
+                .await
+                .map_err(|e| MergeError::Storage(format!("kms wait_all: {e}")))?;
+            let key = map
+                .get(enc_cid)
+                .ok_or_else(|| MergeError::Storage(format!("kms returned no key for {enc_cid}")))?;
+            return crypto::encryption::aes::decrypt_aes(None, data, key, &[])
+                .map_err(|e| MergeError::MergeFailed(format!("kms-keyed decryption failed: {e}")));
+        }
+
+        // Legacy path (unchanged): read the raw key directly from the
+        // Encryption block in encstore/blockstore.
         let enc_txn = self.db.new_txn(true).await.map_err(MergeError::Database)?;
         let encstore = enc_txn.encstore().map_err(MergeError::Database)?;
         let enc_cid_bytes = enc_cid.to_bytes();
@@ -1707,5 +1744,73 @@ mod tests {
             !blockstore.is_merged(&field_cid).await.unwrap(),
             "linked field block should stay unmerged when decryption fails and the field is skipped"
         );
+    }
+
+    /// Stub KMS that returns a fixed key for every requested CID.
+    struct StubKms {
+        key: [u8; 32],
+    }
+
+    #[async_trait]
+    impl kms::KmsService for StubKms {
+        async fn get_keys(
+            &self,
+            _: &kms::RequestContext,
+            cids: &[kms::EncryptionCid],
+        ) -> kms::Result<kms::KeyResults> {
+            let (results, tx) = kms::KeyResults::new(cids.len().max(1));
+            for cid in cids {
+                let _ = tx.send(Ok((*cid, self.key))).await;
+            }
+            drop(tx);
+            Ok(results)
+        }
+
+        async fn generate_key(
+            &self,
+            _: &kms::RequestContext,
+            _: kms::KeyScope,
+        ) -> kms::Result<(kms::EncryptionCid, [u8; 32])> {
+            Err(kms::Error::Unsupported("stub"))
+        }
+
+        async fn serve_request(
+            &self,
+            _: kms::PeerIdentity,
+            _: kms::FetchEncryptionKeyRequest,
+        ) -> kms::Result<kms::FetchEncryptionKeyReply> {
+            Err(kms::Error::Unsupported("stub"))
+        }
+    }
+
+    #[tokio::test]
+    async fn decrypt_block_data_routes_through_kms_when_set() {
+        let (handler, _blockstore) = make_handler();
+
+        // Encrypt a payload with a known key; nonce is prepended to ciphertext.
+        let key = [7u8; 32];
+        let plaintext = b"kms-routed plaintext".to_vec();
+        let (ciphertext, _nonce) =
+            crypto::encryption::aes::encrypt_aes(&plaintext, &key, &[], true).unwrap();
+
+        // Arbitrary CID — the KMS resolves it without touching the encstore.
+        let enc_cid =
+            Cid::try_from("bafyreidykglsfhoixmivffc5uwhcgshx4j465xwqntbmu43nb2dzqwfvae").unwrap();
+
+        handler.set_kms(Arc::new(StubKms { key }));
+
+        let decrypted = handler
+            .decrypt_block_data(&ciphertext, Some(&enc_cid))
+            .await
+            .expect("kms-keyed decryption should succeed");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[tokio::test]
+    async fn decrypt_block_data_no_kms_no_cid_passthrough() {
+        let (handler, _blockstore) = make_handler();
+        let data = b"plaintext".to_vec();
+        let out = handler.decrypt_block_data(&data, None).await.unwrap();
+        assert_eq!(out, data);
     }
 }
