@@ -15,6 +15,7 @@ use storage::IterOptions;
 
 use crate::database::DB;
 use crate::error::{Error, Result};
+use crate::txn::DbTxn;
 
 /// Subset of a collection's policy metadata sufficient for KMS access-control
 /// checks. Returned by `resolve_collection_from_doc_id`.
@@ -44,6 +45,17 @@ pub async fn resolve_collection_from_doc_id<S: Store>(
     doc_id: &str,
 ) -> Result<Option<DocCollectionInfo>> {
     let txn = db.new_txn(true).await?;
+    let result = resolve_inner(&txn, doc_id).await;
+    // Always discard the read-only transaction to release resources
+    // (matches schema_loader.rs and Go's `defer txn.Discard()`).
+    let _ = txn.discard();
+    result
+}
+
+async fn resolve_inner<S: Store>(
+    txn: &DbTxn<S>,
+    doc_id: &str,
+) -> Result<Option<DocCollectionInfo>> {
     let headstore = txn.headstore()?;
 
     let prefix = HeadstorePriorityKey::document_prefix(doc_id);
