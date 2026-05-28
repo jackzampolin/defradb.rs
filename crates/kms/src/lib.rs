@@ -37,3 +37,6 @@ pub use service::{KmsService, PeerIdentity};
 
 mod store;
 pub use store::{KeyStore, StoredKey};
+
+mod memory_store;
+pub use memory_store::MemoryKeyStore;
