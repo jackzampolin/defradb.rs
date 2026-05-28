@@ -12,13 +12,13 @@ use crate::error::Result;
 use crate::service::PeerIdentity;
 use crate::wire::{FetchEncryptionKeyReply, FetchEncryptionKeyRequest};
 
-/// A request ready to send on a `KeyTransport`. Already CBOR-encoded.
+/// A CBOR-encoded `FetchEncryptionKeyRequest` ready to publish on a
+/// `KeyTransport`. KMS wire is bare CBOR (matching Go's
+/// `internal/kms/pubsub.go`) — there is no signature envelope here.
 ///
-/// `request_id` is for tracing only — Go's wire format has no request-id
-/// envelope, so peer correlation happens cryptographically (only the
-/// requester's ephemeral private key can decrypt the reply).
+/// `request_id` is local-only for tracing/correlation; NOT on the wire.
 #[derive(Debug, Clone)]
-pub struct SignedFetchRequest {
+pub struct EncodedFetchRequest {
     /// CBOR-encoded `FetchEncryptionKeyRequest` payload.
     pub payload: Vec<u8>,
     /// Local tracing id (NOT on the wire).
@@ -51,7 +51,7 @@ pub trait KeyTransport: Send + Sync {
 
     /// Publish a fetch request and return a stream of replies. Caller is
     /// responsible for any retry/timeout policy on the returned stream.
-    async fn send_request(&self, req: SignedFetchRequest) -> Result<TransportReplyStream>;
+    async fn send_request(&self, req: EncodedFetchRequest) -> Result<TransportReplyStream>;
 
     /// Install the local handler invoked when a peer sends a fetch request.
     /// Idempotent: replacing a previously installed handler is allowed (M1

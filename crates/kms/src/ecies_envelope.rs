@@ -13,9 +13,10 @@ use crate::error::{Error, Result};
 /// suitable for inclusion in `FetchEncryptionKeyReply::blocks`.
 pub fn wrap_for_requester(plaintext: &[u8], requester_pub: &[u8]) -> Result<Vec<u8>> {
     if requester_pub.len() != 32 {
-        return Err(Error::Crypto(
-            "requester ephemeral pubkey must be 32 bytes".into(),
-        ));
+        return Err(Error::Crypto(format!(
+            "requester ephemeral pubkey must be 32 bytes, got {}",
+            requester_pub.len()
+        )));
     }
     let array: [u8; 32] = requester_pub.try_into().unwrap();
     let public = x25519_dalek::PublicKey::from(array);

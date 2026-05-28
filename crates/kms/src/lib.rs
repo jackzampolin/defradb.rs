@@ -42,7 +42,7 @@ mod memory_store;
 pub use memory_store::MemoryKeyStore;
 
 mod transport;
-pub use transport::{IncomingHandler, KeyTransport, SignedFetchRequest, TransportReplyStream};
+pub use transport::{EncodedFetchRequest, IncomingHandler, KeyTransport, TransportReplyStream};
 
 mod ecies_envelope;
 pub use ecies_envelope::{unwrap_with_private, wrap_for_requester};
