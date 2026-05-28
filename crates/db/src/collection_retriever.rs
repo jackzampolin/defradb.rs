@@ -15,7 +15,6 @@ use storage::IterOptions;
 
 use crate::database::DB;
 use crate::error::{Error, Result};
-use crate::txn::DbTxn;
 
 /// Subset of a collection's policy metadata sufficient for KMS access-control
 /// checks. Returned by `resolve_collection_from_doc_id`.
@@ -44,19 +43,19 @@ pub async fn resolve_collection_from_doc_id<S: Store>(
     db: &Arc<DB<S>>,
     doc_id: &str,
 ) -> Result<Option<DocCollectionInfo>> {
+    // The transaction is held as an owned local across the awaits below. The
+    // store handles (`txn.headstore()` / `.blockstore()` / `.systemstore()`)
+    // are owned `NamespaceView`s, so `&DbTxn` is only borrowed momentarily and
+    // never held across an await. This keeps the future `Send`: a held
+    // `&DbTxn` across an await would make it `!Send` (DbTxn is `!Sync` due to
+    // its callback registry), which breaks `kms::DocCollectionLookup` whose
+    // futures must be `Send`. The read-only txn is discarded on every return
+    // path (matches schema_loader.rs and Go's `defer txn.Discard()`).
     let txn = db.new_txn(true).await?;
-    let result = resolve_inner(&txn, doc_id).await;
-    // Always discard the read-only transaction to release resources
-    // (matches schema_loader.rs and Go's `defer txn.Discard()`).
-    let _ = txn.discard();
-    result
-}
 
-async fn resolve_inner<S: Store>(
-    txn: &DbTxn<S>,
-    doc_id: &str,
-) -> Result<Option<DocCollectionInfo>> {
     let headstore = txn.headstore()?;
+    let blockstore = txn.blockstore()?;
+    let systemstore = txn.systemstore()?;
 
     let prefix = HeadstorePriorityKey::document_prefix(doc_id);
     let opts = IterOptions::new().with_prefix(prefix);
@@ -66,57 +65,74 @@ async fn resolve_inner<S: Store>(
     let pair = match iter.next().await.map_err(Error::Storage)? {
         Some(p) => p,
         None => {
-            iter.close().await.map_err(Error::Storage)?;
+            let _ = iter.close().await;
+            let _ = txn.discard();
             return Ok(None);
         }
     };
     let cid_bytes = match pair.key.get(cid_offset..) {
         Some(b) => b.to_vec(),
         None => {
-            iter.close().await.map_err(Error::Storage)?;
+            let _ = iter.close().await;
+            let _ = txn.discard();
             return Ok(None);
         }
     };
-    iter.close().await.map_err(Error::Storage)?;
+    let _ = iter.close().await;
 
-    let cid = Cid::try_from(cid_bytes.as_slice())
-        .map_err(|e| Error::Serialization(format!("decode head cid: {e}")))?;
+    let cid = match Cid::try_from(cid_bytes.as_slice()) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = txn.discard();
+            return Err(Error::Serialization(format!("decode head cid: {e}")));
+        }
+    };
 
     // Load the block to read its delta.
-    let blockstore = txn.blockstore()?;
-    let block_bytes = match blockstore
-        .get(&cid.to_bytes())
-        .await
-        .map_err(Error::Storage)?
-    {
-        Some(b) => b,
-        None => return Ok(None),
+    let block_bytes_res = blockstore.get(&cid.to_bytes()).await;
+    let block_bytes = match block_bytes_res {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            let _ = txn.discard();
+            return Ok(None);
+        }
+        Err(e) => {
+            let _ = txn.discard();
+            return Err(Error::Storage(e));
+        }
     };
-    let block = defra_core::block::Block::from_dag_cbor(&block_bytes)
-        .map_err(|e| Error::Serialization(format!("decode block: {e}")))?;
+    let block = match defra_core::block::Block::from_dag_cbor(&block_bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = txn.discard();
+            return Err(Error::Serialization(format!("decode block: {e}")));
+        }
+    };
     let schema_version_id = match block.delta.schema_version_id() {
         Some(v) => v.to_string(),
-        None => return Ok(None),
+        None => {
+            let _ = txn.discard();
+            return Ok(None);
+        }
     };
 
     // Resolve collection via the systemstore.
-    let systemstore = txn.systemstore()?;
-    let collection =
-        match crate::schema_loader::get_collection_by_version_id(&systemstore, &schema_version_id)
-            .await?
-        {
-            Some(c) => c,
-            None => return Ok(None),
-        };
-    let policy = match collection.policy.clone() {
-        Some(p) => p,
-        None => return Ok(None),
+    let collection_res =
+        crate::schema_loader::get_collection_by_version_id(&systemstore, &schema_version_id).await;
+    let info = match collection_res {
+        Ok(Some(collection)) => collection.policy.clone().map(|policy| DocCollectionInfo {
+            collection_id: collection.collection_id.clone(),
+            policy_id: policy.id,
+            resource_name: policy.resource_name,
+        }),
+        Ok(None) => None,
+        Err(e) => {
+            let _ = txn.discard();
+            return Err(e);
+        }
     };
-    Ok(Some(DocCollectionInfo {
-        collection_id: collection.collection_id.clone(),
-        policy_id: policy.id,
-        resource_name: policy.resource_name,
-    }))
+    let _ = txn.discard();
+    Ok(info)
 }
 
 #[cfg(test)]

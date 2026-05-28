@@ -21,6 +21,7 @@ pub(crate) type EmbeddedBlockstore<S> = blockstore::DefraBlockstore<S>;
 pub(crate) type EmbeddedMergeHandler<S> = db_merge::AcpMergeHandler<S, EmbeddedBlockstore<S>>;
 type EmbeddedTxnRegistry<S> = db::DbTransactionRegistry<S>;
 pub(crate) type WireDocumentAcpCallback = Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>;
+pub(crate) type WireKmsCallback = Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Send>;
 
 /// Embedded DefraDB node assembled for native/mobile embedding.
 pub struct EmbeddedNode<S: storage::corekv::Store> {
@@ -418,6 +419,74 @@ where
             wire_document_acp(document_acp.clone());
         }
     }
+
+    // Build the KMS once document ACP + NAC manager exist (PR #4778 ordering:
+    // the P2P transport was created earlier; the policy needs ACP/NAC which
+    // initialize here).
+    let kms: Arc<dyn kms::KmsService> = {
+        let store: Arc<dyn kms::KeyStore> = Arc::new(kms::MemoryKeyStore::new());
+        let doc_lookup: Arc<dyn kms::DocCollectionLookup> = Arc::new(
+            crate::kms_adapters::EmbeddedDocCollectionLookup::new(database.clone()),
+        );
+        let policy = Arc::new(kms::NacDacPolicy::new(document_acp.clone(), doc_lookup));
+        policy.set_node_acp(Arc::new(crate::kms_adapters::EmbeddedNodeAcpRead::new(
+            nac_manager.clone(),
+        )));
+
+        // Node identity for the wire `identity` fallback on gossip-initiated
+        // fetches. Anonymous nodes use a stable placeholder DID.
+        let node_did = database.node_did().unwrap_or_else(|| {
+            identity::Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK")
+                .expect("static anonymous DID parses")
+        });
+
+        let transports: Vec<Arc<dyn kms::KeyTransport>> = match p2p_setup.as_ref() {
+            Some(setup) => vec![setup.kms_transport.clone()],
+            None => vec![],
+        };
+
+        Arc::new(kms::DefraKms::new(
+            store,
+            transports,
+            policy as Arc<dyn kms::AccessPolicy>,
+            node_did,
+        ))
+    };
+
+    // Wire the KMS into the P2P transport (serve handler) + merge handler.
+    if let Some(ref mut setup) = p2p_setup {
+        // Install the serve handler. Use a Weak ref to break the
+        // transport↔kms Arc cycle (transport holds handler → kms →
+        // transports → transport).
+        struct KmsServeHandler {
+            kms: std::sync::Weak<dyn kms::KmsService>,
+        }
+        #[async_trait::async_trait]
+        impl kms::IncomingHandler for KmsServeHandler {
+            async fn handle(
+                &self,
+                from: kms::PeerIdentity,
+                req: kms::FetchEncryptionKeyRequest,
+            ) -> kms::Result<kms::FetchEncryptionKeyReply> {
+                match self.kms.upgrade() {
+                    Some(kms) => kms.serve_request(from, req).await,
+                    None => Err(kms::Error::Internal("kms dropped".into())),
+                }
+            }
+        }
+        setup
+            .kms_transport
+            .install_handler(Arc::new(KmsServeHandler {
+                kms: Arc::downgrade(&kms),
+            }));
+
+        if let Some(wire_kms) = setup.wire_kms.take() {
+            wire_kms(kms.clone());
+        }
+    }
+
+    // Wire the KMS into the write path (DB-held, read by doc_mutator).
+    database.set_kms(kms.clone());
 
     let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
     let collection_provider: Arc<dyn query::CollectionProvider> =

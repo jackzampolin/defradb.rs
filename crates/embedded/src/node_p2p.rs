@@ -4,7 +4,9 @@ use anyhow::{anyhow, Result};
 use p2p::sync::SyncConfig;
 use p2p::topics::DefraTopic;
 
-use crate::node::{EmbeddedBlockstore, EmbeddedMergeHandler, WireDocumentAcpCallback};
+use crate::node::{
+    EmbeddedBlockstore, EmbeddedMergeHandler, WireDocumentAcpCallback, WireKmsCallback,
+};
 use crate::node_recovery::{restore_libp2p_documents, restore_libp2p_replicators};
 use crate::node_tasks::{
     spawn_failure_recorder, spawn_libp2p_event_handler, spawn_libp2p_retry_loop,
@@ -25,6 +27,13 @@ pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     /// `P2PSetup` exposes. Without this, transactional writes commit locally
     /// but never replicate.
     pub txn_broadcaster: Arc<dyn db::event_emission::TxnBroadcaster>,
+    /// Type-erased KMS transport for this node's P2P system. node.rs adds it
+    /// to the DefraKms transports list and installs the serve handler.
+    pub kms_transport: Arc<dyn kms::KeyTransport>,
+    /// Defers wiring the late-built KMS into the inner merge handler
+    /// (mirrors `wire_document_acp`). NAC/document_acp aren't available when
+    /// the P2P system is created, so the KMS is built later in node.rs.
+    pub wire_kms: Option<WireKmsCallback>,
 }
 
 pub(crate) async fn setup_libp2p<S>(
@@ -124,6 +133,13 @@ where
         coordinator.clone(),
     );
 
+    let kms_transport =
+        p2p::kms::PubsubKeyTransport::new(p2p::Libp2pTransport::new(handle.clone()))
+            .await
+            .map_err(|e| anyhow!("failed to create KMS transport: {e}"))?;
+    coordinator.install_kms_transport(kms_transport.clone());
+    let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
+
     match db_merge::load_persisted_collections(&coordinator).await {
         Ok(count) if count > 0 => tracing::debug!(count, "loaded persisted P2P collections"),
         Ok(_) => {}
@@ -206,6 +222,10 @@ where
         mutator: replication.broadcast_mutator,
         merge_handler: replication.merge_handler,
         txn_broadcaster: replication.txn_broadcaster,
+        kms_transport: kms_transport as Arc<dyn kms::KeyTransport>,
+        wire_kms: Some(Box::new(move |kms| {
+            merge_handler_inner_for_kms.set_kms(kms);
+        })),
         wire_document_acp: Some(Box::new(move |acp| {
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());
@@ -272,6 +292,12 @@ where
         blockstore.clone(),
         coordinator.clone(),
     );
+
+    let kms_transport = p2p::kms::PubsubKeyTransport::new(transport.clone())
+        .await
+        .map_err(|e| anyhow!("failed to create KMS transport: {e}"))?;
+    coordinator.install_kms_transport(kms_transport.clone());
+    let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
 
     match db_merge::load_persisted_collections(&coordinator).await {
         Ok(count) if count > 0 => tracing::debug!(count, "loaded persisted P2P collections"),
@@ -353,6 +379,10 @@ where
         mutator: replication.broadcast_mutator,
         merge_handler: replication.merge_handler,
         txn_broadcaster: replication.txn_broadcaster,
+        kms_transport: kms_transport as Arc<dyn kms::KeyTransport>,
+        wire_kms: Some(Box::new(move |kms| {
+            merge_handler_inner_for_kms.set_kms(kms);
+        })),
         wire_document_acp: Some(Box::new(move |acp| {
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());

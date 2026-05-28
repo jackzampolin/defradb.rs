@@ -4237,6 +4237,7 @@ dependencies = [
  "events",
  "hex",
  "identity",
+ "kms",
  "lens",
  "libp2p",
  "p2p",

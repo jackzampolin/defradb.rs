@@ -20,6 +20,7 @@ defra-p2p-adapter = { workspace = true, default-features = false, features = ["l
 document = { path = "../document" }
 events = { path = "../events" }
 identity = { path = "../identity" }
+kms = { path = "../kms" }
 lens = { path = "../lens" }
 p2p = { path = "../p2p", features = ["libp2p-transport"] }
 query = { path = "../query" }
