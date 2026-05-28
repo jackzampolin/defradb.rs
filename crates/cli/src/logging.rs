@@ -154,7 +154,11 @@ where
     let (telemetry_handle, tracer) = if config.telemetry_disabled {
         (telemetry::TelemetryHandle::noop(), None)
     } else {
-        match telemetry::init(telemetry::TelemetryConfig::default()) {
+        // Source the service version from defra-version so OTLP receivers see
+        // the actual defra binary version, not the telemetry crate's own.
+        let telemetry_config =
+            telemetry::TelemetryConfig::new("DefraDB", defra_version::VersionInfo::new().version);
+        match telemetry::init(telemetry_config) {
             Ok((handle, tracer)) => (handle, Some(tracer)),
             Err(err) => {
                 eprintln!(

@@ -42,6 +42,53 @@ The CLI exposes GraphQL query guardrails on `defradb start`:
 | `--query-max-width` | `100` | Max fields at any GraphQL selection level (`0` = unlimited). |
 | `--query-max-filter-depth` | `50` | Max recursive filter nesting depth (`0` = unlimited). |
 
+## Telemetry (OpenTelemetry)
+
+Opt in at compile time with `--features otel`:
+
+```bash
+cargo build --release -p cli --features otel
+```
+
+Mirrors Go DefraDB's `//go:build telemetry` tag — when not compiled in, zero OTel dependencies and zero runtime cost. When compiled in, traces and metrics export to `http://localhost:4318` (OTLP/HTTP) **by default**, same as Go.
+
+| Flag / env var | Effect |
+| --- | --- |
+| `--no-telemetry` / `DEFRA_NO_TELEMETRY=true` | Disable exporters at runtime. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Override collector URL (standard OTel env var). |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Add headers, e.g. for auth. |
+| `OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES` | Override service name / extra attributes. |
+| `OTEL_TRACES_SAMPLER` | Configure sampling (default: parent-based always-on, matching Go). |
+
+When no collector is reachable, repeat `"connection refused"` messages from the OTel SDK are suppressed after the first — port of Go's `otel.SetErrorHandler + sync.Once` dedup (issue #977).
+
+### Embedded usage
+
+Library consumers (via `defra-node`) can either let `NodeBuilder` initialize OTel themselves or bring a pre-built handle:
+
+```rust
+use defra_node::{EmbeddedNode, TelemetryConfig};
+
+// Option A — let the builder handle init
+let node = EmbeddedNode::builder()
+    .with_telemetry(TelemetryConfig::new("my-service", env!("CARGO_PKG_VERSION")))
+    .build()
+    .await?;
+
+// Option B — bring your own (e.g. defra-agent runs its own OTel stack)
+let (handle, _tracer) = telemetry::init(TelemetryConfig::default())?;
+// ... compose your own subscriber with `telemetry::otel_layer(_tracer)` ...
+let node = EmbeddedNode::builder()
+    .with_external_telemetry(handle)
+    .build()
+    .await?;
+
+// shutdown() flushes buffered spans (which Go DefraDB forgets to do).
+node.shutdown().await;
+```
+
+Either way requires `defra-node` to be built with `--features otel`.
+
 ## Testing
 
 ### Integration Tests

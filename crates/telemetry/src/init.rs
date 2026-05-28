@@ -1,14 +1,18 @@
 //! OTLP exporter setup. Mirrors Go DefraDB's `internal/telemetry/otel.go`.
 //!
-//! - OTLP/gRPC transport (tonic), traces + metrics signals.
+//! - OTLP/HTTP transport (`reqwest`), traces + metrics signals. Same wire
+//!   protocol Go uses via `otlptracehttp` / `otlpmetrichttp`. Default
+//!   endpoint is `http://localhost:4318`.
 //! - Standard OTEL env vars are honored automatically by `opentelemetry-otlp`
 //!   0.32: `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
 //!   `OTEL_EXPORTER_OTLP_PROTOCOL`, signal-specific overrides, etc.
-//! - Resource attributes: `service.name`, `service.version`. `OS` /
-//!   `process` detectors from the sdk's defaults are not added here yet
-//!   (deferred — Go uses `resource.WithOS() / WithProcess()`).
+//! - Resource attributes: `service.name`, `service.version`, `os.type`,
+//!   `host.arch`, `process.pid`, `process.executable.name`. Mirrors Go's
+//!   `resource.WithOS()` + `resource.WithProcess()` (which we approximate
+//!   with `std::env::consts` + `std::process` to avoid an extra dep).
 //!
-//! Requires a Tokio runtime: `grpc-tonic` builds at the call site assume one.
+//! Requires a Tokio runtime: `reqwest-client` needs one for the async
+//! HTTP exporter.
 
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
@@ -40,13 +44,26 @@ pub enum InitError {
 /// at its subscriber-composition site so type inference can pick the right
 /// `S` parameter for `OpenTelemetryLayer<S, _>`.
 pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), InitError> {
+    // Resource attributes mirror Go's `resource.WithSchemaURL + WithOS + WithProcess`.
+    // We use `std::env::consts` / `std::process` instead of pulling in
+    // `opentelemetry-resource-detectors`, which keeps the dep tree small —
+    // the attribute set matches what those detectors produce for the common
+    // fields (os.type, host.arch, process.pid, process.executable.name).
+    let executable_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default();
     let resource = Resource::builder()
         .with_service_name(config.service_name.clone())
         .with_attribute(KeyValue::new("service.version", config.service_version))
+        .with_attribute(KeyValue::new("os.type", std::env::consts::OS))
+        .with_attribute(KeyValue::new("host.arch", std::env::consts::ARCH))
+        .with_attribute(KeyValue::new("process.pid", i64::from(std::process::id())))
+        .with_attribute(KeyValue::new("process.executable.name", executable_name))
         .build();
 
     let span_exporter = SpanExporter::builder()
-        .with_tonic()
+        .with_http()
         .build()
         .map_err(|e| InitError::SpanExporter(Box::new(e)))?;
     let tracer_provider = SdkTracerProvider::builder()
@@ -55,7 +72,7 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
         .build();
 
     let metric_exporter = MetricExporter::builder()
-        .with_tonic()
+        .with_http()
         .build()
         .map_err(|e| InitError::MetricExporter(Box::new(e)))?;
     let reader = PeriodicReader::builder(metric_exporter).build();

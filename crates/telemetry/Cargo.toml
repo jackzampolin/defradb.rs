@@ -28,7 +28,12 @@ thiserror.workspace = true
 tokio = { workspace = true, optional = true }
 opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "trace", "metrics"], optional = true }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace", "metrics", "tls-ring", "tls-webpki-roots"], optional = true }
+# OTLP over HTTP/proto, mirroring Go DefraDB's `otlptracehttp.New`. Default
+# endpoint is http://localhost:4318 — same default as the Go upstream.
+# `reqwest-blocking-client` runs on the SDK's batch-exporter thread, sidestepping
+# the workspace's locked reqwest 0.13 (which has dropped the `webpki-roots`
+# feature that `opentelemetry-http` still asks for under the async client).
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics"], optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
 
 [lints]

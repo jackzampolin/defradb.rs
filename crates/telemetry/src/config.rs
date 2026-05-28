@@ -20,7 +20,10 @@ impl TelemetryConfig {
 }
 
 impl Default for TelemetryConfig {
+    /// Defaults to Go DefraDB's service name (`"DefraDB"`) and the telemetry
+    /// crate's own version. Callers should override `service_version` with
+    /// the actual defra binary version (e.g. from `defra_version`).
     fn default() -> Self {
-        Self::new("defradb", env!("CARGO_PKG_VERSION"))
+        Self::new("DefraDB", env!("CARGO_PKG_VERSION"))
     }
 }

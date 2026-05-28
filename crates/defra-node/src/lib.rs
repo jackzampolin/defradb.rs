@@ -48,6 +48,8 @@ pub use lens::{LensConfig, LensModule, TransformId};
 pub use query::QueryLimits;
 pub use query::{QueryExecutor, QueryRequest, QueryResponse};
 pub use schema::CollectionVersion;
+#[cfg(feature = "otel")]
+pub use telemetry::{TelemetryConfig, TelemetryHandle};
 
 /// Type-erased schema operations so we can store DB<S> without leaking the Store generic.
 #[async_trait::async_trait]
@@ -83,6 +85,8 @@ pub struct EmbeddedNode {
     p2p_ops: Option<Arc<dyn defra_http::P2POperations>>,
     #[cfg(feature = "p2p")]
     p2p_lifecycle: Option<P2PLifecycle>,
+    #[cfg(feature = "otel")]
+    telemetry: std::sync::Mutex<Option<TelemetryHandle>>,
 }
 
 #[cfg(feature = "p2p")]
@@ -395,6 +399,20 @@ impl EmbeddedNode {
         if let Some(lifecycle) = &self.p2p_lifecycle {
             lifecycle.shutdown().await;
         }
+
+        // Flush buffered spans / metrics. Done after P2P shutdown so trailing
+        // shutdown spans are still captured. Go DefraDB never calls provider
+        // shutdown — we don't repeat that bug.
+        #[cfg(feature = "otel")]
+        {
+            let handle = match self.telemetry.lock() {
+                Ok(mut guard) => guard.take(),
+                Err(poisoned) => poisoned.into_inner().take(),
+            };
+            if let Some(handle) = handle {
+                handle.shutdown();
+            }
+        }
     }
 }
 
@@ -509,6 +527,17 @@ pub struct NodeBuilder {
     http_config: Option<HttpConfig>,
     #[cfg(feature = "p2p")]
     p2p_config: Option<P2PConfig>,
+    #[cfg(feature = "otel")]
+    telemetry_setup: Option<TelemetrySetup>,
+}
+
+/// Two ways an embedded user can wire OpenTelemetry: let `NodeBuilder` call
+/// `telemetry::init` for them at `build()` time, or hand in a handle they
+/// already built (so they can compose their own subscriber chain first).
+#[cfg(feature = "otel")]
+enum TelemetrySetup {
+    Owned(TelemetryConfig),
+    External(TelemetryHandle),
 }
 
 struct StoreBuildArgs {
@@ -523,6 +552,8 @@ struct StoreBuildArgs {
     transaction_cleanup_config: Option<TransactionCleanupConfig>,
     #[cfg(feature = "p2p")]
     p2p_config: Option<P2PConfig>,
+    #[cfg(feature = "otel")]
+    telemetry_handle: Option<TelemetryHandle>,
 }
 
 impl NodeBuilder {
@@ -604,6 +635,31 @@ impl NodeBuilder {
         self
     }
 
+    /// Enable OpenTelemetry exporters owned by the node. The handle's
+    /// `shutdown()` is called from [`EmbeddedNode::shutdown`].
+    ///
+    /// This does **not** install a `tracing` subscriber — the caller's
+    /// subscriber needs the OTel bridge layer composed onto it for spans
+    /// to flow. See [`telemetry::otel_layer`] and the crate docs for the
+    /// pattern. If you already have a configured subscriber and just want
+    /// the node to own shutdown, use [`Self::with_external_telemetry`].
+    #[cfg(feature = "otel")]
+    pub fn with_telemetry(mut self, config: TelemetryConfig) -> Self {
+        self.telemetry_setup = Some(TelemetrySetup::Owned(config));
+        self
+    }
+
+    /// Hand a pre-built telemetry handle to the node so it owns shutdown.
+    /// The caller is responsible for `telemetry::init` and subscriber
+    /// composition; this method just hooks lifetime to the node. Intended
+    /// for consumers (e.g. defra-agent) that run their own OTel stack and
+    /// don't want `NodeBuilder` touching globals.
+    #[cfg(feature = "otel")]
+    pub fn with_external_telemetry(mut self, handle: TelemetryHandle) -> Self {
+        self.telemetry_setup = Some(TelemetrySetup::External(handle));
+        self
+    }
+
     /// Build and start the embedded DefraDB node.
     pub async fn build(self) -> anyhow::Result<EmbeddedNode> {
         let node_identity_did = self.node_identity_did.clone();
@@ -661,6 +717,21 @@ impl NodeBuilder {
         let query_timeout = self.query_timeout;
         let query_limits = self.query_limits;
 
+        // Resolve the telemetry handle (lazy-init the owned variant — we
+        // need a Tokio runtime, which is guaranteed here since build() is
+        // async). Threaded through StoreBuildArgs to the actual EmbeddedNode
+        // construction site.
+        #[cfg(feature = "otel")]
+        let telemetry_handle: Option<TelemetryHandle> = match self.telemetry_setup {
+            Some(TelemetrySetup::Owned(config)) => {
+                let (handle, _tracer) = telemetry::init(config)
+                    .map_err(|e| anyhow::anyhow!("telemetry init failed: {e}"))?;
+                Some(handle)
+            }
+            Some(TelemetrySetup::External(handle)) => Some(handle),
+            None => None,
+        };
+
         // 3. Storage backend + database
         let node = if let Some(path) = self.data_path {
             tokio::fs::create_dir_all(&path).await?;
@@ -696,6 +767,8 @@ impl NodeBuilder {
                             transaction_cleanup_config,
                             #[cfg(feature = "p2p")]
                             p2p_config,
+                            #[cfg(feature = "otel")]
+                            telemetry_handle,
                         },
                     )
                     .await?
@@ -729,6 +802,8 @@ impl NodeBuilder {
                             transaction_cleanup_config,
                             #[cfg(feature = "p2p")]
                             p2p_config,
+                            #[cfg(feature = "otel")]
+                            telemetry_handle,
                         },
                     )
                     .await?
@@ -763,6 +838,8 @@ impl NodeBuilder {
                     transaction_cleanup_config,
                     #[cfg(feature = "p2p")]
                     p2p_config,
+                    #[cfg(feature = "otel")]
+                    telemetry_handle,
                 },
             )
             .await?
@@ -851,6 +928,8 @@ impl NodeBuilder {
             transaction_cleanup_config,
             #[cfg(feature = "p2p")]
             p2p_config,
+            #[cfg(feature = "otel")]
+            telemetry_handle,
         } = args;
 
         let embedding_config = db_options.embedding_config();
@@ -958,6 +1037,8 @@ impl NodeBuilder {
             p2p_ops,
             #[cfg(feature = "p2p")]
             p2p_lifecycle,
+            #[cfg(feature = "otel")]
+            telemetry: std::sync::Mutex::new(telemetry_handle),
         })
     }
 

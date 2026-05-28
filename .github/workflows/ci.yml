@@ -28,6 +28,13 @@ jobs:
 
       - run: cargo clippy --all -- -D warnings
 
+      # OTel feature paths are opt-in (mirror Go's `//go:build telemetry`),
+      # so the default clippy pass doesn't exercise them. These two checks
+      # keep the feature-gated code from rotting silently. Issue #977.
+      - run: cargo clippy -p telemetry --features otlp --all-targets -- -D warnings
+      - run: cargo clippy -p cli --features otel --all-targets -- -D warnings
+      - run: cargo clippy -p defra-node --features otel --all-targets -- -D warnings
+
       - name: Cleanup
         if: always()
         run: |
@@ -88,6 +95,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - run: cargo test --workspace --exclude integration-test --exclude ffi-test
+
+      # Cover OTel-only tests + a feature-on build of the CLI so the otel
+      # path is exercised under CI on every PR. Issue #977.
+      - run: cargo test -p telemetry --features otlp
+      - run: cargo build -p cli --features otel
 
       - name: Cache pre-built binaries
         run: |
