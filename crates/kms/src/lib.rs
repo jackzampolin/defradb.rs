@@ -22,3 +22,6 @@ pub use error::{KmsError, Result};
 
 pub mod types;
 pub use types::{EncryptionCid, KeyScope, PolicyDecision};
+
+pub mod context;
+pub use context::RequestContext;
