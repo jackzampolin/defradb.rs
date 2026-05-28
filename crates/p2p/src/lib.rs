@@ -64,6 +64,8 @@ pub mod error;
 mod explicit_replay;
 #[cfg(feature = "libp2p-transport")]
 pub mod host;
+#[cfg(feature = "libp2p-transport")]
+pub mod kms;
 pub mod message;
 pub mod protocol;
 #[cfg(feature = "libp2p-transport")]

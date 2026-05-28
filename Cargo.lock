@@ -8828,6 +8828,7 @@ dependencies = [
  "iroh-blobs",
  "iroh-gossip",
  "iroh-tickets",
+ "kms",
  "libipld",
  "libp2p",
  "libp2p-stream",
