@@ -53,29 +53,36 @@
 //! - Protocol ID: `/defra/0.0.1` (multicodec 961)
 //! - Messages: CBOR encoded using serde
 
+#[cfg(feature = "libp2p-transport")]
 pub mod address;
+#[cfg(feature = "libp2p-transport")]
 pub mod behaviour;
 pub mod bitswap;
+#[cfg(feature = "libp2p-transport")]
 pub mod codec;
 pub mod error;
 mod explicit_replay;
+#[cfg(feature = "libp2p-transport")]
 pub mod host;
 pub mod message;
 pub mod protocol;
+#[cfg(feature = "libp2p-transport")]
 pub mod pubsub_rpc;
 pub mod replicator;
 pub mod signing;
 pub mod sync;
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(all(any(test, feature = "test-utils"), feature = "libp2p-transport"))]
 pub mod testutil;
 pub mod topics;
 pub mod transport;
+#[cfg(feature = "libp2p-transport")]
 pub mod two_stream;
 
 #[cfg(feature = "iroh-transport")]
 pub mod iroh;
 
 // Re-export address parsing
+#[cfg(feature = "libp2p-transport")]
 pub use address::{parse_multiaddr_with_peer_id, ParsedMultiaddr};
 
 // Re-export main types for convenience
@@ -91,6 +98,7 @@ pub use explicit_replay::{
     DEFAULT_CAPABILITY_TTL as DEFAULT_EXPLICIT_REPLAY_CAPABILITY_TTL,
     MAX_CAPABILITY_TTL as MAX_EXPLICIT_REPLAY_CAPABILITY_TTL,
 };
+#[cfg(feature = "libp2p-transport")]
 pub use host::{
     convert_host_event, HostCommand, HostEvent, Libp2pTransport, P2PHost, P2PHostConfig,
     P2PHostHandle, ResponseChannel,
@@ -106,7 +114,9 @@ pub use protocol::{
 pub use protocol::{PUSHLOG_REQUEST_PROTOCOL, PUSHLOG_RESPONSE_PROTOCOL};
 
 // Re-export signing functions
-pub use signing::{sign_message, sign_message_cloned, sign_with_transport, verify_message};
+pub use signing::sign_with_transport;
+#[cfg(feature = "libp2p-transport")]
+pub use signing::{sign_message, sign_message_cloned, verify_message};
 
 // Re-export topic types
 pub use topics::{DefraTopic, DOC_SYNC_TOPIC, ENCRYPTION_TOPIC, SYNC_BRANCHABLE_TOPIC};
@@ -117,14 +127,19 @@ pub use transport::{P2PTransport, TransportEvent};
 // Re-export sync types
 #[cfg(feature = "iroh-transport")]
 pub use sync::IrohSyncCoordinator;
+#[cfg(feature = "libp2p-transport")]
+pub use sync::Libp2pSyncCoordinator;
 pub use sync::{
     Broadcaster, CreateReplicatorResult, DagSync, DagSyncConfig, DagSyncState,
-    Libp2pSyncCoordinator, LoadReplicatorsResult, NeedsFetchData, PeerStateTracker, ProcessQueue,
-    SyncConfig, SyncCoordinator, SyncEvent, SyncManager, SyncPlan,
+    LoadReplicatorsResult, NeedsFetchData, PeerStateTracker, ProcessQueue, SyncConfig,
+    SyncCoordinator, SyncEvent, SyncManager, SyncPlan,
 };
 
 // Re-export bitswap types
-pub use bitswap::{AccessMode, BitswapStoreAdapter, ReplicatorRegistry};
+#[cfg(feature = "libp2p-transport")]
+pub use bitswap::BitswapStoreAdapter;
+pub use bitswap::{AccessMode, ReplicatorRegistry};
+#[cfg(feature = "libp2p-transport")]
 pub use iroh_bitswap::Store as BitswapStore;
 
 /// Query ID for tracking Bitswap operations.
@@ -136,9 +151,11 @@ pub struct QueryId(pub u64);
 pub use replicator::{ReplicatorInfo, ReplicatorStatus};
 
 // Re-export two-stream protocol types
+#[cfg(feature = "libp2p-transport")]
 pub use two_stream::{TwoStreamEvent, TwoStreamHandler, TwoStreamRunner};
 
 // Re-export commonly used libp2p types
+#[cfg(feature = "libp2p-transport")]
 pub use libp2p::{gossipsub, identity::Keypair, Multiaddr, PeerId};
 
 #[cfg(test)]

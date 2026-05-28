@@ -6,7 +6,9 @@ use std::time::Duration;
 use blockstore::Blockstore;
 use tokio::sync::mpsc;
 
-use super::authorizer::{AccessAuthorizer, RuntimeAuthorizer};
+#[cfg(feature = "libp2p-transport")]
+use super::authorizer::AccessAuthorizer;
+use super::authorizer::RuntimeAuthorizer;
 use super::{
     DagFetchLimiter, SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState,
 };
@@ -119,6 +121,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             Arc::clone(&replicators),
             access_mode,
         ));
+        #[cfg(feature = "libp2p-transport")]
         let pubsub_services = super::pubsub_services::PubsubServices::try_new(
             &local_peer_id,
             Arc::clone(&head_provider),
@@ -155,6 +158,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 },
                 authorizer,
                 document_acp: std::sync::OnceLock::new(),
+                #[cfg(feature = "libp2p-transport")]
                 pubsub_services,
             },
             events,

@@ -380,12 +380,14 @@ impl From<serde_cbor::Error> for Error {
     }
 }
 
+#[cfg(feature = "libp2p-transport")]
 impl From<libp2p::TransportError<io::Error>> for Error {
     fn from(e: libp2p::TransportError<io::Error>) -> Self {
         Error::Transport(e.to_string())
     }
 }
 
+#[cfg(feature = "libp2p-transport")]
 impl From<libp2p::multiaddr::Error> for Error {
     fn from(e: libp2p::multiaddr::Error) -> Self {
         Error::InvalidMultiaddr(e.to_string())
