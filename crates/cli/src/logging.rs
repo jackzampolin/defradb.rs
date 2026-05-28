@@ -77,7 +77,17 @@ impl LoggingHandle {
 }
 
 /// Initialize logging based on configuration.
-pub fn init(config: &Config, enable_profiling: bool) -> Result<LoggingHandle> {
+///
+/// `enable_telemetry` gates the OTLP exporter independently of logging: only
+/// the `start` command sets it, matching Go (which configures telemetry only
+/// in `cli/start.go`). Ephemeral commands like `version` / `client` keep the
+/// fmt subscriber but never spin up the exporter thread or pay its shutdown
+/// cost.
+pub fn init(
+    config: &Config,
+    enable_profiling: bool,
+    enable_telemetry: bool,
+) -> Result<LoggingHandle> {
     let level = match config.log.level {
         LogLevel::Debug => Level::DEBUG,
         LogLevel::Info => Level::INFO,
@@ -108,24 +118,28 @@ pub fn init(config: &Config, enable_profiling: bool) -> Result<LoggingHandle> {
             filter,
             builder.json().with_writer(std::io::stdout),
             enable_profiling,
+            enable_telemetry,
             config,
         ),
         (LogFormat::Json, LogOutput::Stderr) => init_subscriber(
             filter,
             builder.json().with_writer(std::io::stderr),
             enable_profiling,
+            enable_telemetry,
             config,
         ),
         (LogFormat::Text, LogOutput::Stdout) => init_subscriber(
             filter,
             builder.with_writer(std::io::stdout),
             enable_profiling,
+            enable_telemetry,
             config,
         ),
         (LogFormat::Text, LogOutput::Stderr) => init_subscriber(
             filter,
             builder.with_writer(std::io::stderr),
             enable_profiling,
+            enable_telemetry,
             config,
         ),
     }
@@ -135,6 +149,7 @@ fn init_subscriber<L>(
     filter: EnvFilter,
     fmt_layer: L,
     enable_profiling: bool,
+    enable_telemetry: bool,
     config: &Config,
 ) -> Result<LoggingHandle>
 where
@@ -148,12 +163,13 @@ where
     }
 
     // Telemetry init. Mirrors Go's default-on behavior: when compiled with
-    // `--features otel`, the exporter is active unless `--no-telemetry` /
-    // `DEFRA_NO_TELEMETRY` / `telemetry_disabled` opts out. If exporter
-    // construction fails (e.g. malformed env var), we log and continue with
-    // no telemetry — matches Go's `log.ErrorContextE` + continue path.
+    // `--features otel`, the exporter is active for the `start` command
+    // (enable_telemetry) unless `--no-telemetry` / `DEFRA_NO_TELEMETRY` /
+    // `telemetry_disabled` opts out. If exporter construction fails (e.g.
+    // malformed env var), we log and continue with no telemetry — matches
+    // Go's `log.ErrorContextE` + continue path.
     #[cfg(feature = "otel")]
-    let (telemetry_handle, tracer) = if config.telemetry_disabled {
+    let (telemetry_handle, tracer) = if config.telemetry_disabled || !enable_telemetry {
         (telemetry::TelemetryHandle::noop(), None)
     } else {
         // Source the service version from defra-version so OTLP receivers see
@@ -173,7 +189,7 @@ where
 
     #[cfg(not(feature = "otel"))]
     let telemetry_handle = {
-        let _ = config; // suppress unused-binding warning when otel is off
+        let _ = (config, enable_telemetry); // unused when otel is off
         telemetry::TelemetryHandle::noop()
     };
 

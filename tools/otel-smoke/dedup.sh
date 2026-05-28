@@ -109,11 +109,19 @@ if [ "$UNREACHABLE_LINES" -gt "$NEEDLE_MAX" ]; then
   exit 1
 fi
 
+# Zero lines is a FAIL, not informational: with a guaranteed-unreachable
+# collector the SDK must emit at least one export-failure event. Zero means
+# either the dedup is over-suppressing OR — the regression this guards — the
+# SDK's `internal-logs` feature got disabled and the exporter went silent
+# (which would also make the dedup filter dead code). Either way it's a real
+# defect, so fail loudly.
 if [ "$UNREACHABLE_LINES" -eq 0 ]; then
-  echo "WARN: zero exporter-unreachable lines logged."
-  echo "      Either the dedup is doing its job AND the test didn't provoke any pre-dedup logs"
-  echo "      (e.g. SDK self-throttled), or the exporter was reachable. Inspect $STDERR_LOG"
-  echo "      to confirm."
+  echo "FAIL: zero exporter-unreachable lines despite an unreachable collector."
+  echo "      Likely the opentelemetry SDK's 'internal-logs' feature is off"
+  echo "      (the otel_error! macros no-op without it), so export failures emit"
+  echo "      nothing and the dedup filter is dead code. Check telemetry/Cargo.toml"
+  echo "      keeps internal-logs in the otlp feature. Server stderr: $STDERR_LOG"
+  exit 1
 fi
 
-echo "PASS: at most $NEEDLE_MAX exporter-unreachable log lines (got $UNREACHABLE_LINES)"
+echo "PASS: $UNREACHABLE_LINES exporter-unreachable log line(s), within [1, $NEEDLE_MAX]"

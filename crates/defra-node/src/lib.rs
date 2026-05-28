@@ -410,6 +410,10 @@ impl EmbeddedNode {
         // Flush buffered spans / metrics. Done after P2P shutdown so trailing
         // shutdown spans are still captured. Go DefraDB never calls provider
         // shutdown — we don't repeat that bug.
+        //
+        // `handle.shutdown()` synchronously joins the SDK batch-exporter
+        // thread (up to ~5 s, double with metrics), so run it on a blocking
+        // thread rather than stalling this Tokio worker / reactor.
         #[cfg(feature = "otel")]
         {
             let handle = match self.telemetry.lock() {
@@ -417,7 +421,7 @@ impl EmbeddedNode {
                 Err(poisoned) => poisoned.into_inner().take(),
             };
             if let Some(handle) = handle {
-                handle.shutdown();
+                let _ = tokio::task::spawn_blocking(move || handle.shutdown()).await;
             }
         }
     }
