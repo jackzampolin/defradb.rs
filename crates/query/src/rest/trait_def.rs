@@ -7,6 +7,28 @@ use storage::corekv::MaybeSendSync;
 
 use super::error::RestResult;
 
+/// Pagination window for listing collection document IDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CollectionDocIdsPagination {
+    pub limit: usize,
+    pub offset: usize,
+}
+
+/// Paginated document IDs for a collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionDocIdsPage {
+    pub doc_ids: Vec<String>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+impl CollectionDocIdsPage {
+    pub fn has_more(&self) -> bool {
+        self.offset.saturating_add(self.limit) < self.total
+    }
+}
+
 /// REST operations trait for collection and document CRUD.
 ///
 /// This trait provides REST-specific operations separate from GraphQL execution.
@@ -31,6 +53,26 @@ pub trait RestOperations: MaybeSendSync {
         collection: &str,
         identity: Option<&Did>,
     ) -> RestResult<Vec<String>>;
+
+    /// Get a paginated page of document IDs in a collection.
+    async fn get_collection_doc_ids_page(
+        &self,
+        collection: &str,
+        pagination: CollectionDocIdsPagination,
+        identity: Option<&Did>,
+    ) -> RestResult<CollectionDocIdsPage> {
+        let doc_ids = self.get_collection_doc_ids(collection, identity).await?;
+        let total = doc_ids.len();
+        let start = pagination.offset.min(total);
+        let end = start.saturating_add(pagination.limit).min(total);
+
+        Ok(CollectionDocIdsPage {
+            doc_ids: doc_ids[start..end].to_vec(),
+            total,
+            limit: pagination.limit,
+            offset: pagination.offset,
+        })
+    }
 
     /// Get a single document by ID.
     async fn get_document(

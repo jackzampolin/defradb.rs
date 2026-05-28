@@ -12,6 +12,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use query::rest::{CollectionDocIdsPage, CollectionDocIdsPagination};
 use serde::Serialize;
 
 use crate::error::{http_error_from_backend_message, HttpError};
@@ -19,10 +20,67 @@ use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
 
+const DEFAULT_DOC_IDS_LIMIT: usize = 100;
+const MAX_DOC_IDS_LIMIT: usize = 1000;
+
 /// Response for listing collections.
 #[derive(Debug, Clone, Serialize)]
 pub struct CollectionsResponse {
     pub collections: Vec<String>,
+}
+
+/// Response for listing document IDs in a collection.
+#[derive(Debug, Clone, Serialize)]
+pub struct CollectionDocIdsResponse {
+    pub doc_ids: Vec<String>,
+    pub total: usize,
+    pub has_more: bool,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+impl From<CollectionDocIdsPage> for CollectionDocIdsResponse {
+    fn from(page: CollectionDocIdsPage) -> Self {
+        Self {
+            has_more: page.has_more(),
+            doc_ids: page.doc_ids,
+            total: page.total,
+            offset: page.offset,
+            limit: page.limit,
+        }
+    }
+}
+
+fn parse_collection_doc_ids_pagination(
+    params: &HashMap<String, String>,
+) -> Result<CollectionDocIdsPagination, HttpError> {
+    let limit = match params.get("limit") {
+        Some(raw) => {
+            let limit = raw.parse::<usize>().map_err(|_| {
+                HttpError::BadRequest(format!("'limit' must be a positive integer, got '{}'", raw))
+            })?;
+            if limit == 0 || limit > MAX_DOC_IDS_LIMIT {
+                return Err(HttpError::BadRequest(format!(
+                    "'limit' must be between 1 and {}",
+                    MAX_DOC_IDS_LIMIT
+                )));
+            }
+            limit
+        }
+        None => DEFAULT_DOC_IDS_LIMIT,
+    };
+
+    let offset = match params.get("offset") {
+        Some(raw) => raw.parse::<usize>().map_err(|_| {
+            HttpError::BadRequest(format!(
+                "'offset' must be a non-negative integer, got '{}'",
+                raw
+            ))
+        })?,
+        None => 0,
+    };
+
+    Ok(CollectionDocIdsPagination { limit, offset })
 }
 
 /// List all collection names.
@@ -45,6 +103,39 @@ pub async fn list_collections(
         Ok(collections) => Ok(Json(CollectionsResponse { collections })),
         Err(e) => {
             tracing::warn!(error = %e, "Failed to list collections");
+            Err(e.into())
+        }
+    }
+}
+
+/// Get document IDs in a collection.
+///
+/// GET /api/v0/collections/{name}?limit=100&offset=0
+///
+/// Returns a bounded page of document IDs and pagination metadata.
+///
+/// Requires `CollectionGet` permission when NAC is enabled.
+pub async fn get_collection_doc_ids(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Path(name): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<CollectionDocIdsResponse>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionGet).await?;
+
+    let pagination = parse_collection_doc_ids_pagination(&params)?;
+    let rest = state
+        .rest
+        .as_ref()
+        .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
+
+    match rest
+        .get_collection_doc_ids_page(&name, pagination, identity.did())
+        .await
+    {
+        Ok(page) => Ok(Json(page.into())),
+        Err(e) => {
+            tracing::warn!(collection = %name, error = %e, "Failed to list collection document IDs");
             Err(e.into())
         }
     }
