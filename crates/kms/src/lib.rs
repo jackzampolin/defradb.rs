@@ -46,3 +46,6 @@ pub use transport::{EncodedFetchRequest, IncomingHandler, KeyTransport, Transpor
 
 mod ecies_envelope;
 pub use ecies_envelope::{unwrap_with_private, wrap_for_requester};
+
+mod policy;
+pub use policy::{AccessPolicy, DocCollectionInfo, DocCollectionLookup, NodeAcpRead};
