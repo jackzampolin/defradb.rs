@@ -88,8 +88,21 @@ pub struct Cli {
     #[arg(long, global = true, env = "DEFRA_SECRET_FILE")]
     pub secret_file: Option<String>,
 
-    /// Disable OpenTelemetry exporters (no-op unless the binary was built with `--features otel`)
-    #[arg(long, global = true, env = "DEFRA_NO_TELEMETRY", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    /// Disable OpenTelemetry exporters (no-op unless the binary was built with `--features otel`).
+    ///
+    /// Accepts the usual shell-boolean idioms: `true`/`false`, `1`/`0`,
+    /// `yes`/`no`, `on`/`off`. Wider than the other bool flags here because
+    /// telemetry tends to be toggled via env in CI scripts that use the
+    /// `=1`/`=0` convention. Uses `clap::builder::BoolishValueParser`.
+    #[arg(
+        long,
+        global = true,
+        env = "DEFRA_NO_TELEMETRY",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new(),
+    )]
     pub no_telemetry: Option<bool>,
 
     /// Enables development mode features

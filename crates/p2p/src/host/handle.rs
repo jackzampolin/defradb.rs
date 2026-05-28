@@ -296,6 +296,7 @@ impl P2PHostHandle {
     /// Returns the message ID on success.
     #[tracing::instrument(
         name = "p2p.gossip.publish",
+        level = "debug",
         skip(self, message),
         fields(topic = ?topic),
     )]
@@ -564,6 +565,7 @@ impl P2PHostHandle {
     /// This uses Go's two-stream pattern: request on one stream, response on another.
     #[tracing::instrument(
         name = "p2p.push_log.send",
+        level = "debug",
         skip(self, request),
         fields(peer = %peer_id),
     )]

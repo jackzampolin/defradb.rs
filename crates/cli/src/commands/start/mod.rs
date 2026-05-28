@@ -75,10 +75,6 @@ pub struct StartArgs {
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub no_encryption: Option<bool>,
 
-    /// Disable telemetry reporting
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
-    pub no_telemetry: Option<bool>,
-
     /// Disable signing of commits
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub no_signing: Option<bool>,
@@ -413,9 +409,6 @@ impl StartArgs {
         }
         if let Some(no_enc) = self.no_encryption {
             config.datastore.no_encryption = no_enc;
-        }
-        if let Some(no_tel) = self.no_telemetry {
-            config.telemetry_disabled = no_tel;
         }
         if let Some(no_sign) = self.no_signing {
             config.datastore.no_signing = no_sign;

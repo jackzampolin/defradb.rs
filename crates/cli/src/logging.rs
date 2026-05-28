@@ -6,6 +6,8 @@ use tracing_subscriber::layer::SubscriberExt;
 #[cfg(feature = "profiling")]
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
+#[cfg(feature = "otel")]
+use tracing_subscriber::Layer;
 use tracing_subscriber::{EnvFilter, Registry};
 
 #[cfg(feature = "profiling")]
@@ -175,19 +177,28 @@ where
         telemetry::TelemetryHandle::noop()
     };
 
-    // Suppress repeat "connection refused" spam from OTEL exporter target.
-    // Only attach when otel feature is on (otherwise no events to dedup).
+    // Suppress repeat exporter-unreachable spam on every layer that ingests
+    // OTel events. Each layer gets its own filter instance because Filter
+    // is a per-layer hook — sharing state via Arc would interleave the
+    // first-event decision across layers (first layer wins the lock,
+    // second layer sees the event as already-suppressed). With independent
+    // per-layer instances each layer logs the first occurrence and
+    // suppresses the rest.
     #[cfg(feature = "otel")]
     let fmt_layer = fmt_layer.with_filter(telemetry::OtelDedupFilter::new());
 
     #[cfg(feature = "profiling")]
     if enable_profiling {
         let (chrome_layer, profiling) = build_chrome_layer()?;
+        #[cfg(feature = "otel")]
+        let chrome_layer = chrome_layer.with_filter(telemetry::OtelDedupFilter::new());
         let registry = tracing_subscriber::registry()
             .with(fmt_layer)
             .with(chrome_layer);
         #[cfg(feature = "otel")]
-        let registry = registry.with(tracer.map(telemetry::otel_layer));
+        let registry = registry.with(
+            tracer.map(|t| telemetry::otel_layer(t).with_filter(telemetry::OtelDedupFilter::new())),
+        );
         registry
             .with(filter)
             .try_init()
@@ -197,7 +208,9 @@ where
 
     let registry = tracing_subscriber::registry().with(fmt_layer);
     #[cfg(feature = "otel")]
-    let registry = registry.with(tracer.map(telemetry::otel_layer));
+    let registry = registry.with(
+        tracer.map(|t| telemetry::otel_layer(t).with_filter(telemetry::OtelDedupFilter::new())),
+    );
     registry
         .with(filter)
         .try_init()

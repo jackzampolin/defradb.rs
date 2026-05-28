@@ -528,16 +528,7 @@ pub struct NodeBuilder {
     #[cfg(feature = "p2p")]
     p2p_config: Option<P2PConfig>,
     #[cfg(feature = "otel")]
-    telemetry_setup: Option<TelemetrySetup>,
-}
-
-/// Two ways an embedded user can wire OpenTelemetry: let `NodeBuilder` call
-/// `telemetry::init` for them at `build()` time, or hand in a handle they
-/// already built (so they can compose their own subscriber chain first).
-#[cfg(feature = "otel")]
-enum TelemetrySetup {
-    Owned(TelemetryConfig),
-    External(TelemetryHandle),
+    telemetry_handle: Option<TelemetryHandle>,
 }
 
 struct StoreBuildArgs {
@@ -635,28 +626,20 @@ impl NodeBuilder {
         self
     }
 
-    /// Enable OpenTelemetry exporters owned by the node. The handle's
-    /// `shutdown()` is called from [`EmbeddedNode::shutdown`].
-    ///
-    /// This does **not** install a `tracing` subscriber — the caller's
-    /// subscriber needs the OTel bridge layer composed onto it for spans
-    /// to flow. See [`telemetry::otel_layer`] and the crate docs for the
-    /// pattern. If you already have a configured subscriber and just want
-    /// the node to own shutdown, use [`Self::with_external_telemetry`].
-    #[cfg(feature = "otel")]
-    pub fn with_telemetry(mut self, config: TelemetryConfig) -> Self {
-        self.telemetry_setup = Some(TelemetrySetup::Owned(config));
-        self
-    }
-
     /// Hand a pre-built telemetry handle to the node so it owns shutdown.
-    /// The caller is responsible for `telemetry::init` and subscriber
-    /// composition; this method just hooks lifetime to the node. Intended
-    /// for consumers (e.g. defra-agent) that run their own OTel stack and
-    /// don't want `NodeBuilder` touching globals.
+    ///
+    /// The caller is responsible for calling [`telemetry::init`] and
+    /// composing the bridge layer onto their `tracing` subscriber — this
+    /// method just transfers ownership of the lifecycle handle so the node
+    /// flushes providers when it shuts down. Because the handle is moved,
+    /// calling this twice is a compile error rather than a silent overwrite.
+    ///
+    /// For a one-call ergonomic version, callers can write
+    /// `.with_telemetry(telemetry::init(cfg)?.0)` — `init` requires a Tokio
+    /// runtime and returns `(TelemetryHandle, SdkTracer)`.
     #[cfg(feature = "otel")]
-    pub fn with_external_telemetry(mut self, handle: TelemetryHandle) -> Self {
-        self.telemetry_setup = Some(TelemetrySetup::External(handle));
+    pub fn with_telemetry(mut self, handle: TelemetryHandle) -> Self {
+        self.telemetry_handle = Some(handle);
         self
     }
 
@@ -717,20 +700,12 @@ impl NodeBuilder {
         let query_timeout = self.query_timeout;
         let query_limits = self.query_limits;
 
-        // Resolve the telemetry handle (lazy-init the owned variant — we
-        // need a Tokio runtime, which is guaranteed here since build() is
-        // async). Threaded through StoreBuildArgs to the actual EmbeddedNode
-        // construction site.
+        // Telemetry handle (if any) was moved into the builder via
+        // `with_telemetry`. Threaded through `StoreBuildArgs` to the
+        // `EmbeddedNode` construction site so its Drop / explicit
+        // `shutdown()` runs at the right point.
         #[cfg(feature = "otel")]
-        let telemetry_handle: Option<TelemetryHandle> = match self.telemetry_setup {
-            Some(TelemetrySetup::Owned(config)) => {
-                let (handle, _tracer) = telemetry::init(config)
-                    .map_err(|e| anyhow::anyhow!("telemetry init failed: {e}"))?;
-                Some(handle)
-            }
-            Some(TelemetrySetup::External(handle)) => Some(handle),
-            None => None,
-        };
+        let telemetry_handle: Option<TelemetryHandle> = self.telemetry_handle;
 
         // 3. Storage backend + database
         let node = if let Some(path) = self.data_path {

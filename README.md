@@ -64,30 +64,46 @@ When no collector is reachable, repeat `"connection refused"` messages from the 
 
 ### Embedded usage
 
-Library consumers (via `defra-node`) can either let `NodeBuilder` initialize OTel themselves or bring a pre-built handle:
+Library consumers (via `defra-node`) own the OTel lifecycle and hand the resulting handle to the node. The node flushes it via `Drop` or via an explicit `shutdown()` — whichever happens first.
+
+Add `telemetry` to your `Cargo.toml`:
+
+```toml
+[dependencies]
+defra-node = { version = "0.5", features = ["otel"] }
+telemetry  = { version = "0.5", features = ["otlp"] }
+```
 
 ```rust
-use defra_node::{EmbeddedNode, TelemetryConfig};
+use defra_node::EmbeddedNode;
+use telemetry::TelemetryConfig;
 
-// Option A — let the builder handle init
+// Convenience — let the node own init + shutdown
+let (handle, tracer) = telemetry::init(TelemetryConfig::new("my-service", env!("CARGO_PKG_VERSION")))?;
+// Compose the OTel bridge onto your own tracing subscriber so spans flow
+// to the collector. `otel_layer` is generic so type inference picks the
+// right S at the .with() site.
+tracing_subscriber::registry()
+    .with(tracing_subscriber::fmt::layer())
+    .with(telemetry::otel_layer(tracer))
+    .init();
 let node = EmbeddedNode::builder()
-    .with_telemetry(TelemetryConfig::new("my-service", env!("CARGO_PKG_VERSION")))
+    .with_telemetry(handle)
     .build()
     .await?;
 
-// Option B — bring your own (e.g. defra-agent runs its own OTel stack)
-let (handle, _tracer) = telemetry::init(TelemetryConfig::default())?;
-// ... compose your own subscriber with `telemetry::otel_layer(_tracer)` ...
-let node = EmbeddedNode::builder()
-    .with_external_telemetry(handle)
-    .build()
-    .await?;
+// If your host process already runs its own OTel stack and you don't want
+// `telemetry::init` to clobber your globals, set `install_global = false`:
+let (handle, tracer) = telemetry::init(
+    TelemetryConfig::new("my-service", "1.0.0").without_global()
+)?;
 
-// shutdown() flushes buffered spans (which Go DefraDB forgets to do).
+// shutdown() flushes the buffered batch (which Go DefraDB forgets to do).
+// Drop is a safety net for code paths that miss the explicit call.
 node.shutdown().await;
 ```
 
-Either way requires `defra-node` to be built with `--features otel`.
+`telemetry::init` requires a Tokio runtime to be active — its batch span processor and periodic metric reader call `Handle::current()` internally. Wrap in `Runtime::block_on` if calling from a sync context.
 
 ## Testing
 

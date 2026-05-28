@@ -17,7 +17,6 @@ fn default_start_args() -> StartArgs {
         pubkeypath: None,
         privkeypath: None,
         no_encryption: None,
-        no_telemetry: None,
         no_signing: None,
         default_key_type: None,
         no_searchable_encryption: None,
@@ -124,7 +123,6 @@ fn test_apply_to_config_all_flags() {
         pubkeypath: Some("/path/to/pub.key".to_string()),
         privkeypath: Some("/path/to/priv.key".to_string()),
         no_encryption: Some(true),
-        no_telemetry: Some(true),
         no_signing: Some(true),
         default_key_type: Some("ed25519".to_string()),
         no_searchable_encryption: Some(true),
@@ -198,7 +196,6 @@ fn test_apply_to_config_all_flags() {
     assert_eq!(config.api.pubkey_path, "/path/to/pub.key");
     assert_eq!(config.api.privkey_path, "/path/to/priv.key");
     assert!(config.datastore.no_encryption);
-    assert!(config.telemetry_disabled);
     assert!(config.datastore.no_signing);
     assert_eq!(config.datastore.default_key_type, "ed25519");
     assert!(config.datastore.no_searchable_encryption);

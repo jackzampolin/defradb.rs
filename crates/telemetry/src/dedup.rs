@@ -1,15 +1,23 @@
 //! Dedup filter for noisy OTEL exporter errors.
 //!
-//! When the OTLP collector is unreachable, `opentelemetry-otlp` emits a
-//! `"connection refused"` `tracing::error!` per failed batch — fast enough to
-//! flood logs. This filter suppresses all but the first such event per
-//! process, matching Go DefraDB's `otel.SetErrorHandler + sync.Once` dedup
-//! (PR #4639, commit `83af37a9`).
+//! Ports Go DefraDB's `sync.Once`-guarded `otel.SetErrorHandler` (PR #4639,
+//! commit `83af37a9`). Since `opentelemetry::global::set_error_handler` was
+//! removed in opentelemetry-rust v0.27, SDK diagnostics now flow through
+//! `tracing` at `target = "opentelemetry"*` and the natural hook is a
+//! `tracing_subscriber::layer::Filter`.
 //!
-//! `opentelemetry::global::set_error_handler` was removed in opentelemetry-rust
-//! v0.27; SDK diagnostics now flow through `tracing` at `target = "opentelemetry"`
-//! / `"opentelemetry_sdk"` / `"opentelemetry-otlp"`, so a
-//! `tracing_subscriber::layer::Filter` is the natural hook.
+//! **Per-needle latching.** A single shared `OnceLock` would let the first
+//! transient `"network error"` silence all subsequent `"connection refused"`
+//! hours later (or vice versa). Each known unreachable-collector pattern
+//! gets its own latch — one log per pattern per filter instance, then
+//! suppress.
+//!
+//! **Per-layer instances.** `tracing_subscriber::layer::Filter` is a
+//! per-layer hook. Each layer that ingests OTel events needs its own
+//! filter instance; trying to share state via `Arc` interleaves the
+//! per-event decisions (first layer wins the lock, second layer sees the
+//! event as already-suppressed). The right model is each layer logs the
+//! first occurrence and suppresses the rest, independently.
 
 use std::fmt;
 use std::sync::OnceLock;
@@ -20,17 +28,12 @@ use tracing_subscriber::layer::{Context, Filter};
 use tracing_subscriber::registry::LookupSpan;
 
 const OTEL_TARGET_PREFIX: &str = "opentelemetry";
-/// Substrings that indicate "OTLP collector unreachable". The Go port matches
-/// just `"connection refused"`, which is what the gRPC transport surfaces.
-/// With `opentelemetry-otlp`'s HTTP+reqwest transport, the SDK wraps the
-/// connection error as `"HTTP export failed: network error"`, so we match
-/// either pattern. `"connection refused"` is kept first for the gRPC path
-/// in case future builds switch transport.
-const UNREACHABLE_NEEDLES: &[&str] = &["connection refused", "HTTP export failed", "network error"];
 
 #[derive(Default)]
 pub struct OtelDedupFilter {
     refused_logged: OnceLock<()>,
+    http_export_failed_logged: OnceLock<()>,
+    network_error_logged: OnceLock<()>,
 }
 
 impl OtelDedupFilter {
@@ -38,20 +41,27 @@ impl OtelDedupFilter {
         Self::default()
     }
 
-    /// Decide whether to emit. Returns `true` to forward the event,
-    /// `false` to suppress it. Pure logic, separated from the `Filter`
-    /// impl so it can be unit-tested without spinning up a subscriber.
+    /// Decide whether to emit. Pure logic, unit-testable without a subscriber.
     fn decide(&self, target: &str, message: &str) -> bool {
         if !target.starts_with(OTEL_TARGET_PREFIX) {
             return true;
         }
-        if UNREACHABLE_NEEDLES.iter().any(|n| message.contains(n)) {
-            // `OnceLock::set` returns Ok only on the first call; subsequent
-            // calls return Err. That's exactly the "log once, then suppress"
-            // semantics of Go's `sync.Once.Do`.
-            return self.refused_logged.set(()).is_ok();
+        // First match wins. Order doesn't affect correctness — different
+        // needles have independent latches.
+        for (needle, lock) in self.needles() {
+            if message.contains(needle) {
+                return lock.set(()).is_ok();
+            }
         }
         true
+    }
+
+    fn needles(&self) -> [(&'static str, &OnceLock<()>); 3] {
+        [
+            ("connection refused", &self.refused_logged),
+            ("HTTP export failed", &self.http_export_failed_logged),
+            ("network error", &self.network_error_logged),
+        ]
     }
 }
 
@@ -74,11 +84,10 @@ where
     }
 }
 
-/// Concatenates every field of the event into a single string so that
-/// structured events (which the OTel SDK uses — e.g.
-/// `otel_error!(name: "BatchSpanProcessor.ExportError", error = ...)`) are
-/// matchable. An earlier "only the `message` field" version missed those
-/// because the SDK does not include a format-string message.
+/// Concatenates every field of the event into one string. The OTel SDK
+/// uses `otel_error!(name: "BatchSpanProcessor.ExportError", error = ...)`
+/// with no format-string `message` field, so a "message-only" visitor sees
+/// nothing.
 #[derive(Default)]
 struct MessageVisitor {
     message: String,
@@ -146,7 +155,6 @@ mod tests {
         let f = OtelDedupFilter::new();
         assert!(f.decide("opentelemetry-otlp", "connection refused"));
         assert!(!f.decide("opentelemetry-otlp", "connection refused"));
-        // Non-refused OTEL errors still flow through.
         assert!(f.decide("opentelemetry-otlp", "different error"));
         assert!(f.decide("opentelemetry_sdk", "another problem"));
     }
@@ -177,5 +185,21 @@ mod tests {
         assert!(!f1.decide("opentelemetry-otlp", "connection refused"));
         // Separate instance has its own state.
         assert!(f2.decide("opentelemetry-otlp", "connection refused"));
+    }
+
+    #[test]
+    fn needles_latch_independently() {
+        // Critical: a transient `"network error"` early in the process must
+        // NOT suppress later `"connection refused"` events from a different
+        // failure mode. Single shared OnceLock would conflate the two.
+        let f = OtelDedupFilter::new();
+        assert!(f.decide("opentelemetry-otlp", "transient network error"));
+        assert!(!f.decide("opentelemetry-otlp", "another network error"));
+        // Different needle → its own latch, still passes once.
+        assert!(f.decide("opentelemetry-otlp", "connection refused"));
+        assert!(!f.decide("opentelemetry-otlp", "connection refused"));
+        // Third needle.
+        assert!(f.decide("opentelemetry-otlp", "HTTP export failed: 503"));
+        assert!(!f.decide("opentelemetry-otlp", "HTTP export failed: 502"));
     }
 }

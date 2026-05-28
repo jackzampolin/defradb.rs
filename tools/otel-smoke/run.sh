@@ -60,19 +60,22 @@ step "starting otelcol + jaeger"
 
 step "waiting for otelcol :4318"
 for _ in $(seq 1 30); do
-  if nc -z localhost 4318 2>/dev/null; then
+  if nc -z 127.0.0.1 4318 2>/dev/null; then
     break
   fi
   sleep 1
 done
-nc -z localhost 4318 || { echo "FAIL: otelcol did not come up"; exit 1; }
+nc -z 127.0.0.1 4318 || { echo "FAIL: otelcol did not come up"; exit 1; }
 
 step "building defra (cli --features otel)"
 (cd "$REPO_ROOT" && cargo build -p cli --features otel)
 
-step "starting defra against http://localhost:4318"
+step "starting defra against http://127.0.0.1:4318"
 DEFRA_ROOT="$(mktemp -d)"
-export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
+# 127.0.0.1 (not `localhost`) so reqwest's resolver and the docker port
+# binding agree on IPv4 — `localhost` would otherwise prefer ::1 on some
+# Linux setups and miss the docker container that only listens on v4.
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4318"
 export OTEL_BSP_SCHEDULE_DELAY="500"  # ms — flush quickly so the test isn't slow
 # Memory store keeps the test hermetic.
 "$REPO_ROOT/target/debug/defra" start \

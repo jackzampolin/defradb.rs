@@ -8,6 +8,13 @@
 pub struct TelemetryConfig {
     pub service_name: String,
     pub service_version: String,
+    /// When `true` (default) `init` registers the providers as the
+    /// process-wide globals via `opentelemetry::global::set_*`. Set to
+    /// `false` for embedded use where the host process owns its own OTel
+    /// globals and `init` would otherwise silently clobber them (e.g.
+    /// defra-agent runs its own OTel stack and just wants DefraDB-emitted
+    /// spans flushed at shutdown).
+    pub install_global: bool,
 }
 
 impl TelemetryConfig {
@@ -15,7 +22,15 @@ impl TelemetryConfig {
         Self {
             service_name: service_name.into(),
             service_version: service_version.into(),
+            install_global: true,
         }
+    }
+
+    /// Don't touch `opentelemetry::global::set_*`. The returned handle still
+    /// flushes its own providers on shutdown.
+    pub fn without_global(mut self) -> Self {
+        self.install_global = false;
+        self
     }
 }
 

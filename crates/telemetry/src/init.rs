@@ -43,6 +43,21 @@ pub enum InitError {
 /// wraps the tracer with `tracing_opentelemetry::layer().with_tracer(...)`
 /// at its subscriber-composition site so type inference can pick the right
 /// `S` parameter for `OpenTelemetryLayer<S, _>`.
+///
+/// # Tokio runtime requirement
+///
+/// `opentelemetry_sdk`'s batch span processor and periodic metric reader
+/// (built with the `rt-tokio` feature here) require a Tokio runtime to be
+/// active at construction time — they call `tokio::runtime::Handle::current()`
+/// internally. Calling `init` outside a runtime panics with
+/// `there is no reactor running`. The CLI's `#[tokio::main]` covers this
+/// automatically; embedded library users must initialize within an async
+/// context or via `Runtime::block_on`.
+///
+/// By default `init` installs the providers in the process-wide
+/// `opentelemetry::global` slot. Set [`TelemetryConfig::install_global`] to
+/// `false` to skip that — useful when the host process already runs its own
+/// OTel stack and would otherwise see its globals silently replaced.
 pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), InitError> {
     // Resource attributes mirror Go's `resource.WithSchemaURL + WithOS + WithProcess`.
     // We use `std::env::consts` / `std::process` instead of pulling in
@@ -81,8 +96,10 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
         .with_resource(resource)
         .build();
 
-    global::set_tracer_provider(tracer_provider.clone());
-    global::set_meter_provider(meter_provider.clone());
+    if config.install_global {
+        global::set_tracer_provider(tracer_provider.clone());
+        global::set_meter_provider(meter_provider.clone());
+    }
 
     let tracer = tracer_provider.tracer(config.service_name);
 
