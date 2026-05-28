@@ -40,6 +40,41 @@ fn cli_with_defaults() -> Cli {
 }
 
 #[test]
+fn test_apply_cli_flags_no_telemetry_sets_telemetry_disabled() {
+    // Coverage for the global Cli::no_telemetry → config.telemetry_disabled
+    // plumbing. Issue #977 deleted the duplicate StartArgs version (which
+    // had its own assertion in start_tests.rs); this is the replacement
+    // covering the canonical path.
+    let mut config = Config::default();
+    assert!(!config.telemetry_disabled, "default expected to be false");
+    let mut cli = cli_with_defaults();
+    cli.no_telemetry = Some(true);
+
+    config
+        .apply_cli_flags(&cli)
+        .expect("apply_cli_flags should succeed");
+    assert!(
+        config.telemetry_disabled,
+        "--no-telemetry / DEFRA_NO_TELEMETRY=true should flip config.telemetry_disabled"
+    );
+}
+
+#[test]
+fn test_apply_cli_flags_no_telemetry_false_leaves_telemetry_enabled() {
+    let mut config = Config::default();
+    let mut cli = cli_with_defaults();
+    cli.no_telemetry = Some(false);
+
+    config
+        .apply_cli_flags(&cli)
+        .expect("apply_cli_flags should succeed");
+    assert!(
+        !config.telemetry_disabled,
+        "--no-telemetry=false should not flip config.telemetry_disabled"
+    );
+}
+
+#[test]
 fn test_apply_cli_flags_invalid_log_level_returns_error() {
     let mut config = Config::default();
     let mut cli = cli_with_defaults();

@@ -60,11 +60,11 @@ Mirrors Go DefraDB's `//go:build telemetry` tag — when not compiled in, zero O
 | `OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES` | Override service name / extra attributes. |
 | `OTEL_TRACES_SAMPLER` | Configure sampling (default: parent-based always-on, matching Go). |
 
-When no collector is reachable, repeat `"connection refused"` messages from the OTel SDK are suppressed after the first — port of Go's `otel.SetErrorHandler + sync.Once` dedup (issue #977).
+When no collector is reachable, the OTel SDK's exporter-unreachable messages (`connection refused`, `HTTP export failed`, `network error`) are suppressed after the first occurrence of *each* pattern per layer — port of Go's `otel.SetErrorHandler + sync.Once` dedup (issue #977). Each pattern gets its own latch so a transient one doesn't silence a different failure later.
 
 ### Embedded usage
 
-Library consumers (via `defra-node`) own the OTel lifecycle and hand the resulting handle to the node. The node flushes it via `Drop` or via an explicit `shutdown()` — whichever happens first.
+Library consumers (via `defra-node`) own the OTel lifecycle and hand the resulting handle to the node. The node flushes it via `Drop` or via an explicit `shutdown()` — explicit is preferred because `Drop` blocks for up to ~10 s on the SDK's batch-thread joins.
 
 Add `telemetry` to your `Cargo.toml`:
 
@@ -77,33 +77,44 @@ telemetry  = { version = "0.5", features = ["otlp"] }
 ```rust
 use defra_node::EmbeddedNode;
 use telemetry::TelemetryConfig;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-// Convenience — let the node own init + shutdown
-let (handle, tracer) = telemetry::init(TelemetryConfig::new("my-service", env!("CARGO_PKG_VERSION")))?;
-// Compose the OTel bridge onto your own tracing subscriber so spans flow
-// to the collector. `otel_layer` is generic so type inference picks the
-// right S at the .with() site.
+let (handle, tracer) = telemetry::init(
+    TelemetryConfig::new("my-service", env!("CARGO_PKG_VERSION"))
+)?;
+
+// Compose the OTel bridge onto your tracing subscriber so spans flow
+// to the collector. `try_init()` returns Err if a global subscriber is
+// already installed — preferred over `.init()` (which panics).
 tracing_subscriber::registry()
     .with(tracing_subscriber::fmt::layer())
     .with(telemetry::otel_layer(tracer))
-    .init();
+    .try_init()?;
+
 let node = EmbeddedNode::builder()
     .with_telemetry(handle)
     .build()
     .await?;
 
-// If your host process already runs its own OTel stack and you don't want
-// `telemetry::init` to clobber your globals, set `install_global = false`:
-let (handle, tracer) = telemetry::init(
-    TelemetryConfig::new("my-service", "1.0.0").without_global()
-)?;
+// ... use the node ...
 
-// shutdown() flushes the buffered batch (which Go DefraDB forgets to do).
-// Drop is a safety net for code paths that miss the explicit call.
+// Explicit shutdown flushes the buffered batch. Drop is a safety net,
+// but blocks the calling thread on SDK batch-thread joins (up to ~10 s
+// for traces + metrics combined); call shutdown() explicitly from an
+// async-aware path when possible. Note that the node should not be used
+// after shutdown — subsequent spans go to a no-op tracer.
 node.shutdown().await;
 ```
 
-`telemetry::init` requires a Tokio runtime to be active — its batch span processor and periodic metric reader call `Handle::current()` internally. Wrap in `Runtime::block_on` if calling from a sync context.
+If the host process already runs its own OTel stack and you don't want `telemetry::init` to clobber your globals, use `.without_global()`:
+
+```rust
+let (handle, _tracer) = telemetry::init(
+    TelemetryConfig::new("my-service", "1.0.0").without_global()
+)?;
+// You'd compose `_tracer` into a layer of your own choosing instead of
+// installing it as the process-wide global tracer.
+```
 
 ## Testing
 

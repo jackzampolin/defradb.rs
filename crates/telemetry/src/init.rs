@@ -1,8 +1,7 @@
 //! OTLP exporter setup. Mirrors Go DefraDB's `internal/telemetry/otel.go`.
 //!
-//! - OTLP/HTTP transport (`reqwest`), traces + metrics signals. Same wire
-//!   protocol Go uses via `otlptracehttp` / `otlpmetrichttp`. Default
-//!   endpoint is `http://localhost:4318`.
+//! - OTLP/HTTP transport (`reqwest-blocking-client`). Same wire protocol Go
+//!   uses via `otlptracehttp`. Default endpoint is `http://localhost:4318`.
 //! - Standard OTEL env vars are honored automatically by `opentelemetry-otlp`
 //!   0.32: `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
 //!   `OTEL_EXPORTER_OTLP_PROTOCOL`, signal-specific overrides, etc.
@@ -11,20 +10,26 @@
 //!   `resource.WithOS()` + `resource.WithProcess()` (which we approximate
 //!   with `std::env::consts` + `std::process` to avoid an extra dep).
 //!
-//! Requires a Tokio runtime: `reqwest-client` needs one for the async
-//! HTTP exporter.
+//! Traces are always exported. Metrics export is off until the `metrics`
+//! feature is enabled — nothing in defradb.rs records metric instruments
+//! today, so leaving the metric pipeline running would burn an empty
+//! periodic export every 60 s.
 
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
-use opentelemetry_otlp::{MetricExporter, SpanExporter};
-use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+use opentelemetry_otlp::SpanExporter;
 use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 use thiserror::Error;
 use tracing::Subscriber;
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::registry::LookupSpan;
+
+#[cfg(feature = "metrics")]
+use opentelemetry_otlp::MetricExporter;
+#[cfg(feature = "metrics")]
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 
 use crate::config::TelemetryConfig;
 use crate::handle::{OtelProviders, TelemetryHandle};
@@ -35,6 +40,7 @@ pub use opentelemetry_sdk::trace::SdkTracer as Tracer;
 pub enum InitError {
     #[error("failed to build OTLP span exporter: {0}")]
     SpanExporter(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[cfg(feature = "metrics")]
     #[error("failed to build OTLP metric exporter: {0}")]
     MetricExporter(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
@@ -44,26 +50,18 @@ pub enum InitError {
 /// at its subscriber-composition site so type inference can pick the right
 /// `S` parameter for `OpenTelemetryLayer<S, _>`.
 ///
-/// # Tokio runtime requirement
-///
-/// `opentelemetry_sdk`'s batch span processor and periodic metric reader
-/// (built with the `rt-tokio` feature here) require a Tokio runtime to be
-/// active at construction time — they call `tokio::runtime::Handle::current()`
-/// internally. Calling `init` outside a runtime panics with
-/// `there is no reactor running`. The CLI's `#[tokio::main]` covers this
-/// automatically; embedded library users must initialize within an async
-/// context or via `Runtime::block_on`.
+/// Safe to call from any context (no Tokio runtime required): with the
+/// `reqwest-blocking-client` transport selected in this crate's `Cargo.toml`,
+/// both `BatchSpanProcessor` and `PeriodicReader` (opentelemetry_sdk 0.32)
+/// spawn dedicated OS threads via `std::thread`. No `Handle::current()`
+/// call happens at init.
 ///
 /// By default `init` installs the providers in the process-wide
 /// `opentelemetry::global` slot. Set [`TelemetryConfig::install_global`] to
-/// `false` to skip that — useful when the host process already runs its own
-/// OTel stack and would otherwise see its globals silently replaced.
+/// `false` (or call [`TelemetryConfig::without_global`]) to skip that —
+/// useful when the host process already runs its own OTel stack and would
+/// otherwise see its globals silently replaced.
 pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), InitError> {
-    // Resource attributes mirror Go's `resource.WithSchemaURL + WithOS + WithProcess`.
-    // We use `std::env::consts` / `std::process` instead of pulling in
-    // `opentelemetry-resource-detectors`, which keeps the dep tree small —
-    // the attribute set matches what those detectors produce for the common
-    // fields (os.type, host.arch, process.pid, process.executable.name).
     let executable_name = std::env::current_exe()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -86,18 +84,24 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
         .with_resource(resource.clone())
         .build();
 
-    let metric_exporter = MetricExporter::builder()
-        .with_http()
-        .build()
-        .map_err(|e| InitError::MetricExporter(Box::new(e)))?;
-    let reader = PeriodicReader::builder(metric_exporter).build();
-    let meter_provider = SdkMeterProvider::builder()
-        .with_reader(reader)
-        .with_resource(resource)
-        .build();
+    #[cfg(feature = "metrics")]
+    let meter_provider = {
+        let metric_exporter = MetricExporter::builder()
+            .with_http()
+            .build()
+            .map_err(|e| InitError::MetricExporter(Box::new(e)))?;
+        let reader = PeriodicReader::builder(metric_exporter).build();
+        SdkMeterProvider::builder()
+            .with_reader(reader)
+            .with_resource(resource)
+            .build()
+    };
+    #[cfg(not(feature = "metrics"))]
+    let _ = resource; // moved into trace provider only; silence unused-binding
 
     if config.install_global {
         global::set_tracer_provider(tracer_provider.clone());
+        #[cfg(feature = "metrics")]
         global::set_meter_provider(meter_provider.clone());
     }
 
@@ -106,6 +110,7 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
     let handle = TelemetryHandle {
         inner: Some(OtelProviders {
             tracer_provider,
+            #[cfg(feature = "metrics")]
             meter_provider,
         }),
     };

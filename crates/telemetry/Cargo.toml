@@ -9,16 +9,25 @@ repository.workspace = true
 
 [features]
 default = []
-# Compile in the OTLP gRPC exporters. Mirrors Go DefraDB's `//go:build telemetry`
-# tag — opt-in at compile time. When the feature is on, runtime behavior is
-# default-on (Go parity); use `--no-telemetry` to disable at runtime.
+# Compile in the OTLP exporter (traces). Mirrors Go DefraDB's
+# `//go:build telemetry` tag — opt-in at compile time. When this feature is on,
+# runtime behavior is default-on (Go parity); use `--no-telemetry` to disable
+# at runtime.
 otlp = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
     "dep:tracing-opentelemetry",
     "dep:tokio",
+    "opentelemetry_sdk/trace",
+    "opentelemetry-otlp/trace",
 ]
+# Also compile in the OTLP metric exporter. Off by default because nothing in
+# defradb.rs records metric instruments today — leaving the metric pipeline on
+# spawns a `PeriodicReader` background task that wakes every 60 s to export an
+# empty batch (wasted bandwidth + collector ingest). Turn this on alongside
+# `otlp` once application code starts emitting instruments.
+metrics = ["otlp", "opentelemetry_sdk/metrics", "opentelemetry-otlp/metrics"]
 
 [dependencies]
 tracing.workspace = true
@@ -27,13 +36,13 @@ thiserror.workspace = true
 
 tokio = { workspace = true, optional = true }
 opentelemetry = { version = "0.32", optional = true }
-opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "trace", "metrics"], optional = true }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["rt-tokio"], optional = true }
 # OTLP over HTTP/proto, mirroring Go DefraDB's `otlptracehttp.New`. Default
 # endpoint is http://localhost:4318 — same default as the Go upstream.
 # `reqwest-blocking-client` runs on the SDK's batch-exporter thread, sidestepping
 # the workspace's locked reqwest 0.13 (which has dropped the `webpki-roots`
 # feature that `opentelemetry-http` still asks for under the async client).
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics"], optional = true }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client"], optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
 
 [lints]

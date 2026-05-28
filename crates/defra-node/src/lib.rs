@@ -388,6 +388,13 @@ impl EmbeddedNode {
     }
 
     /// Gracefully stop background services owned by this embedded node.
+    ///
+    /// **The node should not be used after this call.** When the `otel`
+    /// feature is on, `shutdown` calls `TelemetryHandle::shutdown` which
+    /// flushes and disables the global tracer provider. Subsequent calls
+    /// that emit spans (e.g. `execute`, `add_schema`) go to a no-op
+    /// tracer — they still work functionally, but observability is gone
+    /// with no error surfaced. Drop the node after shutdown completes.
     pub async fn shutdown(&self) {
         #[cfg(feature = "http")]
         if let Some(task) = self.txn_cleanup_task.lock().await.take() {

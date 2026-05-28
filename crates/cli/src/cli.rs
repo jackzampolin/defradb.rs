@@ -33,11 +33,11 @@ pub struct Cli {
     pub log_format: Option<String>,
 
     /// Include stacktrace in error and fatal logs
-    #[arg(long, global = true, env = "DEFRA_LOG_STACKTRACE", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    #[arg(long, global = true, env = "DEFRA_LOG_STACKTRACE", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
     pub log_stacktrace: Option<bool>,
 
     /// Include source location in logs
-    #[arg(long, global = true, env = "DEFRA_LOG_SOURCE", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    #[arg(long, global = true, env = "DEFRA_LOG_SOURCE", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
     pub log_source: Option<bool>,
 
     /// Logger config overrides. Format <name>,<key>=<val>,...;<name>,...
@@ -45,7 +45,7 @@ pub struct Cli {
     pub log_overrides: Option<String>,
 
     /// Disable colored log output
-    #[arg(long, global = true, env = "DEFRA_NO_LOG_COLOR", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    #[arg(long, global = true, env = "DEFRA_NO_LOG_COLOR", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
     pub no_log_color: Option<bool>,
 
     /// URL of HTTP endpoint to listen on or connect to
@@ -65,7 +65,7 @@ pub struct Cli {
     pub keyring_path: Option<String>,
 
     /// Disable the keyring and generate ephemeral keys
-    #[arg(long, global = true, env = "DEFRA_NO_KEYRING", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    #[arg(long, global = true, env = "DEFRA_NO_KEYRING", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
     pub no_keyring: Option<bool>,
 
     /// The SourceHub address authorized by the client to make SourceHub transactions
@@ -89,31 +89,18 @@ pub struct Cli {
     pub secret_file: Option<String>,
 
     /// Disable OpenTelemetry exporters (no-op unless the binary was built with `--features otel`).
-    ///
-    /// Accepts the usual shell-boolean idioms: `true`/`false`, `1`/`0`,
-    /// `yes`/`no`, `on`/`off`. Wider than the other bool flags here because
-    /// telemetry tends to be toggled via env in CI scripts that use the
-    /// `=1`/`=0` convention. Uses `clap::builder::BoolishValueParser`.
-    #[arg(
-        long,
-        global = true,
-        env = "DEFRA_NO_TELEMETRY",
-        num_args = 0..=1,
-        require_equals = true,
-        default_missing_value = "true",
-        value_parser = clap::builder::BoolishValueParser::new(),
-    )]
+    #[arg(long, global = true, env = "DEFRA_NO_TELEMETRY", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
     pub no_telemetry: Option<bool>,
 
     /// Enables development mode features
-    #[arg(long, global = true, env = "DEFRA_DEVELOPMENT", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    #[arg(long, global = true, env = "DEFRA_DEVELOPMENT", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
     pub development: Option<bool>,
 
     /// Enable Node Access Control (NAC).
     ///
     /// When enabled, node operations require authentication and authorization
     /// based on the node's identity from the keyring.
-    #[arg(long = "node-acp-enable", global = true, env = "DEFRA_ACP_NODE_ENABLE", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    #[arg(long = "node-acp-enable", global = true, env = "DEFRA_ACP_NODE_ENABLE", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
     pub acp_node_enable: Option<bool>,
 
     /// Document ACP type. Options are none, local, source-hub, or hub-rs

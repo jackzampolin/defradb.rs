@@ -28,6 +28,12 @@ use tracing_subscriber::layer::{Context, Filter};
 use tracing_subscriber::registry::LookupSpan;
 
 const OTEL_TARGET_PREFIX: &str = "opentelemetry";
+const NEEDLES: &[&str] = &["connection refused", "HTTP export failed", "network error"];
+
+#[allow(non_snake_case)]
+fn UNREACHABLE_PATTERNS_MATCH_ANY(message: &str) -> bool {
+    NEEDLES.iter().any(|n| message.contains(n))
+}
 
 #[derive(Default)]
 pub struct OtelDedupFilter {
@@ -42,18 +48,25 @@ impl OtelDedupFilter {
     }
 
     /// Decide whether to emit. Pure logic, unit-testable without a subscriber.
+    ///
+    /// Iterates every needle: each one that matches the message claims its
+    /// own latch independently. The event is emitted only if at least one
+    /// matching needle was previously unclaimed. Marking ALL matching
+    /// needles (not just the first) means a real SDK message like
+    /// `"HTTP export failed: network error"` — which contains two needles
+    /// at once — consumes both latches, so a later "network error"-only
+    /// event can't slip through as a "first occurrence".
     fn decide(&self, target: &str, message: &str) -> bool {
         if !target.starts_with(OTEL_TARGET_PREFIX) {
             return true;
         }
-        // First match wins. Order doesn't affect correctness — different
-        // needles have independent latches.
+        let mut emit = false;
         for (needle, lock) in self.needles() {
-            if message.contains(needle) {
-                return lock.set(()).is_ok();
+            if message.contains(needle) && lock.set(()).is_ok() {
+                emit = true;
             }
         }
-        true
+        emit || !UNREACHABLE_PATTERNS_MATCH_ANY(message)
     }
 
     fn needles(&self) -> [(&'static str, &OnceLock<()>); 3] {
@@ -185,6 +198,29 @@ mod tests {
         assert!(!f1.decide("opentelemetry-otlp", "connection refused"));
         // Separate instance has its own state.
         assert!(f2.decide("opentelemetry-otlp", "connection refused"));
+    }
+
+    #[test]
+    fn combined_needles_in_single_message_claim_all_latches() {
+        // Real SDK output contains BOTH "HTTP export failed" AND
+        // "network error". Marking ALL matched needles (not just the
+        // first iterated) means a later "network error"-only event can't
+        // log as a "first occurrence" by riding a still-unclaimed latch.
+        // Regression for the prior first-match-wins bug.
+        let f = OtelDedupFilter::new();
+        let combined = r#"error="Operation failed: HTTP export failed: network error""#;
+        assert!(f.decide("opentelemetry_sdk", combined));
+        // Same combined message — both latches already claimed, suppressed.
+        assert!(!f.decide("opentelemetry_sdk", combined));
+        // A subsequent "network error"-only event must ALSO be suppressed,
+        // because its needle's latch was claimed by the combined message.
+        assert!(!f.decide("opentelemetry-otlp", "transient network error"));
+        // And a "HTTP export failed"-only event is also suppressed.
+        assert!(!f.decide("opentelemetry-otlp", "HTTP export failed: 502"));
+        // But a totally different needle (connection refused) still gets
+        // its one shot — its latch is still free.
+        assert!(f.decide("opentelemetry-otlp", "connection refused"));
+        assert!(!f.decide("opentelemetry-otlp", "connection refused"));
     }
 
     #[test]

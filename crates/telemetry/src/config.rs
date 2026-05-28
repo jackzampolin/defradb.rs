@@ -18,6 +18,10 @@ pub struct TelemetryConfig {
 }
 
 impl TelemetryConfig {
+    /// `service_name` should match what the operator's OTLP backend expects
+    /// to dimension on (Go DefraDB uses literal `"DefraDB"`).
+    /// `service_version` should be the actual binary version — sourcing it
+    /// from `defra_version::VersionInfo::new().version` is the convention.
     pub fn new(service_name: impl Into<String>, service_version: impl Into<String>) -> Self {
         Self {
             service_name: service_name.into(),
@@ -34,11 +38,7 @@ impl TelemetryConfig {
     }
 }
 
-impl Default for TelemetryConfig {
-    /// Defaults to Go DefraDB's service name (`"DefraDB"`) and the telemetry
-    /// crate's own version. Callers should override `service_version` with
-    /// the actual defra binary version (e.g. from `defra_version`).
-    fn default() -> Self {
-        Self::new("DefraDB", env!("CARGO_PKG_VERSION"))
-    }
-}
+// No `Default` impl: the only sensible default for `service_version` would
+// be the telemetry crate's own `CARGO_PKG_VERSION`, which never matches the
+// binary version the operator cares about. Forcing callers through `new`
+// keeps that mismatch from happening silently.

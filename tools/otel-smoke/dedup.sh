@@ -87,18 +87,19 @@ wait "$DEFRA_PID" 2>/dev/null || true
 DEFRA_PID=""
 
 echo "=== counting exporter-unreachable log lines in stderr ==="
-# These are the messages the dedup filter is responsible for squashing.
-# Counted as ERROR-level events from any `opentelemetry*` target, matching
-# the same needles the filter does (see crates/telemetry/src/dedup.rs).
+# Each known needle (connection refused / HTTP export failed / network error)
+# has its own per-process latch — so the upper bound is one log line per
+# needle, not one in total. See crates/telemetry/src/dedup.rs.
+NEEDLE_MAX=3
 PATTERN='connection refused|HTTP export failed|network error'
 UNREACHABLE_LINES=$(grep -E "ERROR" "$STDERR_LOG" \
     | grep -E "opentelemetry" \
     | grep -Ec "$PATTERN" \
     || true)
-echo "exporter-unreachable lines: $UNREACHABLE_LINES"
+echo "exporter-unreachable lines: $UNREACHABLE_LINES (per-needle ceiling: $NEEDLE_MAX)"
 
-if [ "$UNREACHABLE_LINES" -gt 1 ]; then
-  echo "FAIL: dedup let $UNREACHABLE_LINES exporter-unreachable lines through (expected at most 1)"
+if [ "$UNREACHABLE_LINES" -gt "$NEEDLE_MAX" ]; then
+  echo "FAIL: dedup let $UNREACHABLE_LINES exporter-unreachable lines through (expected at most $NEEDLE_MAX, one per needle)"
   echo "--- offending lines ---"
   grep -E "ERROR" "$STDERR_LOG" | grep -E "opentelemetry" | grep -E "$PATTERN" | head -20
   exit 1
@@ -111,4 +112,4 @@ if [ "$UNREACHABLE_LINES" -eq 0 ]; then
   echo "      to confirm."
 fi
 
-echo "PASS: at most 1 exporter-unreachable log line (got $UNREACHABLE_LINES)"
+echo "PASS: at most $NEEDLE_MAX exporter-unreachable log lines (got $UNREACHABLE_LINES)"
