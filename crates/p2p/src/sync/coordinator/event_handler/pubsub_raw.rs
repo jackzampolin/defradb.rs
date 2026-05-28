@@ -20,6 +20,28 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         topic: String,
         data: Vec<u8>,
     ) -> Result<()> {
+        // KMS short-circuit. Wire compat with Go requires bare CBOR on the
+        // encryption topic — no InternalResponse envelope. Route to the KMS
+        // transport's dispatcher before the pubsub_rpc path.
+        if topic == crate::topics::ENCRYPTION_TOPIC {
+            if let Some(transport) = self.kms_transport.get() {
+                transport
+                    .dispatch_incoming(
+                        kms::PeerIdentity {
+                            peer_id: propagation_source.to_string(),
+                        },
+                        data,
+                    )
+                    .await;
+            } else {
+                debug!(
+                    topic = %topic,
+                    "KMS message arrived but no KMS transport installed; dropping"
+                );
+            }
+            return Ok(());
+        }
+
         let Some(services) = self.pubsub_services.as_ref() else {
             // Services are only present on libp2p; the iroh transport never
             // emits GossipRawMessage so this branch should be unreachable
