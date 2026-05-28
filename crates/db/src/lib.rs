@@ -57,6 +57,7 @@ pub(crate) mod collection_loader;
 pub(crate) mod collection_name;
 pub(crate) mod collection_ops;
 pub(crate) mod collection_provider;
+mod collection_retriever;
 pub(crate) mod collection_snapshot;
 mod commit_priority_index;
 pub(crate) mod commits_fetcher;
@@ -107,6 +108,7 @@ pub use collection_acp::{
 pub use collection_cache::CollectionCache;
 pub use collection_name::CollectionName;
 pub use collection_provider::DbCollectionProvider;
+pub use collection_retriever::{resolve_collection_from_doc_id, DocCollectionInfo};
 pub use collection_snapshot::CollectionSnapshot;
 pub use commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
 pub use database::{DbOptions, EmbeddingClientConfig, DB};
