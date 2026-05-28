@@ -4,6 +4,7 @@
 //! `EnclaveKeyStore` (M5), `ThresholdKeyStore` (M6). All share this trait.
 
 use async_trait::async_trait;
+use zeroize::ZeroizeOnDrop;
 
 use crate::error::Result;
 use crate::types::{EncryptionCid, KeyScope};
@@ -16,7 +17,7 @@ use crate::types::{EncryptionCid, KeyScope};
 /// protocol ECIES-wraps the *block bytes* (not just the key) for delivery
 /// to a peer. Bundling both here means `KeyStore::get` can serve a
 /// `serve_request` path without re-reading the blockstore.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ZeroizeOnDrop)]
 pub struct StoredKey {
     /// The 32-byte AES-256 DEK in plaintext.
     pub key: [u8; 32],
@@ -44,6 +45,8 @@ pub trait KeyStore: Send + Sync {
 
     /// List all CIDs held locally. Backends that don't support listing
     /// (e.g. OS keyring) return `Error::Unsupported`.
+    ///
+    /// Order is unspecified; backends may return entries in arbitrary order.
     async fn list(&self) -> Result<Vec<EncryptionCid>>;
 }
 

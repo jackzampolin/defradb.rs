@@ -44,7 +44,11 @@ impl KeyStore for MemoryKeyStore {
 
         let (doc_id_bytes, field_name) = match scope {
             KeyScope::Document { doc_id, field } => (doc_id.as_bytes().to_vec(), field.clone()),
-            KeyScope::Collection { collection_id } => (Vec::new(), Some(collection_id.clone())),
+            KeyScope::Collection { collection_id } => {
+                // Mirrors Go's internal/kms/pubsub.go: collection-scoped DEKs use an
+                // empty doc_id and carry the collection_id in the field_name slot.
+                (Vec::new(), Some(collection_id.clone()))
+            }
         };
         let block = Encryption {
             doc_id: doc_id_bytes,
