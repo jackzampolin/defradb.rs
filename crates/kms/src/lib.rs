@@ -16,3 +16,6 @@
 //! Tracks Go DefraDB's `internal/kms/` package and the NAC-aware fix from
 //! Go PR #4778 (commit `1fab9fb3`). See the design comment on
 //! defradb.rs issue #976 for the full spec.
+
+pub mod error;
+pub use error::{KmsError, Result};
