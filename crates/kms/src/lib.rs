@@ -52,3 +52,6 @@ pub use policy::{AccessPolicy, DocCollectionInfo, DocCollectionLookup, NodeAcpRe
 
 mod nac_dac_policy;
 pub use nac_dac_policy::NacDacPolicy;
+
+mod defra_kms;
+pub use defra_kms::DefraKms;

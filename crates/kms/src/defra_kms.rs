@@ -1,0 +1,498 @@
+//! Concrete `KmsService` implementation.
+//!
+//! Composes a `KeyStore`, zero or more `KeyTransport`s, and one
+//! `AccessPolicy`. Cross-peer fetch fans out across transports; replies
+//! are ECIES envelopes addressed to the requester's per-request
+//! ephemeral pubkey.
+
+use async_trait::async_trait;
+use identity::Did;
+use std::sync::{Arc, RwLock};
+
+use crate::context::RequestContext;
+use crate::error::{Error, Result};
+use crate::policy::AccessPolicy;
+use crate::results::KeyResults;
+use crate::service::{KmsService, PeerIdentity};
+use crate::store::{KeyStore, StoredKey};
+use crate::transport::{EncodedFetchRequest, KeyTransport};
+use crate::types::{EncryptionCid, KeyScope, PolicyDecision};
+use crate::wire::{FetchEncryptionKeyReply, FetchEncryptionKeyRequest};
+
+/// Default `KmsService` implementation.
+pub struct DefraKms {
+    store: Arc<dyn KeyStore>,
+    transports: Vec<Arc<dyn KeyTransport>>,
+    policy: Arc<dyn AccessPolicy>,
+    /// Fallback identity used when `RequestContext::user_identity` is None
+    /// (gossip-triggered syncs with no caller).
+    node_identity: Did,
+    /// Test-only deterministic ephemeral. `None` in prod ⇒ fresh per call.
+    test_ephemeral: RwLock<Option<x25519_dalek::StaticSecret>>,
+}
+
+impl DefraKms {
+    /// Construct a new `DefraKms`. Transports may be empty (single-node).
+    pub fn new(
+        store: Arc<dyn KeyStore>,
+        transports: Vec<Arc<dyn KeyTransport>>,
+        policy: Arc<dyn AccessPolicy>,
+        node_identity: Did,
+    ) -> Self {
+        Self {
+            store,
+            transports,
+            policy,
+            node_identity,
+            test_ephemeral: RwLock::new(None),
+        }
+    }
+
+    fn principal<'a>(&'a self, ctx: &'a RequestContext) -> &'a Did {
+        ctx.user_identity().unwrap_or(&self.node_identity)
+    }
+
+    fn ephemeral(&self) -> x25519_dalek::StaticSecret {
+        self.test_ephemeral
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| crypto::generate_x25519().expect("OsRng"))
+    }
+
+    /// Test hook: inject a deterministic ephemeral so a unit test can
+    /// decrypt replies produced by a `FakeTransport`.
+    #[cfg(test)]
+    pub(crate) fn set_ephemeral_for_test(&self, eph: x25519_dalek::StaticSecret) {
+        if let Ok(mut g) = self.test_ephemeral.write() {
+            *g = Some(eph);
+        }
+    }
+
+    /// Derive a `KeyScope` from the on-disk `Encryption` block.
+    /// Empty `doc_id` ⇒ collection-scoped (mirrors Go).
+    fn scope_from_block(block: &defra_core::Encryption) -> KeyScope {
+        if block.doc_id.is_empty() {
+            KeyScope::Collection {
+                collection_id: block.field_name.clone().unwrap_or_default(),
+            }
+        } else {
+            KeyScope::Document {
+                doc_id: String::from_utf8_lossy(&block.doc_id).to_string(),
+                field: block.field_name.clone(),
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl KmsService for DefraKms {
+    async fn get_keys(&self, ctx: &RequestContext, cids: &[EncryptionCid]) -> Result<KeyResults> {
+        let (results, tx) = KeyResults::new(cids.len().max(1));
+        let actor = self.principal(ctx).clone();
+
+        // Local pass: serve any CIDs we hold.
+        let mut remote: Vec<EncryptionCid> = Vec::new();
+        for cid in cids.iter().copied() {
+            match self.store.get(&cid).await? {
+                Some(stored) => {
+                    let block = defra_core::Encryption::from_dag_cbor(&stored.block_bytes)
+                        .map_err(|e| Error::Storage(format!("decode local block: {e}")))?;
+                    let scope = Self::scope_from_block(&block);
+                    match self.policy.check_release(Some(&actor), &scope).await? {
+                        PolicyDecision::Allow => {
+                            let _ = tx.send(Ok((cid, stored.key))).await;
+                        }
+                        PolicyDecision::Deny => {
+                            let _ = tx
+                                .send(Err(Error::AccessDenied {
+                                    reason: "policy denied".into(),
+                                }))
+                                .await;
+                        }
+                    }
+                }
+                None => remote.push(cid),
+            }
+        }
+
+        // Cross-peer fan-out for misses. If there are no transports
+        // configured, every remote miss surfaces as `KeyUnavailable` to
+        // the caller so they don't block waiting for a reply that can
+        // never come.
+        if !remote.is_empty() && self.transports.is_empty() {
+            for _ in &remote {
+                let _ = tx.send(Err(Error::KeyUnavailable)).await;
+            }
+        }
+        if !remote.is_empty() && !self.transports.is_empty() {
+            let eph = self.ephemeral();
+            let pub_bytes = x25519_dalek::PublicKey::from(&eph).as_bytes().to_vec();
+            let req = FetchEncryptionKeyRequest {
+                identity: actor.to_string().into_bytes(),
+                links: remote.iter().map(|c| c.to_bytes()).collect(),
+                ephemeral_public_key: pub_bytes,
+            };
+            let payload = serde_cbor::to_vec(&req).map_err(|e| Error::WireEncode(e.to_string()))?;
+            let encoded = EncodedFetchRequest {
+                payload,
+                request_id: uuid::Uuid::new_v4().to_string(),
+            };
+            let remote_set: std::collections::HashSet<EncryptionCid> =
+                remote.iter().copied().collect();
+
+            for transport in &self.transports {
+                let mut rx = transport.send_request(encoded.clone()).await?;
+                let tx = tx.clone();
+                let store = self.store.clone();
+                let eph_clone = eph.clone();
+                let remote_set = remote_set.clone();
+                tokio::spawn(async move {
+                    while let Some(reply) = rx.recv().await {
+                        for (cid_bytes, block_env) in reply.links.iter().zip(reply.blocks.iter()) {
+                            let Ok(cid) = cid::Cid::try_from(cid_bytes.as_slice()) else {
+                                continue;
+                            };
+                            if !remote_set.contains(&cid) {
+                                continue;
+                            }
+                            let Ok(block_bytes) =
+                                crate::ecies_envelope::unwrap_with_private(block_env, &eph_clone)
+                            else {
+                                continue;
+                            };
+                            let block = match defra_core::Encryption::from_dag_cbor(&block_bytes) {
+                                Ok(b) => b,
+                                Err(_) => continue,
+                            };
+                            if block.key.len() != 32 {
+                                continue;
+                            }
+                            let mut key = [0u8; 32];
+                            key.copy_from_slice(&block.key);
+                            let _ = store
+                                .put(
+                                    cid,
+                                    StoredKey {
+                                        key,
+                                        block_bytes: block_bytes.clone(),
+                                    },
+                                )
+                                .await;
+                            let _ = tx.send(Ok((cid, key))).await;
+                        }
+                    }
+                });
+            }
+        }
+
+        drop(tx);
+        Ok(results)
+    }
+
+    async fn generate_key(
+        &self,
+        _ctx: &RequestContext,
+        scope: KeyScope,
+    ) -> Result<(EncryptionCid, [u8; 32])> {
+        let (cid, stored) = self.store.generate(&scope).await?;
+        Ok((cid, stored.key))
+    }
+
+    async fn serve_request(
+        &self,
+        _from: PeerIdentity,
+        req: FetchEncryptionKeyRequest,
+    ) -> Result<FetchEncryptionKeyReply> {
+        let actor: Option<Did> = std::str::from_utf8(&req.identity)
+            .ok()
+            .and_then(|s| s.parse().ok());
+
+        let mut out_links: Vec<Vec<u8>> = Vec::new();
+        let mut out_blocks: Vec<Vec<u8>> = Vec::new();
+
+        for cid_bytes in req.links {
+            let cid = match cid::Cid::try_from(cid_bytes.as_slice()) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let Some(stored) = self.store.get(&cid).await? else {
+                continue;
+            };
+            let block = defra_core::Encryption::from_dag_cbor(&stored.block_bytes)
+                .map_err(|e| Error::Storage(format!("decode local block: {e}")))?;
+            let scope = Self::scope_from_block(&block);
+            match self.policy.check_release(actor.as_ref(), &scope).await? {
+                PolicyDecision::Allow => {}
+                PolicyDecision::Deny => continue,
+            }
+            let wrapped = crate::ecies_envelope::wrap_for_requester(
+                &stored.block_bytes,
+                &req.ephemeral_public_key,
+            )?;
+            out_links.push(cid.to_bytes());
+            out_blocks.push(wrapped);
+        }
+
+        let responder = crypto::generate_x25519().map_err(|e| Error::Crypto(e.to_string()))?;
+        Ok(FetchEncryptionKeyReply {
+            links: out_links,
+            blocks: out_blocks,
+            ephemeral_public_key: x25519_dalek::PublicKey::from(&responder)
+                .as_bytes()
+                .to_vec(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::RequestContext;
+    use crate::memory_store::MemoryKeyStore;
+    use crate::transport::{
+        EncodedFetchRequest, IncomingHandler, KeyTransport, TransportReplyStream,
+    };
+    use crate::types::KeyScope;
+    use std::sync::Arc;
+
+    struct AllowAll;
+    #[async_trait::async_trait]
+    impl crate::policy::AccessPolicy for AllowAll {
+        async fn check_release(
+            &self,
+            _: Option<&identity::Did>,
+            _: &KeyScope,
+        ) -> crate::Result<crate::PolicyDecision> {
+            Ok(crate::PolicyDecision::Allow)
+        }
+        async fn check_node_release(
+            &self,
+            _: Option<&identity::Did>,
+            _: &KeyScope,
+        ) -> crate::Result<crate::PolicyDecision> {
+            Ok(crate::PolicyDecision::Allow)
+        }
+    }
+
+    struct DenyAll;
+    #[async_trait::async_trait]
+    impl crate::policy::AccessPolicy for DenyAll {
+        async fn check_release(
+            &self,
+            _: Option<&identity::Did>,
+            _: &KeyScope,
+        ) -> crate::Result<crate::PolicyDecision> {
+            Ok(crate::PolicyDecision::Deny)
+        }
+        async fn check_node_release(
+            &self,
+            _: Option<&identity::Did>,
+            _: &KeyScope,
+        ) -> crate::Result<crate::PolicyDecision> {
+            Ok(crate::PolicyDecision::Deny)
+        }
+    }
+
+    fn node_did() -> identity::Did {
+        "did:key:znode".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn generate_returns_cid_and_plain_key() {
+        let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+        let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
+        let kms = DefraKms::new(store, vec![], policy, node_did());
+        let ctx = RequestContext::anonymous();
+        let (cid, key) = kms
+            .generate_key(
+                &ctx,
+                KeyScope::Document {
+                    doc_id: "d1".into(),
+                    field: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(key.len(), 32);
+        // After generate, get_keys returns the same key locally.
+        let results = kms.get_keys(&ctx, &[cid]).await.unwrap();
+        let map = results.wait_all().await.unwrap();
+        assert_eq!(map[&cid], key);
+    }
+
+    #[tokio::test]
+    async fn get_keys_missing_returns_unavailable() {
+        let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+        let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
+        let kms = DefraKms::new(store, vec![], policy, node_did());
+        let ctx = RequestContext::anonymous();
+        let cid: crate::EncryptionCid =
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+                .parse()
+                .unwrap();
+        let results = kms.get_keys(&ctx, &[cid]).await.unwrap();
+        let mut rx = results.into_receiver();
+        let first = rx.recv().await.unwrap();
+        assert!(matches!(first, Err(crate::Error::KeyUnavailable)));
+    }
+
+    #[tokio::test]
+    async fn get_keys_local_with_deny_policy_returns_access_denied() {
+        let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+        let allow: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
+        let kms_gen = DefraKms::new(store.clone(), vec![], allow, node_did());
+        let ctx = RequestContext::anonymous();
+        let (cid, _) = kms_gen
+            .generate_key(
+                &ctx,
+                KeyScope::Document {
+                    doc_id: "d1".into(),
+                    field: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let deny: Arc<dyn crate::policy::AccessPolicy> = Arc::new(DenyAll);
+        let kms_check = DefraKms::new(store, vec![], deny, node_did());
+        let results = kms_check.get_keys(&ctx, &[cid]).await.unwrap();
+        let mut rx = results.into_receiver();
+        let first = rx.recv().await.unwrap();
+        assert!(matches!(first, Err(crate::Error::AccessDenied { .. })));
+    }
+
+    #[tokio::test]
+    async fn serve_request_returns_ecies_wrapped_block_bytes() {
+        let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+        let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
+        let kms = DefraKms::new(store.clone(), vec![], policy, node_did());
+        let ctx = RequestContext::anonymous();
+        let (cid, _) = kms
+            .generate_key(
+                &ctx,
+                KeyScope::Document {
+                    doc_id: "d1".into(),
+                    field: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let requester = crypto::generate_x25519().unwrap();
+        let req = crate::wire::FetchEncryptionKeyRequest {
+            identity: b"did:key:zalice".to_vec(),
+            links: vec![cid.to_bytes()],
+            ephemeral_public_key: x25519_dalek::PublicKey::from(&requester)
+                .as_bytes()
+                .to_vec(),
+        };
+        let from = crate::service::PeerIdentity {
+            peer_id: "peer-1".into(),
+        };
+        let reply = kms.serve_request(from, req).await.unwrap();
+        assert_eq!(reply.links.len(), 1);
+        assert_eq!(reply.blocks.len(), 1);
+        let unwrapped = crate::unwrap_with_private(&reply.blocks[0], &requester).unwrap();
+        let block = defra_core::Encryption::from_dag_cbor(&unwrapped).unwrap();
+        assert_eq!(block.doc_id, b"d1");
+        assert_eq!(block.key.len(), 32);
+    }
+
+    #[tokio::test]
+    async fn serve_request_skips_unknown_cids() {
+        let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+        let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
+        let kms = DefraKms::new(store, vec![], policy, node_did());
+        let requester = crypto::generate_x25519().unwrap();
+        let unknown: crate::EncryptionCid =
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+                .parse()
+                .unwrap();
+        let req = crate::wire::FetchEncryptionKeyRequest {
+            identity: b"did:key:zalice".to_vec(),
+            links: vec![unknown.to_bytes()],
+            ephemeral_public_key: x25519_dalek::PublicKey::from(&requester)
+                .as_bytes()
+                .to_vec(),
+        };
+        let from = crate::service::PeerIdentity {
+            peer_id: "peer-1".into(),
+        };
+        let reply = kms.serve_request(from, req).await.unwrap();
+        assert!(reply.links.is_empty());
+        assert!(reply.blocks.is_empty());
+    }
+
+    struct FakeTransport {
+        reply: tokio::sync::Mutex<Option<crate::wire::FetchEncryptionKeyReply>>,
+    }
+    #[async_trait::async_trait]
+    impl KeyTransport for FakeTransport {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        async fn send_request(
+            &self,
+            _: EncodedFetchRequest,
+        ) -> crate::Result<TransportReplyStream> {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            if let Some(r) = self.reply.lock().await.take() {
+                let _ = tx.send(r).await;
+            }
+            Ok(rx)
+        }
+        fn install_handler(&self, _: Arc<dyn IncomingHandler>) {}
+    }
+
+    #[tokio::test]
+    async fn get_keys_fans_out_when_local_miss() {
+        // Peer KMS produces a reply for some CID.
+        let peer_store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+        let peer_policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
+        let peer_kms = DefraKms::new(peer_store, vec![], peer_policy, node_did());
+        let ctx = RequestContext::anonymous();
+        let (peer_cid, _) = peer_kms
+            .generate_key(
+                &ctx,
+                KeyScope::Document {
+                    doc_id: "d1".into(),
+                    field: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let requester = crypto::generate_x25519().unwrap();
+        let req = crate::wire::FetchEncryptionKeyRequest {
+            identity: b"did:key:znode".to_vec(),
+            links: vec![peer_cid.to_bytes()],
+            ephemeral_public_key: x25519_dalek::PublicKey::from(&requester)
+                .as_bytes()
+                .to_vec(),
+        };
+        let reply = peer_kms
+            .serve_request(
+                crate::service::PeerIdentity {
+                    peer_id: "peer".into(),
+                },
+                req,
+            )
+            .await
+            .unwrap();
+
+        // Local empty KMS with a fake transport carrying the reply.
+        let fake = FakeTransport {
+            reply: tokio::sync::Mutex::new(Some(reply)),
+        };
+        let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+        let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
+        let kms = DefraKms::new(store, vec![Arc::new(fake)], policy, node_did());
+        kms.set_ephemeral_for_test(requester);
+
+        let results = kms.get_keys(&ctx, &[peer_cid]).await.unwrap();
+        let map = results.wait_all().await.unwrap();
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&peer_cid));
+    }
+}
