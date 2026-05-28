@@ -1,8 +1,9 @@
 //! Transport abstraction for cross-peer DEK fetches.
 //!
-//! M1 ships `Libp2pPubsubTransport` (in `crates/p2p/src/kms/`). M2 adds
-//! `IrohStreamTransport`. The KMS layer composes one or more transports
-//! and fans out fetch requests across them.
+//! M1 ships `PubsubKeyTransport<T>` (in `crates/p2p/src/kms/`), one impl
+//! generic over the `P2PTransport` abstraction so it rides both libp2p and
+//! iroh gossip. The KMS layer composes one or more transports and fans out
+//! fetch requests across them.
 
 use async_trait::async_trait;
 use std::sync::Arc;

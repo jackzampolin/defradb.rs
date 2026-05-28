@@ -38,7 +38,7 @@ pub trait KmsService: Send + Sync {
     ) -> Result<(EncryptionCid, [u8; 32])>;
 
     /// Handle an incoming peer key request. Invoked by `KeyTransport`
-    /// adapters (e.g. `Libp2pPubsubTransport`) when a request arrives on
+    /// adapters (e.g. `PubsubKeyTransport`) when a request arrives on
     /// the wire.
     async fn serve_request(
         &self,
