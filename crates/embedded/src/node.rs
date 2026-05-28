@@ -453,6 +453,12 @@ where
         ))
     };
 
+    // Bind this node's transport peer id into the KMS so served ECIES
+    // replies carry the correct AAD peer id (Go's `makeAssociatedData`).
+    if let Some(ref setup) = p2p_setup {
+        kms.set_local_peer_id(setup.local_peer_id.clone());
+    }
+
     // Wire the KMS into the P2P transport (serve handler) + merge handler.
     if let Some(ref mut setup) = p2p_setup {
         // Install the serve handler. Use a Weak ref to break the

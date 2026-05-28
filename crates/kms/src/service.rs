@@ -45,6 +45,11 @@ pub trait KmsService: Send + Sync {
         from: PeerIdentity,
         req: FetchEncryptionKeyRequest,
     ) -> Result<FetchEncryptionKeyReply>;
+
+    /// Set this node's transport-level peer id. Bound into the ECIES AAD on
+    /// served replies (per Go's `makeAssociatedData`). Default no-op for
+    /// implementations that don't serve over a transport (e.g. `NoopKms`).
+    fn set_local_peer_id(&self, _id: String) {}
 }
 
 #[cfg(test)]

@@ -40,6 +40,7 @@ tracing.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_cbor = { workspace = true }
 serde_bytes = "0.11"
+base64 = "0.22"
 zeroize = "1.8"
 rand = { workspace = true }
 uuid = { workspace = true }

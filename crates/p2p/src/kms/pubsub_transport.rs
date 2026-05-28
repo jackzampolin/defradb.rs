@@ -26,7 +26,7 @@ use crate::transport::P2PTransport;
 pub struct PubsubKeyTransport<T: P2PTransport> {
     transport: T,
     handler: RwLock<Option<Arc<dyn IncomingHandler>>>,
-    in_flight: RwLock<Option<mpsc::Sender<FetchEncryptionKeyReply>>>,
+    in_flight: RwLock<Option<mpsc::Sender<(FetchEncryptionKeyReply, String)>>>,
 }
 
 impl<T: P2PTransport> PubsubKeyTransport<T> {
@@ -52,7 +52,9 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
     pub async fn dispatch_incoming(&self, from: PeerIdentity, payload: Vec<u8>) {
         if let Some(tx) = self.in_flight.read().ok().and_then(|g| g.clone()) {
             if let Ok(reply) = serde_cbor::from_slice::<FetchEncryptionKeyReply>(&payload) {
-                let _ = tx.send(reply).await;
+                // `from` is the gossip source = the responder; its peer id is
+                // needed to rebuild the ECIES AAD on the requester side.
+                let _ = tx.send((reply, from.peer_id.clone())).await;
                 return;
             }
         }

@@ -30,6 +30,9 @@ pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     /// Type-erased KMS transport for this node's P2P system. node.rs adds it
     /// to the DefraKms transports list and installs the serve handler.
     pub kms_transport: Arc<dyn kms::KeyTransport>,
+    /// This node's transport-level peer id (stringified). node.rs binds it
+    /// into the KMS so served ECIES replies carry the correct AAD peer id.
+    pub local_peer_id: String,
     /// Defers wiring the late-built KMS into the inner merge handler
     /// (mirrors `wire_document_acp`). NAC/document_acp aren't available when
     /// the P2P system is created, so the KMS is built later in node.rs.
@@ -133,10 +136,14 @@ where
         coordinator.clone(),
     );
 
-    let kms_transport =
-        p2p::kms::PubsubKeyTransport::new(p2p::Libp2pTransport::new(handle.clone()))
-            .await
-            .map_err(|e| anyhow!("failed to create KMS transport: {e}"))?;
+    let kms_libp2p_transport = p2p::Libp2pTransport::new(handle.clone());
+    let local_peer_id = {
+        use p2p::transport::P2PTransport;
+        kms_libp2p_transport.local_peer_id().to_string()
+    };
+    let kms_transport = p2p::kms::PubsubKeyTransport::new(kms_libp2p_transport)
+        .await
+        .map_err(|e| anyhow!("failed to create KMS transport: {e}"))?;
     coordinator.install_kms_transport(kms_transport.clone());
     let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
 
@@ -223,6 +230,7 @@ where
         merge_handler: replication.merge_handler,
         txn_broadcaster: replication.txn_broadcaster,
         kms_transport: kms_transport as Arc<dyn kms::KeyTransport>,
+        local_peer_id,
         wire_kms: Some(Box::new(move |kms| {
             merge_handler_inner_for_kms.set_kms(kms);
         })),
@@ -293,6 +301,10 @@ where
         coordinator.clone(),
     );
 
+    let local_peer_id = {
+        use p2p::transport::P2PTransport;
+        transport.local_peer_id().to_string()
+    };
     let kms_transport = p2p::kms::PubsubKeyTransport::new(transport.clone())
         .await
         .map_err(|e| anyhow!("failed to create KMS transport: {e}"))?;
@@ -380,6 +392,7 @@ where
         merge_handler: replication.merge_handler,
         txn_broadcaster: replication.txn_broadcaster,
         kms_transport: kms_transport as Arc<dyn kms::KeyTransport>,
+        local_peer_id,
         wire_kms: Some(Box::new(move |kms| {
             merge_handler_inner_for_kms.set_kms(kms);
         })),

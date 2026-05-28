@@ -27,6 +27,10 @@ pub struct DefraKms {
     /// Fallback identity used when `RequestContext::user_identity` is None
     /// (gossip-triggered syncs with no caller).
     node_identity: Did,
+    /// This node's transport-level peer id, bound into the ECIES AAD of
+    /// served replies (Go's `makeAssociatedData`). Empty until the node
+    /// wiring sets it from the P2P transport.
+    local_peer_id: RwLock<String>,
     /// Test-only deterministic ephemeral. `None` in prod ⇒ fresh per call.
     test_ephemeral: RwLock<Option<x25519_dalek::StaticSecret>>,
 }
@@ -44,12 +48,20 @@ impl DefraKms {
             transports,
             policy,
             node_identity,
+            local_peer_id: RwLock::new(String::new()),
             test_ephemeral: RwLock::new(None),
         }
     }
 
     fn principal<'a>(&'a self, ctx: &'a RequestContext) -> &'a Did {
         ctx.user_identity().unwrap_or(&self.node_identity)
+    }
+
+    fn local_peer_id(&self) -> String {
+        self.local_peer_id
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     fn ephemeral(&self) -> x25519_dalek::StaticSecret {
@@ -170,8 +182,17 @@ impl KmsService for DefraKms {
                     let store = self.store.clone();
                     let eph_clone = eph.clone();
                     let remote_set = remote_set.clone();
+                    let our_eph_pub = x25519_dalek::PublicKey::from(&eph_clone)
+                        .as_bytes()
+                        .to_vec();
                     tokio::spawn(async move {
-                        while let Some(reply) = rx.recv().await {
+                        while let Some((reply, responder_peer_id)) = rx.recv().await {
+                            // AAD binds OUR (requester) ephemeral pubkey and the
+                            // RESPONDER's peer id, matching the serve side.
+                            let aad = crate::ecies_envelope::make_associated_data(
+                                &our_eph_pub,
+                                &responder_peer_id,
+                            );
                             for (cid_bytes, block_env) in
                                 reply.links.iter().zip(reply.blocks.iter())
                             {
@@ -185,7 +206,10 @@ impl KmsService for DefraKms {
                                     continue;
                                 }
                                 let block_bytes = match crate::ecies_envelope::unwrap_with_private(
-                                    block_env, &eph_clone,
+                                    block_env,
+                                    &eph_clone,
+                                    &reply.ephemeral_public_key,
+                                    &aad,
                                 ) {
                                     Ok(b) => b,
                                     Err(e) => {
@@ -269,6 +293,12 @@ impl KmsService for DefraKms {
         let mut out_links: Vec<Vec<u8>> = Vec::new();
         let mut out_blocks: Vec<Vec<u8>> = Vec::new();
 
+        // ONE responder ephemeral per reply, shared across all served blocks
+        // (matches Go). Its PUBLIC key is carried in the reply field below.
+        let responder_eph = crypto::generate_x25519().map_err(|e| Error::Crypto(e.to_string()))?;
+        let peer_id = self.local_peer_id();
+        let aad = crate::ecies_envelope::make_associated_data(&req.ephemeral_public_key, &peer_id);
+
         for cid_bytes in req.links {
             let cid = match cid::Cid::try_from(cid_bytes.as_slice()) {
                 Ok(c) => c,
@@ -287,19 +317,26 @@ impl KmsService for DefraKms {
             let wrapped = crate::ecies_envelope::wrap_for_requester(
                 &stored.block_bytes,
                 &req.ephemeral_public_key,
+                &responder_eph,
+                &aad,
             )?;
             out_links.push(cid.to_bytes());
             out_blocks.push(wrapped);
         }
 
-        let responder = crypto::generate_x25519().map_err(|e| Error::Crypto(e.to_string()))?;
         Ok(FetchEncryptionKeyReply {
             links: out_links,
             blocks: out_blocks,
-            ephemeral_public_key: x25519_dalek::PublicKey::from(&responder)
+            ephemeral_public_key: x25519_dalek::PublicKey::from(&responder_eph)
                 .as_bytes()
                 .to_vec(),
         })
+    }
+
+    fn set_local_peer_id(&self, id: String) {
+        if let Ok(mut g) = self.local_peer_id.write() {
+            *g = id;
+        }
     }
 }
 
@@ -425,6 +462,7 @@ mod tests {
         let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
         let kms = DefraKms::new(store.clone(), vec![], policy, node_did());
+        kms.set_local_peer_id("peer-1".into());
         let ctx = RequestContext::anonymous();
         let (cid, _) = kms
             .generate_key(
@@ -438,12 +476,13 @@ mod tests {
             .unwrap();
 
         let requester = crypto::generate_x25519().unwrap();
+        let req_pub = x25519_dalek::PublicKey::from(&requester)
+            .as_bytes()
+            .to_vec();
         let req = crate::wire::FetchEncryptionKeyRequest {
             identity: b"did:key:zalice".to_vec(),
             links: vec![cid.to_bytes()],
-            ephemeral_public_key: x25519_dalek::PublicKey::from(&requester)
-                .as_bytes()
-                .to_vec(),
+            ephemeral_public_key: req_pub.clone(),
         };
         let from = crate::service::PeerIdentity {
             peer_id: "peer-1".into(),
@@ -451,7 +490,14 @@ mod tests {
         let reply = kms.serve_request(from, req).await.unwrap();
         assert_eq!(reply.links.len(), 1);
         assert_eq!(reply.blocks.len(), 1);
-        let unwrapped = crate::unwrap_with_private(&reply.blocks[0], &requester).unwrap();
+        let aad = crate::ecies_envelope::make_associated_data(&req_pub, "peer-1");
+        let unwrapped = crate::unwrap_with_private(
+            &reply.blocks[0],
+            &requester,
+            &reply.ephemeral_public_key,
+            &aad,
+        )
+        .unwrap();
         let block = defra_core::Encryption::from_dag_cbor(&unwrapped).unwrap();
         assert_eq!(block.doc_id, b"d1");
         assert_eq!(block.key.len(), 32);
@@ -483,7 +529,7 @@ mod tests {
     }
 
     struct FakeTransport {
-        reply: tokio::sync::Mutex<Option<crate::wire::FetchEncryptionKeyReply>>,
+        reply: tokio::sync::Mutex<Option<(crate::wire::FetchEncryptionKeyReply, String)>>,
     }
     #[async_trait::async_trait]
     impl KeyTransport for FakeTransport {
@@ -509,6 +555,7 @@ mod tests {
         let peer_store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let peer_policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
         let peer_kms = DefraKms::new(peer_store, vec![], peer_policy, node_did());
+        peer_kms.set_local_peer_id("peer".into());
         let ctx = RequestContext::anonymous();
         let (peer_cid, _) = peer_kms
             .generate_key(
@@ -539,9 +586,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Local empty KMS with a fake transport carrying the reply.
+        // Local empty KMS with a fake transport carrying the reply + the
+        // responder peer id (same one the serve side bound into the AAD).
         let fake = FakeTransport {
-            reply: tokio::sync::Mutex::new(Some(reply)),
+            reply: tokio::sync::Mutex::new(Some((reply, "peer".to_string()))),
         };
         let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);

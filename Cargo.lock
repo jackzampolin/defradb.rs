@@ -6729,6 +6729,7 @@ dependencies = [
  "acp",
  "async-lock",
  "async-trait",
+ "base64 0.22.1",
  "blockstore",
  "cid 0.10.1",
  "crypto",
