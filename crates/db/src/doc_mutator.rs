@@ -219,7 +219,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             let schema_version_id = collection.version_id();
             let enc_config = get_encryption_config();
             let sign_config = get_signing_config();
-            let kms = crate::block_builder::get_request_kms();
+            let kms = self.db.kms();
 
             let block_result = write_document_blocks(
                 &blockstore,
@@ -333,7 +333,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             let enc_config = get_encryption_config()
                 .or_else(|| doc.id().and_then(|id| get_doc_encryption(&id.to_string())));
             let sign_config = get_signing_config();
-            let kms = crate::block_builder::get_request_kms();
+            let kms = self.db.kms();
 
             let block_result = write_document_blocks(
                 &blockstore,

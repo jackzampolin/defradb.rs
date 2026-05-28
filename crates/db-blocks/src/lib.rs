@@ -10,7 +10,6 @@
 mod build;
 mod collection;
 mod compute;
-mod request_kms;
 #[cfg(test)]
 mod tests;
 mod write;
@@ -20,7 +19,6 @@ pub use build::build_block_from_document;
 pub use build::build_blocks_from_document;
 pub use collection::write_collection_block;
 pub use compute::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
-pub use request_kms::{get_request_kms, set_request_kms};
 pub use write::{write_delete_block, write_document_blocks};
 
 use std::collections::HashMap;
