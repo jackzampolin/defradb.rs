@@ -19,3 +19,6 @@
 
 pub mod error;
 pub use error::{KmsError, Result};
+
+pub mod types;
+pub use types::{EncryptionCid, KeyScope, PolicyDecision};

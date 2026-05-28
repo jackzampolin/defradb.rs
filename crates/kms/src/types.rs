@@ -1,0 +1,54 @@
+//! Core types used across the KMS service.
+
+use cid::Cid;
+
+/// CID of an `Encryption` metadata block. One CID == one DEK.
+pub type EncryptionCid = Cid;
+
+/// Scope of a DEK, derived from the on-disk `Encryption` block.
+///
+/// Drives which `AccessPolicy` gate applies. Never serialized on the wire —
+/// re-derived on the responder from the block contents (mirrors Go's
+/// `internal/kms/pubsub.go::getEncryptionKeysLocally`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyScope {
+    Document {
+        doc_id: String,
+        field: Option<String>,
+    },
+    Collection {
+        collection_id: String,
+    },
+}
+
+/// Outcome of an `AccessPolicy` decision. M1 ships only `Allow` / `Deny`.
+/// `AllowAttested` lands with M4 SourceHub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyDecision {
+    Allow,
+    Deny,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_scope_equality() {
+        let a = KeyScope::Document {
+            doc_id: "d".into(),
+            field: None,
+        };
+        let b = KeyScope::Document {
+            doc_id: "d".into(),
+            field: None,
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn policy_decision_equality() {
+        assert_eq!(PolicyDecision::Allow, PolicyDecision::Allow);
+        assert_ne!(PolicyDecision::Allow, PolicyDecision::Deny);
+    }
+}
