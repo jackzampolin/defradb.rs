@@ -25,3 +25,6 @@ pub use types::{EncryptionCid, KeyScope, PolicyDecision};
 
 mod context;
 pub use context::RequestContext;
+
+mod results;
+pub use results::{KeyResults, ResolvedKey, ResultsReceiver, ResultsSender};
