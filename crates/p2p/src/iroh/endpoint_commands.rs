@@ -817,8 +817,9 @@ fn handle_publish(
     let gossip = gossip.clone();
     let initial_peers: Vec<iroh::EndpointId> = peer_map.lock().endpoint_ids().collect();
     let message_id = MessageId::new(uuid::Uuid::new_v4().to_string());
-    let payload = postcard::to_allocvec(&msg)
-        .map_err(|error| crate::error::Error::Codec(error.to_string()))?;
+    let payload = msg
+        .encode_gossip_payload()
+        .map_err(|error| crate::error::Error::CborSerialization(error.to_string()))?;
 
     let task = tokio::spawn(async move {
         let sender = if let Some(sender) = sender {
