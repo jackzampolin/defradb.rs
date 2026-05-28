@@ -20,7 +20,13 @@ use tracing_subscriber::layer::{Context, Filter};
 use tracing_subscriber::registry::LookupSpan;
 
 const OTEL_TARGET_PREFIX: &str = "opentelemetry";
-const REFUSED_NEEDLE: &str = "connection refused";
+/// Substrings that indicate "OTLP collector unreachable". The Go port matches
+/// just `"connection refused"`, which is what the gRPC transport surfaces.
+/// With `opentelemetry-otlp`'s HTTP+reqwest transport, the SDK wraps the
+/// connection error as `"HTTP export failed: network error"`, so we match
+/// either pattern. `"connection refused"` is kept first for the gRPC path
+/// in case future builds switch transport.
+const UNREACHABLE_NEEDLES: &[&str] = &["connection refused", "HTTP export failed", "network error"];
 
 #[derive(Default)]
 pub struct OtelDedupFilter {
@@ -39,7 +45,7 @@ impl OtelDedupFilter {
         if !target.starts_with(OTEL_TARGET_PREFIX) {
             return true;
         }
-        if message.contains(REFUSED_NEEDLE) {
+        if UNREACHABLE_NEEDLES.iter().any(|n| message.contains(n)) {
             // `OnceLock::set` returns Ok only on the first call; subsequent
             // calls return Err. That's exactly the "log once, then suppress"
             // semantics of Go's `sync.Once.Do`.
@@ -68,28 +74,37 @@ where
     }
 }
 
+/// Concatenates every field of the event into a single string so that
+/// structured events (which the OTel SDK uses — e.g.
+/// `otel_error!(name: "BatchSpanProcessor.ExportError", error = ...)`) are
+/// matchable. An earlier "only the `message` field" version missed those
+/// because the SDK does not include a format-string message.
 #[derive(Default)]
 struct MessageVisitor {
     message: String,
 }
 
+impl MessageVisitor {
+    fn push(&mut self, name: &str, value: impl fmt::Display) {
+        use std::fmt::Write;
+        if !self.message.is_empty() {
+            self.message.push(' ');
+        }
+        let _ = write!(self.message, "{name}={value}");
+    }
+}
+
 impl Visit for MessageVisitor {
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        if field.name() == "message" {
-            use std::fmt::Write;
-            let _ = write!(self.message, "{:?}", value);
-        }
+        self.push(field.name(), format_args!("{value:?}"));
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message.push_str(value);
-        }
+        self.push(field.name(), value);
     }
 
-    fn record_error(&mut self, _field: &Field, value: &(dyn std::error::Error + 'static)) {
-        use std::fmt::Write;
-        let _ = write!(self.message, "{value}");
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+        self.push(field.name(), value);
     }
 }
 
@@ -134,6 +149,24 @@ mod tests {
         // Non-refused OTEL errors still flow through.
         assert!(f.decide("opentelemetry-otlp", "different error"));
         assert!(f.decide("opentelemetry_sdk", "another problem"));
+    }
+
+    #[test]
+    fn http_exporter_unreachable_pattern_dedups() {
+        // Real-world output from `opentelemetry_sdk` when the HTTP exporter
+        // can't reach the collector (captured by `tools/otel-smoke/dedup.sh`):
+        //   name="BatchSpanProcessor.ExportError" error="Operation failed: HTTP export failed: network error"
+        let f = OtelDedupFilter::new();
+        let msg = r#"name="BatchSpanProcessor.ExportError" error="Operation failed: HTTP export failed: network error""#;
+        assert!(f.decide("opentelemetry_sdk", msg));
+        assert!(!f.decide("opentelemetry_sdk", msg));
+    }
+
+    #[test]
+    fn network_error_pattern_dedups() {
+        let f = OtelDedupFilter::new();
+        assert!(f.decide("opentelemetry-otlp", "transport network error"));
+        assert!(!f.decide("opentelemetry-otlp", "another network error case"));
     }
 
     #[test]
