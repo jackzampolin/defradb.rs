@@ -28,3 +28,6 @@ pub use context::RequestContext;
 
 mod results;
 pub use results::{KeyResults, ResolvedKey, ResultsReceiver, ResultsSender};
+
+mod wire;
+pub use wire::{FetchEncryptionKeyReply, FetchEncryptionKeyRequest};
