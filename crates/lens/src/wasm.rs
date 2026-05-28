@@ -73,6 +73,12 @@ impl WasmTransformStore {
     /// Create a WASM transform store with optional sandboxing.
     pub fn with_sandbox(sandbox: Option<WasmSandboxConfig>) -> Result<Self> {
         let mut config = Config::new();
+        #[cfg(target_os = "macos")]
+        {
+            // Fork-capable embedders can crash when Wasmtime's Mach-port
+            // exception handler is initialized before spawning child processes.
+            config.macos_use_mach_ports(false);
+        }
         if let Some(ref sb) = sandbox {
             if sb.fuel_budget.is_some() {
                 config.consume_fuel(true);
