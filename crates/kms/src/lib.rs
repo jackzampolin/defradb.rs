@@ -34,3 +34,6 @@ pub use wire::{FetchEncryptionKeyReply, FetchEncryptionKeyRequest};
 
 mod service;
 pub use service::{KmsService, PeerIdentity};
+
+mod store;
+pub use store::{KeyStore, StoredKey};
