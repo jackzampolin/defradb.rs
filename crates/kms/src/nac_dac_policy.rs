@@ -46,11 +46,29 @@ impl NacDacPolicy {
         }
     }
 
-    /// Install the NAC reader. Idempotent — subsequent calls are no-ops
-    /// (matches `OnceLock` semantics). Called by the embedded-node layer
-    /// once NAC is ready.
+    /// Install the NAC reader. First call wins; subsequent calls are
+    /// silently discarded (matches `OnceLock` semantics). Callers must not
+    /// rely on swapping the NAC reader at runtime. Called by the embedded-
+    /// node layer once NAC is ready.
     pub fn set_node_acp(&self, nac: Arc<dyn NodeAcpRead>) {
         let _ = self.node_acp.set(nac);
+    }
+}
+
+/// Map an `acp::Error` to either `AccessDenied` (the backend actively
+/// refused, e.g. permission denied / not owner / not manager / not
+/// registered) or `Internal` (everything else — storage, JSON, cycle
+/// detected, invalid policy, etc. — which are NOT policy denials).
+fn classify_acp_error(e: acp::Error) -> Error {
+    use acp::Error as A;
+    match e {
+        A::PermissionDenied(_)
+        | A::DocumentNotRegistered(_)
+        | A::NotOwner { .. }
+        | A::NotManager { .. } => Error::AccessDenied {
+            reason: e.to_string(),
+        },
+        other => Error::Internal(format!("acp backend: {other}")),
     }
 }
 
@@ -68,10 +86,7 @@ impl AccessPolicy for NacDacPolicy {
                     .ok_or_else(|| Error::Internal(format!("no collection for doc {doc_id}")))?;
 
                 // DAC permission check runs as the actor.
-                let actor_id = match actor {
-                    Some(did) => acp::Identity::Authenticated(did.clone()),
-                    None => acp::Identity::Anonymous,
-                };
+                let actor_id: acp::Identity = actor.into();
                 let allowed = self
                     .doc_acp
                     .check_doc_access(
@@ -82,9 +97,7 @@ impl AccessPolicy for NacDacPolicy {
                         doc_id,
                     )
                     .await
-                    .map_err(|e| Error::AccessDenied {
-                        reason: e.to_string(),
-                    })?;
+                    .map_err(classify_acp_error)?;
                 Ok(if allowed {
                     PolicyDecision::Allow
                 } else {
@@ -101,19 +114,21 @@ impl AccessPolicy for NacDacPolicy {
         _scope: &KeyScope,
     ) -> Result<PolicyDecision> {
         let Some(nac) = self.node_acp.get() else {
-            // NAC not configured ⇒ allow. Mirrors Go's behavior when NAC
+            // NAC not configured => allow. Mirrors Go's behavior when NAC
             // is in `NACNotConfigured` state.
             return Ok(PolicyDecision::Allow);
         };
         let Some(did) = actor else {
+            // NAC is configured but the caller is anonymous. NAC grants are
+            // keyed by DID; anonymous cannot satisfy a permission check.
+            // (When NAC is NOT configured, anonymous is allowed at the
+            //  `node_acp.get()` early-return above.)
             return Ok(PolicyDecision::Deny);
         };
         let allowed = nac
             .check_node_permission(did, "read-document")
             .await
-            .map_err(|e| Error::AccessDenied {
-                reason: e.to_string(),
-            })?;
+            .map_err(classify_acp_error)?;
         Ok(if allowed {
             PolicyDecision::Allow
         } else {
@@ -275,5 +290,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(decision, PolicyDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn doc_scope_with_no_actor_uses_anonymous_dac() {
+        // FakeDac::allow=false means the DAC denies regardless of identity,
+        // so this exercises the Anonymous-conversion path on the None branch.
+        let policy = NacDacPolicy::new(Arc::new(FakeDac { allow: false }), Arc::new(FakeLookup));
+        // NAC unset.
+        let decision = policy
+            .check_release(
+                None,
+                &KeyScope::Document {
+                    doc_id: "d1".into(),
+                    field: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(decision, PolicyDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn collection_scope_with_nac_set_and_no_actor_denies() {
+        let policy = NacDacPolicy::new(Arc::new(FakeDac { allow: true }), Arc::new(FakeLookup));
+        policy.set_node_acp(Arc::new(FakeNac { allow: true }));
+        let decision = policy
+            .check_release(
+                None,
+                &KeyScope::Collection {
+                    collection_id: "c".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(decision, PolicyDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn doc_scope_missing_collection_returns_internal_error() {
+        struct EmptyLookup;
+        #[async_trait::async_trait]
+        impl crate::policy::DocCollectionLookup for EmptyLookup {
+            async fn collection_for_doc(
+                &self,
+                _: &str,
+            ) -> crate::Result<Option<crate::policy::DocCollectionInfo>> {
+                Ok(None)
+            }
+        }
+
+        let policy = NacDacPolicy::new(Arc::new(FakeDac { allow: true }), Arc::new(EmptyLookup));
+        let result = policy
+            .check_release(
+                Some(&did("did:key:zalice")),
+                &KeyScope::Document {
+                    doc_id: "missing".into(),
+                    field: None,
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(crate::Error::Internal(_))));
     }
 }
