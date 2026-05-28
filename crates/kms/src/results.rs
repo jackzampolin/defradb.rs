@@ -84,4 +84,15 @@ mod tests {
         assert_eq!(key, [9u8; 32]);
         assert!(rx.recv().await.is_none());
     }
+
+    #[tokio::test]
+    async fn wait_all_propagates_first_error() {
+        let (results, tx) = KeyResults::new(2);
+        let a = fake_cid("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
+        tx.send(Ok((a, [1u8; 32]))).await.unwrap();
+        tx.send(Err(crate::Error::KeyUnavailable)).await.unwrap();
+        drop(tx);
+        let result = results.wait_all().await;
+        assert!(matches!(result, Err(crate::Error::KeyUnavailable)));
+    }
 }
