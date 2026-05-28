@@ -14,14 +14,20 @@ pub struct RequestContext {
 }
 
 impl RequestContext {
+    /// Construct an anonymous request context (no user identity attached).
+    /// The KMS will fall back to node identity at the wire boundary.
     pub fn anonymous() -> Self {
         Self::default()
     }
+
+    /// Construct a request context carrying a verified user DID.
     pub fn with_user(did: Did) -> Self {
         Self {
             user_identity: Some(did),
         }
     }
+
+    /// Return the verified user DID, if one is attached. `None` ⇒ anonymous.
     pub fn user_identity(&self) -> Option<&Did> {
         self.user_identity.as_ref()
     }

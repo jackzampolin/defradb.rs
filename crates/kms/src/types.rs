@@ -12,20 +12,24 @@ pub type EncryptionCid = Cid;
 /// `internal/kms/pubsub.go::getEncryptionKeysLocally`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyScope {
+    /// Document-scoped DEK. `field: None` means a whole-document key shared
+    /// by all encrypted fields; `field: Some(name)` means a per-field key.
     Document {
         doc_id: String,
         field: Option<String>,
     },
-    Collection {
-        collection_id: String,
-    },
+    /// Per-collection DEK (e.g. @branchable collection-head blocks). Gated
+    /// by node-level NAC on release, not by per-doc DAC.
+    Collection { collection_id: String },
 }
 
 /// Outcome of an `AccessPolicy` decision. M1 ships only `Allow` / `Deny`.
 /// `AllowAttested` lands with M4 SourceHub.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDecision {
+    /// AccessPolicy granted release.
     Allow,
+    /// AccessPolicy refused release.
     Deny,
 }
 

@@ -17,11 +17,11 @@
 //! Go PR #4778 (commit `1fab9fb3`). See the design comment on
 //! defradb.rs issue #976 for the full spec.
 
-pub mod error;
-pub use error::{KmsError, Result};
+mod error;
+pub use error::{Error, Result};
 
-pub mod types;
+mod types;
 pub use types::{EncryptionCid, KeyScope, PolicyDecision};
 
-pub mod context;
+mod context;
 pub use context::RequestContext;
