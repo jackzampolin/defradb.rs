@@ -1,0 +1,53 @@
+[package]
+name = "kms"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Key Management Service for DefraDB — DEK generation, wrapping, distribution under NAC/DAC"
+
+# Tracks Go DefraDB's `internal/kms/` package and the NAC-aware fix from
+# Go PR #4778 (commit 1fab9fb3). Design doc: defradb.rs issue #976.
+#
+# Implementation lands across milestones M1–M7 on separate branches.
+# This crate is a stub at design time.
+
+[features]
+default = []
+# Threshold (Orbis) backend. M6.
+threshold = ["dep:orbis"]
+# SourceHub-attested release policy. M4.
+sourcehub = ["dep:sourcehub"]
+
+[dependencies]
+defra-core = { path = "../defra-core" }
+crypto = { path = "../crypto" }
+keyring = { path = "../keyring" }
+acp = { path = "../acp" }
+identity = { path = "../identity" }
+blockstore = { path = "../blockstore" }
+
+# Optional backends — feature-gated until the corresponding milestone lands.
+orbis = { path = "../orbis", optional = true }
+sourcehub = { path = "../sourcehub", optional = true }
+
+async-trait.workspace = true
+async-lock.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_cbor = { workspace = true }
+zeroize = "1.8"
+rand = { workspace = true }
+uuid = { workspace = true }
+cid = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
+[lints]
+workspace = true

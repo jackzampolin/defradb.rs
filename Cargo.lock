@@ -6719,6 +6719,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "kms"
+version = "0.5.0"
+dependencies = [
+ "acp",
+ "async-lock",
+ "async-trait",
+ "blockstore",
+ "cid 0.10.1",
+ "crypto",
+ "defra-core",
+ "futures",
+ "identity",
+ "keyring 0.5.0",
+ "orbis",
+ "rand 0.8.5",
+ "serde",
+ "serde_cbor",
+ "sourcehub",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "lazy-regex"
 version = "3.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
