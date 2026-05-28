@@ -6742,6 +6742,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "x25519-dalek",
  "zeroize",
 ]
 

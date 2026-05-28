@@ -46,6 +46,7 @@ uuid = { workspace = true }
 cid = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 futures = { workspace = true }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
