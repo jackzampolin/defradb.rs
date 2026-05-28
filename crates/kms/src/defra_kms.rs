@@ -71,16 +71,26 @@ impl DefraKms {
 
     /// Derive a `KeyScope` from the on-disk `Encryption` block.
     /// Empty `doc_id` ⇒ collection-scoped (mirrors Go).
-    fn scope_from_block(block: &defra_core::Encryption) -> KeyScope {
+    fn scope_from_block(block: &defra_core::Encryption) -> Result<KeyScope> {
         if block.doc_id.is_empty() {
-            KeyScope::Collection {
-                collection_id: block.field_name.clone().unwrap_or_default(),
-            }
+            // Collection-scoped: empty doc_id by Go convention.
+            // collection_id is not carried on the on-disk Encryption block (Go
+            // doesn't either — see internal/kms/pubsub.go:354-365 which falls
+            // straight through to a node-level NAC check). Pass empty string;
+            // NacDacPolicy::check_node_release does not consume collection_id.
+            Ok(KeyScope::Collection {
+                collection_id: String::new(),
+            })
         } else {
-            KeyScope::Document {
-                doc_id: String::from_utf8_lossy(&block.doc_id).to_string(),
+            let doc_id = std::str::from_utf8(&block.doc_id)
+                .map_err(|e| {
+                    Error::Internal(format!("invalid utf-8 in encryption block doc_id: {e}"))
+                })?
+                .to_string();
+            Ok(KeyScope::Document {
+                doc_id,
                 field: block.field_name.clone(),
-            }
+            })
         }
     }
 }
@@ -89,7 +99,11 @@ impl DefraKms {
 impl KmsService for DefraKms {
     async fn get_keys(&self, ctx: &RequestContext, cids: &[EncryptionCid]) -> Result<KeyResults> {
         let (results, tx) = KeyResults::new(cids.len().max(1));
-        let actor = self.principal(ctx).clone();
+        // Local policy check uses the caller's actual identity (may be None
+        // for anonymous callers). The node-identity fallback is only correct
+        // on the WIRE path for gossip-triggered syncs (per Go PR #4778), not
+        // on the local pass.
+        let user_actor: Option<Did> = ctx.user_identity().cloned();
 
         // Local pass: serve any CIDs we hold.
         let mut remote: Vec<EncryptionCid> = Vec::new();
@@ -98,8 +112,12 @@ impl KmsService for DefraKms {
                 Some(stored) => {
                     let block = defra_core::Encryption::from_dag_cbor(&stored.block_bytes)
                         .map_err(|e| Error::Storage(format!("decode local block: {e}")))?;
-                    let scope = Self::scope_from_block(&block);
-                    match self.policy.check_release(Some(&actor), &scope).await? {
+                    let scope = Self::scope_from_block(&block)?;
+                    match self
+                        .policy
+                        .check_release(user_actor.as_ref(), &scope)
+                        .await?
+                    {
                         PolicyDecision::Allow => {
                             let _ = tx.send(Ok((cid, stored.key))).await;
                         }
@@ -116,76 +134,110 @@ impl KmsService for DefraKms {
             }
         }
 
-        // Cross-peer fan-out for misses. If there are no transports
-        // configured, every remote miss surfaces as `KeyUnavailable` to
-        // the caller so they don't block waiting for a reply that can
-        // never come.
-        if !remote.is_empty() && self.transports.is_empty() {
-            for _ in &remote {
-                let _ = tx.send(Err(Error::KeyUnavailable)).await;
-            }
-        }
-        if !remote.is_empty() && !self.transports.is_empty() {
-            let eph = self.ephemeral();
-            let pub_bytes = x25519_dalek::PublicKey::from(&eph).as_bytes().to_vec();
-            let req = FetchEncryptionKeyRequest {
-                identity: actor.to_string().into_bytes(),
-                links: remote.iter().map(|c| c.to_bytes()).collect(),
-                ephemeral_public_key: pub_bytes,
-            };
-            let payload = serde_cbor::to_vec(&req).map_err(|e| Error::WireEncode(e.to_string()))?;
-            let encoded = EncodedFetchRequest {
-                payload,
-                request_id: uuid::Uuid::new_v4().to_string(),
-            };
-            let remote_set: std::collections::HashSet<EncryptionCid> =
-                remote.iter().copied().collect();
+        // Cross-peer fan-out for misses.
+        if !remote.is_empty() {
+            if self.transports.is_empty() {
+                // No transports configured — surface unavailability per
+                // missing CID so callers don't block waiting for a reply
+                // that can never come.
+                for _ in &remote {
+                    let _ = tx.send(Err(Error::KeyUnavailable)).await;
+                }
+            } else {
+                // Wire path: fall back to node identity for gossip-triggered
+                // syncs where ctx has no user identity (mirrors Go's
+                // behavior in internal/kms/pubsub.go per PR #4778).
+                let wire_actor = self.principal(ctx).clone();
+                let eph = self.ephemeral();
+                let pub_bytes = x25519_dalek::PublicKey::from(&eph).as_bytes().to_vec();
+                let req = FetchEncryptionKeyRequest {
+                    identity: wire_actor.to_string().into_bytes(),
+                    links: remote.iter().map(|c| c.to_bytes()).collect(),
+                    ephemeral_public_key: pub_bytes,
+                };
+                let payload =
+                    serde_cbor::to_vec(&req).map_err(|e| Error::WireEncode(e.to_string()))?;
+                let encoded = EncodedFetchRequest {
+                    payload,
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                };
+                let remote_set: std::collections::HashSet<EncryptionCid> =
+                    remote.iter().copied().collect();
 
-            for transport in &self.transports {
-                let mut rx = transport.send_request(encoded.clone()).await?;
-                let tx = tx.clone();
-                let store = self.store.clone();
-                let eph_clone = eph.clone();
-                let remote_set = remote_set.clone();
-                tokio::spawn(async move {
-                    while let Some(reply) = rx.recv().await {
-                        for (cid_bytes, block_env) in reply.links.iter().zip(reply.blocks.iter()) {
-                            let Ok(cid) = cid::Cid::try_from(cid_bytes.as_slice()) else {
-                                continue;
-                            };
-                            if !remote_set.contains(&cid) {
-                                continue;
+                for transport in &self.transports {
+                    let mut rx = transport.send_request(encoded.clone()).await?;
+                    let tx = tx.clone();
+                    let store = self.store.clone();
+                    let eph_clone = eph.clone();
+                    let remote_set = remote_set.clone();
+                    tokio::spawn(async move {
+                        while let Some(reply) = rx.recv().await {
+                            for (cid_bytes, block_env) in
+                                reply.links.iter().zip(reply.blocks.iter())
+                            {
+                                let Ok(cid) = cid::Cid::try_from(cid_bytes.as_slice()) else {
+                                    tracing::warn!("KMS reply contained malformed CID; skipping");
+                                    continue;
+                                };
+                                if !remote_set.contains(&cid) {
+                                    // Expected case — reply for a CID we
+                                    // didn't ask for. Silent skip.
+                                    continue;
+                                }
+                                let block_bytes = match crate::ecies_envelope::unwrap_with_private(
+                                    block_env, &eph_clone,
+                                ) {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            cid = %cid,
+                                            "ECIES unwrap failed on KMS reply"
+                                        );
+                                        continue;
+                                    }
+                                };
+                                let block =
+                                    match defra_core::Encryption::from_dag_cbor(&block_bytes) {
+                                        Ok(b) => b,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                error = %e,
+                                                cid = %cid,
+                                                "Encryption block decode failed on KMS reply"
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                if block.key.len() != 32 {
+                                    tracing::warn!(
+                                        cid = %cid,
+                                        len = block.key.len(),
+                                        "Encryption block has invalid key length; skipping"
+                                    );
+                                    continue;
+                                }
+                                let mut key = [0u8; 32];
+                                key.copy_from_slice(&block.key);
+                                let _ = store
+                                    .put(
+                                        cid,
+                                        StoredKey {
+                                            key,
+                                            block_bytes: block_bytes.clone(),
+                                        },
+                                    )
+                                    .await;
+                                let _ = tx.send(Ok((cid, key))).await;
                             }
-                            let Ok(block_bytes) =
-                                crate::ecies_envelope::unwrap_with_private(block_env, &eph_clone)
-                            else {
-                                continue;
-                            };
-                            let block = match defra_core::Encryption::from_dag_cbor(&block_bytes) {
-                                Ok(b) => b,
-                                Err(_) => continue,
-                            };
-                            if block.key.len() != 32 {
-                                continue;
-                            }
-                            let mut key = [0u8; 32];
-                            key.copy_from_slice(&block.key);
-                            let _ = store
-                                .put(
-                                    cid,
-                                    StoredKey {
-                                        key,
-                                        block_bytes: block_bytes.clone(),
-                                    },
-                                )
-                                .await;
-                            let _ = tx.send(Ok((cid, key))).await;
                         }
-                    }
-                });
+                    });
+                }
             }
         }
 
+        // Drop our handle so the channel closes once spawned transport tasks finish.
+        // Without this, the receiver would block indefinitely on the local sender.
         drop(tx);
         Ok(results)
     }
@@ -207,6 +259,12 @@ impl KmsService for DefraKms {
         let actor: Option<Did> = std::str::from_utf8(&req.identity)
             .ok()
             .and_then(|s| s.parse().ok());
+        if actor.is_none() && !req.identity.is_empty() {
+            tracing::warn!(
+                identity_bytes_len = req.identity.len(),
+                "KMS request identity field is non-empty but failed DID parse; treating as anonymous"
+            );
+        }
 
         let mut out_links: Vec<Vec<u8>> = Vec::new();
         let mut out_blocks: Vec<Vec<u8>> = Vec::new();
@@ -221,7 +279,7 @@ impl KmsService for DefraKms {
             };
             let block = defra_core::Encryption::from_dag_cbor(&stored.block_bytes)
                 .map_err(|e| Error::Storage(format!("decode local block: {e}")))?;
-            let scope = Self::scope_from_block(&block);
+            let scope = Self::scope_from_block(&block)?;
             match self.policy.check_release(actor.as_ref(), &scope).await? {
                 PolicyDecision::Allow => {}
                 PolicyDecision::Deny => continue,
