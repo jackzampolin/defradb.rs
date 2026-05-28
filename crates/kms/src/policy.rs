@@ -16,11 +16,7 @@ use crate::types::{KeyScope, PolicyDecision};
 pub trait AccessPolicy: Send + Sync {
     /// Per-key authorization check. Returns `Allow` to release the DEK,
     /// `Deny` to refuse.
-    async fn check_release(
-        &self,
-        actor: Option<&Did>,
-        scope: &KeyScope,
-    ) -> Result<PolicyDecision>;
+    async fn check_release(&self, actor: Option<&Did>, scope: &KeyScope) -> Result<PolicyDecision>;
 
     /// Node-level authorization check for collection-scoped keys.
     /// Called when the scope is `KeyScope::Collection`.
@@ -39,11 +35,7 @@ pub trait AccessPolicy: Send + Sync {
 pub trait NodeAcpRead: Send + Sync {
     /// Check whether `actor` holds the named node-level permission.
     /// Permission strings match NAC's internal names (e.g. `"read-document"`).
-    async fn check_node_permission(
-        &self,
-        actor: &Did,
-        permission: &str,
-    ) -> acp::Result<bool>;
+    async fn check_node_permission(&self, actor: &Did, permission: &str) -> acp::Result<bool>;
 }
 
 /// Resolves a document's collection metadata for ACP policy checks.
