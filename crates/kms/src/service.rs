@@ -25,11 +25,7 @@ pub trait KmsService: Send + Sync {
     /// Fetch DEKs for the given Encryption-block CIDs. Returns a streaming
     /// aggregator because keys may arrive from peers asynchronously.
     /// `ctx` carries the caller identity (set at HTTP/CLI entry points).
-    async fn get_keys(
-        &self,
-        ctx: &RequestContext,
-        cids: &[EncryptionCid],
-    ) -> Result<KeyResults>;
+    async fn get_keys(&self, ctx: &RequestContext, cids: &[EncryptionCid]) -> Result<KeyResults>;
 
     /// Generate a fresh DEK for the given scope, persist it locally, and
     /// return both the CID of the on-disk `Encryption` block AND the plain

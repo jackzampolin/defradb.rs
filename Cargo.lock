@@ -6735,6 +6735,7 @@ dependencies = [
  "orbis",
  "rand 0.8.5",
  "serde",
+ "serde_bytes",
  "serde_cbor",
  "sourcehub",
  "thiserror 2.0.18",

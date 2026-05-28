@@ -91,8 +91,8 @@ mod tests {
             _ => panic!(),
         };
         let keys: Vec<String> = map
-            .into_iter()
-            .filter_map(|(k, _)| match k {
+            .into_keys()
+            .filter_map(|k| match k {
                 serde_cbor::Value::Text(s) => Some(s),
                 _ => None,
             })
