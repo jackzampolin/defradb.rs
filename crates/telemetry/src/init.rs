@@ -79,11 +79,10 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
         .with_http()
         .build()
         .map_err(|e| InitError::SpanExporter(Box::new(e)))?;
-    let tracer_provider = SdkTracerProvider::builder()
-        .with_batch_exporter(span_exporter)
-        .with_resource(resource.clone())
-        .build();
 
+    // Build the meter provider first (when enabled) so the trace provider can
+    // take `resource` by value — avoids a clone-then-discard dance on the
+    // metrics-off path.
     #[cfg(feature = "metrics")]
     let meter_provider = {
         let metric_exporter = MetricExporter::builder()
@@ -93,11 +92,14 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
         let reader = PeriodicReader::builder(metric_exporter).build();
         SdkMeterProvider::builder()
             .with_reader(reader)
-            .with_resource(resource)
+            .with_resource(resource.clone())
             .build()
     };
-    #[cfg(not(feature = "metrics"))]
-    let _ = resource; // moved into trace provider only; silence unused-binding
+
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_batch_exporter(span_exporter)
+        .with_resource(resource)
+        .build();
 
     if config.install_global {
         global::set_tracer_provider(tracer_provider.clone());

@@ -18,9 +18,17 @@ otlp = [
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
     "dep:tracing-opentelemetry",
-    "dep:tokio",
     "opentelemetry_sdk/trace",
     "opentelemetry-otlp/trace",
+    # `internal-logs` is a default feature of both crates that
+    # `default-features = false` (below) turns off. Without it the SDK's
+    # `otel_error!` / `otel_warn!` macros compile to no-ops, so exporter
+    # failures emit no `tracing` events at all — which would make the
+    # OtelDedupFilter dead code AND hide every "collector unreachable"
+    # error. The whole point of #977 is to surface (and dedup) those, so
+    # it must stay on.
+    "opentelemetry_sdk/internal-logs",
+    "opentelemetry-otlp/internal-logs",
 ]
 # Also compile in the OTLP metric exporter. Off by default because nothing in
 # defradb.rs records metric instruments today — leaving the metric pipeline on
@@ -34,9 +42,13 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["registry", "std"] }
 thiserror.workspace = true
 
-tokio = { workspace = true, optional = true }
 opentelemetry = { version = "0.32", optional = true }
-opentelemetry_sdk = { version = "0.32", default-features = false, features = ["rt-tokio"], optional = true }
+# `experimental_async_runtime` (not `rt-tokio`) is all that's needed: with the
+# `reqwest-blocking-client` transport the OTLP exporter selects the `NoAsync`
+# runtime, and the batch processors run on dedicated `std::thread` workers — no
+# Tokio runtime is touched. `rt-tokio` would additionally pull tokio/rt,
+# tokio/time, and tokio-stream for nothing.
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["experimental_async_runtime"], optional = true }
 # OTLP over HTTP/proto, mirroring Go DefraDB's `otlptracehttp.New`. Default
 # endpoint is http://localhost:4318 — same default as the Go upstream.
 # `reqwest-blocking-client` runs on the SDK's batch-exporter thread, sidestepping

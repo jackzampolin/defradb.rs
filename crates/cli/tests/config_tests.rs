@@ -60,8 +60,14 @@ fn test_apply_cli_flags_no_telemetry_sets_telemetry_disabled() {
 }
 
 #[test]
-fn test_apply_cli_flags_no_telemetry_false_leaves_telemetry_enabled() {
-    let mut config = Config::default();
+fn test_apply_cli_flags_no_telemetry_false_re_enables_telemetry() {
+    // Seed with telemetry_disabled = true (e.g. from a config file) so the
+    // assertion actually exercises the write path: a CLI `--no-telemetry=false`
+    // must be able to override a disabled config back to enabled.
+    let mut config = Config {
+        telemetry_disabled: true,
+        ..Config::default()
+    };
     let mut cli = cli_with_defaults();
     cli.no_telemetry = Some(false);
 
@@ -70,7 +76,7 @@ fn test_apply_cli_flags_no_telemetry_false_leaves_telemetry_enabled() {
         .expect("apply_cli_flags should succeed");
     assert!(
         !config.telemetry_disabled,
-        "--no-telemetry=false should not flip config.telemetry_disabled"
+        "--no-telemetry=false should override a disabled config back to enabled"
     );
 }
 

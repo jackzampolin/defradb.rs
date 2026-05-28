@@ -89,8 +89,12 @@ DEFRA_PID=""
 echo "=== counting exporter-unreachable log lines in stderr ==="
 # Each known needle (connection refused / HTTP export failed / network error)
 # has its own per-process latch — so the upper bound is one log line per
-# needle, not one in total. See crates/telemetry/src/dedup.rs.
-NEEDLE_MAX=3
+# distinct pattern. In practice the SDK's unreachable-collector message
+# ("HTTP export failed: network error") matches two needles in one line and
+# claims both latches at once, so the realistic ceiling is 2, not 3. A
+# regression to first-match-wins would leak a 3rd line and trip this.
+# See crates/telemetry/src/dedup.rs.
+NEEDLE_MAX=2
 PATTERN='connection refused|HTTP export failed|network error'
 UNREACHABLE_LINES=$(grep -E "ERROR" "$STDERR_LOG" \
     | grep -E "opentelemetry" \

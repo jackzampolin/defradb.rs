@@ -44,25 +44,25 @@ impl TelemetryHandle {
     /// (e.g. shut down telemetry after the rest of the node stops emitting).
     /// Prefer this over relying on `Drop` — see the module docs for the
     /// blocking-thread + panic-safety reasons.
+    ///
+    /// Unlike the `Drop` path this does NOT swallow panics: a panic in the
+    /// SDK's shutdown (e.g. a poisoned batch-thread join) propagates to the
+    /// caller, who chose this explicit path and can react.
+    // `mut`/`self` are only touched on the otlp path; without it the body is
+    // empty and `self` just drops (a no-op).
+    #[cfg_attr(not(feature = "otlp"), allow(unused_mut, unused_variables))]
     pub fn shutdown(mut self) {
-        self.flush();
+        #[cfg(feature = "otlp")]
+        if let Some(p) = self.inner.take() {
+            Self::shutdown_providers(p);
+        }
     }
 
-    fn flush(&mut self) {
-        #[cfg(feature = "otlp")]
-        if let Some(_p) = self.inner.take() {
-            // `catch_unwind` keeps a panicked batch thread (which the SDK
-            // exposes via `handle.join().unwrap()` in shutdown) from
-            // turning a normal Drop into a double-panic → abort.
-            // `AssertUnwindSafe` is acceptable: the providers we move in
-            // are about to be dropped anyway, so post-panic logical state
-            // doesn't matter.
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                let _ = _p.tracer_provider.shutdown();
-                #[cfg(feature = "metrics")]
-                let _ = _p.meter_provider.shutdown();
-            }));
-        }
+    #[cfg(feature = "otlp")]
+    fn shutdown_providers(p: OtelProviders) {
+        let _ = p.tracer_provider.shutdown();
+        #[cfg(feature = "metrics")]
+        let _ = p.meter_provider.shutdown();
     }
 }
 
@@ -73,7 +73,28 @@ impl TelemetryHandle {
 /// explicit `shutdown` is preferred.
 impl Drop for TelemetryHandle {
     fn drop(&mut self) {
-        self.flush();
+        #[cfg(feature = "otlp")]
+        if let Some(p) = self.inner.take() {
+            // `catch_unwind` keeps a panic inside the SDK shutdown (e.g. the
+            // `handle.join().unwrap()` the batch processor does) from
+            // becoming a panic-during-unwind → process abort when the handle
+            // is dropped while another panic is already unwinding.
+            // `AssertUnwindSafe` is fine: `p` is moved in and dropped here, so
+            // no post-panic logical state is observable. Unlike `shutdown`,
+            // the panic is swallowed — but we surface it so a dead batch
+            // thread isn't completely silent.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                Self::shutdown_providers(p);
+            }));
+            if let Err(panic) = result {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("<non-string panic>");
+                eprintln!("warning: OpenTelemetry shutdown panicked during drop: {msg}");
+            }
+        }
     }
 }
 

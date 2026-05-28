@@ -28,18 +28,19 @@ use tracing_subscriber::layer::{Context, Filter};
 use tracing_subscriber::registry::LookupSpan;
 
 const OTEL_TARGET_PREFIX: &str = "opentelemetry";
-const NEEDLES: &[&str] = &["connection refused", "HTTP export failed", "network error"];
 
-#[allow(non_snake_case)]
-fn UNREACHABLE_PATTERNS_MATCH_ANY(message: &str) -> bool {
-    NEEDLES.iter().any(|n| message.contains(n))
-}
+/// Known "OTLP collector unreachable" substrings. `"connection refused"` is
+/// the gRPC transport's wording; `"HTTP export failed"` / `"network error"`
+/// are what `opentelemetry-otlp`'s HTTP+reqwest transport emits. Each gets
+/// its own latch (indexed positionally by [`OtelDedupFilter::latches`]).
+const NEEDLES: &[&str] = &["connection refused", "HTTP export failed", "network error"];
 
 #[derive(Default)]
 pub struct OtelDedupFilter {
-    refused_logged: OnceLock<()>,
-    http_export_failed_logged: OnceLock<()>,
-    network_error_logged: OnceLock<()>,
+    /// One latch per entry in [`NEEDLES`], positionally aligned. A single
+    /// shared latch would let the first transient `"network error"` silence
+    /// a later `"connection refused"` from a different failure mode.
+    latches: [OnceLock<()>; NEEDLES.len()],
 }
 
 impl OtelDedupFilter {
@@ -49,32 +50,29 @@ impl OtelDedupFilter {
 
     /// Decide whether to emit. Pure logic, unit-testable without a subscriber.
     ///
-    /// Iterates every needle: each one that matches the message claims its
-    /// own latch independently. The event is emitted only if at least one
-    /// matching needle was previously unclaimed. Marking ALL matching
-    /// needles (not just the first) means a real SDK message like
-    /// `"HTTP export failed: network error"` — which contains two needles
-    /// at once — consumes both latches, so a later "network error"-only
-    /// event can't slip through as a "first occurrence".
+    /// Every matching needle claims its own latch in one pass. The event is
+    /// emitted if at least one matching needle was previously unclaimed, OR
+    /// if no needle matched at all (non-unreachable-collector events always
+    /// pass through). Claiming ALL matching needles — not just the first —
+    /// means a real SDK message like `"HTTP export failed: network error"`
+    /// (two needles in one line) consumes both latches, so a later
+    /// `"network error"`-only event can't slip through as a "first
+    /// occurrence".
     fn decide(&self, target: &str, message: &str) -> bool {
         if !target.starts_with(OTEL_TARGET_PREFIX) {
             return true;
         }
         let mut emit = false;
-        for (needle, lock) in self.needles() {
-            if message.contains(needle) && lock.set(()).is_ok() {
-                emit = true;
+        let mut any_match = false;
+        for (needle, lock) in NEEDLES.iter().zip(&self.latches) {
+            if message.contains(needle) {
+                any_match = true;
+                if lock.set(()).is_ok() {
+                    emit = true;
+                }
             }
         }
-        emit || !UNREACHABLE_PATTERNS_MATCH_ANY(message)
-    }
-
-    fn needles(&self) -> [(&'static str, &OnceLock<()>); 3] {
-        [
-            ("connection refused", &self.refused_logged),
-            ("HTTP export failed", &self.http_export_failed_logged),
-            ("network error", &self.network_error_logged),
-        ]
+        emit || !any_match
     }
 }
 
