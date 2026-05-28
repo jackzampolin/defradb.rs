@@ -1,8 +1,8 @@
-use std::net::{TcpListener, UdpSocket};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use defra_harness::ports::allocate_transport_ports;
 use integration_test::node::{
     start_node, GoNode, KeyringBackend, NodeConfig, RunningNode, RustNode,
 };
@@ -14,49 +14,6 @@ const P2P_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 static RUST_BUILD_DONE: OnceLock<()> = OnceLock::new();
-
-struct TransportNodePorts {
-    http: u16,
-    tcp: u16,
-    quic: u16,
-    ws: u16,
-    tcp_guards: Option<Vec<TcpListener>>,
-    udp_guard: Option<UdpSocket>,
-}
-
-impl TransportNodePorts {
-    fn allocate() -> std::io::Result<Self> {
-        let http_guard = TcpListener::bind("127.0.0.1:0")?;
-        let tcp_guard = TcpListener::bind("127.0.0.1:0")?;
-        let ws_guard = TcpListener::bind("127.0.0.1:0")?;
-        let udp_guard = UdpSocket::bind("127.0.0.1:0")?;
-
-        Ok(Self {
-            http: http_guard.local_addr()?.port(),
-            tcp: tcp_guard.local_addr()?.port(),
-            quic: udp_guard.local_addr()?.port(),
-            ws: ws_guard.local_addr()?.port(),
-            tcp_guards: Some(vec![http_guard, tcp_guard, ws_guard]),
-            udp_guard: Some(udp_guard),
-        })
-    }
-
-    fn p2p_addr_arg(&self) -> String {
-        format!(
-            "/ip4/127.0.0.1/tcp/{},/ip4/127.0.0.1/udp/{}/quic-v1,/ip4/127.0.0.1/tcp/{}/ws",
-            self.tcp, self.quic, self.ws
-        )
-    }
-
-    fn quic_p2p_addr_arg(&self) -> String {
-        format!("/ip4/127.0.0.1/udp/{}/quic-v1", self.quic)
-    }
-
-    fn release(&mut self) {
-        self.tcp_guards = None;
-        self.udp_guard = None;
-    }
-}
 
 fn build_rust_binary() -> PathBuf {
     RUST_BUILD_DONE.get_or_init(|| {
@@ -155,9 +112,7 @@ async fn wait_for_quic_transport(client: &DefraClient) -> Vec<String> {
 async fn start_configured_transport_cluster() -> (tempfile::TempDir, Vec<RunningNode>) {
     let binary_path = build_rust_binary();
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut ports = (0..NODE_COUNT)
-        .map(|_| TransportNodePorts::allocate().expect("allocate node ports"))
-        .collect::<Vec<_>>();
+    let mut ports = allocate_transport_ports(NODE_COUNT).expect("allocate node ports");
     let mut nodes = Vec::with_capacity(NODE_COUNT);
 
     for (index, port) in ports.iter_mut().enumerate() {
@@ -197,8 +152,9 @@ async fn start_rust_go_quic_cluster() -> (tempfile::TempDir, RunningNode, Runnin
     GoNode::check_available().expect("Go defradb binary not available");
 
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut rust_ports = TransportNodePorts::allocate().expect("allocate Rust node ports");
-    let mut go_ports = TransportNodePorts::allocate().expect("allocate Go node ports");
+    let mut transport_ports = allocate_transport_ports(2).expect("allocate Rust and Go node ports");
+    let mut go_ports = transport_ports.pop().expect("go ports");
+    let mut rust_ports = transport_ports.pop().expect("rust ports");
 
     let mut rust_config = NodeConfig::new(
         "rust-quic-cross",
