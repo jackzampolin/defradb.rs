@@ -31,3 +31,6 @@ pub use results::{KeyResults, ResolvedKey, ResultsReceiver, ResultsSender};
 
 mod wire;
 pub use wire::{FetchEncryptionKeyReply, FetchEncryptionKeyRequest};
+
+mod service;
+pub use service::{KmsService, PeerIdentity};
