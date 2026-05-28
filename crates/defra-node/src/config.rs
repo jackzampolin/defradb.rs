@@ -28,6 +28,7 @@ pub struct SourceHubConfig {
 #[cfg(feature = "http")]
 pub struct HttpConfig {
     pub address: std::net::SocketAddr,
+    pub(crate) request_timeout: Duration,
     pub(crate) transaction_idle_timeout: Duration,
     pub(crate) transaction_cleanup_interval: Duration,
     pub(crate) extra_routes: Option<axum::Router>,
@@ -42,10 +43,21 @@ impl HttpConfig {
     pub fn with_addr(addr: impl Into<std::net::SocketAddr>) -> Self {
         Self {
             address: addr.into(),
+            request_timeout: Duration::from_secs(
+                defra_http::ServerConfig::default().request_timeout,
+            ),
             transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
             transaction_cleanup_interval: DEFAULT_TRANSACTION_CLEANUP_INTERVAL,
             extra_routes: None,
         }
+    }
+
+    /// Set the HTTP request timeout.
+    ///
+    /// `Duration::ZERO` disables request timeouts.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 
     /// Set the max idle age for explicit HTTP transactions.
