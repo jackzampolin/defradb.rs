@@ -22,6 +22,8 @@ mod index_management;
 mod lens;
 #[path = "query/lens_persistence.rs"]
 mod lens_persistence;
+#[path = "query/lens_reindex_secondary_index_979.rs"]
+mod lens_reindex_secondary_index_979;
 #[path = "query/limits.rs"]
 mod limits;
 #[path = "query/multi_cid_vectors.rs"]
