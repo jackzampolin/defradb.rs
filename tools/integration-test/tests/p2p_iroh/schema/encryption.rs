@@ -114,7 +114,6 @@ async fn public_doc_encrypted_field_fetch_key_decrypt() {
 /// Port: TestDocEncryptionPeer_IfEncryptedPublicDocHasEncryptedField_ShouldFetchKeysAndDecrypt
 #[tokio::test]
 #[serial]
-#[ignore = "requires Orbis KMS for encryption key distribution across peers"]
 async fn encrypted_public_doc_encrypted_field() {
     let (cluster, _) = setup_encrypted_cluster(SCHEMA).await;
     let (sse, merges) = open_merge_events_sse(cluster.api_url(1)).await;
@@ -153,7 +152,6 @@ async fn all_fields_individually_encrypted() {
 /// Port: TestDocEncryptionPeer_IfAllFieldsOfPublicDocAreIndividuallyEncrypted_ShouldFetchKeysAndDecrypt
 #[tokio::test]
 #[serial]
-#[ignore = "requires Orbis KMS for encryption key distribution across peers"]
 async fn all_fields_of_public_doc_individually_encrypted() {
     let (cluster, _) = setup_encrypted_cluster(SCHEMA).await;
     let (sse, merges) = open_merge_events_sse(cluster.api_url(1)).await;
@@ -521,50 +519,90 @@ async fn doc_encrypted_indexed_field() {
 }
 
 // ---------------------------------------------------------------------------
-// KMS-specific test (kept ignored — Rust uses shared hardcoded key)
+// KMS key-sync race test
 // ---------------------------------------------------------------------------
 
 /// Port: TestDocEncryptionPeer_IfPeerDidNotReceiveKey_ShouldNotFetch
+///
+/// Creates an encrypted doc on node0 and queries node1 as soon as the DAG has
+/// synced, without waiting for the cross-peer KMS key fetch. The query result is
+/// race-tolerant (matching Go's `AnyOf`): either empty (key-sync not yet done)
+/// or the fully decrypted doc (key-sync completed). It must never error or
+/// return a partially-decrypted/garbage document.
 #[tokio::test]
 #[serial]
-#[ignore]
 async fn peer_no_key_should_not_fetch() {
-    // Rust uses a shared hardcoded encryption key, so the key-not-received
-    // scenario cannot be reproduced without KMS infrastructure.
+    let (cluster, _) = setup_encrypted_cluster(SCHEMA).await;
+    let (sse, merges) = open_merge_events_sse(cluster.api_url(1)).await;
+
+    cluster
+        .client(0)
+        .query(
+            r#"mutation { add_Users(input: {name: "John", age: 21}, encrypt: true) { _docID } }"#,
+        )
+        .expect("create encrypted doc");
+
+    // Wait only for the DAG merge, NOT the key sync, then query immediately.
+    wait_for_merge_events(&merges, 1, MERGE_TIMEOUT).await;
+    sse.abort();
+
+    let result = cluster
+        .client(1)
+        .query("query { Users { name age } }")
+        .expect("query node1");
+    let users = result["Users"].as_array().expect("Users not array");
+
+    match users.len() {
+        // Key-sync has not yet completed: no decryptable doc.
+        0 => {}
+        // Key-sync completed: the doc must decrypt to the exact original values.
+        1 => {
+            let user = &users[0];
+            assert_eq!(user["name"].as_str(), Some("John"));
+            assert_eq!(user["age"].as_i64(), Some(21));
+        }
+        n => panic!("expected 0 or 1 users, got {}: {:?}", n, users),
+    }
 }
 
 // ---------------------------------------------------------------------------
-// ACP encryption tests (kept ignored — require SourceHub DAC + encryption)
+// ACP encryption tests (kept ignored — require SourceHub DAC, an M4 milestone)
+//
+// The Go originals (tests/integration/encryption/peer_acp_test.go) all declare
+// `SupportedDocumentACPTypes: [SourceHubDocumentACPType]`, i.e. they exercise
+// DAC enforcement of cross-peer key distribution against an on-chain SourceHub
+// policy. M1's KMS NacDacPolicy gates against the node's LOCAL document_acp /
+// nac_manager only; the SourceHub DAC path these tests require lands in M4.
 // ---------------------------------------------------------------------------
 
 /// Port: TestDocEncryptionACP_IfUserAndNodeHaveAccess_ShouldFetch
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires SourceHub DAC (SupportedDocumentACPTypes: SourceHub) — M4 milestone"]
 async fn encryption_acp_user_and_node_access() {
-    // Requires SourceHub DAC policy + KMS integration
+    // Requires SourceHub DAC policy + KMS integration (M4)
 }
 
 /// Port: TestDocEncryptionACP_IfUserHasAccessButNotNode_ShouldNotFetch
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires SourceHub DAC (SupportedDocumentACPTypes: SourceHub) — M4 milestone"]
 async fn encryption_acp_user_access_not_node() {
-    // Requires SourceHub DAC policy + KMS integration
+    // Requires SourceHub DAC policy + KMS integration (M4)
 }
 
 /// Port: TestDocEncryptionACP_IfNodeHasAccessToSomeDocs_ShouldFetchOnlyThem
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires SourceHub DAC (SupportedDocumentACPTypes: SourceHub) — M4 milestone"]
 async fn encryption_acp_node_partial_access() {
-    // Requires SourceHub DAC policy + KMS integration
+    // Requires SourceHub DAC policy + KMS integration (M4)
 }
 
 /// Port: TestDocEncryptionACP_IfClientNodeHasDocPermissionButServerNodeIsNotAvailable_ShouldNotFetch
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires SourceHub DAC + server-availability testing — M4 milestone"]
 async fn encryption_acp_server_not_available() {
-    // Requires SourceHub DAC policy + KMS + server availability testing
+    // Requires SourceHub DAC policy + KMS + server availability testing (M4)
 }
