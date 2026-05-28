@@ -39,6 +39,7 @@ datastore = { path = "../datastore" }
 document = { path = "../document" }
 crypto = { path = "../crypto" }
 defra-core = { path = "../defra-core" }
+kms = { path = "../kms" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

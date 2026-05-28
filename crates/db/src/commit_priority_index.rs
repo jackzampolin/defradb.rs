@@ -171,9 +171,18 @@ mod tests {
                 doc.set("age", NormalValue::Int(30));
 
                 let doc_id = doc.id().unwrap().to_string();
-                write_document_blocks(&blockstore, &headstore, &doc, "schema-v1", None, None, None)
-                    .await
-                    .unwrap();
+                write_document_blocks(
+                    &blockstore,
+                    &headstore,
+                    &doc,
+                    "schema-v1",
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
 
                 doc.set("age", NormalValue::Int(31));
                 let age_only = std::iter::once("age".to_string()).collect();
@@ -183,6 +192,7 @@ mod tests {
                     &doc,
                     "schema-v1",
                     Some(&age_only),
+                    None,
                     None,
                     None,
                 )
@@ -197,6 +207,7 @@ mod tests {
                     &doc,
                     "schema-v1",
                     Some(&name_only),
+                    None,
                     None,
                     None,
                 )
@@ -302,9 +313,18 @@ mod tests {
                 doc.set("name", NormalValue::String("Alice".to_string()));
                 doc.set("age", NormalValue::Int(30));
 
-                write_document_blocks(&blockstore, &headstore, &doc, "schema-v1", None, None, None)
-                    .await
-                    .unwrap();
+                write_document_blocks(
+                    &blockstore,
+                    &headstore,
+                    &doc,
+                    "schema-v1",
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
 
                 doc.set("age", NormalValue::Int(31));
                 let age_only = std::iter::once("age".to_string()).collect();
@@ -314,6 +334,7 @@ mod tests {
                     &doc,
                     "schema-v1",
                     Some(&age_only),
+                    None,
                     None,
                     None,
                 )

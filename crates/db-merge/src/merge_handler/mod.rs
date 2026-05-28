@@ -1421,6 +1421,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .unwrap()
@@ -1540,6 +1541,7 @@ mod tests {
                     &headstore,
                     &doc,
                     "v1",
+                    None,
                     None,
                     None,
                     None,
