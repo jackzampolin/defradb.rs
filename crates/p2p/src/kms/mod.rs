@@ -1,7 +1,5 @@
 //! KMS transport adapters.
-//!
-//! M1 ships `Libp2pPubsubTransport`. M2 adds `IrohStreamTransport`.
 
-mod libp2p_pubsub;
+mod pubsub_transport;
 
-pub use libp2p_pubsub::Libp2pPubsubTransport;
+pub use pubsub_transport::PubsubKeyTransport;

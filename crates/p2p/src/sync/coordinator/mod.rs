@@ -315,10 +315,9 @@ pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
     /// Optional document ACP used for local ACP relationship snapshot replay.
     pub(super) document_acp: std::sync::OnceLock<Arc<dyn DocumentACP>>,
 
-    /// KMS pubsub transport. Set by the embedded-node layer when Libp2p
-    /// transport is in use. Iroh deployments leave this empty.
-    #[cfg(feature = "libp2p-transport")]
-    pub(super) kms_transport: std::sync::OnceLock<Arc<crate::kms::Libp2pPubsubTransport>>,
+    /// KMS pubsub transport. Set by the embedded-node layer when a transport
+    /// that supports raw gossip is in use. Left empty otherwise.
+    pub(super) kms_transport: std::sync::OnceLock<Arc<crate::kms::PubsubKeyTransport<T>>>,
 
     /// Pubsub_rpc DocSync/BranchableSync services (#828). `None` on
     /// transports whose local peer id isn't a libp2p PeerId (e.g. iroh).
@@ -333,8 +332,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     /// Install the KMS pubsub transport. First-call-wins (OnceLock semantics);
     /// subsequent calls are silently discarded.
-    #[cfg(feature = "libp2p-transport")]
-    pub fn install_kms_transport(&self, transport: Arc<crate::kms::Libp2pPubsubTransport>) {
+    pub fn install_kms_transport(&self, transport: Arc<crate::kms::PubsubKeyTransport<T>>) {
         let _ = self.kms_transport.set(transport);
     }
 
