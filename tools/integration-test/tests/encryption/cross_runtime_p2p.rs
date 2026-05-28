@@ -208,18 +208,28 @@ async fn go_rust_kms_interop(writer_idx: usize, reader_idx: usize) {
 /// the Go node's KMS over the `encryption` topic. Exercises the Rust KMS
 /// requester against a Go KMS server.
 ///
-/// IGNORED: blocked upstream of KMS by Go↔Rust encrypted-doc block
-/// replication. For encrypted docs the Go PushLog does not carry the blocks
-/// inline (unlike plaintext docs, which replicate fine — see
-/// `replication::go_rust_replication`), so the Rust node falls back to a
-/// Bitswap DAG walk. Bitswap fetches the per-field encrypted delta blocks but
-/// the root composite block is never served by the Go provider, so the DAG
-/// fetch times out (`DAG fetch incomplete ... remaining_count=2`) and the doc
-/// never materializes. The Rust KMS `encryption`-topic exchange is never
-/// reached. This is a P2P block-transport interop gap, NOT a KMS wire-compat
-/// bug; the KMS requester path cannot be validated until it clears.
+/// The original P2P block-transport gap is FIXED: Rust's DAG-completion walk
+/// (`find_all_missing_links`) used libipld `references()`, which includes the
+/// `encryption` link. Go stores encryption-metadata blocks in a separate
+/// `Encstore` and serves them ONLY over the KMS `encryption` pubsub topic, not
+/// Bitswap (Go's `loadBlockLinks` walks `block.AllLinks()`, which excludes the
+/// encryption link, and fetches it via `kms.GetKeys`). Rust now excludes the
+/// encryption link from the Bitswap walk, so the encrypted DAG fully
+/// replicates and the merge is reached.
+///
+/// STILL IGNORED — second, independent gap: the `defra` CLI binary's P2P
+/// startup (`crates/cli/src/commands/start/server_p2p.rs`) never wires a KMS
+/// service. `DefraKms` construction + `merge_handler.set_kms` +
+/// `coordinator.install_kms_transport` + serve-handler install exist ONLY in
+/// the `embedded` crate (commit 3cede6a1), which the CLI does not use. With no
+/// KMS on the merge handler, `decrypt_block_data` takes the legacy fallback and
+/// fails with "Encryption block <cid> not found" (the enc block is no longer
+/// Bitswap-fetched into the blockstore). Fix requires porting the embedded KMS
+/// wiring into the CLI P2P setup (both libp2p + iroh paths), which pulls in the
+/// `kms` crate, the NAC/DAC policy, and the doc-collection-lookup / node-acp
+/// adapters currently living in `embedded`.
 #[tokio::test]
-#[ignore = "blocked upstream of KMS: Go->Rust encrypted-doc Bitswap DAG fetch never retrieves the root composite block; KMS topic never reached"]
+#[ignore = "blocked: defra CLI P2P startup (server_p2p.rs) never wires DefraKms; merge decrypt falls back to encstore and fails 'Encryption block not found'. KMS wiring exists only in the embedded crate, not the CLI binary the harness runs."]
 async fn go_to_rust_encrypted_p2p_replication() {
     // index 0 = Rust (reader), index 1 = Go (writer)
     go_rust_kms_interop(1, 0).await;
@@ -229,13 +239,15 @@ async fn go_to_rust_encrypted_p2p_replication() {
 /// the Rust node's KMS over the `encryption` topic. Exercises the Rust KMS
 /// server against a Go KMS requester.
 ///
-/// IGNORED: blocked upstream of KMS by the same encrypted-doc block
-/// replication gap as `go_to_rust_encrypted_p2p_replication`, in reverse —
-/// the Go reader never receives/merges the encrypted doc's blocks from the
-/// Rust writer, so it never issues a KMS `FetchEncryptionKeyRequest`. The Rust
-/// KMS server path cannot be validated until block replication clears.
+/// STILL IGNORED — same root cause as `go_to_rust_encrypted_p2p_replication`,
+/// in reverse: the `defra` CLI binary's P2P startup never wires a KMS service
+/// (no `DefraKms`, no serve handler on the `encryption` topic), so when the Go
+/// reader sends a `FetchEncryptionKeyRequest` to the Rust writer, the Rust node
+/// has no KMS server installed to answer it. The Rust KMS serve path lives only
+/// in the `embedded` crate, not the CLI binary the harness runs. Fix is the
+/// same as the forward direction: port the embedded KMS wiring into the CLI.
 #[tokio::test]
-#[ignore = "blocked upstream of KMS: Rust->Go encrypted-doc blocks never fully merge on the Go reader; KMS topic never reached"]
+#[ignore = "blocked: defra CLI P2P startup (server_p2p.rs) never wires a DefraKms server, so the Rust writer cannot answer the Go reader's FetchEncryptionKeyRequest. KMS wiring exists only in the embedded crate, not the CLI binary the harness runs."]
 async fn rust_to_go_encrypted_p2p_replication() {
     // index 0 = Rust (writer), index 1 = Go (reader)
     go_rust_kms_interop(0, 1).await;
