@@ -55,3 +55,6 @@ pub use nac_dac_policy::NacDacPolicy;
 
 mod defra_kms;
 pub use defra_kms::DefraKms;
+
+mod noop;
+pub use noop::NoopKms;
