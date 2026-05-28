@@ -88,6 +88,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "DEFRA_SECRET_FILE")]
     pub secret_file: Option<String>,
 
+    /// Disable OpenTelemetry exporters (no-op unless the binary was built with `--features otel`)
+    #[arg(long, global = true, env = "DEFRA_NO_TELEMETRY", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub no_telemetry: Option<bool>,
+
     /// Enables development mode features
     #[arg(long, global = true, env = "DEFRA_DEVELOPMENT", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub development: Option<bool>,

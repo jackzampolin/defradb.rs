@@ -37,6 +37,7 @@ fn with_default_transport_noise_filters(filter: EnvFilter) -> EnvFilter {
 pub struct LoggingHandle {
     #[cfg(feature = "profiling")]
     profiling: Option<ProfilingTrace>,
+    telemetry: telemetry::TelemetryHandle,
 }
 
 #[cfg(feature = "profiling")]
@@ -46,17 +47,19 @@ struct ProfilingTrace {
 }
 
 impl LoggingHandle {
-    fn none() -> Self {
+    fn new(telemetry: telemetry::TelemetryHandle) -> Self {
         Self {
             #[cfg(feature = "profiling")]
             profiling: None,
+            telemetry,
         }
     }
 
     #[cfg(feature = "profiling")]
-    fn with_profile(profiling: ProfilingTrace) -> Self {
+    fn with_profile(profiling: ProfilingTrace, telemetry: telemetry::TelemetryHandle) -> Self {
         Self {
             profiling: Some(profiling),
+            telemetry,
         }
     }
 
@@ -67,6 +70,7 @@ impl LoggingHandle {
             drop(profiling.guard);
             eprintln!("Chrome trace written to {}", path.display());
         }
+        self.telemetry.shutdown();
     }
 }
 
@@ -102,21 +106,25 @@ pub fn init(config: &Config, enable_profiling: bool) -> Result<LoggingHandle> {
             filter,
             builder.json().with_writer(std::io::stdout),
             enable_profiling,
+            config,
         ),
         (LogFormat::Json, LogOutput::Stderr) => init_subscriber(
             filter,
             builder.json().with_writer(std::io::stderr),
             enable_profiling,
+            config,
         ),
         (LogFormat::Text, LogOutput::Stdout) => init_subscriber(
             filter,
             builder.with_writer(std::io::stdout),
             enable_profiling,
+            config,
         ),
         (LogFormat::Text, LogOutput::Stderr) => init_subscriber(
             filter,
             builder.with_writer(std::io::stderr),
             enable_profiling,
+            config,
         ),
     }
 }
@@ -125,6 +133,7 @@ fn init_subscriber<L>(
     filter: EnvFilter,
     fmt_layer: L,
     enable_profiling: bool,
+    config: &Config,
 ) -> Result<LoggingHandle>
 where
     L: tracing_subscriber::Layer<Registry> + Send + Sync + 'static,
@@ -136,26 +145,61 @@ where
         ));
     }
 
+    // Telemetry init. Mirrors Go's default-on behavior: when compiled with
+    // `--features otel`, the exporter is active unless `--no-telemetry` /
+    // `DEFRA_NO_TELEMETRY` / `telemetry_disabled` opts out. If exporter
+    // construction fails (e.g. malformed env var), we log and continue with
+    // no telemetry — matches Go's `log.ErrorContextE` + continue path.
+    #[cfg(feature = "otel")]
+    let (telemetry_handle, tracer) = if config.telemetry_disabled {
+        (telemetry::TelemetryHandle::noop(), None)
+    } else {
+        match telemetry::init(telemetry::TelemetryConfig::default()) {
+            Ok((handle, tracer)) => (handle, Some(tracer)),
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to configure OpenTelemetry, continuing without telemetry: {err}"
+                );
+                (telemetry::TelemetryHandle::noop(), None)
+            }
+        }
+    };
+
+    #[cfg(not(feature = "otel"))]
+    let telemetry_handle = {
+        let _ = config; // suppress unused-binding warning when otel is off
+        telemetry::TelemetryHandle::noop()
+    };
+
+    // Suppress repeat "connection refused" spam from OTEL exporter target.
+    // Only attach when otel feature is on (otherwise no events to dedup).
+    #[cfg(feature = "otel")]
+    let fmt_layer = fmt_layer.with_filter(telemetry::OtelDedupFilter::new());
+
     #[cfg(feature = "profiling")]
     if enable_profiling {
-        let (chrome_layer, profiling) =
-            build_chrome_layer::<tracing_subscriber::layer::Layered<L, Registry>>()?;
-        tracing_subscriber::registry()
+        let (chrome_layer, profiling) = build_chrome_layer()?;
+        let registry = tracing_subscriber::registry()
             .with(fmt_layer)
-            .with(chrome_layer)
+            .with(chrome_layer);
+        #[cfg(feature = "otel")]
+        let registry = registry.with(tracer.map(telemetry::otel_layer));
+        registry
             .with(filter)
             .try_init()
             .map_err(|error| Error::LoggingInit(error.to_string()))?;
-        return Ok(LoggingHandle::with_profile(profiling));
+        return Ok(LoggingHandle::with_profile(profiling, telemetry_handle));
     }
 
-    tracing_subscriber::registry()
-        .with(fmt_layer)
+    let registry = tracing_subscriber::registry().with(fmt_layer);
+    #[cfg(feature = "otel")]
+    let registry = registry.with(tracer.map(telemetry::otel_layer));
+    registry
         .with(filter)
         .try_init()
         .map_err(|error| Error::LoggingInit(error.to_string()))?;
 
-    Ok(LoggingHandle::none())
+    Ok(LoggingHandle::new(telemetry_handle))
 }
 
 #[cfg(feature = "profiling")]

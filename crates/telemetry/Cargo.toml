@@ -1,0 +1,35 @@
+[package]
+name = "telemetry"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Compile in the OTLP gRPC exporters. Mirrors Go DefraDB's `//go:build telemetry`
+# tag — opt-in at compile time. When the feature is on, runtime behavior is
+# default-on (Go parity); use `--no-telemetry` to disable at runtime.
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:tokio",
+]
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["registry", "std"] }
+thiserror.workspace = true
+
+tokio = { workspace = true, optional = true }
+opentelemetry = { version = "0.32", optional = true }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "trace", "metrics"], optional = true }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace", "metrics", "tls-ring", "tls-webpki-roots"], optional = true }
+tracing-opentelemetry = { version = "0.33", optional = true }
+
+[lints]
+workspace = true

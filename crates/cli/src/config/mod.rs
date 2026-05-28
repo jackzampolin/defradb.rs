@@ -188,6 +188,9 @@ impl Config {
         if let Some(development) = cli.development {
             self.development = development;
         }
+        if let Some(no_telemetry) = cli.no_telemetry {
+            self.telemetry_disabled = no_telemetry;
+        }
 
         // ACP
         if let Some(node_enable) = cli.acp_node_enable {

@@ -28,6 +28,7 @@ fn cli_with_defaults() -> Cli {
         source_hub_chain_id: None,
         hub_rs_address: None,
         secret_file: None,
+        no_telemetry: None,
         development: None,
         acp_node_enable: None,
         acp_document_type: None,
