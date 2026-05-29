@@ -229,7 +229,7 @@ async fn go_rust_kms_interop(writer_idx: usize, reader_idx: usize) {
 /// `kms` crate, the NAC/DAC policy, and the doc-collection-lookup / node-acp
 /// adapters currently living in `embedded`.
 #[tokio::test]
-#[ignore = "blocked: defra CLI P2P startup (server_p2p.rs) never wires DefraKms; merge decrypt falls back to encstore and fails 'Encryption block not found'. KMS wiring exists only in the embedded crate, not the CLI binary the harness runs."]
+#[ignore = "blocked: Go<->Rust gossipsub `encryption`-topic mesh never forms. CLI KMS wiring is now in place and IS invoked (merge -> decrypt_block_data -> KMS get_keys -> PubsubKeyTransport::send_request), but gossipsub publish_raw to the `encryption` topic fails persistently with InsufficientPeers: the Rust node never records the (subscribed) Go peer as an `encryption` subscriber, so flood_publish has zero targets. Both nodes subscribe to `encryption` (Go: AddPubSubTopic in internal/kms/pubsub.go; Rust: PubsubKeyTransport::new), so this is a subscription-propagation/mesh-formation interop gap in the shared p2p gossipsub layer, NOT a CLI KMS wiring defect. Out of scope for the CLI-wiring task."]
 async fn go_to_rust_encrypted_p2p_replication() {
     // index 0 = Rust (reader), index 1 = Go (writer)
     go_rust_kms_interop(1, 0).await;
