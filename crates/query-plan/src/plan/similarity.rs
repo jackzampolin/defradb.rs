@@ -151,6 +151,12 @@ impl PlanNode for SimilarityNode {
         self.source.set_cursor_seek(seek)
     }
 
+    fn set_cursor_fetch_limit(&mut self, _limit: u64) -> bool {
+        // Similarity consumes all input to rank by distance; bounding the scan
+        // below it would drop candidates. Do not forward.
+        false
+    }
+
     fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
         self.source.page_info()
     }

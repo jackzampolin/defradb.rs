@@ -50,9 +50,22 @@ pub(crate) fn expand_cursor_plan(
         (CursorDirection::Forward, params.first)
     };
 
+    // The fetch bound for index scans: `page_size + 1` (the `+1` is the
+    // has-next/has-prev probe row). `None` when `first`/`last` was omitted,
+    // leaving the scan unbounded (matches Go).
+    let fetch_limit = limit.map(|p| p + 1);
+
+    // The cursor token that drives this page's seek, if any. Page 1 has none.
+    let has_active_cursor = match direction {
+        CursorDirection::Forward => after.is_some(),
+        CursorDirection::Backward => before.is_some(),
+    };
+
     // Configure scan for cursor seek — walks the plan tree to set cursor_seek
     // on any IndexScanNode found inside.
-    let (plan, index_seek_active) = configure_scan_for_cursor(
+    // (configure_scan_for_cursor also bounds the scan inside set_cursor_seek
+    // when the seek applies on a residual-filter-free scan.)
+    let (mut plan, index_seek_active) = configure_scan_for_cursor(
         plan,
         &after,
         &before,
@@ -61,7 +74,36 @@ pub(crate) fn expand_cursor_plan(
         &order_fields,
         collection,
         matched_index.as_ref(),
+        fetch_limit,
     )?;
+
+    // Bound the index scan's fetch count for early termination on the
+    // no-cursor-token page-1 case, but ONLY where safe (a wrong bound
+    // under-fetches → short/missing pages). The bound applies when the scan
+    // iterates in the SAME direction the page is accumulated:
+    //
+    //   - FORWARD, no token: the scan reads from the start in order and the
+    //     CursorNode collects the first `page_size` rows, so the first
+    //     `page_size + 1` index entries ARE the page (+1 = has-next probe).
+    //     Safe to bound.
+    //   - BACKWARD, no token: the scan reads forward from the start while the
+    //     CursorNode keeps a sliding window of the LAST `page_size` rows — the
+    //     page is at the END of the scan, so it must read everything. NOT safe
+    //     to bound. Leave unbounded.
+    //
+    // The token cases (both directions) are handled inside `set_cursor_seek`:
+    // when the seek applies, the scan is repositioned (and, for backward,
+    // reversed) so the next `page_size + 1` entries from the boundary ARE the
+    // page; the slow path (token present, seek not applied) is left unbounded
+    // because it skips to the boundary by docID from the start.
+    //
+    // `set_cursor_fetch_limit` itself refuses to bound a scan that has a
+    // residual filter (which would reject rows after the fetcher → under-fetch).
+    if let Some(bound) = fetch_limit {
+        if !has_active_cursor && direction == CursorDirection::Forward {
+            plan.set_cursor_fetch_limit(bound);
+        }
+    }
 
     // Wrap with CursorNode.
     Ok(Box::new(CursorNode::new(
@@ -182,6 +224,7 @@ fn configure_scan_for_cursor(
     order_fields: &[OrderCondition],
     collection: &CollectionVersion,
     matched_index: Option<&IndexDescription>,
+    fetch_limit: Option<u64>,
 ) -> Result<(Box<dyn PlanNode>, bool)> {
     let active_cursor = match direction {
         CursorDirection::Forward => after.as_ref(),
@@ -227,6 +270,7 @@ fn configure_scan_for_cursor(
             CursorDirection::Backward => !reversed,
         },
         expected_index_name: idx.name.clone(),
+        fetch_limit,
     };
 
     let applied = plan.set_cursor_seek(seek);

@@ -284,6 +284,15 @@ impl PlanNode for IndexScanNode {
         if self.index_params.index_name != seek.expected_index_name {
             return false;
         }
+        // When the seek applies and this scan has NO residual filter, bound the
+        // fetch count so the fetcher early-terminates after `fetch_limit` PASSING
+        // entries (matching Go's `indexFetches`). A residual filter rejects rows
+        // AFTER the fetcher, so bounding here would under-fetch — leave unbounded.
+        let bound = if self.residual_filter.is_none() {
+            seek.fetch_limit
+        } else {
+            None
+        };
         match &mut self.index_params.scan_type {
             IndexScanType::PrefixScan { reverse, .. } => {
                 // Propagate the cursor's desired iteration direction into the scan type
@@ -292,11 +301,17 @@ impl PlanNode for IndexScanNode {
                 // and bound logic run in the correct direction.
                 *reverse = seek.reversed;
                 self.index_params.cursor_seek = Some(seek);
+                if bound.is_some() {
+                    self.index_params.limit = bound;
+                }
                 true
             }
             IndexScanType::RangeScan { reverse, .. } => {
                 *reverse = seek.reversed;
                 self.index_params.cursor_seek = Some(seek);
+                if bound.is_some() {
+                    self.index_params.limit = bound;
+                }
                 true
             }
             // ExactMatch, InScan, and OrScan fetchers intentionally ignore cursor_seek
@@ -305,6 +320,18 @@ impl PlanNode for IndexScanNode {
             // index seek that never happens, which would cause page 2 to repeat page 1.
             _ => false,
         }
+    }
+
+    fn set_cursor_fetch_limit(&mut self, limit: u64) -> bool {
+        // A residual filter rejects rows AFTER the fetcher, so bounding the scan
+        // would under-fetch (short/missing pages). Only bound residual-filter-free
+        // scans. A value_filter is fine — it's counted and applied inside
+        // collect_with_limit, which collects `limit` PASSING entries.
+        if self.residual_filter.is_some() {
+            return false;
+        }
+        self.index_params.limit = Some(limit);
+        true
     }
 
     fn exec_info(&self) -> ExecInfo {
@@ -364,6 +391,7 @@ mod tests {
             inclusive: false,
             reversed: false,
             expected_index_name: "idx_test".to_string(),
+            fetch_limit: None,
         }
     }
 
@@ -452,6 +480,7 @@ mod tests {
             inclusive: false,
             reversed: true, // cursor wants backward iteration
             expected_index_name: "idx_test".to_string(),
+            fetch_limit: None,
         };
         let applied = node.set_cursor_seek(seek);
         assert!(applied, "PrefixScan must return true");
@@ -480,6 +509,7 @@ mod tests {
             inclusive: false,
             reversed: true, // cursor wants backward iteration
             expected_index_name: "idx_test".to_string(),
+            fetch_limit: None,
         };
         let applied = node.set_cursor_seek(seek);
         assert!(applied, "RangeScan must return true");
@@ -508,6 +538,7 @@ mod tests {
             inclusive: false,
             reversed: false,
             expected_index_name: "idx_different".to_string(), // does not match "idx_test"
+            fetch_limit: None,
         };
         let applied = node.set_cursor_seek(seek);
         assert!(
@@ -517,6 +548,84 @@ mod tests {
         assert!(
             node.index_params.cursor_seek.is_none(),
             "cursor_seek must not be stored when index name mismatches"
+        );
+    }
+
+    #[test]
+    fn set_cursor_fetch_limit_sets_limit_without_residual_filter() {
+        let mut node = make_index_scan_node(IndexScanType::PrefixScan {
+            prefix_values: vec![],
+            reverse: false,
+        });
+        assert!(node.index_params.limit.is_none());
+        let applied = node.set_cursor_fetch_limit(4);
+        assert!(applied, "must bound a residual-filter-free scan");
+        assert_eq!(
+            node.index_params.limit,
+            Some(4),
+            "limit must be set to page_size + 1"
+        );
+    }
+
+    #[test]
+    fn set_cursor_fetch_limit_rejected_with_residual_filter() {
+        use query_types::mapper::Filter;
+        let mut node = make_index_scan_node(IndexScanType::PrefixScan {
+            prefix_values: vec![],
+            reverse: false,
+        })
+        .with_residual_filter(Filter::new());
+        let applied = node.set_cursor_fetch_limit(4);
+        assert!(
+            !applied,
+            "must NOT bound a scan with a residual filter (would under-fetch)"
+        );
+        assert!(
+            node.index_params.limit.is_none(),
+            "limit must stay None when a residual filter is present"
+        );
+    }
+
+    #[test]
+    fn set_cursor_seek_applies_fetch_limit_without_residual_filter() {
+        let mut node = make_index_scan_node(IndexScanType::RangeScan {
+            prefix_values: vec![],
+            lower: storage::index::Bound::Unbounded,
+            upper: storage::index::Bound::Unbounded,
+            reverse: false,
+        });
+        let mut seek = make_seek();
+        seek.fetch_limit = Some(4);
+        let applied = node.set_cursor_seek(seek);
+        assert!(applied);
+        assert_eq!(
+            node.index_params.limit,
+            Some(4),
+            "applied seek with fetch_limit must bound the scan"
+        );
+    }
+
+    #[test]
+    fn set_cursor_seek_skips_fetch_limit_with_residual_filter() {
+        use query_types::mapper::Filter;
+        let mut node = make_index_scan_node(IndexScanType::RangeScan {
+            prefix_values: vec![],
+            lower: storage::index::Bound::Unbounded,
+            upper: storage::index::Bound::Unbounded,
+            reverse: false,
+        })
+        .with_residual_filter(Filter::new());
+        let mut seek = make_seek();
+        seek.fetch_limit = Some(4);
+        let applied = node.set_cursor_seek(seek);
+        assert!(applied, "seek still applies (sets cursor_seek + direction)");
+        assert!(
+            node.index_params.limit.is_none(),
+            "fetch_limit must NOT bound a scan with a residual filter"
+        );
+        assert!(
+            node.index_params.cursor_seek.is_some(),
+            "seek itself is still stored"
         );
     }
 }
