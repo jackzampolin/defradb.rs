@@ -115,6 +115,10 @@ impl PlanNode for SEFilterNode {
         self.source.set_cursor_seek(seek)
     }
 
+    fn set_cursor_fetch_limit(&mut self, limit: u64) -> bool {
+        self.source.set_cursor_fetch_limit(limit)
+    }
+
     fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
         self.source.page_info()
     }
