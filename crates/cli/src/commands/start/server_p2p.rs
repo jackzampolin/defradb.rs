@@ -73,6 +73,7 @@ impl Node {
         event_bus: Arc<dyn events::Bus>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
+        se_key: Option<[u8; 32]>,
     ) -> Result<P2PSetup>
     where
         S: storage::corekv::Store + 'static,
@@ -84,19 +85,26 @@ impl Node {
         if config.net.transport == TransportType::Iroh {
             #[cfg(feature = "iroh")]
             {
-                return Self::setup_iroh_p2p(store, database, event_bus, config, peer_keypair)
-                    .await;
+                return Self::setup_iroh_p2p(
+                    store,
+                    database,
+                    event_bus,
+                    config,
+                    peer_keypair,
+                    se_key,
+                )
+                .await;
             }
             #[cfg(not(feature = "iroh"))]
             {
-                let _ = (store, database, event_bus, peer_keypair);
+                let _ = (store, database, event_bus, peer_keypair, se_key);
                 return Err(Error::InvalidTransport(
                     "iroh transport not enabled. Rebuild with --features iroh".into(),
                 ));
             }
         }
 
-        Self::setup_libp2p_p2p(store, database, event_bus, config, peer_keypair).await
+        Self::setup_libp2p_p2p(store, database, event_bus, config, peer_keypair, se_key).await
     }
 
     fn p2p_disabled<S>(database: Arc<db::DB<S>>) -> P2PSetup
@@ -123,6 +131,7 @@ impl Node {
         event_bus: Arc<dyn events::Bus>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
+        se_key: Option<[u8; 32]>,
     ) -> Result<P2PSetup>
     where
         S: storage::corekv::Store + 'static,
@@ -207,6 +216,24 @@ impl Node {
         let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
         let merge_handler_for_acp = replication.merge_handler.clone();
         let txn_broadcaster = replication.txn_broadcaster.clone();
+
+        // Feed the keyring-loaded searchable-encryption key into the same SE
+        // path the FFI uses (BroadcastMutator::set_se_options for live writes,
+        // DbMergeHandler::set_se_enc_key for merged/replicated docs). This lets
+        // a `defra start` node produce and verify SE artifacts.
+        if let Some(key) = se_key {
+            if let Err(e) =
+                replication
+                    .broadcast_mutator
+                    .set_se_options(db_merge::BroadcastSeOptions {
+                        encryption_key: Some(zeroize::Zeroizing::new(key.to_vec())),
+                        identity_pubkey: None,
+                    })
+            {
+                warn!(error = %e, "failed to set searchable encryption options on broadcast mutator");
+            }
+            replication.merge_handler_inner.set_se_enc_key(key.to_vec());
+        }
 
         let coordinator_for_replication = coordinator.clone();
         let replication_task = tokio::spawn(async move {
@@ -535,6 +562,7 @@ impl Node {
         event_bus: Arc<dyn events::Bus>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
+        se_key: Option<[u8; 32]>,
     ) -> Result<P2PSetup>
     where
         S: storage::corekv::Store + 'static,
@@ -621,6 +649,22 @@ impl Node {
         let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
         let merge_handler_for_acp = replication.merge_handler.clone();
         let txn_broadcaster = replication.txn_broadcaster.clone();
+
+        // Mirror the libp2p SE wiring (keyring-loaded SE key into the FFI's SE
+        // path) so an iroh `defra start` node produces/verifies SE artifacts.
+        if let Some(key) = se_key {
+            if let Err(e) =
+                replication
+                    .broadcast_mutator
+                    .set_se_options(db_merge::BroadcastSeOptions {
+                        encryption_key: Some(zeroize::Zeroizing::new(key.to_vec())),
+                        identity_pubkey: None,
+                    })
+            {
+                warn!(error = %e, "failed to set searchable encryption options on broadcast mutator");
+            }
+            replication.merge_handler_inner.set_se_enc_key(key.to_vec());
+        }
 
         let coordinator_for_replication = coordinator.clone();
         let replication_task = tokio::spawn(async move {

@@ -90,6 +90,48 @@ impl Node {
         })
     }
 
+    /// Load the keyring `searchable-encryption-key`, generating and persisting
+    /// a new 32-byte AES-256 key on first use (Go's
+    /// `getOrCreateSearchableEncryptionKey`, cli/start.go).
+    ///
+    /// Returns `Ok(None)` when SE is disabled (`--no-searchable-encryption`) or
+    /// the keyring is disabled (`--no-keyring`) -- mirrors Go, which only loads
+    /// the key when a keyring exists and SE is not disabled.
+    fn load_or_create_searchable_encryption_key(config: &Config) -> Result<Option<[u8; 32]>> {
+        use crate::error::Error;
+        use keyring::SEARCHABLE_ENCRYPTION_KEY;
+
+        if config.datastore.no_searchable_encryption || config.keyring.disabled {
+            return Ok(None);
+        }
+
+        let kr = crate::commands::open_keyring(config)?;
+        let key_bytes: Vec<u8> = match kr.get(SEARCHABLE_ENCRYPTION_KEY) {
+            Ok(bytes) => bytes.to_vec(),
+            Err(keyring::Error::NotFound(_)) => {
+                info!("Generating new searchable encryption key");
+                let generated = crypto::generate_aes256().map_err(|e| {
+                    Error::Keyring(format!(
+                        "failed to generate searchable encryption key: {}",
+                        e
+                    ))
+                })?;
+                kr.set(SEARCHABLE_ENCRYPTION_KEY, &generated)
+                    .map_err(|e| Error::Keyring(e.to_string()))?;
+                generated
+            }
+            Err(e) => return Err(Error::Keyring(e.to_string())),
+        };
+
+        let key = <[u8; 32]>::try_from(key_bytes.as_slice()).map_err(|_| {
+            Error::Keyring(format!(
+                "keyring searchable-encryption-key must be 32 bytes, got {}",
+                key_bytes.len()
+            ))
+        })?;
+        Ok(Some(key))
+    }
+
     /// Build the persistent ACP/Zanzibar stores from a shared store and start
     /// the server. The store may be a bare backend or an [`EncryptedStore`];
     /// both DB and ACP share the same instance so they encrypt uniformly.
@@ -100,6 +142,7 @@ impl Node {
         peer_keypair: Option<p2p::Keypair>,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
         node_identity_did: Option<String>,
+        se_key: Option<[u8; 32]>,
     ) -> Result<(
         Option<p2p::P2PHostHandle>,
         Option<P2PTasks>,
@@ -124,6 +167,7 @@ impl Node {
             acp_store,
             zanzibar_store,
             node_identity_did,
+            se_key,
         )
         .await
     }
@@ -150,6 +194,15 @@ impl Node {
                 (None, None)
             };
 
+        // Load the cluster-shared searchable-encryption key from the keyring
+        // (Go's getOrCreateSearchableEncryptionKey). `None` when SE or the
+        // keyring is disabled. Fed into the P2P broadcast/merge SE path so a
+        // `defra start` node produces and verifies SE artifacts.
+        let se_key = Self::load_or_create_searchable_encryption_key(&config)?;
+        if se_key.is_some() {
+            info!("Searchable encryption key loaded from keyring");
+        }
+
         // Initialize storage, database, and set up P2P and HTTP server
         let (p2p_handle, p2p_tasks, downsample_task, txn_cleanup_task, http_server, pg_server) =
             match config.datastore.store {
@@ -174,6 +227,7 @@ impl Node {
                             acp_store,
                             zanzibar_store,
                             node_identity_did.clone(),
+                            se_key,
                         )
                         .await?
                     } else {
@@ -185,6 +239,7 @@ impl Node {
                             acp_store,
                             zanzibar_store,
                             node_identity_did.clone(),
+                            se_key,
                         )
                         .await?
                     }
@@ -207,6 +262,7 @@ impl Node {
                             peer_keypair,
                             user_identity.clone(),
                             node_identity_did.clone(),
+                            se_key,
                         )
                         .await?
                     } else {
@@ -216,6 +272,7 @@ impl Node {
                             peer_keypair,
                             user_identity.clone(),
                             node_identity_did.clone(),
+                            se_key,
                         )
                         .await?
                     }
@@ -243,6 +300,7 @@ impl Node {
                             peer_keypair,
                             user_identity.clone(),
                             node_identity_did.clone(),
+                            se_key,
                         )
                         .await?
                     } else {
@@ -252,6 +310,7 @@ impl Node {
                             peer_keypair,
                             user_identity.clone(),
                             node_identity_did.clone(),
+                            se_key,
                         )
                         .await?
                     }
@@ -283,6 +342,7 @@ impl Node {
                             peer_keypair,
                             user_identity.clone(),
                             node_identity_did.clone(),
+                            se_key,
                         )
                         .await?
                     } else {
@@ -292,6 +352,7 @@ impl Node {
                             peer_keypair,
                             user_identity.clone(),
                             node_identity_did.clone(),
+                            se_key,
                         )
                         .await?
                     }

@@ -72,6 +72,9 @@ getrandom = "0.2"
 # Hex encoding/decoding
 hex = "0.4"
 
+# Zeroizing wrapper for the searchable-encryption key passed to db-merge
+zeroize = "1"
+
 # Base64 encoding/decoding (JWK export/import)
 base64 = { workspace = true }
 

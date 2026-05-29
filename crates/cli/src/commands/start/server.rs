@@ -19,6 +19,7 @@ impl Node {
     ///
     /// Returns a tuple of (P2PHostHandle, P2PTasks, background tasks, HTTP Server)
     /// where the background tasks are tracked for graceful shutdown.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn init_store_and_server<S>(
         store: Arc<S>,
         config: &Config,
@@ -27,6 +28,7 @@ impl Node {
         acp_store: Arc<dyn acp::AcpStore>,
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         node_identity_did: Option<String>,
+        se_key: Option<[u8; 32]>,
     ) -> Result<(
         Option<p2p::P2PHostHandle>,
         Option<P2PTasks>,
@@ -144,6 +146,7 @@ impl Node {
             event_bus.clone(),
             config,
             peer_keypair,
+            se_key,
         )
         .await?;
 
