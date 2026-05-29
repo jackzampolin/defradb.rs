@@ -268,17 +268,10 @@ async fn go_to_rust_encrypted_p2p_replication() {
 
 /// Rust writes an encrypted doc; Go replicates it and must fetch the DEK from
 /// the Rust node's KMS over the `encryption` topic. Exercises the Rust KMS
-/// server against a Go KMS requester.
-///
-/// STILL IGNORED — same root cause as `go_to_rust_encrypted_p2p_replication`,
-/// in reverse: the `defra` CLI binary's P2P startup never wires a KMS service
-/// (no `DefraKms`, no serve handler on the `encryption` topic), so when the Go
-/// reader sends a `FetchEncryptionKeyRequest` to the Rust writer, the Rust node
-/// has no KMS server installed to answer it. The Rust KMS serve path lives only
-/// in the `embedded` crate, not the CLI binary the harness runs. Fix is the
-/// same as the forward direction: port the embedded KMS wiring into the CLI.
+/// server against a Go KMS requester. The Rust KMS serves the DEK from its
+/// blockstore-backed KeyStore (#976), so the Go reader's
+/// `FetchEncryptionKeyRequest` is answered for any encrypted write.
 #[tokio::test]
-#[ignore = "blocked: defra CLI P2P startup (server_p2p.rs) never wires a DefraKms server, so the Rust writer cannot answer the Go reader's FetchEncryptionKeyRequest. KMS wiring exists only in the embedded crate, not the CLI binary the harness runs."]
 async fn rust_to_go_encrypted_p2p_replication() {
     // index 0 = Rust (writer), index 1 = Go (reader)
     go_rust_kms_interop(0, 1).await;
