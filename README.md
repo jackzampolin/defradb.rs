@@ -62,7 +62,7 @@ Metrics are a separate opt-in (the `metrics` feature on the `telemetry` crate). 
 | `OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES` | Override service name / extra attributes. |
 | `OTEL_TRACES_SAMPLER` | Configure sampling (default: parent-based always-on, matching Go). |
 
-When no collector is reachable, the OTel SDK's exporter-unreachable messages (`connection refused`, `HTTP export failed`, `network error`) are suppressed after the first occurrence of *each* pattern per layer — port of Go's `otel.SetErrorHandler + sync.Once` dedup (issue #977). Each pattern gets its own latch so a transient one doesn't silence a different failure later.
+When no collector is reachable, the OTel SDK's repeated export errors are suppressed and a single actionable hint — `OpenTelemetry export failed, ensure your OTLP collector is running and reachable` — is emitted once per process. This ports Go's `otel.SetErrorHandler + sync.Once` behavior (issue #977); genuine non-connectivity OTel errors still log normally.
 
 ### Embedded usage
 

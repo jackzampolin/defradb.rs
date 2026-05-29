@@ -17,6 +17,7 @@ otlp = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
+    "dep:opentelemetry-semantic-conventions",
     "dep:tracing-opentelemetry",
     "opentelemetry_sdk/trace",
     "opentelemetry-otlp/trace",
@@ -55,6 +56,9 @@ opentelemetry_sdk = { version = "0.32", default-features = false, features = ["e
 # the workspace's locked reqwest 0.13 (which has dropped the `webpki-roots`
 # feature that `opentelemetry-http` still asks for under the async client).
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client"], optional = true }
+# Provides the `SCHEMA_URL` constant for the resource's schema declaration,
+# matching Go's `resource.WithSchemaURL(semconv.SchemaURL)`.
+opentelemetry-semantic-conventions = { version = "0.32", optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
 
 [lints]

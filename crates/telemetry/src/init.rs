@@ -67,6 +67,14 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_default();
     let resource = Resource::builder()
+        .with_schema_url(
+            // Declare which semantic-conventions version these attributes
+            // follow, matching Go's `resource.WithSchemaURL(semconv.SchemaURL)`.
+            // The attributes themselves are passed via `.with_*` below, so the
+            // attribute iterator here is empty.
+            std::iter::empty::<KeyValue>(),
+            opentelemetry_semantic_conventions::SCHEMA_URL,
+        )
         .with_service_name(config.service_name.clone())
         .with_attribute(KeyValue::new("service.version", config.service_version))
         .with_attribute(KeyValue::new("os.type", std::env::consts::OS))

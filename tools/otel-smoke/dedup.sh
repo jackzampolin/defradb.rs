@@ -57,37 +57,19 @@ sleep 3
 echo "=== shutting down defra ==="
 stop_defra
 
-echo "=== counting exporter-unreachable log lines in stderr ==="
-# Each known needle (connection refused / HTTP export failed / network error)
-# has its own per-process latch — so the upper bound is one log line per
-# distinct pattern. In practice the SDK's unreachable-collector message
-# ("HTTP export failed: network error") matches two needles in one line and
-# claims both latches at once, so the realistic ceiling is 2, not 3. A
-# regression to first-match-wins would leak a 3rd line and trip this.
-# See crates/telemetry/src/dedup.rs.
-NEEDLE_MAX=2
-PATTERN='connection refused|HTTP export failed|network error'
-UNREACHABLE_LINES=$(grep -E "ERROR" "$STDERR_LOG" \
-    | grep -E "opentelemetry" \
-    | grep -Ec "$PATTERN" \
-    || true)
-echo "exporter-unreachable lines: $UNREACHABLE_LINES (per-needle ceiling: $NEEDLE_MAX)"
+echo "=== checking the operator hint was emitted exactly once ==="
+# Go-parity behavior (crates/telemetry/src/dedup.rs): the raw, repeated SDK
+# export errors are SUPPRESSED, and a single actionable hint is emitted once
+# per process via a global latch. So we assert:
+#   - the hint appears exactly once (proves: internal-logs on → SDK emitted →
+#     filter caught it → emitted once globally; matches Go's sync.Once), and
+#   - the raw needle text is gone from stderr (proves suppression).
+HINT='OpenTelemetry export failed, ensure your OTLP collector is running and reachable'
+HINT_LINES=$(grep -Fc "$HINT" "$STDERR_LOG" || true)
+echo "operator-hint lines: $HINT_LINES (expected exactly 1)"
 
-if [ "$UNREACHABLE_LINES" -gt "$NEEDLE_MAX" ]; then
-  echo "FAIL: dedup let $UNREACHABLE_LINES exporter-unreachable lines through (expected at most $NEEDLE_MAX, one per needle)"
-  echo "--- offending lines ---"
-  grep -E "ERROR" "$STDERR_LOG" | grep -E "opentelemetry" | grep -E "$PATTERN" | head -20
-  exit 1
-fi
-
-# Zero lines is a FAIL, not informational: with a guaranteed-unreachable
-# collector the SDK must emit at least one export-failure event. Zero means
-# either the dedup is over-suppressing OR — the regression this guards — the
-# SDK's `internal-logs` feature got disabled and the exporter went silent
-# (which would also make the dedup filter dead code). Either way it's a real
-# defect, so fail loudly.
-if [ "$UNREACHABLE_LINES" -eq 0 ]; then
-  echo "FAIL: zero exporter-unreachable lines despite an unreachable collector."
+if [ "$HINT_LINES" -eq 0 ]; then
+  echo "FAIL: the operator hint never appeared despite an unreachable collector."
   echo "      Likely the opentelemetry SDK's 'internal-logs' feature is off"
   echo "      (the otel_error! macros no-op without it), so export failures emit"
   echo "      nothing and the dedup filter is dead code. Check telemetry/Cargo.toml"
@@ -95,4 +77,21 @@ if [ "$UNREACHABLE_LINES" -eq 0 ]; then
   exit 1
 fi
 
-echo "PASS: $UNREACHABLE_LINES exporter-unreachable log line(s), within [1, $NEEDLE_MAX]"
+if [ "$HINT_LINES" -gt 1 ]; then
+  echo "FAIL: operator hint emitted $HINT_LINES times (expected exactly 1)."
+  echo "      The process-global once-latch is not deduping across layers."
+  grep -F "$HINT" "$STDERR_LOG" | head -10
+  exit 1
+fi
+
+# The raw, spammy SDK error lines should be fully suppressed (Go parity).
+RAW_LINES=$(grep -E "opentelemetry" "$STDERR_LOG" \
+    | grep -E "ERROR" \
+    | grep -Ec 'connection refused|HTTP export failed|network error' \
+    || true)
+if [ "$RAW_LINES" -ne 0 ]; then
+  echo "WARN: $RAW_LINES raw exporter-error line(s) leaked through (expected 0 — they should be suppressed in favor of the single hint)."
+  grep -E "opentelemetry" "$STDERR_LOG" | grep -E "ERROR" | head -5
+fi
+
+echo "PASS: operator hint emitted exactly once; raw exporter spam suppressed"

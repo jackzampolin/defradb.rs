@@ -8736,6 +8736,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry-semantic-conventions"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ca2f98a0437b427b4b08f19f1caa3c44db885a202bc12cfea13d6c702243d68"
+
+[[package]]
 name = "opentelemetry_sdk"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12285,6 +12291,7 @@ version = "0.5.0"
 dependencies = [
  "opentelemetry 0.32.0",
  "opentelemetry-otlp 0.32.0",
+ "opentelemetry-semantic-conventions",
  "opentelemetry_sdk 0.32.1",
  "thiserror 2.0.18",
  "tracing",

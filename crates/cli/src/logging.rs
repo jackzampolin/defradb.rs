@@ -186,10 +186,14 @@ where
     let (telemetry_handle, tracer) = if config.telemetry_disabled || !enable_telemetry {
         (telemetry::TelemetryHandle::noop(), None)
     } else {
-        // Source the service version from defra-version so OTLP receivers see
-        // the actual defra binary version, not the telemetry crate's own.
-        let telemetry_config =
-            telemetry::TelemetryConfig::new("DefraDB", defra_version::VersionInfo::new().version);
+        // Source a Go-style descriptive build string for service.version
+        // (`defradb <ver> (<commit8> <date>) built with ...`) so OTLP
+        // receivers grouping on service.version see the same shape Go emits,
+        // not the telemetry crate's bare semver.
+        let telemetry_config = telemetry::TelemetryConfig::new(
+            "DefraDB",
+            defra_version::VersionInfo::new().descriptive(),
+        );
         match telemetry::init(telemetry_config) {
             Ok((handle, tracer)) => (handle, Some(tracer)),
             Err(err) => {
@@ -207,13 +211,11 @@ where
         telemetry::TelemetryHandle::noop()
     };
 
-    // Suppress repeat exporter-unreachable spam on every layer that ingests
-    // OTel events. Each layer gets its own filter instance because Filter
-    // is a per-layer hook — sharing state via Arc would interleave the
-    // first-event decision across layers (first layer wins the lock,
-    // second layer sees the event as already-suppressed). With independent
-    // per-layer instances each layer logs the first occurrence and
-    // suppresses the rest.
+    // Suppress exporter-unreachable spam on every layer that ingests OTel
+    // events. The filter is stateless and the one-shot operator hint it
+    // emits is guarded by a process-global latch, so attaching a fresh
+    // instance to each layer is fine — the hint still appears exactly once
+    // across all of them.
     #[cfg(feature = "otel")]
     let fmt_layer = fmt_layer.with_filter(telemetry::OtelDedupFilter::new());
 
