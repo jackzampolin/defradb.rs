@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use graphql_parser::query::{Field, Selection};
+use graphql_parser::query::{Field, Selection, Value};
 use serde_json::Value as JsonValue;
 
 use query_types::error::{QueryError, Result};
@@ -25,34 +25,27 @@ pub(super) fn parse_cursor_wrapper<'a>(
 ) -> Result<Select> {
     let mut inner_field: Option<&'a Field<'a, String>> = None;
     let mut page_info_fields = CursorPageInfoFields::default();
-    let mut page_info_alias: Option<Box<String>> = None;
     let mut page_info_seen = false;
     let mut inner_count = 0usize;
 
-    for selection in &field.selection_set.items {
-        match selection {
-            Selection::Field(child) => {
-                if child.name == "_pageInfo" {
-                    if page_info_seen {
-                        return Err(QueryError::parse(
-                            "_cursor block cannot contain multiple _pageInfo selections"
-                                .to_string(),
-                        ));
-                    }
-                    page_info_seen = true;
-                    page_info_alias = child.alias.clone().map(Box::new);
-                    page_info_fields = parse_page_info_selection(child)?;
-                } else {
-                    inner_count += 1;
-                    if inner_field.is_none() {
-                        inner_field = Some(child);
-                    }
-                }
-            }
-            _ => {
+    // Flatten the wrapper selection set, expanding fragments transparently
+    // (mirrors Go's gql.CollectFields, which never errors on fragments).
+    let mut flattened: Vec<&'a Field<'a, String>> = Vec::new();
+    collect_fields(&field.selection_set.items, fragments, &mut flattened)?;
+
+    for child in flattened {
+        if child.name == "_pageInfo" {
+            if page_info_seen {
                 return Err(QueryError::parse(
-                    "_cursor block does not support fragments".to_string(),
+                    "_cursor block cannot contain multiple _pageInfo selections".to_string(),
                 ));
+            }
+            page_info_seen = true;
+            page_info_fields = parse_page_info_selection(child, fragments)?;
+        } else {
+            inner_count += 1;
+            if inner_field.is_none() {
+                inner_field = Some(child);
             }
         }
     }
@@ -86,7 +79,6 @@ pub(super) fn parse_cursor_wrapper<'a>(
     select.cursor_page_info = page_info_fields;
     select.cursor_aliases = CursorAliases {
         wrapper_alias: field.alias.clone(),
-        page_info_alias,
     };
 
     Ok(select)
@@ -112,7 +104,16 @@ fn extract_cursor_params<'a>(
                 params.first = Some(n as u64);
             }
             "after" => {
-                params.after = Some(resolve_string_value(value, variables, "after")?);
+                // Go treats a null cursor argument as absent (start from the
+                // beginning), not an error.
+                if is_null_value(value, variables) {
+                    continue;
+                }
+                let token = resolve_string_value(value, variables, "after")?;
+                if token.is_empty() {
+                    return Err(QueryError::cursor_invalid());
+                }
+                params.after = Some(token);
             }
             "last" => {
                 let n = parse_int_value(value, variables)?;
@@ -122,7 +123,14 @@ fn extract_cursor_params<'a>(
                 params.last = Some(n as u64);
             }
             "before" => {
-                params.before = Some(resolve_string_value(value, variables, "before")?);
+                if is_null_value(value, variables) {
+                    continue;
+                }
+                let token = resolve_string_value(value, variables, "before")?;
+                if token.is_empty() {
+                    return Err(QueryError::cursor_invalid());
+                }
+                params.before = Some(token);
             }
             "limit" | "offset" => {
                 return Err(QueryError::parse(format!(
@@ -137,34 +145,71 @@ fn extract_cursor_params<'a>(
 }
 
 /// Parse `_pageInfo { hasNext hasPrev startCursor endCursor }` — returns which fields were
-/// selected and the output key to use for each (alias if provided, else canonical name).
-fn parse_page_info_selection(field: &Field<'_, String>) -> Result<CursorPageInfoFields> {
+/// selected. The output key is always the field's canonical name, regardless of any GraphQL
+/// alias (mirrors Go's planner, which keys `PageInfo()` by `request.HasNextFieldName` etc.).
+fn parse_page_info_selection<'a>(
+    field: &'a Field<'a, String>,
+    fragments: &FragmentMap<'a>,
+) -> Result<CursorPageInfoFields> {
     let mut fields = CursorPageInfoFields::default();
-    for selection in &field.selection_set.items {
-        match selection {
-            Selection::Field(child) => {
-                // Output key: alias if provided, else the field's canonical name.
-                let output_key = child.alias.clone().unwrap_or_else(|| child.name.clone());
-                match child.name.as_str() {
-                    "hasNext" => fields.has_next = Some(output_key),
-                    "hasPrev" => fields.has_prev = Some(output_key),
-                    "startCursor" => fields.start_cursor = Some(output_key),
-                    "endCursor" => fields.end_cursor = Some(output_key),
-                    other => {
-                        return Err(QueryError::parse(format!(
-                            "Cannot query field \"{other}\" on type \"PageInfo\"."
-                        )));
-                    }
-                }
-            }
-            Selection::FragmentSpread(_) | Selection::InlineFragment(_) => {
-                return Err(QueryError::parse(
-                    "_pageInfo block does not support fragments".to_string(),
-                ));
+    let mut flattened: Vec<&'a Field<'a, String>> = Vec::new();
+    collect_fields(&field.selection_set.items, fragments, &mut flattened)?;
+    for child in flattened {
+        // Output key: the field's canonical name (aliases are discarded, matching Go).
+        match child.name.as_str() {
+            "hasNext" => fields.has_next = Some(child.name.clone()),
+            "hasPrev" => fields.has_prev = Some(child.name.clone()),
+            "startCursor" => fields.start_cursor = Some(child.name.clone()),
+            "endCursor" => fields.end_cursor = Some(child.name.clone()),
+            other => {
+                return Err(QueryError::parse(format!(
+                    "Cannot query field \"{other}\" on type \"PageInfo\"."
+                )));
             }
         }
     }
     Ok(fields)
+}
+
+/// Flatten a selection set into plain fields, transparently expanding `FragmentSpread`
+/// and `InlineFragment` selections (mirrors Go's `gql.CollectFields`).
+///
+/// Unknown fragment names error (Go would fail resolution too); valid fragments expand.
+fn collect_fields<'a>(
+    selections: &'a [Selection<'a, String>],
+    fragments: &FragmentMap<'a>,
+    out: &mut Vec<&'a Field<'a, String>>,
+) -> Result<()> {
+    for selection in selections {
+        match selection {
+            Selection::Field(child) => out.push(child),
+            Selection::FragmentSpread(spread) => {
+                let frag = fragments.get(&spread.fragment_name).ok_or_else(|| {
+                    QueryError::parse(format!("Unknown fragment \"{}\".", spread.fragment_name))
+                })?;
+                collect_fields(&frag.selection_set.items, fragments, out)?;
+            }
+            Selection::InlineFragment(inline) => {
+                collect_fields(&inline.selection_set.items, fragments, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns true if a GraphQL argument value is `null`, or a variable that resolves to null.
+fn is_null_value(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Variable(name) => variables
+            .and_then(|vars| vars.get(name))
+            .map(JsonValue::is_null)
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +245,21 @@ mod tests {
         let query = r#"{ _cursor { User(first: -1, order: {age: ASC}) { name } } }"#;
         let err = parse(query).unwrap_err();
         assert_eq!(err.to_string(), "first must be non-negative");
+    }
+
+    #[test]
+    fn empty_after_token_rejected() {
+        // Go's CursorSelect.Validate() rejects an empty `after`/`before` with ErrInvalidCursor.
+        let query = r#"{ _cursor { User(after: "", order: {age: ASC}) { name } } }"#;
+        let err = parse(query).unwrap_err();
+        assert_eq!(err.to_string(), "invalid cursor");
+    }
+
+    #[test]
+    fn empty_before_token_rejected() {
+        let query = r#"{ _cursor { User(before: "", order: {age: ASC}) { name } } }"#;
+        let err = parse(query).unwrap_err();
+        assert_eq!(err.to_string(), "invalid cursor");
     }
 
     #[test]
@@ -267,11 +327,12 @@ mod tests {
     }
 
     #[test]
-    fn page_info_field_aliases_are_preserved() {
+    fn page_info_field_aliases_are_ignored() {
+        // Go discards _pageInfo subfield aliases and always renders canonical names.
         let query = r#"{ _cursor { User(first: 5, order: [{age: ASC}]) { name } _pageInfo { next: hasNext } } }"#;
         let selects = parse(query).unwrap();
         let pi = &selects[0].cursor_page_info;
-        assert_eq!(pi.has_next.as_deref(), Some("next"));
+        assert_eq!(pi.has_next.as_deref(), Some("hasNext"));
         assert!(pi.has_prev.is_none());
         assert!(pi.start_cursor.is_none());
         assert!(pi.end_cursor.is_none());
@@ -289,7 +350,9 @@ mod tests {
     }
 
     #[test]
-    fn page_info_wrapper_alias_is_captured() {
+    fn page_info_block_alias_is_ignored() {
+        // Go discards the _pageInfo block alias; the block always renders as `_pageInfo`.
+        // The selection itself still parses, and no alias is tracked.
         let query = r#"
             { _cursor {
                 User(first: 5, order: [{age: ASC}]) { name }
@@ -297,28 +360,75 @@ mod tests {
             } }
         "#;
         let selects = parse(query).unwrap();
-        let aliases = &selects[0].cursor_aliases;
-        assert_eq!(
-            aliases.page_info_alias.as_deref().map(String::as_str),
-            Some("info")
-        );
-        assert_eq!(aliases.wrapper_alias, None);
+        let select = &selects[0];
+        assert_eq!(select.cursor_page_info.has_next.as_deref(), Some("hasNext"));
+        assert_eq!(select.cursor_aliases.wrapper_alias, None);
     }
 
     #[test]
-    fn fragments_in_page_info_rejected() {
+    fn fragments_in_page_info_expand() {
+        // Go expands fragments inside _pageInfo via gql.CollectFields.
         let query = r#"
-            fragment F on PageInfo { hasNext }
+            fragment F on PageInfo { hasNext endCursor }
             { _cursor {
                 User(first: 5, order: [{age: ASC}]) { name }
                 _pageInfo { ...F }
             } }
         "#;
+        let selects = parse(query).unwrap();
+        let pi = &selects[0].cursor_page_info;
+        assert_eq!(pi.has_next.as_deref(), Some("hasNext"));
+        assert_eq!(pi.end_cursor.as_deref(), Some("endCursor"));
+        assert!(pi.has_prev.is_none());
+        assert!(pi.start_cursor.is_none());
+    }
+
+    #[test]
+    fn fragments_in_cursor_wrapper_expand() {
+        // A fragment spread at the _cursor level expands to the collection field.
+        let query = r#"
+            fragment Page on Query { User(first: 5, order: [{age: ASC}]) { name } }
+            { _cursor {
+                ...Page
+                _pageInfo { hasNext }
+            } }
+        "#;
+        let selects = parse(query).unwrap();
+        let select = &selects[0];
+        assert!(select.is_cursor);
+        assert_eq!(select.field.name, "User");
+        assert_eq!(select.cursor_page_info.has_next.as_deref(), Some("hasNext"));
+    }
+
+    #[test]
+    fn unknown_fragment_in_cursor_wrapper_rejected() {
+        let query = r#"
+            { _cursor {
+                ...Missing
+                _pageInfo { hasNext }
+            } }
+        "#;
         let err = parse(query).unwrap_err().to_string();
-        assert!(
-            err.contains("fragment") || err.contains("_pageInfo"),
-            "got: {err}"
-        );
+        assert!(err.contains("Unknown fragment"), "got: {err}");
+    }
+
+    #[test]
+    fn after_null_treated_as_no_cursor() {
+        // Go treats `after: null` as absent (start from the beginning), not an error.
+        let query = r#"{ _cursor { User(first: 5, after: null, order: {age: ASC}) { name } } }"#;
+        let selects = parse(query).unwrap();
+        let params = selects[0].cursor_params.as_ref().unwrap();
+        assert_eq!(params.first, Some(5));
+        assert_eq!(params.after, None);
+    }
+
+    #[test]
+    fn before_null_treated_as_no_cursor() {
+        let query = r#"{ _cursor { User(last: 5, before: null, order: {age: ASC}) { name } } }"#;
+        let selects = parse(query).unwrap();
+        let params = selects[0].cursor_params.as_ref().unwrap();
+        assert_eq!(params.last, Some(5));
+        assert_eq!(params.before, None);
     }
 
     #[test]

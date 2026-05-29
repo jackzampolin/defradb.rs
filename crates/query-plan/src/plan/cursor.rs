@@ -8,41 +8,11 @@ use async_trait::async_trait;
 use cursor::Cursor;
 use query_types::doc::Doc;
 use query_types::document::DocumentMapping;
-use query_types::error::{QueryError, Result};
-use query_types::mapper::{CursorPageInfoFields, OrderCondition, OrderDirection};
+use query_types::error::Result;
+use query_types::mapper::{CursorPageInfoFields, OrderCondition};
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::planner::{ExecInfo, PlanNode};
-
-/// Returns true when the order is either empty or only orders by `_docID`.
-///
-/// The slow-path comparisons in `SkippingUntilAfter` and `populate_backward_buffer_slow`
-/// compare rows against cursor boundaries using only the doc_id string. This is only
-/// correct when the ORDER BY is `_docID` (or absent, which also sorts by doc_id).
-/// For any other field ordering the comparison must account for the full order tuple,
-/// which requires knowing the field values of each row — not just the doc_id.
-///
-/// When this returns false and the slow path is taken, the caller must return an error
-/// rather than silently returning wrong results.
-fn is_doc_id_or_empty_order(order_fields: &[OrderCondition]) -> bool {
-    order_fields.is_empty()
-        || order_fields
-            .iter()
-            .all(|c| c.fields.first().map(String::as_str) == Some("_docID"))
-}
-
-/// Returns the iteration direction implied by the first `_docID` order condition.
-///
-/// Returns `Asc` when `order_fields` is empty (natural doc_id order is ascending).
-/// Caller must have already verified order is `_docID`-only or empty via
-/// `is_doc_id_or_empty_order` before calling this.
-fn doc_id_order_direction(order_fields: &[OrderCondition]) -> OrderDirection {
-    order_fields
-        .first()
-        .filter(|c| c.fields.first().map(String::as_str) == Some("_docID"))
-        .map(|c| c.direction)
-        .unwrap_or(OrderDirection::Asc)
-}
 
 /// Direction of cursor pagination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +44,11 @@ struct CursorSnapshot {
 pub struct CursorNode {
     inner: Box<dyn PlanNode>,
     direction: CursorDirection,
-    page_size: u64,
+    /// Page limit from `first`/`last`. `None` means no limit was supplied, in
+    /// which case the node returns all remaining rows — mirroring Go's
+    /// `cursorNode` where the limit check is gated on `first.HasValue()` /
+    /// `last.HasValue()` (omitting the arg returns all results).
+    limit: Option<u64>,
     after: Option<Cursor>,
     before: Option<Cursor>,
     page_info_fields: CursorPageInfoFields,
@@ -102,7 +76,7 @@ impl CursorNode {
     pub fn new(
         inner: Box<dyn PlanNode>,
         direction: CursorDirection,
-        page_size: u64,
+        limit: Option<u64>,
         after: Option<Cursor>,
         before: Option<Cursor>,
         page_info_fields: CursorPageInfoFields,
@@ -126,7 +100,7 @@ impl CursorNode {
         Self {
             inner,
             direction,
-            page_size,
+            limit,
             after,
             before,
             page_info_fields,
@@ -186,6 +160,9 @@ impl CursorNode {
         Cursor {
             doc_id: snapshot.doc_id.clone(),
             keys: snapshot.keys.clone(),
+            // Go's buildEnrichedPayload never sets Direction; keep it empty for
+            // byte-exact cursor parity.
+            direction: String::new(),
         }
     }
 
@@ -206,7 +183,7 @@ impl CursorNode {
         loop {
             match self.state {
                 CursorState::Collecting => {
-                    if self.emitted >= self.page_size {
+                    if self.limit.is_some_and(|lim| self.emitted >= lim) {
                         // Probe one extra row to determine hasNextPage.
                         self.has_next = self.inner.next().await?;
                         self.has_prev = self.after.is_some();
@@ -235,50 +212,25 @@ impl CursorNode {
                     }
                 }
                 CursorState::SkippingUntilAfter => {
-                    // Slow path: no index seek. Pull rows from the child until
-                    // we find the first row whose docID is strictly greater
-                    // than the `after` cursor's docID.
-                    //
-                    // This comparison is only correct for doc_id or empty ordering.
-                    // For other field orderings, the cursor boundary is determined by
-                    // the full (field_values, doc_id) tuple, not just doc_id — and
-                    // extracting named field values from a Doc requires index-to-name
-                    // mapping that is not available here. Return an error so callers
-                    // notice the limitation rather than silently returning wrong pages.
-                    if !is_doc_id_or_empty_order(&self.order_fields) {
-                        return Err(QueryError::execution(
-                            "cursor slow path (no index seek) does not support non-docID ordering; \
-                             ensure the collection has an index covering the ORDER BY fields",
-                        ));
-                    }
-                    let after_doc_id = self.after.as_ref().map(|c| c.doc_id.clone());
-                    let dir = doc_id_order_direction(&self.order_fields);
+                    // Slow path (no index seek). Mirrors Go's cursorNode skip
+                    // phase: locate the cursor boundary purely by exact docID
+                    // equality and rely on the child plan's ordering — no
+                    // field-value comparison. Skip rows until the row whose
+                    // docID equals the `after` cursor's docID, skip that row
+                    // too, then collect everything after it. If the docID is
+                    // never found (e.g. the cursor doc was deleted), the page
+                    // ends up empty — matching Go. This works for any ORDER BY
+                    // because the orderby/scan node below already emits rows in
+                    // order; the cursor only needs to find the boundary doc.
+                    let after_doc_id = self.after.as_ref().map(|c| c.doc_id.as_str());
                     if self.inner.next().await? {
-                        let doc = self.inner.value().deep_clone(); // ONE clone per row
-                        let row_id = doc.doc_id().map(|s| s.to_string());
-                        let past_boundary = match (after_doc_id.as_deref(), row_id.as_deref()) {
-                            (Some(after), Some(row)) => match dir {
-                                OrderDirection::Asc => row > after,
-                                OrderDirection::Desc => row < after,
-                            },
-                            _ => false,
-                        };
-                        if past_boundary {
-                            // Found the first row past the boundary.
+                        let row_id = self.inner.value().doc_id();
+                        if after_doc_id.is_some() && row_id == after_doc_id {
+                            // Found the cursor doc — skip it, collect from the next row.
                             self.state = CursorState::Collecting;
-                            let map = self.inner.document_map();
-                            let snap = Self::snapshot_from_doc(&doc, map, &self.order_fields);
-                            // First collected row is both the start and end of the page so far.
-                            self.last_snapshot = Some(CursorSnapshot {
-                                doc_id: snap.doc_id.clone(),
-                                keys: snap.keys.clone(),
-                            });
-                            self.first_snapshot = Some(snap);
-                            self.current_doc = doc;
-                            self.emitted += 1;
-                            return Ok(true);
                         }
-                        // still skipping
+                        // Otherwise keep skipping (stay in SkippingUntilAfter).
+                        continue;
                     } else {
                         // Exhausted before finding the boundary.
                         self.state = CursorState::Drained;
@@ -327,23 +279,26 @@ impl CursorNode {
     }
 
     /// Fast path: the inner plan already iterates in reverse from the `before`
-    /// boundary. Collect up to `page_size + 1` docs and reverse them so callers
-    /// receive docs in logical (ascending) order.
+    /// boundary. Collect up to `limit + 1` docs (or all docs when no limit) and
+    /// reverse them so callers receive docs in logical (ascending) order.
     async fn populate_backward_buffer_fast(&mut self) -> Result<()> {
-        let window_size = self.page_size as usize + 1; // +1 to detect has_prev
-        let mut collected: Vec<Doc> = Vec::with_capacity(window_size);
+        // +1 to detect has_prev; `None` means unbounded (return all rows).
+        let window_size = self.limit.map(|lim| lim as usize + 1);
+        let mut collected: Vec<Doc> = Vec::new();
         while self.inner.next().await? {
             let doc = self.inner.value().deep_clone();
             collected.push(doc);
-            if collected.len() >= window_size {
+            if window_size.is_some_and(|w| collected.len() >= w) {
                 break;
             }
         }
         // Reverse so the buffer holds docs in ascending (logical) order.
         collected.reverse();
-        if collected.len() > self.page_size as usize {
-            self.has_prev = true;
-            collected.remove(0); // drop the extra doc at the front
+        if let Some(lim) = self.limit {
+            if collected.len() > lim as usize {
+                self.has_prev = true;
+                collected.remove(0); // drop the extra doc at the front
+            }
         }
         for doc in collected {
             self.buffer.push_back(doc);
@@ -351,52 +306,39 @@ impl CursorNode {
         Ok(())
     }
 
-    /// Slow path: scan forward; keep a sliding window of the last `page_size + 1`
-    /// docs, stopping at (but not including) the `before` boundary doc_id when set.
+    /// Slow path (no index seek). Mirrors Go's `drainBackwardPage`: scan forward
+    /// (the child plan emits rows in order), collecting until the `before`
+    /// boundary doc — matched by exact docID equality and excluded from output —
+    /// while keeping a sliding window of the last `limit + 1` rows (or all rows
+    /// when no limit) to bound memory and still detect has_prev.
     ///
-    /// The boundary comparison uses only doc_id, which is only correct for doc_id
-    /// or empty ordering. When a `before` cursor is present and the order is not
-    /// doc_id-only, return an error instead of silently returning wrong results
-    /// (see `is_doc_id_or_empty_order`). When there is no `before` cursor, no
-    /// boundary comparison happens — the slow path just slides a window — so any
-    /// ordering is safe.
+    /// No field-value comparison is performed: the child's ordering is
+    /// authoritative, so the cursor only needs to find the boundary doc by its
+    /// unique docID. This is correct for any ORDER BY (including legacy
+    /// docID-only cursors against a field-ordered query).
     async fn populate_backward_buffer_slow(&mut self) -> Result<()> {
         let before_doc_id = self.before.as_ref().map(|c| c.doc_id.clone());
-        if before_doc_id.is_some() && !is_doc_id_or_empty_order(&self.order_fields) {
-            return Err(QueryError::execution(
-                "cursor slow path (no index seek) does not support non-docID ordering; \
-                 ensure the collection has an index covering the ORDER BY fields",
-            ));
-        }
-        let window_size = self.page_size as usize + 1; // +1 to detect has_prev
-        let dir = doc_id_order_direction(&self.order_fields);
+        // +1 to detect has_prev; `None` means unbounded (return all rows).
+        let window_size = self.limit.map(|lim| lim as usize + 1);
         while self.inner.next().await? {
             let value = self.inner.value();
             if let Some(boundary) = before_doc_id.as_deref() {
-                // Stop at (not past) the boundary: the `before` doc itself is excluded
-                // from output, matching Go's semantics.
-                //
-                // For ASC order the iterator sees rows in ascending doc_id order;
-                // stop when we reach or pass the boundary: `>=`.
-                // For DESC order the iterator sees rows in descending doc_id order
-                // (larger IDs first); stop when we reach or go below the boundary: `<=`.
-                let stop = match dir {
-                    OrderDirection::Asc => value.doc_id().unwrap_or("") >= boundary,
-                    OrderDirection::Desc => value.doc_id().unwrap_or("") <= boundary,
-                };
-                if stop {
+                // The `before` doc itself is excluded; stop on exact match.
+                if value.doc_id() == Some(boundary) {
                     break;
                 }
             }
             let doc = value.deep_clone();
             self.buffer.push_back(doc);
-            if self.buffer.len() > window_size {
+            if window_size.is_some_and(|w| self.buffer.len() > w) {
                 self.buffer.pop_front();
             }
         }
-        if self.buffer.len() > self.page_size as usize {
-            self.has_prev = true;
-            self.buffer.pop_front();
+        if let Some(lim) = self.limit {
+            if self.buffer.len() > lim as usize {
+                self.has_prev = true;
+                self.buffer.pop_front();
+            }
         }
         Ok(())
     }
@@ -498,7 +440,10 @@ impl PlanNode for CursorNode {
         let mut obj = serde_json::Map::new();
         obj.insert(
             "pageSize".to_string(),
-            serde_json::Value::Number(self.page_size.into()),
+            match self.limit {
+                Some(n) => serde_json::Value::Number(n.into()),
+                None => serde_json::Value::Null,
+            },
         );
         obj.insert(
             "direction".to_string(),
@@ -606,7 +551,7 @@ mod tests {
         let mut node = CursorNode::new(
             Box::new(inner),
             CursorDirection::Forward,
-            2,
+            Some(2),
             None, // no after token
             None,
             CursorPageInfoFields {
@@ -645,7 +590,7 @@ mod tests {
         let mut node = CursorNode::new(
             Box::new(inner),
             CursorDirection::Backward,
-            2,
+            Some(2),
             None,
             None,
             CursorPageInfoFields {
@@ -685,7 +630,7 @@ mod tests {
         let mut node = CursorNode::new(
             Box::new(inner),
             CursorDirection::Backward,
-            2,
+            Some(2),
             None,
             Some(before),
             CursorPageInfoFields {
@@ -720,7 +665,7 @@ mod tests {
         let mut node = CursorNode::new(
             Box::new(inner),
             CursorDirection::Forward,
-            2,
+            Some(2),
             Some(after),
             None,
             CursorPageInfoFields {
@@ -759,7 +704,7 @@ mod tests {
         let mut node = CursorNode::new(
             Box::new(inner),
             CursorDirection::Backward,
-            2,
+            Some(2),
             None,
             None,
             CursorPageInfoFields {
@@ -782,5 +727,80 @@ mod tests {
         let info = node.page_info_data();
         assert!(info.has_prev, "page_size+1 < total => has_prev=true");
         assert!(!info.has_next, "before is None => has_next=false");
+    }
+
+    #[tokio::test]
+    async fn forward_no_limit_emits_all_rows() {
+        // `first` omitted (limit None) must return ALL rows, mirroring Go's
+        // cursorNode where the limit check is gated on `first.HasValue()`.
+        let inner = FakePlan::new(vec![
+            doc_with_id("a"),
+            doc_with_id("b"),
+            doc_with_id("c"),
+            doc_with_id("d"),
+        ]);
+        let mut node = CursorNode::new(
+            Box::new(inner),
+            CursorDirection::Forward,
+            None, // no `first` — unbounded
+            None,
+            None,
+            CursorPageInfoFields {
+                has_next: Some("hasNext".to_string()),
+                ..Default::default()
+            },
+            vec![],
+            false,
+        );
+
+        for expected in ["a", "b", "c", "d"] {
+            assert!(node.next().await.unwrap(), "row {expected}");
+            assert_eq!(current_id(&node), expected);
+        }
+        assert!(!node.next().await.unwrap(), "drained after all rows");
+
+        let info = node.page_info_data();
+        assert!(
+            !info.has_next,
+            "no limit => all rows returned => has_next=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn backward_no_limit_emits_all_rows_in_order() {
+        // `last` omitted (limit None) must return ALL rows in logical order.
+        let inner = FakePlan::new(vec![
+            doc_with_id("a"),
+            doc_with_id("b"),
+            doc_with_id("c"),
+            doc_with_id("d"),
+        ]);
+        let mut node = CursorNode::new(
+            Box::new(inner),
+            CursorDirection::Backward,
+            None, // no `last` — unbounded
+            None,
+            None,
+            CursorPageInfoFields {
+                has_next: Some("hasNext".to_string()),
+                has_prev: Some("hasPrev".to_string()),
+                ..Default::default()
+            },
+            vec![],
+            false,
+        );
+        node.init().await.unwrap();
+
+        for expected in ["a", "b", "c", "d"] {
+            assert!(node.next().await.unwrap(), "row {expected}");
+            assert_eq!(current_id(&node), expected);
+        }
+        assert!(!node.next().await.unwrap(), "drained after all rows");
+
+        let info = node.page_info_data();
+        assert!(
+            !info.has_prev,
+            "no limit => no rows dropped => has_prev=false"
+        );
     }
 }
