@@ -184,6 +184,15 @@ lru = "0.16.4"
 # Async streams
 tokio-stream = "0.1"
 
+# Local backbone checkout carries the test-only
+# `with_shared_searchable_encryption_key` harness addition (#976) used by the
+# Go<->Rust SE write-compat e2e. Remove once the change lands on backbone main.
+[patch."https://github.com/sourcenetwork/backbone.git"]
+defra-harness = { path = "../backbone/crates/defra-harness" }
+sourcehub-harness = { path = "../backbone/crates/sourcehub-harness" }
+hub-harness = { path = "../backbone/crates/hub-harness" }
+test-infra = { path = "../backbone/crates/test-infra" }
+
 [profile.dev]
 opt-level = 0
 debug = true
