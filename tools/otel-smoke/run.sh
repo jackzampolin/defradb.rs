@@ -14,6 +14,9 @@
 
 set -euo pipefail
 
+# shellcheck source=tools/otel-smoke/lib.sh
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/lib.sh"
+
 KEEP=0
 for arg in "$@"; do
   case "$arg" in
@@ -22,21 +25,14 @@ for arg in "$@"; do
   esac
 done
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-REPO_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
-OUTPUT_DIR="$SCRIPT_DIR/output"
 SPANS_FILE="$OUTPUT_DIR/spans.jsonl"
 DEFRA_STDERR="$OUTPUT_DIR/defra.stderr"
 DEFRA_STDOUT="$OUTPUT_DIR/defra.stdout"
-
-DEFRA_PID=""
+PORT=9181
 
 cleanup() {
   local rc=$?
-  if [ -n "$DEFRA_PID" ]; then
-    kill -TERM "$DEFRA_PID" 2>/dev/null || true
-    wait "$DEFRA_PID" 2>/dev/null || true
-  fi
+  stop_defra
   if [ "$KEEP" -eq 0 ]; then
     (cd "$SCRIPT_DIR" && docker compose down -v >/dev/null 2>&1) || true
   else
@@ -67,45 +63,23 @@ for _ in $(seq 1 30); do
 done
 nc -z 127.0.0.1 4318 || { echo "FAIL: otelcol did not come up"; exit 1; }
 
-step "building defra (cli --features otel)"
-(cd "$REPO_ROOT" && cargo build -p cli --features otel)
+build_defra
 
-step "starting defra against http://127.0.0.1:4318"
-DEFRA_ROOT="$(mktemp -d)"
 # 127.0.0.1 (not `localhost`) so reqwest's resolver and the docker port
 # binding agree on IPv4 — `localhost` would otherwise prefer ::1 on some
 # Linux setups and miss the docker container that only listens on v4.
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4318"
 export OTEL_BSP_SCHEDULE_DELAY="500"  # ms — flush quickly so the test isn't slow
-# Memory store keeps the test hermetic.
-"$REPO_ROOT/target/debug/defra" start \
-  --rootdir "$DEFRA_ROOT" \
-  --no-keyring \
-  --store memory \
-  --url 127.0.0.1:9181 \
-  >"$DEFRA_STDOUT" 2>"$DEFRA_STDERR" &
-DEFRA_PID=$!
-
-step "waiting for defra HTTP :9181"
-for _ in $(seq 1 30); do
-  if curl -sf -o /dev/null http://127.0.0.1:9181/ ; then
-    break
-  fi
-  if ! kill -0 "$DEFRA_PID" 2>/dev/null; then
-    echo "FAIL: defra exited; stderr below"
-    cat "$DEFRA_STDERR"
-    exit 1
-  fi
-  sleep 1
-done
+start_defra "$PORT" "$DEFRA_STDOUT" "$DEFRA_STDERR"
+wait_for_http "$PORT" "$DEFRA_STDERR"
 
 step "exercising endpoints to emit spans"
 # Any HTTP request produces a tower_http TraceLayer span; GraphQL adds the
 # QueryRunner::execute span (already #[instrument]'d).
-curl -s -o /dev/null http://127.0.0.1:9181/ || true
-curl -s -o /dev/null http://127.0.0.1:9181/api/v0/schema || true
+curl -s -o /dev/null "http://127.0.0.1:$PORT/" || true
+curl -s -o /dev/null "http://127.0.0.1:$PORT/api/v0/schema" || true
 curl -s -o /dev/null \
-  -X POST http://127.0.0.1:9181/api/v0/graphql \
+  -X POST "http://127.0.0.1:$PORT/api/v0/graphql" \
   -H 'Content-Type: application/json' \
   -d '{"query": "query { __typename }"}' || true
 
@@ -113,9 +87,7 @@ step "waiting for batch flush"
 sleep 2
 
 step "shutting down defra (flushes provider)"
-kill -TERM "$DEFRA_PID"
-wait "$DEFRA_PID" 2>/dev/null || true
-DEFRA_PID=""
+stop_defra
 
 step "waiting for collector to flush file exporter"
 sleep 2

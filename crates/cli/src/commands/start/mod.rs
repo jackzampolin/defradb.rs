@@ -56,7 +56,7 @@ pub struct StartArgs {
     pub p2paddr: Option<Vec<String>>,
 
     /// Disable the peer-to-peer network synchronization system
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = crate::cli::bool_value_parser())]
     pub no_p2p: Option<bool>,
 
     /// List of origins to allow for CORS requests
@@ -72,11 +72,11 @@ pub struct StartArgs {
     pub privkeypath: Option<String>,
 
     /// Skip generating an encryption key. Encryption at rest will be disabled.
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = crate::cli::bool_value_parser())]
     pub no_encryption: Option<bool>,
 
     /// Disable signing of commits
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = crate::cli::bool_value_parser())]
     pub no_signing: Option<bool>,
 
     /// Default key type to generate new node identity
@@ -84,7 +84,7 @@ pub struct StartArgs {
     pub default_key_type: Option<String>,
 
     /// Skip generating a searchable encryption key
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = crate::cli::bool_value_parser())]
     pub no_searchable_encryption: Option<bool>,
 
     /// Hex formatted private key used to authenticate with ACP.

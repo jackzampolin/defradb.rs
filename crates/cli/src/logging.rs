@@ -22,6 +22,20 @@ use tracing_chrome::{ChromeLayerBuilder, FlushGuard};
 use crate::config::{Config, LogFormat, LogLevel, LogOutput};
 use crate::error::{Error, Result};
 
+/// Build the OTLP bridge layer paired with a fresh dedup filter, for a given
+/// inner-subscriber type `S`. Generic over `S` because the registry's type
+/// differs between the profiling (fmt + chrome) and non-profiling (fmt only)
+/// branches — a plain `let` binding would fix `S` at first use and fail at
+/// the second, which is why this is a function rather than a hoisted local.
+/// Returns `None` when no tracer was configured (telemetry off/failed).
+#[cfg(feature = "otel")]
+fn otel_dedup_layer<S>(tracer: Option<telemetry::Tracer>) -> Option<impl Layer<S>>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    tracer.map(|t| telemetry::otel_layer(t).with_filter(telemetry::OtelDedupFilter::new()))
+}
+
 fn with_default_transport_noise_filters(filter: EnvFilter) -> EnvFilter {
     filter
         .add_directive(
@@ -212,9 +226,7 @@ where
             .with(fmt_layer)
             .with(chrome_layer);
         #[cfg(feature = "otel")]
-        let registry = registry.with(
-            tracer.map(|t| telemetry::otel_layer(t).with_filter(telemetry::OtelDedupFilter::new())),
-        );
+        let registry = registry.with(otel_dedup_layer(tracer));
         registry
             .with(filter)
             .try_init()
@@ -224,9 +236,7 @@ where
 
     let registry = tracing_subscriber::registry().with(fmt_layer);
     #[cfg(feature = "otel")]
-    let registry = registry.with(
-        tracer.map(|t| telemetry::otel_layer(t).with_filter(telemetry::OtelDedupFilter::new())),
-    );
+    let registry = registry.with(otel_dedup_layer(tracer));
     registry
         .with(filter)
         .try_init()

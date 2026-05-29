@@ -8,6 +8,16 @@ use crate::commands::{
 use crate::config::Config;
 use crate::error::Result;
 
+/// Shared `value_parser` for the CLI's `Option<bool>` toggle flags. Accepts
+/// the usual shell-boolean idioms (`true`/`false`, `1`/`0`, `yes`/`no`,
+/// `on`/`off`, case-insensitive) so env-driven CI scripts using `=1`/`=0`
+/// work. Defined once and referenced from every `--no-*` / toggle flag in
+/// both this module and the `start` subcommand, so the convention can't
+/// drift per flag.
+pub(crate) fn bool_value_parser() -> clap::builder::BoolishValueParser {
+    clap::builder::BoolishValueParser::new()
+}
+
 /// DefraDB Edge Database
 ///
 /// DefraDB is the edge database to power the user-centric future.
@@ -33,11 +43,11 @@ pub struct Cli {
     pub log_format: Option<String>,
 
     /// Include stacktrace in error and fatal logs
-    #[arg(long, global = true, env = "DEFRA_LOG_STACKTRACE", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    #[arg(long, global = true, env = "DEFRA_LOG_STACKTRACE", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = bool_value_parser())]
     pub log_stacktrace: Option<bool>,
 
     /// Include source location in logs
-    #[arg(long, global = true, env = "DEFRA_LOG_SOURCE", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    #[arg(long, global = true, env = "DEFRA_LOG_SOURCE", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = bool_value_parser())]
     pub log_source: Option<bool>,
 
     /// Logger config overrides. Format <name>,<key>=<val>,...;<name>,...
@@ -45,7 +55,7 @@ pub struct Cli {
     pub log_overrides: Option<String>,
 
     /// Disable colored log output
-    #[arg(long, global = true, env = "DEFRA_NO_LOG_COLOR", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    #[arg(long, global = true, env = "DEFRA_NO_LOG_COLOR", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = bool_value_parser())]
     pub no_log_color: Option<bool>,
 
     /// URL of HTTP endpoint to listen on or connect to
@@ -65,7 +75,7 @@ pub struct Cli {
     pub keyring_path: Option<String>,
 
     /// Disable the keyring and generate ephemeral keys
-    #[arg(long, global = true, env = "DEFRA_NO_KEYRING", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    #[arg(long, global = true, env = "DEFRA_NO_KEYRING", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = bool_value_parser())]
     pub no_keyring: Option<bool>,
 
     /// The SourceHub address authorized by the client to make SourceHub transactions
@@ -89,18 +99,18 @@ pub struct Cli {
     pub secret_file: Option<String>,
 
     /// Disable OpenTelemetry exporters (no-op unless the binary was built with `--features otel`).
-    #[arg(long, global = true, env = "DEFRA_NO_TELEMETRY", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    #[arg(long, global = true, env = "DEFRA_NO_TELEMETRY", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = bool_value_parser())]
     pub no_telemetry: Option<bool>,
 
     /// Enables development mode features
-    #[arg(long, global = true, env = "DEFRA_DEVELOPMENT", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    #[arg(long, global = true, env = "DEFRA_DEVELOPMENT", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = bool_value_parser())]
     pub development: Option<bool>,
 
     /// Enable Node Access Control (NAC).
     ///
     /// When enabled, node operations require authentication and authorization
     /// based on the node's identity from the keyring.
-    #[arg(long = "node-acp-enable", global = true, env = "DEFRA_ACP_NODE_ENABLE", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    #[arg(long = "node-acp-enable", global = true, env = "DEFRA_ACP_NODE_ENABLE", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = bool_value_parser())]
     pub acp_node_enable: Option<bool>,
 
     /// Document ACP type. Options are none, local, source-hub, or hub-rs

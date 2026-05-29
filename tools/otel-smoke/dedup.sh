@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Negative-path verification: with no OTLP collector listening, the dedup
-# filter must squash "connection refused" log spam to a single occurrence
+# filter must squash exporter-unreachable log spam to one line per pattern
 # per process — the Rust port of Go DefraDB's `otel.SetErrorHandler +
 # sync.Once` (issue #977, Go commit 83af37a9).
 #
@@ -9,60 +9,33 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-REPO_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
-STDERR_LOG="$SCRIPT_DIR/output/defra-dedup.stderr"
-STDOUT_LOG="$SCRIPT_DIR/output/defra-dedup.stdout"
+# shellcheck source=tools/otel-smoke/lib.sh
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/lib.sh"
 
-mkdir -p "$SCRIPT_DIR/output"
+STDERR_LOG="$OUTPUT_DIR/defra-dedup.stderr"
+STDOUT_LOG="$OUTPUT_DIR/defra-dedup.stdout"
+PORT=9182
+
+mkdir -p "$OUTPUT_DIR"
 rm -f "$STDERR_LOG" "$STDOUT_LOG"
 
-# Use a port that is almost certainly unbound.
+# Use a port that is almost certainly unbound. Pin to 127.0.0.1 so the
+# precondition check uses the same IP family as reqwest's resolver —
+# `localhost` would let a bound `[::1]:$DEAD_PORT` silently mask the test.
 DEAD_PORT=14318
-# Pin to 127.0.0.1 so the precondition check uses the same IP family as
-# reqwest's resolver — `localhost` would let a bound `[::1]:$DEAD_PORT`
-# silently mask the test.
 if nc -z 127.0.0.1 "$DEAD_PORT" 2>/dev/null; then
   echo "FAIL: port $DEAD_PORT is bound; pick another or stop the listener"
   exit 1
 fi
 
-DEFRA_PID=""
-cleanup() {
-  if [ -n "$DEFRA_PID" ]; then
-    kill -TERM "$DEFRA_PID" 2>/dev/null || true
-    wait "$DEFRA_PID" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT INT TERM
+trap stop_defra EXIT INT TERM
 
-echo "=== building defra (cli --features otel) ==="
-(cd "$REPO_ROOT" && cargo build -p cli --features otel)
+build_defra
 
-echo "=== starting defra against unreachable collector ==="
-DEFRA_ROOT="$(mktemp -d)"
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:$DEAD_PORT"
 export OTEL_BSP_SCHEDULE_DELAY="300"  # ms — provoke multiple retries quickly
-"$REPO_ROOT/target/debug/defra" start \
-  --rootdir "$DEFRA_ROOT" \
-  --no-keyring \
-  --store memory \
-  --url 127.0.0.1:9182 \
-  >"$STDOUT_LOG" 2>"$STDERR_LOG" &
-DEFRA_PID=$!
-
-echo "=== waiting for defra HTTP :9182 ==="
-for _ in $(seq 1 30); do
-  if curl -sf -o /dev/null http://127.0.0.1:9182/ ; then
-    break
-  fi
-  if ! kill -0 "$DEFRA_PID" 2>/dev/null; then
-    echo "FAIL: defra exited; stderr below"
-    tail -50 "$STDERR_LOG"
-    exit 1
-  fi
-  sleep 1
-done
+start_defra "$PORT" "$STDOUT_LOG" "$STDERR_LOG"
+wait_for_http "$PORT" "$STDERR_LOG"
 
 echo "=== generating spans to provoke repeated batch-export attempts ==="
 # Each GraphQL request creates a QueryRunner::execute span (info-level
@@ -72,7 +45,7 @@ echo "=== generating spans to provoke repeated batch-export attempts ==="
 # the BatchSpanProcessor to keep trying.
 for _ in $(seq 1 30); do
   curl -sf -o /dev/null \
-    -X POST http://127.0.0.1:9182/api/v0/graphql \
+    -X POST "http://127.0.0.1:$PORT/api/v0/graphql" \
     -H 'Content-Type: application/json' \
     -d '{"query": "query { __typename }"}' || true
   sleep 0.2
@@ -82,9 +55,7 @@ echo "=== letting any final batch processor retries fire ==="
 sleep 3
 
 echo "=== shutting down defra ==="
-kill -TERM "$DEFRA_PID"
-wait "$DEFRA_PID" 2>/dev/null || true
-DEFRA_PID=""
+stop_defra
 
 echo "=== counting exporter-unreachable log lines in stderr ==="
 # Each known needle (connection refused / HTTP export failed / network error)
