@@ -204,6 +204,7 @@ impl Node {
         let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();
         let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
         let broadcast_mutator = replication.broadcast_mutator.clone();
+        let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
         let merge_handler_for_acp = replication.merge_handler.clone();
         let txn_broadcaster = replication.txn_broadcaster.clone();
 
@@ -506,6 +507,13 @@ impl Node {
             http_adapter: Some(Arc::new(adapter)),
             wire_merge_acp: Some(Box::new(move |acp| {
                 coordinator_for_acp.set_document_acp(acp.clone());
+                // Wire the document ACP into the broadcast mutator so newly
+                // created ACP-protected docs are registered *before* their
+                // detached P2P broadcast fires (#976). Without this, the
+                // mutator's pre-broadcast registration is skipped (ACP handle
+                // absent) and an encrypted doc's DEK can leak during the
+                // ~4.5s SourceHub registration window.
+                broadcast_mutator_for_acp.set_document_acp(acp.clone());
                 merge_handler_for_acp.set_document_acp(acp);
             })),
             wire_doc_pusher_acp: Some(Box::new(move |acp| {
@@ -610,6 +618,7 @@ impl Node {
         let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();
         let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
         let broadcast_mutator = replication.broadcast_mutator.clone();
+        let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
         let merge_handler_for_acp = replication.merge_handler.clone();
         let txn_broadcaster = replication.txn_broadcaster.clone();
 
@@ -868,6 +877,13 @@ impl Node {
             txn_broadcaster: Some(txn_broadcaster),
             wire_merge_acp: Some(Box::new(move |acp| {
                 coordinator_for_acp.set_document_acp(acp.clone());
+                // Wire the document ACP into the broadcast mutator so newly
+                // created ACP-protected docs are registered *before* their
+                // detached P2P broadcast fires (#976). Without this, the
+                // mutator's pre-broadcast registration is skipped (ACP handle
+                // absent) and an encrypted doc's DEK can leak during the
+                // ~4.5s SourceHub registration window.
+                broadcast_mutator_for_acp.set_document_acp(acp.clone());
                 merge_handler_for_acp.set_document_acp(acp);
             })),
             wire_doc_pusher_acp: Some(Box::new(move |acp| {
