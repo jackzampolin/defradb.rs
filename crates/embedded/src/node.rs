@@ -442,8 +442,12 @@ where
     let kms: Arc<dyn kms::KmsService> = {
         // Blockstore-backed KeyStore (mirrors Go's internal/kms/enc_store.go):
         // the KMS serves DEKs for ANY encrypted write by reading/writing the
-        // node's durable encstore→blockstore, not a RAM-only map.
-        let kms_blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
+        // node's durable encstore→blockstore, not a RAM-only map. The DB owns
+        // the blockstore Arc (set_kms_blockstore) so the adapter can hold a Weak
+        // and avoid the lock-pinning cycle (#976) while sharing the block cache.
+        let kms_blockstore = database.set_kms_blockstore(Arc::new(
+            blockstore::DefraBlockstore::new(store.clone(), true),
+        ));
         let enc_block_store: Arc<dyn kms::EncBlockStore> =
             Arc::new(db::DbEncBlockStore::new(database.clone(), kms_blockstore));
         let store: Arc<dyn kms::KeyStore> = Arc::new(kms::BlockstoreKeyStore::new(enc_block_store));

@@ -159,6 +159,13 @@ pub struct DB<S: Store> {
     /// KeyStore for cross-peer serving) instead of inline-and-blockstore.
     /// Set once at node startup via [`DB::set_kms`].
     kms: std::sync::OnceLock<std::sync::Arc<dyn kms::KmsService>>,
+    /// Owning handle to the KMS durable blockstore. The KMS adapter
+    /// (`DbEncBlockStore`) references this weakly to avoid the
+    /// DB→KMS→`KeyStore`→adapter→blockstore→store Arc cycle that would pin the
+    /// storage lock past node close (#976). Parking the owning `Arc` here means
+    /// it shares the DB's lifetime — and its in-process block cache — and drops
+    /// with the DB, releasing the lock. Set once at startup.
+    kms_blockstore: std::sync::OnceLock<Arc<blockstore::DefraBlockstore<S>>>,
 }
 
 impl<S: Store> DB<S> {
@@ -188,6 +195,7 @@ impl<S: Store> DB<S> {
             schema_heads: RwLock::new(HashMap::new()),
             forbidden_collection_ids: RwLock::new(HashSet::new()),
             kms: std::sync::OnceLock::new(),
+            kms_blockstore: std::sync::OnceLock::new(),
         })
     }
 
@@ -239,6 +247,7 @@ impl<S: Store> DB<S> {
             schema_heads: RwLock::new(HashMap::new()),
             forbidden_collection_ids: RwLock::new(HashSet::new()),
             kms: std::sync::OnceLock::new(),
+            kms_blockstore: std::sync::OnceLock::new(),
         })
     }
 
@@ -282,6 +291,22 @@ impl<S: Store> DB<S> {
     /// Get the KMS service, if one has been installed.
     pub fn kms(&self) -> Option<std::sync::Arc<dyn kms::KmsService>> {
         self.kms.get().cloned()
+    }
+
+    /// Park the KMS durable blockstore on the DB so its owning `Arc` shares the
+    /// DB's lifetime (and block cache) without forming a lock-pinning cycle
+    /// (#976). First call wins. Returns the stored handle (the just-set one, or
+    /// the existing one if already set) so the caller can build a `Weak` from
+    /// the canonical instance.
+    pub fn set_kms_blockstore(
+        &self,
+        blockstore: Arc<blockstore::DefraBlockstore<S>>,
+    ) -> Arc<blockstore::DefraBlockstore<S>> {
+        let _ = self.kms_blockstore.set(blockstore);
+        self.kms_blockstore
+            .get()
+            .expect("kms_blockstore set above")
+            .clone()
     }
 
     /// Get the next transaction ID.
