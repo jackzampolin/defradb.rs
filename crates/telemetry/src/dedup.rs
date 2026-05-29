@@ -32,10 +32,18 @@ use tracing_subscriber::registry::LookupSpan;
 
 const OTEL_TARGET_PREFIX: &str = "opentelemetry";
 
-/// Substrings that indicate the OTLP collector is unreachable.
-/// `"connection refused"` is the gRPC transport's wording; `"HTTP export
-/// failed"` / `"network error"` are what the HTTP+reqwest transport emits.
-const UNREACHABLE_NEEDLES: &[&str] = &["connection refused", "HTTP export failed", "network error"];
+/// Substrings that indicate the OTLP collector is *unreachable* (the only
+/// case Go special-cases). `"connection refused"` is the gRPC transport's
+/// wording; `"network error"` is what `opentelemetry-otlp`'s HTTP transport
+/// emits for connection/DNS failures (http/mod.rs:518).
+///
+/// Deliberately NOT `"HTTP export failed"`: that prefix also appears on
+/// status-code rejections from a *reachable* collector
+/// (`"HTTP export failed with status code: 401/429/503"`, http/mod.rs:540).
+/// Those are genuine server-side errors Go keeps visible (its `else` branch),
+/// so matching the prefix would wrongly suppress them behind the
+/// unreachable-collector hint and latch them off for the rest of the process.
+const UNREACHABLE_NEEDLES: &[&str] = &["connection refused", "network error"];
 
 /// Operator-facing hint, matching Go's `internal/telemetry/otel.go`.
 const UNREACHABLE_HINT: &str =
@@ -138,13 +146,32 @@ mod tests {
     }
 
     #[test]
-    fn http_exporter_failure_is_unreachable() {
-        // Real `opentelemetry_sdk` output captured by tools/otel-smoke/dedup.sh.
+    fn http_exporter_unreachable_is_unreachable() {
+        // Real `opentelemetry_sdk` output for an unreachable collector
+        // (http/mod.rs:518), captured by tools/otel-smoke/dedup.sh. Matches
+        // via the "network error" needle.
         let msg = r#"name="BatchSpanProcessor.ExportError" error="Operation failed: HTTP export failed: network error""#;
         assert!(OtelDedupFilter::is_collector_unreachable(
             "opentelemetry_sdk",
             msg
         ));
+    }
+
+    #[test]
+    fn http_status_code_error_is_not_unreachable() {
+        // A *reachable* collector rejecting the export (http/mod.rs:540) is a
+        // genuine server-side error Go keeps visible — it must NOT be treated
+        // as unreachable (else it gets suppressed behind the hint and latched
+        // off). Regression guard for the over-broad "HTTP export failed" needle.
+        for status in ["401", "413", "429", "503"] {
+            let msg = format!(
+                r#"name="BatchSpanProcessor.ExportError" error="Operation failed: HTTP export failed with status code: {status}""#
+            );
+            assert!(
+                !OtelDedupFilter::is_collector_unreachable("opentelemetry_sdk", &msg),
+                "status {status} should pass through, not be suppressed"
+            );
+        }
     }
 
     #[test]

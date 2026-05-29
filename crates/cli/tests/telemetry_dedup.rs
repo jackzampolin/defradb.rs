@@ -81,7 +81,12 @@ fn send_graphql(port: u16) {
 fn exporter_unreachable_logs_hint_once_and_suppresses_raw() {
     let http_port = portpicker::pick_unused_port().expect("free http port");
     // A port nobody listens on → the HTTP exporter fails to reach it.
-    let dead_otlp_port = portpicker::pick_unused_port().expect("free otlp port");
+    // Guard against portpicker handing back the same port twice (the two
+    // calls bind-and-release independently, so equality is possible).
+    let dead_otlp_port = std::iter::repeat_with(portpicker::pick_unused_port)
+        .flatten()
+        .find(|&p| p != http_port)
+        .expect("free otlp port distinct from http port");
     let rootdir = tempfile::tempdir().expect("tempdir");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_defra"))
@@ -99,6 +104,12 @@ fn exporter_unreachable_logs_hint_once_and_suppresses_raw() {
             format!("http://127.0.0.1:{dead_otlp_port}"),
         )
         .env("OTEL_BSP_SCHEDULE_DELAY", "300") // ms — provoke export quickly
+        // Pin the log level so the INFO-level `query.execute_request` span
+        // (which drives the export we're testing) survives the env filter.
+        // An inherited RUST_LOG/DEFRA_LOG_LEVEL=error would drop it and make
+        // the hint count 0 — a false failure.
+        .env("DEFRA_LOG_LEVEL", "info")
+        .env_remove("RUST_LOG")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
