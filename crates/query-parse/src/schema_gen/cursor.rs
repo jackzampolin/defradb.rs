@@ -44,28 +44,28 @@ pub fn gen_cursor_query_type() -> GqlObjectType {
 ///
 /// Mirrors Go's `genCursorCollectionField` (generate.go:1592-1620).
 /// Returns a `[CollectionName]` (nullable list of nullable items) with
-/// cursor args (first/after/last/before) plus order/filter/docIDs/cid/groupBy/showDeleted.
+/// cursor args (first/after/last/before) plus order/filter/docID/cid/showDeleted.
 ///
 /// `limit` and `offset` are intentionally absent — cursor args replace them.
+/// `groupBy` is intentionally absent: the Rust SDL generator does not yet emit
+/// the `<Collection>Field` enum that Go's groupBy arg references, and the
+/// regular query fields do not advertise groupBy either. Exposing it here would
+/// reference an undefined type. (Functional groupBy parsing is unaffected.)
 /// All arg types and the return type are nullable (no NonNull wrapping).
 pub fn gen_cursor_collection_field(collection_name: &str) -> GqlField {
     let order_type_name = format!("{}OrderInput", collection_name);
     let filter_type_name = format!("{}FilterInput", collection_name);
-    let group_by_type_name = format!("{}GroupBy", collection_name);
 
     let return_type = GqlType::list(GqlType::named(collection_name));
 
     let mut args = cursor_args();
+    // `docID` (singular) matches Go's `request.DocIDArgName` for client parity.
     args.push(GqlArg::new(
-        "docIDs",
+        "docID",
         GqlType::list(GqlType::non_null(GqlType::id())),
     ));
     args.push(GqlArg::new("cid", GqlType::string()));
     args.push(GqlArg::new("filter", GqlType::named(filter_type_name)));
-    args.push(GqlArg::new(
-        "groupBy",
-        GqlType::list(GqlType::non_null(GqlType::named(group_by_type_name))),
-    ));
     args.push(GqlArg::new(
         "order",
         GqlType::list(GqlType::named(order_type_name)),
@@ -205,12 +205,16 @@ mod tests {
         // Has other standard collection args
         assert!(find_arg(&field, "filter").is_some(), "filter arg missing");
         assert!(find_arg(&field, "order").is_some(), "order arg missing");
-        assert!(find_arg(&field, "docIDs").is_some(), "docIDs arg missing");
+        assert!(find_arg(&field, "docID").is_some(), "docID arg missing");
         assert!(find_arg(&field, "cid").is_some(), "cid arg missing");
-        assert!(find_arg(&field, "groupBy").is_some(), "groupBy arg missing");
         assert!(
             find_arg(&field, "showDeleted").is_some(),
             "showDeleted arg missing"
+        );
+        // groupBy intentionally absent — see gen_cursor_collection_field doc.
+        assert!(
+            find_arg(&field, "groupBy").is_none(),
+            "groupBy must not be present (references an undefined SDL enum type)"
         );
 
         // Must NOT have limit or offset

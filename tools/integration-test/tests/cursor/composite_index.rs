@@ -314,7 +314,7 @@ async fn rust_unique_composite_prefix_falls_back_to_slow_path() {
 /// This test closes the gap flagged in PR#961 round-3: the previous test only exercised page 1
 /// (no cursor token) and never reached the fallback branch.
 #[tokio::test]
-async fn rust_unique_composite_prefix_after_returns_slow_path_error() {
+async fn rust_unique_composite_prefix_after_paginates_via_slow_path() {
     let cluster = integration_test::TestCluster::builder()
         .rust_nodes(1)
         .build()
@@ -332,7 +332,7 @@ async fn rust_unique_composite_prefix_after_returns_slow_path_error() {
     )
     .await;
 
-    // Page 1 succeeds — no cursor token means no boundary comparison.
+    // Page 1 — no cursor token, returns the first row in age order.
     let p1: Value = node
         .query(
             r#"{ _cursor {
@@ -341,24 +341,28 @@ async fn rust_unique_composite_prefix_after_returns_slow_path_error() {
         } }"#,
         )
         .expect("page 1 unique composite prefix");
+    assert_eq!(p1["_cursor"]["User"][0]["name"], Value::String("alice".into()));
     let end_cursor = p1["_cursor"]["_pageInfo"]["endCursor"]
         .as_str()
         .expect("endCursor present")
         .to_string();
 
-    // Page 2 with `after`: planner falls back to slow path (unique composite prefix),
-    // slow path sees ORDER BY age (non-docID) + a cursor token → errors with actionable message.
-    let err = node
+    // Page 2 with `after`: the unique-composite-prefix cursor uses the slow path
+    // (seek not applicable for a partial index prefix). The slow path locates the
+    // boundary by exact docID equality and relies on the order node's ordering —
+    // matching Go's drain fallback — so it returns the NEXT row, not an error.
+    let p2: Value = node
         .query(&format!(
             r#"{{ _cursor {{
-            User(first: 1, after: "{end_cursor}", order: [{{age: ASC}}]) {{ name }}
+            User(first: 1, after: "{end_cursor}", order: [{{age: ASC}}]) {{ name age }}
         }} }}"#
         ))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("cursor slow path") || err.contains("does not support non-docID ordering"),
-        "expected actionable slow-path error on page 2 of unique composite prefix cursor, got: {err}"
+        .expect("page 2 unique composite prefix slow-path pagination");
+    assert_eq!(
+        p2["_cursor"]["User"][0]["name"],
+        Value::String("bob".into()),
+        "page 2 must continue past alice to bob, got: {}",
+        p2["_cursor"]["User"]
     );
 }
 
