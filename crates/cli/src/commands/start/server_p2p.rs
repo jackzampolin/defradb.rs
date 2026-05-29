@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use p2p::P2PTransport;
 
 type WireDocumentAcp = Option<Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>>;
+type WireKms = Option<Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Send>>;
 
 async fn set_persisted_replicator_status<S: storage::corekv::Store>(
     peerstore: &storage::stores::Peerstore<S>,
@@ -52,6 +53,17 @@ pub(super) struct P2PSetup {
     /// Hook for forwarding committed `/tx` writes to P2P peers. `Some` when the
     /// P2P stack is up; `None` for the non-P2P fallback path.
     pub(super) txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>>,
+    /// Type-erased KMS transport for this node's P2P system. server.rs adds it
+    /// to the DefraKms transports list and installs the serve handler. `None`
+    /// on the non-P2P fallback path.
+    pub(super) kms_transport: Option<Arc<dyn kms::KeyTransport>>,
+    /// Defers wiring the late-built KMS into the inner merge handler (mirrors
+    /// `wire_merge_acp`). NAC/document_acp aren't available when the P2P system
+    /// is created, so the KMS is built later in server.rs.
+    pub(super) wire_kms: WireKms,
+    /// This node's transport-level peer id (stringified). server.rs binds it
+    /// into the KMS so served ECIES replies carry the correct AAD peer id.
+    pub(super) local_peer_id: String,
 }
 
 impl Node {
@@ -99,6 +111,9 @@ impl Node {
             wire_merge_acp: None,
             wire_doc_pusher_acp: None,
             txn_broadcaster: None,
+            kms_transport: None,
+            wire_kms: None,
+            local_peer_id: String::new(),
         }
     }
 
@@ -147,6 +162,21 @@ impl Node {
         let coordinator = Arc::new(coordinator);
         let coordinator_for_acp = coordinator.clone();
 
+        // Build the KMS pubsub transport and install it on the coordinator so
+        // raw gossip on the encryption topic is routed to it (mirrors
+        // crates/embedded/src/node_p2p.rs::setup_libp2p).
+        let kms_transport =
+            p2p::kms::PubsubKeyTransport::new(p2p::Libp2pTransport::new(handle.clone()))
+                .await
+                .map_err(|e| Error::Server(format!("failed to create KMS transport: {e}")))?;
+        coordinator.install_kms_transport(kms_transport.clone());
+        let local_peer_id = {
+            use p2p::transport::P2PTransport;
+            p2p::Libp2pTransport::new(handle.clone())
+                .local_peer_id()
+                .to_string()
+        };
+
         match db_merge::load_persisted_collections(&coordinator).await {
             Ok(count) => {
                 if count > 0 {
@@ -172,6 +202,7 @@ impl Node {
         );
         let merge_handler_for_loop = replication.merge_handler.clone();
         let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();
+        let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
         let broadcast_mutator = replication.broadcast_mutator.clone();
         let merge_handler_for_acp = replication.merge_handler.clone();
         let txn_broadcaster = replication.txn_broadcaster.clone();
@@ -481,6 +512,11 @@ impl Node {
                 doc_pusher_for_acp.set_document_acp(acp);
             })),
             txn_broadcaster: Some(txn_broadcaster),
+            kms_transport: Some(kms_transport as Arc<dyn kms::KeyTransport>),
+            wire_kms: Some(Box::new(move |kms| {
+                merge_handler_inner_for_kms.set_kms(kms);
+            })),
+            local_peer_id,
         })
     }
 
@@ -538,6 +574,15 @@ impl Node {
         let coordinator = Arc::new(coordinator);
         let coordinator_for_acp = coordinator.clone();
 
+        // Build the KMS pubsub transport and install it on the coordinator so
+        // raw gossip on the encryption topic is routed to it (mirrors
+        // crates/embedded/src/node_p2p.rs::setup_iroh).
+        let local_peer_id = transport.local_peer_id().to_string();
+        let kms_transport = p2p::kms::PubsubKeyTransport::new(transport.clone())
+            .await
+            .map_err(|e| Error::Server(format!("failed to create KMS transport: {e}")))?;
+        coordinator.install_kms_transport(kms_transport.clone());
+
         match db_merge::load_persisted_collections(&coordinator).await {
             Ok(count) => {
                 if count > 0 {
@@ -563,6 +608,7 @@ impl Node {
         );
         let merge_handler_for_loop = replication.merge_handler.clone();
         let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();
+        let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
         let broadcast_mutator = replication.broadcast_mutator.clone();
         let merge_handler_for_acp = replication.merge_handler.clone();
         let txn_broadcaster = replication.txn_broadcaster.clone();
@@ -827,6 +873,11 @@ impl Node {
             wire_doc_pusher_acp: Some(Box::new(move |acp| {
                 doc_pusher_for_acp.set_document_acp(acp);
             })),
+            kms_transport: Some(kms_transport as Arc<dyn kms::KeyTransport>),
+            wire_kms: Some(Box::new(move |kms| {
+                merge_handler_inner_for_kms.set_kms(kms);
+            })),
+            local_peer_id,
         })
     }
 

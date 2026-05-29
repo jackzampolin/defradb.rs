@@ -2143,6 +2143,7 @@ dependencies = [
  "identity",
  "iroh",
  "keyring 0.5.0",
+ "kms",
  "lens",
  "libipld",
  "libp2p",

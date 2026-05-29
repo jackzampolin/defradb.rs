@@ -24,6 +24,11 @@ impl NacAdapter {
     pub fn new_arc(nac: Arc<dyn NacManagerApi>) -> Arc<dyn NodeAcpOperations> {
         Arc::new(Self::new(nac))
     }
+
+    /// The underlying NAC manager. Used to build the KMS `NodeAcpRead` bridge.
+    pub fn nac_manager(&self) -> Arc<dyn NacManagerApi> {
+        self.nac.clone()
+    }
 }
 
 #[async_trait]
