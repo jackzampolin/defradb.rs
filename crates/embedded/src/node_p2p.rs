@@ -159,11 +159,18 @@ where
         tracing::warn!(error = %error, "failed to start pubsub_rpc services");
     }
 
+    // SE query correlator: lets this node serve as an SE replicator and route
+    // any inbound replies. The embedded querier (owner) transport is not wired
+    // here because the SE key is provisioned at runtime via set_se_options, not
+    // at setup; embedded nodes acting as queriers is not yet supported (#976).
+    let se_correlator = p2p::SeQueryCorrelator::new();
     let host_event_task = spawn_libp2p_event_handler(
         event_rx,
         coordinator.clone(),
         store.clone(),
         event_bus.clone(),
+        handle.clone(),
+        se_correlator,
     );
     let replication_task = spawn_replication_loop(
         coordinator.clone(),
@@ -317,11 +324,13 @@ where
         Err(error) => tracing::warn!(error = %error, "failed to load persisted P2P collections"),
     }
 
+    let se_correlator = p2p::SeQueryCorrelator::new();
     let event_handler_task = spawn_iroh_event_handler(
         event_rx,
         coordinator.clone(),
         store.clone(),
         event_bus.clone(),
+        se_correlator,
     );
     let replication_task = spawn_replication_loop(
         coordinator.clone(),

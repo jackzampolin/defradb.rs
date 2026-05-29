@@ -37,7 +37,9 @@ pub struct PendingSeQuery {
 impl PendingSeQuery {
     /// Await the reply for this query. Returns `Err` if the slot was cancelled
     /// (sender dropped) before a reply arrived.
-    pub async fn recv(&mut self) -> std::result::Result<QuerySEArtifactsReply, oneshot::error::RecvError> {
+    pub async fn recv(
+        &mut self,
+    ) -> std::result::Result<QuerySEArtifactsReply, oneshot::error::RecvError> {
         (&mut self.receiver).await
     }
 }

@@ -360,13 +360,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .await
                 .map_err(QueryError::execution)?;
 
-            let filtered_ids = Self::filter_ids_by_acp(
-                &ids,
-                self.acp.as_ref(),
-                &collection,
-                caller_identity,
-            )
-            .await;
+            let filtered_ids =
+                Self::filter_ids_by_acp(&ids, self.acp.as_ref(), &collection, caller_identity)
+                    .await;
 
             return Ok(serde_json::json!([{"docIDs": filtered_ids}]));
         }

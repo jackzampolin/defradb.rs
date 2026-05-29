@@ -64,6 +64,10 @@ pub(super) struct P2PSetup {
     /// This node's transport-level peer id (stringified). server.rs binds it
     /// into the KMS so served ECIES replies carry the correct AAD peer id.
     pub(super) local_peer_id: String,
+    /// SE remote query transport (owner-queries-replicator, #976). `Some` on the
+    /// libp2p path when an SE key is present; `None` for iroh (the SE-query
+    /// send path is libp2p-only) and the non-P2P fallback.
+    pub(super) se_transport: Option<Arc<dyn query::SeQueryTransport>>,
 }
 
 impl Node {
@@ -122,6 +126,7 @@ impl Node {
             kms_transport: None,
             wire_kms: None,
             local_peer_id: String::new(),
+            se_transport: None,
         }
     }
 
@@ -147,6 +152,13 @@ impl Node {
             config.net.pubsub_enabled,
         )
         .await?;
+
+        // SE query correlator + replicator registry handle for the
+        // owner-queries-replicator loop (#976). The registry returned by
+        // start_p2p is the same Arc the host updates via create_replicator, so
+        // it reflects live `p2p replicator set` calls.
+        let se_correlator = p2p::SeQueryCorrelator::new();
+        let se_replicator_registry = replicator_registry.clone();
 
         let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
         let merge_blockstore = sync_blockstore.clone();
@@ -291,6 +303,10 @@ impl Node {
         });
 
         let coordinator_for_events = coordinator.clone();
+        let se_store = store.clone();
+        let se_handle = handle.clone();
+        let se_correlator_for_events = se_correlator.clone();
+        let se_event_bus = event_bus.clone();
         let event_handler_task = Some(tokio::spawn(async move {
             let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
             while let Some(event) = events.recv().await {
@@ -327,7 +343,46 @@ impl Node {
                     _ => {}
                 }
 
-                let transport_event = p2p::convert_host_event(event);
+                // Intercept SE events: the CLI must store inbound artifacts and
+                // serve/route SE queries itself (the coordinator does not). #976.
+                let transport_event = match p2p::convert_host_event(event) {
+                    p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
+                        let doc_ids = db_merge::se::serve::handle_artifacts_received(
+                            se_store.as_ref(),
+                            &peer_id.to_string(),
+                            &data,
+                        )
+                        .await;
+                        for doc_id in doc_ids {
+                            se_event_bus.publish(events::Message::se_artifact_received(
+                                events::SEArtifactReceivedData { doc_id },
+                            ));
+                        }
+                        continue;
+                    }
+                    p2p::TransportEvent::SEQueryRequest { peer_id, request } => {
+                        match peer_id.as_str().parse::<libp2p::PeerId>() {
+                            Ok(pid) => {
+                                db_merge::se::serve::handle_query_request(
+                                    se_store.as_ref(),
+                                    &se_handle,
+                                    pid,
+                                    request,
+                                )
+                                .await;
+                            }
+                            Err(e) => {
+                                warn!(peer_id = %peer_id, error = %e, "invalid SE query peer id");
+                            }
+                        }
+                        continue;
+                    }
+                    p2p::TransportEvent::SEQueryReply { reply, .. } => {
+                        se_correlator_for_events.deliver(reply);
+                        continue;
+                    }
+                    other => other,
+                };
                 if transport_event.requires_inline_ordering() {
                     if let Err(e) = coordinator_for_events
                         .handle_transport_event(transport_event)
@@ -518,6 +573,19 @@ impl Node {
         );
         adapter.set_initial_tracked_documents(restored_doc_ids);
 
+        // Build the SE remote query transport (owner-queries-replicator, #976).
+        // Identity is None to match the write side (server_p2p SE options use
+        // identity_pubkey: None), so write-tags and query-tags agree.
+        let se_transport: Option<Arc<dyn query::SeQueryTransport>> = se_key.map(|key| {
+            Arc::new(db_merge::DbMergeSeQueryTransport::new(
+                handle.clone(),
+                se_correlator,
+                se_replicator_registry,
+                key,
+                None,
+            )) as Arc<dyn query::SeQueryTransport>
+        });
+
         info!("P2P sync coordinator initialized");
 
         Ok(P2PSetup {
@@ -552,6 +620,7 @@ impl Node {
                 merge_handler_inner_for_kms.set_kms(kms);
             })),
             local_peer_id,
+            se_transport,
         })
     }
 
@@ -938,6 +1007,9 @@ impl Node {
                 merge_handler_inner_for_kms.set_kms(kms);
             })),
             local_peer_id,
+            // SE remote query uses the libp2p two-stream send path; iroh does
+            // not wire it, so encrypted queries fall back to local plaintext.
+            se_transport: None,
         })
     }
 

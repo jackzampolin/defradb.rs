@@ -250,6 +250,7 @@ impl Node {
             nac_adapter.clone(),
             p2p_setup.mutator.clone(),
             p2p_setup.txn_broadcaster.clone(),
+            p2p_setup.se_transport.take(),
         );
 
         let txn_cleanup_task = if config.api.transaction_idle_timeout > 0 {

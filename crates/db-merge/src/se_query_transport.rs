@@ -60,10 +60,9 @@ impl DbMergeSeQueryTransport {
         eq_conditions: Vec<(String, JsonValue)>,
     ) -> std::result::Result<Vec<SEFieldQuery>, String> {
         let coordinator = match &self.identity_pubkey {
-            Some(pubkey) => SECoordinator::with_key_and_identity(
-                self.enc_key.to_vec(),
-                pubkey.clone(),
-            ),
+            Some(pubkey) => {
+                SECoordinator::with_key_and_identity(self.enc_key.to_vec(), pubkey.clone())
+            }
             None => SECoordinator::with_key(self.enc_key.to_vec()),
         };
 
@@ -146,7 +145,10 @@ impl query::SeQueryTransport for DbMergeSeQueryTransport {
                 }
             };
 
-            match self.query_one(peer_id, collection_id, queries.clone()).await {
+            match self
+                .query_one(peer_id, collection_id, queries.clone())
+                .await
+            {
                 Ok(doc_ids) => return Ok(doc_ids),
                 Err(e) => {
                     tracing::debug!(peer_id = %peer_id, error = %e, "SE query to replicator failed");

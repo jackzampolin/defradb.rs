@@ -24,11 +24,14 @@ impl Drop for BackgroundTasks {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
     mut events: tokio::sync::mpsc::Receiver<p2p::HostEvent>,
     coordinator: Arc<p2p::sync::Libp2pSyncCoordinator<B>>,
     store: Arc<impl storage::corekv::Store + 'static>,
     event_bus: Arc<dyn events::Bus>,
+    handle: p2p::P2PHostHandle,
+    se_correlator: p2p::SeQueryCorrelator,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
@@ -66,6 +69,22 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
                     .await;
                     continue;
                 }
+                p2p::TransportEvent::SEQueryRequest { peer_id, request } => {
+                    if let Ok(pid) = peer_id.as_str().parse::<libp2p::PeerId>() {
+                        db_merge::se::serve::handle_query_request(
+                            store.as_ref(),
+                            &handle,
+                            pid,
+                            request,
+                        )
+                        .await;
+                    }
+                    continue;
+                }
+                p2p::TransportEvent::SEQueryReply { reply, .. } => {
+                    se_correlator.deliver(reply);
+                    continue;
+                }
                 other => other,
             };
             if transport_event.requires_inline_ordering() {
@@ -95,6 +114,7 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
     coordinator: Arc<p2p::sync::IrohSyncCoordinator<B>>,
     store: Arc<impl storage::corekv::Store + 'static>,
     event_bus: Arc<dyn events::Bus>,
+    se_correlator: p2p::SeQueryCorrelator,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
@@ -130,6 +150,12 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
                         data,
                     )
                     .await;
+                    continue;
+                }
+                p2p::TransportEvent::SEQueryReply { reply, .. } => {
+                    // SE query SEND is libp2p-only; deliver any inbound reply so a
+                    // correlator slot resolves rather than leaks.
+                    se_correlator.deliver(reply);
                     continue;
                 }
                 other => other,
