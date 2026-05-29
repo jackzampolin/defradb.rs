@@ -1,6 +1,7 @@
-//! Adapters bridging embedded-node types into the KMS trait surface.
+//! Adapters bridging db types into the KMS trait surface.
 //!
-//! Kept out of `crates/kms` so the KMS crate doesn't depend on `db`.
+//! Kept in `crates/db` (not `crates/kms`) so the KMS crate doesn't depend on
+//! `db`. Shared by both the embedded node and the CLI node.
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -9,22 +10,22 @@ use kms::{DocCollectionInfo, DocCollectionLookup, NodeAcpRead};
 
 /// Resolves doc_id → collection via the DB headstore (Go's
 /// `RetrieveCollectionFromDocID` port).
-pub struct EmbeddedDocCollectionLookup<S: storage::corekv::Store + Send + Sync + 'static> {
-    db: Arc<db::DB<S>>,
+pub struct DbDocCollectionLookup<S: storage::corekv::Store + Send + Sync + 'static> {
+    db: Arc<crate::DB<S>>,
 }
 
-impl<S: storage::corekv::Store + Send + Sync + 'static> EmbeddedDocCollectionLookup<S> {
-    pub fn new(db: Arc<db::DB<S>>) -> Self {
+impl<S: storage::corekv::Store + Send + Sync + 'static> DbDocCollectionLookup<S> {
+    pub fn new(db: Arc<crate::DB<S>>) -> Self {
         Self { db }
     }
 }
 
 #[async_trait]
 impl<S: storage::corekv::Store + Send + Sync + 'static> DocCollectionLookup
-    for EmbeddedDocCollectionLookup<S>
+    for DbDocCollectionLookup<S>
 {
     async fn collection_for_doc(&self, doc_id: &str) -> kms::Result<Option<DocCollectionInfo>> {
-        match db::resolve_collection_from_doc_id(&self.db, doc_id).await {
+        match crate::resolve_collection_from_doc_id(&self.db, doc_id).await {
             Ok(Some(info)) => Ok(Some(DocCollectionInfo {
                 collection_id: info.collection_id,
                 policy_id: info.policy_id,
@@ -37,18 +38,18 @@ impl<S: storage::corekv::Store + Send + Sync + 'static> DocCollectionLookup
 }
 
 /// Bridges the node NAC manager into the KMS `NodeAcpRead` trait.
-pub struct EmbeddedNodeAcpRead {
-    nac: Arc<dyn db::NacManagerApi>,
+pub struct DbNodeAcpRead {
+    nac: Arc<dyn crate::NacManagerApi>,
 }
 
-impl EmbeddedNodeAcpRead {
-    pub fn new(nac: Arc<dyn db::NacManagerApi>) -> Self {
+impl DbNodeAcpRead {
+    pub fn new(nac: Arc<dyn crate::NacManagerApi>) -> Self {
         Self { nac }
     }
 }
 
 #[async_trait]
-impl NodeAcpRead for EmbeddedNodeAcpRead {
+impl NodeAcpRead for DbNodeAcpRead {
     async fn check_node_permission(
         &self,
         identity: &identity::Did,

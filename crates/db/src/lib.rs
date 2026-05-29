@@ -76,6 +76,7 @@ pub use event_emission::{TxnBroadcastEvent, TxnBroadcaster};
 // Index manager extracted to standalone db-index crate.
 pub use db_index as index_manager;
 pub(crate) mod json_patch;
+pub mod kms_adapters;
 #[allow(dead_code)]
 pub(crate) mod lens_utils;
 pub(crate) mod lensed_auto_commit_fetcher;
@@ -123,6 +124,7 @@ pub use doc_mutator::DbDocMutator;
 pub use downsample::GcDownsampleHistoriesOptions;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
+pub use kms_adapters::{DbDocCollectionLookup, DbNodeAcpRead};
 pub use lensed_auto_commit_fetcher::LensedAutoCommitFetcher;
 pub use lensed_fetcher::LensedDocFetcher;
 pub use schema_loader::{

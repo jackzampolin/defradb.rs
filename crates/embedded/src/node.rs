@@ -425,13 +425,10 @@ where
     // initialize here).
     let kms: Arc<dyn kms::KmsService> = {
         let store: Arc<dyn kms::KeyStore> = Arc::new(kms::MemoryKeyStore::new());
-        let doc_lookup: Arc<dyn kms::DocCollectionLookup> = Arc::new(
-            crate::kms_adapters::EmbeddedDocCollectionLookup::new(database.clone()),
-        );
+        let doc_lookup: Arc<dyn kms::DocCollectionLookup> =
+            Arc::new(db::DbDocCollectionLookup::new(database.clone()));
         let policy = Arc::new(kms::NacDacPolicy::new(document_acp.clone(), doc_lookup));
-        policy.set_node_acp(Arc::new(crate::kms_adapters::EmbeddedNodeAcpRead::new(
-            nac_manager.clone(),
-        )));
+        policy.set_node_acp(Arc::new(db::DbNodeAcpRead::new(nac_manager.clone())));
 
         // Node identity for the wire `identity` fallback on gossip-initiated
         // fetches. Anonymous nodes use a stable placeholder DID.
