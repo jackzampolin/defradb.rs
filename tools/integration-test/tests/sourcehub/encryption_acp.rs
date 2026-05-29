@@ -104,8 +104,13 @@ async fn wait_for_names(
 }
 
 /// Build a 2-node SourceHub + encryption + libp2p cluster, deploy `POLICY`
-/// + the Users schema on both nodes, wire node0 -> node1 replication, and
-/// return `(cluster, policy_id, node0_id, node1_id)`.
+/// + the Users schema on both nodes, and return `(cluster, policy_id, ids)`.
+///
+/// This deliberately does NOT wire node0 -> node1 replication. Callers connect
+/// node1 explicitly via [`connect_and_replicate`] at the point they want the
+/// doc to start syncing — this lets the positive test grant the on-chain
+/// `reader` relations BEFORE node1 ever sees the encrypted block, mirroring
+/// Go's grant-then-`WaitForSync` ordering (peer_acp_test.go).
 ///
 /// `node0` is the SourceHub-signing owner (its identity is funded at genesis);
 /// `node1` runs under its own distinct DID so granting *that* DID `reader` is
@@ -149,12 +154,11 @@ async fn setup_two_nodes() -> (TestCluster, String, NodeIds) {
     c1.schema_add_with_identity(&schema, &node0.private_key_hex)
         .expect("schema on node1");
 
-    let addr1 = extract_p2p_addr(&cluster, 1);
-    c0.p2p_connect(&[&addr1]).expect("connect");
+    // Collections are registered for P2P on both nodes here; the actual
+    // connection + replicator (which starts the push of the encrypted DAG to
+    // node1) is deferred to `connect_and_replicate` so callers control timing.
     c0.p2p_collection_add(&["Users"]).expect("col add node0");
     c1.p2p_collection_add(&["Users"]).expect("col add node1");
-    c0.p2p_replicator_set_with_identity(&["Users"], &addr1, &node0.private_key_hex)
-        .expect("set replicator");
 
     (
         cluster,
@@ -171,6 +175,18 @@ struct NodeIds {
     node0_key: String,
     node1_key: String,
     node1_did: String,
+}
+
+/// Connect node0 -> node1 and set node0's replicator so the (already-created,
+/// already-granted) encrypted DAG starts pushing to node1. Call this only AFTER
+/// the relevant `reader` grants are durable on-chain so node1's KMS fetch is
+/// served against an already-registered, already-authorized document.
+fn connect_and_replicate(cluster: &TestCluster, node0_key: &str) {
+    let addr1 = extract_p2p_addr(cluster, 1);
+    let c0 = cluster.client(0);
+    c0.p2p_connect(&[&addr1]).expect("connect");
+    c0.p2p_replicator_set_with_identity(&["Users"], &addr1, node0_key)
+        .expect("set replicator");
 }
 
 /// Port: TestDocEncryptionACP_IfUserAndNodeHaveAccess_ShouldFetch
@@ -200,11 +216,22 @@ async fn encryption_acp_user_and_node_access() {
         .expect("_docID")
         .to_string();
 
-    // Grant reader to the user (user-gate) and to node1's DID (node-gate).
+    // Grant reader to the user (user-gate) and to node1's DID (node-gate)
+    // BEFORE node1 is connected. `acp_relationship_add` shells out to the CLI,
+    // which submits the SourceHub grant tx and returns once it is committed, so
+    // both grants are durable on-chain by the time we connect node1 below.
+    // This mirrors Go's grant-then-`WaitForSync` ordering (peer_acp_test.go):
+    // node1 only ever sees the encrypted block AFTER its `reader` grant exists,
+    // so node0's KMS serve-gate authorizes the DEK fetch on the first attempt
+    // (the Rust receiving node decrypts eagerly-once at merge and has no
+    // late-grant retry, so the grant MUST precede the block).
     c0.acp_relationship_add("Users", &doc_id, "reader", &user.did, &ids.node0_key)
         .expect("grant user reader");
     c0.acp_relationship_add("Users", &doc_id, "reader", &ids.node1_did, &ids.node0_key)
         .expect("grant node1 reader");
+
+    // Only now wire replication so the doc syncs to node1 with grants in place.
+    connect_and_replicate(&cluster, &ids.node0_key);
 
     // The user on node1 should eventually see the decrypted doc.
     let names = wait_for_names(
@@ -228,26 +255,16 @@ async fn encryption_acp_user_and_node_access() {
 /// the DEK (node-gate denies), so the user — even with a query-gate grant —
 /// sees nothing, and node1 has no commit blocks for the doc.
 ///
-/// IGNORED — exposes a real registration/broadcast race in the create path
-/// (issue #976, KMS dual-gate). When node0 creates an encrypted doc on a
-/// policied collection, the doc's block is broadcast to replicators (~0.1s)
-/// BEFORE the SourceHub doc-object registration completes (~4.5s, a chain tx).
-/// During that window the doc is unregistered, so the DAC gate treats it as
-/// public and releases the DEK to node1 regardless of node1's (lack of)
-/// `reader` grant. node1 then decrypts and the user sees the doc.
-///
-/// Diagnosed via KMS serve-gate tracing: node0's `check_doc_access(node1_did)`
-/// returns `allowed=true` at the moment of the fetch because the doc-object is
-/// not yet registered on SourceHub (logs: serve at +0.1s, "ACP document
-/// registration completed elapsed=4.5s" at +4.5s). The fix requires sequencing
-/// the encrypted-doc P2P broadcast AFTER ACP registration in the mutation
-/// pipeline (crates/query/src/runner/mutation.rs::execute_single_mutation),
-/// which is out of scope for this test-porting change. The two DEK-leak fixes
-/// in this branch (CAR + push-replay encryption-link exclusion) are necessary
-/// but not sufficient to close this race.
+/// This now passes with the DEK-leak fix (#976): node0 registers the encrypted
+/// doc on SourceHub *before* the detached P2P broadcast fires (the broadcast
+/// mutator's pre-broadcast registration is now wired via
+/// `crates/cli/src/commands/start/server_p2p.rs`), so there is no
+/// unregistered-window leak. With the doc registered and node1 never granted
+/// `reader`, node0's KMS serve-gate denies the DEK fetch and node1 cannot
+/// decrypt the replicated block. The grant-before-connect ordering below keeps
+/// the on-chain state settled before node1 ever sees the doc.
 #[tokio::test]
 #[serial_test::serial]
-#[ignore = "registration/broadcast race in create path leaks DEK before SourceHub doc-object registration (#976); needs mutation-pipeline reordering"]
 async fn encryption_acp_user_access_not_node() {
     let (cluster, _policy_id, ids) = setup_two_nodes().await;
 
@@ -268,9 +285,14 @@ async fn encryption_acp_user_access_not_node() {
         .expect("_docID")
         .to_string();
 
-    // Only the user gets reader; node1's DID does NOT.
+    // Only the user gets reader; node1's DID does NOT. Grant before connecting
+    // node1 so the on-chain state is settled when the block replicates.
     c0.acp_relationship_add("Users", &doc_id, "reader", &user.did, &ids.node0_key)
         .expect("grant user reader");
+
+    // Now wire replication. node1 receives the ciphertext DAG but its KMS DEK
+    // fetch is denied by node0's serve-gate (node1 has no `reader` grant).
+    connect_and_replicate(&cluster, &ids.node0_key);
 
     // Give replication + (failed) key-fetch a chance to settle.
     tokio::time::sleep(Duration::from_secs(8)).await;
@@ -302,15 +324,17 @@ async fn encryption_acp_user_access_not_node() {
 /// entitled to (encrypted+shared, plaintext+shared, encrypted+public,
 /// plaintext+public) and NOT the 2 private-unshared docs.
 ///
-/// IGNORED — same registration/broadcast race as `encryption_acp_user_access_not_node`
-/// (issue #976). The 2 private-unshared docs leak their DEK to node1 during the
-/// ~4.5s SourceHub doc-object registration window (verified: node1 stored all 6
-/// docs instead of 4). The DEK gate is bypassed because the docs are
-/// momentarily unregistered when node1 fetches their keys. Closing this needs
-/// the same mutation-pipeline reordering (register before broadcast).
+/// IGNORED — blocked by a SourceHub-harness single-signer funding limitation
+/// (not the DEK-leak race, which is now fixed in #976). This test queries node1
+/// AS node1's own DID (`ids.node1_key`); on the merge side node1 must register
+/// the received docs against its own SourceHub account, but the devnet genesis
+/// funds only the single cluster-wide signer (node0). node1's account is
+/// "not found" on-chain, so it cannot sign its merge-side ACP registration.
+/// Supporting this needs per-node genesis funding in the SourceHub harness
+/// (defra-harness / sourcehub-harness, a separate backbone repo).
 #[tokio::test]
 #[serial_test::serial]
-#[ignore = "registration/broadcast race leaks DEK for private-unshared docs before SourceHub registration (#976); needs mutation-pipeline reordering"]
+#[ignore = "SourceHub harness funds only one account (node0); node1 cannot sign its merge-side ACP doc registration (account not found) — single-signer harness funding limitation, not the DEK-leak race (#976)"]
 async fn encryption_acp_node_partial_access() {
     let (cluster, _policy_id, ids) = setup_two_nodes().await;
 
@@ -385,6 +409,9 @@ async fn encryption_acp_node_partial_access() {
     // plaintext, public -> Shahzad
     let _shahzad = public_create("Shahzad", false);
 
+    // Grants are now durable on-chain; wire replication so node1 starts syncing.
+    connect_and_replicate(&cluster, &ids.node0_key);
+
     // node1 queries as itself. The node-identity full-access shortcut means
     // node1 sees everything it physically *has*; the gating happened at sync /
     // key-fetch time, so it ends up with exactly the 4 entitled docs.
@@ -414,22 +441,19 @@ async fn encryption_acp_node_partial_access() {
 /// down. node1 is then granted `reader`. Because the only node that can serve
 /// the DEK is offline, node1's key fetch cannot complete and the query is empty.
 ///
-/// IGNORED for two reasons:
-///   1. Registration/broadcast race (issue #976, same as the other two): node1
-///      grabs the DEK in the ~0.1s after doc creation — while node0 is still up
-///      and before SourceHub registration — so node1 already holds the key
-///      before node0 is shut down, defeating the "server offline" assertion.
-///   2. Harness funding limitation: the Go original issues the post-shutdown
-///      grant from node1's client as `NodeIdentity(0)`. In the Rust harness the
-///      SourceHub cosmos signer is the node's *startup* identity, and the
-///      devnet genesis funds only the single cluster-wide identity (node0).
-///      node1/node2 cannot sign a SourceHub grant tx, so the post-shutdown
-///      grant (which must be signed while node0 is offline) cannot be issued
-///      by any online node. Supporting this needs per-node genesis funding in
-///      the SourceHub harness (defra-harness/sourcehub-harness, a separate repo).
+/// IGNORED — blocked by a SourceHub-harness single-signer funding limitation
+/// (the DEK-leak race is now fixed in #976). The Go original issues the
+/// post-shutdown grant from node1's client as `NodeIdentity(0)`. In the Rust
+/// harness the SourceHub cosmos signer is the node's *startup* identity, and the
+/// devnet genesis funds only the single cluster-wide identity (node0). node1's
+/// own account is "not found" on-chain, so node1 cannot sign its merge-side ACP
+/// registration, and once node0 (the only funded signer AND the only DEK holder)
+/// is shut down there is no online node able to issue the post-shutdown grant.
+/// Supporting this needs per-node genesis funding in the SourceHub harness
+/// (defra-harness / sourcehub-harness, a separate backbone repo).
 #[tokio::test]
 #[serial_test::serial]
-#[ignore = "registration/broadcast race (#976) + harness funds only one SourceHub account (cannot grant from an online node after node0 shutdown)"]
+#[ignore = "SourceHub harness funds only one account (node0); node1 cannot sign its merge-side ACP registration or a post-shutdown grant (account not found) — single-signer harness funding limitation, not the DEK-leak race (#976)"]
 async fn encryption_acp_server_not_available() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
