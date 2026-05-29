@@ -317,6 +317,7 @@ pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
 
     /// KMS pubsub transport. Set by the embedded-node layer when a transport
     /// that supports raw gossip is in use. Left empty otherwise.
+    #[cfg(feature = "libp2p-transport")]
     pub(super) kms_transport: std::sync::OnceLock<Arc<crate::kms::PubsubKeyTransport<T>>>,
 
     /// Pubsub_rpc DocSync/BranchableSync services (#828). `None` on
@@ -332,6 +333,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     /// Install the KMS pubsub transport. First-call-wins (OnceLock semantics);
     /// subsequent calls are silently discarded.
+    #[cfg(feature = "libp2p-transport")]
     pub fn install_kms_transport(&self, transport: Arc<crate::kms::PubsubKeyTransport<T>>) {
         let _ = self.kms_transport.set(transport);
     }

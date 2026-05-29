@@ -187,6 +187,13 @@ impl KmsService for DefraKms {
                         .to_vec();
                     tokio::spawn(async move {
                         while let Some((reply, responder_peer_id)) = rx.recv().await {
+                            tracing::debug!(
+                                responder = %responder_peer_id,
+                                links = reply.links.len(),
+                                blocks = reply.blocks.len(),
+                                resp_eph_len = reply.ephemeral_public_key.len(),
+                                "KMS get_keys: received reply from transport"
+                            );
                             // AAD binds OUR (requester) ephemeral pubkey and the
                             // RESPONDER's peer id, matching the serve side.
                             let aad = crate::ecies_envelope::make_associated_data(
@@ -203,6 +210,10 @@ impl KmsService for DefraKms {
                                 if !remote_set.contains(&cid) {
                                     // Expected case — reply for a CID we
                                     // didn't ask for. Silent skip.
+                                    tracing::debug!(
+                                        cid = %cid,
+                                        "KMS get_keys: reply CID not in requested set; skipping"
+                                    );
                                     continue;
                                 }
                                 let block_bytes = match crate::ecies_envelope::unwrap_with_private(
@@ -252,6 +263,10 @@ impl KmsService for DefraKms {
                                         },
                                     )
                                     .await;
+                                tracing::debug!(
+                                    cid = %cid,
+                                    "KMS get_keys: DEK unwrapped and delivered to caller"
+                                );
                                 let _ = tx.send(Ok((cid, key))).await;
                             }
                         }

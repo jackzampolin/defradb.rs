@@ -20,26 +20,31 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         topic: String,
         data: Vec<u8>,
     ) -> Result<()> {
-        // KMS short-circuit — backend-agnostic. Wire compat with Go requires
-        // bare CBOR on the encryption topic (no InternalResponse envelope), so
-        // route to the KMS transport's dispatcher before the pubsub_rpc path.
-        if topic == crate::topics::ENCRYPTION_TOPIC {
-            if let Some(transport) = self.kms_transport.get() {
-                transport
-                    .dispatch_incoming(
-                        kms::PeerIdentity {
-                            peer_id: propagation_source.to_string(),
-                        },
-                        data,
-                    )
-                    .await;
-            } else {
-                debug!(
-                    topic = %topic,
-                    "KMS message arrived but no KMS transport installed; dropping"
-                );
+        // KMS short-circuit (libp2p only — Go's KMS rides gossipsub). Go layers
+        // the go-libp2p-pubsub-rpc protocol on the `encryption` topic: bare-CBOR
+        // requests on `encryption`, and reply envelopes on the per-peer
+        // `encryption/<caller>/_response` sub-topic. Both must reach the KMS
+        // transport's dispatcher (not the doc-sync/branchable pubsub_rpc path),
+        // so match the base topic and its `_response` sub-topics here.
+        #[cfg(feature = "libp2p-transport")]
+        {
+            let is_kms_base = topic == crate::topics::ENCRYPTION_TOPIC;
+            let is_kms_response = topic
+                .starts_with(&format!("{}/", crate::topics::ENCRYPTION_TOPIC))
+                && topic.ends_with("/_response");
+            if is_kms_base || is_kms_response {
+                if let Some(transport) = self.kms_transport.get() {
+                    transport
+                        .dispatch_incoming(propagation_source.to_string(), topic, data)
+                        .await;
+                } else {
+                    debug!(
+                        topic = %topic,
+                        "KMS message arrived but no KMS transport installed; dropping"
+                    );
+                }
+                return Ok(());
             }
-            return Ok(());
         }
 
         // pubsub_rpc path (libp2p only).

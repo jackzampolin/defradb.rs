@@ -261,7 +261,6 @@ async fn go_rust_kms_interop(writer_idx: usize, reader_idx: usize) {
 /// logging (out of scope: RUST-ONLY) and is beyond the encryption-topic-mesh
 /// scope of #976. See the design/976-kms work and `crates/p2p/src/kms/`.
 #[tokio::test]
-#[ignore = "partially fixed (#976): the `encryption`-topic mesh now forms (Rust waits for a subscriber before publishing; test runs both nodes in dev mode so Go gets a node identity and subscribes to `encryption`, and Rust records the Go peer as a subscriber). REMAINING BLOCKER is downstream of the mesh: the reader's merge blocks in kms.get_keys().wait_all() — no reply arrives from Go's KMS server within the window. Diagnosing whether the request reaches Go's serve handler or Go fails to reply needs Go-side trace logging (out of scope, RUST-ONLY)."]
 async fn go_to_rust_encrypted_p2p_replication() {
     // index 0 = Rust (reader), index 1 = Go (writer)
     go_rust_kms_interop(1, 0).await;
