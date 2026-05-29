@@ -330,14 +330,30 @@ pub enum PushLogGossipPayloadEncoding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(any(feature = "libp2p-transport", feature = "iroh-transport")),
+    allow(dead_code)
+)]
 pub(crate) struct PushLogGossipPayloadDebugInfo {
     pub payload_fingerprint: String,
     pub payload_shape_hint: String,
 }
 
+#[cfg_attr(
+    not(any(feature = "libp2p-transport", feature = "iroh-transport")),
+    allow(dead_code)
+)]
 const GOSSIP_TEXT_PREFIX_CHARS: usize = 48;
+#[cfg_attr(
+    not(any(feature = "libp2p-transport", feature = "iroh-transport")),
+    allow(dead_code)
+)]
 const GOSSIP_PAYLOAD_FINGERPRINT_BYTES: usize = 8;
 
+#[cfg_attr(
+    not(any(feature = "libp2p-transport", feature = "iroh-transport")),
+    allow(dead_code)
+)]
 fn truncated_text_prefix(text: &str) -> String {
     let mut prefix = String::new();
     let mut chars = text.chars();
@@ -353,6 +369,10 @@ fn truncated_text_prefix(text: &str) -> String {
     prefix
 }
 
+#[cfg_attr(
+    not(any(feature = "libp2p-transport", feature = "iroh-transport")),
+    allow(dead_code)
+)]
 fn describe_cbor_value(value: &serde_cbor::Value) -> String {
     match value {
         serde_cbor::Value::Map(entries) => {
@@ -384,6 +404,10 @@ fn describe_cbor_value(value: &serde_cbor::Value) -> String {
     }
 }
 
+#[cfg_attr(
+    not(any(feature = "libp2p-transport", feature = "iroh-transport")),
+    allow(dead_code)
+)]
 fn describe_gossip_payload_shape(payload: &[u8]) -> String {
     if payload.is_empty() {
         return "empty".to_string();
@@ -482,6 +506,10 @@ impl PushLogBroadcast {
         serde_cbor::to_vec(self)
     }
 
+    #[cfg_attr(
+        not(any(feature = "libp2p-transport", feature = "iroh-transport")),
+        allow(dead_code)
+    )]
     pub(crate) fn inspect_gossip_payload(payload: &[u8]) -> PushLogGossipPayloadDebugInfo {
         let digest = Sha256::digest(payload);
         PushLogGossipPayloadDebugInfo {

@@ -41,13 +41,13 @@ pub fn validate_policy_expressions(policy: &ParsedPolicy) -> Result<(), String> 
                             continue;
                         }
 
-                        // Check that the relation exists in this resource
-                        if !resource.has_relation(name) {
+                        // Check that the relation or computed permission exists in this resource.
+                        if !resource.has_relation(name) && !resource.has_permission(name) {
                             // Check if it exists in another resource (cross-resource error)
-                            let exists_elsewhere = policy
-                                .resources
-                                .iter()
-                                .any(|r| r.name != resource.name && r.has_relation(name));
+                            let exists_elsewhere = policy.resources.iter().any(|r| {
+                                r.name != resource.name
+                                    && (r.has_relation(name) || r.has_permission(name))
+                            });
                             if exists_elsewhere {
                                 return Err("resource does not have relation".to_string());
                             }
@@ -290,6 +290,34 @@ resources:
   - name: reader
     types: [actor]
   - name: writer
+    types: [actor]
+"#;
+
+        assert_policy_loads(yaml);
+    }
+
+    #[test]
+    fn test_computed_permission_expression_loads() {
+        let yaml = r#"
+name: computed_permission_reference
+resources:
+- name: site
+  permissions:
+  - name: local_read
+    expr: site_operator + site_manager
+  - name: audit_read
+    expr: local_read + compliance
+  - name: read
+    expr: audit_read
+  - name: update
+    expr: site_manager
+  - name: delete
+  relations:
+  - name: site_operator
+    types: [actor]
+  - name: site_manager
+    types: [actor]
+  - name: compliance
     types: [actor]
 "#;
 

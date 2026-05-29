@@ -2,14 +2,18 @@
 //! pubsub_rpc gossipsub payloads to the appropriate `TopicHandler`.
 
 use blockstore::Blockstore;
-use tracing::{debug, warn};
+use tracing::debug;
+#[cfg(feature = "libp2p-transport")]
+use tracing::warn;
 
 use super::super::SyncCoordinator;
 use crate::error::Result;
+#[cfg(feature = "libp2p-transport")]
 use crate::pubsub_rpc::DeliveryOutcome;
 use crate::transport::{P2PTransport, PeerId};
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
+    #[cfg(feature = "libp2p-transport")]
     pub(super) async fn handle_gossip_raw_message(
         &self,
         propagation_source: PeerId,
@@ -70,5 +74,19 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 Ok(())
             }
         }
+    }
+
+    #[cfg(not(feature = "libp2p-transport"))]
+    pub(super) async fn handle_gossip_raw_message(
+        &self,
+        _propagation_source: PeerId,
+        topic: String,
+        _data: Vec<u8>,
+    ) -> Result<()> {
+        debug!(
+            topic = %topic,
+            "GossipRawMessage received without libp2p transport support; dropping"
+        );
+        Ok(())
     }
 }

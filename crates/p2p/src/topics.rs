@@ -7,6 +7,7 @@
 //! - `{collection_id}`: Collection-specific updates
 //! - `{doc_id}`: Document-specific updates
 
+#[cfg(feature = "libp2p-transport")]
 use libp2p::gossipsub::IdentTopic;
 
 /// Well-known topic for general document synchronization.
@@ -49,6 +50,7 @@ pub enum DefraTopic {
 
 impl DefraTopic {
     /// Convert to libp2p IdentTopic.
+    #[cfg(feature = "libp2p-transport")]
     pub fn to_ident_topic(&self) -> IdentTopic {
         IdentTopic::new(self.topic_string())
     }
@@ -170,6 +172,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "libp2p-transport")]
     fn test_to_ident_topic() {
         let topic = DefraTopic::DocSync;
         let ident = topic.to_ident_topic();

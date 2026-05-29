@@ -156,9 +156,23 @@ jobs:
             needs_go: true
           - suite: iroh
             needs_go: false
+          # #978: re-run the rust integration suite with
+          # DEFRA_MULTIPLIERS=signed-docs so every cluster gets
+          # .with_signing() auto-applied. Catches regressions in
+          # unrelated features that only surface when blocks carry
+          # Signature links (mirrors Go DefraDB PR #4746). Non-blocking
+          # until in-tree .no_signing_multiplier() opt-outs land for
+          # known-incompatible tests; flip continue_on_error to false
+          # once the suite is green.
+          - suite: signed-docs
+            needs_go: false
+            multipliers: signed-docs
+            continue_on_error: true
+    continue-on-error: ${{ matrix.continue_on_error == true }}
     env:
       DEFRA_RUST_BINARY: ${{ github.workspace }}/target/ci/defra
       DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
+      DEFRA_MULTIPLIERS: ${{ matrix.multipliers || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -283,14 +297,14 @@ jobs:
       # Track the underlying harness fix in the backbone repo; this flag
       # is the tactical mitigation.
       - name: Run rust integration tests (serialized — port race)
-        if: matrix.suite == 'rust'
+        if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
           cargo test -p integration-test
           --test basic
           -- --test-threads=1 --skip ::go_
 
       - name: Run rust integration tests (serialized — port race)
-        if: matrix.suite == 'rust'
+        if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
           cargo test -p integration-test
           --test query --test acp --test nac
@@ -299,7 +313,7 @@ jobs:
           -- --test-threads=1 --skip ::go_
 
       - name: Run rust P2P integration tests
-        if: matrix.suite == 'rust'
+        if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
           cargo test -p integration-test
           --test p2p

@@ -12,6 +12,7 @@
 //! path) can round-trip between implementations.
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
+#[cfg(feature = "libp2p-transport")]
 use libp2p::{Multiaddr, PeerId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -163,7 +164,7 @@ impl ReplicatorInfo {
     /// replicator with nothing to replicate, which is never a valid state.
     /// Use [`ReplicatorInfo::from_raw`] when reconstructing from storage or
     /// test fixtures where validation is not desired.
-    pub fn new(peer_id: PeerId, collections: Vec<String>) -> Result<Self, ReplicatorError> {
+    pub fn new(peer_id: impl ToString, collections: Vec<String>) -> Result<Self, ReplicatorError> {
         if collections.is_empty() {
             return Err(ReplicatorError::EmptyCollections);
         }
@@ -194,6 +195,7 @@ impl ReplicatorInfo {
     }
 
     /// Get the peer ID. Returns `None` if the stored ID is not a valid libp2p PeerId.
+    #[cfg(feature = "libp2p-transport")]
     pub fn peer_id(&self) -> Option<PeerId> {
         self.id.parse().ok()
     }
@@ -204,6 +206,7 @@ impl ReplicatorInfo {
     }
 
     /// Try to get the peer ID, returning an error if invalid.
+    #[cfg(feature = "libp2p-transport")]
     pub fn try_peer_id(&self) -> Result<PeerId, ReplicatorError> {
         self.id
             .parse()
@@ -211,6 +214,7 @@ impl ReplicatorInfo {
     }
 
     /// Parsed addresses. Invalid entries are filtered out.
+    #[cfg(feature = "libp2p-transport")]
     pub fn addresses(&self) -> Vec<Multiaddr> {
         self.addresses
             .iter()

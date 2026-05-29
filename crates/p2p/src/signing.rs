@@ -20,9 +20,13 @@
 //! 2. Verify peer ID matches public key
 //! 3. Clear signature, serialize, verify signature
 
+#[cfg(feature = "libp2p-transport")]
 use libp2p::identity::{Keypair, PublicKey};
+#[cfg(feature = "libp2p-transport")]
 use libp2p::PeerId;
-use serde::{de::DeserializeOwned, Serialize};
+#[cfg(feature = "libp2p-transport")]
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
@@ -50,6 +54,7 @@ use crate::protocol::MESSAGE_VERSION;
 /// # Wire Compatibility
 ///
 /// This function matches Go's `signAndSetMetaData` from `message/message.go`.
+#[cfg(feature = "libp2p-transport")]
 pub fn sign_message<M>(keypair: &Keypair, msg: &mut M) -> Result<()>
 where
     M: Message + Serialize,
@@ -115,6 +120,7 @@ where
 /// # Wire Compatibility
 ///
 /// This function matches Go's `verifyMessage` from `message/message.go`.
+#[cfg(feature = "libp2p-transport")]
 pub fn verify_message<M>(msg: &M) -> Result<()>
 where
     M: Message + Serialize + Clone,
@@ -160,6 +166,7 @@ where
 ///
 /// This is a convenience function that clones the message, signs it,
 /// and returns the signed copy.
+#[cfg(feature = "libp2p-transport")]
 pub fn sign_message_cloned<M>(keypair: &Keypair, msg: &M) -> Result<M>
 where
     M: Message + Serialize + Clone + DeserializeOwned,

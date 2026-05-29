@@ -34,7 +34,7 @@ dependencies = [
 [[package]]
 name = "acp-light-client"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#3a95088bc6f32d19e5be43da0ccfd08557c1e7da"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#ac6369450362f5d79d22c5521bbd2015c9872060"
 dependencies = [
  "alloy-primitives",
  "borsh",
@@ -3636,7 +3636,7 @@ dependencies = [
 [[package]]
 name = "defra-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#3a95088bc6f32d19e5be43da0ccfd08557c1e7da"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#ac6369450362f5d79d22c5521bbd2015c9872060"
 dependencies = [
  "eyre",
  "futures",
@@ -5498,7 +5498,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 [[package]]
 name = "hub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#3a95088bc6f32d19e5be43da0ccfd08557c1e7da"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#ac6369450362f5d79d22c5521bbd2015c9872060"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -11863,7 +11863,7 @@ dependencies = [
 [[package]]
 name = "sourcehub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#3a95088bc6f32d19e5be43da0ccfd08557c1e7da"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#ac6369450362f5d79d22c5521bbd2015c9872060"
 dependencies = [
  "cosmrs",
  "eyre",
@@ -12417,7 +12417,7 @@ dependencies = [
 [[package]]
 name = "test-infra"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#3a95088bc6f32d19e5be43da0ccfd08557c1e7da"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#ac6369450362f5d79d22c5521bbd2015c9872060"
 dependencies = [
  "eyre",
  "futures",

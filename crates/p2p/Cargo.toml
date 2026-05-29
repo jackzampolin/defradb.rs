@@ -18,11 +18,11 @@ storage = { path = "../storage" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
 
-# P2P
-libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "request-response", "macros", "tokio", "gossipsub", "kad", "relay", "dns", "quic", "websocket", "memory-connection-limits"] }
-iroh-bitswap = { workspace = true }
-libp2p-stream = { workspace = true }
-multiaddr = { workspace = true }
+# libp2p transport
+libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "request-response", "macros", "tokio", "gossipsub", "kad", "relay", "dns", "quic", "websocket", "memory-connection-limits"], optional = true }
+iroh-bitswap = { workspace = true, optional = true }
+libp2p-stream = { workspace = true, optional = true }
+multiaddr = { workspace = true, optional = true }
 
 # Async
 tokio = { workspace = true, features = ["sync", "rt", "macros", "fs"] }
@@ -52,8 +52,8 @@ libipld = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-rlimit = "0.9"
-sysinfo = "0.29"
+rlimit = { version = "0.9", optional = true }
+sysinfo = { version = "0.29", optional = true }
 
 # Bytes
 bytes = { workspace = true }
@@ -65,7 +65,7 @@ unsigned-varint = "0.8"
 parking_lot = { workspace = true }
 
 # Void type used by libp2p connection-limits behaviour (never emits events)
-void = "1.0.2"
+void = { version = "1.0.2", optional = true }
 
 # Iroh transport (optional)
 iroh = { workspace = true, optional = true }
@@ -77,7 +77,16 @@ blake3 = { version = "1", optional = true }
 
 [features]
 default = []
-test-utils = []
+test-utils = ["libp2p-transport"]
+libp2p-transport = [
+    "dep:iroh-bitswap",
+    "dep:libp2p",
+    "dep:libp2p-stream",
+    "dep:multiaddr",
+    "dep:rlimit",
+    "dep:sysinfo",
+    "dep:void",
+]
 iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-blobs", "dep:iroh-tickets", "dep:rand", "dep:blake3"]
 
 [dev-dependencies]

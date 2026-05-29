@@ -48,7 +48,9 @@ mod constructor;
 pub(crate) mod dag_context;
 pub(crate) mod dag_fetcher;
 mod event_handler;
+#[cfg(feature = "libp2p-transport")]
 mod pubsub_client;
+#[cfg(feature = "libp2p-transport")]
 mod pubsub_services;
 mod replicators;
 mod result_types;
@@ -315,6 +317,7 @@ pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
 
     /// Pubsub_rpc DocSync/BranchableSync services (#828). `None` on
     /// transports whose local peer id isn't a libp2p PeerId (e.g. iroh).
+    #[cfg(feature = "libp2p-transport")]
     pub(super) pubsub_services: Option<pubsub_services::PubsubServices>,
 }
 
@@ -328,6 +331,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     }
 
     pub async fn shutdown(&self) {
+        #[cfg(feature = "libp2p-transport")]
         if let Some(services) = self.pubsub_services.as_ref() {
             services.set_ready(false);
             let cancelled = services.cancel_in_flight();
@@ -363,6 +367,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 }
 
 /// Type alias for SyncCoordinator using the libp2p transport.
+#[cfg(feature = "libp2p-transport")]
 pub type Libp2pSyncCoordinator<B> =
     SyncCoordinator<B, crate::host::libp2p_transport::Libp2pTransport>;
 
