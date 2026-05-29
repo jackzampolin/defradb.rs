@@ -101,10 +101,13 @@ jobs:
 
       # Cover OTel-only tests + a feature-on build of the CLI so the otel
       # path is exercised under CI on every PR. The `metrics` feature build
-      # keeps the metric-exporter code path compiling. Issue #977.
+      # keeps the metric-exporter code path compiling. The cli otel test
+      # spawns a real node against an unreachable collector and asserts the
+      # dedup hint fires exactly once — the regression guard for the SDK's
+      # `internal-logs` feature (Docker-free). Issue #977 / #1004.
       - run: cargo test -p telemetry --features otlp
       - run: cargo test -p telemetry --features metrics
-      - run: cargo build -p cli --features otel
+      - run: cargo test -p cli --features otel --test telemetry_dedup
 
       - name: Cache pre-built binaries
         run: |

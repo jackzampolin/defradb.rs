@@ -29,6 +29,8 @@ use tracing_subscriber::registry::LookupSpan;
 #[cfg(feature = "metrics")]
 use opentelemetry_otlp::MetricExporter;
 #[cfg(feature = "metrics")]
+use opentelemetry_otlp::WithHttpConfig;
+#[cfg(feature = "metrics")]
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 
 use crate::config::TelemetryConfig;
@@ -83,10 +85,22 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
         .with_attribute(KeyValue::new("process.executable.name", executable_name))
         .build();
 
-    let span_exporter = SpanExporter::builder()
-        .with_http()
-        .build()
-        .map_err(|e| InitError::SpanExporter(Box::new(e)))?;
+    // When both signals export (metrics feature on) they share one HTTP
+    // client — one connection pool / TLS context / worker instead of two,
+    // since both target the same OTLP endpoint. Without metrics there's a
+    // single exporter, so the default build keeps the transitive client and
+    // takes no direct reqwest dependency.
+    #[cfg(feature = "metrics")]
+    let http_client = reqwest::blocking::Client::new();
+
+    let span_exporter = {
+        let builder = SpanExporter::builder().with_http();
+        #[cfg(feature = "metrics")]
+        let builder = builder.with_http_client(http_client.clone());
+        builder
+            .build()
+            .map_err(|e| InitError::SpanExporter(Box::new(e)))?
+    };
 
     // Build the meter provider first (when enabled) so the trace provider can
     // take `resource` by value — avoids a clone-then-discard dance on the
@@ -95,6 +109,7 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
     let meter_provider = {
         let metric_exporter = MetricExporter::builder()
             .with_http()
+            .with_http_client(http_client)
             .build()
             .map_err(|e| InitError::MetricExporter(Box::new(e)))?;
         let reader = PeriodicReader::builder(metric_exporter).build();
