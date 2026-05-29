@@ -14,8 +14,10 @@
 //! `FetchEncryptionKeyRequest`/`Reply`, ECIES-wrapped key blocks) and decrypt.
 //! These require the Go KMS binary at `GO_KMS_BINARY`.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
+use integration_test::identity::generate_identity;
 use integration_test::{BinarySource, TestCluster};
 
 /// Path to the Go `defradb` binary built with KMS + the #4778 fix.
@@ -115,11 +117,30 @@ async fn rust_rust_encrypted_p2p_replication() {
 /// With `.rust_nodes(1).go_nodes(1)` the harness assigns index 0 = Rust,
 /// index 1 = Go (Rust nodes are spawned before Go nodes in the builder).
 async fn go_rust_kms_interop(writer_idx: usize, reader_idx: usize) {
+    // Go's KMS pubsub service — which subscribes to the `encryption` topic —
+    // is only created when the node has a *node identity*
+    // (internal/db/p2p/p2p.go: `if nodeIdentity.HasValue()`). The `--identity`
+    // flag sets only the *request* identity, not the node identity; the node
+    // identity comes from the keyring (`getOrCreateIdentity`) or, when the
+    // keyring is disabled, from dev mode's ephemeral identity (cli/start.go).
+    // The harness always launches the Go node with `--no-keyring`, so without
+    // `--development` Go never gets a node identity, never subscribes to
+    // `encryption`, and the Rust requester's publish has zero targets. Dev
+    // mode gives both nodes a node identity. We also mint explicit request
+    // identities so the fetch carries a real DID. Node index 0 = Rust, 1 = Go.
+    let go_binary = Path::new(GO_KMS_BINARY);
+    let rust_identity =
+        generate_identity(go_binary).expect("generate request identity for rust node");
+    let go_identity = generate_identity(go_binary).expect("generate request identity for go node");
+
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .go_nodes(1)
         .with_p2p()
         .with_encryption()
+        .with_development()
+        .with_node_identity(0, rust_identity.private_key_hex)
+        .with_node_identity(1, go_identity.private_key_hex)
         .with_go_binary(BinarySource::Path(GO_KMS_BINARY.into()))
         .build()
         .await
@@ -217,19 +238,30 @@ async fn go_rust_kms_interop(writer_idx: usize, reader_idx: usize) {
 /// encryption link from the Bitswap walk, so the encrypted DAG fully
 /// replicates and the merge is reached.
 ///
-/// STILL IGNORED — second, independent gap: the `defra` CLI binary's P2P
-/// startup (`crates/cli/src/commands/start/server_p2p.rs`) never wires a KMS
-/// service. `DefraKms` construction + `merge_handler.set_kms` +
-/// `coordinator.install_kms_transport` + serve-handler install exist ONLY in
-/// the `embedded` crate (commit 3cede6a1), which the CLI does not use. With no
-/// KMS on the merge handler, `decrypt_block_data` takes the legacy fallback and
-/// fails with "Encryption block <cid> not found" (the enc block is no longer
-/// Bitswap-fetched into the blockstore). Fix requires porting the embedded KMS
-/// wiring into the CLI P2P setup (both libp2p + iroh paths), which pulls in the
-/// `kms` crate, the NAC/DAC policy, and the doc-collection-lookup / node-acp
-/// adapters currently living in `embedded`.
+/// The `encryption`-topic mesh symptom (#976) is FIXED. Two prior gaps are
+/// resolved:
+///   1. Rust-side race: `PubsubKeyTransport::send_request` published the fetch
+///      immediately on a key-miss, before the peer's `encryption` SUBSCRIBE had
+///      propagated, so `flood_publish` had zero targets → InsufficientPeers. It
+///      now waits (bounded) for a known subscriber before publishing.
+///   2. Test config: Go only subscribes to `encryption` when it has a *node
+///      identity* (internal/db/p2p/p2p.go: `if nodeIdentity.HasValue()`), which
+///      under `--no-keyring` requires `--development`. The cluster now runs
+///      both nodes in dev mode with explicit request identities. Go logs
+///      `Adding pubsub topic Topic=encryption` and Rust records the Go peer as
+///      an `encryption` subscriber (`PeerSubscribed`), so the publish now has a
+///      target.
+///
+/// STILL IGNORED — a separate, deeper gap remains downstream of the mesh: the
+/// reader's merge reaches `decrypt_block_data` → `kms.get_keys().wait_all()`,
+/// which blocks for the full test window with no reply ever arriving from the
+/// Go KMS server (no `Document stored`, no `Encryption block not found`). Either
+/// the request does not reach Go's KMS serve handler or Go never publishes a
+/// usable reply on `encryption`. Diagnosing this requires Go-side KMS trace
+/// logging (out of scope: RUST-ONLY) and is beyond the encryption-topic-mesh
+/// scope of #976. See the design/976-kms work and `crates/p2p/src/kms/`.
 #[tokio::test]
-#[ignore = "blocked: Go<->Rust gossipsub `encryption`-topic mesh never forms. CLI KMS wiring is now in place and IS invoked (merge -> decrypt_block_data -> KMS get_keys -> PubsubKeyTransport::send_request), but gossipsub publish_raw to the `encryption` topic fails persistently with InsufficientPeers: the Rust node never records the (subscribed) Go peer as an `encryption` subscriber, so flood_publish has zero targets. Both nodes subscribe to `encryption` (Go: AddPubSubTopic in internal/kms/pubsub.go; Rust: PubsubKeyTransport::new), so this is a subscription-propagation/mesh-formation interop gap in the shared p2p gossipsub layer, NOT a CLI KMS wiring defect. Out of scope for the CLI-wiring task."]
+#[ignore = "partially fixed (#976): the `encryption`-topic mesh now forms (Rust waits for a subscriber before publishing; test runs both nodes in dev mode so Go gets a node identity and subscribes to `encryption`, and Rust records the Go peer as a subscriber). REMAINING BLOCKER is downstream of the mesh: the reader's merge blocks in kms.get_keys().wait_all() — no reply arrives from Go's KMS server within the window. Diagnosing whether the request reaches Go's serve handler or Go fails to reply needs Go-side trace logging (out of scope, RUST-ONLY)."]
 async fn go_to_rust_encrypted_p2p_replication() {
     // index 0 = Rust (reader), index 1 = Go (writer)
     go_rust_kms_interop(1, 0).await;
