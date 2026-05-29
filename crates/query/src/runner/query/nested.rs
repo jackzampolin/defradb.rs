@@ -228,14 +228,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             .unwrap_or(JsonValue::Null),
                     );
                 }
-                let page_info_key = select
-                    .cursor_aliases
-                    .page_info_alias
-                    .as_deref()
-                    .map(String::as_str)
-                    .unwrap_or("_pageInfo")
-                    .to_string();
-                cursor_obj.insert(page_info_key, JsonValue::Object(pageinfo));
+                // Go always renders the literal `_pageInfo` key regardless of any alias.
+                cursor_obj.insert("_pageInfo".to_string(), JsonValue::Object(pageinfo));
             }
             return Ok(JsonValue::Object(cursor_obj));
         }

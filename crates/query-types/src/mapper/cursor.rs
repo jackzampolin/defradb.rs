@@ -45,18 +45,15 @@ impl CursorPageInfoFields {
 /// emit results under the correct keys. The wrapper alias is the alias
 /// (if any) on `_cursor` itself; `select.field.alias` continues to carry
 /// the alias on the inner collection field.
+///
+/// The `_pageInfo` block and its subfields are always emitted under their
+/// canonical names (`_pageInfo`, `hasNext`, etc.) regardless of any alias,
+/// mirroring Go's planner.
 #[derive(Debug, Clone, Default)]
 pub struct CursorAliases {
     /// Alias on `_cursor` (e.g., `{ paged: _cursor { ... } }` => Some("paged")).
     /// None => emit under the literal key `_cursor`.
     pub wrapper_alias: Option<String>,
-    /// Alias on the inner `_pageInfo` selection
-    /// (e.g., `{ _cursor { ... info: _pageInfo { ... } } }` => Some("info")).
-    /// None => emit under the literal key `_pageInfo`.
-    /// Boxed to keep the size of `CursorAliases` (and therefore `Select`)
-    /// minimal; deeply nested non-cursor plans were stack-overflowing when
-    /// `Select` grew beyond ~120 bytes.
-    pub page_info_alias: Option<Box<String>>,
 }
 
 #[cfg(test)]

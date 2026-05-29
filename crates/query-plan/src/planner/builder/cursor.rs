@@ -41,11 +41,13 @@ pub(crate) fn expand_cursor_plan(
     let after = decode_optional(&params.after)?;
     let before = decode_optional(&params.before)?;
 
-    // Determine direction and page size.
-    let (direction, page_size) = if params.is_backward() {
-        (CursorDirection::Backward, params.last.unwrap_or(0))
+    // Determine direction and page limit. A missing `first`/`last` (`None`)
+    // means "no limit" — the CursorNode returns all remaining rows, matching
+    // Go's `cursorNode` which gates its limit on `first/last.HasValue()`.
+    let (direction, limit) = if params.is_backward() {
+        (CursorDirection::Backward, params.last)
     } else {
-        (CursorDirection::Forward, params.first.unwrap_or(0))
+        (CursorDirection::Forward, params.first)
     };
 
     // Configure scan for cursor seek — walks the plan tree to set cursor_seek
@@ -65,7 +67,7 @@ pub(crate) fn expand_cursor_plan(
     Ok(Box::new(CursorNode::new(
         plan,
         direction,
-        page_size,
+        limit,
         after,
         before,
         select.cursor_page_info.clone(),
@@ -436,6 +438,7 @@ mod tests {
         let cursor = Cursor {
             keys,
             doc_id: "bae-test".to_string(),
+            direction: String::new(),
         };
         let order = order_asc("score");
 

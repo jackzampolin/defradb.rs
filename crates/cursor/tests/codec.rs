@@ -18,6 +18,7 @@ fn encode_decode_with_keys() {
     let c = Cursor {
         doc_id: "doc-1".into(),
         keys: keys.clone(),
+        ..Default::default()
     };
 
     let token = c.encode();
@@ -73,6 +74,7 @@ fn keys_serialize_alphabetically() {
     let c = Cursor {
         doc_id: "x".into(),
         keys,
+        ..Default::default()
     };
 
     let token = c.encode();

@@ -314,8 +314,10 @@ async fn rust_backward_last_before_doc_id_desc() {
 }
 
 #[tokio::test]
-async fn rust_page_info_aliases_preserved_in_response() {
-    // PR#961 round-4 P2.2: aliased _pageInfo fields must appear under the alias in the response.
+async fn rust_page_info_field_aliases_are_ignored() {
+    // Go parity: aliases on _pageInfo sub-fields are DISCARDED — the response
+    // always uses canonical names (hasNext/startCursor/...), matching Go's
+    // planner which keys PageInfo() by request.HasNextFieldName etc.
     let (_cluster, node) = setup_indexed_cluster().await;
     seed_users(&node, &[("a", 20), ("b", 30)]).await;
 
@@ -333,20 +335,20 @@ async fn rust_page_info_aliases_preserved_in_response() {
 
     let pi = &result["_cursor"]["_pageInfo"];
     assert!(
-        pi.get("next").is_some(),
-        "aliased hasNext should appear as 'next': {pi}"
+        pi.get("hasNext").is_some(),
+        "canonical 'hasNext' must appear regardless of alias: {pi}"
     );
     assert!(
-        pi.get("hasNext").is_none(),
-        "canonical 'hasNext' must NOT appear when aliased as 'next': {pi}"
+        pi.get("next").is_none(),
+        "alias 'next' must NOT appear (Go discards _pageInfo aliases): {pi}"
     );
     assert!(
-        pi.get("start").is_some(),
-        "aliased startCursor should appear as 'start': {pi}"
+        pi.get("startCursor").is_some(),
+        "canonical 'startCursor' must appear regardless of alias: {pi}"
     );
     assert!(
-        pi.get("startCursor").is_none(),
-        "canonical 'startCursor' must NOT appear when aliased as 'start': {pi}"
+        pi.get("start").is_none(),
+        "alias 'start' must NOT appear (Go discards _pageInfo aliases): {pi}"
     );
     // hasPrev / endCursor were not selected — must be absent.
     assert!(
@@ -360,8 +362,9 @@ async fn rust_page_info_aliases_preserved_in_response() {
 }
 
 #[tokio::test]
-async fn rust_page_info_wrapper_alias_emitted_in_response() {
-    // PR#961 round-5 P2: aliased _pageInfo block must appear under the alias key, not "_pageInfo".
+async fn rust_page_info_block_alias_is_ignored() {
+    // Go parity: an alias on the _pageInfo block is DISCARDED — the block always
+    // renders under the literal "_pageInfo" key (Go uses request.PageInfoFieldName).
     let (_cluster, node) = setup_indexed_cluster().await;
     seed_users(&node, &[("a", 20), ("b", 30)]).await;
 
@@ -376,20 +379,17 @@ async fn rust_page_info_wrapper_alias_emitted_in_response() {
 
     let cursor = &result["_cursor"];
 
-    // The aliased _pageInfo must appear under "info", not "_pageInfo".
+    // The _pageInfo block must render under "_pageInfo", not the alias "info".
     assert!(
-        cursor.get("info").is_some(),
-        "aliased _pageInfo should appear as 'info': {cursor}"
+        cursor.get("_pageInfo").is_some(),
+        "_pageInfo must render under canonical key regardless of alias: {cursor}"
     );
     assert!(
-        cursor.get("_pageInfo").is_none(),
-        "canonical '_pageInfo' must NOT appear when aliased as 'info': {cursor}"
+        cursor.get("info").is_none(),
+        "alias 'info' must NOT appear (Go discards the _pageInfo block alias): {cursor}"
     );
-
-    // And the aliased child fields work too.
-    let info = &cursor["info"];
     assert!(
-        info.get("hasNext").is_some(),
-        "hasNext must be present inside aliased info block: {info}"
+        cursor["_pageInfo"].get("hasNext").is_some(),
+        "hasNext must be present inside the _pageInfo block: {cursor}"
     );
 }
