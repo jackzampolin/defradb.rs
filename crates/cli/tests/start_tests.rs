@@ -17,6 +17,7 @@ fn default_start_args() -> StartArgs {
         pubkeypath: None,
         privkeypath: None,
         no_encryption: None,
+        at_rest_encryption: None,
         no_telemetry: None,
         no_signing: None,
         default_key_type: None,
@@ -124,6 +125,7 @@ fn test_apply_to_config_all_flags() {
         pubkeypath: Some("/path/to/pub.key".to_string()),
         privkeypath: Some("/path/to/priv.key".to_string()),
         no_encryption: Some(true),
+        at_rest_encryption: Some(true),
         no_telemetry: Some(true),
         no_signing: Some(true),
         default_key_type: Some("ed25519".to_string()),
@@ -202,6 +204,7 @@ fn test_apply_to_config_all_flags() {
     assert!(config.datastore.no_signing);
     assert_eq!(config.datastore.default_key_type, "ed25519");
     assert!(config.datastore.no_searchable_encryption);
+    assert!(config.datastore.at_rest_encryption);
     assert_eq!(config.replicator_retry_intervals, vec![10, 20, 30]);
     assert_eq!(config.api.query_timeout, 45);
     assert_eq!(config.api.transaction_idle_timeout, 900);
