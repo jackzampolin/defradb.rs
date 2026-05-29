@@ -166,6 +166,7 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
 pub struct NodeBuilder {
     data_path: Option<PathBuf>,
     config: EmbeddedNodeConfig,
+    at_rest_encryption_key: Option<[u8; 32]>,
 }
 
 impl NodeBuilder {
@@ -217,6 +218,13 @@ impl NodeBuilder {
         self
     }
 
+    /// Enable transparent at-rest value encryption for the storage backend,
+    /// keyed by the given 32-byte AES-256 key. Opt-in; off by default.
+    pub fn with_at_rest_encryption_key(mut self, key: [u8; 32]) -> Self {
+        self.at_rest_encryption_key = Some(key);
+        self
+    }
+
     pub async fn build(mut self) -> Result<EmbeddedNode<EmbeddedStore>> {
         let (store, persistence) = if let Some(path) = self.data_path.take() {
             if let Some(parent) = path.parent() {
@@ -245,16 +253,24 @@ impl NodeBuilder {
             )
             .with_context(|| format!("failed to open redb store at '{}'", path.display()))?;
 
-            (Arc::new(EmbeddedStore::Redb(redb)), Persistence::Persistent)
+            (EmbeddedStore::Redb(redb), Persistence::Persistent)
         } else {
             tracing::info!(
                 storage_backend = "memory",
                 "embedded node starting (ephemeral, no data_path)"
             );
             (
-                Arc::new(EmbeddedStore::Memory(storage::MemoryStore::new())),
+                EmbeddedStore::Memory(storage::MemoryStore::new()),
                 Persistence::Memory,
             )
+        };
+
+        let store = match self.at_rest_encryption_key.take() {
+            Some(key) => {
+                tracing::info!("at-rest encryption enabled (value-only, AES-256-GCM)");
+                Arc::new(store.encrypted(key))
+            }
+            None => Arc::new(store),
         };
 
         self.config.persistence = persistence;

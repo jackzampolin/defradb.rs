@@ -91,6 +91,11 @@ pub struct StartArgs {
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub no_searchable_encryption: Option<bool>,
 
+    /// Enable transparent at-rest value encryption for the storage backend,
+    /// keyed by the keyring `encryption-key`. Default: false.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub at_rest_encryption: Option<bool>,
+
     /// Hex formatted private key used to authenticate with ACP.
     ///
     /// The key type is auto-detected from the key length:
@@ -425,6 +430,9 @@ impl StartArgs {
         }
         if let Some(no_se) = self.no_searchable_encryption {
             config.datastore.no_searchable_encryption = no_se;
+        }
+        if let Some(at_rest) = self.at_rest_encryption {
+            config.datastore.at_rest_encryption = at_rest;
         }
         if let Some(ref intervals) = self.replicator_retry_intervals {
             config.replicator_retry_intervals = intervals.clone();

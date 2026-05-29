@@ -12013,6 +12013,7 @@ dependencies = [
  "chrono",
  "cid 0.10.1",
  "criterion 0.6.0",
+ "crypto",
  "defra-core",
  "document",
  "fjall",
@@ -12036,6 +12037,7 @@ dependencies = [
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "zeroize",
 ]
 
 [[package]]

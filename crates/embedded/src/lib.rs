@@ -204,6 +204,17 @@ impl ManagedP2PSystem {
 pub enum EmbeddedStore {
     Memory(storage::MemoryStore),
     Redb(storage::RedbStore),
+    /// A backend wrapped in transparent at-rest value encryption.
+    Encrypted(Box<storage::encrypted_store::EncryptedStore<EmbeddedStore>>),
+}
+
+impl EmbeddedStore {
+    /// Wrap this store in transparent at-rest value encryption keyed by `key`.
+    pub fn encrypted(self, key: [u8; 32]) -> Self {
+        Self::Encrypted(Box::new(storage::encrypted_store::EncryptedStore::new(
+            self, key,
+        )))
+    }
 }
 
 impl storage::corekv::private::Sealed for EmbeddedStore {}
@@ -214,6 +225,7 @@ impl storage::Store for EmbeddedStore {
         match self {
             Self::Memory(store) => store.new_txn(readonly).await,
             Self::Redb(store) => store.new_txn(readonly).await,
+            Self::Encrypted(store) => store.new_txn(readonly).await,
         }
     }
 
@@ -221,6 +233,7 @@ impl storage::Store for EmbeddedStore {
         match self {
             Self::Memory(store) => store.close().await,
             Self::Redb(store) => store.close().await,
+            Self::Encrypted(store) => store.close().await,
         }
     }
 }
