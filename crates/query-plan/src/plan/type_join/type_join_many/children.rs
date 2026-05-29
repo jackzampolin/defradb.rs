@@ -537,6 +537,9 @@ impl TypeJoinMany {
             let mut matching_count = 0u64;
             let mut total_scanned = 0u64;
             let mut limit_reached = false;
+            let can_stop_at_limit = self.relation_filter.is_none()
+                && (self.child_order_by.is_none()
+                    || (self.child_plan_provides_ordering && !self.preserve_ordered_orphans));
 
             while self.child_plan.next().await? {
                 total_scanned += 1;
@@ -553,12 +556,11 @@ impl TypeJoinMany {
                     matching_count += 1;
                     all_children.push(child_doc.deep_clone());
 
-                    // Early termination is only safe when child ordering does not need
-                    // exhaustive orphan/null merging before the per-parent limit.
-                    if self.relation_filter.is_none()
-                        && self.child_order_by.is_none()
-                        && !(self.preserve_ordered_orphans && self.child_order_by.is_some())
-                    {
+                    // Early termination is safe for unordered child scans, and for
+                    // ordered scans when the child plan is already streaming in that
+                    // order. Exhaustive relation ordering still needs the full scope
+                    // so orphan/null children can be merged before applying limit.
+                    if can_stop_at_limit {
                         if let Some(limit) = self.child_limit {
                             let effective_needed = self.child_offset + limit;
                             if matching_count >= effective_needed {

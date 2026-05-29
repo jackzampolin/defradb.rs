@@ -125,18 +125,13 @@ fn test_parse_relation() {
     assert!(author_field.kind.is_relation());
     assert!(!author_field.kind.is_array());
 
-    let author_idx = post
-        .indexes
-        .iter()
-        .find(|idx| {
-            idx.fields
+    assert!(
+        post.indexes.iter().all(|idx| {
+            !idx.fields
                 .first()
                 .is_some_and(|field| field.name == "_authorID")
-        })
-        .expect("expected auto-created FK index on _authorID");
-    assert!(
-        !author_idx.unique,
-        "one-to-many relation should auto-create a non-unique FK index"
+        }),
+        "one-to-many relation FK indexes require an explicit @index"
     );
 }
 
@@ -665,6 +660,25 @@ fn test_collection_ids_are_deterministic() {
     assert_ne!(
         id1, id3,
         "different type names should produce different IDs"
+    );
+}
+
+#[test]
+fn test_collection_id_matches_go_when_link_string_order_differs_from_cid_order() {
+    let collections = parse_sdl(
+        r#"
+        type Block {
+            data: String
+            idx: Int
+        }
+    "#,
+    )
+    .unwrap();
+
+    let block = &collections[0];
+    assert_eq!(
+        block.collection_id,
+        "bafyreiajfzj23wjpiiborrteeh3h6fmazttq2svb6vzmhxu3n3o2jyk4me",
     );
 }
 
@@ -1809,5 +1823,50 @@ fn test_secondary_relation_is_primary_false() {
     assert!(
         published_idx.unique,
         "one-to-one primary relation should auto-create a unique FK index"
+    );
+}
+
+#[test]
+fn test_one_to_many_collection_ids_match_go() {
+    let sdl = r#"
+        type Book {
+            name: String
+            rating: Float
+            author: Author
+        }
+        type Author {
+            name: String
+            age: Int
+            verified: Boolean
+            published: [Book]
+        }
+    "#;
+
+    let collections = parse_sdl(sdl).unwrap();
+    let book = collections.iter().find(|c| c.name == "Book").unwrap();
+    let author = collections.iter().find(|c| c.name == "Author").unwrap();
+
+    assert_eq!(
+        book.collection_id,
+        "bafyreihpq2q7a7bgpmp54uwzpwomrmzar77qu4ncjrukumbj66pxomrlsq",
+    );
+    assert_eq!(
+        author.collection_id,
+        "bafyreibsjnlzaqfu6lq2njqjfgot2p4lwjhoxp63karkxzfu7flft4fohy",
+    );
+    assert_eq!(
+        book.field_by_name("author")
+            .unwrap()
+            .kind
+            .relation_collection_id(),
+        Some(author.collection_id.as_str()),
+    );
+    assert_eq!(
+        author
+            .field_by_name("published")
+            .unwrap()
+            .kind
+            .relation_collection_id(),
+        Some(book.collection_id.as_str()),
     );
 }

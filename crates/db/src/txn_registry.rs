@@ -81,17 +81,36 @@ pub struct DbTransactionRegistry<S: Store> {
     db: Arc<DB<S>>,
     transactions: RwLock<HashMap<String, Arc<DbTransactionContext<S>>>>,
     id_counter: AtomicU64,
+    broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
 }
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
-    /// Create a new transaction registry.
+    /// Create a new transaction registry without a P2P broadcaster.
     ///
-    /// Collections are sourced from the DB's collection cache.
+    /// Use [`with_broadcaster`] when running with the P2P stack so that
+    /// committed transactional writes are forwarded to peers.
     pub fn new(db: Arc<DB<S>>) -> Self {
         Self {
             db,
             transactions: RwLock::new(HashMap::new()),
             id_counter: AtomicU64::new(0),
+            broadcaster: None,
+        }
+    }
+
+    /// Create a transaction registry that forwards committed writes to a
+    /// `TxnBroadcaster`. Each contained transaction's success callbacks will
+    /// call `broadcaster.broadcast_update` in addition to publishing to the
+    /// local event bus.
+    pub fn with_broadcaster(
+        db: Arc<DB<S>>,
+        broadcaster: Arc<dyn crate::event_emission::TxnBroadcaster>,
+    ) -> Self {
+        Self {
+            db,
+            transactions: RwLock::new(HashMap::new()),
+            id_counter: AtomicU64::new(0),
+            broadcaster: Some(broadcaster),
         }
     }
 
@@ -435,6 +454,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let db = self.db.clone();
         let schemas_for_cache = finalized.clone();
         txn.on_success(Box::new(move || {
+            for schema in &schemas_for_cache {
+                let _ = db.unforbid_collection_id(&schema.collection_id);
+            }
             if let Ok(mut cache) = db.collections.write() {
                 for schema in &schemas_for_cache {
                     cache.insert(schema.name.clone(), Collection::new(schema.clone()));
@@ -567,7 +589,15 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let mut versions = Vec::new();
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
             match serde_json::from_slice::<schema::CollectionVersion>(&pair.value) {
-                Ok(col) => versions.push(col),
+                Ok(mut col) => {
+                    crate::collection::populate_collection_root_id(&systemstore, &mut col).await?;
+                    if self.db.is_collection_forbidden(&col.collection_id)?
+                        && !txn.was_collection_created(&col.collection_id)
+                    {
+                        continue;
+                    }
+                    versions.push(col);
+                }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
@@ -624,12 +654,13 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             },
         )?);
         let fetcher = Arc::new(LensedDocFetcher::new(db_txn, lens_store));
-        let ctx = Arc::new(DbTransactionContext::new(
+        let ctx = Arc::new(DbTransactionContext::new_with_broadcaster(
             self.db.clone(),
             txn_id.clone(),
             readonly,
             fetcher,
             deferred_acp_mutations,
+            self.broadcaster.clone(),
         ));
 
         self.transactions

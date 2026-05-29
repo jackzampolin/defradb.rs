@@ -169,6 +169,7 @@ impl Node {
             acp_setup.document_acp.clone(),
             nac_adapter.clone(),
             p2p_setup.mutator.clone(),
+            p2p_setup.txn_broadcaster.clone(),
         );
 
         let zanzibar_store_for_pg = zanzibar_store.clone();

@@ -186,6 +186,7 @@ impl Store for FjallStore {
             read_version,
             snapshot,
             pending: Mutex::new(BTreeMap::new()),
+            read_set: Mutex::new(crate::backends::shared::ReadSet::default()),
             readonly,
             discarded: AtomicBool::new(false),
             committed: AtomicBool::new(false),

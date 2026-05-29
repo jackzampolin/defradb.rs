@@ -264,6 +264,13 @@ fn hex_encode(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
+    if !s.len().is_multiple_of(2) {
+        return Err(format!("hex string has odd length: {}", s.len()));
+    }
+    hex::decode(s).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,11 +297,4 @@ mod tests {
         let err = args.execute(Config::default()).unwrap_err();
         assert!(matches!(err, Error::OperationRequiresDeveloperMode));
     }
-}
-
-fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
-    if !s.len().is_multiple_of(2) {
-        return Err(format!("hex string has odd length: {}", s.len()));
-    }
-    hex::decode(s).map_err(|e| e.to_string())
 }

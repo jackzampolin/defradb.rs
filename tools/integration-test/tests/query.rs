@@ -24,6 +24,8 @@ mod lens;
 mod lens_persistence;
 #[path = "query/limits.rs"]
 mod limits;
+#[path = "query/multi_cid_vectors.rs"]
+mod multi_cid_vectors;
 #[path = "query/planner_4656.rs"]
 mod planner_4656;
 #[path = "query/planner_4684.rs"]

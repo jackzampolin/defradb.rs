@@ -801,23 +801,16 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         // Go-compatible pubsub_rpc path when coordinator is wired (#828).
         // Falls back to two-stream per-peer requests otherwise.
         if let Some(coord) = self.sync_coordinator.as_ref() {
-            let coord = coord.clone();
-            let collection_id = collection_id.to_string();
-            tokio::spawn(async move {
-                if let Err(error) = coord
-                    .pubsub_sync_branchable_collection(
-                        collection_id.clone(),
-                        Some(std::time::Duration::from_secs(8)),
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        collection_id = %collection_id,
-                        error = %error,
-                        "pubsub_rpc branchable-sync failed",
-                    );
-                }
-            });
+            coord
+                .pubsub_sync_branchable_collection(
+                    collection_id.to_string(),
+                    Some(std::time::Duration::from_secs(8)),
+                    Some(connected_peers.len()),
+                )
+                .await
+                .map_err(|error| {
+                    P2PError::transport(format!("pubsub_rpc branchable-sync failed: {error}"))
+                })?;
             return Ok(());
         }
 

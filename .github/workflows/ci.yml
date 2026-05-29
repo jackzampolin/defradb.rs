@@ -165,36 +165,55 @@ jobs:
           chmod +x target/ci/defra target/ci/defra-iroh
           target/ci/defra version --format json
 
-      - name: Download Go DefraDB binary
-        if: matrix.needs_go
-        run: |
-          GO_TAG=$(grep 'pub const GO_COMPAT_TAG' crates/defra-version/src/lib.rs | sed "s/.*\"\(.*\)\".*/\1/")
-          if [ -z "$GO_TAG" ]; then
-            echo "::error::GO_COMPAT_TAG is empty in crates/defra-version/src/lib.rs"
-            exit 1
-          fi
-          VER_NUM="${GO_TAG#v}"
-          ASSET="defradb_${VER_NUM}_darwin_arm64"
-          URL="https://github.com/sourcenetwork/defradb/releases/download/${GO_TAG}/${ASSET}"
-          CACHE_DIR="$HOME/.cache/defra-harness/${GO_TAG}"
-          mkdir -p "$CACHE_DIR"
-          if [ ! -x "$CACHE_DIR/defradb" ]; then
-            echo "Downloading Go DefraDB ${GO_TAG}..."
-            curl -fSL -o "$CACHE_DIR/defradb" "$URL"
-            chmod +x "$CACHE_DIR/defradb"
-          fi
-          echo "$CACHE_DIR" >> "$GITHUB_PATH"
-          "$CACHE_DIR/defradb" version --format json
-
-      # The self-hosted macOS ARM64 runner ships without a Go toolchain —
-      # the `go-compat` suite normally uses a prebuilt defradb binary.
-      # The fixture drift step below needs `go run`, so install Go on
-      # demand for that suite only.
-      - name: Install Go toolchain (fixture drift guard only)
+      - name: Install Go toolchain
         if: matrix.suite == 'go-compat'
         uses: actions/setup-go@v5
         with:
           go-version: '1.25'
+
+      - name: Prepare Go DefraDB binary
+        if: matrix.needs_go
+        run: |
+          GO_REF=$(grep 'pub const GO_COMPAT_COMMIT' crates/defra-version/src/lib.rs | sed "s/.*\"\(.*\)\".*/\1/")
+          GO_BRANCH=$(grep 'pub const GO_COMPAT_BRANCH' crates/defra-version/src/lib.rs | sed "s/.*\"\(.*\)\".*/\1/")
+          GO_TAG=$(grep 'pub const GO_COMPAT_TAG' crates/defra-version/src/lib.rs | sed "s/.*\"\(.*\)\".*/\1/")
+
+          if [ -n "$GO_TAG" ]; then
+            VER_NUM="${GO_TAG#v}"
+            ASSET="defradb_${VER_NUM}_darwin_arm64"
+            URL="https://github.com/sourcenetwork/defradb/releases/download/${GO_TAG}/${ASSET}"
+            CACHE_DIR="$HOME/.cache/defra-harness/${GO_TAG}"
+            mkdir -p "$CACHE_DIR"
+            if [ ! -x "$CACHE_DIR/defradb" ]; then
+              echo "Downloading Go DefraDB ${GO_TAG}..."
+              curl -fSL -o "$CACHE_DIR/defradb" "$URL"
+              chmod +x "$CACHE_DIR/defradb"
+            fi
+          else
+            if [ -z "$GO_REF" ]; then
+              echo "::error::GO_COMPAT_COMMIT is empty in crates/defra-version/src/lib.rs"
+              exit 1
+            fi
+            if [ -z "$GO_BRANCH" ]; then
+              echo "::error::GO_COMPAT_BRANCH is empty in crates/defra-version/src/lib.rs"
+              exit 1
+            fi
+
+            CACHE_DIR="$HOME/.cache/defra-harness/${GO_REF}"
+            mkdir -p "$CACHE_DIR"
+            if [ ! -x "$CACHE_DIR/defradb" ]; then
+              echo "Building Go DefraDB ${GO_REF} from ${GO_BRANCH}..."
+              WORK_DIR="$RUNNER_TEMP/defradb-${GO_REF}"
+              rm -rf "$WORK_DIR"
+              git clone --filter=blob:none --branch "$GO_BRANCH" https://github.com/sourcenetwork/defradb "$WORK_DIR"
+              git -C "$WORK_DIR" checkout "$GO_REF"
+              make -C "$WORK_DIR" build path="$CACHE_DIR/defradb"
+              chmod +x "$CACHE_DIR/defradb"
+            fi
+          fi
+
+          echo "$CACHE_DIR" >> "$GITHUB_PATH"
+          "$CACHE_DIR/defradb" version --format json
 
       # Guards against silent drift between the committed Go-parity hex
       # constants in `crates/p2p/src/**` and what upstream Go actually
@@ -263,8 +282,8 @@ jobs:
 
       # go-compat runs the `go_*` half of every dual-runtime test against
       # the upstream Go DefraDB binary. Catches cross-implementation
-      # regressions at PR time. Each binary added here was verified
-      # against defradb commit d5a5a879 (2026-04-10) before landing.
+      # regressions at PR time. The binary is selected by GO_COMPAT_TAG
+      # when a release exists, otherwise it is built from GO_COMPAT_COMMIT.
       #
       # The 5 `link_collection::go_acp_link_collection_*_reject` tests
       # cover #746 (Rust schema loader silently accepts invalid DRIs).

@@ -179,12 +179,18 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     )));
                 }
 
-                // Emit update event for subscriptions
-                let cid = commit_result
-                    .as_ref()
-                    .map(|(c, _, _)| *c)
-                    .unwrap_or_default();
-                self.emit_update_events(&collection, &doc_id.to_string(), cid);
+                // Emit update event for subscriptions when blocks were written.
+                // Skipping the default-cid emit avoids publishing a misleading
+                // Update on the block-write failure path.
+                if let Some((cid, block, col_data)) = commit_result.as_ref() {
+                    self.emit_update_events(
+                        &collection,
+                        &doc_id.to_string(),
+                        *cid,
+                        block.clone(),
+                        col_data.clone(),
+                    );
+                }
 
                 // Return result with commit CID and block if available
                 match commit_result {

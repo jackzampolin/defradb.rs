@@ -26,6 +26,12 @@ pub const ALPN_CAR_RESP: &[u8] = b"/defra-iroh/car/0.1/resp";
 /// ALPN for searchable encryption artifacts.
 pub const ALPN_SE: &[u8] = b"/defra-iroh/se/0.1";
 
+/// ALPN for searchable encryption artifact query requests.
+pub const ALPN_SE_QUERY_REQ: &[u8] = b"/defra-iroh/se-query/0.1/req";
+
+/// ALPN for searchable encryption artifact query responses.
+pub const ALPN_SE_QUERY_RESP: &[u8] = b"/defra-iroh/se-query/0.1/resp";
+
 /// ALPN for two-stream push protocol.
 pub const ALPN_TWOSTREAM: &[u8] = b"/defra-iroh/twostream/0.1";
 
@@ -42,6 +48,8 @@ pub const ALL_ALPNS: &[&[u8]] = &[
     ALPN_CAR,
     ALPN_CAR_RESP,
     ALPN_SE,
+    ALPN_SE_QUERY_REQ,
+    ALPN_SE_QUERY_RESP,
     ALPN_TWOSTREAM,
     ALPN_TWOSTREAM_RESP,
 ];

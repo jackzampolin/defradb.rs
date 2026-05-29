@@ -693,11 +693,6 @@ pub(super) fn parse_field_to_select(
                 // null means "no cid filter" (skip setting it)
                 if !matches!(arg_value, Value::Null) {
                     let cids = parse_cid_value(arg_value, variables)?;
-                    if cids.len() > 1 {
-                        return Err(QueryError::parse(
-                            "querying by multiple cids is not yet supported",
-                        ));
-                    }
                     select.cid = Some(cids);
                 }
             }

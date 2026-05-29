@@ -24,6 +24,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         if self.access.access_mode.is_open() {
             return Ok(());
         }
+        if self.access.peer_state.is_connected(peer_id.as_str()) {
+            return Ok(());
+        }
 
         let mut checked_collection = false;
         for cid in request.response_roots() {

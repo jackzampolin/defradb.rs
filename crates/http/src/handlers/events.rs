@@ -204,6 +204,7 @@ pub async fn events_sse(
                         "doc_id": update.doc_id,
                         "cid": update.cid.to_string(),
                         "collection_id": update.collection_id,
+                        "block": hex::encode(&update.block),
                     }
                 })
             } else if let Some(data) = message.as_merge_complete() {

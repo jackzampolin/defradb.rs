@@ -220,6 +220,14 @@ pub struct DeleteResult {
     pub commit_cid: Option<Cid>,
     /// The raw bytes of the committed composite delete block (for P2P broadcast)
     pub commit_block: Option<Vec<u8>>,
+    /// For branchable collections: the CID of the collection-level head block
+    /// that was written alongside the composite delete (for P2P broadcast).
+    /// Go emits a second update for this so collection subscribers / replicators
+    /// don't miss the collection head on deletes.
+    pub broadcast_cid: Option<Cid>,
+    /// For branchable collections: the raw bytes of the collection-level head
+    /// block written alongside the composite delete (for P2P broadcast).
+    pub broadcast_block: Option<Vec<u8>>,
 }
 
 impl DeleteResult {
@@ -231,6 +239,8 @@ impl DeleteResult {
             broadcast_status: BroadcastStatus::NotAttempted,
             commit_cid: None,
             commit_block: None,
+            broadcast_cid: None,
+            broadcast_block: None,
         }
     }
 
@@ -247,6 +257,8 @@ impl DeleteResult {
             broadcast_status: BroadcastStatus::NotAttempted,
             commit_cid: Some(commit_cid),
             commit_block: Some(commit_block),
+            broadcast_cid: None,
+            broadcast_block: None,
         }
     }
 
@@ -258,6 +270,8 @@ impl DeleteResult {
             broadcast_status,
             commit_cid: None,
             commit_block: None,
+            broadcast_cid: None,
+            broadcast_block: None,
         }
     }
 }

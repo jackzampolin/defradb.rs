@@ -158,20 +158,17 @@ pub fn filter_to_index_scan(
             }
             FilterOp::Like | FilterOp::Nlike | FilterOp::Ilike | FilterOp::Nilike => {
                 has_scan_all = true;
+                if let ConditionValue::Pattern(pattern) = &cond.value {
+                    scan_value_filter = Some(match cond.op {
+                        FilterOp::Like => ScanValueFilter::Like(pattern.clone()),
+                        FilterOp::Nlike => ScanValueFilter::Nlike(pattern.clone()),
+                        FilterOp::Ilike => ScanValueFilter::Ilike(pattern.clone()),
+                        FilterOp::Nilike => ScanValueFilter::Nilike(pattern.clone()),
+                        _ => unreachable!(),
+                    });
+                }
                 if cond.json_path.is_some() {
                     range_json_path = cond.json_path.clone();
-                    // For JSON fields only: add scan-level value filter to exclude
-                    // non-string entries (matches Go's indexLikeMatcher behavior).
-                    // Regular string indexes don't need this because all entries are strings.
-                    if let ConditionValue::Pattern(pattern) = &cond.value {
-                        scan_value_filter = Some(match cond.op {
-                            FilterOp::Like => ScanValueFilter::Like(pattern.clone()),
-                            FilterOp::Nlike => ScanValueFilter::Nlike(pattern.clone()),
-                            FilterOp::Ilike => ScanValueFilter::Ilike(pattern.clone()),
-                            FilterOp::Nilike => ScanValueFilter::Nilike(pattern.clone()),
-                            _ => unreachable!(),
-                        });
-                    }
                 }
             }
             _ => {}

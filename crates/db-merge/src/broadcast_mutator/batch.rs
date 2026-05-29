@@ -187,7 +187,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             let col_block_result = BlockResult {
                 cid: col_cid,
                 block: col_block,
-                doc_id,
+                doc_id: String::new(),
                 field_cids: vec![],
             };
             sync.push_to_replicators_with_creator(
@@ -285,14 +285,17 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
     ) -> query::error::Result<DeleteResult> {
         let result = self.inner.delete(collection_name, doc_id).await?;
         let doc_id = result.doc_id.to_string();
+        // Pass through the branchable collection block so it gets broadcast
+        // alongside the composite delete (matches the non-batch BroadcastMutator
+        // path and Go's two-update emit for branchable mutations).
         self.capture_broadcast(BroadcastCapture {
             kind: BroadcastKind::SingleBlockPush,
             collection_name,
             doc_id: &doc_id,
             commit_cid: result.commit_cid,
             commit_block: result.commit_block.as_ref(),
-            broadcast_cid: None,
-            broadcast_block: None,
+            broadcast_cid: result.broadcast_cid,
+            broadcast_block: result.broadcast_block.as_ref(),
         })
         .await?;
         Ok(result)

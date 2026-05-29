@@ -207,6 +207,96 @@ async fn test_add_reader_relationship() {
 }
 
 #[tokio::test]
+async fn test_wildcard_reader_relationship_allows_authenticated_and_anonymous_read() {
+    let store = Arc::new(MemoryZanzibarStore::new());
+    let acp = ZanzibarDocumentACP::new(store);
+
+    let owner = test_did();
+    let reader = test_did2();
+    let wildcard = Did::wildcard();
+
+    acp.register_doc_object(&owner, "collection1", "collection1", "doc1")
+        .await
+        .unwrap();
+
+    let added = acp
+        .add_actor_relationship(
+            &owner,
+            &wildcard,
+            "collection1",
+            "collection1",
+            "doc1",
+            "reader",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(added);
+
+    let can_authenticated_read = acp
+        .check_doc_access(
+            &Identity::Authenticated(reader.clone()),
+            DocumentPermission::Read,
+            "collection1",
+            "collection1",
+            "doc1",
+        )
+        .await
+        .unwrap();
+    assert!(can_authenticated_read);
+
+    let can_anonymous_read = acp
+        .check_doc_access(
+            &Identity::Anonymous,
+            DocumentPermission::Read,
+            "collection1",
+            "collection1",
+            "doc1",
+        )
+        .await
+        .unwrap();
+    assert!(can_anonymous_read);
+
+    let can_authenticated_update = acp
+        .check_doc_access(
+            &Identity::Authenticated(reader.clone()),
+            DocumentPermission::Update,
+            "collection1",
+            "collection1",
+            "doc1",
+        )
+        .await
+        .unwrap();
+    assert!(!can_authenticated_update);
+
+    let deleted = acp
+        .delete_actor_relationship(
+            &owner,
+            &wildcard,
+            "collection1",
+            "collection1",
+            "doc1",
+            "reader",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(deleted);
+
+    let can_read_after_delete = acp
+        .check_doc_access(
+            &Identity::Authenticated(reader),
+            DocumentPermission::Read,
+            "collection1",
+            "collection1",
+            "doc1",
+        )
+        .await
+        .unwrap();
+    assert!(!can_read_after_delete);
+}
+
+#[tokio::test]
 async fn test_updater_implies_read() {
     let store = Arc::new(MemoryZanzibarStore::new());
     let acp = ZanzibarDocumentACP::new(store);

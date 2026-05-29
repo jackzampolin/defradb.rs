@@ -163,6 +163,14 @@ mod tests {
     }
 
     #[test]
+    fn acp_document_decide_route_uses_dac_status_permission() {
+        assert_eq!(
+            route_permission("/api/v0/acp/document/decide", &Method::POST),
+            RoutePermission::Required(NodePermission::DacStatus)
+        );
+    }
+
+    #[test]
     fn unknown_route_gets_safe_default() {
         assert_eq!(
             route_permission("/api/v0/unknown", &Method::GET),
@@ -356,6 +364,11 @@ mod tests {
             (
                 "/api/v0/acp/policy",
                 Method::GET,
+                RoutePermission::Required(NodePermission::DacStatus),
+            ),
+            (
+                "/api/v0/acp/document/decide",
+                Method::POST,
                 RoutePermission::Required(NodePermission::DacStatus),
             ),
             (

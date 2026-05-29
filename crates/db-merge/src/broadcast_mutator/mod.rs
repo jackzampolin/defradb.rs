@@ -16,14 +16,19 @@ use async_trait::async_trait;
 use blockstore::Blockstore;
 use document::{DocID, Document};
 use identity::Did;
+use p2p::message::SEArtifact;
 use p2p::sync::SyncCoordinator;
 use p2p::transport::P2PTransport;
 use query::mutator::{
     BroadcastStatus, CreateResult, DeleteResult, DocMutator, MutationBatch,
     MutationBatchController, UpdateResult,
 };
+use schema::CollectionVersion;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 use storage::corekv::Store;
+use zeroize::Zeroizing;
 
 use self::batch::BroadcastBatchMutator;
 use self::broadcast::{broadcast_with_retry_with_creator, log_broadcast_failure};
@@ -31,6 +36,12 @@ use db::auto_commit_mutator::AutoCommitMutator;
 use db::block_reader::read_latest_composite_block;
 use db::database::DB;
 use db_blocks::{build_blocks_from_document, BlockResult};
+
+#[derive(Debug, Clone, Default)]
+pub struct BroadcastSeOptions {
+    pub encryption_key: Option<Zeroizing<Vec<u8>>>,
+    pub identity_pubkey: Option<Vec<u8>>,
+}
 
 /// Document mutator that broadcasts changes to P2P network.
 ///
@@ -54,6 +65,7 @@ pub struct BroadcastMutator<S: Store, B: Blockstore, T: P2PTransport = p2p::Libp
     sync: Arc<SyncCoordinator<B, T>>,
     db: Arc<DB<S>>,
     document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
+    se_options: Arc<RwLock<BroadcastSeOptions>>,
 }
 
 impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, T> {
@@ -64,11 +76,81 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, 
             sync,
             db,
             document_acp: std::sync::OnceLock::new(),
+            se_options: Arc::new(RwLock::new(BroadcastSeOptions::default())),
         }
     }
 
     pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
         let _ = self.document_acp.set(acp);
+    }
+
+    pub fn set_se_options(&self, options: BroadcastSeOptions) -> Result<(), String> {
+        let mut guard = self
+            .se_options
+            .write()
+            .map_err(|_| "broadcast SE options lock poisoned".to_string())?;
+        *guard = options;
+        Ok(())
+    }
+
+    fn load_se_options(&self) -> BroadcastSeOptions {
+        self.se_options
+            .read()
+            .map(|options| options.clone())
+            .unwrap_or_default()
+    }
+
+    fn generate_se_artifacts(
+        &self,
+        collection: &CollectionVersion,
+        doc_id: &str,
+        doc: &Document,
+        field_names: &[String],
+    ) -> Vec<SEArtifact> {
+        if collection.encrypted_indexes.is_empty() {
+            return Vec::new();
+        }
+
+        let se_options = self.load_se_options();
+        let Some(se_key) = se_options.encryption_key else {
+            return Vec::new();
+        };
+
+        let coordinator = match se_options.identity_pubkey {
+            Some(pubkey) => {
+                crate::se::SECoordinator::with_key_and_identity(se_key.to_vec(), pubkey)
+            }
+            None => crate::se::SECoordinator::with_key(se_key.to_vec()),
+        };
+        let field_values: HashMap<String, document::NormalValue> = doc
+            .values()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.value().clone()))
+            .collect();
+
+        match coordinator.generate_artifacts(
+            &collection.collection_id,
+            doc_id,
+            &collection.encrypted_indexes,
+            field_names,
+            &field_values,
+        ) {
+            Ok(artifacts) => artifacts
+                .into_iter()
+                .map(|artifact| {
+                    SEArtifact::new(artifact.doc_id, artifact.index_id, artifact.search_tag)
+                })
+                .collect(),
+            Err(error) => {
+                tracing::warn!(
+                    collection_id = %collection.collection_id,
+                    doc_id,
+                    error = %error,
+                    "failed to generate live SE artifacts"
+                );
+                Vec::new()
+            }
+        }
     }
 
     async fn register_created_doc_with_acp_if_needed(
@@ -204,12 +286,18 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             Some(BlockResult {
                 cid: col_cid,
                 block: col_block.clone(),
-                doc_id: block_result.doc_id.clone(),
+                doc_id: String::new(),
                 field_cids: vec![],
             })
         } else {
             None
         };
+        let se_artifacts = self.generate_se_artifacts(
+            collection.schema(),
+            &block_result.doc_id,
+            &result.document,
+            &[],
+        );
 
         // Capture everything for the spawned task by value.
         let sync = self.sync.clone();
@@ -232,6 +320,8 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 creator_ref,
             )
             .await;
+            sync.push_se_artifacts_to_replicators(&collection_id, se_artifacts)
+                .await;
 
             // Broadcast composite via GossipSub with retry for InsufficientPeers
             log_broadcast_failure(
@@ -299,7 +389,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         // Build block results and collect broadcast work items.
         // Block building failures return Failed status immediately (not spawned).
         let mut broadcast_results = Vec::with_capacity(results.len());
-        let mut broadcast_work: Vec<(BlockResult, Option<BlockResult>)> =
+        let mut broadcast_work: Vec<(BlockResult, Option<BlockResult>, Vec<SEArtifact>)> =
             Vec::with_capacity(results.len());
 
         for result in results {
@@ -346,7 +436,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 Some(BlockResult {
                     cid: col_cid,
                     block: col_block.clone(),
-                    doc_id: block_result.doc_id.clone(),
+                    doc_id: String::new(),
                     field_cids: vec![],
                 })
             } else {
@@ -360,6 +450,13 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             )
             .await?;
 
+            let se_artifacts = self.generate_se_artifacts(
+                collection.schema(),
+                &block_result.doc_id,
+                &result.document,
+                &[],
+            );
+
             broadcast_results.push(CreateResult::with_commit_and_broadcast(
                 result.doc_id,
                 result.document,
@@ -368,7 +465,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 BroadcastStatus::Pending,
             ));
 
-            broadcast_work.push((block_result, branchable_data));
+            broadcast_work.push((block_result, branchable_data, se_artifacts));
         }
 
         // Spawn a single detached task that processes all broadcast work items.
@@ -379,7 +476,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             tokio::spawn(async move {
                 let creator_ref = creator_did.as_deref();
 
-                for (block_result, branchable_data) in &broadcast_work {
+                for (block_result, branchable_data, se_artifacts) in &broadcast_work {
                     sync.push_to_replicators_with_creator(
                         &block_result.cid,
                         &block_result.block,
@@ -388,6 +485,8 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                         creator_ref,
                     )
                     .await;
+                    sync.push_se_artifacts_to_replicators(&collection_id, se_artifacts.clone())
+                        .await;
 
                     log_broadcast_failure(
                         &broadcast_with_retry_with_creator(
@@ -440,6 +539,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
         let collection_id = collection.collection_id().to_string();
+        let se_fields: Vec<String> = modified_fields.iter().cloned().collect();
 
         // Execute the update mutation
         let result = self
@@ -494,12 +594,18 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             Some(BlockResult {
                 cid: col_cid,
                 block: col_block.clone(),
-                doc_id: block_result.doc_id.clone(),
+                doc_id: String::new(),
                 field_cids: vec![],
             })
         } else {
             None
         };
+        let se_artifacts = self.generate_se_artifacts(
+            collection.schema(),
+            &block_result.doc_id,
+            &result.document,
+            &se_fields,
+        );
 
         // Capture everything for the spawned task by value.
         let sync = self.sync.clone();
@@ -520,6 +626,8 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 creator_ref,
             )
             .await;
+            sync.push_se_artifacts_to_replicators(&collection_id, se_artifacts)
+                .await;
 
             // Broadcast composite via GossipSub with retry for InsufficientPeers
             log_broadcast_failure(
@@ -579,27 +687,63 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         // Execute the delete mutation
         let result = self.inner.delete(collection_name, doc_id).await?;
 
-        // Read the delete composite block that was written during the mutation.
+        // No-op delete (missing doc): the inner mutator wrote nothing, so
+        // there's no tombstone block to read or broadcast. Returning here
+        // also avoids re-broadcasting the previous (stale) head.
+        if !result.existed {
+            return Ok(result);
+        }
+
+        // Prefer the delete block the inner mutator just wrote — re-reading
+        // the "latest" composite head via storage would race with concurrent
+        // writes on the same doc and broadcast the wrong block. Fall back to
+        // reading from storage only when commit artifacts are missing.
         let doc_id_str = doc_id.to_string();
-        let block_result = match read_latest_composite_block(&self.db, &doc_id_str).await {
-            Ok(br) => br,
-            Err(e) => {
-                tracing::error!(
-                    doc_id = %doc_id,
-                    collection = %collection_name,
-                    error = %e,
-                    "Failed to read delete composite block for P2P broadcast"
-                );
-                return Ok(DeleteResult::with_broadcast(
-                    result.doc_id,
-                    result.existed,
-                    BroadcastStatus::Failed(format!("Block read failed: {}", e)),
-                ));
-            }
-        };
+        let block_result =
+            if let (Some(cid), Some(block)) = (result.commit_cid, result.commit_block.as_ref()) {
+                BlockResult {
+                    cid,
+                    block: block.clone(),
+                    doc_id: doc_id_str,
+                    field_cids: vec![],
+                }
+            } else {
+                match read_latest_composite_block(&self.db, &doc_id_str).await {
+                    Ok(br) => br,
+                    Err(e) => {
+                        tracing::error!(
+                            doc_id = %doc_id,
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to read delete composite block for P2P broadcast"
+                        );
+                        return Ok(DeleteResult::with_broadcast(
+                            result.doc_id,
+                            result.existed,
+                            BroadcastStatus::Failed(format!("Block read failed: {}", e)),
+                        ));
+                    }
+                }
+            };
 
         // Read broadcast creator DID before spawning (reads thread-local state).
         let creator_did = defra_core::signing::get_broadcast_creator_did();
+
+        // For branchable collections, capture the collection-level head block
+        // so we can broadcast it alongside the composite delete (Go emits two
+        // updates for branchable mutations; see internal/db/collection.go:789).
+        let branchable_data = if let (Some(col_cid), Some(col_block)) =
+            (result.broadcast_cid, result.broadcast_block.as_ref())
+        {
+            Some(BlockResult {
+                cid: col_cid,
+                block: col_block.clone(),
+                doc_id: String::new(),
+                field_cids: vec![],
+            })
+        } else {
+            None
+        };
 
         // Capture everything for the spawned task by value.
         let sync = self.sync.clone();
@@ -631,6 +775,28 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 )
                 .await,
             );
+
+            // For branchable collections, also broadcast the collection block.
+            if let Some(col_block_result) = branchable_data {
+                sync.push_to_replicators_with_creator(
+                    &col_block_result.cid,
+                    &col_block_result.block,
+                    &col_block_result.doc_id,
+                    &collection_id,
+                    creator_ref,
+                )
+                .await;
+                log_broadcast_failure(
+                    &broadcast_with_retry_with_creator(
+                        &sync,
+                        &col_block_result,
+                        &collection_id,
+                        &collection_name_owned,
+                        creator_ref,
+                    )
+                    .await,
+                );
+            }
         });
 
         Ok(DeleteResult::with_broadcast(

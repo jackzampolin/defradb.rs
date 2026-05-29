@@ -157,11 +157,6 @@ impl Planner {
         self
     }
 
-    /// Whether this planner should insert ACP permission filters into plans.
-    pub(super) fn has_acp(&self) -> bool {
-        self.acp.is_some()
-    }
-
     /// Conditionally wrap a plan with a PermissionFilterNode if the collection has an ACP policy.
     pub(super) fn maybe_wrap_with_acp_filter(
         &self,

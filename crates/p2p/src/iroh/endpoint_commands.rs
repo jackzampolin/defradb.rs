@@ -1,6 +1,6 @@
 //! Command handlers for the iroh endpoint event loop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -112,6 +112,17 @@ pub(super) async fn handle_command(
         IrohCommand::Publish { topic, msg, reply } => {
             let result = handle_publish(gossip, subscriptions, peer_map, topic, msg, spawned_tasks);
             let _ = reply.send(result);
+        }
+        IrohCommand::TopicPeers { topic, reply } => {
+            let topic_str = topic.to_string();
+            let peers = subscriptions
+                .get(&topic_str)
+                .map(|sub| {
+                    let snapshot: Vec<_> = sub.neighbors.lock().iter().copied().collect();
+                    snapshot.iter().map(endpoint_id_to_peer_id).collect()
+                })
+                .unwrap_or_default();
+            let _ = reply.send(Ok(peers));
         }
         IrohCommand::SendPushLogResponse {
             mut send_stream,
@@ -431,6 +442,50 @@ pub(super) async fn handle_command(
             });
             track_task(spawned_tasks, task);
         }
+        IrohCommand::SendSEQueryRequest {
+            peer_id,
+            request,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
+            let task = tokio::spawn(async move {
+                let result = handle_fire_and_forget(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_SE_QUERY_REQ,
+                    &request,
+                    direct_addr,
+                    &connection_cache,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
+            track_task(spawned_tasks, task);
+        }
+        IrohCommand::SendSEQueryResponse {
+            peer_id,
+            reply_msg,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
+            let task = tokio::spawn(async move {
+                let result = handle_fire_and_forget(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_SE_QUERY_RESP,
+                    &reply_msg,
+                    direct_addr,
+                    &connection_cache,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
+            track_task(spawned_tasks, task);
+        }
         IrohCommand::SyncBlocks {
             root,
             providers,
@@ -607,9 +662,13 @@ pub(super) async fn handle_subscribe(
         .map_err(|e| crate::error::Error::GossipSubSubscription(e.to_string()))?;
 
     let (sender, mut receiver) = gossip_topic.split();
+    let neighbors = Arc::new(parking_lot::Mutex::new(
+        receiver.neighbors().collect::<HashSet<_>>(),
+    ));
 
     let event_tx = event_tx.clone();
     let topic_str_clone = topic_str.clone();
+    let reader_neighbors = Arc::clone(&neighbors);
     let reader_task = tokio::spawn(async move {
         while let Some(result) = receiver.next().await {
             match result {
@@ -693,6 +752,7 @@ pub(super) async fn handle_subscribe(
                         }
                     }
                     iroh_gossip::api::Event::NeighborUp(id) => {
+                        reader_neighbors.lock().insert(id);
                         if event_tx
                             .send(TransportEvent::PeerSubscribed {
                                 peer_id: endpoint_id_to_peer_id(&id),
@@ -705,6 +765,7 @@ pub(super) async fn handle_subscribe(
                         }
                     }
                     iroh_gossip::api::Event::NeighborDown(id) => {
+                        reader_neighbors.lock().remove(&id);
                         if event_tx
                             .send(TransportEvent::PeerUnsubscribed {
                                 peer_id: endpoint_id_to_peer_id(&id),
@@ -736,6 +797,7 @@ pub(super) async fn handle_subscribe(
         TopicSubscription {
             sender,
             reader_task,
+            neighbors,
         },
     );
     Ok(true)

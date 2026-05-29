@@ -31,6 +31,13 @@ pub struct OrphanConfig {
     pub is_secondary_side: bool,
 }
 
+#[derive(Clone)]
+struct IndexedInvertedChildFetch {
+    fetcher: Arc<dyn DocFetcher>,
+    collection_name: String,
+    index_name: String,
+}
+
 /// TypeJoinOne implements one-to-one relation joins.
 ///
 /// **Primary side join flow** (when parent has the FK, e.g., `Book.author`):
@@ -113,6 +120,10 @@ pub struct TypeJoinOne {
     /// combining scalar and relation filters (e.g., `{genre: "thriller", author: {name: "X"}}`)
     /// would skip the scalar conditions.
     parent_residual_filter: Option<Filter>,
+    /// For normal inverted joins, optionally fetch the child per parent via the
+    /// child's FK index. This mirrors Go's one-to-one secondary-side lookup and
+    /// records empty FK-index reads for SSI conflict detection.
+    indexed_inverted_child_fetch: Option<IndexedInvertedChildFetch>,
 }
 
 /// A filter condition on a relation field.
@@ -231,6 +242,7 @@ impl TypeJoinOne {
             orphan_phase_done: false,
             shared_yielded_ids: None,
             parent_residual_filter: None,
+            indexed_inverted_child_fetch: None,
         }
     }
 
@@ -303,6 +315,24 @@ impl TypeJoinOne {
     /// This filter ensures the scalar conditions are still applied.
     pub fn with_parent_residual_filter(mut self, filter: Filter) -> Self {
         self.parent_residual_filter = Some(filter);
+        self
+    }
+
+    /// Configure normal inverted joins to fetch child docs from the child's FK
+    /// index per parent instead of relying on a prebuilt full child cache.
+    pub fn with_indexed_inverted_child_fetch(
+        mut self,
+        fetcher: Arc<dyn DocFetcher>,
+        collection_name: impl Into<String>,
+        index_name: impl Into<String>,
+    ) -> Self {
+        let collection_name = collection_name.into();
+        let index_name = index_name.into();
+        self.indexed_inverted_child_fetch = Some(IndexedInvertedChildFetch {
+            fetcher,
+            collection_name,
+            index_name,
+        });
         self
     }
 
@@ -431,6 +461,49 @@ impl TypeJoinOne {
     /// Find child document by FK lookup using the pre-built cache.
     fn find_child_doc(&self, fk: &str) -> Option<Doc> {
         self.child_cache.get(fk).map(|doc| doc.deep_clone())
+    }
+
+    async fn find_child_doc_by_fk_index(&mut self, parent_doc_id: &str) -> Result<Option<Doc>> {
+        let Some(indexed_fetch) = self.indexed_inverted_child_fetch.clone() else {
+            return Ok(self.find_child_doc(parent_doc_id));
+        };
+
+        let scan_result = indexed_fetch
+            .fetcher
+            .get_by_index_scan(
+                &indexed_fetch.collection_name,
+                &IndexScanParams {
+                    index_name: indexed_fetch.index_name,
+                    scan_type: IndexScanType::ExactMatch {
+                        values: vec![NormalValue::String(parent_doc_id.to_string())],
+                    },
+                    limit: Some(1),
+                    offset: 0,
+                    value_filter: None,
+                },
+            )
+            .await?;
+
+        if scan_result.doc_ids().is_empty() {
+            self.go_child_metrics.iterations += 1;
+            return Ok(None);
+        }
+
+        let fetched = indexed_fetch
+            .fetcher
+            .get_by_ids(&indexed_fetch.collection_name, scan_result.doc_ids())
+            .await?;
+        let child_docs = documents_to_plan_docs(fetched.docs(), self.child_plan.document_map())?;
+
+        self.go_child_metrics.iterations += 2;
+        self.go_child_metrics.index_fetches += scan_result.raw_fetches();
+        if let Some(child_doc) = child_docs.first() {
+            self.go_child_metrics.doc_fetches += 1;
+            self.go_child_metrics.field_fetches += child_doc.stored_field_count as u64;
+            return Ok(Some(child_doc.deep_clone()));
+        }
+
+        Ok(None)
     }
 
     /// Build the child cache by scanning child_plan once.
@@ -741,6 +814,12 @@ impl TypeJoinOne {
                 None => continue,
             };
 
+            if let Some(ref filter) = self.parent_residual_filter {
+                if !filter.matches(parent_doc.fields(), parent_mapping)? {
+                    continue;
+                }
+            }
+
             // Apply relation filter if present
             if let Some(ref rel_filter) = self.relation_filter {
                 if !self.check_relation_filter(&Some(child_doc.deep_clone()), rel_filter)? {
@@ -958,6 +1037,13 @@ impl PlanNode for TypeJoinOne {
             self.child_plan.start().await?;
             // Capture child's index fetches from init (the initial index scan)
             self.child_exec_info = self.child_plan.exec_info();
+        } else if matches!(self.direction, JoinDirection::Inverted)
+            && self.indexed_inverted_child_fetch.is_some()
+        {
+            // Go performs one-to-one secondary-side relation lookups per parent
+            // using the child's FK index. Avoid pre-scanning all child docs so
+            // empty FK-index reads are recorded against each parent snapshot.
+            self.parent_plan.init().await?;
         } else {
             // Normal mode: build child cache, then init parent
             self.build_child_cache().await?;
@@ -1002,9 +1088,18 @@ impl PlanNode for TypeJoinOne {
             }
 
             let mut parent_doc = self.parent_plan.value().deep_clone();
-            // Extract FK and lookup child in cache (O(1) lookup)
+            // Extract FK and lookup child in cache or via the child's FK index.
             let fk = self.extract_fk(&parent_doc);
-            let child_doc = fk.and_then(|fk| self.find_child_doc(&fk));
+            let child_doc = if matches!(self.direction, JoinDirection::Inverted)
+                && self.indexed_inverted_child_fetch.is_some()
+            {
+                match fk {
+                    Some(fk) => self.find_child_doc_by_fk_index(&fk).await?,
+                    None => None,
+                }
+            } else {
+                fk.and_then(|fk| self.find_child_doc(&fk))
+            };
 
             // Simulate Go's per-parent child scan metrics.
             // The behavior differs by join direction:
@@ -1015,7 +1110,7 @@ impl PlanNode for TypeJoinOne {
             // Inverted: fetchPrimaryDocsReferencingSecondaryDoc sets a filter + unique index
             // on the child scanNode, then calls collectDocs(0). This calls Next() twice
             // per parent (true + false), and uses the index (1 indexFetch per match).
-            if child_doc.is_some() {
+            if child_doc.is_some() && self.indexed_inverted_child_fetch.is_none() {
                 match &self.direction {
                     JoinDirection::Primary { .. } => {
                         // 1 iteration (Next()=true only), no index

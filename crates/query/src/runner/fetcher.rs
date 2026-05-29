@@ -5,7 +5,7 @@ use document::Document;
 use std::marker::PhantomData;
 
 use crate::error::{QueryError, Result};
-use crate::fetcher::{DocFetcher, FetchByIdsResult};
+use crate::fetcher::{CommitsQueryOptions, DocFetcher, FetchByIdsResult};
 use crate::planner::index_selection::IndexScanParams;
 
 /// Wrapper to convert a `&dyn DocFetcher` reference into an owned `DocFetcher`.
@@ -166,6 +166,30 @@ impl DocFetcher for FetcherWrapper {
 
     fn supports_index_queries(&self) -> bool {
         self.get_fetcher().supports_index_queries()
+    }
+
+    async fn get_commits(&self, options: &CommitsQueryOptions) -> Result<Vec<Document>> {
+        self.get_fetcher().get_commits(options).await
+    }
+
+    async fn get_document_at_cid(
+        &self,
+        cid: &str,
+        expected_doc_id: Option<&str>,
+    ) -> Result<Document> {
+        self.get_fetcher()
+            .get_document_at_cid(cid, expected_doc_id)
+            .await
+    }
+
+    async fn get_documents_at_cid(
+        &self,
+        cid: &str,
+        expected_doc_id: Option<&str>,
+    ) -> Result<Vec<Document>> {
+        self.get_fetcher()
+            .get_documents_at_cid(cid, expected_doc_id)
+            .await
     }
 
     async fn search_fulltext_scored(

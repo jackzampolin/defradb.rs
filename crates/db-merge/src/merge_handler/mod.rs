@@ -1286,6 +1286,350 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn counter_standalone_skips_already_merged_block() {
+        let (handler, blockstore) = make_handler_with_counter_schema().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-counters")
+            .unwrap()
+            .expect("counter collection should exist");
+        let mut doc = Document::new();
+        doc.generate_and_set_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().clone();
+        let doc_id_str = doc_id.to_string();
+
+        let mut delta_data = Vec::new();
+        ciborium::into_writer(&5_i64, &mut delta_data).unwrap();
+
+        let payload = CounterDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            field_name: "score".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            data: delta_data,
+            nonce: 999,
+        };
+        let block = Block {
+            delta: CrdtDelta::Counter(payload.clone()),
+            heads: None,
+            links: None,
+            encryption: None,
+            signature: None,
+        };
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+        blockstore.put(&cid, &block_data).await.unwrap();
+        blockstore.mark_as_merged(&cid).await.unwrap();
+
+        let metadata = BlockMetadata::normal(
+            &doc_id_str,
+            "col-counters",
+            "did:key:z6MkrCounterReplayTest",
+            None,
+            false,
+        );
+        let outcome = handler
+            .process_counter_delta(&cid, &payload, &metadata)
+            .await
+            .unwrap();
+        assert!(outcome.is_terminal_skip());
+
+        let txn = handler.db.new_txn(true).await.unwrap();
+        let stored = {
+            let datastore = txn.datastore().unwrap();
+            collection
+                .get_with_datastore(&datastore, &doc_id)
+                .await
+                .unwrap()
+        };
+        txn.force_discard().unwrap();
+        assert!(
+            stored.is_none(),
+            "standalone re-delivery must not materialize an already-merged counter block"
+        );
+    }
+
+    #[tokio::test]
+    async fn composite_merge_skips_locally_merged_counter_parent() {
+        let (handler, blockstore) = make_handler_with_counter_schema().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-counters")
+            .unwrap()
+            .expect("counter collection should exist");
+
+        let mut doc = Document::new();
+        doc.set_with_crdt("score", CType::PnCounter, NormalValue::Int(10))
+            .unwrap();
+        doc.generate_and_set_doc_id().unwrap();
+        doc.set_schema_version_id("v1");
+        let doc_id = doc.id().unwrap().clone();
+        let doc_id_str = doc_id.to_string();
+
+        let local_blocks = {
+            let txn = handler.db.new_txn(false).await.unwrap();
+            let blocks = {
+                let datastore = txn.datastore().unwrap();
+                let headstore = txn.headstore().unwrap();
+                let raw_blockstore = txn.blockstore().unwrap();
+                collection
+                    .save_with_datastore(&datastore, &doc)
+                    .await
+                    .unwrap();
+                db_blocks::write_document_blocks(
+                    &raw_blockstore,
+                    &headstore,
+                    &doc,
+                    "v1",
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            };
+            txn.force_commit().await.unwrap();
+            blocks
+        };
+        assert!(
+            blockstore.is_merged(&local_blocks.cid).await.unwrap(),
+            "locally-created composite blocks are already merged"
+        );
+
+        let mut update_data = Vec::new();
+        ciborium::into_writer(&10_i64, &mut update_data).unwrap();
+        let update_field_payload = CounterDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            field_name: "score".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 2,
+            data: update_data,
+            nonce: 99,
+        };
+        let update_field_block = Block::new(
+            CrdtDelta::Counter(update_field_payload),
+            local_blocks.field_cids.clone(),
+            vec![],
+        );
+        let update_field_cid = update_field_block.generate_cid().unwrap();
+        let update_field_data = update_field_block.to_dag_cbor().unwrap();
+        blockstore
+            .put(&update_field_cid, &update_field_data)
+            .await
+            .unwrap();
+
+        let update_payload = CompositeDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 2,
+            status: 1,
+        };
+        let update_composite_block = Block::new(
+            CrdtDelta::Composite(update_payload.clone()),
+            vec![local_blocks.cid],
+            vec![DAGLink::new("score", update_field_cid)],
+        );
+        let update_composite_cid = update_composite_block.generate_cid().unwrap();
+        let update_composite_data = update_composite_block.to_dag_cbor().unwrap();
+        blockstore
+            .put(&update_composite_cid, &update_composite_data)
+            .await
+            .unwrap();
+
+        let metadata = BlockMetadata::normal(
+            &doc_id_str,
+            "col-counters",
+            "did:key:z6MkrCompositeCounterParent",
+            None,
+            false,
+        );
+        let outcome = handler
+            .process_composite_delta(
+                &update_composite_cid,
+                &update_composite_block,
+                &update_payload,
+                &metadata,
+                false,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, MergeOutcome::Merged);
+
+        let stored = {
+            let txn = handler.db.new_txn(true).await.unwrap();
+            let stored = {
+                let datastore = txn.datastore().unwrap();
+                collection
+                    .get_with_datastore(&datastore, &doc_id)
+                    .await
+                    .unwrap()
+                    .expect("document should still exist")
+            };
+            txn.force_discard().unwrap();
+            stored
+        };
+        assert_eq!(stored.get("score"), Some(&NormalValue::Int(20)));
+    }
+
+    #[tokio::test]
+    async fn composite_parent_replay_updates_headstore_for_merged_parent() {
+        let (handler, blockstore, _bus) = make_handler_with_schema_and_bus().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-users")
+            .unwrap()
+            .expect("users collection should exist");
+
+        let mut doc = Document::new();
+        doc.set("name", NormalValue::String("John".to_string()));
+        doc.generate_and_set_doc_id().unwrap();
+        doc.set_schema_version_id("v1");
+        let doc_id = doc.id().unwrap().clone();
+        let doc_id_str = doc_id.to_string();
+
+        let local_blocks = {
+            let txn = handler.db.new_txn(false).await.unwrap();
+            let blocks = {
+                let datastore = txn.datastore().unwrap();
+                let headstore = txn.headstore().unwrap();
+                let raw_blockstore = txn.blockstore().unwrap();
+                collection
+                    .save_with_datastore(&datastore, &doc)
+                    .await
+                    .unwrap();
+                db_blocks::write_document_blocks(
+                    &raw_blockstore,
+                    &headstore,
+                    &doc,
+                    "v1",
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            };
+            txn.force_commit().await.unwrap();
+            blocks
+        };
+
+        let build_update =
+            |name: &str, priority: u64, field_heads: Vec<Cid>, composite_heads: Vec<Cid>| {
+                let mut data = Vec::new();
+                ciborium::into_writer(&NormalValue::String(name.to_string()), &mut data).unwrap();
+                let field_payload = LwwDeltaPayload {
+                    doc_id: doc_id_str.as_bytes().to_vec(),
+                    field_name: "name".to_string(),
+                    schema_version_id: "v1".to_string(),
+                    priority,
+                    data,
+                };
+                let field_block = Block::new(CrdtDelta::Lww(field_payload), field_heads, vec![]);
+                let field_cid = field_block.generate_cid().unwrap();
+                let field_data = field_block.to_dag_cbor().unwrap();
+
+                let composite_payload = CompositeDeltaPayload {
+                    doc_id: doc_id_str.as_bytes().to_vec(),
+                    schema_version_id: "v1".to_string(),
+                    priority,
+                    status: 1,
+                };
+                let composite_block = Block::new(
+                    CrdtDelta::Composite(composite_payload.clone()),
+                    composite_heads,
+                    vec![DAGLink::new("name", field_cid)],
+                );
+                let composite_cid = composite_block.generate_cid().unwrap();
+                let composite_data = composite_block.to_dag_cbor().unwrap();
+
+                (
+                    field_cid,
+                    field_data,
+                    composite_cid,
+                    composite_block,
+                    composite_payload,
+                    composite_data,
+                )
+            };
+
+        let (
+            parent_field_cid,
+            parent_field_data,
+            parent_cid,
+            _parent_block,
+            _parent_payload,
+            parent_data,
+        ) = build_update(
+            "Shahzad",
+            2,
+            local_blocks.field_cids.clone(),
+            vec![local_blocks.cid],
+        );
+        blockstore
+            .put(&parent_field_cid, &parent_field_data)
+            .await
+            .unwrap();
+        blockstore.put(&parent_cid, &parent_data).await.unwrap();
+
+        let (child_field_cid, child_field_data, child_cid, child_block, child_payload, child_data) =
+            build_update("Chris", 3, vec![parent_field_cid], vec![parent_cid]);
+        blockstore
+            .put(&child_field_cid, &child_field_data)
+            .await
+            .unwrap();
+        blockstore.put(&child_cid, &child_data).await.unwrap();
+
+        let metadata = BlockMetadata::normal(
+            &doc_id_str,
+            "col-users",
+            "did:key:z6MkrCompositeParentReplay",
+            None,
+            false,
+        );
+        let outcome = handler
+            .process_composite_delta(
+                &child_cid,
+                &child_block,
+                &child_payload,
+                &metadata,
+                false,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, MergeOutcome::Merged);
+
+        let txn = handler.db.new_txn(true).await.unwrap();
+        let head_keys = {
+            let headstore = txn.headstore().unwrap();
+            let mut iter = headstore
+                .iterator(storage::corekv::IterOptions::new().with_prefix(
+                    storage::keys::headstore::HeadstoreDocKey::field_prefix(&doc_id_str, "name"),
+                ))
+                .await
+                .unwrap();
+            let mut keys = Vec::new();
+            while let Some(pair) = iter.next().await.unwrap() {
+                keys.push(pair.key);
+            }
+            iter.close().await.unwrap();
+            keys
+        };
+        txn.force_discard().unwrap();
+
+        assert_eq!(
+            head_keys,
+            vec![storage::keys::headstore::HeadstoreDocKey::new(
+                &doc_id_str,
+                "name",
+                child_field_cid
+            )
+            .bytes()]
+        );
+    }
+
+    #[tokio::test]
     async fn composite_skip_field_does_not_mark_unreadable_linked_counter_merged() {
         let (handler, blockstore) = make_handler_with_counter_schema().await;
         let mut doc = Document::new();

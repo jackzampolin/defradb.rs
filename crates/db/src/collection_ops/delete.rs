@@ -94,6 +94,69 @@ impl<S: Store> crate::database::DB<S> {
         }
     }
 
+    /// Delete one or more collections by name in a single call (Go #4688 parity).
+    ///
+    /// - If `active_only` is true, only the active head version of each named
+    ///   collection is removed; earlier versions are kept intact.
+    /// - If `active_only` is false (Go's default), every version of each named
+    ///   collection is removed.
+    ///
+    /// Names are deduplicated. Name resolution happens up-front: if any name
+    /// is unknown, no deletion is performed. Validation (no documents, no
+    /// orphan child versions outside the batch) is delegated to
+    /// `delete_collection_versions_batch`.
+    pub async fn delete_collections(&self, names: Vec<String>, active_only: bool) -> Result<()> {
+        if names.is_empty() {
+            return Err(Error::InvalidPatch(
+                "collection name required: pass at least one name to delete".into(),
+            ));
+        }
+
+        let mut seen_names = std::collections::HashSet::new();
+        let unique_names: Vec<String> = names
+            .into_iter()
+            .filter(|n| !n.is_empty() && seen_names.insert(n.clone()))
+            .collect();
+
+        if unique_names.is_empty() {
+            return Err(Error::InvalidPatch(
+                "collection name required: every supplied name was empty".into(),
+            ));
+        }
+
+        let mut version_ids: Vec<String> = Vec::new();
+        let mut seen_versions = std::collections::HashSet::new();
+
+        if active_only {
+            for name in &unique_names {
+                let col = self
+                    .get_collection(name)?
+                    .ok_or_else(|| Error::CollectionNotFound(name.clone()))?;
+                let vid = col.version_id().to_string();
+                if seen_versions.insert(vid.clone()) {
+                    version_ids.push(vid);
+                }
+            }
+        } else {
+            let all_versions = self.get_all_collection_versions().await?;
+            for name in &unique_names {
+                let col = self
+                    .get_collection(name)?
+                    .ok_or_else(|| Error::CollectionNotFound(name.clone()))?;
+                let collection_id = col.collection_id().to_string();
+                for v in &all_versions {
+                    if v.collection_id == collection_id
+                        && seen_versions.insert(v.version_id.clone())
+                    {
+                        version_ids.push(v.version_id.clone());
+                    }
+                }
+            }
+        }
+
+        self.delete_collection_versions_batch(version_ids).await
+    }
+
     /// Truncate a collection: delete all documents, heads, blocks, and index entries
     /// while preserving the collection schema.
     ///

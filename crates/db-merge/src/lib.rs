@@ -15,10 +15,11 @@ mod push_docs_replay;
 pub mod push_docs_transport;
 pub mod replication;
 pub mod se;
+pub mod txn_broadcaster;
 
 // Re-export primary types
 pub use acp_merge_handler::{AcpMergeError, AcpMergeHandler};
-pub use broadcast_mutator::BroadcastMutator;
+pub use broadcast_mutator::{BroadcastMutator, BroadcastSeOptions};
 pub use head_provider::DbHeadProvider;
 pub use merge_handler::{DbMergeHandler, MergeError};
 pub use peer_identity::{
@@ -41,3 +42,4 @@ pub use se::{
     fetch_doc_ids, generate_doc_artifacts, generate_field_artifact, store_artifacts, FieldQuery,
     FieldValueQuery, SECoordinator,
 };
+pub use txn_broadcaster::SyncTxnBroadcaster;

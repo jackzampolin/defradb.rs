@@ -84,15 +84,25 @@ fn test_parse_query_with_cid_list_of_one() {
 }
 
 #[test]
-fn test_parse_query_with_multiple_cids_returns_error() {
+fn test_parse_query_with_multiple_cids() {
     let query = r#"{ Users(cid: ["bafy-one", "bafy-two"]) { _docID name } }"#;
-    let result = parse_query(query);
+    let selects = parse_query(query).unwrap();
 
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("querying by multiple cids is not yet supported"));
+    assert_eq!(
+        selects[0].cid,
+        Some(vec!["bafy-one".to_string(), "bafy-two".to_string()])
+    );
+}
+
+#[test]
+fn test_parse_commits_with_multiple_cids() {
+    let query = r#"{ _commits(cid: ["bafy-one", "bafy-two"]) { cid } }"#;
+    let selects = parse_query(query).unwrap();
+
+    assert_eq!(
+        selects[0].cid,
+        Some(vec!["bafy-one".to_string(), "bafy-two".to_string()])
+    );
 }
 
 #[test]
