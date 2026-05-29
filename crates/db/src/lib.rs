@@ -124,7 +124,7 @@ pub use doc_mutator::DbDocMutator;
 pub use downsample::GcDownsampleHistoriesOptions;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
-pub use kms_adapters::{DbDocCollectionLookup, DbNodeAcpRead};
+pub use kms_adapters::{DbDocCollectionLookup, DbEncBlockStore, DbNodeAcpRead};
 pub use lensed_auto_commit_fetcher::LensedAutoCommitFetcher;
 pub use lensed_fetcher::LensedDocFetcher;
 pub use schema_loader::{

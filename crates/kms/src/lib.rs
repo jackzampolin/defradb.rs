@@ -41,6 +41,9 @@ pub use store::{KeyStore, StoredKey};
 mod memory_store;
 pub use memory_store::MemoryKeyStore;
 
+mod blockstore_store;
+pub use blockstore_store::{BlockstoreKeyStore, EncBlockStore};
+
 mod transport;
 pub use transport::{EncodedFetchRequest, IncomingHandler, KeyTransport, TransportReplyStream};
 

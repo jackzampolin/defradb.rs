@@ -424,7 +424,13 @@ where
     // the P2P transport was created earlier; the policy needs ACP/NAC which
     // initialize here).
     let kms: Arc<dyn kms::KmsService> = {
-        let store: Arc<dyn kms::KeyStore> = Arc::new(kms::MemoryKeyStore::new());
+        // Blockstore-backed KeyStore (mirrors Go's internal/kms/enc_store.go):
+        // the KMS serves DEKs for ANY encrypted write by reading/writing the
+        // node's durable encstore→blockstore, not a RAM-only map.
+        let kms_blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
+        let enc_block_store: Arc<dyn kms::EncBlockStore> =
+            Arc::new(db::DbEncBlockStore::new(database.clone(), kms_blockstore));
+        let store: Arc<dyn kms::KeyStore> = Arc::new(kms::BlockstoreKeyStore::new(enc_block_store));
         let doc_lookup: Arc<dyn kms::DocCollectionLookup> =
             Arc::new(db::DbDocCollectionLookup::new(database.clone()));
         let policy = Arc::new(kms::NacDacPolicy::new(document_acp.clone(), doc_lookup));

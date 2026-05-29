@@ -79,11 +79,15 @@ impl AccessPolicy for NacDacPolicy {
             KeyScope::Document { doc_id, .. } => {
                 // Collection lookup runs internally (no actor check at this
                 // step; mirrors Go's "node-level" resolution).
-                let info = self
-                    .doc_lookup
-                    .collection_for_doc(doc_id)
-                    .await?
-                    .ok_or_else(|| Error::Internal(format!("no collection for doc {doc_id}")))?;
+                //
+                // `None` means the document's collection has no DAC policy
+                // attached (ACP not configured for it). With no policy there is
+                // no per-document access gate, so the DEK is freely releasable —
+                // matching the legacy decrypt path, which reads the key from the
+                // Encryption block with no policy check at all.
+                let Some(info) = self.doc_lookup.collection_for_doc(doc_id).await? else {
+                    return Ok(PolicyDecision::Allow);
+                };
 
                 // DAC permission check runs as the actor.
                 let actor_id: acp::Identity = actor.into();
@@ -328,7 +332,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn doc_scope_missing_collection_returns_internal_error() {
+    async fn doc_scope_no_policy_collection_allows_release() {
+        // A collection with no DAC policy attached resolves to `None`. With no
+        // policy there is no per-document access gate, so release is allowed —
+        // matching the legacy decrypt path (no policy check at all).
         struct EmptyLookup;
         #[async_trait::async_trait]
         impl crate::policy::DocCollectionLookup for EmptyLookup {
@@ -340,16 +347,17 @@ mod tests {
             }
         }
 
-        let policy = NacDacPolicy::new(Arc::new(FakeDac { allow: true }), Arc::new(EmptyLookup));
+        let policy = NacDacPolicy::new(Arc::new(FakeDac { allow: false }), Arc::new(EmptyLookup));
         let result = policy
             .check_release(
                 Some(&did("did:key:zalice")),
                 &KeyScope::Document {
-                    doc_id: "missing".into(),
+                    doc_id: "no-policy".into(),
                     field: None,
                 },
             )
-            .await;
-        assert!(matches!(result, Err(crate::Error::Internal(_))));
+            .await
+            .unwrap();
+        assert_eq!(result, PolicyDecision::Allow);
     }
 }

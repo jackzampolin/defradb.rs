@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use kms::{DocCollectionInfo, DocCollectionLookup, NodeAcpRead};
+use kms::{DocCollectionInfo, DocCollectionLookup, EncBlockStore, EncryptionCid, NodeAcpRead};
 
 /// Resolves doc_id → collection via the DB headstore (Go's
 /// `RetrieveCollectionFromDocID` port).
@@ -34,6 +34,75 @@ impl<S: storage::corekv::Store + Send + Sync + 'static> DocCollectionLookup
             Ok(None) => Ok(None),
             Err(e) => Err(kms::Error::Storage(e.to_string())),
         }
+    }
+}
+
+/// Durable `Encryption`-block store backing the KMS `BlockstoreKeyStore`.
+///
+/// Mirrors Go's `internal/kms/enc_store.go`: reads the encstore→blockstore
+/// (the same order as the merge decrypt path) and writes new blocks to the
+/// durable blockstore. This lets the KMS serve a DEK for ANY encrypted write,
+/// including blocks written by the legacy auto-commit path.
+pub struct DbEncBlockStore<S, B>
+where
+    S: storage::corekv::Store + Send + Sync + 'static,
+    B: blockstore::Blockstore,
+{
+    db: Arc<crate::DB<S>>,
+    blockstore: Arc<B>,
+}
+
+impl<S, B> DbEncBlockStore<S, B>
+where
+    S: storage::corekv::Store + Send + Sync + 'static,
+    B: blockstore::Blockstore,
+{
+    pub fn new(db: Arc<crate::DB<S>>, blockstore: Arc<B>) -> Self {
+        Self { db, blockstore }
+    }
+}
+
+#[async_trait]
+impl<S, B> EncBlockStore for DbEncBlockStore<S, B>
+where
+    S: storage::corekv::Store + Send + Sync + 'static,
+    B: blockstore::Blockstore + 'static,
+{
+    async fn get_block(&self, cid: &EncryptionCid) -> kms::Result<Option<Vec<u8>>> {
+        // Mirror the merge decrypt path: encstore first, then blockstore.
+        let txn = self
+            .db
+            .new_txn(true)
+            .await
+            .map_err(|e| kms::Error::Storage(e.to_string()))?;
+        let encstore = txn
+            .encstore()
+            .map_err(|e| kms::Error::Storage(e.to_string()))?;
+        let from_encstore = encstore
+            .get(&cid.to_bytes())
+            .await
+            .map_err(|e| kms::Error::Storage(e.to_string()))?;
+        // Read txn carries no writes; dropping it releases the snapshot.
+        drop(txn);
+        if let Some(bytes) = from_encstore {
+            return Ok(Some(bytes));
+        }
+        match self
+            .blockstore
+            .get(cid)
+            .await
+            .map_err(|e| kms::Error::Storage(e.to_string()))?
+        {
+            Some(bytes) => Ok(Some(bytes.to_vec())),
+            None => Ok(None),
+        }
+    }
+
+    async fn put_block(&self, cid: EncryptionCid, bytes: Vec<u8>) -> kms::Result<()> {
+        self.blockstore
+            .put(&cid, &bytes)
+            .await
+            .map_err(|e| kms::Error::Storage(e.to_string()))
     }
 }
 
