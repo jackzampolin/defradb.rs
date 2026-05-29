@@ -333,6 +333,12 @@ impl PlanNode for OrderByNode {
         self.source.set_cursor_seek(seek)
     }
 
+    fn set_cursor_fetch_limit(&mut self, _limit: u64) -> bool {
+        // OrderBy buffers and re-sorts all input rows; bounding the scan below
+        // it would drop rows the sort needs. Do not forward.
+        false
+    }
+
     fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
         self.source.page_info()
     }

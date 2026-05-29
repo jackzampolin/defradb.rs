@@ -333,6 +333,12 @@ impl PlanNode for AverageNode {
         self.source.set_cursor_seek(seek)
     }
 
+    fn set_cursor_fetch_limit(&mut self, _limit: u64) -> bool {
+        // Average consumes all input rows; bounding the scan below would
+        // produce a wrong aggregate. Do not forward.
+        false
+    }
+
     fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
         self.source.page_info()
     }

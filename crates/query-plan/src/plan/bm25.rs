@@ -102,6 +102,12 @@ impl PlanNode for BM25Node {
         self.source.set_cursor_seek(seek)
     }
 
+    fn set_cursor_fetch_limit(&mut self, _limit: u64) -> bool {
+        // BM25 consumes all input to score/rank; bounding the scan below it
+        // would drop candidates. Do not forward.
+        false
+    }
+
     fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
         self.source.page_info()
     }

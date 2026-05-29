@@ -87,6 +87,25 @@ pub trait PlanNode: MaybeSendSync {
         false
     }
 
+    /// Bound the underlying index scan's fetch count for cursor pagination
+    /// early-termination, setting `IndexScanParams.limit = limit`.
+    ///
+    /// `limit` is the cursor's `page_size + 1` (the `+1` is the has-next/has-prev
+    /// probe row). Pass-through wrapper nodes that emit one output row per input
+    /// row (select, permission_filter, se_filter, limit, lens) forward to their
+    /// child. Nodes that CONSUME ALL input before emitting (orderby, groupby,
+    /// aggregate, allDocs, bm25, similarity) must NOT forward — bounding the scan
+    /// below them would drop rows they need — so they return `false`.
+    ///
+    /// `IndexScanNode` returns `true` only when it has NO residual filter (a
+    /// residual filter rejects rows AFTER the fetcher, which would cause
+    /// under-fetch if the scan were bounded).
+    ///
+    /// Default: no-op, returns `false`.
+    fn set_cursor_fetch_limit(&mut self, _limit: u64) -> bool {
+        false
+    }
+
     /// Returns cursor page-info if this node is (or wraps) a `CursorNode`.
     ///
     /// Called after iteration is complete. `CursorNode` returns `Some(...)`;

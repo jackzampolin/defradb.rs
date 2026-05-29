@@ -48,6 +48,13 @@ pub struct CursorSeek {
     /// `try_select_index` chose a filter-only index that doesn't match the
     /// order-supporting index validated by `validate_cursor_index`.
     pub expected_index_name: String,
+    /// Optional bound on the number of index entries to fetch (`page_size + 1`,
+    /// the `+1` being the has-next/has-prev probe row). When the seek APPLIES on
+    /// a scan with no residual filter, this is copied into
+    /// `IndexScanParams.limit` so the fetcher early-terminates after collecting
+    /// `fetch_limit` PASSING entries — matching Go's `indexFetches` count.
+    /// `None` leaves the scan unbounded (omitted `first`/`last`).
+    pub fetch_limit: Option<u64>,
 }
 
 /// Value-level filter applied to individual index entries during scan iteration.
