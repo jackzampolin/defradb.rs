@@ -565,44 +565,5 @@ async fn peer_no_key_should_not_fetch() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ACP encryption tests (kept ignored — require SourceHub DAC, an M4 milestone)
-//
-// The Go originals (tests/integration/encryption/peer_acp_test.go) all declare
-// `SupportedDocumentACPTypes: [SourceHubDocumentACPType]`, i.e. they exercise
-// DAC enforcement of cross-peer key distribution against an on-chain SourceHub
-// policy. M1's KMS NacDacPolicy gates against the node's LOCAL document_acp /
-// nac_manager only; the SourceHub DAC path these tests require lands in M4.
-// ---------------------------------------------------------------------------
-
-/// Port: TestDocEncryptionACP_IfUserAndNodeHaveAccess_ShouldFetch
-#[tokio::test]
-#[serial]
-#[ignore = "requires SourceHub DAC (SupportedDocumentACPTypes: SourceHub) — M4 milestone"]
-async fn encryption_acp_user_and_node_access() {
-    // Requires SourceHub DAC policy + KMS integration (M4)
-}
-
-/// Port: TestDocEncryptionACP_IfUserHasAccessButNotNode_ShouldNotFetch
-#[tokio::test]
-#[serial]
-#[ignore = "requires SourceHub DAC (SupportedDocumentACPTypes: SourceHub) — M4 milestone"]
-async fn encryption_acp_user_access_not_node() {
-    // Requires SourceHub DAC policy + KMS integration (M4)
-}
-
-/// Port: TestDocEncryptionACP_IfNodeHasAccessToSomeDocs_ShouldFetchOnlyThem
-#[tokio::test]
-#[serial]
-#[ignore = "requires SourceHub DAC (SupportedDocumentACPTypes: SourceHub) — M4 milestone"]
-async fn encryption_acp_node_partial_access() {
-    // Requires SourceHub DAC policy + KMS integration (M4)
-}
-
-/// Port: TestDocEncryptionACP_IfClientNodeHasDocPermissionButServerNodeIsNotAvailable_ShouldNotFetch
-#[tokio::test]
-#[serial]
-#[ignore = "requires SourceHub DAC + server-availability testing — M4 milestone"]
-async fn encryption_acp_server_not_available() {
-    // Requires SourceHub DAC policy + KMS + server availability testing (M4)
-}
+// ACP encryption tests live in the sourcehub suite (they own the SourceHub
+// harness setup): tools/integration-test/tests/sourcehub/encryption_acp.rs.
