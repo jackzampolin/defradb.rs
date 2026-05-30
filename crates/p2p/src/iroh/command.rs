@@ -69,6 +69,16 @@ pub enum IrohCommand {
         topic: String,
         reply: oneshot::Sender<crate::error::Result<()>>,
     },
+    /// Join the gossip mesh for a raw string topic (e.g. the KMS
+    /// `encryption/<peer>/_response` sub-topic) AND mark it raw-routed, so
+    /// inbound messages are actually received and surfaced as
+    /// `TransportEvent::GossipRawMessage`. Unlike `RegisterRawTopic` (which only
+    /// classifies routing), this spawns a gossip reader — without it a topic is
+    /// classified but never subscribed, so replies never arrive (#976).
+    SubscribeRaw {
+        topic: String,
+        reply: oneshot::Sender<crate::error::Result<bool>>,
+    },
 
     // Messaging
     SendPushLogResponse {

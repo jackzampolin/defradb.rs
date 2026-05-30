@@ -163,17 +163,14 @@ impl P2PTransport for IrohTransport {
     }
 
     async fn subscribe_raw(&self, topic: String) -> Result<bool> {
-        // Iroh routes raw topics (e.g. the KMS `encryption/<peer>/_response`
-        // sub-topic) via `register_pubsub_rpc_topic`; the wire subscription is
-        // implicit in the gossip topic membership, so this is a no-op that
-        // simply registers the topic for raw routing. Without this override the
-        // default impl errors and the KMS pubsub transport (created
-        // unconditionally at iroh node startup) fails to construct, preventing
-        // the node from starting at all. Full KMS-over-iroh key fetch (response
-        // dispatch) remains a follow-up; SE query/serve does not use KMS.
-        self.send_command(|reply| IrohCommand::RegisterRawTopic { topic, reply })
-            .await?;
-        Ok(true)
+        // Actually JOIN the iroh-gossip mesh for this raw topic and spawn a
+        // reader, in addition to marking it raw-routed. The KMS pubsub
+        // transport subscribes to its private `encryption/<self>/_response`
+        // sub-topic here to receive reply envelopes; `RegisterRawTopic` alone
+        // only classifies routing and never joins, so replies published by a
+        // responder on that topic would never arrive (#976).
+        self.send_command(|reply| IrohCommand::SubscribeRaw { topic, reply })
+            .await
     }
 
     async fn send_pushlog_response(
@@ -633,6 +630,105 @@ mod tests {
                 }
                 TransportEvent::GossipMessage { .. } => {
                     panic!("raw-registered topic must not decode as PushLogBroadcast");
+                }
+                _ => continue,
+            }
+        }
+
+        transport0.shutdown().await.unwrap();
+        transport1.shutdown().await.unwrap();
+        task0.await.unwrap();
+        task1.await.unwrap();
+    }
+
+    /// Regression for #976: `subscribe_raw` must JOIN the gossip mesh for a raw
+    /// string sub-topic (here a KMS `encryption/<peer>/_response`-style topic
+    /// that no `DefraTopic::subscribe` covers) and spawn a reader, so a peer's
+    /// `publish_raw` on the same string is actually received as a
+    /// `GossipRawMessage`. Before the fix `subscribe_raw` only registered the
+    /// topic for raw routing without joining, so the message never arrived and
+    /// the KMS key fetch timed out.
+    #[tokio::test]
+    async fn subscribe_raw_joins_mesh_and_receives_publish_raw() {
+        let key0 = SecretKey::generate();
+        let key1 = SecretKey::generate();
+        let (command_tx0, mut events0, _replicators0, task0) =
+            spawn_endpoint(test_config(key0.clone())).await.unwrap();
+        let (command_tx1, mut events1, _replicators1, task1) =
+            spawn_endpoint(test_config(key1.clone())).await.unwrap();
+        let transport0 = IrohTransport::new(command_tx0, key0);
+        let transport1 = IrohTransport::new(command_tx1, key1);
+
+        transport0
+            .dial(
+                transport1.local_peer_id(),
+                transport1.listen_addresses().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        transport0
+            .poll_until_connected(transport1.local_peer_id(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        transport1
+            .poll_until_connected(transport0.local_peer_id(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // A `_response`-style sub-topic not covered by any DefraTopic. Both
+        // peers join it via subscribe_raw so the mesh forms; publisher then
+        // broadcasts raw bytes on the same string.
+        let response_topic = format!(
+            "encryption/{}/_response",
+            transport1.local_peer_id().as_str()
+        );
+        transport0
+            .subscribe_raw(response_topic.clone())
+            .await
+            .unwrap();
+        transport1
+            .subscribe_raw(response_topic.clone())
+            .await
+            .unwrap();
+
+        async fn wait_peer_subscribed(
+            events: &mut tokio::sync::mpsc::Receiver<TransportEvent<iroh::endpoint::SendStream>>,
+            want_topic: &str,
+        ) {
+            loop {
+                let event = timeout(Duration::from_secs(5), events.recv())
+                    .await
+                    .expect("timed out waiting for peer subscription")
+                    .expect("iroh event channel closed");
+                if let TransportEvent::PeerSubscribed { topic, .. } = &event {
+                    if topic == want_topic {
+                        break;
+                    }
+                }
+            }
+        }
+        wait_peer_subscribed(&mut events0, &response_topic).await;
+        wait_peer_subscribed(&mut events1, &response_topic).await;
+
+        let payload = vec![0xA1u8, 0x02, 0x03, 0x04];
+        transport0
+            .publish_raw(response_topic.clone(), payload.clone())
+            .await
+            .unwrap();
+
+        loop {
+            let event = timeout(Duration::from_secs(10), events1.recv())
+                .await
+                .expect("timed out waiting for raw gossip reply on _response sub-topic")
+                .expect("iroh event channel closed");
+            match event {
+                TransportEvent::GossipRawMessage { topic, data, .. } => {
+                    assert_eq!(topic, response_topic);
+                    assert_eq!(data, payload);
+                    break;
+                }
+                TransportEvent::GossipMessage { .. } => {
+                    panic!("raw-subscribed topic must not decode as PushLogBroadcast");
                 }
                 _ => continue,
             }

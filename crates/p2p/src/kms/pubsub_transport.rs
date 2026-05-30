@@ -119,17 +119,10 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
     /// - `topic == encryption/<self>/_response`: decode the `internalResponse`
     ///   envelope and route it to the correlator for the waiting `send_request`.
     pub async fn dispatch_incoming(&self, from_peer: String, topic: String, payload: Vec<u8>) {
-        let from = match from_peer.parse::<libp2p::PeerId>() {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(
-                    peer = %from_peer,
-                    error = %e,
-                    "KMS dispatch: source peer id does not parse as libp2p::PeerId; dropping"
-                );
-                return;
-            }
-        };
+        // `from_peer` is the verified gossip source in transport-native form
+        // (libp2p base58 over libp2p, iroh hex over iroh). It is forwarded
+        // through correlation/AAD as an opaque string and never parsed, so the
+        // KMS pubsub path is transport-agnostic (#976).
 
         // Reply path: our own `_response` sub-topic.
         if topic == self.self_response_topic {
@@ -137,7 +130,7 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
                 Ok(e) => e,
                 Err(e) => {
                     debug!(
-                        from = %from,
+                        from = %from_peer,
                         error = %e,
                         payload_len = payload.len(),
                         "KMS dispatch: failed to decode response envelope; dropping"
@@ -145,9 +138,9 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
                     return;
                 }
             };
-            let delivered = self.correlator.deliver(from, envelope);
+            let delivered = self.correlator.deliver(from_peer.clone(), envelope);
             debug!(
-                from = %from,
+                from = %from_peer,
                 payload_len = payload.len(),
                 delivered,
                 "KMS dispatch: response envelope routed to correlator"
@@ -157,7 +150,7 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
 
         // Request path: bare-CBOR FetchEncryptionKeyRequest on the base topic.
         if topic == ENCRYPTION_TOPIC {
-            self.handle_request(from, payload).await;
+            self.handle_request(from_peer, payload).await;
             return;
         }
 
@@ -170,9 +163,9 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
     /// Handle an inbound request on the base topic: decode, dispatch to the
     /// installed handler, then publish the reply on the caller's `_response`
     /// sub-topic wrapped in an `internalResponse` envelope (Go parity).
-    async fn handle_request(&self, from: libp2p::PeerId, payload: Vec<u8>) {
+    async fn handle_request(&self, from: String, payload: Vec<u8>) {
         // Ignore our own request echoed back by the mesh.
-        if from.to_string() == self.local_peer_id {
+        if from == self.local_peer_id {
             return;
         }
         let handler = self.handler.read().ok().and_then(|g| g.clone());
@@ -191,7 +184,7 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
         let (reply_bytes, err) = match handler
             .handle(
                 kms::PeerIdentity {
-                    peer_id: from.to_string(),
+                    peer_id: from.clone(),
                 },
                 req,
             )
@@ -226,7 +219,11 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
                 return;
             }
         };
-        let reply_topic = response_topic(ENCRYPTION_TOPIC, &from);
+        // Build the caller's `_response` sub-topic from the transport-native
+        // peer-id string. Identical to `response_topic(ENCRYPTION_TOPIC, &pid)`
+        // for a libp2p base58 `from` (Go wire-compat), and correct for iroh hex
+        // peer ids that do not parse as a `libp2p::PeerId`.
+        let reply_topic = format!("{ENCRYPTION_TOPIC}/{from}/_response");
         if let Err(e) = self
             .publish_with_graft_retry(reply_topic.clone(), bytes)
             .await
@@ -353,7 +350,7 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
                         continue;
                     }
                 };
-                if tx.send((reply, resp.from.to_string())).await.is_err() {
+                if tx.send((reply, resp.from)).await.is_err() {
                     // Receiver (get_keys spawned task) gone; stop draining.
                     break;
                 }
