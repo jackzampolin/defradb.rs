@@ -122,6 +122,28 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
             .await
     }
 
+    async fn get_commits(
+        &self,
+        options: &query::fetcher::CommitsQueryOptions,
+    ) -> query::error::Result<Vec<Document>> {
+        use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
+
+        let db_options = DbCommitsOptions {
+            doc_id: options.doc_id.clone(),
+            cid: options.cid.clone(),
+            depth: options.depth,
+            height_start: options.height_start,
+            height_end: options.height_end,
+            field_name: options.field_name.clone(),
+        };
+
+        let commits_fetcher = CommitsFetcher::new(self.txn.clone());
+        commits_fetcher
+            .fetch_commits(&db_options)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("commits fetch error: {}", e)))
+    }
+
     async fn search_fulltext_scored(
         &self,
         collection_name: &str,

@@ -13,7 +13,8 @@ use cid::Cid;
 use crate::error::Result;
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, CarFetchRequest, DocSyncReply, DocSyncRequest,
-    PushLogBroadcast, PushLogReply, PushLogRequest, PushSEArtifactsRequest,
+    PushLogBroadcast, PushLogReply, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
+    QuerySEArtifactsRequest,
 };
 use crate::replicator::ReplicatorInfo;
 use crate::topics::DefraTopic;
@@ -42,12 +43,14 @@ impl fmt::Display for PeerId {
     }
 }
 
+#[cfg(feature = "libp2p-transport")]
 impl From<libp2p::PeerId> for PeerId {
     fn from(peer_id: libp2p::PeerId) -> Self {
         Self(peer_id.to_string())
     }
 }
 
+#[cfg(feature = "libp2p-transport")]
 impl From<&libp2p::PeerId> for PeerId {
     fn from(peer_id: &libp2p::PeerId) -> Self {
         Self(peer_id.to_string())
@@ -81,6 +84,7 @@ impl fmt::Display for PeerAddr {
     }
 }
 
+#[cfg(feature = "libp2p-transport")]
 impl From<libp2p::Multiaddr> for PeerAddr {
     fn from(addr: libp2p::Multiaddr) -> Self {
         Self(addr.to_string())
@@ -107,6 +111,7 @@ impl fmt::Display for MessageId {
     }
 }
 
+#[cfg(feature = "libp2p-transport")]
 impl From<libp2p::gossipsub::MessageId> for MessageId {
     fn from(id: libp2p::gossipsub::MessageId) -> Self {
         Self(id.to_string())
@@ -131,6 +136,16 @@ pub enum TransportEvent<ResponseToken> {
         message_id: MessageId,
         topic: String,
         message: PushLogBroadcast,
+    },
+    /// Raw gossipsub message on a topic registered as `pubsub_rpc`-owned
+    /// (#828). The payload is an opaque CBOR-encoded DocSync/Branchable
+    /// request or an `InternalResponse` envelope; the coordinator feeds
+    /// it into a `pubsub_rpc::TopicHandler` for decoding.
+    GossipRawMessage {
+        propagation_source: PeerId,
+        message_id: MessageId,
+        topic: String,
+        data: Vec<u8>,
     },
     PeerSubscribed {
         peer_id: PeerId,
@@ -193,6 +208,14 @@ pub enum TransportEvent<ResponseToken> {
         peer_id: PeerId,
         data: Vec<u8>,
     },
+    SEQueryRequest {
+        peer_id: PeerId,
+        request: QuerySEArtifactsRequest,
+    },
+    SEQueryReply {
+        peer_id: PeerId,
+        reply: QuerySEArtifactsReply,
+    },
     Listening(PeerAddr),
 }
 
@@ -247,6 +270,43 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
     async fn unsubscribe(&self, topic: DefraTopic) -> Result<bool>;
 
     async fn publish(&self, topic: DefraTopic, msg: PushLogBroadcast) -> Result<MessageId>;
+
+    /// Publish raw pre-encoded bytes on `topic`. Used by the pubsub_rpc layer
+    /// (#828) for DocSync/BranchableSync requests and for
+    /// `<base>/<peer>/_response` reply envelopes, whose payloads are not
+    /// `PushLogBroadcast`-shaped and whose topic names are not
+    /// [`DefraTopic`] variants.
+    ///
+    /// Default implementation returns `Error::Transport("not supported")` —
+    /// transports that don't implement gossipsub (iroh, mocks) can rely on
+    /// it; libp2p overrides.
+    async fn publish_raw(&self, _topic: String, _data: Vec<u8>) -> Result<MessageId> {
+        Err(crate::error::Error::Transport(
+            "publish_raw is not supported on this transport".to_string(),
+        ))
+    }
+
+    /// Subscribe to an arbitrary topic string without the [`DefraTopic`]
+    /// wrapper. Used for dynamic pubsub_rpc response sub-topics.
+    ///
+    /// Default implementation returns `Error::Transport("not supported")`.
+    async fn subscribe_raw(&self, _topic: String) -> Result<bool> {
+        Err(crate::error::Error::Transport(
+            "subscribe_raw is not supported on this transport".to_string(),
+        ))
+    }
+
+    /// Register `topic` as owned by the pubsub_rpc layer. Future inbound
+    /// gossipsub messages on `topic` (or any sub-topic matching
+    /// `<topic>/<peer>/_response`) arrive as
+    /// [`TransportEvent::GossipRawMessage`] rather than being decoded as
+    /// PushLog broadcasts. Idempotent.
+    ///
+    /// Default implementation is a no-op so callers can register
+    /// unconditionally on transports without a gossipsub dispatcher.
+    async fn register_pubsub_rpc_topic(&self, _topic: String) -> Result<()> {
+        Ok(())
+    }
 
     /// Get all peers known to GossipSub for a topic (mesh + non-mesh).
     async fn topic_peers(&self, topic: DefraTopic) -> Result<Vec<PeerId>>;
@@ -306,6 +366,26 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
     ) -> Result<()>;
 
     async fn send_se_artifacts(&self, peer_id: &PeerId, req: PushSEArtifactsRequest) -> Result<()>;
+
+    async fn send_se_query_request(
+        &self,
+        _peer_id: &PeerId,
+        _req: QuerySEArtifactsRequest,
+    ) -> Result<()> {
+        Err(crate::error::Error::Transport(
+            "send_se_query_request is not supported on this transport".to_string(),
+        ))
+    }
+
+    async fn send_se_query_response(
+        &self,
+        _peer_id: &PeerId,
+        _reply: QuerySEArtifactsReply,
+    ) -> Result<()> {
+        Err(crate::error::Error::Transport(
+            "send_se_query_response is not supported on this transport".to_string(),
+        ))
+    }
 
     // ---- Block sync ----
 

@@ -24,6 +24,7 @@ use crate::plan::{IndexScanNode, PermissionFilterNode, SEFilterNode, ScanNode, S
 use crate::planner::index_selection::IndexScanParams;
 use crate::planner::PlanNode;
 use query_types::error::{QueryError, Result};
+use query_types::limits::QueryLimits;
 use query_types::mapper::{Requestable, Select};
 
 /// Maximum allowed nesting depth for nested queries (0-indexed).
@@ -76,6 +77,8 @@ pub struct Planner {
     identity_did: Option<Did>,
     /// Pre-computed FTS scores: output_name → (doc_id → score)
     pub(crate) fts_scores: HashMap<String, HashMap<String, f64>>,
+    /// Query parsing and filter evaluation guardrails.
+    pub(crate) query_limits: QueryLimits,
 }
 
 impl Planner {
@@ -113,6 +116,7 @@ impl Planner {
             acp: None,
             identity_did: None,
             fts_scores: HashMap::new(),
+            query_limits: QueryLimits::default(),
         }
     }
 
@@ -137,16 +141,17 @@ impl Planner {
         self
     }
 
+    /// Set query parsing and filter evaluation limits.
+    pub fn with_query_limits(mut self, limits: QueryLimits) -> Self {
+        self.query_limits = limits;
+        self
+    }
+
     /// Set ACP and identity for permission filtering in plans.
     pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>, identity_did: Option<Did>) -> Self {
         self.acp = Some(acp);
         self.identity_did = identity_did;
         self
-    }
-
-    /// Whether this planner should insert ACP permission filters into plans.
-    pub(super) fn has_acp(&self) -> bool {
-        self.acp.is_some()
     }
 
     /// Conditionally wrap a plan with a PermissionFilterNode if the collection has an ACP policy.

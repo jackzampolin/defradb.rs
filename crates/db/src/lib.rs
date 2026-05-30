@@ -70,6 +70,8 @@ pub(crate) mod doc_mutator;
 pub mod downsample;
 pub(crate) mod dump;
 pub mod error;
+pub mod event_emission;
+pub use event_emission::{TxnBroadcastEvent, TxnBroadcaster};
 // Index manager extracted to standalone db-index crate.
 pub use db_index as index_manager;
 pub(crate) mod json_patch;
@@ -127,7 +129,10 @@ pub use schema_loader::{
 };
 pub use txn::DbTxn;
 pub use txn_context::DbTransactionContext;
-pub use txn_registry::{CleanupResult, DbTransactionRegistry};
+pub use txn_registry::{
+    CleanupResult, DbTransactionRegistry, DEFAULT_TRANSACTION_CLEANUP_INTERVAL,
+    DEFAULT_TRANSACTION_IDLE_TIMEOUT,
+};
 pub use versioned_fetcher::VersionedFetcher;
 pub use view_ops::RefreshViewsOptions;
 

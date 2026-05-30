@@ -1,3 +1,4 @@
+use super::helpers::ensure_collection_is_active;
 use super::*;
 
 impl<S: Store + 'static> AutoCommitMutator<S> {
@@ -24,6 +25,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
 
         let collection = self.get_collection_or_err(collection_name)?;
+        ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id().to_string();
         let sign_config = get_signing_config();
@@ -41,7 +43,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
         })?;
 
-        let mut results: Vec<(DocID, bool, Option<Cid>)> = Vec::with_capacity(doc_ids.len());
+        let mut results: Vec<(DocID, bool, Option<CommitArtifacts>)> =
+            Vec::with_capacity(doc_ids.len());
 
         for doc_id in doc_ids {
             // Delete from datastore + indexes
@@ -71,8 +74,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 }
             };
 
+            // Skip block-write and event emit for missing docs; DeleteNode
+            // treats existed==false as a no-op.
+            if !existed {
+                results.push((doc_id.clone(), existed, None));
+                continue;
+            }
+
             // Write delete block (composite with status=2)
-            let commit_cid = {
+            let commit_result: Option<CommitArtifacts> = {
                 let blockstore = txn.blockstore().map_err(|e| {
                     query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
                 })?;
@@ -92,8 +102,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     Ok(block_result) => {
                         let composite_cid = block_result.cid;
 
+                        let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
                         if collection.schema().is_branchable {
-                            if let Err(e) = write_collection_block(
+                            match write_collection_block(
                                 &blockstore,
                                 &headstore,
                                 short_id,
@@ -103,15 +114,20 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             )
                             .await
                             {
-                                warn!(
-                                    collection = %collection_name,
-                                    error = %e,
-                                    "Failed to write collection block for branchable delete"
-                                );
+                                Ok((col_cid, col_bytes)) => {
+                                    col_block_data = Some((col_cid, col_bytes));
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        collection = %collection_name,
+                                        error = %e,
+                                        "Failed to write collection block for branchable delete"
+                                    );
+                                }
                             }
                         }
 
-                        Some(composite_cid)
+                        Some((composite_cid, block_result.block, col_block_data))
                     }
                     Err(e) => {
                         warn!(
@@ -125,7 +141,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 }
             };
 
-            results.push((doc_id.clone(), existed, commit_cid));
+            results.push((doc_id.clone(), existed, commit_result));
         }
 
         // Single commit for entire batch
@@ -141,11 +157,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             )));
         }
 
-        // Emit events after commit
+        // Emit events after commit, only when blocks were written.
         let mut delete_results = Vec::with_capacity(results.len());
-        for (doc_id, existed, commit_cid) in results {
-            let cid = commit_cid.unwrap_or_default();
-            self.emit_update_events(&collection, &doc_id.to_string(), cid);
+        for (doc_id, existed, commit_result) in results {
+            if let Some((cid, block, col_data)) = commit_result {
+                self.emit_update_events(&collection, &doc_id.to_string(), cid, block, col_data);
+            }
             delete_results.push(DeleteResult::new(doc_id, existed));
         }
 

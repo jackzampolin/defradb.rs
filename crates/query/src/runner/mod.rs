@@ -50,6 +50,7 @@ use std::sync::Arc;
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::fetcher::{CollectionProvider, StaticCollectionProvider};
+use crate::limits::QueryLimits;
 use crate::mutator::DocMutator;
 use crate::planner::Doc;
 use crate::txn::{NoOpTransactionRegistry, TransactionRegistry};
@@ -191,6 +192,8 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     pub(crate) nac: Arc<dyn NacChecker>,
     /// Query execution timeout in seconds (0 = no timeout). Default: 30.
     pub(crate) query_timeout: u64,
+    /// Query parsing and filter evaluation guardrails.
+    pub(crate) query_limits: QueryLimits,
 }
 
 impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
@@ -209,6 +212,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
+            query_limits: QueryLimits::default(),
         }
     }
 
@@ -227,6 +231,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
+            query_limits: QueryLimits::default(),
         }
     }
 }
@@ -247,6 +252,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
+            query_limits: QueryLimits::default(),
         }
     }
 
@@ -270,6 +276,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
+            query_limits: QueryLimits::default(),
         }
     }
 
@@ -292,6 +299,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
+            query_limits: QueryLimits::default(),
         }
     }
 
@@ -343,6 +351,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Set query execution timeout in seconds (0 = no timeout).
     pub fn with_query_timeout(mut self, timeout_secs: u64) -> Self {
         self.query_timeout = timeout_secs;
+        self
+    }
+
+    /// Set query parsing and filter evaluation limits.
+    pub fn with_query_limits(mut self, limits: QueryLimits) -> Self {
+        self.query_limits = limits;
         self
     }
 

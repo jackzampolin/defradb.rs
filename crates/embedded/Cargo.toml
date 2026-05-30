@@ -21,7 +21,7 @@ document = { path = "../document" }
 events = { path = "../events" }
 identity = { path = "../identity" }
 lens = { path = "../lens" }
-p2p = { path = "../p2p" }
+p2p = { path = "../p2p", features = ["libp2p-transport"] }
 query = { path = "../query" }
 schema = { path = "../schema" }
 sourcehub = { path = "../sourcehub" }

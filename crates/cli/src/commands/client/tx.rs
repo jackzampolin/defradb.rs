@@ -18,24 +18,19 @@ pub struct TxArgs {
 #[non_exhaustive]
 pub enum TxCommand {
     /// Create a new transaction
-    #[command(alias = "create")]
-    New(TxCreateArgs),
+    New(TxNewArgs),
     /// Commit a transaction
     Commit(TxCommitArgs),
     /// Discard (rollback) a transaction
     Discard(TxDiscardArgs),
 }
 
-/// Arguments for tx create command
+/// Arguments for tx new command
 #[derive(Args, Debug)]
-pub struct TxCreateArgs {
+pub struct TxNewArgs {
     /// Create a read-only transaction
     #[arg(long = "read-only")]
     pub read_only: bool,
-
-    /// Create a concurrent transaction
-    #[arg(long)]
-    pub concurrent: bool,
 }
 
 /// Arguments for tx commit command
@@ -65,17 +60,13 @@ impl TxArgs {
     }
 }
 
-impl TxCreateArgs {
-    /// Execute the tx create command
+impl TxNewArgs {
+    /// Execute the tx new command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
-        let response = if self.concurrent {
-            client.tx_begin_concurrent(self.read_only).await?
-        } else {
-            client.tx_begin(self.read_only).await?
-        };
+        let response = client.tx_begin(self.read_only).await?;
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({ "id": response.id }))?
@@ -111,13 +102,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tx_create_args_default() {
-        let args = TxCreateArgs {
-            read_only: false,
-            concurrent: false,
-        };
+    fn test_tx_new_args_default() {
+        let args = TxNewArgs { read_only: false };
         assert!(!args.read_only);
-        assert!(!args.concurrent);
     }
 
     #[test]

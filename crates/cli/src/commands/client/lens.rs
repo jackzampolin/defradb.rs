@@ -139,7 +139,9 @@ impl LensSetArgs {
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        let response = client.lens_set_migration(&body.to_string()).await?;
+        let response = client
+            .lens_set_migration(&body.to_string(), ctx.tx_id.as_deref())
+            .await?;
         println!("{}", serde_json::to_string_pretty(&response)?);
         Ok(())
     }

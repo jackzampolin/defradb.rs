@@ -36,7 +36,7 @@ impl HttpClient {
     pub async fn collection_set_active(&self, version_id: Option<&str>) -> Result<()> {
         let url = format!("{}/api/v0/collections/default", self.base_url);
         let text = version_id.unwrap_or("");
-        let response = self.post_text(&url, text).await?;
+        let response = self.post_text(&url, text, None).await?;
         if !response.status().is_success() {
             return Err(Self::extract_error(response).await);
         }
@@ -48,6 +48,23 @@ impl HttpClient {
             "{}/api/v0/collections/{}/truncate",
             self.base_url,
             encode(name)
+        );
+        self.request_void("DELETE", &url, None).await
+    }
+
+    /// Delete one or more collections by name via Go-compatible
+    /// `DELETE /collections?name=Users,Books&active-only=true`.
+    pub async fn collection_delete(&self, names: &[String], active_only: bool) -> Result<()> {
+        let joined = names
+            .iter()
+            .map(|n| n.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let url = format!(
+            "{}/api/v0/collections?name={}&active-only={}",
+            self.base_url,
+            encode(&joined),
+            active_only
         );
         self.request_void("DELETE", &url, None).await
     }

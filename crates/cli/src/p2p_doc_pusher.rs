@@ -90,11 +90,32 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         let pid: libp2p::PeerId = peer_id
             .parse()
             .map_err(|e| format!("invalid peer ID: {}", e))?;
-        let info = p2p::ReplicatorInfo::new(pid, collections.to_vec());
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let mut info = match peerstore
+            .get_replicator(peer_id)
+            .await
+            .map_err(|e| format!("failed to load persisted replicator: {}", e))?
+        {
+            Some(bytes) => match p2p::ReplicatorInfo::from_bytes(&bytes) {
+                Ok(info) => info,
+                Err(e) => {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Replacing invalid persisted replicator"
+                    );
+                    p2p::ReplicatorInfo::new(pid, collections.to_vec())
+                        .map_err(|e| format!("invalid replicator info: {}", e))?
+                }
+            },
+            None => p2p::ReplicatorInfo::new(pid, collections.to_vec())
+                .map_err(|e| format!("invalid replicator info: {}", e))?,
+        };
+        info.id = peer_id.to_string();
+        info.collections = collections.to_vec();
         let bytes = info
             .to_bytes()
             .map_err(|e| format!("failed to serialize replicator info: {}", e))?;
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
         peerstore
             .create_replicator(peer_id, &bytes)
             .await
@@ -107,6 +128,29 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             .delete_replicator(peer_id)
             .await
             .map_err(|e| format!("failed to delete persisted replicator: {}", e))
+    }
+
+    async fn load_persisted_replicators(&self) -> Result<Option<Vec<p2p::ReplicatorInfo>>, String> {
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let entries = peerstore
+            .list_replicators()
+            .await
+            .map_err(|e| format!("failed to list persisted replicators: {}", e))?;
+
+        let mut replicators = Vec::with_capacity(entries.len());
+        for (peer_id, bytes) in entries {
+            match p2p::ReplicatorInfo::from_bytes(&bytes) {
+                Ok(info) => replicators.push(info),
+                Err(e) => {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Skipping invalid persisted replicator"
+                    );
+                }
+            }
+        }
+        Ok(Some(replicators))
     }
 
     async fn persist_p2p_documents(&self, doc_ids: &[String]) -> Result<(), String> {

@@ -11,13 +11,20 @@ use crate::node_tasks::{
     spawn_replication_loop,
 };
 use crate::{Libp2pConfig, ManagedP2PSystem, TransportKind};
-use defra_p2p_adapter::{DbDocPusher, DbVersionSyncer, DocPusher, P2PAdapter};
+use defra_p2p_adapter::{
+    DbDocPusher, DbVersionSyncer, DocPusher, P2PAdapter, ReplicatorPushOptions,
+    ReplicatorPushOptionsState,
+};
 
 pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     pub system: Arc<ManagedP2PSystem>,
     pub mutator: Arc<dyn query::DocMutator>,
     pub merge_handler: Arc<EmbeddedMergeHandler<S>>,
     pub wire_document_acp: Option<WireDocumentAcpCallback>,
+    /// Forwards committed `/tx` writes to P2P peers; mirrors what the CLI
+    /// `P2PSetup` exposes. Without this, transactional writes commit locally
+    /// but never replicate.
+    pub txn_broadcaster: Arc<dyn db::event_emission::TxnBroadcaster>,
 }
 
 pub(crate) async fn setup_libp2p<S>(
@@ -123,8 +130,18 @@ where
         Err(error) => tracing::warn!(error = %error, "failed to load persisted P2P collections"),
     }
 
-    let host_event_task =
-        spawn_libp2p_event_handler(event_rx, coordinator.clone(), event_bus.clone());
+    // Start pubsub_rpc doc-sync / sync-branchable services (#828) so this
+    // node can interoperate with Go DefraDB peers over gossipsub.
+    if let Err(error) = coordinator.start_pubsub_services().await {
+        tracing::warn!(error = %error, "failed to start pubsub_rpc services");
+    }
+
+    let host_event_task = spawn_libp2p_event_handler(
+        event_rx,
+        coordinator.clone(),
+        store.clone(),
+        event_bus.clone(),
+    );
     let replication_task = spawn_replication_loop(
         coordinator.clone(),
         sync_events_rx,
@@ -148,17 +165,26 @@ where
     restore_libp2p_replicators(&handle, &restore_peerstore).await;
     let restored_doc_ids = restore_libp2p_documents(&handle, &restore_peerstore).await;
 
+    let replicator_push_options = ReplicatorPushOptionsState::default();
     let adapter = P2PAdapter::with_full_context(
         handle.clone(),
         coordinator.clone(),
         doc_pusher,
         event_bus,
         version_syncer,
-    );
+    )
+    .with_replicator_push_options_state(replicator_push_options.clone());
     adapter.set_initial_tracked_documents(restored_doc_ids);
     let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
-    let system = Arc::new(ManagedP2PSystem::new(
+    let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
+    let se_options_callback = Arc::new(move |options: ReplicatorPushOptions| {
+        broadcast_mutator_for_se.set_se_options(db_merge::BroadcastSeOptions {
+            encryption_key: options.se_encryption_key,
+            identity_pubkey: options.se_identity_pubkey,
+        })
+    });
+    let system = Arc::new(ManagedP2PSystem::with_replicator_push_options_callback(
         TransportKind::Libp2p,
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
         crate::node::ShutdownHandle::libp2p(
@@ -171,12 +197,15 @@ where
                 retry_loop_task.abort_handle(),
             ],
         ),
+        replicator_push_options,
+        Some(se_options_callback),
     ));
 
     Ok(P2PSetup {
         system,
         mutator: replication.broadcast_mutator,
         merge_handler: replication.merge_handler,
+        txn_broadcaster: replication.txn_broadcaster,
         wire_document_acp: Some(Box::new(move |acp| {
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());
@@ -250,8 +279,12 @@ where
         Err(error) => tracing::warn!(error = %error, "failed to load persisted P2P collections"),
     }
 
-    let event_handler_task =
-        spawn_iroh_event_handler(event_rx, coordinator.clone(), event_bus.clone());
+    let event_handler_task = spawn_iroh_event_handler(
+        event_rx,
+        coordinator.clone(),
+        store.clone(),
+        event_bus.clone(),
+    );
     let replication_task = spawn_replication_loop(
         coordinator.clone(),
         sync_events_rx,
@@ -272,24 +305,32 @@ where
         database.clone(),
         transport.clone(),
     ));
-    let retry_loop_task =
-        spawn_iroh_retry_loop(store.clone(), transport.clone(), doc_pusher.clone());
+    let retry_loop_task = spawn_iroh_retry_loop(store.clone(), doc_pusher.clone());
 
     let restore_peerstore = Peerstore::new(store.clone());
     restore_iroh_replicators(&coordinator, &restore_peerstore).await;
     let restored_doc_ids = restore_iroh_documents(&transport, &restore_peerstore).await;
 
+    let replicator_push_options = ReplicatorPushOptionsState::default();
     let adapter = IrohP2PAdapter::with_full_context(
         transport.clone(),
         coordinator.clone(),
         doc_pusher,
         event_bus,
         version_syncer,
-    );
+    )
+    .with_replicator_push_options_state(replicator_push_options.clone());
     adapter.set_initial_tracked_documents(restored_doc_ids);
     let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
-    let system = Arc::new(ManagedP2PSystem::new(
+    let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
+    let se_options_callback = Arc::new(move |options: ReplicatorPushOptions| {
+        broadcast_mutator_for_se.set_se_options(db_merge::BroadcastSeOptions {
+            encryption_key: options.se_encryption_key,
+            identity_pubkey: options.se_identity_pubkey,
+        })
+    });
+    let system = Arc::new(ManagedP2PSystem::with_replicator_push_options_callback(
         TransportKind::Iroh,
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
         crate::node::ShutdownHandle::iroh(
@@ -303,12 +344,15 @@ where
                 retry_loop_task.abort_handle(),
             ],
         ),
+        replicator_push_options,
+        Some(se_options_callback),
     ));
 
     Ok(P2PSetup {
         system,
         mutator: replication.broadcast_mutator,
         merge_handler: replication.merge_handler,
+        txn_broadcaster: replication.txn_broadcaster,
         wire_document_acp: Some(Box::new(move |acp| {
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());

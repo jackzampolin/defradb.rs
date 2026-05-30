@@ -34,10 +34,6 @@ mod tests {
             RoutePermission::IdentityOnly
         );
         assert_eq!(
-            route_permission("/api/v0/tx/concurrent", &Method::POST),
-            RoutePermission::IdentityOnly
-        );
-        assert_eq!(
             route_permission("/api/v0/tx/:id", &Method::POST),
             RoutePermission::IdentityOnly
         );
@@ -84,10 +80,6 @@ mod tests {
         assert_eq!(
             route_permission("/api/v0/collections", &Method::PATCH),
             RoutePermission::Required(NodePermission::CollectionPatch)
-        );
-        assert_eq!(
-            route_permission("/api/v0/collections/:name", &Method::GET),
-            RoutePermission::Required(NodePermission::CollectionGet)
         );
         assert_eq!(
             route_permission("/api/v0/collections/:name", &Method::POST),
@@ -171,6 +163,14 @@ mod tests {
     }
 
     #[test]
+    fn acp_document_decide_route_uses_dac_status_permission() {
+        assert_eq!(
+            route_permission("/api/v0/acp/document/decide", &Method::POST),
+            RoutePermission::Required(NodePermission::DacStatus)
+        );
+    }
+
+    #[test]
     fn unknown_route_gets_safe_default() {
         assert_eq!(
             route_permission("/api/v0/unknown", &Method::GET),
@@ -213,11 +213,6 @@ mod tests {
             ),
             // Transactions
             ("/api/v0/tx", Method::POST, RoutePermission::IdentityOnly),
-            (
-                "/api/v0/tx/concurrent",
-                Method::POST,
-                RoutePermission::IdentityOnly,
-            ),
             (
                 "/api/v0/tx/:id",
                 Method::POST,
@@ -273,11 +268,6 @@ mod tests {
                 "/api/v0/collections/migrations",
                 Method::POST,
                 RoutePermission::Required(NodePermission::MigrationSet),
-            ),
-            (
-                "/api/v0/collections/:name",
-                Method::GET,
-                RoutePermission::Required(NodePermission::CollectionGet),
             ),
             (
                 "/api/v0/collections/:name",
@@ -374,6 +364,11 @@ mod tests {
             (
                 "/api/v0/acp/policy",
                 Method::GET,
+                RoutePermission::Required(NodePermission::DacStatus),
+            ),
+            (
+                "/api/v0/acp/document/decide",
+                Method::POST,
                 RoutePermission::Required(NodePermission::DacStatus),
             ),
             (

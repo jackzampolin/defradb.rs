@@ -4,6 +4,8 @@ use cid::Cid;
 
 use blockstore::Blockstore;
 
+use super::super::authorizer::AccessAuthorizer;
+use super::super::dag_context::{block_context_from_data, DagFetchContext};
 use super::super::SyncCoordinator;
 use crate::error::{Error, Result};
 use crate::message::{DocSyncItem, DocSyncReply, MAX_DOC_IDS};
@@ -44,6 +46,80 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         Ok(())
     }
 
+    async fn filter_authorized_doc_heads(
+        &self,
+        peer_id: &PeerId,
+        doc_id: &str,
+        heads: Vec<Cid>,
+    ) -> Vec<Cid> {
+        if self.access.access_mode.is_open() {
+            return heads;
+        }
+
+        let mut authorized = Vec::with_capacity(heads.len());
+        for cid in heads {
+            let block_data = match self.manager.blockstore().get(&cid).await {
+                Ok(Some(data)) => data,
+                Ok(None) => {
+                    tracing::debug!(
+                        peer_id = %peer_id,
+                        doc_id = %doc_id,
+                        cid = %cid,
+                        "Skipping DocSync head with missing local block during access check"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        peer_id = %peer_id,
+                        doc_id = %doc_id,
+                        cid = %cid,
+                        error = %error,
+                        "Skipping DocSync head after blockstore access-check failure"
+                    );
+                    continue;
+                }
+            };
+
+            let Some(collection_id) = block_context_from_data(&block_data).collection_id else {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    doc_id = %doc_id,
+                    cid = %cid,
+                    "Skipping DocSync head without collection context in Controlled mode"
+                );
+                continue;
+            };
+
+            let is_collection_replicator = self
+                .authorizer
+                .peer_authorized_for_collection(peer_id.as_str(), &collection_id)
+                .await;
+            let is_collection_subscriber = self
+                .access
+                .peer_state
+                .peer_subscribed_to_collection(peer_id.as_str(), &collection_id);
+            let is_connected_peer = self.access.peer_state.is_connected(peer_id.as_str());
+
+            if is_connected_peer || is_collection_replicator || is_collection_subscriber {
+                authorized.push(cid);
+            } else {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    doc_id = %doc_id,
+                    cid = %cid,
+                    collection_id = %collection_id,
+                    is_connected_peer,
+                    is_collection_replicator,
+                    is_collection_subscriber,
+                    "Skipping DocSync head for unauthorized collection"
+                );
+            }
+        }
+
+        authorized
+    }
+
     pub(super) async fn handle_doc_sync_request(
         &self,
         peer_id: PeerId,
@@ -69,7 +145,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         tracing::debug!(
             peer_id = %peer_id,
             doc_ids = ?request.doc_ids,
-            message_id = %request.metadata.message_id,
+            message_id = %request.message_id,
             "Received DocSync request"
         );
 
@@ -83,6 +159,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 .await
             {
                 Ok(heads) => {
+                    let heads = self
+                        .filter_authorized_doc_heads(&peer_id, doc_id, heads)
+                        .await;
                     tracing::debug!(
                         doc_id = %doc_id,
                         head_count = heads.len(),
@@ -115,7 +194,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .send_doc_sync_reply(
                 &peer_id,
                 token,
-                DocSyncReply::success(&request.metadata.message_id, results),
+                DocSyncReply::success(&request.message_id, results),
             )
             .await
         {
@@ -130,7 +209,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         Ok(())
     }
 
-    pub(super) async fn handle_doc_sync_reply(
+    pub(in crate::sync::coordinator) async fn handle_doc_sync_reply(
         &self,
         peer_id: PeerId,
         reply: DocSyncReply,
@@ -214,23 +293,42 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         .unwrap_or_default();
 
                         if missing.is_empty() {
+                            let mut context = DagFetchContext::new(
+                                doc_id.clone(),
+                                String::new(),
+                                String::new(),
+                                peer_id.clone(),
+                            )
+                            .with_explicit_replicator_collections(
+                                self.access.replicators.get_collections(peer_id.as_str()),
+                            );
+                            context.fill_missing_from_block(&data);
                             tracing::info!(
                                 cid = %cid,
                                 doc_id = %doc_id,
                                 "DAG complete locally, emitting BlockReceived for re-merge"
                             );
-                            let _ = event_tx
+                            if event_tx
                                 .send(crate::sync::manager::SyncEvent::BlockReceived {
                                     cid,
-                                    doc_id: doc_id.clone(),
-                                    collection_id: String::new(),
-                                    creator: String::new(),
-                                    sender_peer: Some(peer_id.to_string()),
-                                    is_explicit_replicator: false,
+                                    doc_id: context.doc_id,
+                                    collection_id: context.collection_id,
+                                    creator: context.creator,
+                                    sender_peer: Some(context.source_peer.to_string()),
+                                    is_explicit_replicator: context.is_explicit_replicator,
                                     explicit_replay_authorization: None,
                                     acp_actor_relationships: None,
                                 })
-                                .await;
+                                .await
+                                .is_err()
+                            {
+                                tracing::error!(
+                                    cid = %cid,
+                                    doc_id = %doc_id,
+                                    "Failed to emit BlockReceived for locally complete DocSync DAG"
+                                );
+                                return Err(Error::ChannelSend);
+                            }
                         } else {
                             tracing::info!(
                                 cid = %cid,
@@ -257,7 +355,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let transport = self.runtime.transport.clone();
             let blockstore = self.manager.blockstore().clone();
             let event_tx = self.manager.event_sender();
-            let semaphore = self.runtime.dag_fetch_semaphore.clone();
+            let limiter = self.runtime.dag_fetch_limiter.clone();
 
             for (root_cid, doc_id) in cids_to_fetch {
                 tracing::debug!(
@@ -269,11 +367,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 let transport = transport.clone();
                 let blockstore = blockstore.clone();
                 let event_tx = event_tx.clone();
-                let semaphore = semaphore.clone();
+                let limiter = limiter.clone();
                 let source_peer = peer_id.clone();
+                let explicit_replicator_collections =
+                    self.access.replicators.get_collections(peer_id.as_str());
 
                 self.spawn_background_task("doc_sync_reply_fetch_dag", async move {
-                    let Ok(_permit) = semaphore.acquire_owned().await else {
+                    let Some(_permits) = limiter.acquire(&source_peer).await else {
                         return;
                     };
                     super::super::dag_fetcher::poll_fetch_dag(
@@ -281,10 +381,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         blockstore,
                         event_tx,
                         root_cid,
-                        doc_id,
-                        String::new(),
-                        String::new(),
-                        source_peer,
+                        DagFetchContext::new(doc_id, String::new(), String::new(), source_peer)
+                            .with_explicit_replicator_collections(explicit_replicator_collections),
                     )
                     .await;
                 });

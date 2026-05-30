@@ -27,10 +27,10 @@ impl EvmSigner {
 
     pub fn did(&self) -> String {
         let verifying_key = self.signer.credential().verifying_key();
-        let compressed = verifying_key.to_sec1_bytes();
+        let compressed = verifying_key.to_encoded_point(true);
         // multicodec prefix for secp256k1-pub: 0xe7 0x01
         let mut multicodec = vec![0xe7, 0x01];
-        multicodec.extend_from_slice(&compressed);
+        multicodec.extend_from_slice(compressed.as_bytes());
         let encoded = bs58::encode(&multicodec).into_string();
         format!("did:key:z{}", encoded)
     }

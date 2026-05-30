@@ -59,6 +59,23 @@ pub(crate) fn compute_signature(
         return Ok(None);
     }
 
+    // Only secp256k1, Ed25519, and BLS are supported for block signing.
+    // secp256k1 and Ed25519 match Go's internal/core/block/signing.go:74-79
+    // and signature.go:186-193. BLS is a Rust-specific extension wired
+    // through a remote signer (Orbis ring); the local-signing match below
+    // still rejects local BLS with a clearer error.
+    match signer.key_type {
+        defra_core::signing::SigningKeyType::Secp256k1
+        | defra_core::signing::SigningKeyType::Ed25519
+        | defra_core::signing::SigningKeyType::Bls => {}
+        other => {
+            return Err(format!(
+                "unsupported key type for signing. KeyType: {}",
+                other
+            ));
+        }
+    }
+
     // Serialize the block (without signature) to get the bytes to sign
     let block_bytes = block
         .to_dag_cbor()
@@ -82,14 +99,6 @@ pub(crate) fn compute_signature(
                 let private_key =
                     crypto::Secp256k1PrivateKey::from_bytes(&signer.private_key_bytes)
                         .map_err(|e| format!("Failed to load secp256k1 private key: {}", e))?;
-                private_key
-                    .sign(&block_bytes)
-                    .map_err(|e| format!("Failed to sign block: {}", e))?
-            }
-            defra_core::signing::SigningKeyType::Secp256r1 => {
-                let private_key =
-                    crypto::Secp256r1PrivateKey::from_bytes(&signer.private_key_bytes)
-                        .map_err(|e| format!("Failed to load secp256r1 private key: {}", e))?;
                 private_key
                     .sign(&block_bytes)
                     .map_err(|e| format!("Failed to sign block: {}", e))?
@@ -244,8 +253,8 @@ pub async fn get_all_field_heads(
         }
     }
 
-    // Sort by CID string representation to match Go's Block.New() sorting
-    entries.sort_by_key(|a| a.cid.to_bytes());
+    // Sort by CID string representation to match Go's Block.New() sorting.
+    entries.sort_by_cached_key(|a| a.cid.to_string());
     Ok(entries)
 }
 
@@ -304,7 +313,7 @@ impl DocHeadsSnapshot {
 
         // Sort each field's entries by CID string to match Go's deterministic ordering.
         for entries in entries_by_field.values_mut() {
-            entries.sort_by_key(|a| a.cid.to_bytes());
+            entries.sort_by_cached_key(|a| a.cid.to_string());
         }
 
         Ok(Self {

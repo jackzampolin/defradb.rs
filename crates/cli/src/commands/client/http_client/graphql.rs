@@ -39,9 +39,9 @@ impl HttpClient {
     }
 
     /// Add a schema definition (SDL text)
-    pub async fn schema_add(&self, sdl: &str) -> Result<JsonValue> {
+    pub async fn schema_add(&self, sdl: &str, txn_id: Option<&str>) -> Result<JsonValue> {
         let url = format!("{}/api/v0/collections", self.base_url);
-        let response = self.post_text(&url, sdl).await?;
+        let response = self.post_text(&url, sdl, txn_id).await?;
 
         if !response.status().is_success() {
             return Err(Self::extract_error(response).await);

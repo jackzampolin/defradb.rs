@@ -22,6 +22,7 @@
 pub use query_types::document;
 pub use query_types::error;
 pub use query_types::json_convert;
+pub use query_types::limits;
 pub use query_types::mapper;
 
 // Parsing extracted to query-parse crate.
@@ -54,6 +55,9 @@ pub use document::{DocumentMapping, RenderKey};
 pub use error::{QueryError, Result, TransactionError};
 pub use executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 pub use fetcher::{CollectionProvider, StaticCollectionProvider};
+pub use limits::{
+    QueryLimits, DEFAULT_MAX_FILTER_DEPTH, DEFAULT_MAX_QUERY_DEPTH, DEFAULT_MAX_QUERY_WIDTH,
+};
 pub use mapper::{Filter, Mutation, MutationType, Select};
 pub use mutator::{
     BroadcastStatus, CreateResult, DeleteResult, DocMutator, MutationBatch,
@@ -64,8 +68,14 @@ pub use plan::{
     TypeJoinMany, TypeJoinOne, UpdateInput, UpdateNode, UpsertAction, UpsertInput, UpsertNode,
 };
 pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
-pub use query_parse::{parse_mutations, parse_query, parse_request, ExplainType, ParsedOperation};
-pub use rest::{RestError, RestOperations, RestOperationsImpl, RestResult};
+pub use query_parse::{
+    parse_mutations, parse_mutations_with_limits, parse_query, parse_query_with_limits,
+    parse_request, parse_request_with_limits, ExplainType, ParsedOperation,
+};
+pub use rest::{
+    CollectionDocIdsPage, CollectionDocIdsPagination, RestError, RestOperations,
+    RestOperationsImpl, RestResult,
+};
 pub use runner::{DocFetcher, FetchByIdsResult, NacChecker, QueryRunner};
 pub use sdl_parse::{parse_sdl, parse_sdl_with_known_types};
 pub use select_convert::select_to_go_json;

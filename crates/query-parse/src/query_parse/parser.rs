@@ -12,6 +12,7 @@ use tracing::instrument;
 
 use query_types::document::DocumentMapping;
 use query_types::error::{QueryError, Result};
+use query_types::limits::QueryLimits;
 use query_types::mapper::{
     AggregateType, Field as SelectField, Limit, Mutation, Requestable, Select,
 };
@@ -21,7 +22,7 @@ use super::explain::{
     check_field_explain_directive, parse_exhaustive_directive, parse_explain_directive,
 };
 use super::filters::parse_filter_value;
-use super::limits::validate_select_limits;
+use super::limits::{validate_requestable_limits_with, validate_select_limits_with};
 use super::mutations::{parse_bm25_field, parse_field_to_mutation, parse_similarity_field};
 use super::ordering::parse_order_value;
 use super::values::{
@@ -192,7 +193,16 @@ pub fn parse_query_with_variables(
     query: &str,
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<Vec<Select>> {
-    match parse_request_with_variables(query, variables, None)? {
+    parse_query_with_limits(query, variables, QueryLimits::default())
+}
+
+/// Parse a GraphQL query string with variable substitution and custom limits.
+pub fn parse_query_with_limits(
+    query: &str,
+    variables: Option<&HashMap<String, JsonValue>>,
+    limits: QueryLimits,
+) -> Result<Vec<Select>> {
+    match parse_request_with_limits(query, variables, None, limits)? {
         ParsedOperation::Query { selects, .. } => Ok(selects),
         ParsedOperation::Mutation { .. } => Err(QueryError::parse(
             "Expected query but got mutation. Use parse_mutations_with_variables() for mutations.",
@@ -220,7 +230,16 @@ pub fn parse_mutations_with_variables(
     query: &str,
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<Vec<Mutation>> {
-    match parse_request_with_variables(query, variables, None)? {
+    parse_mutations_with_limits(query, variables, QueryLimits::default())
+}
+
+/// Parse a GraphQL mutation string with variable substitution and custom limits.
+pub fn parse_mutations_with_limits(
+    query: &str,
+    variables: Option<&HashMap<String, JsonValue>>,
+    limits: QueryLimits,
+) -> Result<Vec<Mutation>> {
+    match parse_request_with_limits(query, variables, None, limits)? {
         ParsedOperation::Mutation { mutations, .. } => Ok(mutations),
         ParsedOperation::Query { .. } => Err(QueryError::parse("Expected mutation but got query")),
         ParsedOperation::Subscription { .. } => {
@@ -279,11 +298,21 @@ fn is_introspection_query(doc: &Document<'_, String>) -> bool {
     false
 }
 
-#[instrument(name = "query.parse", skip(query, variables), fields(query_len = query.len()))]
 pub fn parse_request_with_variables(
     query: &str,
     variables: Option<&HashMap<String, JsonValue>>,
     operation_name: Option<&str>,
+) -> Result<ParsedOperation> {
+    parse_request_with_limits(query, variables, operation_name, QueryLimits::default())
+}
+
+/// Parse a GraphQL request with variable substitution and custom limits.
+#[instrument(name = "query.parse", skip(query, variables, limits), fields(query_len = query.len()))]
+pub fn parse_request_with_limits(
+    query: &str,
+    variables: Option<&HashMap<String, JsonValue>>,
+    operation_name: Option<&str>,
+    limits: QueryLimits,
 ) -> Result<ParsedOperation> {
     let doc: Document<'_, String> = graphql_parser::parse_query(query).map_err(|e| {
         let msg = e.to_string();
@@ -476,16 +505,22 @@ pub fn parse_request_with_variables(
 
     if has_subscription {
         // subscription_selects is guaranteed to have exactly one element due to earlier validation
-        let select = subscription_selects.into_iter().next().unwrap();
-        validate_select_limits(&select)?;
+        let mut select = subscription_selects.into_iter().next().unwrap();
+        apply_limits_to_select(&mut select, limits)?;
+        validate_select_limits_with(&select, limits)?;
         Ok(ParsedOperation::Subscription {
             select: Box::new(select),
         })
     } else if has_mutation {
+        for mutation in &mut mutations {
+            apply_limits_to_mutation(mutation, limits)?;
+            validate_requestable_limits_with(&mutation.fields, limits)?;
+        }
         Ok(ParsedOperation::Mutation { mutations, explain })
     } else {
-        for select in &selects {
-            validate_select_limits(select)?;
+        for select in &mut selects {
+            apply_limits_to_select(select, limits)?;
+            validate_select_limits_with(select, limits)?;
         }
         Ok(ParsedOperation::Query {
             selects,
@@ -493,6 +528,57 @@ pub fn parse_request_with_variables(
             exhaustive,
         })
     }
+}
+
+fn apply_limits_to_mutation(mutation: &mut Mutation, limits: QueryLimits) -> Result<()> {
+    if let Some(filter) = mutation.filter.as_mut() {
+        apply_limit_to_filter(filter, limits)?;
+    }
+
+    for field in &mut mutation.fields {
+        apply_limits_to_requestable(field, limits)?;
+    }
+
+    Ok(())
+}
+
+fn apply_limits_to_select(select: &mut Select, limits: QueryLimits) -> Result<()> {
+    if let Some(filter) = select.filter.as_mut() {
+        apply_limit_to_filter(filter, limits)?;
+    }
+
+    for field in &mut select.fields {
+        apply_limits_to_requestable(field, limits)?;
+    }
+
+    Ok(())
+}
+
+fn apply_limits_to_requestable(requestable: &mut Requestable, limits: QueryLimits) -> Result<()> {
+    match requestable {
+        Requestable::Select(select) => apply_limits_to_select(select, limits)?,
+        Requestable::Aggregate(aggregate) => {
+            if let Some(filter) = aggregate.filter.as_mut() {
+                apply_limit_to_filter(filter, limits)?;
+            }
+            for target in &mut aggregate.targets {
+                if let Some(filter) = target.filter.as_mut() {
+                    apply_limit_to_filter(filter, limits)?;
+                }
+            }
+        }
+        Requestable::Field(_) | Requestable::Similarity(_) | Requestable::FullTextSearch(_) => {}
+    }
+
+    Ok(())
+}
+
+fn apply_limit_to_filter(
+    filter: &mut query_types::mapper::Filter,
+    limits: QueryLimits,
+) -> Result<()> {
+    filter.set_max_depth(limits.max_filter_depth);
+    filter.validate_depth()
 }
 
 /// Parse a single GraphQL field into a Select operation.
@@ -588,6 +674,11 @@ fn parse_field_to_select(
                 // Null docIDs is valid and means "no specific docIDs" (use filter or all)
                 if !matches!(arg_value, Value::Null) {
                     let doc_ids = parse_doc_ids_value(arg_value, variables)?;
+                    if collection_name == "_commits" && doc_ids.len() > 1 {
+                        return Err(QueryError::parse(
+                            "querying by multiple docIDs is not yet supported",
+                        ));
+                    }
                     select.doc_ids = Some(doc_ids);
                 }
             }
@@ -595,11 +686,6 @@ fn parse_field_to_select(
                 // null means "no cid filter" (skip setting it)
                 if !matches!(arg_value, Value::Null) {
                     let cids = parse_cid_value(arg_value, variables)?;
-                    if cids.len() > 1 {
-                        return Err(QueryError::parse(
-                            "querying by multiple cids is not yet supported",
-                        ));
-                    }
                     select.cid = Some(cids);
                 }
             }
@@ -892,3 +978,7 @@ mod variable_tests;
 #[cfg(test)]
 #[path = "subscription_tests.rs"]
 mod subscription_tests;
+
+#[cfg(test)]
+#[path = "limits_tests.rs"]
+mod limits_tests;

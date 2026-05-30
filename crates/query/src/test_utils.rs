@@ -102,15 +102,22 @@ pub struct MockTxnContext {
     id: String,
     readonly: bool,
     fetcher: Arc<dyn DocFetcher>,
+    action_lock: Arc<async_lock::Mutex<()>>,
 }
 
 impl MockTxnContext {
     /// Create a new mock transaction context.
-    pub fn new(id: String, readonly: bool, fetcher: Arc<dyn DocFetcher>) -> Self {
+    pub fn new(
+        id: String,
+        readonly: bool,
+        fetcher: Arc<dyn DocFetcher>,
+        action_lock: Arc<async_lock::Mutex<()>>,
+    ) -> Self {
         Self {
             id,
             readonly,
             fetcher,
+            action_lock,
         }
     }
 }
@@ -126,6 +133,10 @@ impl TransactionContext for MockTxnContext {
 
     fn doc_fetcher(&self) -> Arc<dyn DocFetcher> {
         self.fetcher.clone()
+    }
+
+    fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
+        Some(self.action_lock.clone())
     }
 }
 
@@ -161,6 +172,7 @@ impl TransactionRegistry for MockTxnRegistry {
             txn_id.clone(),
             readonly,
             self.fetcher.clone(),
+            Arc::new(async_lock::Mutex::new(())),
         ));
 
         self.transactions

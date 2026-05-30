@@ -4,6 +4,7 @@ use cid::Cid;
 
 use blockstore::Blockstore;
 
+use super::super::dag_context::DagFetchContext;
 use super::super::SyncCoordinator;
 use crate::error::Result;
 use crate::message::BranchableSyncReply;
@@ -86,11 +87,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .send_branchable_sync_reply(
                 &peer_id,
                 token,
-                BranchableSyncReply::success(
-                    &request.metadata.message_id,
-                    &request.collection_id,
-                    heads,
-                ),
+                BranchableSyncReply::success(&request.message_id, &request.collection_id, heads),
             )
             .await
         {
@@ -105,7 +102,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         Ok(())
     }
 
-    pub(super) async fn handle_branchable_sync_reply(
+    pub(in crate::sync::coordinator) async fn handle_branchable_sync_reply(
         &self,
         peer_id: PeerId,
         reply: crate::message::BranchableSyncReply,
@@ -186,18 +183,20 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let transport = self.runtime.transport.clone();
             let blockstore = self.manager.blockstore().clone();
             let event_tx = self.manager.event_sender();
-            let semaphore = self.runtime.dag_fetch_semaphore.clone();
+            let limiter = self.runtime.dag_fetch_limiter.clone();
 
             for root_cid in cids_to_fetch {
                 let transport = transport.clone();
                 let blockstore = blockstore.clone();
                 let event_tx = event_tx.clone();
                 let collection_id = reply.collection_id.clone();
-                let semaphore = semaphore.clone();
+                let limiter = limiter.clone();
                 let source_peer = peer_id.clone();
+                let is_explicit_replicator =
+                    self.is_registered_replicator(peer_id.as_str(), &collection_id);
 
                 self.spawn_background_task("branchable_sync_reply_fetch_dag", async move {
-                    let Ok(_permit) = semaphore.acquire_owned().await else {
+                    let Some(_permits) = limiter.acquire(&source_peer).await else {
                         return;
                     };
                     super::super::dag_fetcher::poll_fetch_dag(
@@ -205,10 +204,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         blockstore,
                         event_tx,
                         root_cid,
-                        String::new(),
-                        collection_id,
-                        String::new(),
-                        source_peer,
+                        DagFetchContext::new(
+                            String::new(),
+                            collection_id,
+                            String::new(),
+                            source_peer,
+                        )
+                        .with_explicit_replicator(is_explicit_replicator),
                     )
                     .await;
                 });

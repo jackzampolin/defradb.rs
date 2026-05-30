@@ -1,17 +1,23 @@
 //! Constructor methods for the sync coordinator.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use blockstore::Blockstore;
 use tokio::sync::mpsc;
 
-use super::{SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState};
+#[cfg(feature = "libp2p-transport")]
+use super::authorizer::AccessAuthorizer;
+use super::authorizer::RuntimeAuthorizer;
+use super::{
+    DagFetchLimiter, SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState,
+};
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Result;
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::{NoOpCollectionStorage, P2PCollectionStorage};
 use crate::sync::head_provider::{DocumentHeadProvider, NoOpHeadProvider};
-use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
+use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager, DEFAULT_PUSH_SEND_TIMEOUT};
 use crate::sync::peer_state::PeerStateTracker;
 use crate::sync::rate_limiter::PeerRateLimiter;
 use crate::transport::P2PTransport;
@@ -99,7 +105,28 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let max_push_tasks = config.max_concurrent_push_tasks.max(1);
         let rate_limit_burst = config.rate_limit_burst;
         let rate_limit_rate = config.rate_limit_rate;
+        let rate_limit_backoff = config.rate_limit_backoff.clone();
+        let push_send_timeout = if config.push_send_timeout.is_zero() {
+            DEFAULT_PUSH_SEND_TIMEOUT
+        } else {
+            config.push_send_timeout.max(Duration::from_millis(1))
+        };
+        let subscribed_collections =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
         let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), config);
+
+        let authorizer = Arc::new(RuntimeAuthorizer::new(
+            transport.clone(),
+            Arc::clone(&peer_state),
+            Arc::clone(&replicators),
+            access_mode,
+        ));
+        #[cfg(feature = "libp2p-transport")]
+        let pubsub_services = super::pubsub_services::PubsubServices::try_new(
+            &local_peer_id,
+            Arc::clone(&head_provider),
+            Arc::clone(&authorizer) as Arc<dyn AccessAuthorizer>,
+        );
 
         Ok((
             Self {
@@ -107,9 +134,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     transport,
                     broadcaster,
                     failure_tx: None,
-                    dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(max_dag_fetches)),
+                    dag_fetch_limiter: DagFetchLimiter::new(max_dag_fetches),
                     push_semaphore: Arc::new(tokio::sync::Semaphore::new(max_push_tasks)),
-                    rate_limiter: Arc::new(PeerRateLimiter::new(rate_limit_burst, rate_limit_rate)),
+                    rate_limiter: Arc::new(PeerRateLimiter::with_backoff_steps(
+                        rate_limit_burst,
+                        rate_limit_rate,
+                        rate_limit_backoff,
+                    )),
+                    push_send_timeout,
                     shutdown: super::SyncShutdownHandle::new(),
                 },
                 manager,
@@ -120,13 +152,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     replicators,
                 },
                 subscriptions: SyncSubscriptionState {
-                    subscribed_collections: Arc::new(tokio::sync::RwLock::new(
-                        std::collections::HashSet::new(),
-                    )),
+                    subscribed_collections,
                     collection_store,
                     head_provider,
                 },
+                authorizer,
                 document_acp: std::sync::OnceLock::new(),
+                #[cfg(feature = "libp2p-transport")]
+                pubsub_services,
             },
             events,
         ))

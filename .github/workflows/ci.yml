@@ -131,9 +131,23 @@ jobs:
             needs_go: true
           - suite: iroh
             needs_go: false
+          # #978: re-run the rust integration suite with
+          # DEFRA_MULTIPLIERS=signed-docs so every cluster gets
+          # .with_signing() auto-applied. Catches regressions in
+          # unrelated features that only surface when blocks carry
+          # Signature links (mirrors Go DefraDB PR #4746). Non-blocking
+          # until in-tree .no_signing_multiplier() opt-outs land for
+          # known-incompatible tests; flip continue_on_error to false
+          # once the suite is green.
+          - suite: signed-docs
+            needs_go: false
+            multipliers: signed-docs
+            continue_on_error: true
+    continue-on-error: ${{ matrix.continue_on_error == true }}
     env:
       DEFRA_RUST_BINARY: ${{ github.workspace }}/target/ci/defra
       DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
+      DEFRA_MULTIPLIERS: ${{ matrix.multipliers || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -165,26 +179,91 @@ jobs:
           chmod +x target/ci/defra target/ci/defra-iroh
           target/ci/defra version --format json
 
-      - name: Download Go DefraDB binary
+      - name: Install Go toolchain
+        if: matrix.suite == 'go-compat'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Prepare Go DefraDB binary
         if: matrix.needs_go
         run: |
+          GO_REF=$(grep 'pub const GO_COMPAT_COMMIT' crates/defra-version/src/lib.rs | sed "s/.*\"\(.*\)\".*/\1/")
+          GO_BRANCH=$(grep 'pub const GO_COMPAT_BRANCH' crates/defra-version/src/lib.rs | sed "s/.*\"\(.*\)\".*/\1/")
           GO_TAG=$(grep 'pub const GO_COMPAT_TAG' crates/defra-version/src/lib.rs | sed "s/.*\"\(.*\)\".*/\1/")
-          if [ -z "$GO_TAG" ]; then
-            echo "::error::GO_COMPAT_TAG is empty in crates/defra-version/src/lib.rs"
-            exit 1
+
+          if [ -n "$GO_TAG" ]; then
+            VER_NUM="${GO_TAG#v}"
+            ASSET="defradb_${VER_NUM}_darwin_arm64"
+            URL="https://github.com/sourcenetwork/defradb/releases/download/${GO_TAG}/${ASSET}"
+            CACHE_DIR="$HOME/.cache/defra-harness/${GO_TAG}"
+            mkdir -p "$CACHE_DIR"
+            if [ ! -x "$CACHE_DIR/defradb" ]; then
+              echo "Downloading Go DefraDB ${GO_TAG}..."
+              curl -fSL -o "$CACHE_DIR/defradb" "$URL"
+              chmod +x "$CACHE_DIR/defradb"
+            fi
+          else
+            if [ -z "$GO_REF" ]; then
+              echo "::error::GO_COMPAT_COMMIT is empty in crates/defra-version/src/lib.rs"
+              exit 1
+            fi
+            if [ -z "$GO_BRANCH" ]; then
+              echo "::error::GO_COMPAT_BRANCH is empty in crates/defra-version/src/lib.rs"
+              exit 1
+            fi
+
+            CACHE_DIR="$HOME/.cache/defra-harness/${GO_REF}"
+            mkdir -p "$CACHE_DIR"
+            if [ ! -x "$CACHE_DIR/defradb" ]; then
+              echo "Building Go DefraDB ${GO_REF} from ${GO_BRANCH}..."
+              WORK_DIR="$RUNNER_TEMP/defradb-${GO_REF}"
+              rm -rf "$WORK_DIR"
+              git clone --filter=blob:none --branch "$GO_BRANCH" https://github.com/sourcenetwork/defradb "$WORK_DIR"
+              git -C "$WORK_DIR" checkout "$GO_REF"
+              make -C "$WORK_DIR" build path="$CACHE_DIR/defradb"
+              chmod +x "$CACHE_DIR/defradb"
+            fi
           fi
-          VER_NUM="${GO_TAG#v}"
-          ASSET="defradb_${VER_NUM}_darwin_arm64"
-          URL="https://github.com/sourcenetwork/defradb/releases/download/${GO_TAG}/${ASSET}"
-          CACHE_DIR="$HOME/.cache/defra-harness/${GO_TAG}"
-          mkdir -p "$CACHE_DIR"
-          if [ ! -x "$CACHE_DIR/defradb" ]; then
-            echo "Downloading Go DefraDB ${GO_TAG}..."
-            curl -fSL -o "$CACHE_DIR/defradb" "$URL"
-            chmod +x "$CACHE_DIR/defradb"
-          fi
+
           echo "$CACHE_DIR" >> "$GITHUB_PATH"
           "$CACHE_DIR/defradb" version --format json
+
+      # Guards against silent drift between the committed Go-parity hex
+      # constants in `crates/p2p/src/**` and what upstream Go actually
+      # emits. Both generators print hex to stdout (no files written);
+      # every `(N bytes): <hex>` or `(N): <hex>` line is checked against
+      # the Rust source tree. If upstream reorders a struct field the
+      # hex changes, the grep misses, and the job fails — instead of
+      # Rust tests passing against stale constants.
+      - name: Verify Go fixtures still match Rust constants
+        if: matrix.suite == 'go-compat'
+        run: |
+          set -euo pipefail
+          OUT=$(mktemp)
+          # Each generator has its own go.mod; `go run <path>/main.go`
+          # uses single-file mode and ignores it, so cd into each module.
+          (cd crates/p2p/testdata/gen_message_fixtures   && go run .) >> "$OUT"
+          (cd crates/p2p/testdata/gen_pubsub_rpc_fixture && go run .) >> "$OUT"
+          # Extract every hex token emitted after a "(N bytes): " or
+          # "(N): " marker. Lowercase hex, length >= 4.
+          HEXES=$(grep -Eo '\(([0-9]+)( bytes)?\): [0-9a-f]+' "$OUT" | awk '{print $NF}')
+          if [ -z "$HEXES" ]; then
+            echo "::error::no hex fixtures extracted from generator output" >&2
+            cat "$OUT" >&2
+            exit 1
+          fi
+          STALE=0
+          while IFS= read -r H; do
+            if ! grep -qR --include='*.rs' -F "$H" crates/p2p/src/; then
+              echo "::error::Go fixture hex not found in crates/p2p/src/**: $H" >&2
+              STALE=1
+            fi
+          done <<< "$HEXES"
+          if [ "$STALE" -ne 0 ]; then
+            echo "::error::Go fixture drift detected — regenerate Rust constants by running the generators locally and updating crates/p2p/src/message/pubsub.rs, crates/p2p/src/pubsub_rpc/envelope.rs, and crates/p2p/src/sync/coordinator/pubsub_services.rs" >&2
+            exit 1
+          fi
 
       # `basic` is serialized because its tests start rust nodes and the
       # harness port allocator (`defra-harness::ports`) has a TOCTOU race
@@ -193,14 +272,14 @@ jobs:
       # Track the underlying harness fix in the backbone repo; this flag
       # is the tactical mitigation.
       - name: Run rust integration tests (serialized — port race)
-        if: matrix.suite == 'rust'
+        if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
           cargo test -p integration-test
           --test basic
           -- --test-threads=1 --skip ::go_
 
       - name: Run rust integration tests (serialized — port race)
-        if: matrix.suite == 'rust'
+        if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
           cargo test -p integration-test
           --test query --test acp --test nac
@@ -209,7 +288,7 @@ jobs:
           -- --test-threads=1 --skip ::go_
 
       - name: Run rust P2P integration tests
-        if: matrix.suite == 'rust'
+        if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'
         run: >-
           cargo test -p integration-test
           --test p2p
@@ -217,8 +296,8 @@ jobs:
 
       # go-compat runs the `go_*` half of every dual-runtime test against
       # the upstream Go DefraDB binary. Catches cross-implementation
-      # regressions at PR time. Each binary added here was verified
-      # against defradb commit d5a5a879 (2026-04-10) before landing.
+      # regressions at PR time. The binary is selected by GO_COMPAT_TAG
+      # when a release exists, otherwise it is built from GO_COMPAT_COMMIT.
       #
       # The 5 `link_collection::go_acp_link_collection_*_reject` tests
       # cover #746 (Rust schema loader silently accepts invalid DRIs).
@@ -229,7 +308,7 @@ jobs:
         if: matrix.suite == 'go-compat'
         run: >-
           cargo test -p integration-test
-          --test basic --test query --test acp --test nac --test backup
+          --test basic --test query --test acp --test nac --test backup --test p2p
           -- --test-threads=1 go_
           --skip go_acp_link_collection_nonexistent_policy_reject
           --skip go_acp_link_collection_nonexistent_resource_reject

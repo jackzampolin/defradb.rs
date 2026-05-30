@@ -12,6 +12,7 @@ use alloy_sol_types::SolCall;
 use async_trait::async_trait;
 use events::{AcpCacheInvalidatedData, AcpHeightAdvancedData, Bus, Message};
 use k256::ecdsa::SigningKey;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use super::abi::{IAcp, ACP_ADDRESS};
@@ -22,6 +23,9 @@ use super::provider_commands::{
     encode_set_relationship_cmd, resolve_registered_or_passthrough_bearer_token,
 };
 use super::signer::EvmSigner;
+
+const MAX_NONCE_RETRIES: usize = 5;
+const MAX_NONCE_RESERVE_ATTEMPTS: usize = 16;
 
 pub struct HubRsProvider {
     light_client: Arc<AcpLightClient>,
@@ -87,21 +91,55 @@ impl HubRsProvider {
     }
 
     async fn send_tx(&self, data: Bytes) -> Result<serde_json::Value, ProviderError> {
-        let nonce = self.nonce.fetch_add(1, Ordering::Relaxed);
+        let mut nonce_retries = 0;
+        let tx_hash = loop {
+            let nonce = if nonce_retries == 0 {
+                self.nonce.fetch_add(1, Ordering::Relaxed)
+            } else {
+                let chain_nonce = self
+                    .client
+                    .get_nonce(self.signer.address())
+                    .await
+                    .map_err(|e| ProviderError::Config(format!("nonce: {}", e)))?;
+                self.reserve_nonce_at_or_after(chain_nonce)
+            };
 
-        let raw = self
-            .signer
-            .sign_tx(nonce, ACP_ADDRESS, data)
-            .map_err(|e| ProviderError::Transaction(format!("sign: {}", e)))?;
-        let tx_hash = self
-            .client
-            .send_raw_transaction(raw)
-            .await
-            .map_err(|e| ProviderError::Transaction(format!("send: {}", e)))?;
+            let raw = self
+                .signer
+                .sign_tx(nonce, ACP_ADDRESS, data.clone())
+                .map_err(|e| ProviderError::Transaction(format!("sign: {}", e)))?;
+
+            match self.client.send_raw_transaction(raw).await {
+                Ok(tx_hash) => break tx_hash,
+                Err(e) if nonce_retries < MAX_NONCE_RETRIES && is_nonce_error(&e) => {
+                    nonce_retries += 1;
+                    tracing::debug!(error = %e, "hub.rs transaction nonce stale; refreshing");
+                    tokio::time::sleep(Duration::from_millis(100 * nonce_retries as u64)).await;
+                }
+                Err(e) => return Err(ProviderError::Transaction(format!("send: {}", e))),
+            }
+        };
         self.client
             .wait_for_receipt(tx_hash)
             .await
             .map_err(|e| ProviderError::Transaction(format!("receipt: {}", e)))
+    }
+
+    fn reserve_nonce_at_or_after(&self, chain_nonce: u64) -> u64 {
+        for _ in 0..MAX_NONCE_RESERVE_ATTEMPTS {
+            let current = self.nonce.load(Ordering::Relaxed);
+            let nonce = current.max(chain_nonce);
+            if self
+                .nonce
+                .compare_exchange(current, nonce + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return nonce;
+            }
+        }
+
+        let _ = self.nonce.fetch_max(chain_nonce, Ordering::Relaxed);
+        self.nonce.fetch_add(1, Ordering::Relaxed).max(chain_nonce)
     }
 
     async fn guarded_eth_call<F, Fut, T>(&self, op: F) -> Result<T, ProviderError>
@@ -116,6 +154,34 @@ impl HubRsProvider {
             }
             Err(e) => Err(ProviderError::Query(e.to_string())),
         }
+    }
+
+    async fn query_policy_ids(&self) -> Result<Vec<String>, ProviderError> {
+        let call = IAcp::getPolicyIdsCall {};
+        let calldata = Bytes::from(call.abi_encode());
+        let result = self
+            .guarded_eth_call(|| self.client.eth_call(ACP_ADDRESS, calldata.clone()))
+            .await?;
+        IAcp::getPolicyIdsCall::abi_decode_returns(&result)
+            .map_err(|e| ProviderError::Query(format!("ABI decode: {}", e)))
+    }
+
+    async fn query_policy_raw(&self, policy_id: &str) -> Result<Option<String>, ProviderError> {
+        let call = IAcp::getPolicyCall {
+            policyId: Self::policy_id_to_bytes32(policy_id),
+        };
+        let calldata = Bytes::from(call.abi_encode());
+        let result = self
+            .guarded_eth_call(|| self.client.eth_call(ACP_ADDRESS, calldata.clone()))
+            .await?;
+        let bytes = IAcp::getPolicyCall::abi_decode_returns(&result)
+            .map_err(|e| ProviderError::Query(format!("ABI decode: {}", e)))?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let record: HubRsPolicyRecord = serde_json::from_slice(&bytes)
+            .map_err(|e| ProviderError::Query(format!("policy JSON: {}", e)))?;
+        Ok(record.raw_policy)
     }
 
     fn policy_id_to_bytes32(policy_id: &str) -> FixedBytes<32> {
@@ -188,6 +254,16 @@ impl HubRsProvider {
         );
         Ok(allowed)
     }
+}
+
+fn is_nonce_error(error: &ClientError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("nonce") || message.contains("duplicate transaction")
+}
+
+#[derive(Deserialize)]
+struct HubRsPolicyRecord {
+    raw_policy: Option<String>,
 }
 
 impl Drop for HubRsProvider {
@@ -293,25 +369,18 @@ impl SourceHubProvider for HubRsProvider {
             marshalType: 1,
         };
         let calldata = Bytes::from(call.abi_encode());
-        let receipt = self.send_tx(calldata).await?;
+        self.send_tx(calldata).await?;
 
-        let logs = receipt["logs"].as_array();
-        if let Some(logs) = logs {
-            for log in logs {
-                let topics = log["topics"].as_array();
-                if let Some(topics) = topics {
-                    if topics.len() >= 2 {
-                        let topic_hex = topics[1].as_str().unwrap_or("");
-                        let topic = topic_hex.strip_prefix("0x").unwrap_or(topic_hex);
-                        return Ok(format!("0x{}", topic));
-                    }
+        let ids = self.query_policy_ids().await?;
+        for id in ids.iter().rev() {
+            if let Some(raw_policy) = self.query_policy_raw(id).await? {
+                if raw_policy.trim() == policy_yaml.trim() {
+                    return Ok(id.clone());
                 }
             }
         }
 
-        Err(ProviderError::Transaction(
-            "could not extract policy ID from receipt".into(),
-        ))
+        Err(ProviderError::Query("created policy ID not found".into()))
     }
 
     async fn register_object(
@@ -408,17 +477,11 @@ impl SourceHubProvider for HubRsProvider {
         &self,
         policy_id: &str,
     ) -> Result<Option<ProviderPolicyInfo>, ProviderError> {
-        let result = self
-            .light_client
-            .check_policy(policy_id)
-            .await
-            .map_err(|e| ProviderError::Query(format!("light client: {}", e)))?;
-
-        if result.allowed {
+        if let Some(raw_policy) = self.query_policy_raw(policy_id).await? {
             Ok(Some(ProviderPolicyInfo {
                 id: policy_id.to_string(),
                 name: policy_id.to_string(),
-                raw_policy: None,
+                raw_policy: Some(raw_policy),
             }))
         } else {
             Ok(None)
@@ -649,6 +712,7 @@ mod tests {
 
     #[test]
     fn resolve_registered_or_passthrough_bearer_token_uses_request_token_for_remote_identity() {
+        let _guard = crate::signing_state_test_guard();
         let did = "did:key:zRemoteHubRsToken";
         let token = "device.jwt.token".to_string();
         defra_core::signing::clear_identity_store();
@@ -668,6 +732,7 @@ mod tests {
 
     #[test]
     fn resolve_registered_or_passthrough_bearer_token_builds_local_secp256k1_token() {
+        let _guard = crate::signing_state_test_guard();
         let private_key = crypto::generate_secp256k1().expect("should generate secp256k1 key");
         let raw_identity =
             identity::RawIdentity::from_secp256k1(private_key).expect("identity should build");
@@ -723,5 +788,16 @@ mod tests {
             HubRsProvider::relations_for_permission("signer"),
             vec!["signer"]
         );
+    }
+
+    #[test]
+    fn nonce_errors_include_hubrs_duplicate_transaction_response() {
+        assert!(is_nonce_error(&ClientError::Rpc("nonce too low".into())));
+        assert!(is_nonce_error(&ClientError::Rpc(
+            "code -32000: duplicate transaction".into()
+        )));
+        assert!(!is_nonce_error(&ClientError::Rpc(
+            "execution reverted".into()
+        )));
     }
 }

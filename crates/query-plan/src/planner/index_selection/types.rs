@@ -43,6 +43,13 @@ impl ScanValueFilter {
         // Extract the string from the value (supports both String and JsonLeaf with string)
         let s = match value {
             NormalValue::String(s) => s.as_str(),
+            NormalValue::NillableString(Some(s)) => s.as_str(),
+            NormalValue::Bytes(bytes) | NormalValue::NillableBytes(Some(bytes)) => {
+                match std::str::from_utf8(bytes) {
+                    Ok(s) => s,
+                    Err(_) => return false,
+                }
+            }
             NormalValue::JsonLeaf(leaf) => match &leaf.value {
                 JsonScalarValue::String(s) => s.as_str(),
                 _ => return false, // Non-string JSON leaf: exclude

@@ -11,9 +11,7 @@ use identity::Did;
 
 use crate::error::{Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
-use crate::query_parse::{
-    parse_request_with_variables, validate_parsed_operation, ParsedOperation,
-};
+use crate::query_parse::{parse_request_with_limits, validate_parsed_operation, ParsedOperation};
 use crate::txn::{GetTransactionResult, TransactionHandle, TransactionRegistry};
 
 use super::{DocFetcher, QueryRunner};
@@ -112,10 +110,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         let variables = convert_variables(&request.variables);
 
         // First, parse the request to determine if it's a query or mutation
-        let parsed = match parse_request_with_variables(
+        let parsed = match parse_request_with_limits(
             &request.query,
             variables.as_ref(),
             request.operation_name.as_deref(),
+            self.query_limits,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -300,15 +299,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 ));
             }
         };
+        let action_lock = txn_ctx.action_lock();
+        let _action_guard = match action_lock.as_ref() {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
 
         // Convert variables from JSON to HashMap format for the parser
         let variables = convert_variables(&request.variables);
 
         // Parse the request to determine if it's a query or mutation
-        let parsed = match parse_request_with_variables(
+        let parsed = match parse_request_with_limits(
             &request.query,
             variables.as_ref(),
             request.operation_name.as_deref(),
+            self.query_limits,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -538,9 +543,12 @@ mod tests {
     use async_trait::async_trait;
     use document::Document;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use crate::fetcher::{DocFetcher, FetchByIdsResult};
     use crate::test_utils::{MockFetcher, MockTxnRegistry};
+    use crate::txn::{GetTransactionResult, TransactionContext, TransactionRegistry};
 
     struct ChangingFetcher {
         call_count: std::sync::atomic::AtomicUsize,
@@ -596,6 +604,163 @@ mod tests {
         doc.generate_and_set_doc_id().expect("doc id");
         doc.set("name", serde_json::Value::String(name.to_string()));
         doc
+    }
+
+    struct SerialOnlyFetcher {
+        in_flight: AtomicUsize,
+    }
+
+    impl SerialOnlyFetcher {
+        fn new() -> Self {
+            Self {
+                in_flight: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    struct InFlightGuard<'a>(&'a AtomicUsize);
+
+    impl Drop for InFlightGuard<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl DocFetcher for SerialOnlyFetcher {
+        async fn get_all(&self, _collection_name: &str) -> Result<Vec<Document>> {
+            let active = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            let _guard = InFlightGuard(&self.in_flight);
+            if active > 1 {
+                return Err(crate::error::QueryError::execution(
+                    "transaction action overlapped",
+                ));
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Ok(vec![make_users_doc("serial")])
+        }
+
+        async fn get_by_ids(
+            &self,
+            collection_name: &str,
+            _doc_ids: &[String],
+        ) -> Result<FetchByIdsResult> {
+            let docs = self.get_all(collection_name).await?;
+            Ok(FetchByIdsResult::all_found(docs))
+        }
+
+        async fn get_by_field_value(
+            &self,
+            collection_name: &str,
+            _field_name: &str,
+            _value: &str,
+        ) -> Result<Vec<Document>> {
+            self.get_all(collection_name).await
+        }
+    }
+
+    struct SerialTxnContext {
+        id: String,
+        fetcher: Arc<dyn DocFetcher>,
+        action_lock: Arc<async_lock::Mutex<()>>,
+    }
+
+    impl TransactionContext for SerialTxnContext {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn is_readonly(&self) -> bool {
+            true
+        }
+
+        fn doc_fetcher(&self) -> Arc<dyn DocFetcher> {
+            self.fetcher.clone()
+        }
+
+        fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
+            Some(self.action_lock.clone())
+        }
+    }
+
+    struct SerialTxnRegistry {
+        ctx: Arc<SerialTxnContext>,
+    }
+
+    impl SerialTxnRegistry {
+        fn new(fetcher: SerialOnlyFetcher) -> Self {
+            Self {
+                ctx: Arc::new(SerialTxnContext {
+                    id: "serial-txn".to_string(),
+                    fetcher: Arc::new(fetcher),
+                    action_lock: Arc::new(async_lock::Mutex::new(())),
+                }),
+            }
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl TransactionRegistry for SerialTxnRegistry {
+        async fn begin(
+            &self,
+            _readonly: bool,
+        ) -> std::result::Result<TransactionHandle, TransactionError> {
+            Ok(TransactionHandle::new(self.ctx.id.clone()))
+        }
+
+        fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
+            if handle.as_str() == self.ctx.id {
+                GetTransactionResult::Found(self.ctx.clone())
+            } else {
+                GetTransactionResult::NotFound
+            }
+        }
+
+        async fn commit(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Ok(())
+        }
+
+        async fn rollback(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_in_txn_serializes_concurrent_actions_on_same_handle() {
+        let collections = crate::parse_sdl("type Users { name: String }").expect("schema");
+        let txn_fetcher = SerialOnlyFetcher::new();
+
+        let runner = QueryRunner::with_registry(
+            MockFetcher::new(),
+            collections,
+            SerialTxnRegistry::new(txn_fetcher),
+        );
+        let handle = runner.begin_txn(true).await.expect("begin txn");
+
+        let (first, second) = tokio::join!(
+            runner.execute_in_txn(QueryRequest::new("query { Users { name } }"), &handle),
+            runner.execute_in_txn(QueryRequest::new("query { Users { name } }"), &handle)
+        );
+
+        assert!(
+            !first.has_errors(),
+            "first transaction action failed: {:?}",
+            first.errors
+        );
+        assert!(
+            !second.has_errors(),
+            "second transaction action failed: {:?}",
+            second.errors
+        );
     }
 
     #[tokio::test]

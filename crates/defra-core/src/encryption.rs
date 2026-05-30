@@ -19,12 +19,20 @@
 //! incompatible with Go (different key bytes) and cryptographically
 //! weaker (one master-key compromise revealed every past, present, and
 //! future document). See #651 for the audit trail.
+//!
+//! Deterministic encryption keys are retained only for Go-compatibility tests
+//! that assert exact encrypted CIDs. Release builds require
+//! `DEFRA_ALLOW_DETERMINISTIC_TEST_CRYPTO=1` before the hidden test switch can
+//! be enabled; production deployments must never set that variable.
 
 use rand::RngCore;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+const DETERMINISTIC_TEST_CRYPTO_ENV: &str = "DEFRA_ALLOW_DETERMINISTIC_TEST_CRYPTO";
 
 /// Wrapper for encryption key bytes with zeroization on drop.
 ///
@@ -87,9 +95,19 @@ impl EncryptionConfig {
     pub fn should_encrypt_field(&self, field_name: &str) -> bool {
         self.encrypt_doc || self.encrypt_fields.iter().any(|f| f == field_name)
     }
+
+    /// Check if a field should use its own field-level encryption key.
+    pub fn should_encrypt_individual_field(&self, field_name: &str) -> bool {
+        self.encrypt_fields.iter().any(|f| f == field_name)
+    }
 }
 
-/// Generate a fresh 32-byte AES-256 key from the OS RNG.
+#[doc(hidden)]
+static USE_DETERMINISTIC_ENCRYPTION_KEY: AtomicBool = AtomicBool::new(false);
+
+const TEST_ENCRYPTION_KEY: &str = "examplekey1234567890examplekey12";
+
+/// Generate a fresh random 32-byte AES-256 key from the OS RNG.
 ///
 /// Matches Go's `internal/encryption/encryptor.go::generateEncryptionKey`:
 /// each write gets a unique random key. The key is stored alongside the
@@ -104,6 +122,52 @@ pub fn generate_encryption_key() -> [u8; 32] {
     let mut key = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut key);
     key
+}
+
+/// Generate an AES-256 key for a document field.
+///
+/// Production builds use fresh random keys. When FFI runs under the Go
+/// integration test binary, this mirrors Go's `generateTestEncryptionKey` so
+/// expected encrypted deltas and CIDs are reproducible.
+pub fn generate_encryption_key_for(doc_id: &str, field_name: Option<&str>) -> [u8; 32] {
+    if USE_DETERMINISTIC_ENCRYPTION_KEY.load(Ordering::Acquire) {
+        return generate_deterministic_encryption_key(doc_id, field_name);
+    }
+    generate_encryption_key()
+}
+
+#[doc(hidden)]
+pub fn set_deterministic_encryption_key(enabled: bool) {
+    USE_DETERMINISTIC_ENCRYPTION_KEY.store(
+        enabled && deterministic_test_crypto_allowed(),
+        Ordering::Release,
+    );
+}
+
+#[doc(hidden)]
+pub fn deterministic_encryption_key_enabled() -> bool {
+    USE_DETERMINISTIC_ENCRYPTION_KEY.load(Ordering::Acquire)
+}
+
+fn generate_deterministic_encryption_key(doc_id: &str, field_name: Option<&str>) -> [u8; 32] {
+    let material = format!(
+        "{}{}{}",
+        field_name.unwrap_or(""),
+        doc_id,
+        TEST_ENCRYPTION_KEY
+    );
+    let bytes = material.as_bytes();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes[..32]);
+    key
+}
+
+fn deterministic_test_crypto_allowed() -> bool {
+    cfg!(debug_assertions)
+        || matches!(
+            std::env::var(DETERMINISTIC_TEST_CRYPTO_ENV).as_deref(),
+            Ok("1")
+        )
 }
 
 thread_local! {

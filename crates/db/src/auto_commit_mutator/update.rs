@@ -1,3 +1,4 @@
+use super::helpers::ensure_collection_is_active;
 use super::*;
 
 #[allow(clippy::type_complexity)]
@@ -9,6 +10,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         modified_fields: std::collections::HashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         let collection = self.get_collection_or_err(collection_name)?;
+        ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
         // Generate embeddings if source fields were modified
         let mut doc = doc;
@@ -71,19 +73,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     crate::error::Error::DocumentNotFound(id) => {
                         query::error::QueryError::document_not_found(id)
                     }
-                    other => {
-                        let msg = other.to_string();
-                        // If this is a unique constraint violation, return the core message without wrapping
-                        if msg.contains("can not index a doc's field(s) that violates unique index")
-                        {
-                            query::error::QueryError::execution(
-                                "can not index a doc's field(s) that violates unique index."
-                                    .to_string(),
-                            )
-                        } else {
-                            query::error::QueryError::execution(format!("update error: {}", other))
-                        }
-                    }
+                    other => crate::error::index_write_query_error("update", other),
                 })
         };
 
@@ -183,13 +173,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     )));
                 }
 
-                // Emit update event for subscriptions
-                if let Some(doc_id) = doc.id() {
-                    let cid = commit_result
-                        .as_ref()
-                        .map(|(c, _, _)| *c)
-                        .unwrap_or_default();
-                    self.emit_update_events(&collection, &doc_id.to_string(), cid);
+                // Emit update event for subscriptions when blocks were written.
+                if let (Some(doc_id), Some((cid, block, col_data))) =
+                    (doc.id(), commit_result.as_ref())
+                {
+                    self.emit_update_events(
+                        &collection,
+                        &doc_id.to_string(),
+                        *cid,
+                        block.clone(),
+                        col_data.clone(),
+                    );
                 }
 
                 // Count modified fields

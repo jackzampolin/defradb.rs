@@ -349,8 +349,8 @@ mod tests {
         let peer2 = libp2p::PeerId::random();
 
         let infos = vec![
-            ReplicatorInfo::new(peer1, vec!["users".to_string(), "posts".to_string()]),
-            ReplicatorInfo::new(peer2, vec!["comments".to_string()]),
+            ReplicatorInfo::new(peer1, vec!["users".to_string(), "posts".to_string()]).unwrap(),
+            ReplicatorInfo::new(peer2, vec!["comments".to_string()]).unwrap(),
         ];
 
         let (loaded, skipped) = registry.load_from_infos(&infos);
@@ -376,7 +376,7 @@ mod tests {
         registry.add_replicator("users", &peer1);
         assert!(registry.is_replicator("users", &peer1));
 
-        let infos = vec![ReplicatorInfo::new(peer2, vec!["comments".to_string()])];
+        let infos = vec![ReplicatorInfo::new(peer2, vec!["comments".to_string()]).unwrap()];
         let (loaded, skipped) = registry.load_from_infos(&infos);
         assert_eq!(loaded, 1);
         assert_eq!(skipped, 0);

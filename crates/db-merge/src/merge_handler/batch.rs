@@ -30,6 +30,17 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
 
         let mut results = Vec::with_capacity(blocks.len());
         for block in blocks {
+            if let Err(error) = self
+                .validate_explicit_replay_authorization(
+                    block.explicit_replay_authorization.as_ref(),
+                    block,
+                )
+                .await
+            {
+                results.push(Err(error));
+                continue;
+            }
+
             // Serialize merges for the same document
             let _guard = self.merge_queue.acquire(&block.doc_id).await;
 
@@ -148,6 +159,12 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
             let headstore = txn.headstore()?;
 
             for block in blocks {
+                self.validate_explicit_replay_authorization(
+                    block.explicit_replay_authorization.as_ref(),
+                    block,
+                )
+                .await?;
+
                 let metadata = BlockMetadata::normal(
                     &block.doc_id,
                     &block.collection_id,
@@ -403,7 +420,13 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     .await
             }
             CrdtDelta::CollectionSet(_) => Ok(MergeOutcome::terminal_skip("collection set delta")),
-            _ => unreachable!(),
+            // Only the variant discriminant is reported — `CrdtDelta` carries
+            // field-value bytes from user documents and must not be formatted
+            // into error strings that may end up in logs.
+            other => Err(MergeError::UnsupportedDelta(format!(
+                "unhandled CrdtDelta variant in batch dispatch: {:?}",
+                std::mem::discriminant(other)
+            ))),
         }
     }
 }

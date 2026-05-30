@@ -1,3 +1,4 @@
+use super::helpers::ensure_collection_is_active;
 use super::*;
 
 use crate::block_builder::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
@@ -23,6 +24,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
 
         let collection = self.get_collection_or_err(collection_name)?;
+        ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id().to_string();
@@ -148,18 +150,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 collection
                     .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
                     .await
-                    .map_err(|e| {
-                        let msg = e.to_string();
-                        if msg.contains("can not index a doc's field(s) that violates unique index")
-                        {
-                            query::error::QueryError::execution(
-                                "can not index a doc's field(s) that violates unique index."
-                                    .to_string(),
-                            )
-                        } else {
-                            query::error::QueryError::execution(format!("create error: {}", e))
-                        }
-                    })?;
+                    .map_err(|e| crate::error::index_write_query_error("create", e))?;
             } // datastore dropped
 
             // Insert pre-computed blocks + collection blocks
@@ -246,11 +237,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // Emit events and build results
         let mut create_results = Vec::with_capacity(results.len());
         for (doc_id, doc, commit_result) in results {
-            let cid = commit_result
-                .as_ref()
-                .map(|(c, _, _)| *c)
-                .unwrap_or_default();
-            self.emit_update_events(&collection, &doc_id.to_string(), cid);
+            if let Some((cid, block, col_data)) = commit_result.as_ref() {
+                self.emit_update_events(
+                    &collection,
+                    &doc_id.to_string(),
+                    *cid,
+                    block.clone(),
+                    col_data.clone(),
+                );
+            }
 
             match commit_result {
                 Some((cid, block, col_data)) => {

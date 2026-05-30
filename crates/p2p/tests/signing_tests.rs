@@ -24,28 +24,28 @@ fn test_sign_message_sets_all_fields() {
     let mut msg = create_test_message();
 
     // Before signing, metadata should have defaults
-    assert!(msg.metadata.message_id.is_empty());
-    assert!(msg.metadata.sender_id.is_empty());
-    assert!(msg.metadata.pubkey.is_empty());
-    assert!(msg.metadata.signature.is_none());
+    assert!(msg.message_id.is_empty());
+    assert!(msg.sender_id.is_empty());
+    assert!(msg.pubkey.is_empty());
+    assert!(msg.signature.is_none());
 
     // Sign the message
     sign_message(&keypair, &mut msg).expect("signing should succeed");
 
     // After signing, all fields should be populated
-    assert!(!msg.metadata.message_id.is_empty());
-    assert_eq!(msg.metadata.version, MESSAGE_VERSION);
-    assert!(!msg.metadata.sender_id.is_empty());
-    assert!(!msg.metadata.pubkey.is_empty());
-    assert!(msg.metadata.signature.is_some());
+    assert!(!msg.message_id.is_empty());
+    assert_eq!(msg.version, MESSAGE_VERSION);
+    assert!(!msg.sender_id.is_empty());
+    assert!(!msg.pubkey.is_empty());
+    assert!(msg.signature.is_some());
 
     // Verify sender_id matches keypair's peer ID
     let expected_peer_id = keypair.public().to_peer_id().to_string();
-    assert_eq!(msg.metadata.sender_id, expected_peer_id);
+    assert_eq!(msg.sender_id, expected_peer_id);
 
     // Verify pubkey matches keypair's public key
     let expected_pubkey = keypair.public().encode_protobuf();
-    assert_eq!(msg.metadata.pubkey, expected_pubkey);
+    assert_eq!(msg.pubkey, expected_pubkey);
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn test_verify_wrong_signature_fails() {
     sign_message(&keypair, &mut msg).expect("signing should succeed");
 
     // Replace signature with garbage
-    msg.metadata.signature = Some(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    msg.signature = Some(vec![0xDE, 0xAD, 0xBE, 0xEF]);
 
     // Verify should fail
     let result = verify_message(&msg);
@@ -112,7 +112,7 @@ fn test_verify_pubkey_mismatch_fails() {
     sign_message(&keypair1, &mut msg).expect("signing should succeed");
 
     // Replace sender_id with keypair2's peer ID (but keep keypair1's pubkey and signature)
-    msg.metadata.sender_id = keypair2.public().to_peer_id().to_string();
+    msg.sender_id = keypair2.public().to_peer_id().to_string();
 
     // Verify should fail because pubkey doesn't match sender_id
     let result = verify_message(&msg);
@@ -131,13 +131,13 @@ fn test_sign_preserves_existing_message_id() {
 
     // Set a custom message ID before signing
     let custom_id = "custom-message-id-123".to_string();
-    msg.metadata.message_id = custom_id.clone();
+    msg.message_id = custom_id.clone();
 
     // Sign the message
     sign_message(&keypair, &mut msg).expect("signing should succeed");
 
     // Message ID should be preserved
-    assert_eq!(msg.metadata.message_id, custom_id);
+    assert_eq!(msg.message_id, custom_id);
 }
 
 #[test]
@@ -146,10 +146,10 @@ fn test_verify_missing_signature_fails() {
     let mut msg = create_test_message();
 
     // Partially populate metadata without signature
-    msg.metadata.message_id = Uuid::new_v4().to_string();
-    msg.metadata.version = MESSAGE_VERSION.to_string();
-    msg.metadata.sender_id = keypair.public().to_peer_id().to_string();
-    msg.metadata.pubkey = keypair.public().encode_protobuf();
+    msg.message_id = Uuid::new_v4().to_string();
+    msg.version = MESSAGE_VERSION.to_string();
+    msg.sender_id = keypair.public().to_peer_id().to_string();
+    msg.pubkey = keypair.public().encode_protobuf();
     // Intentionally leave signature as None
 
     // Verify should fail due to missing signature
@@ -171,12 +171,12 @@ fn test_sign_message_cloned() {
     let signed = sign_message_cloned(&keypair, &original).expect("signing should succeed");
 
     // Original should be unchanged
-    assert!(original.metadata.message_id.is_empty());
-    assert!(original.metadata.signature.is_none());
+    assert!(original.message_id.is_empty());
+    assert!(original.signature.is_none());
 
     // Signed copy should have all fields populated
-    assert!(!signed.metadata.message_id.is_empty());
-    assert!(signed.metadata.signature.is_some());
+    assert!(!signed.message_id.is_empty());
+    assert!(signed.signature.is_some());
 
     // Signed copy should verify
     verify_message(&signed).expect("verification should succeed");
@@ -192,14 +192,14 @@ fn test_different_keypairs_produce_different_signatures() {
 
     // Set same message ID for comparison
     let msg_id = "same-msg-id".to_string();
-    msg1.metadata.message_id = msg_id.clone();
-    msg2.metadata.message_id = msg_id;
+    msg1.message_id = msg_id.clone();
+    msg2.message_id = msg_id;
 
     sign_message(&keypair1, &mut msg1).expect("signing should succeed");
     sign_message(&keypair2, &mut msg2).expect("signing should succeed");
 
     // Signatures should be different
-    assert_ne!(msg1.metadata.signature, msg2.metadata.signature);
+    assert_ne!(msg1.signature, msg2.signature);
 
     // Both should verify with their own keypairs
     verify_message(&msg1).expect("msg1 should verify");
@@ -214,7 +214,7 @@ fn test_uuid_format() {
     sign_message(&keypair, &mut msg).expect("signing should succeed");
 
     // Verify message_id is a valid UUID format
-    let uuid_result = Uuid::parse_str(&msg.metadata.message_id);
+    let uuid_result = Uuid::parse_str(&msg.message_id);
     assert!(
         uuid_result.is_ok(),
         "message_id should be valid UUID format"

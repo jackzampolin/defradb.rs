@@ -54,6 +54,8 @@ pub struct ClientContext {
     pub identity_key_bytes: Option<Vec<u8>>,
     /// Transaction ID
     pub tx_id: Option<String>,
+    /// Development mode
+    pub development: bool,
     /// Verbose mode
     pub verbose: bool,
 }
@@ -110,7 +112,6 @@ pub enum ClientCommand {
     /// Interact with blocks
     Block(BlockArgs),
     /// Interact with collections
-    #[command(alias = "schema")]
     Collection(CollectionArgs),
     /// Interact with documents
     Document(DocumentArgs),
@@ -165,6 +166,7 @@ impl ClientArgs {
             auth_token,
             identity_key_bytes,
             tx_id: self.tx.map(|id| id.to_string()),
+            development: config.development,
             verbose: self.verbose,
         };
 

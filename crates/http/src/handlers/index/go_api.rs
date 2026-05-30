@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
@@ -118,7 +118,7 @@ pub async fn go_create_index(
             request.unique,
         )
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     // Convert to Go-compatible response format
     let response = GoIndexDescription {
@@ -214,7 +214,7 @@ pub async fn go_delete_index(
     index_ops
         .delete_index(&collection, &index_name)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     // Return empty body to match Go DefraDB behavior
     Ok(StatusCode::OK)

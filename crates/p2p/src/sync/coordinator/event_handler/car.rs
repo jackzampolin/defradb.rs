@@ -3,13 +3,83 @@
 use blockstore::{verify_block_cid, Blockstore};
 use cid::Cid;
 
-use crate::error::Result;
+use super::super::authorizer::AccessAuthorizer;
+use crate::error::{Error, Result};
 use crate::message::CarFetchRequest;
 use crate::sync::car::{collect_dag_blocks, collect_exact_blocks, decode_car, encode_car};
+use crate::sync::coordinator::dag_context::block_context_from_data;
 use crate::sync::coordinator::SyncCoordinator;
 use crate::transport::{P2PTransport, PeerId};
 
+fn sample_cids(cids: &[Cid]) -> Vec<String> {
+    cids.iter().take(4).map(ToString::to_string).collect()
+}
+
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
+    async fn check_car_fetch_access(
+        &self,
+        peer_id: &PeerId,
+        request: &CarFetchRequest,
+    ) -> Result<()> {
+        if self.access.access_mode.is_open() {
+            return Ok(());
+        }
+        if self.access.peer_state.is_connected(peer_id.as_str()) {
+            return Ok(());
+        }
+
+        let mut checked_collection = false;
+        for cid in request.response_roots() {
+            let block_data = match self.manager.blockstore().get(&cid).await {
+                Ok(Some(data)) => data,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::debug!(
+                        cid = %cid,
+                        peer_id = %peer_id,
+                        error = %error,
+                        "CAR handler: failed to read requested block for collection access check"
+                    );
+                    continue;
+                }
+            };
+
+            let Some(collection_id) = block_context_from_data(&block_data).collection_id else {
+                continue;
+            };
+
+            checked_collection = true;
+            let is_collection_replicator = self
+                .authorizer
+                .peer_authorized_for_collection(peer_id.as_str(), &collection_id)
+                .await;
+            let is_collection_subscriber = self
+                .access
+                .peer_state
+                .peer_subscribed_to_collection(peer_id.as_str(), &collection_id);
+
+            if !is_collection_replicator && !is_collection_subscriber {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    collection_id = %collection_id,
+                    is_collection_replicator,
+                    is_collection_subscriber,
+                    "Access denied: peer cannot fetch CAR blocks for this collection"
+                );
+                return Err(Error::AccessDenied {
+                    peer_id: peer_id.to_string(),
+                    collection_id,
+                });
+            }
+        }
+
+        if checked_collection {
+            Ok(())
+        } else {
+            self.check_peer_is_replicator(peer_id).await
+        }
+    }
+
     /// Handle an inbound CAR fetch request: collect the DAG and send CARv1 response.
     pub(crate) async fn handle_car_fetch_request(
         &self,
@@ -17,7 +87,33 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         request: CarFetchRequest,
         token: Option<T::ResponseToken>,
     ) -> Result<()> {
-        self.check_peer_is_replicator(&peer_id).await?;
+        let root_present = match self.manager.blockstore().has(&request.root_cid).await {
+            Ok(present) => Some(present),
+            Err(error) => {
+                tracing::debug!(
+                    root_cid = %request.root_cid,
+                    peer_id = %peer_id,
+                    error = %error,
+                    "CAR handler: failed to check root presence before serving request"
+                );
+                None
+            }
+        };
+
+        if let Err(error) = self.check_car_fetch_access(&peer_id, &request).await {
+            tracing::warn!(
+                root_cid = %request.root_cid,
+                peer_id = %peer_id,
+                recursive = request.recursive,
+                requested_count = request.wanted_cids.len(),
+                root_present = ?root_present,
+                connected = self.access.peer_state.is_connected(peer_id.as_str()),
+                registered_any = self.access.replicators.is_any_replicator(peer_id.as_str()),
+                error = %error,
+                "CAR handler rejected request"
+            );
+            return Err(error);
+        }
 
         tracing::debug!(
             root_cid = %request.root_cid,
@@ -41,13 +137,25 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             // Normal race: peer asked for blocks we have not yet received
             // ourselves. Noisy at WARN during concurrent replication catch-up;
             // the requester retries until some peer serves the DAG.
-            tracing::debug!(
-                root_cid = %request.root_cid,
-                peer_id = %peer_id,
-                recursive = request.recursive,
-                requested_count = request.wanted_cids.len(),
-                "CAR handler: no blocks found for request"
-            );
+            if request.recursive {
+                tracing::debug!(
+                    root_cid = %request.root_cid,
+                    peer_id = %peer_id,
+                    recursive = request.recursive,
+                    requested_count = request.wanted_cids.len(),
+                    root_present = ?root_present,
+                    "CAR handler: no blocks found for request"
+                );
+            } else {
+                tracing::warn!(
+                    root_cid = %request.root_cid,
+                    peer_id = %peer_id,
+                    root_present = ?root_present,
+                    requested_count = request.wanted_cids.len(),
+                    requested_cids = ?sample_cids(&request.wanted_cids),
+                    "CAR handler: no exact blocks found for selective request"
+                );
+            }
             // Send a header-only CAR so both transports (iroh and libp2p)
             // receive a well-formed response they can decode. Without this,
             // the libp2p response handler errors on empty bytes and the

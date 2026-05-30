@@ -16,9 +16,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         mutation_str: &str,
         caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
-        use crate::query_parse::parse_mutations;
+        use crate::query_parse::parse_mutations_with_limits;
 
-        let mutations = parse_mutations(mutation_str)?;
+        let mutations = parse_mutations_with_limits(mutation_str, None, self.query_limits)?;
         let mut operation_children: Vec<JsonValue> = Vec::new();
         let mut execution_success = true;
         let mut execution_errors: Vec<String> = Vec::new();
@@ -166,8 +166,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     } else if let Some(ref doc_ids) = mutation.doc_ids {
                         node = node.with_doc_ids(doc_ids.clone());
                     }
-                    if let Some(ref filter) = mutation.filter {
-                        node = node.with_filter(filter.clone());
+                    if resolved_doc_ids.is_none() && mutation.doc_ids.is_none() {
+                        if let Some(ref filter) = mutation.filter {
+                            node = node.with_filter(filter.clone());
+                        }
                     }
                     Box::new(node)
                 }

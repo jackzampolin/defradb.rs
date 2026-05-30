@@ -88,7 +88,10 @@ impl Filter {
                 // Check if this is a nested filter (has non-operator keys)
                 let is_nested = obj.keys().any(|k| FilterOp::parse(k).is_none());
                 if is_nested {
-                    return Some(Filter::from_conditions(obj.clone()));
+                    return Some(Filter::from_conditions_with_max_depth(
+                        obj.clone(),
+                        self.max_depth(),
+                    ));
                 }
             }
         }
@@ -104,7 +107,10 @@ impl Filter {
                                     let is_nested =
                                         rel_obj.keys().any(|k| FilterOp::parse(k).is_none());
                                     if is_nested {
-                                        return Some(Filter::from_conditions(rel_obj.clone()));
+                                        return Some(Filter::from_conditions_with_max_depth(
+                                            rel_obj.clone(),
+                                            self.max_depth(),
+                                        ));
                                     }
                                 }
                             }
@@ -219,15 +225,19 @@ impl Filter {
             return Some(self.clone());
         }
 
-        Self::extract_at_path_recursive(self.conditions(), path)
+        Self::extract_at_path_recursive(self.conditions(), path, self.max_depth())
     }
 
     fn extract_at_path_recursive(
         conditions: &Map<String, JsonValue>,
         path: &[String],
+        max_depth: usize,
     ) -> Option<Filter> {
         if path.is_empty() {
-            return Some(Filter::from_conditions(conditions.clone()));
+            return Some(Filter::from_conditions_with_max_depth(
+                conditions.clone(),
+                max_depth,
+            ));
         }
 
         let current_key = &path[0];
@@ -238,10 +248,13 @@ impl Filter {
             if let Some(obj) = value.as_object() {
                 if remaining_path.is_empty() {
                     // We've reached the end of the path - return this level's conditions
-                    return Some(Filter::from_conditions(obj.clone()));
+                    return Some(Filter::from_conditions_with_max_depth(
+                        obj.clone(),
+                        max_depth,
+                    ));
                 } else {
                     // Continue down the path
-                    return Self::extract_at_path_recursive(obj, remaining_path);
+                    return Self::extract_at_path_recursive(obj, remaining_path, max_depth);
                 }
             }
         }
@@ -252,7 +265,9 @@ impl Filter {
                 if let Some(arr) = value.as_array() {
                     for item in arr {
                         if let Some(obj) = item.as_object() {
-                            if let Some(filter) = Self::extract_at_path_recursive(obj, path) {
+                            if let Some(filter) =
+                                Self::extract_at_path_recursive(obj, path, max_depth)
+                            {
                                 return Some(filter);
                             }
                         }

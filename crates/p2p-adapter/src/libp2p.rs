@@ -8,6 +8,7 @@ use crate::libp2p_doc_pusher::DocPusher;
 use crate::{
     ExplicitReplayCapabilityInput, P2PError, P2PErrorExt as _, P2POperations, P2PResult,
     P2pDocumentInfo, P2pDocumentRequest, ReplicatorInfo, ReplicatorPushOptions,
+    ReplicatorPushOptionsState,
 };
 
 use p2p::sync::Libp2pSyncCoordinator;
@@ -37,12 +38,25 @@ pub struct P2PAdapter<B: Blockstore + 'static> {
     doc_pusher: Option<Arc<dyn DocPusher>>,
     event_bus: Option<Arc<dyn events::Bus>>,
     version_syncer: Option<Arc<dyn VersionSyncer>>,
-    replicator_push_options: ReplicatorPushOptions,
+    replicator_push_options: ReplicatorPushOptionsState,
     peer_addresses: Arc<std::sync::RwLock<HashMap<String, String>>>,
     tracked_documents: Arc<std::sync::RwLock<HashSet<String>>>,
 }
 
 impl<B: Blockstore + 'static> P2PAdapter<B> {
+    fn to_http_replicator_info(info: p2p::ReplicatorInfo) -> ReplicatorInfo {
+        let address = info.addresses_str().first().map(|addr| addr.to_string());
+        let status = Some(info.status.into());
+        let last_status_change = Some(info.last_status_change_go_string());
+        ReplicatorInfo {
+            id: Some(info.peer_id_str().to_string()),
+            collections: info.collections,
+            address,
+            status,
+            last_status_change,
+        }
+    }
+
     async fn resubscribe_tracked_document_topics(&self) {
         let doc_ids: Vec<String> = match self.tracked_documents.read() {
             Ok(docs) => docs.iter().cloned().collect(),
@@ -75,13 +89,21 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             doc_pusher: Some(doc_pusher),
             event_bus: Some(event_bus),
             version_syncer,
-            replicator_push_options: ReplicatorPushOptions::default(),
+            replicator_push_options: ReplicatorPushOptionsState::default(),
             peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
             tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
     }
 
     pub fn with_replicator_push_options(mut self, options: ReplicatorPushOptions) -> Self {
+        self.replicator_push_options = ReplicatorPushOptionsState::new(options);
+        self
+    }
+
+    pub fn with_replicator_push_options_state(
+        mut self,
+        options: ReplicatorPushOptionsState,
+    ) -> Self {
         self.replicator_push_options = options;
         self
     }
@@ -176,22 +198,25 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
-        let p2p_infos = self
-            .handle
-            .list_replicators()
-            .await
-            .map_err(|error| P2PError::transport(error.to_string()))?;
+        let p2p_infos = if let Some(ref pusher) = self.doc_pusher {
+            match pusher.load_persisted_replicators().await? {
+                Some(infos) => infos,
+                None => self
+                    .handle
+                    .list_replicators()
+                    .await
+                    .map_err(|error| P2PError::transport(error.to_string()))?,
+            }
+        } else {
+            self.handle
+                .list_replicators()
+                .await
+                .map_err(|error| P2PError::transport(error.to_string()))?
+        };
 
         Ok(p2p_infos
             .into_iter()
-            .map(|info| {
-                let address = info.addresses_str().first().map(|addr| addr.to_string());
-                ReplicatorInfo {
-                    id: Some(info.peer_id_str().to_string()),
-                    collections: info.collections,
-                    address,
-                }
-            })
+            .map(Self::to_http_replicator_info)
             .collect())
     }
 
@@ -332,8 +357,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 let push_handle = self.handle.clone();
                 let push_pusher = Arc::clone(pusher);
                 let push_event_bus = self.event_bus.clone();
-                let push_se_key = self.replicator_push_options.se_encryption_key.clone();
-                let push_identity = self.replicator_push_options.se_identity_pubkey.clone();
+                let push_options = self.replicator_push_options.load();
+                let push_se_key = push_options.se_encryption_key;
+                let push_identity = push_options.se_identity_pubkey;
 
                 tracing::info!(
                     peer_id = %peer_id,
@@ -347,7 +373,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                             &push_handle,
                             peer_id,
                             &new_collection_names,
-                            push_se_key.as_deref(),
+                            push_se_key.as_ref().map(|key| key.as_slice()),
                             push_identity.as_deref(),
                         )
                         .await
@@ -595,6 +621,17 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             }
         }
 
+        if let Some(ref pusher) = self.doc_pusher {
+            let all_docs: Vec<String> = self
+                .tracked_documents
+                .read()
+                .map(|docs| docs.iter().cloned().collect())
+                .unwrap_or_default();
+            if let Err(error) = pusher.persist_p2p_documents(&all_docs).await {
+                tracing::warn!(error = %error, "failed to persist P2P documents after removal");
+            }
+        }
+
         Ok(())
     }
 
@@ -663,28 +700,63 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         let start = std::time::Instant::now();
         let doc_set: HashSet<String> = doc_ids.iter().cloned().collect();
 
+        // Wire-compatible with Go (#828): use pubsub_rpc doc-sync when the
+        // coordinator has it. `pubsub_sync_documents` also feeds each
+        // received reply through the coordinator's DAG-fetch scheduler,
+        // so merges flow to the event bus the same way as the two-stream
+        // path. Falls back to two-stream per-peer requests when no
+        // coordinator is wired (e.g. light tests).
+        let use_pubsub = self
+            .sync_coordinator
+            .as_ref()
+            .is_some_and(|coord| coord.pubsub_services_ready());
+
         for _attempt in 0..3 {
             if total_received >= total_expected || start.elapsed() >= overall_timeout {
                 break;
             }
 
-            let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
-            if let Err(error) = p2p::signing::sign_message(self.handle.keypair(), &mut request) {
-                event_bus.unsubscribe(sub.id());
-                return Err(P2PError::internal(format!(
-                    "failed to sign DocSync request: {error}"
-                )));
-            }
-
-            for peer_id in &connected_peers {
-                if let Err(error) = self
-                    .handle
-                    .send_doc_sync_request(*peer_id, request.clone())
-                    .await
+            let publish_result = if use_pubsub {
+                let coord = self
+                    .sync_coordinator
+                    .as_ref()
+                    .expect("pubsub readiness requires a coordinator")
+                    .clone();
+                let doc_ids = doc_ids.clone();
+                // Remaining budget for this attempt.
+                let remaining = overall_timeout.saturating_sub(start.elapsed());
+                let attempt_timeout = remaining.min(std::time::Duration::from_secs(8));
+                tokio::spawn(async move {
+                    if let Err(error) = coord
+                        .pubsub_sync_documents(doc_ids, Some(attempt_timeout))
+                        .await
+                    {
+                        tracing::warn!(error = %error, "pubsub_rpc doc-sync publish failed");
+                    }
+                });
+                Ok::<(), P2PError>(())
+            } else {
+                let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
+                if let Err(error) = p2p::signing::sign_message(self.handle.keypair(), &mut request)
                 {
-                    tracing::warn!(peer_id = %peer_id, error = %error, "failed to send DocSync request");
+                    event_bus.unsubscribe(sub.id());
+                    return Err(P2PError::internal(format!(
+                        "failed to sign DocSync request: {error}"
+                    )));
                 }
-            }
+
+                for peer_id in &connected_peers {
+                    if let Err(error) = self
+                        .handle
+                        .send_doc_sync_request(*peer_id, request.clone())
+                        .await
+                    {
+                        tracing::warn!(peer_id = %peer_id, error = %error, "failed to send DocSync request");
+                    }
+                }
+                Ok(())
+            };
+            publish_result?;
 
             let mut last_merge = std::time::Instant::now();
             while total_received < total_expected && start.elapsed() < overall_timeout {
@@ -723,6 +795,22 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             P2PError::transport(format!("failed to get connected peers: {error}"))
         })?;
         if connected_peers.is_empty() {
+            return Ok(());
+        }
+
+        // Go-compatible pubsub_rpc path when coordinator is wired (#828).
+        // Falls back to two-stream per-peer requests otherwise.
+        if let Some(coord) = self.sync_coordinator.as_ref() {
+            coord
+                .pubsub_sync_branchable_collection(
+                    collection_id.to_string(),
+                    Some(std::time::Duration::from_secs(8)),
+                    Some(connected_peers.len()),
+                )
+                .await
+                .map_err(|error| {
+                    P2PError::transport(format!("pubsub_rpc branchable-sync failed: {error}"))
+                })?;
             return Ok(());
         }
 

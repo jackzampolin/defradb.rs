@@ -34,6 +34,7 @@ pub struct EmbeddedNode<S: storage::corekv::Store> {
     pub event_bus: Arc<dyn events::Bus>,
     pub node_identity_did: Option<String>,
     pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
+    pub query_limits: query::QueryLimits,
     pub p2p: Option<Arc<ManagedP2PSystem>>,
     /// Idempotency guard for [`EmbeddedNode::shutdown`]. Set to `true`
     /// by the first caller of `shutdown()`.
@@ -207,6 +208,11 @@ impl NodeBuilder {
 
     pub fn with_sourcehub(mut self, config: SourceHubConfig) -> Self {
         self.config.document_acp = DocumentAcpConfig::SourceHub(config);
+        self
+    }
+
+    pub fn with_query_limits(mut self, limits: query::QueryLimits) -> Self {
+        self.config.query_limits = limits;
         self
     }
 
@@ -416,7 +422,13 @@ where
     let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
     let collection_provider: Arc<dyn query::CollectionProvider> =
         db::DbCollectionProvider::new_arc(database.clone());
-    let txn_registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
+    let txn_broadcaster = p2p_setup
+        .as_ref()
+        .map(|setup| setup.txn_broadcaster.clone());
+    let txn_registry = Arc::new(match txn_broadcaster {
+        Some(b) => db::DbTransactionRegistry::with_broadcaster(database.clone(), b),
+        None => db::DbTransactionRegistry::new(database.clone()),
+    });
 
     let query_runner = query::QueryRunner::with_arc_registry_and_provider(
         fetcher,
@@ -430,7 +442,8 @@ where
             .unwrap_or_else(|| Arc::new(db::AutoCommitMutator::new(database.clone()))),
     )
     .with_acp(document_acp.clone())
-    .with_lens_store(database.lens_store().clone());
+    .with_lens_store(database.lens_store().clone())
+    .with_query_limits(config.query_limits);
 
     let query_runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
 
@@ -445,6 +458,7 @@ where
         event_bus,
         node_identity_did,
         sourcehub_acp,
+        query_limits: config.query_limits,
         p2p: p2p_setup.map(|setup| setup.system),
         shutdown_started: AtomicBool::new(false),
         shutdown_finished: AtomicBool::new(false),

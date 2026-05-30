@@ -5,7 +5,7 @@
 //! - Gossip events from iroh-gossip
 //! - Commands from the `IrohTransport` facade
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use iroh::{Endpoint, EndpointId};
@@ -23,15 +23,21 @@ use super::endpoint_commands::handle_command;
 use super::endpoint_config::{
     apply_bind_config, apply_discovery_config, relay_mode_from_config, IrohEndpointConfig,
 };
+use super::endpoint_rpc::ConnectionCache;
 use super::endpoint_streams::handle_incoming;
 use super::peer_map::{parse_endpoint_id, PeerMap};
 use super::protocols;
+
+const MAX_COMMAND_BATCH: usize = 16;
 
 /// Handle to a gossip topic subscription.
 pub(super) struct TopicSubscription {
     pub(super) sender: iroh_gossip::api::GossipSender,
     pub(super) reader_task: JoinHandle<()>,
+    pub(super) neighbors: Arc<parking_lot::Mutex<HashSet<EndpointId>>>,
 }
+
+pub(super) type SubscriptionSenders = Vec<(String, iroh_gossip::api::GossipSender)>;
 
 /// Active block sync task.
 pub(super) struct ActiveSync {
@@ -105,7 +111,7 @@ pub async fn spawn_endpoint(
     alpns.push(iroh_gossip::net::GOSSIP_ALPN.to_vec());
 
     let relay_mode = relay_mode_from_config(&config.relay_mode)?;
-    let mut builder = Endpoint::empty_builder()
+    let mut builder = Endpoint::builder(iroh::endpoint::presets::Minimal)
         .relay_mode(relay_mode)
         .secret_key(config.secret_key.clone())
         .alpns(alpns);
@@ -147,8 +153,8 @@ async fn run_event_loop(
         String,
         oneshot::Sender<PushLogReply>,
     >::new()));
-    let mut subscriptions: std::collections::HashMap<String, TopicSubscription> =
-        std::collections::HashMap::new();
+    let connection_cache: ConnectionCache = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+    let mut subscriptions: HashMap<String, TopicSubscription> = HashMap::new();
     let mut active_syncs: HashMap<u64, ActiveSync> = HashMap::new();
     let spawned_tasks: SpawnedTasks = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let mut next_query_id: u64 = 1;
@@ -163,40 +169,61 @@ async fn run_event_loop(
         warn!("Event channel closed, cannot emit Listening event");
     }
 
-    loop {
+    'endpoint: loop {
         tokio::select! {
+            Some(cmd) = command_rx.recv() => {
+                let mut pending_cmd = Some(cmd);
+                let mut processed = 0;
+                while let Some(cmd) = pending_cmd.take() {
+                    let should_shutdown = handle_command(
+                        cmd,
+                        &endpoint,
+                        &gossip,
+                        &peer_map,
+                        &pending_pushlog_replies,
+                        &connection_cache,
+                        &mut subscriptions,
+                        &replicators,
+                        &mut active_syncs,
+                        &spawned_tasks,
+                        &mut next_query_id,
+                        &event_tx,
+                    ).await;
+                    if should_shutdown {
+                        break 'endpoint;
+                    }
+
+                    processed += 1;
+                    if processed >= MAX_COMMAND_BATCH {
+                        break;
+                    }
+                    pending_cmd = command_rx.try_recv().ok();
+                }
+            }
             incoming = endpoint.accept() => {
                 match incoming {
                     Some(incoming) => {
-                        handle_incoming(
-                            incoming,
-                            &gossip,
-                            &peer_map,
-                            &pending_pushlog_replies,
-                            &subscriptions,
-                            &spawned_tasks,
-                            &event_tx,
-                        ).await;
+                        let gossip = gossip.clone();
+                        let peer_map = Arc::clone(&peer_map);
+                        let pending_pushlog_replies = Arc::clone(&pending_pushlog_replies);
+                        let subscription_senders = snapshot_subscription_senders(&subscriptions);
+                        let spawned_tasks_for_incoming = Arc::clone(&spawned_tasks);
+                        let event_tx = event_tx.clone();
+                        let task = tokio::spawn(async move {
+                            handle_incoming(
+                                incoming,
+                                &gossip,
+                                &peer_map,
+                                &pending_pushlog_replies,
+                                &subscription_senders,
+                                &spawned_tasks_for_incoming,
+                                &event_tx,
+                            )
+                            .await;
+                        });
+                        track_task(&spawned_tasks, task);
                     }
                     None => break,
-                }
-            }
-            Some(cmd) = command_rx.recv() => {
-                let should_shutdown = handle_command(
-                    cmd,
-                    &endpoint,
-                    &gossip,
-                    &peer_map,
-                    &pending_pushlog_replies,
-                    &mut subscriptions,
-                    &replicators,
-                    &mut active_syncs,
-                    &spawned_tasks,
-                    &mut next_query_id,
-                    &event_tx,
-                ).await;
-                if should_shutdown {
-                    break;
                 }
             }
             else => break,
@@ -230,13 +257,14 @@ async fn run_event_loop(
     );
 
     let gossip_started = std::time::Instant::now();
-    if let Err(error) = gossip.shutdown().await {
-        debug!(%error, "Iroh gossip shutdown failed");
+    match tokio::time::timeout(std::time::Duration::from_secs(1), gossip.shutdown()).await {
+        Ok(Ok(())) => warn!(
+            elapsed_ms = gossip_started.elapsed().as_millis(),
+            "Iroh endpoint shutdown: gossip stopped"
+        ),
+        Ok(Err(error)) => debug!(%error, "Iroh gossip shutdown failed"),
+        Err(_) => debug!("Timed out waiting for Iroh gossip shutdown"),
     }
-    warn!(
-        elapsed_ms = gossip_started.elapsed().as_millis(),
-        "Iroh endpoint shutdown: gossip stopped"
-    );
 
     let close_started = std::time::Instant::now();
     endpoint.close().await;
@@ -256,8 +284,25 @@ pub(super) async fn join_peer_to_subscriptions(
     subscriptions: &HashMap<String, TopicSubscription>,
     endpoint_id: EndpointId,
 ) {
+    let subscription_senders = snapshot_subscription_senders(subscriptions);
+    join_peer_to_subscription_senders(&subscription_senders, endpoint_id).await;
+}
+
+pub(super) fn snapshot_subscription_senders(
+    subscriptions: &HashMap<String, TopicSubscription>,
+) -> SubscriptionSenders {
+    subscriptions
+        .iter()
+        .map(|(topic, sub)| (topic.clone(), sub.sender.clone()))
+        .collect()
+}
+
+pub(super) async fn join_peer_to_subscription_senders(
+    subscriptions: &[(String, iroh_gossip::api::GossipSender)],
+    endpoint_id: EndpointId,
+) {
     for (topic, sub) in subscriptions.iter() {
-        if let Err(e) = sub.sender.join_peers(vec![endpoint_id]).await {
+        if let Err(e) = sub.join_peers(vec![endpoint_id]).await {
             debug!(
                 topic = %topic,
                 peer = %endpoint_id,

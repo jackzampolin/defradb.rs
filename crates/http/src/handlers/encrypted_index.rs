@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, EncryptedIndexInfo, NodePermission};
@@ -51,7 +51,7 @@ pub async fn go_add_encrypted_index(
     let info = ops
         .add_encrypted_index(&collection, &field_name)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(info))
 }
@@ -123,7 +123,7 @@ pub async fn go_delete_encrypted_index(
 
     ops.delete_encrypted_index(&collection, &field)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(StatusCode::OK)
 }

@@ -23,7 +23,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "p2p")]
 use std::sync::Mutex;
+use std::time::Duration;
 
+use defra_core::signing::SigningConfig;
+use identity::{Identity as _, IdentityKeyType, RawIdentity};
 #[cfg(feature = "p2p")]
 use p2p::P2PTransport;
 
@@ -42,6 +45,7 @@ pub use config::{DocumentAcpConfig, SourceHubConfig};
 pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybridSearchResponse};
 pub use events::EventName;
 pub use lens::{LensConfig, LensModule, TransformId};
+pub use query::QueryLimits;
 pub use query::{QueryExecutor, QueryRequest, QueryResponse};
 pub use schema::CollectionVersion;
 
@@ -72,6 +76,9 @@ pub struct EmbeddedNode {
     event_bus: Arc<dyn events::Bus>,
     schema_ops: Arc<dyn SchemaOps>,
     embedding_config: db::EmbeddingClientConfig,
+    node_identity_did: Option<String>,
+    #[cfg(feature = "http")]
+    txn_cleanup_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     #[cfg(feature = "p2p")]
     p2p_ops: Option<Arc<dyn defra_http::P2POperations>>,
     #[cfg(feature = "p2p")]
@@ -112,6 +119,13 @@ impl P2PLifecycle {
             inner.shutdown().await;
         }
     }
+}
+
+#[cfg(feature = "http")]
+#[derive(Clone, Copy)]
+struct TransactionCleanupConfig {
+    max_idle_age: Duration,
+    sweep_interval: Duration,
 }
 
 #[cfg(feature = "p2p")]
@@ -155,7 +169,7 @@ impl P2PLifecycleInner {
         drop(coordinator);
 
         let event_handler_started = std::time::Instant::now();
-        await_background_task("iroh event handler", event_handler_task).await;
+        abort_background_task("iroh event handler", event_handler_task).await;
         tracing::warn!(
             elapsed_ms = event_handler_started.elapsed().as_millis(),
             "P2P shutdown: event handler stopped"
@@ -221,25 +235,6 @@ async fn abort_background_task(task_name: &'static str, task: tokio::task::JoinH
     }
 }
 
-#[cfg(feature = "p2p")]
-async fn await_background_task(task_name: &'static str, mut task: tokio::task::JoinHandle<()>) {
-    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) if error.is_cancelled() => {}
-        Ok(Err(error)) => {
-            tracing::debug!(task = task_name, %error, "P2P background task failed during shutdown");
-        }
-        Err(_) => {
-            tracing::debug!(
-                task = task_name,
-                "P2P background task did not stop after graceful shutdown; aborting"
-            );
-            task.abort();
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
-        }
-    }
-}
-
 impl EmbeddedNode {
     /// Start building a new embedded node.
     pub fn builder() -> NodeBuilder {
@@ -248,7 +243,26 @@ impl EmbeddedNode {
 
     /// Execute a GraphQL query or mutation.
     pub async fn execute(&self, query_str: &str) -> QueryResponse {
-        self.runner.execute(QueryRequest::new(query_str)).await
+        let request = QueryRequest::new(query_str);
+        let Some(node_identity_did) = self.node_identity_did.as_deref() else {
+            return self.runner.execute(request).await;
+        };
+
+        let signing_config = defra_core::signing::resolve_signing_config_with_flag(
+            None,
+            Some(node_identity_did),
+            true,
+        );
+        let Some(signing_config) = signing_config else {
+            return self.runner.execute(request).await;
+        };
+
+        execute_with_signing_context(self.runner.clone(), request, signing_config).await
+    }
+
+    /// DID used as the embedded node identity for signing, when configured.
+    pub fn node_identity_did(&self) -> Option<&str> {
+        self.node_identity_did.as_deref()
     }
 
     /// Add a schema from a GraphQL SDL type definition.
@@ -371,10 +385,96 @@ impl EmbeddedNode {
 
     /// Gracefully stop background services owned by this embedded node.
     pub async fn shutdown(&self) {
+        #[cfg(feature = "http")]
+        if let Some(task) = self.txn_cleanup_task.lock().await.take() {
+            task.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+        }
+
         #[cfg(feature = "p2p")]
         if let Some(lifecycle) = &self.p2p_lifecycle {
             lifecycle.shutdown().await;
         }
+    }
+}
+
+async fn execute_with_signing_context(
+    executor: Arc<dyn QueryExecutor>,
+    request: QueryRequest,
+    signing_config: SigningConfig,
+) -> QueryResponse {
+    let handle = tokio::runtime::Handle::current();
+    let batch_session_key = Some(signing_config.public_key_hex.clone());
+
+    match tokio::task::spawn_blocking(move || {
+        defra_core::signing::set_signing_config(Some(signing_config));
+        defra_core::batch_signing::set_batch_session_key(batch_session_key);
+        handle.block_on(async { executor.execute(request).await })
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(join_error) => {
+            QueryResponse::error(format!("query execution task failed: {join_error}"))
+        }
+    }
+}
+
+fn resolve_registered_node_identity(did: &str) -> anyhow::Result<SigningConfig> {
+    let config = defra_core::signing::get_identity(did).ok_or_else(|| {
+        anyhow::anyhow!("node identity DID {did} is not registered in the DefraDB signing registry")
+    })?;
+    if !config.has_local_private_key() && !config.has_remote_signer() {
+        anyhow::bail!(
+            "node identity DID {did} is registered without local key bytes or a remote signer"
+        );
+    }
+    Ok(config)
+}
+
+fn local_raw_identity_from_registered_config(
+    did: &str,
+    config: &SigningConfig,
+) -> anyhow::Result<Option<RawIdentity>> {
+    if !config.has_local_private_key() {
+        return Ok(None);
+    }
+
+    let key_type = identity_key_type_from_signing_key_type(config.key_type)?;
+    let identity = RawIdentity::from_identity_key_type(key_type, &config.private_key_bytes)
+        .map_err(|error| {
+            anyhow::anyhow!("failed to load registered node identity {did}: {error}")
+        })?;
+    let derived_did = identity
+        .did()
+        .map_err(|error| anyhow::anyhow!("failed to derive registered node identity DID: {error}"))?
+        .to_string();
+    if derived_did != did {
+        anyhow::bail!(
+            "registered node identity DID mismatch: expected {did}, derived {derived_did}"
+        );
+    }
+    Ok(Some(identity))
+}
+
+fn identity_key_type_from_signing_key_type(
+    key_type: defra_core::signing::SigningKeyType,
+) -> anyhow::Result<IdentityKeyType> {
+    match key_type {
+        defra_core::signing::SigningKeyType::Ed25519 => Ok(IdentityKeyType::Ed25519),
+        defra_core::signing::SigningKeyType::Secp256k1 => Ok(IdentityKeyType::Secp256k1),
+        defra_core::signing::SigningKeyType::Secp256r1 => Ok(IdentityKeyType::Secp256r1),
+        unsupported => anyhow::bail!("unsupported registered node identity key type {unsupported}"),
+    }
+}
+
+fn timeout_secs(timeout: Duration) -> u64 {
+    if timeout.is_zero() {
+        0
+    } else {
+        timeout
+            .as_secs()
+            .saturating_add(u64::from(timeout.subsec_nanos() > 0))
     }
 }
 
@@ -402,8 +502,25 @@ pub struct NodeBuilder {
     embedding_model: Option<String>,
     embedding_api_key: Option<String>,
     document_acp: DocumentAcpConfig,
+    node_identity_did: Option<String>,
+    query_timeout: Option<Duration>,
+    query_limits: QueryLimits,
     #[cfg(feature = "http")]
     http_config: Option<HttpConfig>,
+    #[cfg(feature = "p2p")]
+    p2p_config: Option<P2PConfig>,
+}
+
+struct StoreBuildArgs {
+    acp_store: Arc<dyn acp::AcpStore>,
+    document_acp_config: DocumentAcpConfig,
+    db_options: db::DbOptions,
+    event_bus: Arc<dyn events::Bus>,
+    node_identity_did: Option<String>,
+    query_timeout: Option<Duration>,
+    query_limits: QueryLimits,
+    #[cfg(feature = "http")]
+    transaction_cleanup_config: Option<TransactionCleanupConfig>,
     #[cfg(feature = "p2p")]
     p2p_config: Option<P2PConfig>,
 }
@@ -449,6 +566,30 @@ impl NodeBuilder {
         self
     }
 
+    /// Use an identity already registered in DefraDB's process-local signing registry.
+    ///
+    /// The caller must register the signer before calling [`NodeBuilder::build`].
+    /// Registered identities may be backed by exportable private key bytes or by a
+    /// remote signer such as a host Secure Enclave adapter.
+    pub fn with_node_identity_did(mut self, did: impl Into<String>) -> Self {
+        self.node_identity_did = Some(did.into());
+        self
+    }
+
+    /// Set the query execution timeout.
+    ///
+    /// `Duration::ZERO` disables query execution timeouts.
+    pub fn with_query_timeout(mut self, timeout: Duration) -> Self {
+        self.query_timeout = Some(timeout);
+        self
+    }
+
+    /// Set GraphQL parsing and filter evaluation limits.
+    pub fn with_query_limits(mut self, limits: QueryLimits) -> Self {
+        self.query_limits = limits;
+        self
+    }
+
     /// Enable the HTTP GraphQL server.
     #[cfg(feature = "http")]
     pub fn with_http(mut self, config: HttpConfig) -> Self {
@@ -465,6 +606,12 @@ impl NodeBuilder {
 
     /// Build and start the embedded DefraDB node.
     pub async fn build(self) -> anyhow::Result<EmbeddedNode> {
+        let node_identity_did = self.node_identity_did.clone();
+        let node_identity_config = node_identity_did
+            .as_deref()
+            .map(resolve_registered_node_identity)
+            .transpose()?;
+
         // 1. Event bus
         let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::default());
 
@@ -479,14 +626,40 @@ impl NodeBuilder {
             if let Some(api_key) = self.embedding_api_key.as_ref() {
                 options = options.with_embedding_api_key(api_key.clone());
             }
+            if let (Some(did), Some(config)) =
+                (node_identity_did.as_deref(), node_identity_config.as_ref())
+            {
+                if let Some(identity) = local_raw_identity_from_registered_config(did, config)? {
+                    options = options.with_node_identity(identity);
+                }
+            }
             options
         };
 
         // 2. Extract configs before moving self
         #[cfg(feature = "http")]
         let http_config = self.http_config;
+        #[cfg(feature = "http")]
+        let transaction_cleanup_config = match http_config.as_ref() {
+            Some(config) if config.transaction_idle_timeout.is_zero() => None,
+            Some(config) => {
+                if config.transaction_cleanup_interval.is_zero() {
+                    anyhow::bail!(
+                        "transaction cleanup interval must be non-zero when idle cleanup is enabled"
+                    );
+                }
+
+                Some(TransactionCleanupConfig {
+                    max_idle_age: config.transaction_idle_timeout,
+                    sweep_interval: config.transaction_cleanup_interval,
+                })
+            }
+            None => None,
+        };
         #[cfg(feature = "p2p")]
         let p2p_config = self.p2p_config;
+        let query_timeout = self.query_timeout;
+        let query_limits = self.query_limits;
 
         // 3. Storage backend + database
         let node = if let Some(path) = self.data_path {
@@ -511,12 +684,19 @@ impl NodeBuilder {
 
                     Self::build_with_store(
                         store,
-                        acp_store,
-                        self.document_acp.clone(),
-                        db_options.clone(),
-                        event_bus,
-                        #[cfg(feature = "p2p")]
-                        p2p_config,
+                        StoreBuildArgs {
+                            acp_store,
+                            document_acp_config: self.document_acp.clone(),
+                            db_options: db_options.clone(),
+                            event_bus,
+                            node_identity_did: node_identity_did.clone(),
+                            query_timeout,
+                            query_limits,
+                            #[cfg(feature = "http")]
+                            transaction_cleanup_config,
+                            #[cfg(feature = "p2p")]
+                            p2p_config,
+                        },
                     )
                     .await?
                 }
@@ -537,12 +717,19 @@ impl NodeBuilder {
 
                     Self::build_with_store(
                         store,
-                        acp_store,
-                        self.document_acp.clone(),
-                        db_options.clone(),
-                        event_bus,
-                        #[cfg(feature = "p2p")]
-                        p2p_config,
+                        StoreBuildArgs {
+                            acp_store,
+                            document_acp_config: self.document_acp.clone(),
+                            db_options: db_options.clone(),
+                            event_bus,
+                            node_identity_did: node_identity_did.clone(),
+                            query_timeout,
+                            query_limits,
+                            #[cfg(feature = "http")]
+                            transaction_cleanup_config,
+                            #[cfg(feature = "p2p")]
+                            p2p_config,
+                        },
                     )
                     .await?
                 }
@@ -564,12 +751,19 @@ impl NodeBuilder {
 
             Self::build_with_store(
                 store,
-                acp_store,
-                self.document_acp,
-                db_options,
-                event_bus,
-                #[cfg(feature = "p2p")]
-                p2p_config,
+                StoreBuildArgs {
+                    acp_store,
+                    document_acp_config: self.document_acp,
+                    db_options,
+                    event_bus,
+                    node_identity_did: node_identity_did.clone(),
+                    query_timeout,
+                    query_limits,
+                    #[cfg(feature = "http")]
+                    transaction_cleanup_config,
+                    #[cfg(feature = "p2p")]
+                    p2p_config,
+                },
             )
             .await?
         };
@@ -579,11 +773,19 @@ impl NodeBuilder {
         if let Some(http_cfg) = http_config {
             let server_config = defra_http::ServerConfig {
                 address: http_cfg.address,
+                request_timeout: timeout_secs(http_cfg.request_timeout),
+                query_limits,
                 ..Default::default()
             };
             let server =
                 defra_http::Server::from_arc_with_config(node.runner.clone(), server_config)
                     .with_event_bus_arc(node.event_bus.clone());
+
+            let server = if let Some(did) = node_identity_did.as_ref() {
+                server.with_node_identity_did(did.clone())
+            } else {
+                server
+            };
 
             #[cfg(feature = "p2p")]
             let server = if let Some(p2p) = node.p2p_ops.as_ref() {
@@ -635,12 +837,22 @@ impl NodeBuilder {
 
     async fn build_with_store<S: storage::corekv::Store + 'static>(
         store: Arc<S>,
-        acp_store: Arc<dyn acp::AcpStore>,
-        document_acp_config: DocumentAcpConfig,
-        db_options: db::DbOptions,
-        event_bus: Arc<dyn events::Bus>,
-        #[cfg(feature = "p2p")] p2p_config: Option<P2PConfig>,
+        args: StoreBuildArgs,
     ) -> anyhow::Result<EmbeddedNode> {
+        let StoreBuildArgs {
+            acp_store,
+            document_acp_config,
+            db_options,
+            event_bus,
+            node_identity_did,
+            query_timeout,
+            query_limits,
+            #[cfg(feature = "http")]
+            transaction_cleanup_config,
+            #[cfg(feature = "p2p")]
+            p2p_config,
+        } = args;
+
         let embedding_config = db_options.embedding_config();
 
         // Open database
@@ -678,7 +890,28 @@ impl NodeBuilder {
         let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
         let provider: Arc<dyn query::CollectionProvider> =
             db::DbCollectionProvider::new_arc(database.clone());
-        let registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
+
+        #[cfg(feature = "p2p")]
+        let txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>> =
+            p2p_result.as_ref().map(|r| r.txn_broadcaster.clone());
+        #[cfg(not(feature = "p2p"))]
+        let txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>> = None;
+
+        let registry = Arc::new(match txn_broadcaster {
+            Some(b) => db::DbTransactionRegistry::with_broadcaster(database.clone(), b),
+            None => db::DbTransactionRegistry::new(database.clone()),
+        });
+
+        #[cfg(feature = "http")]
+        let txn_cleanup_task = transaction_cleanup_config.map(|cleanup| {
+            tracing::info!(
+                max_idle_age_secs = cleanup.max_idle_age.as_secs(),
+                sweep_interval_secs = cleanup.sweep_interval.as_secs(),
+                "Transaction idle cleanup worker enabled"
+            );
+            registry.start_stale_transaction_cleanup(cleanup.max_idle_age, cleanup.sweep_interval)
+        });
+
         let (document_acp, _strict_replicated_doc_access) =
             node_acp::create_document_acp(acp_store, &document_acp_config).await?;
 
@@ -695,10 +928,17 @@ impl NodeBuilder {
             query::QueryRunner::with_arc_registry_and_provider(fetcher, provider, registry)
                 .with_mutator(mutator)
                 .with_acp(document_acp)
-                .with_lens_store(database.lens_store().clone());
+                .with_lens_store(database.lens_store().clone())
+                .with_query_limits(query_limits);
+        let query_runner = if let Some(timeout) = query_timeout {
+            query_runner.with_query_timeout(timeout_secs(timeout))
+        } else {
+            query_runner
+        };
 
         let runner: Arc<dyn QueryExecutor> = Arc::new(query_runner);
-        let schema_ops: Arc<dyn SchemaOps> = Arc::new(database.clone());
+        let schema_ops: Arc<dyn SchemaOps> =
+            Arc::new(db_impls::DbSchemaOps::new(database.clone(), query_limits));
 
         #[cfg(feature = "p2p")]
         let (p2p_ops, p2p_lifecycle) = match p2p_result {
@@ -711,6 +951,9 @@ impl NodeBuilder {
             event_bus,
             schema_ops,
             embedding_config,
+            node_identity_did,
+            #[cfg(feature = "http")]
+            txn_cleanup_task: tokio::sync::Mutex::new(txn_cleanup_task),
             #[cfg(feature = "p2p")]
             p2p_ops,
             #[cfg(feature = "p2p")]
@@ -832,16 +1075,20 @@ impl NodeBuilder {
         let broadcast_mutator_for_acp = broadcast_mutator.clone();
         let mutator: Arc<dyn query::DocMutator> = broadcast_mutator;
 
+        let restored_doc_ids =
+            restore_iroh_p2p_state(store.clone(), &transport, &coordinator).await;
+
         let peer_id = transport.local_peer_id().to_string();
         tracing::info!(peer_id = %peer_id, "P2P started (IROH/QUIC)");
-        let ops: Arc<dyn defra_http::P2POperations> =
-            Arc::new(defra_p2p_adapter::IrohP2PAdapter::with_full_context(
-                transport.clone(),
-                coordinator.clone(),
-                doc_pusher,
-                event_bus,
-                version_syncer,
-            ));
+        let adapter = defra_p2p_adapter::IrohP2PAdapter::with_full_context(
+            transport.clone(),
+            coordinator.clone(),
+            doc_pusher,
+            event_bus,
+            version_syncer,
+        );
+        adapter.set_initial_tracked_documents(restored_doc_ids);
+        let ops: Arc<dyn defra_http::P2POperations> = Arc::new(adapter);
 
         Ok(P2PSetupResult {
             ops,
@@ -861,6 +1108,7 @@ impl NodeBuilder {
                 doc_pusher_for_acp.set_document_acp(acp.clone());
                 broadcast_mutator_for_acp.set_document_acp(acp);
             })),
+            txn_broadcaster: replication.txn_broadcaster,
         })
     }
 
@@ -905,6 +1153,73 @@ impl NodeBuilder {
 }
 
 #[cfg(feature = "p2p")]
+async fn restore_iroh_p2p_state<S, B>(
+    store: Arc<S>,
+    transport: &p2p::iroh::IrohTransport,
+    coordinator: &Arc<p2p::sync::IrohSyncCoordinator<B>>,
+) -> std::collections::HashSet<String>
+where
+    S: storage::corekv::Store + 'static,
+    B: blockstore::Blockstore + 'static,
+{
+    let peerstore = storage::stores::Peerstore::new(store);
+
+    match peerstore.list_replicators().await {
+        Ok(entries) => {
+            for (peer_id_str, data) in entries {
+                let replicator = match p2p::ReplicatorInfo::from_bytes(&data) {
+                    Ok(replicator) => replicator,
+                    Err(error) => {
+                        tracing::warn!(
+                            peer_id = %peer_id_str,
+                            error = %error,
+                            "failed to decode persisted P2P replicator"
+                        );
+                        continue;
+                    }
+                };
+                let peer_id = p2p::transport::PeerId::new(replicator.peer_id_str().to_string());
+                if let Err(error) = coordinator
+                    .create_replicator(&peer_id, replicator.collections.clone(), false)
+                    .await
+                {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %error,
+                        "failed to restore persisted P2P replicator"
+                    );
+                }
+            }
+        }
+        Err(error) => tracing::warn!(error = %error, "failed to load persisted P2P replicators"),
+    }
+
+    let mut restored_doc_ids = std::collections::HashSet::new();
+    match peerstore.load_documents().await {
+        Ok(doc_ids) => {
+            for doc_id in doc_ids {
+                if let Err(error) = transport
+                    .subscribe(p2p::topics::DefraTopic::document(&doc_id))
+                    .await
+                {
+                    tracing::warn!(
+                        doc_id = %doc_id,
+                        error = %error,
+                        "failed to restore P2P document subscription"
+                    );
+                }
+                restored_doc_ids.insert(doc_id);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to load persisted P2P document subscriptions");
+        }
+    }
+
+    restored_doc_ids
+}
+
+#[cfg(feature = "p2p")]
 fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
     store: Arc<S>,
     mut failure_rx: tokio::sync::mpsc::Receiver<p2p::sync::PushFailure>,
@@ -938,6 +1253,16 @@ fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                 .await
             {
                 tracing::warn!(error = %error, "failed to record push failure");
+                continue;
+            }
+            if let Err(error) = defra_p2p_adapter::set_persisted_replicator_status(
+                &peerstore,
+                &failure.peer_id.to_string(),
+                p2p::ReplicatorStatus::Inactive,
+            )
+            .await
+            {
+                tracing::warn!(error = %error, "failed to mark replicator inactive");
             }
         }
     })
@@ -987,6 +1312,12 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                 };
                 if docs.is_empty() {
                     let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                    let _ = defra_p2p_adapter::set_persisted_replicator_status(
+                        &peerstore,
+                        &peer_id_str,
+                        p2p::ReplicatorStatus::Active,
+                    )
+                    .await;
                     continue;
                 }
 
@@ -1019,7 +1350,19 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
 
                 if all_succeeded {
                     let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                    let _ = defra_p2p_adapter::set_persisted_replicator_status(
+                        &peerstore,
+                        &peer_id_str,
+                        p2p::ReplicatorStatus::Active,
+                    )
+                    .await;
                 } else {
+                    let _ = defra_p2p_adapter::set_persisted_replicator_status(
+                        &peerstore,
+                        &peer_id_str,
+                        p2p::ReplicatorStatus::Inactive,
+                    )
+                    .await;
                     retry_info.bump();
                     if let Ok(bytes) = retry_info.to_bytes() {
                         let _ = peerstore.update_retry_info(&peer_id_str, &bytes).await;
@@ -1037,207 +1380,118 @@ struct P2PSetupResult {
     lifecycle: Option<P2PLifecycle>,
     mutator: Arc<dyn query::DocMutator>,
     wire_document_acp: Option<WireDocumentAcpCallback>,
+    txn_broadcaster: Arc<dyn db::event_emission::TxnBroadcaster>,
 }
 
-#[cfg(all(test, feature = "http"))]
+#[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use defra_core::signing::{RemoteSigner, SigningConfig, SigningKeyType};
+
+    use super::EmbeddedNode;
+
+    #[cfg(feature = "http")]
     use axum::{routing::get, Router};
 
+    #[cfg(feature = "http")]
     use super::HttpConfig;
 
+    #[cfg(feature = "http")]
     #[test]
     fn http_config_accepts_extra_routes() {
+        use std::time::Duration;
+
         let config = HttpConfig::new(9182)
+            .with_request_timeout(Duration::from_secs(120))
+            .with_transaction_idle_timeout(Duration::from_secs(900))
+            .with_transaction_cleanup_interval(Duration::from_secs(30))
             .with_extra_routes(Router::new().route("/healthz", get(|| async { "ok" })));
 
         assert_eq!(config.address.port(), 9182);
+        assert_eq!(config.request_timeout, Duration::from_secs(120));
+        assert_eq!(config.transaction_idle_timeout, Duration::from_secs(900));
+        assert_eq!(config.transaction_cleanup_interval, Duration::from_secs(30));
         assert!(config.extra_routes.is_some());
+    }
+
+    #[test]
+    fn node_builder_accepts_query_timeout() {
+        let timeout = std::time::Duration::from_secs(45);
+        let builder = EmbeddedNode::builder().with_query_timeout(timeout);
+
+        assert_eq!(builder.query_timeout, Some(timeout));
+    }
+
+    #[test]
+    fn timeout_secs_rounds_non_zero_duration_up() {
+        assert_eq!(super::timeout_secs(std::time::Duration::ZERO), 0);
+        assert_eq!(super::timeout_secs(std::time::Duration::from_millis(1)), 1);
+        assert_eq!(super::timeout_secs(std::time::Duration::new(2, 1)), 3);
+        assert_eq!(super::timeout_secs(std::time::Duration::from_secs(5)), 5);
+    }
+
+    #[tokio::test]
+    async fn node_identity_did_requires_registered_signer() {
+        defra_core::signing::clear_identity_store();
+
+        let error = match EmbeddedNode::builder()
+            .with_node_identity_did("did:key:zMissing")
+            .build()
+            .await
+        {
+            Ok(_) => panic!("unregistered node identity must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("is not registered in the DefraDB signing registry"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_identity_did_accepts_registered_remote_signer() {
+        defra_core::signing::clear_identity_store();
+
+        let did = "did:key:zRegisteredRemote";
+        defra_core::signing::store_identity(
+            did,
+            SigningConfig {
+                key_type: SigningKeyType::Secp256r1,
+                private_key_bytes: Vec::new(),
+                public_key_bytes: vec![2, 3, 4],
+                public_key_hex: "020304".to_string(),
+                remote_signer: Some(Arc::new(TestRemoteSigner)),
+                signing_authorization: None,
+            },
+        );
+
+        let node = EmbeddedNode::builder()
+            .with_node_identity_did(did)
+            .build()
+            .await
+            .expect("registered remote signer should build");
+
+        assert_eq!(node.node_identity_did(), Some(did));
+        node.shutdown().await;
+        defra_core::signing::clear_identity_store();
+    }
+
+    struct TestRemoteSigner;
+
+    impl RemoteSigner for TestRemoteSigner {
+        fn sign_sync(
+            &self,
+            _data: &[u8],
+            _authorization: Option<&defra_core::signing::SigningAuthorization>,
+        ) -> Result<Vec<u8>, String> {
+            Ok(vec![1, 2, 3])
+        }
     }
 }
 
 #[cfg(all(test, feature = "p2p"))]
-mod p2p_tests {
-    use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::Once;
-    use std::time::{Duration, Instant};
-
-    use serde_json::Value as JsonValue;
-
-    use super::{EmbeddedNode, P2PConfig};
-
-    fn init_tracing() {
-        static INIT: Once = Once::new();
-        INIT.call_once(|| {
-            let filter = tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into())
-                .add_directive(
-                    "iroh_quinn_proto::connection=error"
-                        .parse()
-                        .expect("valid tracing directive"),
-                )
-                .add_directive(
-                    "noq_proto::connection=error"
-                        .parse()
-                        .expect("valid tracing directive"),
-                );
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .with_test_writer()
-                .try_init();
-        });
-    }
-
-    fn test_p2p_config() -> P2PConfig {
-        P2PConfig {
-            port: 0,
-            bind_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-            relay_mode: p2p::iroh::IrohRelayModeConfig::Disabled,
-            discovery: p2p::iroh::IrohDiscoveryConfig::Disabled,
-            secret_key_path: None,
-            load_persisted_collections: false,
-            max_concurrent_dag_fetches: p2p::sync::DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
-            max_concurrent_push_tasks: p2p::sync::DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
-            rate_limit_burst: p2p::sync::DEFAULT_RATE_LIMIT_BURST,
-            rate_limit_rate: p2p::sync::DEFAULT_RATE_LIMIT_RATE,
-        }
-    }
-
-    async fn wait_for_listen_addr(node: &EmbeddedNode) -> String {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let addrs = node
-                .p2p()
-                .expect("P2P should be enabled")
-                .listen_addresses()
-                .await;
-            if let Some(addr) = addrs.first() {
-                return addr.clone();
-            }
-            assert!(
-                Instant::now() < deadline,
-                "node never exposed a P2P listen address"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
-
-    async fn wait_for_connected_peer(node: &EmbeddedNode) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let peers = node
-                .p2p()
-                .expect("P2P should be enabled")
-                .connected_peers()
-                .await
-                .expect("connected_peers should succeed");
-            if !peers.is_empty() {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "node never reported a connected peer"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
-
-    fn collection_len(data: &JsonValue, collection: &str) -> usize {
-        data.get(collection)
-            .and_then(|v| v.as_array())
-            .map(|docs| docs.len())
-            .unwrap_or(0)
-    }
-
-    async fn wait_for_collection_len(node: &EmbeddedNode, collection: &str, expected: usize) {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            let response = node
-                .execute(&format!("query {{ {collection} {{ _docID name age }} }}"))
-                .await;
-            assert!(
-                response.errors.is_empty(),
-                "query returned errors: {:?}",
-                response.errors
-            );
-
-            let len = response
-                .data
-                .as_ref()
-                .map(|data| collection_len(data, collection))
-                .unwrap_or(0);
-            if len >= expected {
-                return;
-            }
-
-            assert!(
-                Instant::now() < deadline,
-                "collection {collection} never reached {expected} docs; last response: {:?}",
-                response.data
-            );
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn live_replicator_pushes_post_config_writes() {
-        init_tracing();
-
-        let node0 = EmbeddedNode::builder()
-            .with_p2p(test_p2p_config())
-            .build()
-            .await
-            .expect("build node0");
-        let node1 = EmbeddedNode::builder()
-            .with_p2p(test_p2p_config())
-            .build()
-            .await
-            .expect("build node1");
-
-        node0
-            .add_schema("type User { name: String age: Int }")
-            .await
-            .expect("schema on node0");
-        node1
-            .add_schema("type User { name: String age: Int }")
-            .await
-            .expect("schema on node1");
-
-        let addr1 = wait_for_listen_addr(&node1).await;
-
-        let p2p0 = node0.p2p().expect("node0 p2p");
-        let p2p1 = node1.p2p().expect("node1 p2p");
-
-        p2p0.connect_peer(&addr1)
-            .await
-            .expect("connect node0 -> node1");
-        wait_for_connected_peer(&node0).await;
-        wait_for_connected_peer(&node1).await;
-
-        p2p0.subscribe_collection("User")
-            .await
-            .expect("subscribe node0 User");
-        p2p1.subscribe_collection("User")
-            .await
-            .expect("subscribe node1 User");
-
-        p2p0.set_replicator(&addr1, vec!["User".to_string()])
-            .await
-            .expect("set replicator node0 -> node1");
-
-        let response = node0
-            .execute(
-                r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID name age } }"#,
-            )
-            .await;
-        assert!(
-            response.errors.is_empty(),
-            "mutation returned errors: {:?}",
-            response.errors
-        );
-
-        wait_for_collection_len(&node1, "User", 1).await;
-
-        node0.shutdown().await;
-        node1.shutdown().await;
-    }
-}
+mod p2p_tests;

@@ -42,6 +42,22 @@ impl<S: Store> P2PHost<S> {
         }
     }
 
+    pub(super) fn handle_subscribe_raw(
+        &mut self,
+        topic: String,
+        response: tokio::sync::oneshot::Sender<Result<bool>>,
+    ) {
+        let ident_topic = libp2p::gossipsub::IdentTopic::new(&topic);
+        let result = self
+            .swarm
+            .behaviour_mut()
+            .subscribe(&ident_topic)
+            .map_err(|e| Error::GossipSubSubscription(e.to_string()));
+        if response.send(result).is_err() {
+            debug!(topic = %topic, "SubscribeRaw command response dropped - caller cancelled");
+        }
+    }
+
     pub(super) fn handle_publish(
         &mut self,
         topic: DefraTopic,
@@ -49,7 +65,8 @@ impl<S: Store> P2PHost<S> {
         response: tokio::sync::oneshot::Sender<Result<libp2p::gossipsub::MessageId>>,
     ) {
         let ident_topic = topic.to_ident_topic();
-        let result = serde_cbor::to_vec(&message)
+        let result = message
+            .encode_gossip_payload()
             .map_err(|e| Error::CborSerialization(e.to_string()))
             .and_then(|data| {
                 self.swarm
@@ -60,6 +77,35 @@ impl<S: Store> P2PHost<S> {
         if response.send(result).is_err() {
             debug!(topic = ?topic, "Publish command response dropped - caller cancelled");
         }
+    }
+
+    pub(super) fn handle_publish_raw(
+        &mut self,
+        topic: String,
+        data: Vec<u8>,
+        response: tokio::sync::oneshot::Sender<Result<libp2p::gossipsub::MessageId>>,
+    ) {
+        let ident_topic = libp2p::gossipsub::IdentTopic::new(&topic);
+        let result = self
+            .swarm
+            .behaviour_mut()
+            .publish(ident_topic, data)
+            .map_err(|e| Error::GossipSubPublish(e.to_string()));
+        if response.send(result).is_err() {
+            debug!(topic = %topic, "PublishRaw command response dropped - caller cancelled");
+        }
+    }
+
+    pub(super) fn handle_register_pubsub_rpc_topic(
+        &mut self,
+        topic: String,
+        response: tokio::sync::oneshot::Sender<()>,
+    ) {
+        self.pubsub_rpc_topics.insert(topic);
+        // Acknowledge the registration. The caller uses the oneshot to
+        // know the command has been processed; no result value is needed
+        // because insertion is infallible.
+        let _ = response.send(());
     }
 
     pub(super) fn handle_subscribed_topics(

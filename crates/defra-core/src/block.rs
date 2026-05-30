@@ -55,7 +55,7 @@ pub struct Block {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heads: Option<Vec<Cid>>,
 
-    /// Named links to other blocks (sorted lexicographically by CID)
+    /// Named links to other blocks (sorted lexicographically by CID string)
     ///
     /// Used for field-level links in composite blocks. Empty for field-level blocks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,9 +78,9 @@ impl Block {
     /// - Sorts links lexicographically by CID string
     /// - Converts empty slices to `None` for space efficiency
     pub fn new(delta: CrdtDelta, heads: Vec<Cid>, links: Vec<DAGLink>) -> Self {
-        // Sort and normalize heads
+        // Sort and normalize heads. Go sorts by CID string, not raw CID bytes.
         let mut sorted_heads = heads;
-        sorted_heads.sort_unstable();
+        sorted_heads.sort_by_cached_key(|cid| cid.to_string());
         let heads = if sorted_heads.is_empty() {
             None
         } else {
@@ -224,9 +224,12 @@ impl PartialOrd for DAGLink {
 
 impl Ord for DAGLink {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // DefraDB block links are CIDv1 DAG-CBOR SHA2-256 values, so native CID ordering
-        // matches the prior multibase string ordering without allocating.
-        self.link.cmp(&other.link)
+        // Go sorts DAG links by CID string. Raw CID byte ordering is not equivalent
+        // for all CID values and changes block CIDs for those schemas.
+        self.link
+            .to_string()
+            .cmp(&other.link.to_string())
+            .then_with(|| self.name.cmp(&other.name))
     }
 }
 

@@ -24,10 +24,10 @@ where
     Ok(opt.filter(|s| !s.is_empty()))
 }
 use query::subscription::{
-    extract_doc_id_from_query, is_commits_subscription, response_has_data,
-    subscription_to_commits_query_with_cid, subscription_to_query_with_doc_id,
+    is_subscription_operation_with_limits, response_has_data, subscription_accepts_doc_id,
+    subscription_doc_ids_with_limits, subscription_to_scoped_query,
 };
-use query::{parse_request, ParsedOperation};
+use query::{parse_request_with_limits, ParsedOperation, QueryLimits};
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
@@ -51,7 +51,7 @@ fn check_encrypted_fields(state: &AppState, query: &str) -> Result<(), HttpError
     if state.p2p.is_some() {
         return Ok(());
     }
-    let parsed = match parse_request(query) {
+    let parsed = match parse_request_with_limits(query, None, None, state.query_limits) {
         Ok(p) => p,
         Err(_) => return Ok(()),
     };
@@ -102,8 +102,8 @@ fn wants_sse(headers: &HeaderMap) -> bool {
 /// - Other mutations → `DocumentUpdate`
 /// - Subscriptions → `DocumentRead`
 /// - Introspection → `DocumentRead`
-fn graphql_required_permission(query: &str) -> NodePermission {
-    match parse_request(query) {
+fn graphql_required_permission(query: &str, limits: QueryLimits) -> NodePermission {
+    match parse_request_with_limits(query, None, None, limits) {
         Ok(ParsedOperation::Mutation { mutations, .. }) => {
             if mutations
                 .iter()
@@ -141,7 +141,7 @@ pub async fn graphql(
     check_encrypted_fields(&state, &request.query)?;
 
     // Enforce NAC permission before executing the query
-    let permission = graphql_required_permission(&request.query);
+    let permission = graphql_required_permission(&request.query, state.query_limits);
     require_permission(&state, &identity, permission).await?;
 
     // Wire identity from Authorization header into the request
@@ -256,16 +256,18 @@ pub async fn graphql_transactional(
     check_encrypted_fields(&state, &request.query)?;
 
     // Enforce NAC permission before executing the query
-    let permission = graphql_required_permission(&request.query);
+    let permission = graphql_required_permission(&request.query, state.query_limits);
     require_permission(&state, &identity, permission).await?;
 
     // Check if this is a subscription query.
     // Fast path: skip the full GraphQL parse for mutations/queries (the common case).
     // Only do the full parse when the query might be a subscription.
     if might_be_subscription(&request.query)
-        && matches!(
-            parse_request(&request.query),
-            Ok(ParsedOperation::Subscription { .. })
+        && is_subscription_operation_with_limits(
+            &request.query,
+            request.variables.as_ref(),
+            request.operation_name.as_deref(),
+            state.query_limits,
         )
     {
         if !wants_sse(&headers) {
@@ -335,14 +337,20 @@ async fn graphql_sse(
 
     let mut subscription = event_bus.subscribe(&[events::EventName::Update]);
     let query_str = request.query;
+    let operation_name = request.operation_name;
+    let variables = request.variables;
     let did = identity.did().cloned();
 
     // Resolve signing config and DAC bypass once at subscription setup time
     let signing_config = crate::query_context::resolve_signing_config(&state, &identity);
     let dac_bypass = crate::query_context::resolve_dac_bypass(&state, &identity).await;
 
-    let subscription_doc_id = extract_doc_id_from_query(&query_str);
-    let is_commits = is_commits_subscription(&query_str);
+    let subscription_doc_ids_filter = subscription_doc_ids_with_limits(
+        &query_str,
+        variables.as_ref(),
+        operation_name.as_deref(),
+        state.query_limits,
+    );
 
     let executor = state.executor.clone();
 
@@ -351,24 +359,36 @@ async fn graphql_sse(
             if let Some(update) = message.as_update() {
                 let event_doc_id = update.doc_id.clone();
 
-                // Check subscription docID filter
-                if let Some(ref sub_doc) = subscription_doc_id {
-                    if event_doc_id != *sub_doc {
-                        continue;
-                    }
+                if !subscription_accepts_doc_id(
+                    subscription_doc_ids_filter.as_deref(),
+                    &event_doc_id,
+                ) {
+                    continue;
                 }
 
-                // Convert subscription to a scoped query
-                let query_text = if is_commits {
-                    let cid_str = update.cid.to_string();
-                    subscription_to_commits_query_with_cid(&query_str, &cid_str)
-                } else {
-                    subscription_to_query_with_doc_id(&query_str, &event_doc_id)
+                let cid_str = update.cid.to_string();
+                let query_text = match subscription_to_scoped_query(
+                    &query_str,
+                    &event_doc_id,
+                    &cid_str,
+                    operation_name.as_deref(),
+                ) {
+                    Ok(query) => query,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "failed to scope subscription query");
+                        continue;
+                    }
                 };
 
                 let mut req = QueryRequest::new(query_text);
                 if did.is_some() {
                     req = req.with_identity(did.clone());
+                }
+                if let Some(ref op_name) = operation_name {
+                    req = req.with_operation_name(op_name.clone());
+                }
+                if let Some(ref vars) = variables {
+                    req = req.with_variables(vars.clone());
                 }
                 let response = execute_with_resolved_context(
                     executor.clone(),
@@ -404,4 +424,55 @@ pub async fn graphql_ws_handler() -> impl IntoResponse {
         StatusCode::NOT_IMPLEMENTED,
         "GraphQL subscriptions over WebSocket are not yet implemented",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use query::executor::QueryExecutor;
+
+    use super::*;
+    use crate::{router::AppStateBuilder, MockQueryExecutor};
+
+    fn state_with_limits(query_limits: QueryLimits) -> AppState {
+        AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
+            .with_query_limits(query_limits)
+            .build()
+    }
+
+    fn deep_encrypted_query(depth: usize) -> String {
+        let mut query = "query { encrypted_User ".to_string();
+        for level in 0..depth {
+            query.push_str(&format!("{{ f{level} "));
+        }
+        query.push_str("{ leaf }");
+        for _ in 0..depth {
+            query.push('}');
+        }
+        query.push_str(" }");
+        query
+    }
+
+    #[test]
+    fn encrypted_field_preparse_uses_configured_query_depth_limit() {
+        let query = deep_encrypted_query(30);
+        assert!(query::parse_request(&query).is_err());
+
+        let default_state = state_with_limits(QueryLimits::default());
+        assert!(check_encrypted_fields(&default_state, &query).is_ok());
+
+        let raised_state = state_with_limits(QueryLimits {
+            max_query_depth: 100,
+            ..QueryLimits::default()
+        });
+        let err = check_encrypted_fields(&raised_state, &query).unwrap_err();
+
+        match err {
+            HttpError::BadRequest(message) => {
+                assert!(message.contains("Cannot query field \"encrypted_User\""));
+            }
+            other => panic!("expected encrypted field validation error, got {other:?}"),
+        }
+    }
 }

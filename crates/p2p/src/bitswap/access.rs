@@ -3,33 +3,27 @@
 //! This module provides access control primitives:
 //! - `AccessMode`: Controls whether access control is enabled (Open vs Controlled)
 //!
-//! # Security Model (current state)
+//! # Security Model
 //!
-//! Access control today is enforced **only on the ingress path** via the
-//! SyncCoordinator: incoming PushLog and GossipSub messages are checked against
-//! the `ReplicatorRegistry` before blocks are stored. This means unauthorized
-//! peers cannot push blocks *into* this node.
+//! Access control is enforced on **both the ingress and egress paths**:
 //!
-//! **The egress path via Bitswap is not filtered.** Once a block is in the
-//! blockstore — however it got there — it is served to any connected peer that
-//! requests it via Bitswap. The `BitswapStoreAdapter::get(&self, cid: &Cid)`
-//! signature (`crates/p2p/src/bitswap/store.rs`) has no peer context, so a
-//! per-peer access check cannot be expressed at this layer today.
+//! - **Ingress:** `SyncCoordinator` checks incoming PushLog and GossipSub
+//!   messages against the `ReplicatorRegistry` before storing blocks.
+//!   Unauthorized peers cannot push blocks into this node.
+//! - **Egress:** A per-peer Bitswap filter
+//!   (`crate::bitswap::make_peer_block_access_filter`) is installed at
+//!   behaviour-construction time (`crates/p2p/src/behaviour.rs`). On every
+//!   incoming Bitswap `WANT`, the filter reads the block, decodes its
+//!   `collectionVersionID`, and consults the same `ReplicatorRegistry`.
+//!   Peers that are not registered replicators for the block's collection
+//!   are denied (signature and definition blocks are exempt to allow
+//!   signature verification and schema bootstrap).
 //!
-//! **This diverges from Go DefraDB.** Go wires Bitswap with
-//! `bitswap.WithPeerBlockRequestFilter(p.hasAccess)` (`go-p2p/peer.go:146`),
-//! so every incoming block request is filtered per (peer, CID) against the
-//! replicator registry. Go denies block fetches from peers that are not
-//! authorized for the collection that owns the CID.
+//! This matches Go DefraDB's `bitswap.WithPeerBlockRequestFilter(hasAccess)`
+//! wiring (`go-p2p/peer.go:146`), closing issue #830.
 //!
-//! In practice this means that in a Rust node running `AccessMode::Controlled`,
-//! any peer that can open a libp2p connection can fetch any stored block,
-//! regardless of their authorization for the owning collection. ACP-encrypted
-//! collections still protect plaintext confidentiality, but ciphertext and
-//! block-existence signals leak to all connected peers.
-//!
-//! See issue #830 for the tracking fix (adding a per-peer request filter to
-//! Rust's Bitswap integration to restore parity with Go).
+//! Note: in `AccessMode::Open` the filter allows all requests, preserving the
+//! previous behaviour for nodes that haven't enabled ACP.
 
 /// Access control mode for P2P synchronization.
 ///

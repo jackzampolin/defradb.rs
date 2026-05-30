@@ -1,10 +1,12 @@
 //! P2P initialization methods for Node
 
+use std::time::Duration;
+
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 use super::node::Node;
-use crate::config::Config;
+use crate::config::{AcpDocumentType, Config};
 use crate::error::{Error, Result};
 
 impl Node {
@@ -97,6 +99,11 @@ impl Node {
         std::sync::Arc<p2p::ReplicatorRegistry>,
         JoinHandle<()>,
     )> {
+        let access_mode = if config.acp.document_type != AcpDocumentType::None {
+            p2p::bitswap::AccessMode::Controlled
+        } else {
+            p2p::bitswap::AccessMode::Open
+        };
         let p2p_config = p2p::P2PHostConfig {
             enable_pubsub,
             enable_relay: config.net.relay_enabled,
@@ -104,9 +111,13 @@ impl Node {
             max_car_size: config.net.max_car_size,
             stream_timeout: config.net.stream_timeout,
             max_p2p_tasks: config.net.max_p2p_tasks,
-            max_connections_in: config.net.max_connections_in,
-            max_connections_out: config.net.max_connections_out,
+            connection_manager_low_water: config.net.connection_manager_low_water,
+            connection_manager_high_water: config.net.connection_manager_high_water,
+            connection_manager_grace_period: Duration::from_millis(
+                config.net.connection_manager_grace_period_ms,
+            ),
             max_connections_per_peer: config.net.max_connections_per_peer,
+            access_mode,
         };
         let (host, handle, events, replicators) = match keypair {
             Some(kp) => p2p::P2PHost::with_keypair_and_config(kp, bitswap_store, p2p_config)

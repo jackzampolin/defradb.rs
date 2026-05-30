@@ -71,8 +71,10 @@ chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3.17"
 identity = { path = "../../crates/identity" }
 crypto = { path = "../../crates/crypto" }
+p2p = { path = "../../crates/p2p", features = ["iroh-transport"] }
 base64 = "0.22"
 hex = "0.4"
+cid = "0.10"
 serial_test = "3"
 
 [lints]

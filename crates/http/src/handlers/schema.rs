@@ -5,9 +5,10 @@
 //!
 //! All endpoints enforce NAC permissions when NAC is enabled.
 
-use axum::{extract::State, Json};
+use axum::{extract::State, http::HeaderMap, Json};
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
+use crate::handlers::txn_header::txn_id_from_headers;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
@@ -24,16 +25,27 @@ use schema::CollectionVersion;
 pub async fn add_schema(
     State(state): State<AppState>,
     identity: ExtractIdentity,
+    headers: HeaderMap,
     body: String,
 ) -> Result<Json<Vec<CollectionVersion>>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
+
+    if let Some(txn_id) = txn_id_from_headers(&headers)? {
+        let txn_ops = state.require_txn_ops()?;
+        let collections = txn_ops
+            .add_schema_in_txn(txn_id, &body)
+            .await
+            .map_err(http_error_from_backend_message)?;
+
+        return Ok(Json(collections));
+    }
 
     let schema_ops = state.require_schema()?;
 
     let collections = schema_ops
         .add_schema(&body)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(collections))
 }

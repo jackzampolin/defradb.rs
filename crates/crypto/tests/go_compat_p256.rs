@@ -124,6 +124,18 @@ fn test_rust_verifier_accepts_go_high_s_signature() {
 }
 
 #[test]
+fn test_public_key_equality_uses_raw_key_bytes() {
+    let private_key = Secp256r1PrivateKey::from_bytes(&PRIVATE_KEY).expect("valid private key");
+    let public_key = private_key.to_public_key();
+    let same_key =
+        Secp256r1PublicKey::from_bytes(&PUBLIC_KEY_COMPRESSED).expect("valid public key");
+    let other_private = Secp256r1PrivateKey::from_bytes(&[0x02; 32]).expect("valid private key");
+
+    assert_eq!(public_key, same_key);
+    assert_ne!(public_key, other_private.to_public_key());
+}
+
+#[test]
 fn test_go_sig_has_high_s_value() {
     // Document that the Go test vector actually has high-S (S > N/2).
     let s = extract_s_from_der(GO_SIG_HIGH_S);

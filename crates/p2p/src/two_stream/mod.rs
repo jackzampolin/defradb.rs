@@ -30,6 +30,14 @@ mod tests {
             TwoStreamHandler::response_protocol().as_ref(),
             "/defradb/rep_resp/0.0.1"
         );
+        assert_eq!(
+            TwoStreamHandler::se_query_request_protocol().as_ref(),
+            "/defradb/se_query_req/0.0.1"
+        );
+        assert_eq!(
+            TwoStreamHandler::se_query_response_protocol().as_ref(),
+            "/defradb/se_query_resp/0.0.1"
+        );
     }
 
     #[test]
@@ -44,7 +52,7 @@ mod tests {
 
         let reply = TwoStreamHandler::success_reply(&request);
         // PushLogReply has flat fields (no metadata struct) for CBOR wire compatibility
-        assert_eq!(reply.message_id, request.metadata.message_id);
+        assert_eq!(reply.message_id, request.message_id);
         assert!(reply.err_message.is_none());
     }
 
@@ -60,7 +68,7 @@ mod tests {
 
         let reply = TwoStreamHandler::error_reply(&request, "test error");
         // PushLogReply has flat fields (no metadata struct) for CBOR wire compatibility
-        assert_eq!(reply.message_id, request.metadata.message_id);
+        assert_eq!(reply.message_id, request.message_id);
         assert_eq!(reply.err_message, Some("test error".to_string()));
     }
 }

@@ -11,7 +11,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
@@ -56,13 +56,16 @@ pub async fn dump(
     require_permission(&state, &identity, NodePermission::DocumentRead).await?;
 
     if !state.dev_mode {
-        return Err(HttpError::BadRequest(
+        return Err(HttpError::Forbidden(
             "dump is only available in development mode".into(),
         ));
     }
 
     let dump_ops = state.require_dump()?;
-    let lines = dump_ops.print_dump().await.map_err(HttpError::Internal)?;
+    let lines = dump_ops
+        .print_dump()
+        .await
+        .map_err(http_error_from_backend_message)?;
     Ok(Json(lines))
 }
 
@@ -80,7 +83,7 @@ pub async fn purge(
     require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
     if !state.dev_mode {
-        return Err(HttpError::BadRequest(
+        return Err(HttpError::Forbidden(
             "cannot purge database when development mode is disabled".into(),
         ));
     }
@@ -89,7 +92,7 @@ pub async fn purge(
         .require_collection_mgmt()?
         .purge()
         .await
-        .map_err(HttpError::Internal)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(StatusCode::OK)
 }

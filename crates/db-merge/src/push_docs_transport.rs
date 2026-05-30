@@ -7,10 +7,9 @@ use p2p::transport::PeerId;
 use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
 
-use crate::push_docs_common::{
-    load_latest_composite_head_cids, load_push_dag_blocks, resolve_push_creator,
-    MAX_CONCURRENT_REPLAY_TASKS,
-};
+use crate::push_docs_common::{load_latest_composite_head_cids, load_push_dag_blocks};
+use crate::push_docs_creator::resolve_push_creator;
+use crate::push_docs_replay::{ReplayPushConfig, ReplayPushGate};
 use db::database::DB;
 
 /// Push existing documents to a replicator peer via a generic transport.
@@ -24,6 +23,28 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
     peer_id: &PeerId,
     collections: &[String],
     se_encryption_key: Option<&[u8]>,
+) -> Result<(), String> {
+    push_existing_docs_via_transport_with_config(
+        transport,
+        db,
+        document_acp,
+        peer_id,
+        collections,
+        se_encryption_key,
+        ReplayPushConfig::default(),
+    )
+    .await
+}
+
+/// Push existing documents to a replicator peer via a generic transport with explicit replay limits.
+pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T: P2PTransport>(
+    transport: &T,
+    db: &DB<S>,
+    document_acp: Option<&dyn DocumentACP>,
+    peer_id: &PeerId,
+    collections: &[String],
+    se_encryption_key: Option<&[u8]>,
+    replay_config: ReplayPushConfig,
 ) -> Result<(), String> {
     let conn_timeout = std::time::Duration::from_secs(15);
     let conn_start = std::time::Instant::now();
@@ -73,7 +94,8 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
         .map_err(|e| format!("failed to get datastore: {}", e))?;
 
     let mut push_handles = Vec::new();
-    let replay_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REPLAY_TASKS));
+    let replay_gate = Arc::new(ReplayPushGate::new(replay_config));
+    let mut skipped_creator_docs = 0usize;
 
     for col_name in collections {
         let collection = match db
@@ -111,8 +133,27 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
             .map_err(|e| format!("datastore close error: {}", e))?;
 
         for doc_id in &doc_ids {
-            let creator =
-                resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id).await;
+            let creator = match resolve_push_creator(
+                document_acp,
+                &collection,
+                doc_id,
+                &local_peer_id,
+            )
+            .await
+            {
+                Ok(creator) => creator,
+                Err(error) => {
+                    skipped_creator_docs += 1;
+                    tracing::warn!(
+                        collection = %collection.name(),
+                        collection_id = %collection.collection_id(),
+                        doc_id = %doc_id,
+                        error = %error,
+                        "Skipping existing document replay because ACP creator could not be resolved"
+                    );
+                    continue;
+                }
+            };
             let mut doc_blocks = Vec::new();
             for head_cid in
                 load_latest_composite_head_cids(&headstore, &blockstore_view, doc_id).await
@@ -148,18 +189,22 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
             if !requests.is_empty() {
                 let t = transport.clone();
                 let pid = peer_id.clone();
+                let gate = replay_gate.clone();
+                let peer_key = pid.clone();
                 let total_blocks = requests.len();
-                let permit = replay_semaphore
-                    .clone()
-                    .acquire_owned()
+                let permit = replay_gate
+                    .acquire_document_task()
                     .await
-                    .map_err(|_| "replay semaphore closed before scheduling push".to_string())?;
+                    .map_err(|e| format!("replay gate closed before scheduling push: {e}"))?;
                 push_handles.push(tokio::spawn(async move {
                     let _permit = permit;
                     let mut completed_blocks = 0usize;
                     for req in requests {
                         let cid = req.cid.clone();
-                        match t.send_two_stream_request(&pid, req).await {
+                        match gate
+                            .send_pushlog(&peer_key, t.send_two_stream_request(&pid, req))
+                            .await
+                        {
                             Ok(reply) if reply.err_message.is_some() => {
                                 tracing::warn!(
                                     peer_id = %pid,
@@ -210,6 +255,12 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
         }
     }
     tracing::debug!("all push tasks completed");
+
+    if skipped_creator_docs > 0 {
+        return Err(format!(
+            "skipped {skipped_creator_docs} existing document replay(s) because ACP creator could not be resolved"
+        ));
+    }
 
     if let Some(se_key) = se_encryption_key {
         let coordinator = crate::se::SECoordinator::with_key(se_key.to_vec());
@@ -337,7 +388,9 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
         .find_collection_by_id(collection_id)
         .map_err(|e| format!("failed to get collection: {}", e))?
         .ok_or_else(|| format!("collection '{}' not found", collection_id))?;
-    let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id).await;
+    let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let headstore = storage::stores::Headstore::new(db.store().clone());
     let head_txn = headstore

@@ -682,3 +682,92 @@ fn test_counter_delta_validation_rejects_empty_values() {
         .to_string()
         .contains("schema_version_id"));
 }
+
+// === Float32 tests (issue #848) ===
+
+#[tokio::test]
+async fn test_counter_float32_basic() {
+    let store = MemoryStore::new();
+    let counter = Counter::new(
+        "v1".to_string(),
+        b"doc1",
+        "score".to_string(),
+        true,
+        NumericKind::Float32,
+    )
+    .unwrap();
+
+    let ctx = Context {
+        doc_id: DocId::new_unchecked("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    let delta = CounterDelta::new_float32(
+        b"doc1".to_vec(),
+        "score".to_string(),
+        1,
+        1,
+        "v1".to_string(),
+        1.5f32,
+    )
+    .unwrap();
+
+    let result = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+    assert_eq!(result, MergeResult::Applied);
+
+    let value_bytes = counter.value(&*txn).await.unwrap();
+    assert_eq!(value_bytes.len(), 4, "Float32 counter stores 4 bytes");
+    let value = f32::from_be_bytes(value_bytes[..4].try_into().unwrap());
+    assert_eq!(value, 1.5f32);
+}
+
+#[tokio::test]
+async fn test_counter_float32_accumulation_uses_f32_precision() {
+    // Go accumulates float32 counters in f32 precision, not f64.
+    // This test verifies Rust does the same by checking that the result
+    // matches f32 arithmetic (which differs from f64 for 1.1 + 2.2).
+    let store = MemoryStore::new();
+    let counter = Counter::new(
+        "v1".to_string(),
+        b"doc1",
+        "score".to_string(),
+        true,
+        NumericKind::Float32,
+    )
+    .unwrap();
+
+    let ctx = Context {
+        doc_id: DocId::new_unchecked("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    let d1 = CounterDelta::new_float32(b"doc1".to_vec(), "score".into(), 1, 1, "v1".into(), 1.1f32)
+        .unwrap();
+    let d2 = CounterDelta::new_float32(b"doc1".to_vec(), "score".into(), 2, 2, "v1".into(), 2.2f32)
+        .unwrap();
+
+    counter.merge(&mut *txn, &ctx, &d1).await.unwrap();
+    counter.merge(&mut *txn, &ctx, &d2).await.unwrap();
+
+    let value_bytes = counter.value(&*txn).await.unwrap();
+    let value = f32::from_be_bytes(value_bytes[..4].try_into().unwrap());
+
+    // f32: 1.1 + 2.2 = 3.3000002 (NOT 3.3000000000000003 which is f64)
+    let expected = 1.1f32 + 2.2f32;
+    assert_eq!(
+        value, expected,
+        "Float32 counter must use f32 arithmetic for Go parity, got {value} expected {expected}"
+    );
+    // Confirm it differs from f64 arithmetic
+    let f64_result = (1.1f64 + 2.2f64) as f32;
+    assert_ne!(
+        value, f64_result,
+        "Float32 result should differ from f64-promoted arithmetic"
+    );
+}

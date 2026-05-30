@@ -1,4 +1,6 @@
-use integration_test::{for_each_runtime, TestCluster};
+use std::time::Duration;
+
+use integration_test::{for_each_runtime, open_events_sse, poll_until, TestCluster};
 
 async fn txn_schema_add_and_mutate(cluster: TestCluster) {
     let client = cluster.client(0);
@@ -73,6 +75,135 @@ async fn rust_txn_schema_add_and_mutate() {
     let _root = integration_test::workspace_root();
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
     txn_schema_add_and_mutate(cluster).await;
+}
+
+async fn txn_schema_add_via_header_is_scoped(cluster: TestCluster) {
+    let client = cluster.client(0);
+    let api_url = cluster.api_url(0);
+    let tx_id = client.tx_create().expect("tx_create failed");
+
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(format!("{}/api/v0/collections", api_url))
+        .header("x-defradb-tx", &tx_id)
+        .body("type HeaderWidget { name: String }")
+        .send()
+        .await
+        .expect("schema add request failed");
+    assert!(
+        resp.status().is_success(),
+        "schema add in tx failed with status: {} body: {}",
+        resp.status(),
+        resp.text().await.unwrap_or_default()
+    );
+
+    let in_tx = client
+        .query_with_tx(
+            r#"mutation { add_HeaderWidget(input: {name: "scoped"}) { name } }"#,
+            &tx_id,
+        )
+        .expect("create HeaderWidget in tx");
+    assert_eq!(in_tx["add_HeaderWidget"][0]["name"], "scoped");
+
+    let outside = client.query("query { HeaderWidget { name } }");
+    assert!(
+        outside.is_err(),
+        "schema created with x-defradb-tx should not be visible outside the transaction"
+    );
+
+    client.tx_commit(&tx_id).expect("tx_commit failed");
+
+    let after_commit = client
+        .query("query { HeaderWidget { name } }")
+        .expect("query HeaderWidget after commit");
+    assert_eq!(after_commit["HeaderWidget"][0]["name"], "scoped");
+}
+
+#[tokio::test]
+async fn rust_txn_schema_add_via_header_is_scoped() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    txn_schema_add_via_header_is_scoped(cluster).await;
+}
+
+async fn concurrent_txn_endpoint_is_not_exposed(cluster: TestCluster) {
+    let api_url = cluster.api_url(0);
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/v0/tx/concurrent", api_url))
+        .send()
+        .await
+        .expect("tx concurrent request failed");
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    assert!(
+        body.contains("invalid transaction id"),
+        "expected invalid transaction id error, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn rust_concurrent_txn_endpoint_is_not_exposed() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    concurrent_txn_endpoint_is_not_exposed(cluster).await;
+}
+
+async fn update_with_filter_sees_txn_scoped_state(cluster: TestCluster) {
+    let client = cluster.client(0);
+    let api_url = cluster.api_url(0);
+    let tx_id = client.tx_create().expect("tx_create failed");
+
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(format!("{}/api/v0/tx/{}/schema", api_url, tx_id))
+        .body("type TxnFilterUser { name: String  age: Int }")
+        .send()
+        .await
+        .expect("schema add in txn request failed");
+    assert!(
+        resp.status().is_success(),
+        "schema add in txn failed with status: {} body: {}",
+        resp.status(),
+        resp.text().await.unwrap_or_default()
+    );
+
+    client
+        .query_with_tx(
+            r#"mutation { add_TxnFilterUser(input: {name: "John", age: 27}) { _docID } }"#,
+            &tx_id,
+        )
+        .expect("create TxnFilterUser in tx");
+
+    let update = client
+        .query_with_tx(
+            r#"mutation { update_TxnFilterUser(filter: {name: {_eq: "John"}}, input: {name: "Chris"}) { name age } }"#,
+            &tx_id,
+        )
+        .expect("update TxnFilterUser by filter in tx");
+
+    let updated = update["update_TxnFilterUser"]
+        .as_array()
+        .expect("update result not array");
+    assert_eq!(updated.len(), 1, "expected one filtered update result");
+    assert_eq!(updated[0]["name"], "Chris");
+    assert_eq!(updated[0]["age"], 27);
+
+    client.tx_commit(&tx_id).expect("tx_commit failed");
+
+    let after_commit = client
+        .query("query { TxnFilterUser { name age } }")
+        .expect("query TxnFilterUser after commit");
+    assert_eq!(after_commit["TxnFilterUser"][0]["name"], "Chris");
+    assert_eq!(after_commit["TxnFilterUser"][0]["age"], 27);
+}
+
+#[tokio::test]
+async fn rust_update_with_filter_sees_txn_scoped_state() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    update_with_filter_sees_txn_scoped_state(cluster).await;
 }
 
 async fn transactions_test(cluster: TestCluster) {
@@ -196,3 +327,203 @@ async fn transactions_test(cluster: TestCluster) {
 }
 
 for_each_runtime!(transactions, transactions_test);
+
+async fn txn_commit_publishes_update_events(cluster: TestCluster) {
+    let client = cluster.client(0);
+    let api_url = cluster.api_url(0);
+
+    // Schema first (auto-commit, generates events we don't care about)
+    client
+        .schema_add("type TxEvent { name: String value: Int }")
+        .expect("schema add");
+
+    // Open SSE stream BEFORE the tx so we capture every emitted event
+    let (sse_handle, events) = open_events_sse(api_url, "update").await;
+
+    // Drain any startup events from schema add
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let baseline = events.lock().unwrap().len();
+
+    // Open a transaction and do three writes inside it
+    let tx_id = client.tx_create().expect("tx_create failed");
+
+    let create_a = client
+        .query_with_tx(
+            r#"mutation { add_TxEvent(input: {name: "a", value: 1}) { _docID } }"#,
+            &tx_id,
+        )
+        .expect("create a in tx");
+    let create_b = client
+        .query_with_tx(
+            r#"mutation { add_TxEvent(input: {name: "b", value: 2}) { _docID } }"#,
+            &tx_id,
+        )
+        .expect("create b in tx");
+    let create_c = client
+        .query_with_tx(
+            r#"mutation { add_TxEvent(input: {name: "c", value: 3}) { _docID } }"#,
+            &tx_id,
+        )
+        .expect("create c in tx");
+    let doc_a = create_a["add_TxEvent"][0]["_docID"]
+        .as_str()
+        .expect("missing _docID for TxEvent a")
+        .to_string();
+    let doc_b = create_b["add_TxEvent"][0]["_docID"]
+        .as_str()
+        .expect("missing _docID for TxEvent b")
+        .to_string();
+    let doc_c = create_c["add_TxEvent"][0]["_docID"]
+        .as_str()
+        .expect("missing _docID for TxEvent c")
+        .to_string();
+
+    // Critical assertion: zero events while tx is uncommitted
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    {
+        let observed = events.lock().unwrap();
+        let count_after_writes = observed.len();
+        assert_eq!(
+            count_after_writes,
+            baseline,
+            "no update events should fire before tx commit; got {} new events",
+            count_after_writes.saturating_sub(baseline)
+        );
+    }
+
+    // Commit the transaction
+    client.tx_commit(&tx_id).expect("tx_commit failed");
+
+    // After commit: exactly three events should arrive, one per doc
+    poll_until(
+        || {
+            let observed = events.lock().unwrap();
+            let new_events: Vec<_> = observed.iter().skip(baseline).collect();
+            new_events.len() >= 3
+        },
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        "three update events should arrive after tx commit",
+    )
+    .await;
+
+    // Validate doc_ids match
+    let observed = events.lock().unwrap();
+    let new_events: Vec<_> = observed.iter().skip(baseline).collect();
+    assert_eq!(
+        new_events.len(),
+        3,
+        "expected exactly 3 update events after commit; got {}",
+        new_events.len()
+    );
+    let observed_doc_ids: std::collections::HashSet<String> = new_events
+        .iter()
+        .filter_map(|e| e.pointer("/data/doc_id").and_then(|v| v.as_str()))
+        .map(String::from)
+        .collect();
+    assert!(
+        observed_doc_ids.contains(&doc_a),
+        "missing event for doc_a={doc_a}"
+    );
+    assert!(
+        observed_doc_ids.contains(&doc_b),
+        "missing event for doc_b={doc_b}"
+    );
+    assert!(
+        observed_doc_ids.contains(&doc_c),
+        "missing event for doc_c={doc_c}"
+    );
+
+    // Also validate cids are non-default. Cid::default().to_string() is
+    // "baeaaaaa" (non-empty), so an is_empty() check would silently pass the
+    // pre-fix bug where a failed block write emitted an event with a default
+    // cid. Compare against the parsed default explicitly.
+    let default_cid = cid::Cid::default();
+    for event in &new_events {
+        let cid_str = event
+            .pointer("/data/cid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            !cid_str.is_empty(),
+            "event cid should not be empty: {event:?}"
+        );
+        let parsed: cid::Cid = cid_str.parse().unwrap_or_else(|e| {
+            panic!("event cid should parse as a real Cid (got {cid_str:?}): {e}")
+        });
+        assert_ne!(
+            parsed, default_cid,
+            "event cid should not be Cid::default() (would indicate the block write failed): {event:?}"
+        );
+
+        // The block field carries hex-encoded composite commit bytes. It
+        // must reach SSE subscribers so downstream consumers (e.g. defra-agent)
+        // can traverse the DAG without an extra round-trip.
+        let block_hex = event
+            .pointer("/data/block")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("event missing /data/block: {event:?}"));
+        assert!(
+            !block_hex.is_empty(),
+            "event block hex should not be empty: {event:?}"
+        );
+        let block_bytes = hex::decode(block_hex)
+            .unwrap_or_else(|e| panic!("block field should be valid hex ({block_hex:?}): {e}"));
+        assert!(
+            !block_bytes.is_empty(),
+            "decoded block bytes should not be empty: {event:?}"
+        );
+    }
+
+    sse_handle.abort();
+}
+
+#[tokio::test]
+async fn rust_txn_commit_publishes_update_events() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    txn_commit_publishes_update_events(cluster).await;
+}
+
+async fn txn_discard_publishes_no_events(cluster: TestCluster) {
+    let client = cluster.client(0);
+    let api_url = cluster.api_url(0);
+
+    client
+        .schema_add("type TxDiscard { name: String }")
+        .expect("schema add");
+
+    let (sse_handle, events) = open_events_sse(api_url, "update").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let baseline = events.lock().unwrap().len();
+
+    let tx_id = client.tx_create().expect("tx_create failed");
+    client
+        .query_with_tx(
+            r#"mutation { add_TxDiscard(input: {name: "doomed"}) { _docID } }"#,
+            &tx_id,
+        )
+        .expect("create in tx");
+
+    // Discard, not commit
+    client.tx_discard(&tx_id).expect("tx_discard failed");
+
+    // Wait long enough that an event would have arrived if it were going to
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let observed = events.lock().unwrap();
+    assert_eq!(
+        observed.len(),
+        baseline,
+        "no events should fire on discard; got {} new events",
+        observed.len().saturating_sub(baseline)
+    );
+
+    sse_handle.abort();
+}
+
+#[tokio::test]
+async fn rust_txn_discard_publishes_no_events() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    txn_discard_publishes_no_events(cluster).await;
+}

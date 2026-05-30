@@ -292,3 +292,58 @@ async fn subscription_no_filter_test(cluster: TestCluster) {
 }
 
 for_each_runtime!(subscription_no_filter, subscription_no_filter_test);
+
+// ---------------------------------------------------------------------------
+// Test: delete subscriptions are scoped by event CID
+// ---------------------------------------------------------------------------
+
+async fn subscription_delete_event_scoped_by_cid_test(cluster: TestCluster) {
+    let client = cluster.client(0);
+    let api_url = cluster.api_url(0);
+
+    client
+        .schema_add("type User { name: String  age: Int }")
+        .expect("schema deploy");
+
+    let created = client
+        .query(r#"mutation { add_User(input: {name: "DeleteMe", age: 30}) { _docID } }"#)
+        .expect("create user");
+    let doc_id = created["add_User"][0]["_docID"]
+        .as_str()
+        .expect("user _docID")
+        .to_string();
+
+    let (handle, events) =
+        open_subscription(api_url, "subscription { User { _docID _deleted name } }");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    client
+        .query(&format!(
+            r#"mutation {{ delete_User(docID: "{doc_id}") {{ _docID }} }}"#
+        ))
+        .expect("delete user");
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    handle.abort();
+
+    let collected = events.lock().unwrap();
+    assert!(
+        collected.iter().any(|event| {
+            extract_doc_id(event, "User").as_deref() == Some(doc_id.as_str())
+                && event
+                    .pointer("/data/User/0/_deleted")
+                    .or_else(|| event.pointer("/User/0/_deleted"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        }),
+        "expected delete subscription event with _deleted=true for {doc_id}, got: {:?}",
+        &*collected
+    );
+}
+
+#[tokio::test]
+async fn rust_subscription_delete_event_scoped_by_cid() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    subscription_delete_event_scoped_by_cid_test(cluster).await;
+}

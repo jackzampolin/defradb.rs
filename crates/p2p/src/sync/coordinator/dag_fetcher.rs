@@ -11,6 +11,7 @@ use cid::Cid;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use super::dag_context::DagFetchContext;
 use crate::sync::manager::links::find_all_missing_links;
 use crate::sync::manager::SyncEvent;
 use crate::transport::{P2PTransport, PeerId};
@@ -28,21 +29,19 @@ enum FetchBatchOutcome {
 ///
 /// Strategy: try CAR fetch first (one round-trip), then selective block fetch
 /// for any missing blocks.
-#[allow(clippy::too_many_arguments)]
 pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
     transport: T,
     blockstore: Arc<B>,
     event_tx: mpsc::Sender<SyncEvent>,
     root_cid: Cid,
-    doc_id: String,
-    collection_id: String,
-    schema_version_id: String,
-    source_peer: PeerId,
+    context: DagFetchContext,
 ) {
     debug!(
         root_cid = %root_cid,
-        doc_id = %doc_id,
-        source_peer = %source_peer,
+        doc_id = %context.doc_id,
+        collection_id = %context.collection_id,
+        source_peer = %context.source_peer,
+        is_explicit_replicator = context.is_explicit_replicator,
         "Starting DAG fetch (CAR-first, selective block fallback)"
     );
 
@@ -59,7 +58,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
         &transport,
         &blockstore,
         &root_cid,
-        &source_peer,
+        &context.source_peer,
         car_missing_watch.as_deref(),
     )
     .await
@@ -69,19 +68,8 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
                 .await
                 .unwrap_or_default();
             if missing.is_empty() {
-                info!(root_cid = %root_cid, doc_id = %doc_id, "DAG fetch complete via CAR");
-                let _ = event_tx
-                    .send(SyncEvent::DagReady {
-                        root_cid,
-                        doc_id,
-                        collection_id,
-                        creator: schema_version_id,
-                        sender_peer: Some(source_peer.to_string()),
-                        is_explicit_replicator: false,
-                        explicit_replay_authorization: None,
-                        acp_actor_relationships: None,
-                    })
-                    .await;
+                info!(root_cid = %root_cid, doc_id = %context.doc_id, "DAG fetch complete via CAR");
+                emit_dag_ready(&event_tx, root_cid, &context, &root_data).await;
                 return;
             }
             debug!(
@@ -99,7 +87,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
             std::slice::from_ref(&root_cid),
             &transport,
             &blockstore,
-            &source_peer,
+            &context.source_peer,
         )
         .await,
         FetchBatchOutcome::Complete
@@ -139,7 +127,15 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
 
         let mut made_progress = false;
         for batch in missing.chunks(SELECTIVE_FETCH_BATCH_SIZE) {
-            match poll_fetch_blocks(&root_cid, batch, &transport, &blockstore, &source_peer).await {
+            match poll_fetch_blocks(
+                &root_cid,
+                batch,
+                &transport,
+                &blockstore,
+                &context.source_peer,
+            )
+            .await
+            {
                 FetchBatchOutcome::Complete => {
                     made_progress = true;
                 }
@@ -175,25 +171,34 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
         .unwrap_or_default();
 
     if remaining.is_empty() {
-        info!(root_cid = %root_cid, doc_id = %doc_id, "DAG fetch complete");
-        let _ = event_tx
-            .send(SyncEvent::DagReady {
-                root_cid,
-                doc_id,
-                collection_id,
-                creator: schema_version_id,
-                sender_peer: Some(source_peer.to_string()),
-                is_explicit_replicator: false,
-                explicit_replay_authorization: None,
-                acp_actor_relationships: None,
-            })
-            .await;
+        info!(root_cid = %root_cid, doc_id = %context.doc_id, "DAG fetch complete");
+        emit_dag_ready(&event_tx, root_cid, &context, &root_data).await;
     } else {
         warn!(
             root_cid = %root_cid,
-            doc_id = %doc_id,
+            doc_id = %context.doc_id,
             remaining_count = remaining.len(),
             "DAG fetch incomplete"
+        );
+    }
+}
+
+async fn emit_dag_ready(
+    event_tx: &mpsc::Sender<SyncEvent>,
+    root_cid: Cid,
+    context: &DagFetchContext,
+    root_data: &[u8],
+) {
+    let mut context = context.clone();
+    context.fill_missing_from_block(root_data);
+    if event_tx
+        .send(context.into_dag_ready(root_cid))
+        .await
+        .is_err()
+    {
+        warn!(
+            root_cid = %root_cid,
+            "Failed to emit DagReady after DAG fetch"
         );
     }
 }
@@ -622,17 +627,35 @@ mod tests {
             blockstore.clone(),
             event_tx,
             root_cid,
-            "doc-id".to_string(),
-            "collection-id".to_string(),
-            "schema-version-id".to_string(),
-            source_peer,
+            DagFetchContext::new(
+                "doc-id".to_string(),
+                "collection-id".to_string(),
+                "creator-id".to_string(),
+                source_peer.clone(),
+            )
+            .with_explicit_replicator(true),
         )
         .await;
 
-        assert!(matches!(
-            event_rx.recv().await,
-            Some(SyncEvent::DagReady { root_cid: ready_cid, .. }) if ready_cid == root_cid
-        ));
+        match event_rx.recv().await {
+            Some(SyncEvent::DagReady {
+                root_cid: ready_cid,
+                doc_id,
+                collection_id,
+                creator,
+                sender_peer,
+                is_explicit_replicator,
+                ..
+            }) => {
+                assert_eq!(ready_cid, root_cid);
+                assert_eq!(doc_id, "doc-id");
+                assert_eq!(collection_id, "collection-id");
+                assert_eq!(creator, "creator-id");
+                assert_eq!(sender_peer.as_deref(), Some(source_peer.as_str()));
+                assert!(is_explicit_replicator);
+            }
+            other => panic!("expected DagReady, got {:?}", other),
+        }
         assert!(matches!(blockstore.has(&child_one_cid).await, Ok(true)));
         assert!(matches!(blockstore.has(&child_two_cid).await, Ok(true)));
         assert_eq!(transport.car_request_count(), 1);
@@ -673,10 +696,12 @@ mod tests {
             blockstore.clone(),
             event_tx,
             root_cid,
-            "doc-id".to_string(),
-            "collection-id".to_string(),
-            "schema-version-id".to_string(),
-            source_peer,
+            DagFetchContext::new(
+                "doc-id".to_string(),
+                "collection-id".to_string(),
+                "creator-id".to_string(),
+                source_peer,
+            ),
         )
         .await;
 
@@ -729,10 +754,12 @@ mod tests {
             blockstore.clone(),
             event_tx,
             root_cid,
-            "doc-id".to_string(),
-            "collection-id".to_string(),
-            "schema-version-id".to_string(),
-            source_peer,
+            DagFetchContext::new(
+                "doc-id".to_string(),
+                "collection-id".to_string(),
+                "creator-id".to_string(),
+                source_peer,
+            ),
         )
         .await;
 

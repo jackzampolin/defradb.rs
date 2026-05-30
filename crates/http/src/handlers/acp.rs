@@ -16,7 +16,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AcpLightClientStatus, AppState, NodePermission, PolicyInfo};
@@ -53,7 +53,10 @@ pub async fn add_policy(
         return Err(HttpError::BadRequest("policy data can not be empty".into()));
     }
 
-    let policy_id = acp.add_policy(&body).await.map_err(HttpError::BadRequest)?;
+    let policy_id = acp
+        .add_policy(&body)
+        .await
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(AddPolicyResponse { policy_id }))
 }
@@ -139,6 +142,81 @@ pub struct DocRelationshipResponse {
     pub existed_already: bool,
 }
 
+/// Request body for document ACP decision preview operations.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DocDecisionRequest {
+    pub actor: String,
+    pub permission: String,
+    #[serde(rename = "policyID", alias = "policy_id")]
+    pub policy_id: String,
+    #[serde(rename = "resourceName", alias = "resource_name")]
+    pub resource_name: String,
+    #[serde(rename = "docID", alias = "doc_id")]
+    pub doc_id: String,
+}
+
+/// Response for document ACP decision preview operations.
+#[derive(Debug, Clone, Serialize)]
+pub struct DocDecisionResponse {
+    pub allowed: bool,
+}
+
+fn parse_doc_permission(permission: &str) -> Result<acp::DocumentPermission, HttpError> {
+    match permission {
+        "read" => Ok(acp::DocumentPermission::Read),
+        "update" => Ok(acp::DocumentPermission::Update),
+        "delete" => Ok(acp::DocumentPermission::Delete),
+        _ => Err(HttpError::BadRequest(format!(
+            "invalid document permission '{}'",
+            permission
+        ))),
+    }
+}
+
+/// Check document ACP access without mutating relationships.
+///
+/// POST /api/v0/acp/document/decide
+///
+/// Requires `DacStatus` permission when NAC is enabled.
+pub async fn decide_doc_access(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Json(body): Json<DocDecisionRequest>,
+) -> Result<Json<DocDecisionResponse>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DacStatus).await?;
+
+    if body.actor.is_empty()
+        || body.permission.is_empty()
+        || body.policy_id.is_empty()
+        || body.resource_name.is_empty()
+        || body.doc_id.is_empty()
+    {
+        return Err(HttpError::BadRequest(
+            "missing a required argument needed to decide doc access.".into(),
+        ));
+    }
+
+    let actor = body
+        .actor
+        .parse::<identity::Did>()
+        .map_err(|e| HttpError::BadRequest(format!("invalid actor DID: {}", e)))?;
+    let permission = parse_doc_permission(&body.permission)?;
+
+    let doc_acp = state.require_doc_acp()?;
+    let allowed = doc_acp
+        .check_doc_access(
+            &actor,
+            permission,
+            &body.policy_id,
+            &body.resource_name,
+            &body.doc_id,
+        )
+        .await
+        .map_err(http_error_from_backend_message)?;
+
+    Ok(Json(DocDecisionResponse { allowed }))
+}
+
 /// Add a document ACP relationship.
 ///
 /// POST /api/v0/acp/document/relationship
@@ -183,7 +261,7 @@ pub async fn add_doc_relationship(
             &body.relation,
         )
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(DocRelationshipResponse {
         existed_already: !is_new,
@@ -234,7 +312,7 @@ pub async fn remove_doc_relationship(
             &body.relation,
         )
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(DocRelationshipResponse {
         existed_already: !was_removed,
@@ -270,5 +348,56 @@ mod tests {
         assert!(json.contains("Test Policy"));
         // Should not contain null fields
         assert!(!json.contains("description"));
+    }
+
+    #[test]
+    fn test_doc_decision_request_accepts_camel_and_snake_case() {
+        let camel: DocDecisionRequest = serde_json::from_str(
+            r#"{
+                "actor": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+                "permission": "read",
+                "policyID": "policy",
+                "resourceName": "resource",
+                "docID": "doc"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(camel.policy_id, "policy");
+        assert_eq!(camel.resource_name, "resource");
+        assert_eq!(camel.doc_id, "doc");
+
+        let snake: DocDecisionRequest = serde_json::from_str(
+            r#"{
+                "actor": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+                "permission": "delete",
+                "policy_id": "policy",
+                "resource_name": "resource",
+                "doc_id": "doc"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(snake.policy_id, "policy");
+        assert_eq!(snake.resource_name, "resource");
+        assert_eq!(snake.doc_id, "doc");
+    }
+
+    #[test]
+    fn test_parse_doc_permission() {
+        assert_eq!(
+            parse_doc_permission("read").unwrap(),
+            acp::DocumentPermission::Read
+        );
+        assert_eq!(
+            parse_doc_permission("update").unwrap(),
+            acp::DocumentPermission::Update
+        );
+        assert_eq!(
+            parse_doc_permission("delete").unwrap(),
+            acp::DocumentPermission::Delete
+        );
+        assert!(matches!(
+            parse_doc_permission("admin"),
+            Err(HttpError::BadRequest(_))
+        ));
     }
 }

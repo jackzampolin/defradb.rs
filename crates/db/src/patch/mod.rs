@@ -144,6 +144,10 @@ impl<S: Store> crate::database::DB<S> {
 
         let mut new_schema =
             self.validate_patched_schema(schema_json, &old_schema, &actual_name)?;
+        // root_id is runtime storage metadata and is intentionally skipped in schema JSON.
+        // Preserve it across patch application so the new active version keeps using the
+        // same index/head/cache namespace as the rest of the collection history.
+        new_schema.root_id = old_schema.root_id;
 
         // Handle in-place updates (deactivation, IsActive-only, or PreviousVersion/Transform-only).
         // These don't create a new schema version - they update the existing one.

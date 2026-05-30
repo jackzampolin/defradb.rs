@@ -26,7 +26,8 @@ pub(crate) struct TxSigner {
 }
 
 impl TxSigner {
-    const MAX_SEQUENCE_RETRIES: usize = 3;
+    const TX_INCLUSION_TIMEOUT_MS: u64 = 30_000;
+    const MAX_SEQUENCE_RETRIES: u8 = 3;
 
     /// Create a signer from raw secp256k1 private key bytes.
     pub(crate) fn from_secp256k1_bytes(
@@ -65,12 +66,8 @@ impl TxSigner {
         policy_yaml: &str,
     ) -> Result<String, TxSignerError> {
         let msg = build_msg_create_policy(&self.address(), policy_yaml);
-        let tx_hash = self.sign_and_broadcast(client, vec![msg]).await?;
-        tracing::debug!(tx_hash = %tx_hash, "create_policy: broadcast complete");
-        let tx_result = client
-            .await_tx(&tx_hash, 30_000)
-            .await
-            .map_err(|e| TxSignerError::Broadcast(e.to_string()))?;
+        let (tx_hash, tx_result) = self.sign_and_broadcast(client, vec![msg]).await?;
+        tracing::debug!(tx_hash = %tx_hash, "create_policy: tx included");
 
         // Extract policy ID from tx_result.data (protobuf-encoded TxMsgData)
         if let Some(policy_id) = extract_policy_id_from_tx_data(&tx_result) {
@@ -99,11 +96,7 @@ impl TxSigner {
         cmd_json: serde_json::Value,
     ) -> Result<serde_json::Value, TxSignerError> {
         let msg = build_msg_bearer_policy_cmd(&self.address(), bearer_token, policy_id, cmd_json);
-        let tx_hash = self.sign_and_broadcast(client, vec![msg]).await?;
-        let tx_result = client
-            .await_tx(&tx_hash, 30_000)
-            .await
-            .map_err(|e| TxSignerError::Broadcast(e.to_string()))?;
+        let (tx_hash, tx_result) = self.sign_and_broadcast(client, vec![msg]).await?;
 
         let mut result = serde_json::json!({"tx_hash": tx_hash});
 
@@ -127,12 +120,10 @@ impl TxSigner {
         &self,
         client: &SourceHubClient,
         messages: Vec<Any>,
-    ) -> Result<String, TxSignerError> {
+    ) -> Result<(String, serde_json::Value), TxSignerError> {
         let sequence_state = sequence_state(client, &self.address());
         let mut state = sequence_state.lock().await;
-
         let body = Body::new(messages, "", 0u32);
-
         let fee = Fee::from_amount_and_gas(
             Coin {
                 denom: "uopen".parse().unwrap(),
@@ -140,29 +131,22 @@ impl TxSigner {
             },
             400_000u64,
         );
+        let mut sequence_retries = 0;
 
-        let mut last_error = None;
-
-        for attempt in 0..Self::MAX_SEQUENCE_RETRIES {
+        loop {
+            // Body and fee are sequence-free; retries rebuild AuthInfo/SignDoc below.
             let (account_number, sequence) = if let (Some(account_number), Some(sequence)) =
                 (state.account_number, state.next_sequence)
             {
                 (account_number, sequence)
             } else {
-                let (account_number, sequence) = client
-                    .query_account(&self.address())
-                    .await
-                    .map_err(|e| TxSignerError::Broadcast(format!("account query: {}", e)))?;
-                state.account_number = Some(account_number);
-                state.next_sequence = Some(sequence);
-                (account_number, sequence)
+                self.refresh_sequence(client, &mut state).await?
             };
 
             tracing::debug!(
                 msg_count = body.messages.len(),
                 account_number,
                 sequence,
-                attempt,
                 "sign_and_broadcast"
             );
 
@@ -181,73 +165,69 @@ impl TxSigner {
                 .to_bytes()
                 .map_err(|e| TxSignerError::Sign(format!("tx serialization: {}", e)))?;
 
-            tracing::debug!(
-                tx_bytes_len = tx_bytes.len(),
-                attempt,
-                "transaction serialized"
-            );
+            tracing::debug!(tx_bytes_len = tx_bytes.len(), "transaction serialized");
 
-            match client.broadcast_tx_sync(&tx_bytes).await {
-                Ok(hash) => {
-                    state.account_number = Some(account_number);
-                    state.next_sequence = Some(sequence + 1);
-                    return Ok(hash);
+            let tx_hash = match client.broadcast_tx_sync(&tx_bytes).await {
+                Ok(hash) => hash,
+                Err(e)
+                    if is_sequence_mismatch(&e.to_string())
+                        && sequence_retries < Self::MAX_SEQUENCE_RETRIES =>
+                {
+                    sequence_retries += 1;
+                    self.refresh_sequence(client, &mut state).await?;
+                    continue;
                 }
-                Err(e) if is_sequence_mismatch(&e) && attempt + 1 < Self::MAX_SEQUENCE_RETRIES => {
-                    tracing::warn!(
-                        attempt,
-                        error = %e,
-                        "retrying SourceHub tx after account sequence mismatch"
-                    );
-                    let (account_number, queried_sequence) = client
-                        .query_account(&self.address())
-                        .await
-                        .map_err(|query_error| {
-                            TxSignerError::Broadcast(format!("account query: {}", query_error))
-                        })?;
-                    let next_sequence = expected_sequence_from_error(&e)
-                        .unwrap_or_else(|| std::cmp::max(sequence + 1, queried_sequence));
-                    state.account_number = Some(account_number);
-                    state.next_sequence = Some(next_sequence);
-                    last_error = Some(e);
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                Err(e) => {
+                    state.next_sequence = None;
+                    return Err(TxSignerError::Broadcast(e.to_string()));
                 }
-                Err(e) => return Err(TxSignerError::Broadcast(e.to_string())),
-            }
+            };
+
+            tracing::debug!(tx_hash = %tx_hash, "transaction accepted by mempool; waiting for inclusion");
+
+            let tx_result = match client
+                .await_tx(&tx_hash, Self::TX_INCLUSION_TIMEOUT_MS)
+                .await
+            {
+                Ok(result) => result,
+                Err(e)
+                    if is_sequence_mismatch(&e.to_string())
+                        && sequence_retries < Self::MAX_SEQUENCE_RETRIES =>
+                {
+                    sequence_retries += 1;
+                    self.refresh_sequence(client, &mut state).await?;
+                    continue;
+                }
+                Err(e) => {
+                    state.next_sequence = None;
+                    return Err(TxSignerError::Broadcast(e.to_string()));
+                }
+            };
+
+            state.account_number = Some(account_number);
+            state.next_sequence = Some(sequence + 1);
+            return Ok((tx_hash, tx_result));
         }
+    }
 
-        Err(TxSignerError::Broadcast(
-            last_error
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "transaction broadcast failed".to_string()),
-        ))
+    async fn refresh_sequence(
+        &self,
+        client: &SourceHubClient,
+        state: &mut SequenceState,
+    ) -> Result<(u64, u64), TxSignerError> {
+        let (account_number, sequence) = client
+            .query_account(&self.address())
+            .await
+            .map_err(|e| TxSignerError::Broadcast(format!("account query: {}", e)))?;
+        state.account_number = Some(account_number);
+        state.next_sequence = Some(sequence);
+        Ok((account_number, sequence))
     }
 }
 
-fn is_sequence_mismatch(error: &super::client::ClientError) -> bool {
-    match error {
-        super::client::ClientError::TxFailed(message) => {
-            message.contains("incorrect account sequence")
-                || message.contains("account sequence mismatch")
-                || message.contains("code=32")
-        }
-        _ => false,
-    }
-}
-
-fn expected_sequence_from_error(error: &super::client::ClientError) -> Option<u64> {
-    let super::client::ClientError::TxFailed(message) = error else {
-        return None;
-    };
-
-    let expected_idx = message.find("expected ")?;
-    let rest = &message[expected_idx + "expected ".len()..];
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        None
-    } else {
-        digits.parse().ok()
-    }
+fn is_sequence_mismatch(message: &str) -> bool {
+    let message = message.to_lowercase();
+    message.contains("account sequence") || message.contains("incorrect account sequence")
 }
 
 fn sequence_state(client: &SourceHubClient, address: &str) -> Arc<AsyncMutex<SequenceState>> {
@@ -626,3 +606,6 @@ pub(crate) enum TxSignerError {
     #[error("broadcast error: {0}")]
     Broadcast(String),
 }
+
+#[cfg(test)]
+mod tests;

@@ -51,6 +51,10 @@ pub trait DocPusher: Send + Sync {
 
     async fn delete_persisted_replicator(&self, peer_id: &str) -> Result<(), String>;
 
+    async fn load_persisted_replicators(&self) -> Result<Option<Vec<p2p::ReplicatorInfo>>, String> {
+        Ok(None)
+    }
+
     async fn persist_p2p_documents(&self, doc_ids: &[String]) -> Result<(), String>;
 
     async fn load_p2p_documents(&self) -> Result<Vec<String>, String>;
@@ -115,6 +119,19 @@ pub struct P2PAdapter<
 }
 
 impl<B: Blockstore + 'static> P2PAdapter<B> {
+    fn to_http_replicator_info(info: p2p::ReplicatorInfo) -> ReplicatorInfo {
+        let address = info.addresses_str().first().map(|s| s.to_string());
+        let status = Some(info.status.into());
+        let last_status_change = Some(info.last_status_change_go_string());
+        ReplicatorInfo {
+            id: Some(info.peer_id_str().to_string()),
+            collections: info.collections,
+            address,
+            status,
+            last_status_change,
+        }
+    }
+
     /// Create a new adapter wrapping the given P2P handle.
     pub fn new(handle: P2PHostHandle) -> Self {
         Self {
@@ -299,22 +316,26 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
-        let p2p_infos = self
-            .handle
-            .list_replicators()
-            .await
-            .map_err(|e| P2PError::Transport(e.to_string()))?;
+        let p2p_infos = if let Some(ref pusher) = self.doc_pusher {
+            match pusher.load_persisted_replicators().await {
+                Ok(Some(infos)) => infos,
+                Ok(None) => self
+                    .handle
+                    .list_replicators()
+                    .await
+                    .map_err(|e| P2PError::Transport(e.to_string()))?,
+                Err(e) => return Err(P2PError::Internal(e)),
+            }
+        } else {
+            self.handle
+                .list_replicators()
+                .await
+                .map_err(|e| P2PError::Transport(e.to_string()))?
+        };
 
         let http_infos: Vec<ReplicatorInfo> = p2p_infos
             .into_iter()
-            .map(|info| {
-                let address = info.addresses_str().first().map(|s| s.to_string());
-                ReplicatorInfo {
-                    id: Some(info.peer_id_str().to_string()),
-                    collections: info.collections,
-                    address,
-                }
-            })
+            .map(Self::to_http_replicator_info)
             .collect();
 
         Ok(http_infos)
@@ -780,6 +801,17 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             }
             if let Ok(mut tracked) = self.tracked_documents.write() {
                 tracked.remove(doc_id);
+            }
+        }
+
+        if let Some(ref pusher) = self.doc_pusher {
+            let all_docs: Vec<String> = self
+                .tracked_documents
+                .read()
+                .map(|docs| docs.iter().cloned().collect())
+                .unwrap_or_default();
+            if let Err(e) = pusher.persist_p2p_documents(&all_docs).await {
+                tracing::warn!(error = %e, "failed to persist P2P documents after removal");
             }
         }
 

@@ -71,10 +71,6 @@ pub struct StartArgs {
     #[arg(long)]
     pub privkeypath: Option<String>,
 
-    /// Enables development mode features
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
-    pub development: Option<bool>,
-
     /// Skip generating an encryption key. Encryption at rest will be disabled.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub no_encryption: Option<bool>,
@@ -164,13 +160,17 @@ pub struct StartArgs {
     #[arg(long)]
     pub max_p2p_tasks: Option<usize>,
 
-    /// Max established inbound P2P connections (default: 100)
+    /// P2P established connection low watermark (default: 100)
     #[arg(long)]
-    pub max_connections_in: Option<u32>,
+    pub connection_manager_low_water: Option<u32>,
 
-    /// Max established outbound P2P connections (default: 400)
+    /// P2P established connection high watermark (default: 400)
     #[arg(long)]
-    pub max_connections_out: Option<u32>,
+    pub connection_manager_high_water: Option<u32>,
+
+    /// P2P connection manager grace period in milliseconds (default: 20000)
+    #[arg(long)]
+    pub connection_manager_grace_period_ms: Option<u64>,
 
     /// Max established P2P connections per peer (default: 4)
     #[arg(long)]
@@ -183,6 +183,26 @@ pub struct StartArgs {
     /// Query execution timeout in seconds (0 = no timeout, default: 30)
     #[arg(long)]
     pub query_timeout: Option<u64>,
+
+    /// Max idle age for explicit HTTP transactions in seconds (0 = disabled, default: 600)
+    #[arg(long)]
+    pub transaction_idle_timeout: Option<u64>,
+
+    /// Interval between explicit HTTP transaction cleanup sweeps in seconds (default: 60)
+    #[arg(long)]
+    pub transaction_cleanup_interval: Option<u64>,
+
+    /// Max GraphQL selection nesting depth (0 = unlimited, default: 20)
+    #[arg(long)]
+    pub query_max_depth: Option<usize>,
+
+    /// Max fields at any GraphQL selection level (0 = unlimited, default: 100)
+    #[arg(long)]
+    pub query_max_width: Option<usize>,
+
+    /// Max recursive filter nesting depth (0 = unlimited, default: 50)
+    #[arg(long)]
+    pub query_max_filter_depth: Option<usize>,
 
     /// Per-peer rate limit burst capacity (max tokens). Default: 500.
     #[arg(long)]
@@ -391,9 +411,6 @@ impl StartArgs {
         if let Some(ref path) = self.privkeypath {
             config.api.privkey_path = path.clone();
         }
-        if let Some(dev) = self.development {
-            config.development = dev;
-        }
         if let Some(no_enc) = self.no_encryption {
             config.datastore.no_encryption = no_enc;
         }
@@ -460,11 +477,14 @@ impl StartArgs {
         if let Some(max) = self.max_p2p_tasks {
             config.net.max_p2p_tasks = max;
         }
-        if let Some(max) = self.max_connections_in {
-            config.net.max_connections_in = max;
+        if let Some(low_water) = self.connection_manager_low_water {
+            config.net.connection_manager_low_water = low_water;
         }
-        if let Some(max) = self.max_connections_out {
-            config.net.max_connections_out = max;
+        if let Some(high_water) = self.connection_manager_high_water {
+            config.net.connection_manager_high_water = high_water;
+        }
+        if let Some(grace_period_ms) = self.connection_manager_grace_period_ms {
+            config.net.connection_manager_grace_period_ms = grace_period_ms;
         }
         if let Some(max) = self.max_connections_per_peer {
             config.net.max_connections_per_peer = max;
@@ -474,6 +494,21 @@ impl StartArgs {
         }
         if let Some(timeout) = self.query_timeout {
             config.api.query_timeout = timeout;
+        }
+        if let Some(timeout) = self.transaction_idle_timeout {
+            config.api.transaction_idle_timeout = timeout;
+        }
+        if let Some(interval) = self.transaction_cleanup_interval {
+            config.api.transaction_cleanup_interval = interval;
+        }
+        if let Some(depth) = self.query_max_depth {
+            config.api.query_max_depth = depth;
+        }
+        if let Some(width) = self.query_max_width {
+            config.api.query_max_width = width;
+        }
+        if let Some(depth) = self.query_max_filter_depth {
+            config.api.query_max_filter_depth = depth;
         }
         if let Some(ref addr) = self.pg_address {
             config.api.pg_address = addr.clone();
@@ -502,6 +537,7 @@ impl StartArgs {
         if let Some(ref api_key_env) = self.embedding_api_key_env {
             config.embedding.api_key_env = api_key_env.clone();
         }
+        config.api.validate()?;
         Ok(())
     }
 }

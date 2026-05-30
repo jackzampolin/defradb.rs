@@ -129,7 +129,7 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
             if let Some(field) = collection.field_by_name(field_name) {
                 if field.kind.is_object() && field.kind.is_array() {
                     return Err(QueryError::parse(format!(
-                        "invalid field value to groupBy. Field: {}",
+                        "cannot group by array or object field. Field: {}",
                         field_name
                     )));
                 }
@@ -240,4 +240,35 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::mapper::GroupBy;
+    use schema::{CollectionVersion, FieldDescription, FieldKind};
+
+    #[test]
+    fn group_by_array_relation_returns_go_mapper_error() {
+        let collection = CollectionVersion::new(
+            "Author",
+            "author-version",
+            "author-id",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                FieldDescription::new("3", "published", FieldKind::relation("Book", true)),
+            ],
+        );
+        let mut select = Select::new("Author");
+        select.group_by = Some(GroupBy::new(vec!["published".to_string()]));
+
+        let err = validate_select(&select, &collection).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "parse error: cannot group by array or object field. Field: published"
+        );
+    }
 }

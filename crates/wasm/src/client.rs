@@ -122,17 +122,6 @@ impl DefraClient {
         self.mutate_impl(graphql).await.map_err(|e| e.into())
     }
 
-    /// Verify a Merkle proof.
-    ///
-    /// Returns `true` if the proof verifies successfully. Throws on any
-    /// failure (structural input error, hash mismatch, broken chain).
-    /// Never returns `false` — see [`crate::verification::verify_merkle_proof`]
-    /// and issue #733 for rationale.
-    #[wasm_bindgen]
-    pub fn verify_proof(&self, proof_json: &str) -> std::result::Result<bool, JsValue> {
-        crate::verification::verify_merkle_proof(proof_json)
-    }
-
     /// Get information about all registered collections.
     ///
     /// Returns an array of collection info objects.

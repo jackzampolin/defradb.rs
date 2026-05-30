@@ -38,6 +38,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const BUCKET_MS: i64 = 1_000;
 const PARENT_BUCKET_MS: i64 = 2_000;
 const BASE_OFFSET_BUCKETS: i64 = 3;
+const FIRST_WINDOW_SETTLE_MS: i64 = 350;
+const FINAL_WINDOW_SETTLE_MS: i64 = 350;
 
 fn format_timestamp(timestamp: DateTime<Utc>) -> String {
     if timestamp.timestamp_subsec_nanos() == 0 {
@@ -333,7 +335,7 @@ async fn downsample_test(cluster: TestCluster) {
         "Metric2Rollup should stay empty before the first time bucket closes",
     );
 
-    sleep_until(first_window_end + ChronoDuration::milliseconds(350)).await;
+    sleep_until(first_window_end + ChronoDuration::milliseconds(FIRST_WINDOW_SETTLE_MS)).await;
 
     let first_rollup = wait_for_rollup(
         &client,
@@ -373,6 +375,13 @@ async fn downsample_test(cluster: TestCluster) {
         ))
         .expect("update metric to 30");
 
+    client
+        .query(&format!(
+            r#"mutation {{ update_Metric(docID: "{source_doc_id}", input: {{ts: "{}", value: 40}}) {{ _docID }} }}"#,
+            format_timestamp(t4)
+        ))
+        .expect("update metric to 40");
+
     let stale_rollup = query_rollup(&client, "Metric2Rollup", &source_doc_id)
         .expect("Metric2Rollup row should still exist during an incomplete bucket");
     assert_rollup_row(
@@ -388,14 +397,7 @@ async fn downsample_test(cluster: TestCluster) {
         20,
     );
 
-    client
-        .query(&format!(
-            r#"mutation {{ update_Metric(docID: "{source_doc_id}", input: {{ts: "{}", value: 40}}) {{ _docID }} }}"#,
-            format_timestamp(t4)
-        ))
-        .expect("update metric to 40");
-
-    sleep_until(second_window_end + ChronoDuration::milliseconds(350)).await;
+    sleep_until(second_window_end + ChronoDuration::milliseconds(FINAL_WINDOW_SETTLE_MS)).await;
 
     let second_rollup = wait_for_rollup(
         &client,

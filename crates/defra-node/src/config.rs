@@ -1,5 +1,11 @@
 //! Configuration types for the embedded DefraDB node.
 
+#[cfg(feature = "http")]
+use std::time::Duration;
+
+#[cfg(feature = "http")]
+use db::{DEFAULT_TRANSACTION_CLEANUP_INTERVAL, DEFAULT_TRANSACTION_IDLE_TIMEOUT};
+
 /// Document ACP configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -22,23 +28,52 @@ pub struct SourceHubConfig {
 #[cfg(feature = "http")]
 pub struct HttpConfig {
     pub address: std::net::SocketAddr,
+    pub(crate) request_timeout: Duration,
+    pub(crate) transaction_idle_timeout: Duration,
+    pub(crate) transaction_cleanup_interval: Duration,
     pub(crate) extra_routes: Option<axum::Router>,
 }
 
 #[cfg(feature = "http")]
 impl HttpConfig {
     pub fn new(port: u16) -> Self {
-        Self {
-            address: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-            extra_routes: None,
-        }
+        Self::with_addr(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
     }
 
     pub fn with_addr(addr: impl Into<std::net::SocketAddr>) -> Self {
         Self {
             address: addr.into(),
+            request_timeout: Duration::from_secs(
+                defra_http::ServerConfig::default().request_timeout,
+            ),
+            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
+            transaction_cleanup_interval: DEFAULT_TRANSACTION_CLEANUP_INTERVAL,
             extra_routes: None,
         }
+    }
+
+    /// Set the HTTP request timeout.
+    ///
+    /// `Duration::ZERO` disables request timeouts.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    /// Set the max idle age for explicit HTTP transactions.
+    ///
+    /// `Duration::ZERO` disables idle transaction cleanup.
+    pub fn with_transaction_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.transaction_idle_timeout = timeout;
+        self
+    }
+
+    /// Set the interval between explicit HTTP transaction cleanup sweeps.
+    ///
+    /// Must be non-zero when transaction idle cleanup is enabled.
+    pub fn with_transaction_cleanup_interval(mut self, interval: Duration) -> Self {
+        self.transaction_cleanup_interval = interval;
+        self
     }
 
     pub fn with_extra_routes(mut self, extra: axum::Router) -> Self {

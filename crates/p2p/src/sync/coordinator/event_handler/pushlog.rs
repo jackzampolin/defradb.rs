@@ -24,6 +24,38 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             "Received PushLog request"
         );
 
+        if let Err(e) = self
+            .check_pushlog_access_str(peer_id.as_str(), &request.collection_id)
+            .await
+        {
+            tracing::warn!(
+                peer_id = %peer_id,
+                collection_id = %request.collection_id,
+                doc_id = %request.doc_id,
+                "Rejecting PushLog request from unauthorized peer"
+            );
+            let reply = PushLogReply::error(
+                &request.message_id,
+                &format!(
+                    "access denied: not authorized for collection {}",
+                    request.collection_id
+                ),
+            );
+            if let Err(send_err) = self
+                .runtime
+                .transport
+                .send_pushlog_response(token, reply)
+                .await
+            {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    error = %send_err,
+                    "Failed to send access denied response"
+                );
+            }
+            return Err(e);
+        }
+
         let is_explicit_replicator =
             self.is_registered_replicator(peer_id.as_str(), &request.collection_id);
 
@@ -41,7 +73,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     error = %e,
                     "Failed to parse CID from PushLog request - sending error response"
                 );
-                let reply = PushLogReply::error(&request.metadata.message_id, &error_msg);
+                let reply = PushLogReply::error(&request.message_id, &error_msg);
                 if let Err(send_err) = self
                     .runtime
                     .transport
@@ -83,8 +115,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         let reply = match &process_result {
-            Ok(()) => PushLogReply::success(&request.metadata.message_id),
-            Err(e) => PushLogReply::error(&request.metadata.message_id, &e.to_string()),
+            Ok(()) => PushLogReply::success(&request.message_id),
+            Err(e) => PushLogReply::error(&request.message_id, &e.to_string()),
         };
 
         if let Err(e) = self
@@ -122,9 +154,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             peer_id = %peer_id,
             doc_id = %request.doc_id,
             collection_id = %request.collection_id,
-            message_id = %request.metadata.message_id,
+            message_id = %request.message_id,
             "Received PushLog request via two-stream protocol (Go compatibility)"
         );
+
+        // Go's direct replicator comm channel calls `processPushlogRequest`
+        // with `isReplicator=true`, which skips the receiver-side pre-merge
+        // collection access check. This two-stream protocol is that direct
+        // replicator channel in Rust. Keep pubsub PushLog ingress guarded
+        // above, and keep merge-time ACP/explicit replay checks downstream.
 
         // Parse CID
         let cid = match Cid::try_from(request.cid.as_ref()) {
@@ -140,7 +178,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     error = %e,
                     "Failed to parse CID from two-stream request - sending error response"
                 );
-                let mut reply = PushLogReply::error(&request.metadata.message_id, &error_msg);
+                let mut reply = PushLogReply::error(&request.message_id, &error_msg);
                 if let Err(sign_err) = sign_with_transport(&self.runtime.transport, &mut reply) {
                     tracing::error!(error = %sign_err, "Failed to sign invalid CID response");
                 }
@@ -163,8 +201,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .await;
 
         let mut reply = match &process_result {
-            Ok(()) => PushLogReply::success(&request.metadata.message_id),
-            Err(e) => PushLogReply::error(&request.metadata.message_id, &e.to_string()),
+            Ok(()) => PushLogReply::success(&request.message_id),
+            Err(e) => PushLogReply::error(&request.message_id, &e.to_string()),
         };
 
         if let Err(e) = sign_with_transport(&self.runtime.transport, &mut reply) {
@@ -189,17 +227,18 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         reply: PushLogReply,
         _token: Option<T::ResponseToken>,
     ) {
-        if let Err(e) = self
+        let send_result = self
             .runtime
             .transport
             .send_two_stream_response(peer_id, reply)
-            .await
-        {
+            .await;
+
+        if let Err(e) = send_result {
             if e.is_connection_like() {
                 tracing::debug!(
                     peer_id = %peer_id,
                     error = %e,
-                    "Peer disconnected before the fallback two-stream response could be sent"
+                    "Peer disconnected before the two-stream response could be sent"
                 );
             } else {
                 tracing::warn!(

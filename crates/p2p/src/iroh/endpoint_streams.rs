@@ -10,10 +10,13 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-use crate::message::PushLogReply;
+use crate::error::Error;
+use crate::message::{Message, PushLogReply};
 use crate::transport::{PeerId, TransportEvent};
 
-use super::endpoint::{join_peer_to_subscriptions, track_task, SpawnedTasks, TopicSubscription};
+use super::endpoint::{
+    join_peer_to_subscription_senders, track_task, SpawnedTasks, SubscriptionSenders,
+};
 use super::peer_map::{endpoint_id_to_peer_id, PeerMap};
 use super::protocols;
 
@@ -25,7 +28,7 @@ pub(super) async fn handle_incoming(
     pending_pushlog_replies: &Arc<
         parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
     >,
-    subscriptions: &HashMap<String, TopicSubscription>,
+    subscription_senders: &SubscriptionSenders,
     spawned_tasks: &SpawnedTasks,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
@@ -90,7 +93,7 @@ pub(super) async fn handle_incoming(
     }
 
     if is_new {
-        join_peer_to_subscriptions(subscriptions, remote_id).await;
+        join_peer_to_subscription_senders(subscription_senders, remote_id).await;
     }
 
     // Spawn handler for this connection's streams
@@ -216,17 +219,8 @@ async fn dispatch_stream(
             }
         }
         x if x == protocols::ALPN_TWOSTREAM => {
-            let payload = protocols::read_message_bytes(recv, protocols::MAX_MESSAGE_SIZE).await?;
-            if let Ok(reply) = serde_cbor::from_slice::<PushLogReply>(&payload) {
-                let sender = pending_pushlog_replies.lock().remove(&reply.message_id);
-                if let Some(sender) = sender {
-                    let _ = sender.send(reply);
-                    return Ok(());
-                }
-            }
-
-            let request: crate::message::PushLogRequest = serde_cbor::from_slice(&payload)
-                .map_err(|e| crate::error::Error::Codec(e.to_string()))?;
+            let request: crate::message::PushLogRequest =
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
             if event_tx
                 .send(TransportEvent::TwoStreamRequest {
                     peer_id: peer_id.clone(),
@@ -239,6 +233,25 @@ async fn dispatch_stream(
                 .is_err()
             {
                 warn!("Event channel closed, cannot emit TwoStreamRequest");
+            }
+        }
+        x if x == protocols::ALPN_TWOSTREAM_RESP => {
+            let reply: PushLogReply =
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
+            let (sender, pending_len_after_remove) = {
+                let mut pending = pending_pushlog_replies.lock();
+                let sender = pending.remove(&reply.message_id);
+                (sender, pending.len())
+            };
+            if let Some(sender) = sender {
+                let _ = sender.send(reply);
+            } else {
+                warn!(
+                    peer_id = %peer_id,
+                    message_id = %reply.message_id,
+                    pending_reply_count = pending_len_after_remove,
+                    "Received unmatched two-stream reply on response protocol"
+                );
             }
         }
         x if x == protocols::ALPN_DOCSYNC => {
@@ -351,17 +364,119 @@ async fn dispatch_stream(
         x if x == protocols::ALPN_SE => {
             let request: crate::message::PushSEArtifactsRequest =
                 protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
+            verify_iroh_message(&request)?;
+            ensure_iroh_signed_sender(peer_id, request.sender_id.as_str())?;
             debug!(
                 peer_id = %peer_id,
                 collection_id = %request.collection_id,
                 artifact_count = request.artifacts.len(),
                 "Received SE artifacts"
             );
-            // SE artifact processing is handled at the database layer
+            let data = serde_cbor::to_vec(&request)
+                .map_err(|e| crate::error::Error::Codec(e.to_string()))?;
+            if event_tx
+                .send(TransportEvent::SEArtifactsReceived {
+                    peer_id: peer_id.clone(),
+                    data,
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit SEArtifactsReceived");
+            }
+        }
+        x if x == protocols::ALPN_SE_QUERY_REQ => {
+            let request: crate::message::QuerySEArtifactsRequest =
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
+            verify_iroh_message(&request)?;
+            ensure_iroh_signed_sender(peer_id, request.sender_id.as_str())?;
+            debug!(
+                peer_id = %peer_id,
+                message_id = %request.message_id,
+                collection_id = %request.collection_id,
+                query_count = request.queries.len(),
+                "Received SE query request"
+            );
+            if event_tx
+                .send(TransportEvent::SEQueryRequest {
+                    peer_id: peer_id.clone(),
+                    request,
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit SEQueryRequest");
+            }
+        }
+        x if x == protocols::ALPN_SE_QUERY_RESP => {
+            let reply: crate::message::QuerySEArtifactsReply =
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
+            verify_iroh_message(&reply)?;
+            ensure_iroh_signed_sender(peer_id, reply.sender_id.as_str())?;
+            debug!(
+                peer_id = %peer_id,
+                message_id = %reply.message_id,
+                doc_count = reply.doc_ids.len(),
+                "Received SE query response"
+            );
+            if event_tx
+                .send(TransportEvent::SEQueryReply {
+                    peer_id: peer_id.clone(),
+                    reply,
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit SEQueryReply");
+            }
         }
         _ => {
             debug!("Unknown ALPN: {:?}", String::from_utf8_lossy(alpn));
         }
     }
     Ok(())
+}
+
+fn ensure_iroh_signed_sender(peer_id: &PeerId, sender_id: &str) -> crate::error::Result<()> {
+    if sender_id == peer_id.as_str() {
+        Ok(())
+    } else {
+        Err(crate::error::Error::Transport(format!(
+            "transport peer {} did not match signed sender {}",
+            peer_id, sender_id
+        )))
+    }
+}
+
+fn verify_iroh_message<M>(msg: &M) -> crate::error::Result<()>
+where
+    M: Message + serde::Serialize + Clone,
+{
+    let signature = msg.signature().ok_or(Error::MissingSignature)?;
+
+    let sender_id: iroh::EndpointId = msg
+        .sender_id()
+        .parse()
+        .map_err(|error: iroh::KeyParsingError| Error::InvalidPeerId(error.to_string()))?;
+
+    let pubkey_bytes: [u8; 32] = msg
+        .pubkey()
+        .try_into()
+        .map_err(|_| Error::PublicKeyDecode("expected 32-byte iroh public key".into()))?;
+    let pubkey = iroh::PublicKey::from_bytes(&pubkey_bytes)
+        .map_err(|error| Error::PublicKeyDecode(error.to_string()))?;
+
+    if pubkey != sender_id {
+        return Err(Error::PubkeyPeerIdMismatch);
+    }
+
+    let signature = iroh::Signature::try_from(signature).map_err(|_| Error::InvalidSignature)?;
+    let mut msg_for_verify = msg.clone();
+    msg_for_verify.set_signature(None);
+    let bytes =
+        serde_cbor::to_vec(&msg_for_verify).map_err(|e| Error::CborSerialization(e.to_string()))?;
+
+    pubkey
+        .verify(&bytes, &signature)
+        .map_err(|_| Error::InvalidSignature)
 }

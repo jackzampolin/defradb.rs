@@ -32,6 +32,7 @@ mod cbor;
 mod docsync;
 mod identity;
 mod metadata;
+pub mod pubsub;
 mod pushlog;
 mod se;
 mod traits;

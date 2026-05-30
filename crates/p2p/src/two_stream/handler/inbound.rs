@@ -5,27 +5,15 @@ use std::sync::Arc;
 use libp2p::{PeerId, Stream};
 use parking_lot::Mutex;
 
-use super::PendingResponses;
+use super::{ensure_transport_sender, PendingResponseKey, PendingResponses};
 use crate::error::{Error, Result};
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, IdentityRequest,
-    IdentityResponse, Message, PushLogReply, PushLogRequest,
+    IdentityResponse, PushLogReply, PushLogRequest,
 };
 use crate::two_stream::event::TwoStreamEvent;
 
 use super::TwoStreamHandler;
-
-fn ensure_transport_sender<M: Message>(peer_id: &PeerId, msg: &M) -> Result<()> {
-    if msg.sender_id() == peer_id.to_string() {
-        Ok(())
-    } else {
-        Err(Error::Transport(format!(
-            "transport peer {} did not match signed sender {}",
-            peer_id,
-            msg.sender_id()
-        )))
-    }
-}
 
 impl TwoStreamHandler {
     /// Handle an incoming stream on the request protocol.
@@ -63,7 +51,7 @@ impl TwoStreamHandler {
             ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
                 peer_id = %peer_id,
-                message_id = %request.metadata.message_id,
+                message_id = %request.message_id,
                 doc_id = %request.doc_id,
                 "Successfully read PushLog request on two-stream protocol"
             );
@@ -76,7 +64,7 @@ impl TwoStreamHandler {
             ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
                 peer_id = %peer_id,
-                message_id = %request.metadata.message_id,
+                message_id = %request.message_id,
                 doc_ids = ?request.doc_ids,
                 "Successfully read DocSync request on two-stream protocol"
             );
@@ -89,7 +77,7 @@ impl TwoStreamHandler {
             ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
                 peer_id = %peer_id,
-                message_id = %request.metadata.message_id,
+                message_id = %request.message_id,
                 collection_id = %request.collection_id,
                 "Successfully read BranchableSync request on two-stream protocol"
             );
@@ -102,7 +90,7 @@ impl TwoStreamHandler {
             ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
                 peer_id = %peer_id,
-                message_id = %request.metadata.message_id,
+                message_id = %request.message_id,
                 requester = %request.peer_id,
                 "Successfully read Identity request on two-stream protocol"
             );
@@ -160,9 +148,27 @@ impl TwoStreamHandler {
         match serde_cbor::from_slice::<BranchableSyncReply>(&buf) {
             Ok(reply) if !reply.collection_id.is_empty() => {
                 crate::verify_message(&reply)?;
+                ensure_transport_sender(&peer_id, &reply)?;
+                let message_id = reply.message_id.clone();
+                let pending_key = PendingResponseKey::new(peer_id, message_id.clone());
+                let is_pending_branchable_sync = {
+                    let mut pending = pending.lock();
+                    pending.consume_branchable_sync_request(&pending_key)
+                };
+
+                if !is_pending_branchable_sync {
+                    tracing::debug!(
+                        peer_id = %peer_id,
+                        message_id = %message_id,
+                        collection_id = %reply.collection_id,
+                        "Ignoring BranchableSync response for unknown request"
+                    );
+                    return Ok(None);
+                }
+
                 tracing::debug!(
                     peer_id = %peer_id,
-                    message_id = %reply.message_id,
+                    message_id = %message_id,
                     collection_id = %reply.collection_id,
                     heads_count = reply.heads.len(),
                     "Received BranchableSync response on two-stream protocol"
@@ -185,13 +191,15 @@ impl TwoStreamHandler {
         // shape changes the serialized bytes and fails validation.
         if let Ok(response) = serde_cbor::from_slice::<PushLogReply>(&buf) {
             let message_id = response.message_id.clone();
+            let pending_key = PendingResponseKey::new(peer_id, message_id.clone());
             let is_pending_pushlog = {
                 let pending = pending.lock();
-                pending.channels.contains_key(&message_id)
+                pending.channels.contains_key(&pending_key)
             };
 
             if is_pending_pushlog {
                 crate::verify_message(&response)?;
+                ensure_transport_sender(&peer_id, &response)?;
 
                 tracing::debug!(
                     peer_id = %peer_id,
@@ -201,7 +209,7 @@ impl TwoStreamHandler {
 
                 let sender = {
                     let mut pending = pending.lock();
-                    pending.channels.remove(&message_id)
+                    pending.channels.remove(&pending_key)
                 };
 
                 if let Some(sender) = sender {
@@ -214,11 +222,13 @@ impl TwoStreamHandler {
 
         if let Ok(reply) = serde_cbor::from_slice::<IdentityResponse>(&buf) {
             crate::verify_message(&reply)?;
+            ensure_transport_sender(&peer_id, &reply)?;
             let message_id = reply.message_id.clone();
+            let pending_key = PendingResponseKey::new(peer_id, message_id.clone());
 
             let sender = {
                 let mut pending = pending.lock();
-                pending.identity_channels.remove(&message_id)
+                pending.identity_channels.remove(&pending_key)
             };
 
             if let Some(sender) = sender {
@@ -238,9 +248,38 @@ impl TwoStreamHandler {
         // shape and DocSyncReply defaults Results to empty, so DocSync must come later.
         if let Ok(reply) = serde_cbor::from_slice::<DocSyncReply>(&buf) {
             crate::verify_message(&reply)?;
+            ensure_transport_sender(&peer_id, &reply)?;
             let message_id = reply.message_id.clone();
+            let pending_key = PendingResponseKey::new(peer_id, message_id.clone());
 
-            // No pending channel - this is a DocSyncReply for the coordinator
+            let doc_sync_sender = {
+                let mut pending = pending.lock();
+                pending.doc_sync_channels.remove(&pending_key)
+            };
+            if let Some(sender) = doc_sync_sender {
+                let _ = sender.send(reply);
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    message_id = %message_id,
+                    "Received awaited DocSync response on two-stream protocol"
+                );
+                return Ok(None);
+            }
+
+            let is_pending_doc_sync = {
+                let mut pending = pending.lock();
+                pending.consume_doc_sync_request(&pending_key)
+            };
+
+            if !is_pending_doc_sync {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    message_id = %message_id,
+                    "Ignoring DocSync response for unknown request"
+                );
+                return Ok(None);
+            }
+
             tracing::debug!(
                 peer_id = %peer_id,
                 message_id = %message_id,
@@ -253,7 +292,9 @@ impl TwoStreamHandler {
         // Fallback: try PushLogReply in case the message doesn't parse as DocSyncReply
         if let Ok(response) = serde_cbor::from_slice::<PushLogReply>(&buf) {
             crate::verify_message(&response)?;
+            ensure_transport_sender(&peer_id, &response)?;
             let message_id = response.message_id.clone();
+            let pending_key = PendingResponseKey::new(peer_id, message_id.clone());
 
             tracing::debug!(
                 peer_id = %peer_id,
@@ -263,7 +304,7 @@ impl TwoStreamHandler {
 
             let sender = {
                 let mut pending = pending.lock();
-                pending.channels.remove(&message_id)
+                pending.channels.remove(&pending_key)
             };
 
             if let Some(sender) = sender {

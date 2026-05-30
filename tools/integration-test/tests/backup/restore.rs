@@ -1,4 +1,6 @@
-use integration_test::{for_each_runtime, TestCluster};
+use std::process::Command;
+
+use integration_test::{for_each_runtime, DefraClient, NodeKind, TestCluster};
 
 async fn backup_restore_test(cluster: TestCluster) {
     let client = cluster.client(0);
@@ -40,13 +42,12 @@ async fn backup_restore_test(cluster: TestCluster) {
 
     // Build backup paths inside the node's rootdir
     let node_dir = cluster.nodes[0].rootdir.to_str().unwrap().to_string();
+    let node_url = cluster.nodes[0].http_addr.as_str();
     let full_path = format!("{}/full.json", node_dir);
     let users_path = format!("{}/users.json", node_dir);
 
     // 3. Full backup export
-    client
-        .backup_export(&full_path, &[], true)
-        .expect("backup_export full failed");
+    backup_export(&client, node_url, &full_path, &[], true).expect("backup_export full failed");
 
     // Verify file exists with content
     let full_content = std::fs::read_to_string(&full_path).expect("failed to read full.json");
@@ -60,8 +61,7 @@ async fn backup_restore_test(cluster: TestCluster) {
     );
 
     // 4. Partial backup (Users only)
-    client
-        .backup_export(&users_path, &["User"], false)
+    backup_export(&client, node_url, &users_path, &["User"], false)
         .expect("backup_export users failed");
 
     let users_content = std::fs::read_to_string(&users_path).expect("failed to read users.json");
@@ -98,9 +98,7 @@ async fn backup_restore_test(cluster: TestCluster) {
     );
 
     // 7. Import full backup
-    client
-        .backup_import(&full_path)
-        .expect("backup_import full failed");
+    backup_import(&client, node_url, &full_path).expect("backup_import full failed");
 
     // 8. Verify restored data
     let restored_users = client
@@ -132,9 +130,7 @@ async fn backup_restore_test(cluster: TestCluster) {
         .expect("truncate User for partial restore");
 
     // 11. Partial restore (Users only)
-    client
-        .backup_import(&users_path)
-        .expect("backup_import users failed");
+    backup_import(&client, node_url, &users_path).expect("backup_import users failed");
 
     // 12. Verify: 2 users restored, 3 posts untouched
     let final_users = client
@@ -154,6 +150,51 @@ async fn backup_restore_test(cluster: TestCluster) {
         3,
         "expected 3 posts still present"
     );
+}
+
+fn backup_export(
+    client: &DefraClient,
+    node_url: &str,
+    file: &str,
+    collections: &[&str],
+    pretty: bool,
+) -> Result<String, String> {
+    let mut args = vec!["client", "backup", "export", file];
+    for collection in collections {
+        args.push("-c");
+        args.push(collection);
+    }
+    if pretty {
+        args.push("--pretty");
+    }
+    exec_with_development(client, node_url, &args)
+}
+
+fn backup_import(client: &DefraClient, node_url: &str, file: &str) -> Result<String, String> {
+    exec_with_development(client, node_url, &["client", "backup", "import", file])
+}
+
+fn exec_with_development(
+    client: &DefraClient,
+    node_url: &str,
+    args: &[&str],
+) -> Result<String, String> {
+    let mut command = Command::new(client.binary_path());
+    command.arg("--url").arg(node_url);
+    if client.kind() == NodeKind::Rust {
+        command.arg("--development");
+    }
+    let output = command.args(args).output().map_err(|err| err.to_string())?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(format!(
+            "command failed (exit {}): stderr={}, stdout={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim(),
+            String::from_utf8_lossy(&output.stdout).trim()
+        ))
+    }
 }
 
 for_each_runtime!(backup_restore, backup_restore_test, .with_development());

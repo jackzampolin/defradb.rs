@@ -6,6 +6,9 @@ use thiserror::Error;
 /// Result type for P2P operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Error text used when the coordinator rejects a request due to peer backpressure.
+pub const RATE_LIMITED_MESSAGE: &str = "rate limited: too many requests, retry later";
+
 /// P2P error types.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -343,6 +346,11 @@ impl Error {
     }
 }
 
+/// Returns true when a peer reply carries the coordinator's explicit rate-limit signal.
+pub fn is_rate_limited_message(message: &str) -> bool {
+    message == RATE_LIMITED_MESSAGE
+}
+
 /// Convert a blockstore CID verification error into its P2P counterpart.
 ///
 /// Called at each P2P block ingestion boundary so callers get typed errors
@@ -372,12 +380,14 @@ impl From<serde_cbor::Error> for Error {
     }
 }
 
+#[cfg(feature = "libp2p-transport")]
 impl From<libp2p::TransportError<io::Error>> for Error {
     fn from(e: libp2p::TransportError<io::Error>) -> Self {
         Error::Transport(e.to_string())
     }
 }
 
+#[cfg(feature = "libp2p-transport")]
 impl From<libp2p::multiaddr::Error> for Error {
     fn from(e: libp2p::multiaddr::Error) -> Self {
         Error::InvalidMultiaddr(e.to_string())

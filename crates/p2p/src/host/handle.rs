@@ -277,6 +277,20 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Subscribe to an arbitrary topic string (for pubsub_rpc response
+    /// sub-topics that aren't enumerated in [`DefraTopic`]).
+    pub async fn subscribe_raw(&self, topic: String) -> Result<bool> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SubscribeRaw {
+                topic,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Publish a message to a GossipSub topic.
     ///
     /// Returns the message ID on success.
@@ -295,6 +309,46 @@ impl P2PHostHandle {
             .await
             .map_err(|_| Error::ChannelSend)?;
         response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Publish raw bytes to a GossipSub topic.
+    ///
+    /// Used by the `pubsub_rpc` layer (issue #828) where the publisher
+    /// controls the wire format end-to-end — the request is an opaque
+    /// CBOR-encoded struct or an `InternalResponse` envelope. The topic
+    /// string may be a dynamically-named per-peer response sub-topic, so
+    /// it is passed as a plain `String` rather than a `DefraTopic`
+    /// variant.
+    pub async fn publish_raw(&self, topic: String, data: Vec<u8>) -> Result<gossipsub::MessageId> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::PublishRaw {
+                topic,
+                data,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Register a topic as `pubsub_rpc`-owned.
+    ///
+    /// Incoming messages on this topic (and its `<topic>/<peer>/_response`
+    /// sub-topics) will be delivered to the consumer as
+    /// [`super::event::HostEvent::GossipRawMessage`] instead of the default
+    /// PushLog-broadcast decoding. Safe to call multiple times with the
+    /// same topic; the host stores a set, not a list.
+    pub async fn register_pubsub_rpc_topic(&self, topic: String) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::RegisterPubsubRpcTopic {
+                topic,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)
     }
 
     /// Get list of subscribed topics.
@@ -614,6 +668,44 @@ impl P2PHostHandle {
             .send(HostCommand::SendSEArtifacts {
                 peer_id,
                 request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Send an SE query request to a peer via the SE query two-stream protocol.
+    ///
+    /// The response arrives asynchronously as [`HostEvent::SEQueryReply`].
+    pub async fn send_se_query_request(
+        &self,
+        peer_id: PeerId,
+        request: crate::message::QuerySEArtifactsRequest,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendSEQueryRequest {
+                peer_id,
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Send an SE query response to a peer via the SE query two-stream protocol.
+    pub async fn send_se_query_response(
+        &self,
+        peer_id: PeerId,
+        reply: crate::message::QuerySEArtifactsReply,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendSEQueryResponse {
+                peer_id,
+                reply,
                 response: response_tx,
             })
             .await

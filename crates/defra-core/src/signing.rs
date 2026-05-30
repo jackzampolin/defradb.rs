@@ -171,11 +171,16 @@ impl SigningConfig {
     }
 
     /// Normalize owned private key bytes to an exactly sized allocation.
-    pub fn private_key_bytes_from_vec(bytes: Vec<u8>) -> Vec<u8> {
+    pub fn private_key_bytes_from_vec(mut bytes: Vec<u8>) -> Vec<u8> {
         if bytes.len() == bytes.capacity() {
             bytes
         } else {
-            Self::private_key_bytes_from_slice(&bytes)
+            let exact = Self::private_key_bytes_from_slice(&bytes);
+            // Wipe spare capacity too: oversized buffers may have held key
+            // material while being built incrementally.
+            bytes.resize(bytes.capacity(), 0);
+            bytes.zeroize();
+            exact
         }
     }
 
@@ -245,29 +250,39 @@ pub fn find_remote_signer_did() -> Option<String> {
     })
 }
 
-/// Resolve signing config for a request identity.
+/// Resolve signing config for a request identity when signing is enabled.
 ///
 /// When an explicit identity DID is provided, uses that identity's signing config
 /// (falling back to node identity for JWT-authenticated users without local keys).
+///
+/// Callers that need to respect a runtime signing flag should use
+/// [`resolve_signing_config_with_flag`].
+pub fn resolve_signing_config(
+    identity_did: Option<&str>,
+    node_identity_did: Option<&str>,
+) -> Option<SigningConfig> {
+    resolve_signing_config_with_flag(identity_did, node_identity_did, true)
+}
+
+/// Resolve signing config for a request identity.
+///
+/// When signing is enabled and an explicit identity DID is provided, uses that
+/// identity's signing config (falling back to node identity for JWT-authenticated
+/// users without local keys).
 ///
 /// When no identity is provided (anonymous request):
 /// - If signing is enabled on the node, uses the node identity to sign
 ///   (matching Go's `!signingDisabled` check)
 /// - Otherwise, produces unsigned blocks
-pub fn resolve_signing_config(
-    identity_did: Option<&str>,
-    node_identity_did: Option<&str>,
-) -> Option<SigningConfig> {
-    resolve_signing_config_with_flag(identity_did, node_identity_did, false)
-}
-
-/// Like `resolve_signing_config` but with explicit signing-enabled flag.
-/// When `signing_enabled` is true, anonymous requests still sign with the node identity.
 pub fn resolve_signing_config_with_flag(
     identity_did: Option<&str>,
     node_identity_did: Option<&str>,
     signing_enabled: bool,
 ) -> Option<SigningConfig> {
+    if !signing_enabled {
+        return None;
+    }
+
     match identity_did {
         Some(did) if !did.is_empty() => {
             get_identity(did).or_else(|| node_identity_did.and_then(get_identity))
@@ -350,6 +365,10 @@ mod tests {
         store_identity("did:key:request", make_config("request"));
         store_identity("did:key:node", make_config("node"));
 
+        let disabled =
+            resolve_signing_config_with_flag(Some("did:key:request"), Some("did:key:node"), false);
+        assert!(disabled.is_none());
+
         let resolved = resolve_signing_config(Some("did:key:request"), Some("did:key:node"))
             .expect("request identity should resolve");
         assert_eq!(resolved.public_key_hex, "request");
@@ -408,6 +427,25 @@ mod tests {
         let mut bytes = Vec::with_capacity(64);
         bytes.extend_from_slice(&[1_u8, 2, 3, 4]);
         assert_eq!(bytes.capacity(), 64);
+
+        let exact = SigningConfig::private_key_bytes_from_vec(bytes);
+
+        assert_eq!(exact, vec![1, 2, 3, 4]);
+        assert_eq!(exact.len(), exact.capacity());
+    }
+
+    #[test]
+    fn private_key_bytes_from_slice_uses_exact_capacity() {
+        let bytes = SigningConfig::private_key_bytes_from_slice(&[1_u8, 2, 3, 4]);
+
+        assert_eq!(bytes, vec![1, 2, 3, 4]);
+        assert_eq!(bytes.len(), bytes.capacity());
+    }
+
+    #[test]
+    fn private_key_bytes_from_vec_reuses_exact_capacity() {
+        let bytes = vec![1_u8, 2, 3, 4];
+        assert_eq!(bytes.len(), bytes.capacity());
 
         let exact = SigningConfig::private_key_bytes_from_vec(bytes);
 

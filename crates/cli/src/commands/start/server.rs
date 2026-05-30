@@ -1,6 +1,7 @@
 //! Store and server initialization
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::{info, warn};
 
@@ -16,7 +17,7 @@ impl Node {
     /// This function creates the database, loads collections, sets up the query
     /// runner with proper transaction support, and returns the HTTP server.
     ///
-    /// Returns a tuple of (P2PHostHandle, P2PTasks, downsample task, HTTP Server)
+    /// Returns a tuple of (P2PHostHandle, P2PTasks, background tasks, HTTP Server)
     /// where the background tasks are tracked for graceful shutdown.
     pub(super) async fn init_store_and_server<S>(
         store: Arc<S>,
@@ -29,6 +30,7 @@ impl Node {
     ) -> Result<(
         Option<p2p::P2PHostHandle>,
         Option<P2PTasks>,
+        Option<tokio::task::JoinHandle<()>>,
         Option<tokio::task::JoinHandle<()>>,
         defra_http::Server,
         Option<pg_compat::PgServer>,
@@ -169,7 +171,33 @@ impl Node {
             acp_setup.document_acp.clone(),
             nac_adapter.clone(),
             p2p_setup.mutator.clone(),
+            p2p_setup.txn_broadcaster.clone(),
         );
+
+        let txn_cleanup_task = if config.api.transaction_idle_timeout > 0 {
+            if config.api.transaction_cleanup_interval == 0 {
+                return Err(Error::InvalidConfig(
+                    "api.transaction_cleanup_interval must be > 0 when transaction_idle_timeout is enabled"
+                        .to_string(),
+                ));
+            }
+
+            let max_idle_age = Duration::from_secs(config.api.transaction_idle_timeout);
+            let sweep_interval = Duration::from_secs(config.api.transaction_cleanup_interval);
+            info!(
+                max_idle_age_secs = config.api.transaction_idle_timeout,
+                sweep_interval_secs = config.api.transaction_cleanup_interval,
+                "Transaction idle cleanup worker enabled"
+            );
+            Some(
+                query_setup
+                    .registry
+                    .start_stale_transaction_cleanup(max_idle_age, sweep_interval),
+            )
+        } else {
+            info!("Transaction idle cleanup worker disabled");
+            None
+        };
 
         let zanzibar_store_for_pg = zanzibar_store.clone();
         let http_server = Self::build_http_server(HttpServerArgs {
@@ -196,6 +224,7 @@ impl Node {
             p2p_setup.host_handle,
             p2p_setup.p2p_tasks,
             downsample_task,
+            txn_cleanup_task,
             http_server,
             pg_server,
         ))

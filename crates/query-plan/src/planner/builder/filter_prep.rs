@@ -58,7 +58,10 @@ impl super::Planner {
                     for (k, v) in doc_ids_filter.conditions() {
                         merged.insert(k.clone(), v.clone());
                     }
-                    Some(Filter::from_conditions(merged))
+                    Some(Filter::from_conditions_with_max_depth(
+                        merged,
+                        existing.max_depth(),
+                    ))
                 }
                 None => Some(doc_ids_filter),
             }
@@ -140,7 +143,15 @@ impl super::Planner {
             if combined_conditions.is_empty() {
                 None
             } else {
-                Some(Filter::from_conditions(combined_conditions))
+                let max_depth = scalar_filter_raw
+                    .as_ref()
+                    .or(relation_filter.as_ref())
+                    .map(Filter::max_depth)
+                    .unwrap_or(self.query_limits.max_filter_depth);
+                Some(Filter::from_conditions_with_max_depth(
+                    combined_conditions,
+                    max_depth,
+                ))
             }
         };
 

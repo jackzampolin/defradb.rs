@@ -188,18 +188,7 @@ pub fn private_key_from_bytes(key_type: KeyType, bytes: &[u8]) -> Result<Box<dyn
 /// # Returns
 /// A boxed private key implementing the PrivateKey trait
 pub fn private_key_from_string(key_type: KeyType, hex_str: &str) -> Result<Box<dyn PrivateKey>> {
-    let bytes = hex::decode(hex_str).map_err(|e| {
-        let preview = if hex_str.len() > 64 {
-            format!(
-                "{}...(truncated, length: {})",
-                &hex_str[..64],
-                hex_str.len()
-            )
-        } else {
-            hex_str.to_string()
-        };
-        crypto_error(format!("invalid hex string: {}, input: {}", e, preview))
-    })?;
+    let bytes = hex::decode(hex_str).map_err(|_| crypto_error("invalid private key hex format"))?;
     private_key_from_bytes(key_type, &bytes)
 }
 

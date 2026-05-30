@@ -129,6 +129,10 @@ impl From<db_index::Error> for Error {
 }
 
 impl Error {
+    pub fn is_unique_constraint_violation(&self) -> bool {
+        matches!(self, Error::Storage(source) if source.is_unique_constraint_violation())
+    }
+
     pub fn document_at_key(key: &[u8], source: document::Error) -> Self {
         Self::DocumentAtKey {
             key: String::from_utf8_lossy(key).into_owned(),
@@ -158,12 +162,20 @@ impl Error {
     }
 }
 
+pub(crate) fn index_write_query_error(operation: &str, error: Error) -> query::error::QueryError {
+    if error.is_unique_constraint_violation() {
+        query::error::QueryError::execution(storage::corekv::UNIQUE_CONSTRAINT_VIOLATION_MESSAGE)
+    } else {
+        query::error::QueryError::execution(format!("{operation} error: {error}"))
+    }
+}
+
 /// Result type for database operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests {
-    use super::Error;
+    use super::{index_write_query_error, Error};
 
     #[test]
     fn document_at_key_preserves_display_message() {
@@ -211,5 +223,17 @@ mod tests {
 
         assert!(matches!(error, Error::TextDecode { .. }));
         assert!(error.to_string().starts_with("invalid version encoding: "));
+    }
+
+    #[test]
+    fn index_write_query_error_preserves_unique_constraint_message() {
+        let error = Error::Storage(storage::Error::UniqueConstraintViolation);
+
+        assert!(error.is_unique_constraint_violation());
+        assert!(matches!(
+            index_write_query_error("create", error),
+            query::error::QueryError::Execution(message)
+                if message == storage::corekv::UNIQUE_CONSTRAINT_VIOLATION_MESSAGE
+        ));
     }
 }

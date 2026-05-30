@@ -7,9 +7,12 @@ use acp::ReplicatedDocActorRelationships;
 
 use super::config::ReplicationConfig;
 use super::result::ReplicationResult;
+use crate::sync::coordinator::dag_context::DagFetchContext;
 use crate::sync::coordinator::SyncCoordinator;
 use crate::sync::manager::SyncEvent;
-use crate::sync::merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
+use crate::sync::merge::{
+    BlockMetadata, MergeBlock, MergeHandler, MergeOutcome, RecoveredBlockMetadata,
+};
 use crate::transport::P2PTransport;
 
 pub(super) struct DagFetchRequest {
@@ -20,6 +23,70 @@ pub(super) struct DagFetchRequest {
     collection_id: String,
     creator: String,
     sender_peer: Option<String>,
+    is_explicit_replicator: bool,
+    explicit_replay_authorization: Option<crate::ExplicitReplayAuthorization>,
+    acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
+}
+
+struct MergeEventMetadata {
+    cid: Cid,
+    doc_id: String,
+    collection_id: String,
+    creator: String,
+    sender_peer: Option<String>,
+    is_explicit_replicator: bool,
+    explicit_replay_authorization: Option<crate::ExplicitReplayAuthorization>,
+    acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
+}
+
+fn merge_block_from_metadata(
+    cid: Cid,
+    block_data: bytes::Bytes,
+    metadata: &BlockMetadata<'_>,
+) -> Option<MergeBlock> {
+    Some(MergeBlock {
+        cid,
+        block_data,
+        doc_id: metadata.doc_id?.to_string(),
+        collection_id: metadata.collection_id?.to_string(),
+        creator: metadata.creator?.to_string(),
+        sender_peer: metadata.sender_peer.map(str::to_string),
+        is_explicit_replicator: metadata.is_explicit_replicator,
+        explicit_replay_authorization: metadata.explicit_replay_authorization.clone(),
+        verified_creator: metadata.verified_creator.clone(),
+    })
+}
+
+fn recovered_metadata_error(cid: Cid, details: impl Into<String>) -> ReplicationResult {
+    ReplicationResult::Failed {
+        cid,
+        error: format!("Recovery metadata incomplete: {}", details.into()),
+    }
+}
+
+async fn recover_metadata_for_block<H>(
+    handler: &H,
+    cid: Cid,
+    block_data: &[u8],
+) -> Result<RecoveredBlockMetadata, ReplicationResult>
+where
+    H: MergeHandler + ?Sized + 'static,
+{
+    match handler.recover_block_metadata(&cid, block_data).await {
+        Ok(Some(metadata)) if metadata.is_complete() => Ok(metadata),
+        Ok(Some(metadata)) => Err(recovered_metadata_error(
+            cid,
+            format!(
+                "handler returned doc_id='{}', collection_id='{}', creator='{}'",
+                metadata.doc_id, metadata.collection_id, metadata.creator
+            ),
+        )),
+        Ok(None) => Err(recovered_metadata_error(
+            cid,
+            "handler did not return recovered metadata",
+        )),
+        Err(error) => Err(recovered_metadata_error(cid, error.to_string())),
+    }
 }
 
 /// Handle a DagNeedsFetch event by initiating a Bitswap sync.
@@ -39,6 +106,9 @@ where
         collection_id,
         creator,
         sender_peer,
+        is_explicit_replicator,
+        explicit_replay_authorization,
+        acp_actor_relationships,
     } = request;
 
     tracing::debug!(
@@ -58,18 +128,20 @@ where
         let transport = coordinator.transport().clone();
         let blockstore = coordinator.blockstore().clone();
         let event_tx = coordinator.manager().event_sender();
+        let limiter = coordinator.dag_fetch_limiter();
         let source_peer = crate::transport::PeerId::new(source_peer);
+        let permit_peer = source_peer.clone();
+        let context = DagFetchContext::new(doc_id, collection_id, creator, source_peer)
+            .with_explicit_replicator(is_explicit_replicator)
+            .with_explicit_replay_authorization(explicit_replay_authorization)
+            .with_acp_actor_relationships(acp_actor_relationships);
 
         coordinator.spawn_background_task("pushlog_fetch_dag", async move {
+            let Some(_permits) = limiter.acquire(&permit_peer).await else {
+                return;
+            };
             crate::sync::coordinator::dag_fetcher::poll_fetch_dag(
-                transport,
-                blockstore,
-                event_tx,
-                root_cid,
-                doc_id,
-                collection_id,
-                creator,
-                source_peer,
+                transport, blockstore, event_tx, root_cid, context,
             )
             .await;
         });
@@ -148,7 +220,45 @@ where
         }
     };
 
-    // Extract doc_id and collection_id for use in result (use empty string if recovery mode)
+    let recovered_metadata: Option<RecoveredBlockMetadata>;
+    let metadata = if metadata.is_recovery && metadata.is_incomplete() {
+        let recovered = match recover_metadata_for_block(handler, cid, &block_data).await {
+            Ok(recovered) => recovered,
+            Err(result) => return result,
+        };
+        recovered_metadata = Some(recovered);
+        let recovered = recovered_metadata
+            .as_ref()
+            .expect("recovered metadata was just stored");
+        BlockMetadata::recovered(
+            &recovered.doc_id,
+            &recovered.collection_id,
+            &recovered.creator,
+            recovered.verified_creator.clone(),
+        )
+    } else {
+        metadata
+    };
+
+    if metadata.explicit_replay_authorization.is_some() {
+        let Some(block) = merge_block_from_metadata(cid, block_data.clone(), &metadata) else {
+            return ReplicationResult::Failed {
+                cid,
+                error: "Explicit replay authorization requires complete block metadata".to_string(),
+            };
+        };
+        if let Err(error) = handler
+            .validate_authorization(block.explicit_replay_authorization.as_ref(), &block)
+            .await
+        {
+            return ReplicationResult::Failed {
+                cid,
+                error: error.to_string(),
+            };
+        }
+    }
+
+    // Extract doc_id and collection_id for use in result.
     let doc_id_for_result = metadata.doc_id.unwrap_or("").to_string();
     let collection_id_for_result = metadata.collection_id.unwrap_or("").to_string();
     let collection_id_for_broadcast = metadata.collection_id.unwrap_or("");
@@ -277,31 +387,112 @@ where
 
 /// Returns true if this event type can be batch-merged.
 pub(super) fn is_mergeable_event(event: &SyncEvent) -> bool {
+    matches!(
+        event,
+        SyncEvent::BlockReceived { .. } | SyncEvent::DagReady { .. }
+    )
+}
+
+fn event_merge_cid(event: &SyncEvent) -> Option<Cid> {
     match event {
-        SyncEvent::BlockReceived {
-            acp_actor_relationships,
-            ..
-        }
-        | SyncEvent::DagReady {
-            acp_actor_relationships,
-            ..
-        } => acp_actor_relationships.is_none(),
-        _ => false,
+        SyncEvent::BlockReceived { cid, .. } => Some(*cid),
+        SyncEvent::DagReady { root_cid, .. } => Some(*root_cid),
+        _ => None,
+    }
+}
+
+async fn skipped_if_already_merged<B, T>(
+    coordinator: &SyncCoordinator<B, T>,
+    event: &SyncEvent,
+    cid: Cid,
+) -> Option<ReplicationResult>
+where
+    B: Blockstore + 'static,
+    T: P2PTransport,
+{
+    match coordinator.manager().is_merged(&cid).await {
+        Ok(false) => None,
+        Ok(true) => match event {
+            SyncEvent::BlockReceived {
+                doc_id,
+                collection_id,
+                creator,
+                acp_actor_relationships,
+                ..
+            } => Some(
+                already_merged_result(
+                    coordinator,
+                    cid,
+                    doc_id,
+                    collection_id,
+                    creator,
+                    acp_actor_relationships.as_ref(),
+                )
+                .await,
+            ),
+            SyncEvent::DagReady {
+                root_cid,
+                doc_id,
+                collection_id,
+                creator,
+                acp_actor_relationships,
+                ..
+            } => {
+                coordinator.clear_pending_dag(root_cid);
+                Some(
+                    already_merged_result(
+                        coordinator,
+                        cid,
+                        doc_id,
+                        collection_id,
+                        creator,
+                        acp_actor_relationships.as_ref(),
+                    )
+                    .await,
+                )
+            }
+            _ => None,
+        },
+        Err(error) => Some(ReplicationResult::Failed {
+            cid,
+            error: error.to_string(),
+        }),
+    }
+}
+
+async fn already_merged_result<B, T>(
+    coordinator: &SyncCoordinator<B, T>,
+    cid: Cid,
+    doc_id: &str,
+    collection_id: &str,
+    creator: &str,
+    acp_actor_relationships: Option<&ReplicatedDocActorRelationships>,
+) -> ReplicationResult
+where
+    B: Blockstore + 'static,
+    T: P2PTransport,
+{
+    if let Err(error) = coordinator
+        .apply_replicated_actor_relationships(doc_id, Some(creator), acp_actor_relationships)
+        .await
+    {
+        return ReplicationResult::Failed {
+            cid,
+            error: error.to_string(),
+        };
+    }
+
+    ReplicationResult::Skipped {
+        cid,
+        doc_id: doc_id.to_string(),
+        collection_id: collection_id.to_string(),
+        reason: "already merged".to_string(),
+        terminal: true,
     }
 }
 
 /// Extract merge block metadata from a SyncEvent.
-fn event_to_merge_metadata(
-    event: &SyncEvent,
-) -> (
-    Cid,
-    String,
-    String,
-    String,
-    Option<String>,
-    bool,
-    Option<crate::ExplicitReplayAuthorization>,
-) {
+fn event_to_merge_metadata(event: &SyncEvent) -> MergeEventMetadata {
     match event {
         SyncEvent::BlockReceived {
             cid,
@@ -311,16 +502,18 @@ fn event_to_merge_metadata(
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
+            acp_actor_relationships,
             ..
-        } => (
-            *cid,
-            doc_id.clone(),
-            collection_id.clone(),
-            creator.clone(),
-            sender_peer.clone(),
-            *is_explicit_replicator,
-            explicit_replay_authorization.clone(),
-        ),
+        } => MergeEventMetadata {
+            cid: *cid,
+            doc_id: doc_id.clone(),
+            collection_id: collection_id.clone(),
+            creator: creator.clone(),
+            sender_peer: sender_peer.clone(),
+            is_explicit_replicator: *is_explicit_replicator,
+            explicit_replay_authorization: explicit_replay_authorization.clone(),
+            acp_actor_relationships: acp_actor_relationships.clone(),
+        },
         SyncEvent::DagReady {
             root_cid,
             doc_id,
@@ -329,16 +522,18 @@ fn event_to_merge_metadata(
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
+            acp_actor_relationships,
             ..
-        } => (
-            *root_cid,
-            doc_id.clone(),
-            collection_id.clone(),
-            creator.clone(),
-            sender_peer.clone(),
-            *is_explicit_replicator,
-            explicit_replay_authorization.clone(),
-        ),
+        } => MergeEventMetadata {
+            cid: *root_cid,
+            doc_id: doc_id.clone(),
+            collection_id: collection_id.clone(),
+            creator: creator.clone(),
+            sender_peer: sender_peer.clone(),
+            is_explicit_replicator: *is_explicit_replicator,
+            explicit_replay_authorization: explicit_replay_authorization.clone(),
+            acp_actor_relationships: acp_actor_relationships.clone(),
+        },
         _ => unreachable!("is_mergeable_event should have filtered this"),
     }
 }
@@ -351,7 +546,7 @@ pub(super) async fn process_merge_batch<B, T, H>(
     coordinator: &SyncCoordinator<B, T>,
     events: Vec<SyncEvent>,
     handler: &H,
-    _config: &ReplicationConfig,
+    config: &ReplicationConfig,
 ) -> Vec<ReplicationResult>
 where
     B: Blockstore + 'static,
@@ -359,11 +554,12 @@ where
     H: MergeHandler + ?Sized + 'static,
 {
     let mut merge_blocks = Vec::with_capacity(events.len());
+    let mut acp_actor_relationships = Vec::with_capacity(events.len());
     let mut results = Vec::new();
 
     // Load block data for each event from blockstore
     for event in &events {
-        let (
+        let MergeEventMetadata {
             cid,
             doc_id,
             collection_id,
@@ -371,7 +567,8 @@ where
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
-        ) = event_to_merge_metadata(event);
+            acp_actor_relationships: relationships,
+        } = event_to_merge_metadata(event);
 
         if matches!(event, SyncEvent::DagReady { .. }) {
             coordinator.clear_pending_dag(&cid);
@@ -379,7 +576,7 @@ where
 
         match coordinator.blockstore().get(&cid).await {
             Ok(Some(data)) => {
-                merge_blocks.push(MergeBlock {
+                let block = MergeBlock {
                     cid,
                     block_data: data,
                     doc_id,
@@ -389,7 +586,21 @@ where
                     is_explicit_replicator,
                     explicit_replay_authorization,
                     verified_creator: None,
-                });
+                };
+
+                if let Err(error) = handler
+                    .validate_authorization(block.explicit_replay_authorization.as_ref(), &block)
+                    .await
+                {
+                    results.push(ReplicationResult::Failed {
+                        cid,
+                        error: error.to_string(),
+                    });
+                    continue;
+                }
+
+                merge_blocks.push(block);
+                acp_actor_relationships.push(relationships);
             }
             Ok(None) => {
                 results.push(ReplicationResult::Failed {
@@ -411,6 +622,7 @@ where
     }
 
     // Call handler.handle_block_batch()
+    let batch_result_start = results.len();
     let batch_results = handler.handle_block_batch(&merge_blocks).await;
 
     // Collect CIDs to mark as merged
@@ -454,17 +666,114 @@ where
                 count = merged_cids.len(),
                 "Failed to batch mark_as_merged"
             );
-            // Downgrade affected Merged results to MergedButNotMarked
+            // Downgrade affected terminal results to MergedButNotMarked.
             for result in &mut results {
-                if let ReplicationResult::Merged { cid, .. } = result {
-                    if merged_cids.contains(cid) {
-                        *result = ReplicationResult::MergedButNotMarked {
-                            cid: *cid,
-                            error: e.to_string(),
-                        };
-                    }
+                let cid = match result {
+                    ReplicationResult::Merged { cid, .. } => *cid,
+                    ReplicationResult::Skipped {
+                        cid,
+                        terminal: true,
+                        ..
+                    } => *cid,
+                    _ => continue,
+                };
+
+                if merged_cids.contains(&cid) {
+                    *result = ReplicationResult::MergedButNotMarked {
+                        cid,
+                        error: e.to_string(),
+                    };
                 }
             }
+        }
+    }
+
+    if config.rebroadcast_on_merge {
+        for (index, block) in merge_blocks.iter().enumerate() {
+            let result_index = batch_result_start + index;
+            if block.collection_id.is_empty()
+                || !matches!(results[result_index], ReplicationResult::Merged { .. })
+            {
+                continue;
+            }
+
+            match coordinator
+                .broadcast_local_update(
+                    &block.cid,
+                    block.block_data.as_ref(),
+                    &block.doc_id,
+                    &block.collection_id,
+                )
+                .await
+            {
+                Ok(crate::sync::BroadcastResult::Success) => {}
+                Ok(crate::sync::BroadcastResult::PartialDocumentOnly { collection_error }) => {
+                    results[result_index] = ReplicationResult::MergedButBroadcastFailed {
+                        cid: block.cid,
+                        doc_id: block.doc_id.clone(),
+                        collection_id: block.collection_id.clone(),
+                        broadcast_error: format!(
+                            "Partial: document topic succeeded but collection topic failed: {}",
+                            collection_error
+                        ),
+                    };
+                }
+                Ok(crate::sync::BroadcastResult::PartialCollectionOnly { document_error }) => {
+                    results[result_index] = ReplicationResult::MergedButBroadcastFailed {
+                        cid: block.cid,
+                        doc_id: block.doc_id.clone(),
+                        collection_id: block.collection_id.clone(),
+                        broadcast_error: format!(
+                            "Partial: collection topic succeeded but document topic failed: {}",
+                            document_error
+                        ),
+                    };
+                }
+                Err(error) => {
+                    results[result_index] = ReplicationResult::MergedButBroadcastFailed {
+                        cid: block.cid,
+                        doc_id: block.doc_id.clone(),
+                        collection_id: block.collection_id.clone(),
+                        broadcast_error: error.to_string(),
+                    };
+                }
+            }
+        }
+    }
+
+    for ((block, relationships), result) in merge_blocks
+        .iter()
+        .zip(acp_actor_relationships.iter())
+        .zip(results[batch_result_start..].iter_mut())
+    {
+        let should_apply = match result {
+            ReplicationResult::Merged { .. } => true,
+            ReplicationResult::Skipped { terminal, .. } => *terminal,
+            _ => false,
+        };
+
+        if !should_apply {
+            continue;
+        }
+
+        let effective_creator = Some(
+            block
+                .verified_creator
+                .as_deref()
+                .unwrap_or(block.creator.as_str()),
+        );
+        if let Err(error) = coordinator
+            .apply_replicated_actor_relationships(
+                &block.doc_id,
+                effective_creator,
+                relationships.as_ref(),
+            )
+            .await
+        {
+            *result = ReplicationResult::Failed {
+                cid: block.cid,
+                error: error.to_string(),
+            };
         }
     }
 
@@ -549,7 +858,9 @@ where
             collection_id,
             creator,
             sender_peer,
-            ..
+            is_explicit_replicator,
+            explicit_replay_authorization,
+            acp_actor_relationships,
         } => {
             handle_dag_needs_fetch(
                 coordinator,
@@ -561,6 +872,9 @@ where
                     collection_id,
                     creator,
                     sender_peer,
+                    is_explicit_replicator,
+                    explicit_replay_authorization,
+                    acp_actor_relationships,
                 },
             )
             .await
@@ -600,4 +914,69 @@ where
             .await
         }
     }
+}
+
+/// Process a sync event after acquiring the CID-level merge guard.
+pub(super) async fn process_event_serialized<B, T, H>(
+    coordinator: &SyncCoordinator<B, T>,
+    event: SyncEvent,
+    handler: &H,
+    config: &ReplicationConfig,
+) -> ReplicationResult
+where
+    B: Blockstore + 'static,
+    T: P2PTransport,
+    H: MergeHandler + ?Sized + 'static,
+{
+    let Some(cid) = event_merge_cid(&event) else {
+        return process_event(coordinator, event, handler, config).await;
+    };
+
+    loop {
+        match coordinator
+            .manager()
+            .process_queue()
+            .try_acquire(&cid)
+            .await
+        {
+            Ok(_guard) => return process_event(coordinator, event, handler, config).await,
+            Err(wait_for_current_merge) => {
+                if wait_for_current_merge.await.is_err() {
+                    tracing::debug!(
+                        cid = %cid,
+                        "CID merge guard owner was cancelled; checking merge status"
+                    );
+                }
+                if let Some(result) = skipped_if_already_merged(coordinator, &event, cid).await {
+                    return result;
+                }
+            }
+        }
+    }
+}
+
+pub(super) async fn process_events_individually<B, T, H>(
+    coordinator: &SyncCoordinator<B, T>,
+    events: Vec<SyncEvent>,
+    handler: &H,
+    config: &ReplicationConfig,
+) -> Vec<ReplicationResult>
+where
+    B: Blockstore + 'static,
+    T: P2PTransport,
+    H: MergeHandler + ?Sized + 'static,
+{
+    let mut results = Vec::with_capacity(events.len());
+    for event in events {
+        results.push(process_event_serialized(coordinator, event, handler, config).await);
+    }
+    results
+}
+
+pub(super) fn has_duplicate_merge_cids(events: &[SyncEvent]) -> bool {
+    let mut seen = std::collections::HashSet::with_capacity(events.len());
+    events
+        .iter()
+        .filter_map(event_merge_cid)
+        .any(|cid| !seen.insert(cid))
 }

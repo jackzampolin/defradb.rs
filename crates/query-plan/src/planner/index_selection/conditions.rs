@@ -1,6 +1,7 @@
 //! Condition analysis and scoring for index selection.
 
-use schema::IndexDescription;
+use document::NormalValue;
+use schema::{FieldKind, IndexDescription};
 use serde_json::Map;
 use serde_json::Value as JsonValue;
 
@@ -10,7 +11,11 @@ use super::types::{ConditionValue, FieldCondition};
 
 /// Determines if a filter condition should force a fallback to full scan instead of using the index.
 /// Matches Go's `shouldFallbackToFullScan` in indexer_iterators.go.
-pub(super) fn should_fallback_to_full_scan(cond: &FieldCondition, is_json_field: bool) -> bool {
+pub(super) fn should_fallback_to_full_scan(
+    cond: &FieldCondition,
+    is_json_field: bool,
+    field_kind: Option<&FieldKind>,
+) -> bool {
     let is_null = matches!(
         &cond.value,
         ConditionValue::Single(document::NormalValue::Null)
@@ -39,6 +44,29 @@ pub(super) fn should_fallback_to_full_scan(cond: &FieldCondition, is_json_field:
     // JSON indexes only store leaf values (scalars), not objects or arrays.
     // If the filter value is a complex type, fall back to full scan.
     if is_json_field {
+        // JSON ordering operators only work with numeric values. Non-numeric
+        // values must take the normal scan path so filter evaluation returns
+        // the correct type error.
+        if matches!(
+            cond.op,
+            FilterOp::Gt | FilterOp::Gte | FilterOp::Lt | FilterOp::Lte
+        ) && !is_numeric_filter_value(&cond.value)
+            && !(cond.op == FilterOp::Lte && is_null && !has_nested_path)
+        {
+            return true;
+        }
+
+        // Root-level JSON LIKE filters need all documents. JSON indexes only
+        // store leaf values, so objects and arrays without leaf index entries
+        // would otherwise be missed.
+        if matches!(
+            cond.op,
+            FilterOp::Like | FilterOp::Nlike | FilterOp::Ilike | FilterOp::Nilike
+        ) && !has_nested_path
+        {
+            return true;
+        }
+
         // _in/_nin with empty values (all objects were filtered out) → fallback
         if matches!(cond.op, FilterOp::In | FilterOp::Nin) {
             if let ConditionValue::Multiple(vs) = &cond.value {
@@ -49,7 +77,23 @@ pub(super) fn should_fallback_to_full_scan(cond: &FieldCondition, is_json_field:
         }
     }
 
+    if field_kind.map(|kind| kind.is_array()).unwrap_or(false)
+        && matches!(cond.op, FilterOp::Eq | FilterOp::Ne)
+        && matches!(cond.value, ConditionValue::Multiple(_))
+    {
+        return true;
+    }
+
     false
+}
+
+fn is_numeric_filter_value(value: &ConditionValue) -> bool {
+    matches!(
+        value,
+        ConditionValue::Single(NormalValue::Int(_))
+            | ConditionValue::Single(NormalValue::Float32(_))
+            | ConditionValue::Single(NormalValue::Float64(_))
+    )
 }
 
 /// Extract field conditions from a filter.

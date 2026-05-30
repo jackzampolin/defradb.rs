@@ -56,12 +56,25 @@ impl<S: Store> P2PHost<S> {
             HostCommand::Unsubscribe { topic, response } => {
                 self.handle_unsubscribe(topic, response);
             }
+            HostCommand::SubscribeRaw { topic, response } => {
+                self.handle_subscribe_raw(topic, response);
+            }
             HostCommand::Publish {
                 topic,
                 message,
                 response,
             } => {
                 self.handle_publish(topic, message, response);
+            }
+            HostCommand::PublishRaw {
+                topic,
+                data,
+                response,
+            } => {
+                self.handle_publish_raw(topic, data, response);
+            }
+            HostCommand::RegisterPubsubRpcTopic { topic, response } => {
+                self.handle_register_pubsub_rpc_topic(topic, response);
             }
             HostCommand::SubscribedTopics { response } => {
                 self.handle_subscribed_topics(response);
@@ -128,6 +141,20 @@ impl<S: Store> P2PHost<S> {
                 response,
             } => {
                 self.handle_send_se_artifacts(peer_id, request, response);
+            }
+            HostCommand::SendSEQueryRequest {
+                peer_id,
+                request,
+                response,
+            } => {
+                self.handle_send_se_query_request(peer_id, request, response);
+            }
+            HostCommand::SendSEQueryResponse {
+                peer_id,
+                reply,
+                response,
+            } => {
+                self.handle_send_se_query_response(peer_id, reply, response);
             }
             HostCommand::CreateReplicator {
                 peer_id,

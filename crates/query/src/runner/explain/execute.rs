@@ -13,7 +13,7 @@ use crate::planner::index_selection::{
     can_be_ordered_by_index, can_or_filter_use_index, select_best_index,
 };
 use crate::planner::Planner;
-use crate::query_parse::{parse_query_with_variables, ExplainType};
+use crate::query_parse::{parse_query_with_limits, ExplainType};
 use crate::txn::TransactionRegistry;
 
 use super::super::fetcher::FetcherWrapper;
@@ -29,7 +29,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         caller_identity: Option<Did>,
         variables: Option<&std::collections::HashMap<String, JsonValue>>,
     ) -> Result<JsonValue> {
-        let mut selects = parse_query_with_variables(query, variables)?;
+        let mut selects = parse_query_with_limits(query, variables, self.query_limits)?;
         if query.contains("@exhaustive") {
             for s in &mut selects {
                 s.exhaustive = true;
@@ -259,6 +259,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 collections_map.values().map(|c| (**c).clone()).collect();
 
             let mut planner = Planner::new(collections)
+                .with_query_limits(self.query_limits)
                 .with_fetcher(Arc::new(fetcher_arc))
                 .with_acp(self.acp.clone(), caller_identity.clone());
             if let Some(ref lens_store) = self.lens_store {
@@ -344,6 +345,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 mapping.clone(),
                 &collection,
                 acp_filter,
+                self.query_limits,
             )?;
 
             // Execute the plan and count iterations

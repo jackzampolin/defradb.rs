@@ -16,7 +16,6 @@ fn default_start_args() -> StartArgs {
         allowed_origins: None,
         pubkeypath: None,
         privkeypath: None,
-        development: None,
         no_encryption: None,
         no_telemetry: None,
         no_signing: None,
@@ -38,13 +37,19 @@ fn default_start_args() -> StartArgs {
         max_car_size: None,
         stream_timeout: None,
         max_p2p_tasks: None,
-        max_connections_in: None,
-        max_connections_out: None,
+        connection_manager_low_water: None,
+        connection_manager_high_water: None,
+        connection_manager_grace_period_ms: None,
         max_connections_per_peer: None,
         p2p_rate_limit_burst: None,
         p2p_rate_limit_rate: None,
         max_merge_depth: None,
         query_timeout: None,
+        transaction_idle_timeout: None,
+        transaction_cleanup_interval: None,
+        query_max_depth: None,
+        query_max_width: None,
+        query_max_filter_depth: None,
         p2p_transport: None,
         pg_address: None,
         acp_cache_ttl: None,
@@ -80,6 +85,19 @@ fn test_apply_to_config_valid_store_succeeds() {
 }
 
 #[test]
+fn test_apply_to_config_rejects_zero_transaction_cleanup_interval_when_enabled() {
+    let mut config = Config::default();
+    let mut args = default_start_args();
+    args.transaction_idle_timeout = Some(600);
+    args.transaction_cleanup_interval = Some(0);
+
+    let result = args.apply_to_config(&mut config);
+    assert!(
+        matches!(result, Err(Error::InvalidConfig(message)) if message.contains("transaction_cleanup_interval"))
+    );
+}
+
+#[test]
 fn test_apply_to_config_redb_store_succeeds() {
     let mut config = Config::default();
     config.datastore.store = DatastoreType::Memory; // Start with non-default
@@ -105,7 +123,6 @@ fn test_apply_to_config_all_flags() {
         allowed_origins: Some(vec!["http://localhost:3000".to_string()]),
         pubkeypath: Some("/path/to/pub.key".to_string()),
         privkeypath: Some("/path/to/priv.key".to_string()),
-        development: Some(true),
         no_encryption: Some(true),
         no_telemetry: Some(true),
         no_signing: Some(true),
@@ -127,13 +144,19 @@ fn test_apply_to_config_all_flags() {
         max_car_size: Some(128 * 1024 * 1024),
         stream_timeout: Some(60),
         max_p2p_tasks: Some(128),
-        max_connections_in: Some(200),
-        max_connections_out: Some(800),
+        connection_manager_low_water: Some(200),
+        connection_manager_high_water: Some(800),
+        connection_manager_grace_period_ms: Some(10_000),
         max_connections_per_peer: Some(8),
         p2p_rate_limit_burst: Some(32),
         p2p_rate_limit_rate: Some(4.5),
         max_merge_depth: Some(2048),
         query_timeout: Some(45),
+        transaction_idle_timeout: Some(900),
+        transaction_cleanup_interval: Some(30),
+        query_max_depth: Some(12),
+        query_max_width: Some(64),
+        query_max_filter_depth: Some(24),
         p2p_transport: None,
         pg_address: None,
         acp_cache_ttl: None,
@@ -153,8 +176,9 @@ fn test_apply_to_config_all_flags() {
     assert_eq!(config.net.max_car_size, 128 * 1024 * 1024);
     assert_eq!(config.net.stream_timeout, 60);
     assert_eq!(config.net.max_p2p_tasks, 128);
-    assert_eq!(config.net.max_connections_in, 200);
-    assert_eq!(config.net.max_connections_out, 800);
+    assert_eq!(config.net.connection_manager_low_water, 200);
+    assert_eq!(config.net.connection_manager_high_water, 800);
+    assert_eq!(config.net.connection_manager_grace_period_ms, 10_000);
     assert_eq!(config.net.max_connections_per_peer, 8);
     assert_eq!(config.net.p2p_rate_limit_burst, 32);
     assert_eq!(config.net.p2p_rate_limit_rate, 4.5);
@@ -173,7 +197,6 @@ fn test_apply_to_config_all_flags() {
     assert_eq!(config.api.allowed_origins, vec!["http://localhost:3000"]);
     assert_eq!(config.api.pubkey_path, "/path/to/pub.key");
     assert_eq!(config.api.privkey_path, "/path/to/priv.key");
-    assert!(config.development);
     assert!(config.datastore.no_encryption);
     assert!(config.telemetry_disabled);
     assert!(config.datastore.no_signing);
@@ -181,6 +204,11 @@ fn test_apply_to_config_all_flags() {
     assert!(config.datastore.no_searchable_encryption);
     assert_eq!(config.replicator_retry_intervals, vec![10, 20, 30]);
     assert_eq!(config.api.query_timeout, 45);
+    assert_eq!(config.api.transaction_idle_timeout, 900);
+    assert_eq!(config.api.transaction_cleanup_interval, 30);
+    assert_eq!(config.api.query_max_depth, 12);
+    assert_eq!(config.api.query_max_width, 64);
+    assert_eq!(config.api.query_max_filter_depth, 24);
     assert_eq!(config.embedding.url, "http://localhost:11434/v1");
     assert_eq!(config.embedding.model, "nomic-embed-text");
     assert_eq!(config.embedding.api_key_env, "CUSTOM_EMBEDDING_KEY");

@@ -283,11 +283,14 @@ impl HttpClient {
     }
 
     /// Helper for POST requests with plain text body
-    async fn post_text(&self, url: &str, text: &str) -> Result<Response> {
-        let request = self
+    async fn post_text(&self, url: &str, text: &str, txn_id: Option<&str>) -> Result<Response> {
+        let mut request = self
             .add_auth_header(self.client.post(url))
             .header("Content-Type", "text/plain")
             .body(text.to_string());
+        if let Some(txn_id) = txn_id {
+            request = request.header("x-defradb-tx", txn_id);
+        }
 
         if self.verbose {
             eprintln!(">>> POST {}", url);
@@ -326,6 +329,35 @@ impl HttpClient {
 
         let result: T = response.json().await?;
         Ok(result)
+    }
+
+    /// Helper for POST requests with a pre-serialized JSON body and optional txn header.
+    async fn post_json_text(
+        &self,
+        url: &str,
+        text: &str,
+        txn_id: Option<&str>,
+    ) -> Result<Response> {
+        let mut request = self
+            .add_auth_header(self.client.post(url))
+            .header("Content-Type", "application/json")
+            .body(text.to_string());
+        if let Some(txn_id) = txn_id {
+            request = request.header("x-defradb-tx", txn_id);
+        }
+
+        if self.verbose {
+            eprintln!(">>> POST {}", url);
+            eprintln!(">>> Body: {}", text);
+        }
+
+        let response = request.send().await.map_err(Error::HttpRequest)?;
+
+        if self.verbose {
+            eprintln!("<<< HTTP {}", response.status());
+        }
+
+        Ok(response)
     }
 
     async fn request_json<T: DeserializeOwned>(

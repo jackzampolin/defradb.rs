@@ -17,19 +17,18 @@ pub struct IndexArgs {
 #[derive(Subcommand, Debug)]
 #[non_exhaustive]
 pub enum IndexCommand {
-    /// Create a new index on a collection
-    #[command(alias = "create")]
-    New(IndexCreateArgs),
+    /// Make a new index on a collection
+    New(IndexNewArgs),
     /// List indexes (optionally filtered by collection)
     List(IndexListArgs),
     /// Delete an index by name
     Delete(IndexDeleteArgs),
 }
 
-/// Arguments for index create command
+/// Arguments for index new command
 #[derive(Args, Debug)]
-pub struct IndexCreateArgs {
-    /// The collection to create the index on
+pub struct IndexNewArgs {
+    /// The collection to make the index on
     #[arg(long, short = 'c')]
     pub collection: String,
 
@@ -41,7 +40,7 @@ pub struct IndexCreateArgs {
     #[arg(long, short = 'n')]
     pub name: Option<String>,
 
-    /// Create a unique index
+    /// Make a unique index
     #[arg(long)]
     pub unique: bool,
 }
@@ -77,8 +76,8 @@ impl IndexArgs {
     }
 }
 
-impl IndexCreateArgs {
-    /// Execute the index create command
+impl IndexNewArgs {
+    /// Execute the index new command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         validate_identifier(&self.collection)?;
         for field in &self.fields {
@@ -147,8 +146,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_index_create_args() {
-        let args = IndexCreateArgs {
+    fn test_index_new_args() {
+        let args = IndexNewArgs {
             collection: "Users".to_string(),
             fields: vec!["name".to_string(), "email".to_string()],
             name: Some("idx_name_email".to_string()),
@@ -160,8 +159,8 @@ mod tests {
     }
 
     #[test]
-    fn test_index_create_args_minimal() {
-        let args = IndexCreateArgs {
+    fn test_index_new_args_minimal() {
+        let args = IndexNewArgs {
             collection: "Users".to_string(),
             fields: vec!["name".to_string()],
             name: None,

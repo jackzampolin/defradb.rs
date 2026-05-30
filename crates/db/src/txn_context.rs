@@ -4,8 +4,8 @@ use query::fetcher::CollectionProvider;
 use query::mutator::DocMutator;
 use query::runner::DocFetcher;
 use query::txn::{DeferredAcpMutations, TransactionContext};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use storage::corekv::Store;
 
 use crate::collection_provider::TxnCollectionProvider;
@@ -25,31 +25,66 @@ pub struct DbTransactionContext<S: Store> {
     readonly: bool,
     fetcher: Arc<LensedDocFetcher<S>>,
     deferred_acp_mutations: Arc<DeferredAcpMutations>,
+    broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
+    action_lock: Arc<async_lock::Mutex<()>>,
     created_at: Instant,
+    last_request_seen: Mutex<Instant>,
 }
 
 impl<S: Store> DbTransactionContext<S> {
-    /// Create a new transaction context.
-    pub(crate) fn new(
+    /// Create a transaction context. Pass `Some(broadcaster)` to forward
+    /// committed writes to P2P peers; pass `None` for the non-P2P case.
+    pub(crate) fn new_with_broadcaster(
         db: Arc<DB<S>>,
         id: String,
         readonly: bool,
         fetcher: Arc<LensedDocFetcher<S>>,
         deferred_acp_mutations: Arc<DeferredAcpMutations>,
+        broadcaster: Option<Arc<dyn crate::event_emission::TxnBroadcaster>>,
     ) -> Self {
+        let now = Instant::now();
         Self {
             db,
             id,
             readonly,
             fetcher,
             deferred_acp_mutations,
-            created_at: Instant::now(),
+            broadcaster,
+            action_lock: Arc::new(async_lock::Mutex::new(())),
+            created_at: now,
+            last_request_seen: Mutex::new(now),
         }
     }
 
     /// Get the instant when this transaction was created.
     pub fn created_at(&self) -> Instant {
         self.created_at
+    }
+
+    /// Mark that a request used this transaction.
+    pub(crate) fn touch(&self) {
+        match self.last_request_seen.lock() {
+            Ok(mut last_request_seen) => {
+                *last_request_seen = Instant::now();
+            }
+            Err(poisoned) => {
+                let mut last_request_seen = poisoned.into_inner();
+                *last_request_seen = Instant::now();
+            }
+        }
+    }
+
+    /// Get the instant when this transaction last saw a request.
+    pub fn last_request_seen(&self) -> Instant {
+        match self.last_request_seen.lock() {
+            Ok(last_request_seen) => *last_request_seen,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    /// Get how long this transaction has been idle.
+    pub fn idle_for(&self, now: Instant) -> Duration {
+        now.duration_since(self.last_request_seen())
     }
 }
 
@@ -82,9 +117,10 @@ impl<S: Store + 'static> DbTransactionContext<S> {
     /// Should only be called on non-readonly transactions. Attempting to mutate
     /// via the returned mutator on a readonly transaction will fail.
     pub fn doc_mutator(&self) -> Arc<dyn DocMutator> {
-        Arc::new(DbDocMutator::from_shared_txn(
+        Arc::new(DbDocMutator::from_shared_txn_with_broadcaster(
             self.db.clone(),
             self.fetcher.shared_txn(),
+            self.broadcaster.clone(),
         ))
     }
 
@@ -98,6 +134,10 @@ impl<S: Store + 'static> DbTransactionContext<S> {
 
     pub(crate) fn lens_store(&self) -> Arc<dyn lens::TransformStore> {
         self.fetcher.lens_store()
+    }
+
+    pub(crate) fn action_lock(&self) -> Arc<async_lock::Mutex<()>> {
+        self.action_lock.clone()
     }
 }
 
@@ -131,5 +171,9 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
 
     fn deferred_acp_mutations(&self) -> Option<Arc<DeferredAcpMutations>> {
         Some(self.deferred_acp_mutations.clone())
+    }
+
+    fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
+        Some(self.action_lock.clone())
     }
 }

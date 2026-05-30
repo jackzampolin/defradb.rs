@@ -2,6 +2,9 @@
 //!
 //! Generates search tags for encrypted-indexed fields using HMAC-SHA256.
 //! Matches Go's internal/se/se.go generateDocArtifacts and generateFieldArtifact.
+//! Passing `None` for `identity_pubkey` preserves Go-compatible tags. Passing
+//! `Some` enables Rust-only per-identity tag isolation and should be limited to
+//! Rust-only deployments until Go supports the same isolation input.
 
 use crypto::se::{generate_equality_tag, Artifact};
 use document::NormalValue;
@@ -42,7 +45,7 @@ pub fn generate_field_artifact(
     let identity_bytes = identity_pubkey.unwrap_or(&[]);
 
     // Generate tag based on index type
-    let tag = match enc_idx.index_type {
+    let tag = match &enc_idx.index_type {
         EncryptedIndexType::Equality => generate_equality_tag(
             enc_key,
             identity_bytes,

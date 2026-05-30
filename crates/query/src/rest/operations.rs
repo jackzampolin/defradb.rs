@@ -11,7 +11,7 @@ use crate::runner::QueryRunner;
 use crate::txn::TransactionRegistry;
 
 use super::error::{RestError, RestResult};
-use super::trait_def::RestOperations;
+use super::trait_def::{CollectionDocIdsPage, CollectionDocIdsPagination, RestOperations};
 
 /// Production implementation of REST operations using QueryRunner.
 ///
@@ -55,9 +55,28 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
         }
     }
 
-    fn build_list_ids_query(&self, collection: &str) -> String {
+    fn build_list_ids_query(
+        &self,
+        collection: &str,
+        pagination: Option<CollectionDocIdsPagination>,
+    ) -> String {
+        match pagination {
+            Some(pagination) => format!(
+                r#"{{ {collection}(limit: {limit}, offset: {offset}) {{ _docID }} }}"#,
+                collection = collection,
+                limit = pagination.limit,
+                offset = pagination.offset
+            ),
+            None => format!(
+                r#"{{ {collection} {{ _docID }} }}"#,
+                collection = collection
+            ),
+        }
+    }
+
+    fn build_count_query(&self, collection: &str) -> String {
         format!(
-            r#"{{ {collection} {{ _docID }} }}"#,
+            r#"{{ total: COUNT({collection}: {{}}) }}"#,
             collection = collection
         )
     }
@@ -135,6 +154,30 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
             .collect())
     }
 
+    fn extract_doc_id_total(&self, result: &JsonValue, collection: &str) -> RestResult<usize> {
+        let total = result
+            .get("total")
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| {
+                tracing::warn!(
+                    collection = %collection,
+                    result = ?result,
+                    "Count query result missing numeric total"
+                );
+                RestError::internal(format!(
+                    "expected numeric total for collection '{}'",
+                    collection
+                ))
+            })?;
+
+        usize::try_from(total).map_err(|_| {
+            RestError::internal(format!(
+                "document count for collection '{}' exceeds platform limits",
+                collection
+            ))
+        })
+    }
+
     async fn fetch_full_document(
         &self,
         collection: &str,
@@ -203,12 +246,58 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
             return Err(RestError::collection_not_found(collection));
         }
 
-        let query = self.build_list_ids_query(collection);
+        let query = self.build_list_ids_query(collection, None);
         let result = self
             .runner
             .execute_query_with_identity(&query, identity.cloned())
             .await?;
         self.extract_doc_ids(&result, collection)
+    }
+
+    async fn get_collection_doc_ids_page(
+        &self,
+        collection: &str,
+        pagination: CollectionDocIdsPagination,
+        identity: Option<&Did>,
+    ) -> RestResult<CollectionDocIdsPage> {
+        if !self
+            .runner
+            .has_collection(collection)
+            .await
+            .map_err(|e| RestError::internal(e.to_string()))?
+        {
+            return Err(RestError::collection_not_found(collection));
+        }
+
+        let count_query = self.build_count_query(collection);
+        let count_result = self
+            .runner
+            .execute_query_with_identity(&count_query, identity.cloned())
+            .await?;
+        let total = self.extract_doc_id_total(&count_result, collection)?;
+
+        if pagination.offset >= total {
+            return Ok(CollectionDocIdsPage {
+                doc_ids: Vec::new(),
+                total,
+                limit: pagination.limit,
+                offset: pagination.offset,
+            });
+        }
+
+        let query = self.build_list_ids_query(collection, Some(pagination));
+        let result = self
+            .runner
+            .execute_query_with_identity(&query, identity.cloned())
+            .await?;
+        let doc_ids = self.extract_doc_ids(&result, collection)?;
+
+        Ok(CollectionDocIdsPage {
+            doc_ids,
+            total,
+            limit: pagination.limit,
+            offset: pagination.offset,
+        })
     }
 
     async fn get_document(

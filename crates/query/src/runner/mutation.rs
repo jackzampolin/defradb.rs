@@ -11,7 +11,7 @@ use crate::mapper::{Mutation, MutationType, Requestable};
 use crate::mutator::DocMutator;
 use crate::plan::{CreateNode, DeleteNode, UpdateNode, UpsertNode};
 use crate::planner::PlanNode;
-use crate::query_parse::parse_mutations_with_variables;
+use crate::query_parse::parse_mutations_with_limits;
 use crate::txn::TransactionRegistry;
 
 use super::{DocFetcher, QueryRunner};
@@ -122,7 +122,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         variables: Option<&std::collections::HashMap<String, JsonValue>>,
         fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     ) -> Result<JsonValue> {
-        let mutations = parse_mutations_with_variables(mutation_str, variables)?;
+        let mutations = parse_mutations_with_limits(mutation_str, variables, self.query_limits)?;
         self.execute_parsed_mutations(mutations, mutator, caller_identity, fetcher_override)
             .await
     }
@@ -499,7 +499,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     None
                 }
                 None => {
-                    tracing::warn!(
+                    // No signing config is the normal case for nodes that don't
+                    // run with `--signer-type=...`. There is nothing to authorize
+                    // and nothing actionable for an operator to do, so this stays
+                    // at debug. The two `warn!` arms above remain warnings because
+                    // they signal a *partially* configured remote-signer setup.
+                    tracing::debug!(
                         collection = %mutation.collection_name,
                         "create mutation has no signing config; remote signer authorization skipped"
                     );
@@ -542,10 +547,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     node = node.with_doc_ids(doc_ids.clone());
                 }
 
-                // Always pass filter: for node-level resolution when no doc_ids,
-                // and for re-filtering results after update (Go compatibility)
-                if let Some(ref filter) = mutation.filter {
-                    node = node.with_filter(filter.clone());
+                // Pass the filter only when the node still needs to resolve it.
+                // If it was already resolved to doc IDs above, the filter must
+                // not be applied again to post-update document state.
+                if resolved_doc_ids.is_none() && mutation.doc_ids.is_none() {
+                    if let Some(ref filter) = mutation.filter {
+                        node = node.with_filter(filter.clone());
+                    }
                 }
 
                 Box::new(node)

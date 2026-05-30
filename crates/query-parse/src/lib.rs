@@ -8,6 +8,9 @@ pub mod schema_gen;
 pub mod sdl_parse;
 pub mod select_convert;
 
-pub use query_parse::{parse_mutations, parse_query, parse_request, ExplainType, ParsedOperation};
+pub use query_parse::{
+    parse_mutations, parse_mutations_with_limits, parse_query, parse_query_with_limits,
+    parse_request, parse_request_with_limits, ExplainType, ParsedOperation,
+};
 pub use sdl_parse::{parse_sdl, parse_sdl_with_known_types};
 pub use select_convert::select_to_go_json;

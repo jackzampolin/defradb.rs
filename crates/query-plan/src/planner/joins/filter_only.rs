@@ -113,8 +113,13 @@ impl Planner {
             }
 
             // Build child scan, using an index if the filter is index-eligible.
-            let child_index_result =
-                self.try_select_child_index(Some(&nested_conditions), None, &target_collection);
+            let child_index_result = self.try_select_child_index(
+                Some(&nested_conditions),
+                None,
+                &target_collection,
+                None,
+                0,
+            );
             let child_has_index = child_index_result.is_some();
             let child_plan: Box<dyn PlanNode> = if let Some((params, _)) = child_index_result {
                 let mut index_scan =

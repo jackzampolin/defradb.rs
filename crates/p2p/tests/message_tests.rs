@@ -103,12 +103,12 @@ fn test_message_trait_accessors_pushlog_request() {
         Bytes::from(vec![30, 40]),
     );
 
-    // Set metadata fields via the embedded metadata struct
-    request.metadata.message_id = "test-msg-id".to_string();
-    request.metadata.sender_id = "sender-peer-id".to_string();
-    request.metadata.pubkey = vec![1, 2, 3, 4, 5];
-    request.metadata.signature = Some(vec![6, 7, 8, 9]);
-    request.metadata.err_message = Some("test error".to_string());
+    // Set metadata fields directly on the struct
+    request.message_id = "test-msg-id".to_string();
+    request.sender_id = "sender-peer-id".to_string();
+    request.pubkey = vec![1, 2, 3, 4, 5];
+    request.signature = Some(vec![6, 7, 8, 9]);
+    request.err_message = Some("test error".to_string());
 
     // Test trait accessors
     assert_eq!(request.version(), MESSAGE_VERSION);
@@ -118,8 +118,8 @@ fn test_message_trait_accessors_pushlog_request() {
     assert_eq!(request.signature(), Some(&[6u8, 7, 8, 9][..]));
     assert_eq!(request.err_message(), Some("test error"));
 
-    // Test mutable access via metadata field
-    request.metadata.message_id = "new-msg-id".to_string();
+    // Test mutable access via direct field
+    request.message_id = "new-msg-id".to_string();
     assert_eq!(request.message_id(), "new-msg-id");
 }
 
@@ -398,7 +398,87 @@ fn test_pushlog_broadcast_to_request() {
     assert_eq!(request.creator, broadcast.creator);
     assert_eq!(request.block, broadcast.block);
     // Request should have default metadata
-    assert_eq!(request.metadata.version, MESSAGE_VERSION);
+    assert_eq!(request.version, MESSAGE_VERSION);
+}
+
+// Regression guard for issue #827.
+//
+// `#[serde(flatten)]` on MetaData causes serde_cbor to emit an indefinite-
+// length CBOR map (major type 5, additional info 31 = byte 0xbf) instead of
+// a definite-length map (0xa0–0xb7 for 0–23 entries). Go's fxamacker/cbor
+// emits definite maps. Since both sides re-serialize for signature
+// verification, the byte mismatch breaks Rust↔Go interop.
+//
+// The fix inlines MetaData fields (same as PushLogReply already does).
+// These tests fail on pre-fix code (first byte = 0xbf) and pass after.
+mod regression_827 {
+    use bytes::Bytes;
+    use p2p::message::*;
+
+    fn assert_definite_cbor_map(type_name: &str, bytes: &[u8]) {
+        assert!(
+            !bytes.is_empty(),
+            "{type_name}: serialization produced empty output"
+        );
+        assert_ne!(
+            bytes[0], 0xbf,
+            "{type_name}: CBOR map must be definite-length (not 0xbf indefinite). \
+             If this fails, #[serde(flatten)] has been reintroduced on MetaData."
+        );
+        let major = bytes[0] >> 5;
+        assert_eq!(
+            major, 5,
+            "{type_name}: expected CBOR map (major type 5), got major type {major}"
+        );
+    }
+
+    #[test]
+    fn pushlog_request_definite_map() {
+        let req = PushLogRequest::new(
+            "doc".into(),
+            Bytes::from(vec![1]),
+            "col".into(),
+            "creator".into(),
+            Bytes::from(vec![2]),
+        );
+        let bytes = serde_cbor::to_vec(&req).unwrap();
+        assert_definite_cbor_map("PushLogRequest", &bytes);
+    }
+
+    #[test]
+    fn docsync_request_definite_map() {
+        let req = DocSyncRequest::new(vec!["doc1".into()]);
+        let bytes = serde_cbor::to_vec(&req).unwrap();
+        assert_definite_cbor_map("DocSyncRequest", &bytes);
+    }
+
+    #[test]
+    fn branchable_request_definite_map() {
+        let req = BranchableSyncRequest::new("col1".into());
+        let bytes = serde_cbor::to_vec(&req).unwrap();
+        assert_definite_cbor_map("BranchableSyncRequest", &bytes);
+    }
+
+    #[test]
+    fn identity_request_definite_map() {
+        let req = IdentityRequest::new("peer1".into());
+        let bytes = serde_cbor::to_vec(&req).unwrap();
+        assert_definite_cbor_map("IdentityRequest", &bytes);
+    }
+
+    #[test]
+    fn query_se_request_definite_map() {
+        let req = QuerySEArtifactsRequest::new("col1", vec![]);
+        let bytes = serde_cbor::to_vec(&req).unwrap();
+        assert_definite_cbor_map("QuerySEArtifactsRequest", &bytes);
+    }
+
+    #[test]
+    fn push_se_request_definite_map() {
+        let req = PushSEArtifactsRequest::new("col1", vec![]);
+        let bytes = serde_cbor::to_vec(&req).unwrap();
+        assert_definite_cbor_map("PushSEArtifactsRequest", &bytes);
+    }
 }
 
 #[test]
@@ -417,6 +497,27 @@ fn test_decode_gossip_payload_from_postcard_broadcast() {
         PushLogBroadcast::decode_gossip_payload(&encoded).expect("decode failed");
 
     assert_eq!(encoding, PushLogGossipPayloadEncoding::PostcardBroadcast);
+    assert_eq!(decoded, broadcast);
+}
+
+#[test]
+fn test_encode_gossip_payload_uses_cbor_broadcast() {
+    let broadcast = PushLogBroadcast::new(
+        "doc-canonical".to_string(),
+        Bytes::from(vec![1, 3, 5]),
+        "collection-canonical".to_string(),
+        "creator-canonical".to_string(),
+        Bytes::from(vec![2, 4, 6]),
+        None,
+    );
+
+    let encoded = broadcast
+        .encode_gossip_payload()
+        .expect("canonical encode should succeed");
+    let (decoded, encoding) =
+        PushLogBroadcast::decode_gossip_payload(&encoded).expect("decode failed");
+
+    assert_eq!(encoding, PushLogGossipPayloadEncoding::CborBroadcast);
     assert_eq!(decoded, broadcast);
 }
 

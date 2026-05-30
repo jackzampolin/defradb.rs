@@ -23,12 +23,16 @@ impl Node {
         document_acp: Arc<dyn acp::DocumentACP>,
         nac_adapter: Option<Arc<crate::nac_adapter::NacAdapter>>,
         mutator: Arc<dyn query::mutator::DocMutator>,
+        txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>>,
     ) -> QueryRunnerSetup<S>
     where
         S: storage::corekv::Store + 'static,
     {
         let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
-        let registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
+        let registry = Arc::new(match txn_broadcaster {
+            Some(b) => db::DbTransactionRegistry::with_broadcaster(database.clone(), b),
+            None => db::DbTransactionRegistry::new(database.clone()),
+        });
         let collection_provider: Arc<dyn query::CollectionProvider> =
             db::DbCollectionProvider::new_arc(database.clone());
         info!(
@@ -44,7 +48,12 @@ impl Node {
         .with_mutator(mutator)
         .with_acp(document_acp)
         .with_lens_store(database.lens_store().clone())
-        .with_query_timeout(config.api.query_timeout);
+        .with_query_timeout(config.api.query_timeout)
+        .with_query_limits(query::QueryLimits {
+            max_query_depth: config.api.query_max_depth,
+            max_query_width: config.api.query_max_width,
+            max_filter_depth: config.api.query_max_filter_depth,
+        });
 
         if !config.datastore.no_encryption {
             info!("CRDT delta encryption enabled");

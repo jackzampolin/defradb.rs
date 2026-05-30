@@ -73,11 +73,19 @@ pub struct GossipDecodeFailureSample {
 /// Crate-internal: only the libp2p and iroh transport paths call this.
 /// Downstream consumers read the total via `SyncDiagnostics::snapshot()`
 /// rather than synthesizing failures.
+#[cfg_attr(
+    not(any(feature = "libp2p-transport", feature = "iroh-transport")),
+    allow(dead_code)
+)]
 pub(crate) fn record_gossip_decode_failure() -> u64 {
     GOSSIP_DECODE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 /// Record a gossip payload decode failure and retain a deduplicated sample.
+#[cfg_attr(
+    not(any(feature = "libp2p-transport", feature = "iroh-transport")),
+    allow(dead_code)
+)]
 pub(crate) fn record_gossip_decode_failure_sample(mut sample: GossipDecodeFailureSample) -> u64 {
     let total = record_gossip_decode_failure();
     let mut recent = RECENT_GOSSIP_DECODE_FAILURES.lock();

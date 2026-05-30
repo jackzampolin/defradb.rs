@@ -6,7 +6,7 @@ use crate::codec::write_message;
 use crate::error::{Error, Result};
 use crate::message::{BranchableSyncReply, BranchableSyncRequest, PushSEArtifactsRequest};
 
-use super::TwoStreamHandler;
+use super::{PendingResponseKey, TwoStreamHandler};
 
 impl TwoStreamHandler {
     /// Send a BranchableSync request to a peer without waiting for response.
@@ -17,17 +17,27 @@ impl TwoStreamHandler {
         peer_id: PeerId,
         request: BranchableSyncRequest,
     ) -> Result<()> {
-        let message_id = request.metadata.message_id.clone();
+        let message_id = request.message_id.clone();
+        let pending_key = PendingResponseKey::new(peer_id, message_id.clone());
+
+        {
+            let mut pending = self.pending.lock();
+            pending.register_branchable_sync_request(pending_key);
+        }
 
         let mut stream = self
             .control
             .open_stream(peer_id, Self::request_protocol())
             .await
-            .map_err(|e| Error::Transport(format!("failed to open stream: {}", e)))?;
+            .map_err(|e| {
+                self.cleanup_pending_branchable_sync(peer_id, &message_id);
+                Error::Transport(format!("failed to open stream: {}", e))
+            })?;
 
-        write_message(&mut stream, &request)
-            .await
-            .map_err(|e| Error::CborSerialization(format!("failed to write request: {}", e)))?;
+        write_message(&mut stream, &request).await.map_err(|e| {
+            self.cleanup_pending_branchable_sync(peer_id, &message_id);
+            Error::CborSerialization(format!("failed to write request: {}", e))
+        })?;
 
         tracing::info!(
             peer_id = %peer_id,
@@ -86,7 +96,7 @@ impl TwoStreamHandler {
         peer_id: PeerId,
         request: PushSEArtifactsRequest,
     ) -> Result<()> {
-        let message_id = request.metadata.message_id.clone();
+        let message_id = request.message_id.clone();
         let artifacts_count = request.artifacts.len();
 
         let mut stream = self

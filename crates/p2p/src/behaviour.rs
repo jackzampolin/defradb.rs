@@ -26,15 +26,14 @@
 //! IPFS block exchange protocol (1.0.0, 1.1.0, 1.2.0), enabling
 //! interoperability with Go DefraDB.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use iroh_bitswap::{Bitswap, BitswapEvent, Config as BitswapConfig, Store};
 use libp2p::{
     connection_limits::{self, ConnectionLimits},
     gossipsub::{self, MessageAuthenticity, MessageId, ValidationMode},
-    identify,
-    kad::{self, store::MemoryStore, Mode},
-    relay,
+    identify, memory_connection_limits, relay,
     request_response::{self, ProtocolSupport},
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
     PeerId, StreamProtocol,
@@ -43,11 +42,46 @@ use libp2p_stream as stream;
 
 use libp2p::identity::Keypair;
 
+use crate::bitswap::{make_peer_block_access_filter, AccessMode, ReplicatorRegistry};
 use crate::codec::PushLogCodec;
 use crate::message::{PushLogReply, PushLogRequest};
 
+mod dual_kademlia;
+
+pub use dual_kademlia::{
+    validate_pk_namespaced_record, DefraKademliaEvent, DualKademlia, KademliaNetwork,
+    PublicKeyRecordValidationError, LAN_KAD_PROTOCOL, WAN_KAD_PROTOCOL,
+};
+
 /// Timeout for PushLog requests.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Enough for the common identity multihash plus an 8-byte sequence number.
+const GO_MESSAGE_ID_CAPACITY: usize = 48;
+
+/// Pending dial/listen limits are intentionally separate from the exposed
+/// established-connection watermarks and follow the Go default shape.
+const MAX_PENDING_INCOMING_CONNECTIONS: u32 = 100;
+const MAX_PENDING_OUTGOING_CONNECTIONS: u32 = 400;
+
+/// Go-compatible gossipsub message ID derivation.
+///
+/// go-libp2p-pubsub@v0.15.0 pubsub.go:1356 uses raw `from || seqno` bytes.
+/// rust-libp2p's default uses base58/decimal strings, which breaks cross-impl
+/// IHAVE/IWANT parity.
+///
+/// This requires message authenticity modes that populate source and sequence
+/// number; anonymous messages would all collapse to the empty ID.
+pub fn go_compatible_gossipsub_message_id(message: &gossipsub::Message) -> MessageId {
+    let mut id = Vec::with_capacity(GO_MESSAGE_ID_CAPACITY);
+    if let Some(peer_id) = message.source {
+        id.extend_from_slice(&peer_id.to_bytes());
+    }
+    if let Some(seqno) = message.sequence_number {
+        id.extend_from_slice(&seqno.to_be_bytes());
+    }
+    MessageId::from(id)
+}
 
 /// Composite network behaviour for DefraDB nodes.
 #[derive(NetworkBehaviour)]
@@ -56,9 +90,8 @@ pub struct DefraBehaviour<S: Store> {
     /// Peer identification protocol.
     pub identify: identify::Behaviour,
 
-    /// Kademlia DHT for peer discovery and content routing.
-    /// Required for Bitswap to find peers who have specific blocks.
-    pub kademlia: kad::Behaviour<MemoryStore>,
+    /// LAN and WAN Kademlia DHTs for peer discovery and content routing.
+    pub kademlia: DualKademlia,
 
     /// Bitswap block exchange protocol (Go compatibility).
     /// Uses iroh-bitswap for IPFS block exchange.
@@ -78,10 +111,22 @@ pub struct DefraBehaviour<S: Store> {
     /// Go's DefraDB uses separate streams for request and response.
     pub stream: stream::Behaviour,
 
-    /// Connection limits to prevent resource exhaustion from too many peers.
-    /// Watermarks match Go DefraDB's defaults: 100 pending/established inbound,
-    /// 400 established outbound, 4 streams per peer.
+    /// Hard connection limits for pending handshakes and per-peer fan-out.
+    /// Total established connection pruning is handled by `P2PHost` so new
+    /// peers are not rejected before the Go-compatible low/high-water pruner
+    /// can trim older connections.
     pub connection_limits: connection_limits::Behaviour,
+
+    /// Process-memory guard approximating Go's ResourceManager system scope.
+    ///
+    /// rust-libp2p 0.53 does not expose go-libp2p ResourceManager scopes for
+    /// transient, per-peer, service, or protocol memory/FD accounting. This
+    /// behaviour can only refuse new connections once process physical memory
+    /// exceeds the Go-compatible system budget. Existing connection count
+    /// limits cover pending/per-peer counts, but the Go transient 25% byte
+    /// scope and service/protocol/peer byte scopes have no Rust equivalent
+    /// here.
+    pub memory_connection_limits: memory_connection_limits::Behaviour,
 }
 
 /// Events emitted by the DefraDB network behaviour.
@@ -92,7 +137,7 @@ pub enum DefraEvent {
     Identify(identify::Event),
 
     /// Kademlia DHT event.
-    Kademlia(kad::Event),
+    Kademlia(DefraKademliaEvent),
 
     /// Bitswap block exchange event.
     Bitswap(BitswapEvent),
@@ -113,8 +158,8 @@ impl From<identify::Event> for DefraEvent {
     }
 }
 
-impl From<kad::Event> for DefraEvent {
-    fn from(event: kad::Event) -> Self {
+impl From<DefraKademliaEvent> for DefraEvent {
+    fn from(event: DefraKademliaEvent) -> Self {
         DefraEvent::Kademlia(event)
     }
 }
@@ -153,13 +198,13 @@ impl From<()> for DefraEvent {
 
 impl From<void::Void> for DefraEvent {
     fn from(v: void::Void) -> Self {
-        // connection_limits::Behaviour emits Void — it never actually fires events,
-        // it only enforces limits by refusing connections at the transport layer.
+        // Resource-limit behaviours emit Void — they never actually fire events,
+        // they only enforce limits by refusing connections at the transport layer.
         void::unreachable(v)
     }
 }
 
-impl<S: Store> DefraBehaviour<S> {
+impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
     /// Create a new DefraDB network behaviour with message signing enabled.
     ///
     /// # Arguments
@@ -168,6 +213,10 @@ impl<S: Store> DefraBehaviour<S> {
     /// * `local_public_key` - The local peer's public key
     /// * `keypair` - The keypair for message signing/verification
     /// * `bitswap_store` - The blockstore for Bitswap block exchange
+    /// * `access_mode` - Controls whether the Bitswap filter enforces
+    ///   per-peer access control on served blocks
+    /// * `replicators` - Registry used by the filter to authorize peers
+    ///   per collection (shared with SyncCoordinator)
     ///
     /// # Returns
     ///
@@ -177,13 +226,17 @@ impl<S: Store> DefraBehaviour<S> {
     ///
     /// This must be called within a tokio runtime context as Bitswap spawns
     /// background tasks for operations.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         local_peer_id: PeerId,
         local_public_key: libp2p::identity::PublicKey,
         keypair: Keypair,
         bitswap_store: S,
+        access_mode: AccessMode,
+        replicators: Arc<ReplicatorRegistry>,
         enable_pubsub: bool,
         config: &super::P2PHostConfig,
+        resource_manager_system_memory_budget_bytes: usize,
     ) -> Result<Self, crate::error::Error> {
         // Configure identify behaviour
         let identify_config =
@@ -208,15 +261,13 @@ impl<S: Store> DefraBehaviour<S> {
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(1))
                 .validation_mode(ValidationMode::Strict)
+                // See `go_compatible_gossipsub_message_id`.
+                .message_id_fn(go_compatible_gossipsub_message_id)
                 // Enable peer exchange (PX) in PRUNE messages — matches Go's
                 // pubsub.WithPeerExchange(true). Allows peers sharing a topic
                 // to discover each other through mesh management.
                 .do_px()
                 .flood_publish(true)
-                .message_id_fn(|message: &gossipsub::Message| {
-                    let hash = crypto::sha256(&message.data);
-                    MessageId::from(hash.to_vec())
-                })
                 .build()
                 .map_err(|e| crate::error::Error::GossipSubConfig(e.to_string()))?;
 
@@ -228,28 +279,38 @@ impl<S: Store> DefraBehaviour<S> {
             Toggle::from(None)
         };
 
-        // Configure Kademlia DHT for peer discovery
-        // Required for Bitswap to find peers who have specific blocks
-        let kad_store = MemoryStore::new(local_peer_id);
-        let mut kademlia = kad::Behaviour::new(local_peer_id, kad_store);
-        // Run as server to respond to DHT queries from other peers
-        kademlia.set_mode(Some(Mode::Server));
+        let kademlia = DualKademlia::new(local_peer_id);
 
-        // Configure Bitswap for block exchange (Go compatibility)
-        // iroh-bitswap implements the standard IPFS bitswap protocols
-        let bitswap_config = BitswapConfig::default();
+        // Configure Bitswap for block exchange (Go compatibility).
+        // iroh-bitswap implements the standard IPFS bitswap protocols.
+        //
+        // Install a per-peer block-request filter to enforce ACP on the
+        // egress path. Without this, any connected peer could fetch any
+        // block in the blockstore — see #830. Matches Go's
+        // `bitswap.WithPeerBlockRequestFilter(hasAccess)` wiring
+        // (`go-p2p/peer.go:146`).
+        let filter = make_peer_block_access_filter(
+            access_mode,
+            Arc::clone(&replicators),
+            bitswap_store.clone(),
+        );
+        let mut bitswap_config = BitswapConfig::default();
+        if let Some(server_cfg) = bitswap_config.server.as_mut() {
+            server_cfg.decision_config.peer_block_request_filter = Some(Box::new(filter));
+        }
         let bitswap = Bitswap::new(local_peer_id, bitswap_store, bitswap_config).await;
 
         // Configure stream behaviour for Go two-stream compatibility
         let stream = stream::Behaviour::new();
 
         let limits = ConnectionLimits::default()
-            .with_max_pending_incoming(Some(config.max_connections_in))
-            .with_max_pending_outgoing(Some(config.max_connections_out))
-            .with_max_established_incoming(Some(config.max_connections_in))
-            .with_max_established_outgoing(Some(config.max_connections_out))
+            .with_max_pending_incoming(Some(MAX_PENDING_INCOMING_CONNECTIONS))
+            .with_max_pending_outgoing(Some(MAX_PENDING_OUTGOING_CONNECTIONS))
             .with_max_established_per_peer(Some(config.max_connections_per_peer));
         let connection_limits = connection_limits::Behaviour::new(limits);
+        let memory_connection_limits = memory_connection_limits::Behaviour::with_max_bytes(
+            resource_manager_system_memory_budget_bytes,
+        );
 
         Ok(Self {
             identify,
@@ -260,6 +321,7 @@ impl<S: Store> DefraBehaviour<S> {
             relay: Toggle::from(None),
             stream,
             connection_limits,
+            memory_connection_limits,
         })
     }
 
@@ -297,15 +359,13 @@ impl<S: Store> DefraBehaviour<S> {
             request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT),
         );
 
-        // Configure GossipSub (optional, matches Go's `if options.EnablePubSub`)
+        // Configure GossipSub (optional, matches Go's `if options.EnablePubSub`).
         let gossipsub = if enable_pubsub {
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(1))
                 .validation_mode(ValidationMode::Permissive)
-                .message_id_fn(|message: &gossipsub::Message| {
-                    let hash = crypto::sha256(&message.data);
-                    MessageId::from(hash.to_vec())
-                })
+                // See `go_compatible_gossipsub_message_id`.
+                .message_id_fn(go_compatible_gossipsub_message_id)
                 .build()
                 .map_err(|e| crate::error::Error::GossipSubConfig(e.to_string()))?;
 
@@ -316,10 +376,7 @@ impl<S: Store> DefraBehaviour<S> {
             Toggle::from(None)
         };
 
-        // Configure Kademlia DHT for peer discovery
-        let kad_store = MemoryStore::new(local_peer_id);
-        let mut kademlia = kad::Behaviour::new(local_peer_id, kad_store);
-        kademlia.set_mode(Some(Mode::Server));
+        let kademlia = DualKademlia::new(local_peer_id);
 
         // Configure Bitswap for block exchange
         let bitswap_config = BitswapConfig::default();
@@ -328,14 +385,15 @@ impl<S: Store> DefraBehaviour<S> {
         // Configure stream behaviour for Go two-stream compatibility
         let stream = stream::Behaviour::new();
 
-        // Configure connection limits — matches Go DefraDB watermarks
+        // Configure hard pending/per-peer limits; total connection pruning
+        // happens at the host layer to match Go's active conn manager.
         let limits = ConnectionLimits::default()
             .with_max_pending_incoming(Some(100))
             .with_max_pending_outgoing(Some(100))
-            .with_max_established_incoming(Some(100))
-            .with_max_established_outgoing(Some(400))
             .with_max_established_per_peer(Some(4));
         let connection_limits = connection_limits::Behaviour::new(limits);
+        let memory_connection_limits =
+            memory_connection_limits::Behaviour::with_max_bytes(usize::MAX);
 
         Ok(Self {
             identify,
@@ -346,6 +404,7 @@ impl<S: Store> DefraBehaviour<S> {
             relay: Toggle::from(None),
             stream,
             connection_limits,
+            memory_connection_limits,
         })
     }
 
@@ -452,6 +511,14 @@ mod tests {
     use super::*;
     use crate::testutil::MockBitswapStore;
     use libp2p::identity::Keypair;
+    use libp2p::kad;
+    use libp2p::kad::store::RecordStore;
+
+    fn pk_record_key(peer_id: PeerId) -> Vec<u8> {
+        let mut key = b"/pk/".to_vec();
+        key.extend_from_slice(&peer_id.to_bytes());
+        key
+    }
 
     #[tokio::test]
     async fn test_behaviour_creation_with_signing() {
@@ -461,8 +528,19 @@ mod tests {
         let store = MockBitswapStore::new();
 
         let config = crate::P2PHostConfig::default();
-        let behaviour =
-            DefraBehaviour::new(peer_id, public_key, keypair, store, true, &config).await;
+        let registry = Arc::new(ReplicatorRegistry::new());
+        let behaviour = DefraBehaviour::new(
+            peer_id,
+            public_key,
+            keypair,
+            store,
+            AccessMode::Open,
+            registry,
+            true,
+            &config,
+            usize::MAX,
+        )
+        .await;
         assert!(behaviour.is_ok());
     }
 
@@ -475,6 +553,35 @@ mod tests {
 
         let behaviour = DefraBehaviour::new_without_signing(peer_id, public_key, store, true).await;
         assert!(behaviour.is_ok());
+        let mut behaviour = behaviour.unwrap();
+
+        assert_eq!(
+            behaviour.kademlia.lan.protocol_names()[0].as_ref(),
+            LAN_KAD_PROTOCOL
+        );
+        assert_eq!(
+            behaviour.kademlia.wan.protocol_names()[0].as_ref(),
+            WAN_KAD_PROTOCOL
+        );
+
+        let record = kad::Record::new(b"/v/split".to_vec(), b"lan".to_vec());
+        let key = record.key.clone();
+        behaviour
+            .kademlia
+            .store_mut(KademliaNetwork::Lan)
+            .put(record)
+            .unwrap();
+
+        assert!(behaviour
+            .kademlia
+            .store_mut(KademliaNetwork::Lan)
+            .get(&key)
+            .is_some());
+        assert!(behaviour
+            .kademlia
+            .store_mut(KademliaNetwork::Wan)
+            .get(&key)
+            .is_none());
     }
 
     #[tokio::test]
@@ -485,10 +592,79 @@ mod tests {
         let store = MockBitswapStore::new();
 
         let config = crate::P2PHostConfig::default();
-        let behaviour =
-            DefraBehaviour::new(peer_id, public_key, keypair, store, false, &config).await;
+        let registry = Arc::new(ReplicatorRegistry::new());
+        let behaviour = DefraBehaviour::new(
+            peer_id,
+            public_key,
+            keypair,
+            store,
+            AccessMode::Open,
+            registry,
+            false,
+            &config,
+            usize::MAX,
+        )
+        .await;
         assert!(behaviour.is_ok());
         let behaviour = behaviour.unwrap();
         assert!(behaviour.gossipsub.as_ref().is_none());
+    }
+
+    #[test]
+    fn pk_namespaced_validator_accepts_matching_public_key() {
+        let keypair = Keypair::generate_ed25519();
+        let public_key = keypair.public();
+        let record = kad::Record::new(
+            pk_record_key(public_key.to_peer_id()),
+            public_key.encode_protobuf(),
+        );
+
+        assert_eq!(validate_pk_namespaced_record(&record), Ok(()));
+    }
+
+    #[test]
+    fn pk_namespaced_validator_rejects_mismatched_public_key() {
+        let keypair = Keypair::generate_ed25519();
+        let other_keypair = Keypair::generate_ed25519();
+        let record = kad::Record::new(
+            pk_record_key(keypair.public().to_peer_id()),
+            other_keypair.public().encode_protobuf(),
+        );
+
+        assert!(matches!(
+            validate_pk_namespaced_record(&record),
+            Err(PublicKeyRecordValidationError::PeerIdMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn pk_namespaced_validator_rejects_invalid_peer_id_key() {
+        let record = kad::Record::new(b"/pk/not-a-peer-id".to_vec(), b"not checked".to_vec());
+
+        assert!(matches!(
+            validate_pk_namespaced_record(&record),
+            Err(PublicKeyRecordValidationError::InvalidPeerId(_))
+        ));
+    }
+
+    #[test]
+    fn pk_namespaced_validator_rejects_invalid_public_key() {
+        let keypair = Keypair::generate_ed25519();
+        let record = kad::Record::new(
+            pk_record_key(keypair.public().to_peer_id()),
+            b"not protobuf".to_vec(),
+        );
+
+        assert!(matches!(
+            validate_pk_namespaced_record(&record),
+            Err(PublicKeyRecordValidationError::InvalidPublicKey(_))
+        ));
+    }
+
+    #[test]
+    fn pk_namespaced_validator_ignores_other_namespaces() {
+        let record = kad::Record::new(b"/v/hello".to_vec(), b"not a public key".to_vec());
+
+        assert_eq!(validate_pk_namespaced_record(&record), Ok(()));
     }
 }

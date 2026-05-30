@@ -23,6 +23,37 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             "Received GossipSub message"
         );
 
+        let topic_matches_collection = topic == message.collection_id;
+        let topic_matches_document = !message.doc_id.is_empty() && topic == message.doc_id;
+        let is_subscribed = self
+            .is_locally_subscribed_collection(&message.collection_id)
+            .await;
+        let is_open_access = self.access.access_mode.is_open();
+        let is_outbound_replicator_target =
+            self.is_registered_replicator(propagation_source.as_str(), &message.collection_id);
+
+        if !topic_matches_document
+            && (!topic_matches_collection
+                || is_outbound_replicator_target
+                || (!is_open_access && !is_subscribed))
+        {
+            tracing::warn!(
+                peer_id = %propagation_source,
+                topic = %topic,
+                collection_id = %message.collection_id,
+                doc_id = %message.doc_id,
+                topic_matches_collection,
+                topic_matches_document,
+                is_subscribed,
+                is_outbound_replicator_target,
+                "Dropping GossipSub message outside accepted replication direction"
+            );
+            return Err(crate::error::Error::AccessDenied {
+                peer_id: propagation_source.to_string(),
+                collection_id: message.collection_id.clone(),
+            });
+        }
+
         // Parse CID
         match Cid::try_from(message.cid.as_ref()) {
             Ok(cid) => {
@@ -44,8 +75,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
         }
 
+        let is_explicit_replicator =
+            self.is_registered_replicator(propagation_source.as_str(), &message.collection_id);
+
         self.manager
-            .process_pushlog(&message, Some(propagation_source.as_str()), false, None)
+            .process_pushlog(
+                &message,
+                Some(propagation_source.as_str()),
+                is_explicit_replicator,
+                None,
+            )
             .await
     }
 }

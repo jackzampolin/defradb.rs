@@ -3,6 +3,8 @@
 //! Maps every registered HTTP route to its required permission level,
 //! ensuring consistent access control enforcement across all endpoints.
 
+use std::borrow::Cow;
+
 use axum::http::Method;
 
 use crate::router::NodePermission;
@@ -30,7 +32,9 @@ pub enum RoutePermission {
 /// Unknown routes return `Required(DocumentRead)` as a safe default:
 /// when NAC is enabled, this blocks unauthenticated access.
 pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
-    match path {
+    let normalized_path = normalize_api_version(path);
+
+    match normalized_path.as_ref() {
         // =====================================================================
         // Exempt routes (no auth needed)
         // =====================================================================
@@ -60,7 +64,6 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // Transactions (permissions enforced per-operation within tx)
         // =====================================================================
         "/api/v0/tx" => RoutePermission::IdentityOnly,
-        "/api/v0/tx/concurrent" => RoutePermission::IdentityOnly,
         "/api/v0/tx/:id" => RoutePermission::IdentityOnly,
         "/api/v0/tx/:id/lens" => RoutePermission::Required(NodePermission::CollectionPatch),
         "/api/v0/tx/:id/collections" => RoutePermission::Required(NodePermission::CollectionGet),
@@ -179,6 +182,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             _ => RoutePermission::Required(NodePermission::DacStatus),
         },
         "/api/v0/acp/policy/:id" => RoutePermission::Required(NodePermission::DacStatus),
+        "/api/v0/acp/document/decide" => RoutePermission::Required(NodePermission::DacStatus),
         "/api/v0/acp/document/relationship" => match *method {
             Method::POST => RoutePermission::Required(NodePermission::DacRelationAdd),
             Method::DELETE => RoutePermission::Required(NodePermission::DacRelationDelete),
@@ -283,6 +287,16 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
     }
 }
 
+fn normalize_api_version(path: &str) -> Cow<'_, str> {
+    if path == "/api/v1" {
+        Cow::Borrowed("/api/v0")
+    } else if let Some(suffix) = path.strip_prefix("/api/v1/") {
+        Cow::Owned(format!("/api/v0/{suffix}"))
+    } else {
+        Cow::Borrowed(path)
+    }
+}
+
 #[cfg(test)]
 #[path = "route_permissions_tests.rs"]
 mod route_permissions_tests;
@@ -326,11 +340,6 @@ mod tests {
             ),
             // Transactions
             ("/api/v0/tx", Method::POST, RoutePermission::IdentityOnly),
-            (
-                "/api/v0/tx/concurrent",
-                Method::POST,
-                RoutePermission::IdentityOnly,
-            ),
             (
                 "/api/v0/tx/:id",
                 Method::POST,
@@ -386,11 +395,6 @@ mod tests {
                 "/api/v0/collections/migrations",
                 Method::POST,
                 RoutePermission::Required(NodePermission::MigrationSet),
-            ),
-            (
-                "/api/v0/collections/:name",
-                Method::GET,
-                RoutePermission::Required(NodePermission::CollectionGet),
             ),
             (
                 "/api/v0/collections/:name",
@@ -490,6 +494,11 @@ mod tests {
                 RoutePermission::Required(NodePermission::DacStatus),
             ),
             (
+                "/api/v0/acp/document/decide",
+                Method::POST,
+                RoutePermission::Required(NodePermission::DacStatus),
+            ),
+            (
                 "/api/v0/acp/document/relationship",
                 Method::POST,
                 RoutePermission::Required(NodePermission::DacRelationAdd),
@@ -582,6 +591,24 @@ mod tests {
                 actual, *expected,
                 "Mismatch for {} {} — expected {:?}, got {:?}",
                 method, path, expected, actual
+            );
+        }
+    }
+
+    #[test]
+    fn v1_routes_use_same_permissions_as_v0() {
+        for (v0_path, method) in [
+            ("/api/v0/version", Method::GET),
+            ("/api/v0/graphql", Method::POST),
+            ("/api/v0/collections/:name", Method::POST),
+            ("/api/v0/p2p/replicators", Method::DELETE),
+            ("/api/v0/acp/node/disable", Method::POST),
+            ("/api/v0/backup/export", Method::POST),
+        ] {
+            let v1_path = v0_path.replacen("/api/v0", "/api/v1", 1);
+            assert_eq!(
+                route_permission(&v1_path, &method),
+                route_permission(v0_path, &method)
             );
         }
     }

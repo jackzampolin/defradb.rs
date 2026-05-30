@@ -16,24 +16,26 @@ use tokio::time::timeout;
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Error;
 use crate::message::{
-    BranchableSyncRequest, DocSyncRequest, MetaData, PushLogBroadcast, PushLogRequest,
+    BranchableSyncRequest, CarFetchRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
+    PushLogRequest,
 };
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::NoOpCollectionStorage;
-use crate::sync::head_provider::NoOpHeadProvider;
-use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
+use crate::sync::head_provider::{DocumentHeadProvider, NoOpHeadProvider};
+use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager, DEFAULT_PUSH_SEND_TIMEOUT};
 use crate::sync::peer_state::PeerStateTracker;
 use crate::sync::rate_limiter::PeerRateLimiter;
 use crate::sync::SyncShutdownHandle;
-use crate::topics::DefraTopic;
+use crate::topics::{DefraTopic, DOC_SYNC_TOPIC};
 use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
 use crate::ReplicatorInfo;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 
+use super::authorizer::RuntimeAuthorizer;
 use super::{
-    SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState,
+    DagFetchLimiter, SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState,
     DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
 };
 
@@ -70,7 +72,7 @@ fn create_test_coordinator_with_rate_limiter(
     let broadcaster = Broadcaster::new(transport.clone());
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
-    create_test_coordinator_with_blockstore(
+    create_test_coordinator_with_blockstore(TestCoordinatorParams {
         access_mode,
         replicators,
         peer_state,
@@ -79,10 +81,13 @@ fn create_test_coordinator_with_rate_limiter(
         broadcaster,
         blockstore,
         rate_limiter,
-    )
+    })
 }
 
-fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
+/// Bundled constructor arguments for [`create_test_coordinator_with_blockstore`].
+/// Grouped so the test helper stays under clippy's `too_many_arguments` budget
+/// without hiding the list of inputs behind a builder pattern.
+struct TestCoordinatorParams<B: Blockstore + 'static> {
     access_mode: AccessMode,
     replicators: Arc<ReplicatorRegistry>,
     peer_state: Arc<PeerStateTracker>,
@@ -91,24 +96,55 @@ fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
     broadcaster: Broadcaster<NoopTransport>,
     blockstore: Arc<B>,
     rate_limiter: Arc<PeerRateLimiter>,
+}
+
+fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
+    params: TestCoordinatorParams<B>,
 ) -> (
     SyncCoordinator<B, NoopTransport>,
     tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
 ) {
+    create_test_coordinator_with_blockstore_and_head_provider(params, Arc::new(NoOpHeadProvider))
+}
+
+fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'static>(
+    params: TestCoordinatorParams<B>,
+    head_provider: Arc<dyn DocumentHeadProvider>,
+) -> (
+    SyncCoordinator<B, NoopTransport>,
+    tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
+) {
+    let TestCoordinatorParams {
+        access_mode,
+        replicators,
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore,
+        rate_limiter,
+    } = params;
+
     let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), SyncConfig::default());
+
+    let authorizer = Arc::new(RuntimeAuthorizer::new(
+        transport.clone(),
+        Arc::clone(&peer_state),
+        Arc::clone(&replicators),
+        access_mode,
+    ));
 
     let coordinator = SyncCoordinator {
         runtime: SyncRuntime {
             transport,
             broadcaster,
             failure_tx: None,
-            dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(
-                DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
-            )),
+            dag_fetch_limiter: DagFetchLimiter::new(DEFAULT_MAX_CONCURRENT_DAG_FETCHES),
             push_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
             )),
             rate_limiter,
+            push_send_timeout: DEFAULT_PUSH_SEND_TIMEOUT,
             shutdown: SyncShutdownHandle::new(),
         },
         manager,
@@ -123,9 +159,11 @@ fn create_test_coordinator_with_blockstore<B: Blockstore + 'static>(
                 std::collections::HashSet::new(),
             )),
             collection_store: Arc::new(NoOpCollectionStorage),
-            head_provider: Arc::new(NoOpHeadProvider),
+            head_provider,
         },
+        authorizer,
         document_acp: std::sync::OnceLock::new(),
+        pubsub_services: None,
     };
 
     (coordinator, events)
@@ -226,6 +264,7 @@ struct NoopTransport {
     pubkey: Vec<u8>,
     replicators: Arc<RwLock<std::collections::HashMap<String, Vec<String>>>>,
     connected_peers: Arc<RwLock<Vec<PeerId>>>,
+    doc_sync_replies: Arc<RwLock<Vec<DocSyncReply>>>,
 }
 
 impl NoopTransport {
@@ -235,11 +274,16 @@ impl NoopTransport {
             pubkey: vec![1, 2, 3],
             replicators: Arc::new(RwLock::new(std::collections::HashMap::new())),
             connected_peers: Arc::new(RwLock::new(Vec::new())),
+            doc_sync_replies: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
     fn set_connected_peers(&self, peers: Vec<PeerId>) {
         *self.connected_peers.write() = peers;
+    }
+
+    fn doc_sync_replies(&self) -> Vec<DocSyncReply> {
+        self.doc_sync_replies.read().clone()
     }
 }
 
@@ -342,8 +386,9 @@ impl P2PTransport for NoopTransport {
     async fn send_doc_sync_response(
         &self,
         _peer_id: &PeerId,
-        _reply: crate::message::DocSyncReply,
+        reply: crate::message::DocSyncReply,
     ) -> crate::Result<()> {
+        self.doc_sync_replies.write().push(reply);
         Ok(())
     }
 
@@ -382,8 +427,9 @@ impl P2PTransport for NoopTransport {
     async fn send_doc_sync_response_token(
         &self,
         _token: Self::ResponseToken,
-        _reply: crate::message::DocSyncReply,
+        reply: crate::message::DocSyncReply,
     ) -> crate::Result<()> {
+        self.doc_sync_replies.write().push(reply);
         Ok(())
     }
 
@@ -481,10 +527,7 @@ impl P2PTransport for NoopTransport {
 fn doc_sync_event(peer_id: PeerId) -> TransportEvent<()> {
     TransportEvent::DocSyncRequest {
         peer_id,
-        request: DocSyncRequest {
-            metadata: MetaData::new(),
-            doc_ids: vec!["doc1".to_string()],
-        },
+        request: DocSyncRequest::new(vec!["doc1".to_string()]),
         token: None,
     }
 }
@@ -492,10 +535,7 @@ fn doc_sync_event(peer_id: PeerId) -> TransportEvent<()> {
 fn branchable_sync_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
     TransportEvent::BranchableSyncRequest {
         peer_id,
-        request: BranchableSyncRequest {
-            metadata: MetaData::new(),
-            collection_id: collection_id.to_string(),
-        },
+        request: BranchableSyncRequest::new(collection_id.to_string()),
         token: None,
     }
 }
@@ -529,11 +569,38 @@ fn pushlog_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
 }
 
 fn gossip_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
+    gossip_event_on_topic(peer_id, collection_id, collection_id)
+}
+
+fn gossip_event_on_topic(peer_id: PeerId, topic: &str, collection_id: &str) -> TransportEvent<()> {
     TransportEvent::GossipMessage {
         propagation_source: peer_id,
         message_id: MessageId::new("gossip".to_string()),
-        topic: collection_id.to_string(),
+        topic: topic.to_string(),
         message: PushLogBroadcast::from_request(&pushlog_request(collection_id)),
+    }
+}
+
+fn car_fetch_event(peer_id: PeerId, root_cid: Cid) -> TransportEvent<()> {
+    TransportEvent::CarFetchRequest {
+        peer_id,
+        request: CarFetchRequest::full_dag(root_cid),
+        token: None,
+    }
+}
+
+struct StaticHeadProvider {
+    heads: Vec<Cid>,
+}
+
+#[async_trait]
+impl DocumentHeadProvider for StaticHeadProvider {
+    async fn get_document_heads(&self, _doc_id: &str) -> crate::Result<Vec<Cid>> {
+        Ok(self.heads.clone())
+    }
+
+    async fn get_collection_heads(&self, _collection_id: &str) -> crate::Result<Vec<Cid>> {
+        Ok(Vec::new())
     }
 }
 
@@ -623,7 +690,183 @@ async fn doc_sync_controlled_mode_allows_connected_peer() {
 
     assert!(
         !matches!(&result, Err(Error::AccessDenied { .. })),
-        "Connected peer should not get AccessDenied, got {:?}",
+        "Connected peer should be allowed for Go-compatible DocSync, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn doc_sync_controlled_mode_allows_data_topic_subscriber() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+
+    let peer = random_peer_id();
+    peer_state.peer_subscribed(peer.as_str(), "collection1".to_string());
+
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(doc_sync_event(peer))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "Data-topic subscriber should not get AccessDenied, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn doc_sync_controlled_mode_rejects_system_topic_only_subscriber() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+
+    let peer = random_peer_id();
+    peer_state.peer_subscribed(peer.as_str(), DOC_SYNC_TOPIC.to_string());
+
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(doc_sync_event(peer))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "System RPC topic subscription must not authorize DocSync, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn doc_sync_controlled_mode_allows_any_replicator() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+
+    let peer = random_peer_id();
+    replicators.add_replicator("collection1", peer.as_str());
+
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(doc_sync_event(peer))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "Registered replicator (any collection) should be allowed, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn doc_sync_filters_heads_outside_replicator_collection() {
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta};
+
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+
+    let peer = random_peer_id();
+    replicators.add_replicator("collection_a", peer.as_str());
+
+    let transport = NoopTransport::new();
+    let transport_handle = transport.clone();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "collection_b".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![],
+    );
+    let block_data = block.to_dag_cbor().unwrap();
+    let cid = block.generate_cid().unwrap();
+    blockstore.put(&cid, &block_data).await.unwrap();
+
+    let (coordinator, _events) = create_test_coordinator_with_blockstore_and_head_provider(
+        TestCoordinatorParams {
+            access_mode: AccessMode::Controlled,
+            replicators,
+            peer_state,
+            transport,
+            local_peer_id,
+            broadcaster,
+            blockstore,
+            rate_limiter: Arc::new(PeerRateLimiter::default()),
+        },
+        Arc::new(StaticHeadProvider { heads: vec![cid] }),
+    );
+
+    coordinator
+        .handle_transport_event(doc_sync_event(peer))
+        .await
+        .unwrap();
+
+    let replies = transport_handle.doc_sync_replies();
+    assert_eq!(replies.len(), 1);
+    assert!(
+        replies[0].results.is_empty(),
+        "DocSync must not return heads from collections the peer cannot replicate"
+    );
+}
+
+#[tokio::test]
+async fn car_fetch_controlled_mode_rejects_wrong_collection_root() {
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta};
+
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+
+    let peer = random_peer_id();
+    replicators.add_replicator("collection_a", peer.as_str());
+
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "collection_b".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![],
+    );
+    let block_data = block.to_dag_cbor().unwrap();
+    let cid = block.generate_cid().unwrap();
+    blockstore.put(&cid, &block_data).await.unwrap();
+
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        access_mode: AccessMode::Controlled,
+        replicators,
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore,
+        rate_limiter: Arc::new(PeerRateLimiter::default()),
+    });
+
+    let result = coordinator
+        .handle_transport_event(car_fetch_event(peer, cid))
+        .await;
+
+    assert!(
+        matches!(result, Err(Error::AccessDenied { .. })),
+        "CAR root access must be collection-scoped in Controlled mode, got {:?}",
         result
     );
 }
@@ -725,48 +968,36 @@ async fn branchable_sync_controlled_mode_allows_connected_peer() {
     let (coordinator, _events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
 
-    // Connected peers are allowed without explicit collection subscription.
-    // This matches Go DefraDB behavior where replicator targets accept
-    // push-logs from any connected peer.
     let result = coordinator
         .handle_transport_event(branchable_sync_event(connected_peer, "collection1"))
         .await;
 
     assert!(
         !matches!(&result, Err(Error::AccessDenied { .. })),
-        "Connected peer should not get AccessDenied, got {:?}",
+        "Connected peer should be allowed for Go-compatible BranchableSync, got {:?}",
         result
     );
 }
 
 #[tokio::test]
-async fn gossip_access_falls_back_to_transport_connected_peer_state() {
+async fn gossip_subscribed_collection_accepts_without_peer_connection_cache() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
-    let transport = NoopTransport::new();
-    let local_peer_id = transport.local_peer_id().to_string();
-    let broadcaster = Broadcaster::new(transport.clone());
-    let store = Arc::new(MemoryStore::new());
-    let blockstore = Arc::new(DefraBlockstore::new(store, true));
-
     let peer = random_peer_id();
-    transport.set_connected_peers(vec![peer.clone()]);
-
-    let (coordinator, _events) = create_test_coordinator_with_blockstore(
-        AccessMode::Controlled,
-        replicators,
-        peer_state.clone(),
-        transport,
-        local_peer_id,
-        broadcaster,
-        blockstore,
-        Arc::new(PeerRateLimiter::default()),
-    );
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state.clone());
 
     assert!(
         !peer_state.is_connected(peer.as_str()),
         "test setup requires the coordinator peer_state cache to start cold"
     );
+
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
 
     let result = coordinator
         .handle_transport_event(gossip_event(peer.clone(), "collection1"))
@@ -774,7 +1005,7 @@ async fn gossip_access_falls_back_to_transport_connected_peer_state() {
 
     assert!(
         !matches!(&result, Err(Error::AccessDenied { .. })),
-        "transport-connected peer should authorize gossip on peer_state cache miss, got {:?}",
+        "delivered gossip on a subscribed collection should not require a separate connection-cache hit, got {:?}",
         result
     );
 }
@@ -797,15 +1028,43 @@ async fn branchable_sync_open_mode_allows_any_peer() {
     );
 }
 
+// #838: PushLog in Controlled mode must reject a merely-connected peer
+// that isn't registered as a replicator for the target collection.
 #[tokio::test]
-async fn pushlog_connected_peer_is_not_marked_explicit_replicator() {
+async fn pushlog_controlled_mode_rejects_non_replicator_connected_peer() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
     peer_state.peer_connected(peer.as_str());
 
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(pushlog_event(peer, "collection1"))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "Connected-but-not-registered peer must be denied in Controlled mode, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn pushlog_controlled_mode_allows_locally_subscribed_collection() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
     let (coordinator, mut events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
 
     coordinator
         .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
@@ -821,7 +1080,7 @@ async fn pushlog_connected_peer_is_not_marked_explicit_replicator() {
             assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
             assert!(
                 !is_explicit_replicator,
-                "connected peer must not get explicit replicator trust"
+                "collection subscription should not mark the source as an explicit replicator"
             );
         }
         other => panic!("expected BlockReceived, got {:?}", other),
@@ -859,197 +1118,11 @@ async fn pushlog_registered_replicator_is_marked_explicit_replicator() {
     }
 }
 
+// Go parity: the direct replicator protocol skips the receiver-side
+// collection access gate. The sending node's replicator registry selects the
+// target; merge-time ACP still applies downstream.
 #[tokio::test]
-async fn gossip_controlled_mode_allows_unknown_transport_authenticated_peer() {
-    let replicators = Arc::new(ReplicatorRegistry::new());
-    let peer_state = Arc::new(PeerStateTracker::new());
-    let (coordinator, mut events) =
-        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
-
-    let peer = random_peer_id();
-    coordinator
-        .handle_transport_event(gossip_event(peer.clone(), "collection1"))
-        .await
-        .unwrap();
-
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived {
-            sender_peer,
-            is_explicit_replicator,
-            ..
-        } => {
-            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
-            assert!(
-                !is_explicit_replicator,
-                "unknown gossip sender should be accepted without gaining explicit replicator trust"
-            );
-        }
-        other => panic!("expected BlockReceived, got {:?}", other),
-    }
-}
-
-#[tokio::test]
-async fn create_replicator_updates_access_registry_for_gossip() {
-    let replicators = Arc::new(ReplicatorRegistry::new());
-    let peer_state = Arc::new(PeerStateTracker::new());
-    let (coordinator, _events) =
-        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
-
-    let peer = random_peer_id();
-    coordinator
-        .create_replicator(&peer, vec!["collection1".to_string()], false)
-        .await
-        .unwrap();
-
-    let result = coordinator
-        .handle_transport_event(gossip_event(peer, "collection1"))
-        .await;
-
-    assert!(
-        !matches!(&result, Err(Error::AccessDenied { .. })),
-        "create_replicator should authorize collection access immediately, got {:?}",
-        result
-    );
-}
-
-#[tokio::test]
-async fn gossip_access_falls_back_to_transport_replicator_state() {
-    let replicators = Arc::new(ReplicatorRegistry::new());
-    let peer_state = Arc::new(PeerStateTracker::new());
-    let transport = NoopTransport::new();
-    let local_peer_id = transport.local_peer_id().to_string();
-    let broadcaster = Broadcaster::new(transport.clone());
-    let store = Arc::new(MemoryStore::new());
-    let blockstore = Arc::new(DefraBlockstore::new(store, true));
-
-    let peer = random_peer_id();
-    transport
-        .create_replicator(&peer, vec!["collection1".to_string()])
-        .await
-        .unwrap();
-
-    let (coordinator, _events) = create_test_coordinator_with_blockstore(
-        AccessMode::Controlled,
-        replicators.clone(),
-        peer_state,
-        transport,
-        local_peer_id,
-        broadcaster,
-        blockstore,
-        Arc::new(PeerRateLimiter::default()),
-    );
-
-    assert!(
-        !replicators.is_replicator("collection1", peer.as_str()),
-        "test setup requires the coordinator registry to start empty"
-    );
-
-    let result = coordinator
-        .handle_transport_event(gossip_event(peer.clone(), "collection1"))
-        .await;
-
-    assert!(
-        !matches!(&result, Err(Error::AccessDenied { .. })),
-        "transport replicator state should authorize gossip on registry miss, got {:?}",
-        result
-    );
-}
-
-#[tokio::test]
-async fn delete_replicator_preserves_connected_peer_gossip_access() {
-    let replicators = Arc::new(ReplicatorRegistry::new());
-    let peer_state = Arc::new(PeerStateTracker::new());
-    let transport = NoopTransport::new();
-    let local_peer_id = transport.local_peer_id().to_string();
-    let broadcaster = Broadcaster::new(transport.clone());
-    let store = Arc::new(MemoryStore::new());
-    let blockstore = Arc::new(DefraBlockstore::new(store, true));
-
-    let peer = random_peer_id();
-    transport.set_connected_peers(vec![peer.clone()]);
-
-    let (coordinator, _events) = create_test_coordinator_with_blockstore(
-        AccessMode::Controlled,
-        replicators,
-        peer_state,
-        transport,
-        local_peer_id,
-        broadcaster,
-        blockstore,
-        Arc::new(PeerRateLimiter::default()),
-    );
-
-    coordinator
-        .create_replicator(&peer, vec!["collection1".to_string()], false)
-        .await
-        .unwrap();
-    coordinator.delete_replicator(&peer).await.unwrap();
-
-    let result = coordinator
-        .handle_transport_event(gossip_event(peer, "collection1"))
-        .await;
-
-    assert!(
-        !matches!(&result, Err(Error::AccessDenied { .. })),
-        "connected authenticated peers stay authorized for gossip after replicator deletion, got {:?}",
-        result
-    );
-}
-
-#[tokio::test]
-async fn create_replicator_update_preserves_connected_peer_old_collection_access() {
-    let replicators = Arc::new(ReplicatorRegistry::new());
-    let peer_state = Arc::new(PeerStateTracker::new());
-    let transport = NoopTransport::new();
-    let local_peer_id = transport.local_peer_id().to_string();
-    let broadcaster = Broadcaster::new(transport.clone());
-    let store = Arc::new(MemoryStore::new());
-    let blockstore = Arc::new(DefraBlockstore::new(store, true));
-
-    let peer = random_peer_id();
-    transport.set_connected_peers(vec![peer.clone()]);
-
-    let (coordinator, _events) = create_test_coordinator_with_blockstore(
-        AccessMode::Controlled,
-        replicators,
-        peer_state,
-        transport,
-        local_peer_id,
-        broadcaster,
-        blockstore,
-        Arc::new(PeerRateLimiter::default()),
-    );
-
-    coordinator
-        .create_replicator(&peer, vec!["collection_a".to_string()], false)
-        .await
-        .unwrap();
-    coordinator
-        .create_replicator(&peer, vec!["collection_b".to_string()], false)
-        .await
-        .unwrap();
-
-    let old_collection_result = coordinator
-        .handle_transport_event(gossip_event(peer.clone(), "collection_a"))
-        .await;
-    let new_collection_result = coordinator
-        .handle_transport_event(gossip_event(peer, "collection_b"))
-        .await;
-
-    assert!(
-        !matches!(&old_collection_result, Err(Error::AccessDenied { .. })),
-        "connected authenticated peers remain allowed on the old collection after replicator update, got {:?}",
-        old_collection_result
-    );
-    assert!(
-        !matches!(&new_collection_result, Err(Error::AccessDenied { .. })),
-        "updating a replicator must authorize the new collection immediately, got {:?}",
-        new_collection_result
-    );
-}
-
-#[tokio::test]
-async fn two_stream_connected_peer_is_not_marked_explicit_replicator() {
+async fn two_stream_controlled_mode_accepts_replicator_protocol_without_local_registration() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
@@ -1072,7 +1145,7 @@ async fn two_stream_connected_peer_is_not_marked_explicit_replicator() {
             assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
             assert!(
                 !is_explicit_replicator,
-                "connected peer must not get explicit replicator trust on two-stream ingress"
+                "ordinary direct replicator pushes should not imply explicit replay trust"
             );
         }
         other => panic!("expected BlockReceived, got {:?}", other),
@@ -1080,13 +1153,14 @@ async fn two_stream_connected_peer_is_not_marked_explicit_replicator() {
 }
 
 #[tokio::test]
-async fn two_stream_controlled_mode_allows_unknown_transport_authenticated_peer() {
+async fn two_stream_controlled_mode_accepts_unknown_peer() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+
     let (coordinator, mut events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
 
-    let peer = random_peer_id();
     coordinator
         .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
         .await
@@ -1101,11 +1175,376 @@ async fn two_stream_controlled_mode_allows_unknown_transport_authenticated_peer(
             assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
             assert!(
                 !is_explicit_replicator,
-                "unknown two-stream sender should be accepted without explicit replicator trust"
+                "two-stream transport auth and explicit replay trust remain separate"
             );
         }
         other => panic!("expected BlockReceived, got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn two_stream_controlled_mode_allows_locally_subscribed_collection() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    coordinator
+        .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
+        .await
+        .unwrap();
+
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+            assert!(
+                !is_explicit_replicator,
+                "collection subscription should not mark two-stream senders as explicit replicators"
+            );
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
+}
+
+// --- GossipSub access check tests ---
+
+#[tokio::test]
+async fn gossip_controlled_mode_rejects_unregistered_unsubscribed_peer() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    peer_state.peer_connected(peer.as_str());
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(gossip_event(peer, "collection1"))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "connected peer that is neither registered nor on a subscribed collection must be denied, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gossip_controlled_mode_allows_subscribed_collection() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    let result = coordinator
+        .handle_transport_event(gossip_event(peer, "collection1"))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "gossip on a subscribed collection must be accepted, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gossip_controlled_mode_allows_document_topic() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(gossip_event_on_topic(peer, "doc1", "collection1"))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "gossip on a subscribed document topic must be accepted, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gossip_controlled_mode_rejects_mismatched_topic_and_payload_collection() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    let result = coordinator
+        .handle_transport_event(gossip_event_on_topic(peer, "collection2", "collection1"))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "gossip payload collection must match the received topic, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gossip_controlled_mode_rejects_mismatched_document_topic() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(gossip_event_on_topic(peer, "doc2", "collection1"))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "gossip document topic must match the payload document id, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gossip_controlled_mode_rejects_outbound_replicator_target() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    peer_state.peer_connected(peer.as_str());
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .create_replicator(&peer, vec!["collection1".to_string()], false)
+        .await
+        .unwrap();
+
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    let result = coordinator
+        .handle_transport_event(gossip_event(peer, "collection1"))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "outbound replicator targets must not be accepted as gossip sources, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gossip_document_topic_allows_outbound_replicator_target() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    peer_state.peer_connected(peer.as_str());
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .create_replicator(&peer, vec!["collection1".to_string()], false)
+        .await
+        .unwrap();
+
+    let result = coordinator
+        .handle_transport_event(gossip_event_on_topic(peer, "doc1", "collection1"))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "document-topic subscriptions must accept updates from outbound replicator targets, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gossip_open_mode_rejects_outbound_replicator_target() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    replicators.add_replicator("collection1", peer.as_str());
+
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
+
+    let result = coordinator
+        .handle_transport_event(gossip_event(peer.clone(), "collection1"))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "open access mode must still preserve one-way replicator gossip direction, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gossip_ignores_transport_replicator_state_for_directionality() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let peer = random_peer_id();
+    transport
+        .create_replicator(&peer, vec!["collection1".to_string()])
+        .await
+        .unwrap();
+
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        access_mode: AccessMode::Controlled,
+        replicators: replicators.clone(),
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore,
+        rate_limiter: Arc::new(PeerRateLimiter::default()),
+    });
+
+    assert!(
+        !replicators.is_replicator("collection1", peer.as_str()),
+        "test setup requires the coordinator registry to start empty"
+    );
+
+    let result = coordinator
+        .handle_transport_event(gossip_event(peer.clone(), "collection1"))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "transport outbound replicator state must not authorize inbound gossip, got {:?}",
+        result
+    );
+    assert!(
+        !replicators.is_replicator("collection1", peer.as_str()),
+        "gossip access checks must not backfill outbound replicator state as inbound gossip trust"
+    );
+}
+
+#[tokio::test]
+async fn delete_replicator_removes_gossip_access_without_subscription() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let peer = random_peer_id();
+    transport.set_connected_peers(vec![peer.clone()]);
+
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        access_mode: AccessMode::Controlled,
+        replicators,
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore,
+        rate_limiter: Arc::new(PeerRateLimiter::default()),
+    });
+
+    coordinator
+        .create_replicator(&peer, vec!["collection1".to_string()], false)
+        .await
+        .unwrap();
+    coordinator.delete_replicator(&peer).await.unwrap();
+
+    let result = coordinator
+        .handle_transport_event(gossip_event(peer, "collection1"))
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "connected peers without registry or subscription access must be denied after delete, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn create_replicator_update_keeps_outbound_targets_from_gossip_sources() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let peer = random_peer_id();
+    transport.set_connected_peers(vec![peer.clone()]);
+
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        access_mode: AccessMode::Controlled,
+        replicators,
+        peer_state,
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore,
+        rate_limiter: Arc::new(PeerRateLimiter::default()),
+    });
+
+    coordinator
+        .create_replicator(&peer, vec!["collection_a".to_string()], false)
+        .await
+        .unwrap();
+    coordinator
+        .create_replicator(&peer, vec!["collection_b".to_string()], false)
+        .await
+        .unwrap();
+
+    let old_collection_result = coordinator
+        .handle_transport_event(gossip_event(peer.clone(), "collection_a"))
+        .await;
+    let new_collection_result = coordinator
+        .handle_transport_event(gossip_event(peer, "collection_b"))
+        .await;
+
+    assert!(
+        matches!(&old_collection_result, Err(Error::AccessDenied { .. })),
+        "updating a replicator must remove old collection access without subscription, got {:?}",
+        old_collection_result
+    );
+    assert!(
+        matches!(&new_collection_result, Err(Error::AccessDenied { .. })),
+        "updating a replicator must not turn the outbound target into a gossip source, got {:?}",
+        new_collection_result
+    );
 }
 
 #[tokio::test]
@@ -1196,16 +1635,17 @@ async fn pushlog_retries_transient_transaction_conflicts_without_sync_error() {
     let broadcaster = Broadcaster::new(transport.clone());
     let blockstore = Arc::new(ConflictOnceBlockstore::new());
 
-    let (coordinator, mut events) = create_test_coordinator_with_blockstore(
-        AccessMode::Open,
-        replicators,
-        peer_state,
-        transport,
-        local_peer_id,
-        broadcaster,
-        blockstore.clone(),
-        Arc::new(PeerRateLimiter::default()),
-    );
+    let (coordinator, mut events) =
+        create_test_coordinator_with_blockstore(TestCoordinatorParams {
+            access_mode: AccessMode::Open,
+            replicators,
+            peer_state,
+            transport,
+            local_peer_id,
+            broadcaster,
+            blockstore: blockstore.clone(),
+            rate_limiter: Arc::new(PeerRateLimiter::default()),
+        });
 
     let peer = random_peer_id();
     coordinator
@@ -1231,16 +1671,17 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
     let broadcaster = Broadcaster::new(transport.clone());
     let blockstore = Arc::new(ConflictOnceBlockstore::new());
 
-    let (coordinator, mut events) = create_test_coordinator_with_blockstore(
-        AccessMode::Open,
-        replicators,
-        peer_state,
-        transport,
-        local_peer_id,
-        broadcaster,
-        blockstore.clone(),
-        Arc::new(PeerRateLimiter::default()),
-    );
+    let (coordinator, mut events) =
+        create_test_coordinator_with_blockstore(TestCoordinatorParams {
+            access_mode: AccessMode::Open,
+            replicators,
+            peer_state,
+            transport,
+            local_peer_id,
+            broadcaster,
+            blockstore: blockstore.clone(),
+            rate_limiter: Arc::new(PeerRateLimiter::default()),
+        });
 
     let peer = random_peer_id();
     coordinator

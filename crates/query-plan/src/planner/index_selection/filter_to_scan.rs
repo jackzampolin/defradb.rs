@@ -53,9 +53,11 @@ pub fn filter_to_index_scan(
     let first_field = &index.fields[0].name;
 
     // Check if the first index field is JSON-typed
-    let first_field_is_json = collection_fields
+    let first_field_kind = collection_fields
         .iter()
-        .any(|f| &f.name == first_field && matches!(f.kind, FieldKind::Scalar(ScalarKind::Json)));
+        .find(|f| &f.name == first_field)
+        .map(|f| &f.kind);
+    let first_field_is_json = matches!(first_field_kind, Some(FieldKind::Scalar(ScalarKind::Json)));
 
     // Find conditions on the first index field
     // For JSON fields, ensure top-level conditions get an empty json_path
@@ -81,7 +83,7 @@ pub fn filter_to_index_scan(
     // Check if any condition requires falling back to full scan (matches Go's shouldFallbackToFullScan).
     // Returns None to skip index when the index cannot produce correct results.
     for cond in &first_field_conditions {
-        if should_fallback_to_full_scan(cond, first_field_is_json) {
+        if should_fallback_to_full_scan(cond, first_field_is_json, first_field_kind) {
             return None;
         }
     }
@@ -156,20 +158,17 @@ pub fn filter_to_index_scan(
             }
             FilterOp::Like | FilterOp::Nlike | FilterOp::Ilike | FilterOp::Nilike => {
                 has_scan_all = true;
+                if let ConditionValue::Pattern(pattern) = &cond.value {
+                    scan_value_filter = Some(match cond.op {
+                        FilterOp::Like => ScanValueFilter::Like(pattern.clone()),
+                        FilterOp::Nlike => ScanValueFilter::Nlike(pattern.clone()),
+                        FilterOp::Ilike => ScanValueFilter::Ilike(pattern.clone()),
+                        FilterOp::Nilike => ScanValueFilter::Nilike(pattern.clone()),
+                        _ => unreachable!(),
+                    });
+                }
                 if cond.json_path.is_some() {
                     range_json_path = cond.json_path.clone();
-                    // For JSON fields only: add scan-level value filter to exclude
-                    // non-string entries (matches Go's indexLikeMatcher behavior).
-                    // Regular string indexes don't need this because all entries are strings.
-                    if let ConditionValue::Pattern(pattern) = &cond.value {
-                        scan_value_filter = Some(match cond.op {
-                            FilterOp::Like => ScanValueFilter::Like(pattern.clone()),
-                            FilterOp::Nlike => ScanValueFilter::Nlike(pattern.clone()),
-                            FilterOp::Ilike => ScanValueFilter::Ilike(pattern.clone()),
-                            FilterOp::Nilike => ScanValueFilter::Nilike(pattern.clone()),
-                            _ => unreachable!(),
-                        });
-                    }
                 }
             }
             _ => {}

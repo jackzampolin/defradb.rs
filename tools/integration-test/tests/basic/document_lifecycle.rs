@@ -157,3 +157,91 @@ async fn document_lifecycle_test(cluster: TestCluster) {
 }
 
 for_each_runtime!(document_lifecycle, document_lifecycle_test);
+
+async fn filter_mutations_return_post_update_docs(cluster: TestCluster) {
+    let client = cluster.client(0);
+
+    client
+        .schema_add("type FilterMutationUser { name: String  age: Int }")
+        .expect("failed to add schema");
+
+    client
+        .query(r#"mutation { add_FilterMutationUser(input: {name: "Alice", age: 20}) { _docID } }"#)
+        .expect("create Alice");
+
+    let update = client
+        .query(
+            r#"mutation {
+                update_FilterMutationUser(
+                    filter: {age: {_lt: 30}},
+                    input: {age: 50}
+                ) {
+                    name
+                    age
+                }
+            }"#,
+        )
+        .expect("update by filter");
+    let updated = update["update_FilterMutationUser"]
+        .as_array()
+        .expect("update result not array");
+    assert_eq!(updated.len(), 1, "expected updated doc to be returned");
+    assert_eq!(updated[0]["name"], "Alice");
+    assert_eq!(updated[0]["age"], 50);
+
+    let no_longer_matching = client
+        .query("query { FilterMutationUser(filter: {age: {_lt: 30}}) { name age } }")
+        .expect("query age filter after update");
+    assert_eq!(
+        no_longer_matching["FilterMutationUser"]
+            .as_array()
+            .expect("query result not array")
+            .len(),
+        0,
+        "updated doc should no longer match the original update filter"
+    );
+
+    client
+        .query(r#"mutation { add_FilterMutationUser(input: {name: "Bob", age: 25}) { _docID } }"#)
+        .expect("create Bob");
+
+    let upsert = client
+        .query(
+            r#"mutation {
+                upsert_FilterMutationUser(
+                    filter: {name: {_eq: "Bob"}},
+                    add: {name: "Bob", age: 25},
+                    update: {name: "Robert", age: 51}
+                ) {
+                    name
+                    age
+                }
+            }"#,
+        )
+        .expect("upsert by filter");
+    let upserted = upsert["upsert_FilterMutationUser"]
+        .as_array()
+        .expect("upsert result not array");
+    assert_eq!(upserted.len(), 1, "expected upserted doc to be returned");
+    assert_eq!(upserted[0]["name"], "Robert");
+    assert_eq!(upserted[0]["age"], 51);
+
+    let old_name = client
+        .query(r#"query { FilterMutationUser(filter: {name: {_eq: "Bob"}}) { name age } }"#)
+        .expect("query old name after upsert");
+    assert_eq!(
+        old_name["FilterMutationUser"]
+            .as_array()
+            .expect("old-name query result not array")
+            .len(),
+        0,
+        "upserted doc should no longer match the original upsert filter"
+    );
+}
+
+#[tokio::test]
+async fn rust_filter_mutations_return_post_update_docs() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    filter_mutations_return_post_update_docs(cluster).await;
+}

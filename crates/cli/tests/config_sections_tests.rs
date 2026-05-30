@@ -25,6 +25,12 @@ fn test_api_config_defaults() {
     assert!(config.allowed_origins.is_empty());
     assert!(config.pubkey_path.is_empty());
     assert!(config.privkey_path.is_empty());
+    assert_eq!(config.query_max_depth, query::DEFAULT_MAX_QUERY_DEPTH);
+    assert_eq!(config.query_max_width, query::DEFAULT_MAX_QUERY_WIDTH);
+    assert_eq!(
+        config.query_max_filter_depth,
+        query::DEFAULT_MAX_FILTER_DEPTH
+    );
 }
 
 #[test]
@@ -46,7 +52,7 @@ fn test_net_config_defaults() {
     assert_eq!(config.p2p_addresses, vec!["/ip4/127.0.0.1/tcp/9171"]);
     assert!(config.peers.is_empty());
     assert!(config.pubsub_enabled);
-    assert!(!config.relay_enabled);
+    assert!(config.relay_enabled);
 }
 
 #[test]

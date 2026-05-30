@@ -24,7 +24,7 @@ storage = { path = "../storage" }
 blockstore = { path = "../blockstore" }
 crypto = { path = "../crypto" }
 identity = { path = "../identity" }
-p2p = { path = "../p2p" }
+p2p = { path = "../p2p", features = ["libp2p-transport"] }
 defra-http = { path = "../http" }
 query = { path = "../query" }
 db = { path = "../db" }
@@ -99,7 +99,7 @@ optional = true
 
 [dependencies.iroh-net]
 package = "iroh"
-version = "0.97"
+version = "1.0.0-rc.0"
 optional = true
 
 [dependencies.rand]

@@ -138,6 +138,8 @@ pub struct ReplicatorInfo {
     pub id: Option<String>,
     pub collections: Vec<String>,
     pub address: Option<String>,
+    pub status: Option<u8>,
+    pub last_status_change: Option<String>,
 }
 
 /// P2P document information for HTTP responses.
@@ -548,6 +550,14 @@ pub trait CollectionManagementOperations: Send + Sync {
 
     /// Delete a collection by name.
     async fn delete_collection(&self, name: &str) -> Result<(), String>;
+
+    /// Delete one or more collections by name (Go #4688 parity).
+    ///
+    /// When `active_only` is true, only the active head version of each named
+    /// collection is removed. When false (Go's default), every version of each
+    /// named collection is removed.
+    async fn delete_collections(&self, names: Vec<String>, active_only: bool)
+        -> Result<(), String>;
 }
 
 /// Trait for lens migration operations.
@@ -586,6 +596,19 @@ pub trait LensOperations: Send + Sync {
 /// read or write access to a specific document).
 #[async_trait::async_trait]
 pub trait DocumentAcpOperations: Send + Sync {
+    /// Check whether an actor has a document permission.
+    ///
+    /// This is a read-only preview of the current document ACP decision and
+    /// does not create or remove relationships.
+    async fn check_doc_access(
+        &self,
+        actor: &identity::Did,
+        permission: acp::DocumentPermission,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<bool, String>;
+
     /// Add an actor relationship to a document.
     ///
     /// Grants the `target_actor` the specified `relation` on the document

@@ -20,6 +20,8 @@ use p2p::P2PTransport;
 use crate::transport_doc_pusher::TransportDocPusher;
 use crate::transport_version_syncer::TransportVersionSyncer;
 
+const DOC_SYNC_DISPATCH_PARALLELISM: usize = 16;
+
 /// P2POperations implementation for iroh transport.
 pub struct IrohP2PAdapter<B: Blockstore + 'static> {
     transport: IrohTransport,
@@ -32,6 +34,19 @@ pub struct IrohP2PAdapter<B: Blockstore + 'static> {
 }
 
 impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
+    fn to_http_replicator_info(info: p2p::ReplicatorInfo) -> ReplicatorInfo {
+        let address = info.addresses_str().first().map(|s| s.to_string());
+        let status = Some(info.status.into());
+        let last_status_change = Some(info.last_status_change_go_string());
+        ReplicatorInfo {
+            id: Some(info.peer_id_str().to_string()),
+            collections: info.collections,
+            address,
+            status,
+            last_status_change,
+        }
+    }
+
     pub fn with_full_context(
         transport: IrohTransport,
         coordinator: Arc<IrohSyncCoordinator<B>>,
@@ -54,6 +69,50 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
         if let Ok(mut tracked) = self.tracked_documents.write() {
             *tracked = docs;
         }
+    }
+
+    async fn send_doc_sync_requests_concurrently(
+        &self,
+        peers: &[p2p::transport::PeerId],
+        request: p2p::message::DocSyncRequest,
+    ) -> bool {
+        let mut peer_iter = peers.iter().cloned();
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut any_sent = false;
+
+        loop {
+            while tasks.len() < DOC_SYNC_DISPATCH_PARALLELISM {
+                let Some(peer) = peer_iter.next() else {
+                    break;
+                };
+                let transport = self.transport.clone();
+                let request = request.clone();
+                tasks.spawn(async move {
+                    let result = transport.send_doc_sync_request(&peer, request).await;
+                    (peer, result)
+                });
+            }
+
+            if tasks.is_empty() {
+                break;
+            }
+
+            match tasks.join_next().await {
+                Some(Ok((peer, Ok(())))) => {
+                    any_sent = true;
+                    tracing::debug!(peer_id = %peer, "sent DocSync request");
+                }
+                Some(Ok((peer, Err(error)))) => {
+                    tracing::warn!(peer_id = %peer, error = %error, "failed to send DocSync request");
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(error = %error, "DocSync dispatch task failed");
+                }
+                None => break,
+            }
+        }
+
+        any_sent
     }
 }
 
@@ -129,22 +188,26 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
     }
 
     async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
-        let p2p_infos = self
-            .transport
-            .list_replicators()
-            .await
-            .map_err(|e| P2PError::Transport(e.to_string()))?;
+        let p2p_infos = if let Some(ref pusher) = self.doc_pusher {
+            match pusher.load_persisted_replicators().await {
+                Ok(Some(infos)) => infos,
+                Ok(None) => self
+                    .transport
+                    .list_replicators()
+                    .await
+                    .map_err(|e| P2PError::Transport(e.to_string()))?,
+                Err(e) => return Err(P2PError::Internal(e)),
+            }
+        } else {
+            self.transport
+                .list_replicators()
+                .await
+                .map_err(|e| P2PError::Transport(e.to_string()))?
+        };
 
         let http_infos: Vec<ReplicatorInfo> = p2p_infos
             .into_iter()
-            .map(|info| {
-                let address = info.addresses_str().first().map(|s| s.to_string());
-                ReplicatorInfo {
-                    id: Some(info.peer_id_str().to_string()),
-                    collections: info.collections,
-                    address,
-                }
-            })
+            .map(Self::to_http_replicator_info)
             .collect();
 
         Ok(http_infos)
@@ -503,6 +566,17 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             }
         }
 
+        if let Some(ref pusher) = self.doc_pusher {
+            let all_docs: Vec<String> = self
+                .tracked_documents
+                .read()
+                .map(|docs| docs.iter().cloned().collect())
+                .unwrap_or_default();
+            if let Err(e) = pusher.persist_p2p_documents(&all_docs).await {
+                tracing::warn!(error = %e, "failed to persist P2P documents after removal");
+            }
+        }
+
         Ok(())
     }
 
@@ -594,19 +668,9 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                 )));
             }
 
-            let mut any_sent = false;
-            for peer in &connected_peers {
-                match self
-                    .transport
-                    .send_doc_sync_request(peer, request.clone())
-                    .await
-                {
-                    Ok(()) => any_sent = true,
-                    Err(e) => {
-                        tracing::warn!(peer_id = %peer, error = %e, "failed to send DocSync request")
-                    }
-                }
-            }
+            let any_sent = self
+                .send_doc_sync_requests_concurrently(&connected_peers, request)
+                .await;
 
             // No peers accepted the request; no MergeComplete events will arrive.
             if !any_sent {

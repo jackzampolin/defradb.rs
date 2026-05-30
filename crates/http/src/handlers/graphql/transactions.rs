@@ -64,48 +64,7 @@ pub async fn tx_begin(
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to begin transaction");
-            (
-                StatusCode::BAD_REQUEST,
-                Json(crate::error::ErrorResponse {
-                    error: format!("Failed to begin transaction: {}", e),
-                }),
-            )
-                .into_response()
-        }
-    })
-}
-
-/// Begin a new concurrent transaction (Go-compatible).
-///
-/// POST /api/v0/tx/concurrent?read_only=true
-///
-/// Concurrent transactions allow multiple transactions to run in parallel.
-///
-/// No NAC check — permissions are enforced per-operation within the transaction.
-pub async fn tx_begin_concurrent(
-    State(state): State<AppState>,
-    Query(query): Query<TxBeginQuery>,
-) -> Result<impl IntoResponse, HttpError> {
-    Ok(match state.executor.begin_txn(query.read_only).await {
-        Ok(handle) => {
-            let id: u64 = handle.to_string().parse().unwrap_or(0);
-            tracing::info!(
-                txn_id = id,
-                readonly = query.read_only,
-                concurrent = true,
-                "Concurrent transaction started"
-            );
-            (StatusCode::OK, Json(TxBeginResponse { id })).into_response()
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to begin concurrent transaction");
-            (
-                StatusCode::BAD_REQUEST,
-                Json(crate::error::ErrorResponse {
-                    error: format!("Failed to begin transaction: {}", e),
-                }),
-            )
-                .into_response()
+            HttpError::from(e).into_response()
         }
     })
 }
@@ -140,13 +99,7 @@ pub async fn tx_commit(
         }
         Err(e) => {
             tracing::error!(txn_id = %handle, error = %e, "Failed to commit transaction");
-            Ok((
-                StatusCode::BAD_REQUEST,
-                Json(crate::error::ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-                .into_response())
+            Ok(HttpError::from(e).into_response())
         }
     }
 }
@@ -182,13 +135,7 @@ pub async fn tx_discard(
         }
         Err(e) => {
             tracing::error!(txn_id = %handle, error = %e, "Failed to discard transaction");
-            Ok((
-                StatusCode::BAD_REQUEST,
-                Json(crate::error::ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-                .into_response())
+            Ok(HttpError::from(e).into_response())
         }
     }
 }

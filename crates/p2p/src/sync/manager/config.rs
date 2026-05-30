@@ -1,5 +1,7 @@
 //! Sync manager configuration.
 
+use std::time::Duration;
+
 /// Default maximum number of concurrent DAG fetch tasks.
 ///
 /// Lowered from 16 to 4 for mobile client compatibility — 16 concurrent
@@ -15,6 +17,25 @@ pub const DEFAULT_RATE_LIMIT_BURST: u32 = 500;
 /// Default per-peer rate limit refill rate (tokens per second).
 pub const DEFAULT_RATE_LIMIT_RATE: f64 = 50.0;
 
+/// Default per-peer rate-limit backoff ladder, in seconds.
+///
+/// Mirrors the persisted replicator retry ladder: seconds-to-hours, capped at
+/// 12 hours, so abusive peers are retried less aggressively over time.
+pub const DEFAULT_RATE_LIMIT_BACKOFF_SECS: &[u64] = &[
+    30, 60, 120, 240, 480, 960, 1920, 3600, 7200, 14400, 28800, 43200,
+];
+
+/// Default timeout for one outbound PushLog send to a replicator peer.
+pub const DEFAULT_PUSH_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default rate-limit backoff ladder as durations.
+pub fn default_rate_limit_backoff() -> Vec<Duration> {
+    DEFAULT_RATE_LIMIT_BACKOFF_SECS
+        .iter()
+        .map(|seconds| Duration::from_secs(*seconds))
+        .collect()
+}
+
 /// Configuration for the SyncManager.
 #[derive(Debug, Clone)]
 pub struct SyncConfig {
@@ -23,8 +44,8 @@ pub struct SyncConfig {
 
     /// Maximum number of concurrent DAG fetch tasks spawned by the coordinator.
     ///
-    /// Caps fan-out from DocSync and BranchableSync replies to prevent resource
-    /// exhaustion from a peer advertising a large number of head CIDs.
+    /// Caps fan-out from DocSync, BranchableSync, and push-driven DAG recovery to
+    /// prevent resource exhaustion from a peer advertising a large number of head CIDs.
     pub max_concurrent_dag_fetches: usize,
 
     /// Maximum number of concurrent push tasks for sending blocks to replicators.
@@ -38,6 +59,12 @@ pub struct SyncConfig {
 
     /// Per-peer rate limit refill rate (tokens per second).
     pub rate_limit_rate: f64,
+
+    /// Per-peer backoff ladder after rate-limit refusals.
+    pub rate_limit_backoff: Vec<Duration>,
+
+    /// Timeout for one outbound PushLog send to a replicator peer.
+    pub push_send_timeout: Duration,
 }
 
 impl Default for SyncConfig {
@@ -48,6 +75,8 @@ impl Default for SyncConfig {
             max_concurrent_push_tasks: DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
             rate_limit_burst: DEFAULT_RATE_LIMIT_BURST,
             rate_limit_rate: DEFAULT_RATE_LIMIT_RATE,
+            rate_limit_backoff: default_rate_limit_backoff(),
+            push_send_timeout: DEFAULT_PUSH_SEND_TIMEOUT,
         }
     }
 }

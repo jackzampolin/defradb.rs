@@ -17,14 +17,14 @@ use crate::error::{Error, Result};
 #[derive(Args, Debug)]
 pub struct DocumentArgs {
     /// Collection name
-    #[arg(long = "collection-name", alias = "name", global = true)]
+    #[arg(long = "collection-name", global = true)]
     pub collection_name: Option<String>,
 
     /// Collection ID
     #[arg(long, global = true)]
     pub collection_id: Option<String>,
 
-    /// Schema version ID
+    /// Collection version ID
     #[arg(long, global = true)]
     pub version_id: Option<String>,
 

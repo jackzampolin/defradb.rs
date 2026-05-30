@@ -9,6 +9,7 @@ use acp::{DocumentPermission, Identity};
 use identity::Did;
 use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
+use std::collections::HashSet;
 
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
@@ -38,31 +39,43 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let cids = select.cid.as_ref().ok_or_else(|| {
             QueryError::internal("execute_cid_query called without CID - this is a bug")
         })?;
-        let cid = cids.first().ok_or_else(|| {
-            QueryError::internal("execute_cid_query called with empty CID array - this is a bug")
-        })?;
+        if cids.is_empty() {
+            return Err(QueryError::internal(
+                "execute_cid_query called with empty CID array - this is a bug",
+            ));
+        }
 
         // Get expected docID from select.doc_ids (optional validation)
         let expected_doc_id = select.doc_ids.as_ref().and_then(|ids| ids.first());
 
-        // Fetch document(s) at the specified CID.
+        // Fetch document(s) at the specified CIDs.
         // For collection-level CIDs (branchable), this returns multiple documents.
         // For document-level CIDs, this returns a single document.
-        let documents = match fetcher
-            .get_documents_at_cid(cid, expected_doc_id.map(|s| s.as_str()))
-            .await
-        {
-            Ok(docs) => docs,
-            Err(e) => {
-                let err_msg = e.to_string();
-                // docID mismatch: Go returns empty results
-                if err_msg.contains("cid either does not exist or belong to document") {
-                    return Ok(JsonValue::Array(vec![]));
-                }
-                // Block not found in blockstore: propagate as error (Go does the same)
-                return Err(e);
+        let mut seen_cids = HashSet::new();
+        let mut documents = Vec::new();
+        for cid in cids {
+            if !seen_cids.insert(cid.clone()) {
+                continue;
             }
-        };
+
+            match fetcher
+                .get_documents_at_cid(cid, expected_doc_id.map(|s| s.as_str()))
+                .await
+            {
+                Ok(docs) => {
+                    documents.extend(docs.into_iter().map(|doc| (doc, cid.clone())));
+                }
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    // docID mismatch: Go returns empty results
+                    if err_msg.contains("cid either does not exist or belong to document") {
+                        continue;
+                    }
+                    // Block not found in blockstore: propagate as error (Go does the same)
+                    return Err(e);
+                }
+            }
+        }
 
         // Get collection schema for building the mapping
         let collection = self.get_collection(&select.collection_name).await?;
@@ -73,7 +86,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let documents = if let Some(ref policy) = collection.policy {
             let identity = Identity::from(caller_identity);
             let mut permitted = Vec::with_capacity(documents.len());
-            for doc in documents {
+            for (doc, cid) in documents {
                 let doc_id = match doc.id() {
                     Some(id) => id.to_string(),
                     None => continue,
@@ -88,7 +101,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 )
                 .await
                 {
-                    Ok(true) => permitted.push(doc),
+                    Ok(true) => permitted.push((doc, cid)),
                     Ok(false) => {
                         tracing::debug!(
                             target: "acp::audit",
@@ -104,6 +117,25 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
             }
             permitted
+        } else {
+            documents
+        };
+
+        let documents = if let Some(ref filter) = select.filter {
+            let mut filtered = Vec::with_capacity(documents.len());
+            for (document, cid) in documents {
+                let json_obj = JsonValue::Object(
+                    document
+                        .to_map()
+                        .map_err(|err| QueryError::internal(err.to_string()))?
+                        .into_iter()
+                        .collect(),
+                );
+                if filter.matches_json_object(&json_obj)? {
+                    filtered.push((document, cid));
+                }
+            }
+            filtered
         } else {
             documents
         };
@@ -138,7 +170,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Process each document into a JSON object
         let mut result_array = Vec::new();
 
-        for document in &documents {
+        for (document, cid) in &documents {
             // Convert the document to JSON with only the requested scalar fields
             let mut obj = serde_json::Map::new();
 
@@ -212,7 +244,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let doc_id = document.id().map(|id| id.to_string());
                 if let Some(doc_id_str) = doc_id {
                     let version_data = self
-                        .fetch_version_data(fetcher, &doc_id_str, version_select, Some(cid))
+                        .fetch_version_data(
+                            fetcher,
+                            &doc_id_str,
+                            version_select,
+                            Some(cid.as_str()),
+                        )
                         .await?;
                     let output_name = version_select.field.output_name();
                     obj.insert(output_name.to_string(), version_data);

@@ -19,6 +19,15 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             "Processing Counter delta"
         );
 
+        if self.blockstore.is_merged(cid).await.unwrap_or(false) {
+            tracing::debug!(
+                cid = %cid,
+                field_name = %payload.field_name,
+                "Counter delta already marked merged, skipping standalone replay"
+            );
+            return Ok(MergeOutcome::terminal_skip("already merged"));
+        }
+
         // Look up the collection to determine field kind and counter type,
         // with fallback to metadata's collection_id for cross-version sync
         let collection = self
@@ -214,6 +223,16 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
+        if self.blockstore.is_merged(cid).await.unwrap_or(false) {
+            let value = self
+                .read_counter_value(&counter, datastore, numeric_kind, &payload.field_name)
+                .await;
+            return Ok(CounterMergeResult {
+                applied: false,
+                value,
+            });
+        }
+
         // Create the CounterDelta from payload
         let delta = self.create_counter_delta(payload, numeric_kind)?;
         let ctx = Context {
@@ -330,7 +349,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 )
                 .map_err(|e| MergeError::MergeFailed(e.to_string()))
             }
-            _ => unreachable!(),
+            other => Err(MergeError::UnsupportedDelta(format!(
+                "unsupported NumericKind {:?} for counter delta",
+                other
+            ))),
         }
     }
 
@@ -389,7 +411,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     None
                 }
             }
-            _ => unreachable!(),
+            other => {
+                tracing::warn!(kind = ?other, "unsupported NumericKind in counter value decode");
+                None
+            }
         }
     }
 }

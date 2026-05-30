@@ -2,7 +2,7 @@
 
 use axum::{extract::State, Json};
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
@@ -45,7 +45,7 @@ pub async fn add_view(
     let result = view_ops
         .add_view(&body.query, &body.sdl, body.transform.as_deref())
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(result))
 }
@@ -67,7 +67,7 @@ pub async fn refresh_views(
     view_ops
         .refresh_views(body.names)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(serde_json::json!({})))
 }
@@ -89,7 +89,7 @@ pub async fn gc_downsample_histories(
     view_ops
         .gc_downsample_histories(body.names)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(serde_json::json!({})))
 }

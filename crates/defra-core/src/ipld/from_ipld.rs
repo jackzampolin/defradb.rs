@@ -231,11 +231,14 @@ impl TryFrom<&Ipld> for CompositeDeltaPayload {
             }
         };
 
+        let status = CompositeDeltaPayload::validate_status(parse_u8(map, "status")?)
+            .map_err(Error::IpldError)?;
+
         Ok(CompositeDeltaPayload {
             doc_id: parse_bytes(map, "docID")?,
             schema_version_id: parse_string(map, "schemaVersionID")?,
             priority: parse_u64(map, "priority")?,
-            status: parse_u8(map, "status")?,
+            status,
         })
     }
 }

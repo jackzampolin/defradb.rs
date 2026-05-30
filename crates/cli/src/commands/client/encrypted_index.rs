@@ -17,23 +17,22 @@ pub struct EncryptedIndexArgs {
 #[derive(Subcommand, Debug)]
 #[non_exhaustive]
 pub enum EncryptedIndexCommand {
-    /// Add an encrypted index on a collection field
-    #[command(alias = "add")]
-    New(EncryptedIndexAddArgs),
+    /// Make a new encrypted index on a collection field
+    New(EncryptedIndexNewArgs),
     /// Delete an encrypted index from a collection field
     Delete(EncryptedIndexDeleteArgs),
     /// List encrypted indexes for a collection
     List(EncryptedIndexListArgs),
 }
 
-/// Arguments for encrypted-index add command
+/// Arguments for encrypted-index new command
 #[derive(Args, Debug)]
-pub struct EncryptedIndexAddArgs {
+pub struct EncryptedIndexNewArgs {
     /// Collection name
     #[arg(long, short = 'c')]
     pub collection: String,
 
-    /// Field name to add encrypted index on
+    /// Field name to make a new encrypted index on
     #[arg(long)]
     pub field: String,
 }
@@ -68,7 +67,7 @@ impl EncryptedIndexArgs {
     }
 }
 
-impl EncryptedIndexAddArgs {
+impl EncryptedIndexNewArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         validate_identifier(&self.collection)?;
         validate_identifier(&self.field)?;

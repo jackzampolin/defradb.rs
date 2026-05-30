@@ -164,7 +164,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         continue;
                     }
                 }
-
                 let head_data = match self.blockstore.get(head_cid).await {
                     Ok(Some(data)) => data,
                     Ok(None) => {
@@ -487,7 +486,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         continue;
                     }
                 }
-
                 let head_data = match self.blockstore.get(head_cid).await {
                     Ok(Some(data)) => data,
                     _ => continue,

@@ -2,8 +2,10 @@
 
 use std::net::SocketAddr;
 
+use db::{DEFAULT_TRANSACTION_CLEANUP_INTERVAL, DEFAULT_TRANSACTION_IDLE_TIMEOUT};
 use serde::{Deserialize, Serialize};
 
+use query::{DEFAULT_MAX_FILTER_DEPTH, DEFAULT_MAX_QUERY_DEPTH, DEFAULT_MAX_QUERY_WIDTH};
 use storage::backends::DurabilityMode;
 
 use super::types::{
@@ -66,6 +68,21 @@ pub struct ApiConfig {
     /// Query execution timeout in seconds (0 = no timeout). Default: 30.
     #[serde(default = "default_query_timeout")]
     pub query_timeout: u64,
+    /// Max idle age for explicit HTTP transactions in seconds (0 = disabled). Default: 600.
+    #[serde(default = "default_transaction_idle_timeout")]
+    pub transaction_idle_timeout: u64,
+    /// Interval between explicit HTTP transaction cleanup sweeps in seconds. Default: 60.
+    #[serde(default = "default_transaction_cleanup_interval")]
+    pub transaction_cleanup_interval: u64,
+    /// Max GraphQL selection nesting depth (0 = unlimited). Default: 20.
+    #[serde(default = "default_query_max_depth")]
+    pub query_max_depth: usize,
+    /// Max fields at any GraphQL selection level (0 = unlimited). Default: 100.
+    #[serde(default = "default_query_max_width")]
+    pub query_max_width: usize,
+    /// Max recursive filter nesting depth (0 = unlimited). Default: 50.
+    #[serde(default = "default_query_max_filter_depth")]
+    pub query_max_filter_depth: usize,
     /// Postgres wire protocol address (empty = disabled). Default: "" (disabled).
     #[serde(default)]
     pub pg_address: String,
@@ -83,6 +100,26 @@ fn default_query_timeout() -> u64 {
     30
 }
 
+fn default_transaction_idle_timeout() -> u64 {
+    DEFAULT_TRANSACTION_IDLE_TIMEOUT.as_secs()
+}
+
+fn default_transaction_cleanup_interval() -> u64 {
+    DEFAULT_TRANSACTION_CLEANUP_INTERVAL.as_secs()
+}
+
+fn default_query_max_depth() -> usize {
+    DEFAULT_MAX_QUERY_DEPTH
+}
+
+fn default_query_max_width() -> usize {
+    DEFAULT_MAX_QUERY_WIDTH
+}
+
+fn default_query_max_filter_depth() -> usize {
+    DEFAULT_MAX_FILTER_DEPTH
+}
+
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
@@ -96,6 +133,11 @@ impl Default for ApiConfig {
             request_timeout: default_request_timeout(),
             max_concurrent_requests: default_max_concurrent(),
             query_timeout: default_query_timeout(),
+            transaction_idle_timeout: default_transaction_idle_timeout(),
+            transaction_cleanup_interval: default_transaction_cleanup_interval(),
+            query_max_depth: default_query_max_depth(),
+            query_max_width: default_query_max_width(),
+            query_max_filter_depth: default_query_max_filter_depth(),
             pg_address: String::new(),
         }
     }
@@ -112,6 +154,13 @@ impl ApiConfig {
         let has_priv = !self.privkey_path.is_empty();
         if has_pub != has_priv {
             return Err(Error::IncompleteTlsConfig);
+        }
+
+        if self.transaction_idle_timeout > 0 && self.transaction_cleanup_interval == 0 {
+            return Err(Error::InvalidConfig(
+                "api.transaction_cleanup_interval must be > 0 when transaction_idle_timeout is enabled"
+                    .to_string(),
+            ));
         }
 
         Ok(())
@@ -199,6 +248,8 @@ pub struct NetConfig {
     #[serde(default)]
     pub peers: Vec<String>,
     pub pubsub_enabled: bool,
+    /// Enable libp2p relay client support. Default: true.
+    #[serde(default = "default_true")]
     pub relay_enabled: bool,
     /// Max P2P protocol message size in bytes. Default: 16 MiB.
     #[serde(default = "default_max_msg_size")]
@@ -212,12 +263,15 @@ pub struct NetConfig {
     /// Max concurrent P2P stream handler tasks. Default: 64.
     #[serde(default = "default_max_p2p_tasks")]
     pub max_p2p_tasks: usize,
-    /// Max established inbound P2P connections. Default: 100.
-    #[serde(default = "default_max_connections_in")]
-    pub max_connections_in: u32,
-    /// Max established outbound P2P connections. Default: 400.
-    #[serde(default = "default_max_connections_out")]
-    pub max_connections_out: u32,
+    /// P2P established connection low watermark. Default: 100.
+    #[serde(default = "default_connection_manager_low_water")]
+    pub connection_manager_low_water: u32,
+    /// P2P established connection high watermark. Default: 400.
+    #[serde(default = "default_connection_manager_high_water")]
+    pub connection_manager_high_water: u32,
+    /// P2P connection manager grace period in milliseconds. Default: 20000.
+    #[serde(default = "default_connection_manager_grace_period_ms")]
+    pub connection_manager_grace_period_ms: u64,
     /// Max established connections per peer. Default: 4.
     #[serde(default = "default_max_connections_per_peer")]
     pub max_connections_per_peer: u32,
@@ -268,11 +322,14 @@ fn default_stream_timeout() -> u64 {
 fn default_max_p2p_tasks() -> usize {
     64
 }
-fn default_max_connections_in() -> u32 {
+fn default_connection_manager_low_water() -> u32 {
     100
 }
-fn default_max_connections_out() -> u32 {
+fn default_connection_manager_high_water() -> u32 {
     400
+}
+fn default_connection_manager_grace_period_ms() -> u64 {
+    20_000
 }
 fn default_max_connections_per_peer() -> u32 {
     4
@@ -294,13 +351,14 @@ impl Default for NetConfig {
             p2p_addresses: vec!["/ip4/127.0.0.1/tcp/9171".to_string()],
             peers: Vec::new(),
             pubsub_enabled: true,
-            relay_enabled: false,
+            relay_enabled: true,
             max_msg_size: default_max_msg_size(),
             max_car_size: default_max_car_size(),
             stream_timeout: default_stream_timeout(),
             max_p2p_tasks: default_max_p2p_tasks(),
-            max_connections_in: default_max_connections_in(),
-            max_connections_out: default_max_connections_out(),
+            connection_manager_low_water: default_connection_manager_low_water(),
+            connection_manager_high_water: default_connection_manager_high_water(),
+            connection_manager_grace_period_ms: default_connection_manager_grace_period_ms(),
             max_connections_per_peer: default_max_connections_per_peer(),
             transport: TransportType::default(),
             iroh_relay_url: None,

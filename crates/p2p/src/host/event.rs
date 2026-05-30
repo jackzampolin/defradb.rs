@@ -40,6 +40,21 @@ pub enum HostEvent {
         message: PushLogBroadcast,
     },
 
+    /// Received a gossipsub message on a topic registered as `pubsub_rpc`
+    /// (via [`super::command::HostCommand::RegisterPubsubRpcTopic`]).
+    ///
+    /// The host does not attempt to decode the payload; the consumer (the
+    /// coordinator, see `sync/coordinator/event_handler/doc_sync.rs` and
+    /// `branchable_sync.rs`) runs it through its own
+    /// `pubsub_rpc::TopicHandler`. This channel is how DocSync and
+    /// BranchableSync receive Go-compatible traffic (#828).
+    GossipRawMessage {
+        propagation_source: PeerId,
+        message_id: gossipsub::MessageId,
+        topic: String,
+        data: Vec<u8>,
+    },
+
     /// A peer subscribed to a topic we're also subscribed to.
     PeerSubscribed { peer_id: PeerId, topic: String },
 
@@ -67,6 +82,12 @@ pub enum HostEvent {
     },
 
     /// Received a PushLog request via two-stream protocol (Go compatibility).
+    ///
+    /// Invariant (#838): `is_explicit_replicator` must only be set to
+    /// `true` by the two-stream transport after verifying the remote peer via
+    /// the signed explicit-replicator handshake. The sync coordinator treats
+    /// this flag as merge-time explicit replay trust, separate from the
+    /// direct replicator protocol's Go-compatible pre-merge acceptance.
     TwoStreamRequest {
         peer_id: PeerId,
         request: crate::message::PushLogRequest,
@@ -113,5 +134,17 @@ pub enum HostEvent {
         peer_id: PeerId,
         /// Raw CBOR bytes of the PushSEArtifactsRequest for the db layer to process.
         data: Vec<u8>,
+    },
+
+    /// Received an SE query request from a peer.
+    SEQueryRequest {
+        peer_id: PeerId,
+        request: crate::message::QuerySEArtifactsRequest,
+    },
+
+    /// Received an SE query reply from a peer.
+    SEQueryReply {
+        peer_id: PeerId,
+        reply: crate::message::QuerySEArtifactsReply,
     },
 }

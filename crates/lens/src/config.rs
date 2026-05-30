@@ -33,7 +33,7 @@ pub struct LensConfig {
     /// The Lens modules to apply, in execution order.
     ///
     /// Go's model.Lens embeds this as a flat `Lenses` array.
-    #[serde(rename = "Lenses", alias = "Lens", default)]
+    #[serde(rename = "Lenses", alias = "Lens", alias = "lenses", default)]
     pub lenses: Vec<LensModule>,
 }
 
@@ -75,11 +75,16 @@ pub struct LensModule {
     /// Path to the WASM module file.
     ///
     /// The WASM module must remain at this location as long as the migration is active.
-    #[serde(rename = "Path", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "Path",
+        alias = "path",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub path: Option<String>,
 
     /// Whether to inverse the module transform.
-    #[serde(rename = "Inverse", default)]
+    #[serde(rename = "Inverse", alias = "inverse", default)]
     pub inverse: bool,
 
     /// Raw WASM module bytes (alternative to path).
@@ -92,7 +97,12 @@ pub struct LensModule {
     pub module: Option<Vec<u8>>,
 
     /// Arguments passed to the WASM module.
-    #[serde(rename = "Arguments", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "Arguments",
+        alias = "arguments",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub arguments: Option<serde_json::Value>,
 }
 
@@ -209,6 +219,30 @@ mod tests {
         assert_eq!(
             parsed.lenses[0].path,
             Some("/path/to/transform.wasm".to_string())
+        );
+    }
+
+    #[test]
+    fn test_lens_config_cli_format() {
+        let json = r#"{
+            "lenses": [
+                {
+                    "path": "/path/to/transform.wasm",
+                    "inverse": true,
+                    "arguments": {"src": "Name", "dst": "FullName"}
+                }
+            ]
+        }"#;
+        let parsed: LensConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.lenses.len(), 1);
+        assert_eq!(
+            parsed.lenses[0].path,
+            Some("/path/to/transform.wasm".to_string())
+        );
+        assert!(parsed.lenses[0].inverse);
+        assert_eq!(
+            parsed.lenses[0].arguments,
+            Some(serde_json::json!({"src": "Name", "dst": "FullName"}))
         );
     }
 

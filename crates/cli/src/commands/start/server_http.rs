@@ -52,6 +52,12 @@ impl Node {
                     Error::InvalidApiAddress(config.api.address.clone(), e.to_string())
                 })?;
 
+        let query_limits = query::QueryLimits {
+            max_query_depth: config.api.query_max_depth,
+            max_query_width: config.api.query_max_width,
+            max_filter_depth: config.api.query_max_filter_depth,
+        };
+
         let server_config = defra_http::ServerConfig {
             address: api_address,
             allowed_origins: config.api.allowed_origins.clone(),
@@ -60,6 +66,7 @@ impl Node {
             max_backup_size: config.api.max_backup_size,
             request_timeout: config.api.request_timeout,
             max_concurrent_requests: config.api.max_concurrent_requests,
+            query_limits,
         };
 
         let mut server =
@@ -140,7 +147,8 @@ impl Node {
         server = server.with_schema_arc(schema_adapter);
         info!("Schema HTTP endpoint enabled");
 
-        let view_adapter = crate::view_adapter::ViewAdapter::new_arc(database.clone());
+        let view_adapter =
+            crate::view_adapter::ViewAdapter::new_arc(database.clone(), query_limits);
         server = server.with_view_arc(view_adapter);
         info!("View HTTP endpoints enabled");
 

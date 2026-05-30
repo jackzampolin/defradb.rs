@@ -5,17 +5,23 @@
 //!
 //! All endpoints enforce NAC permissions when NAC is enabled.
 
+use std::collections::HashMap;
+
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
+use query::rest::{CollectionDocIdsPage, CollectionDocIdsPagination};
 use serde::Serialize;
 
-use crate::error::HttpError;
+use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
+
+const DEFAULT_DOC_IDS_LIMIT: usize = 100;
+const MAX_DOC_IDS_LIMIT: usize = 1000;
 
 /// Response for listing collections.
 #[derive(Debug, Clone, Serialize)]
@@ -23,10 +29,58 @@ pub struct CollectionsResponse {
     pub collections: Vec<String>,
 }
 
-/// Response for document IDs in a collection.
+/// Response for listing document IDs in a collection.
 #[derive(Debug, Clone, Serialize)]
-pub struct DocIdsResponse {
+pub struct CollectionDocIdsResponse {
     pub doc_ids: Vec<String>,
+    pub total: usize,
+    pub has_more: bool,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+impl From<CollectionDocIdsPage> for CollectionDocIdsResponse {
+    fn from(page: CollectionDocIdsPage) -> Self {
+        Self {
+            has_more: page.has_more(),
+            doc_ids: page.doc_ids,
+            total: page.total,
+            offset: page.offset,
+            limit: page.limit,
+        }
+    }
+}
+
+fn parse_collection_doc_ids_pagination(
+    params: &HashMap<String, String>,
+) -> Result<CollectionDocIdsPagination, HttpError> {
+    let limit = match params.get("limit") {
+        Some(raw) => {
+            let limit = raw.parse::<usize>().map_err(|_| {
+                HttpError::BadRequest(format!("'limit' must be a positive integer, got '{}'", raw))
+            })?;
+            if limit == 0 || limit > MAX_DOC_IDS_LIMIT {
+                return Err(HttpError::BadRequest(format!(
+                    "'limit' must be between 1 and {}",
+                    MAX_DOC_IDS_LIMIT
+                )));
+            }
+            limit
+        }
+        None => DEFAULT_DOC_IDS_LIMIT,
+    };
+
+    let offset = match params.get("offset") {
+        Some(raw) => raw.parse::<usize>().map_err(|_| {
+            HttpError::BadRequest(format!(
+                "'offset' must be a non-negative integer, got '{}'",
+                raw
+            ))
+        })?,
+        None => 0,
+    };
+
+    Ok(CollectionDocIdsPagination { limit, offset })
 }
 
 /// List all collection names.
@@ -54,31 +108,34 @@ pub async fn list_collections(
     }
 }
 
-/// Get all document IDs in a collection.
+/// Get document IDs in a collection.
 ///
-/// GET /api/v0/collections/{name}
+/// GET /api/v0/collections/{name}?limit=100&offset=0
 ///
-/// Identity is extracted from the Authorization header and used to filter
-/// documents based on read permissions (protected documents will only be
-/// visible if the identity has read access).
+/// Returns a bounded page of document IDs and pagination metadata.
 ///
 /// Requires `CollectionGet` permission when NAC is enabled.
 pub async fn get_collection_doc_ids(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path(name): Path<String>,
-) -> Result<Json<DocIdsResponse>, HttpError> {
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<CollectionDocIdsResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
+    let pagination = parse_collection_doc_ids_pagination(&params)?;
     let rest = state
         .rest
         .as_ref()
         .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
 
-    match rest.get_collection_doc_ids(&name, identity.did()).await {
-        Ok(doc_ids) => Ok(Json(DocIdsResponse { doc_ids })),
+    match rest
+        .get_collection_doc_ids_page(&name, pagination, identity.did())
+        .await
+    {
+        Ok(page) => Ok(Json(page.into())),
         Err(e) => {
-            tracing::warn!(collection = %name, error = %e, "Failed to get collection doc IDs");
+            tracing::warn!(collection = %name, error = %e, "Failed to list collection document IDs");
             Err(e.into())
         }
     }
@@ -133,7 +190,7 @@ pub async fn patch_collection(
     collection_mgmt
         .patch_collection(&name, &patch_str)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(StatusCode::OK)
 }
@@ -187,7 +244,7 @@ pub async fn set_active(
     collection_mgmt
         .set_active_version(version_id.trim())
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(StatusCode::OK)
 }
@@ -212,7 +269,7 @@ pub async fn truncate_collection(
     collection_mgmt
         .truncate_collection(&name)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(()))
 }
@@ -243,7 +300,7 @@ pub async fn describe_collection(
             "collection '{}' not found",
             name
         ))),
-        Err(e) => Err(HttpError::BadRequest(e)),
+        Err(e) => Err(http_error_from_backend_message(e)),
     }
 }
 
@@ -266,7 +323,7 @@ pub async fn collection_exists(
     let exists = collection_mgmt
         .has_collection(&name)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(serde_json::json!({ "exists": exists })))
 }
@@ -294,7 +351,7 @@ pub async fn find_collection_by_id(
             Ok(Json(val))
         }
         Ok(None) => Ok(Json(serde_json::Value::Null)),
-        Err(e) => Err(HttpError::BadRequest(e)),
+        Err(e) => Err(http_error_from_backend_message(e)),
     }
 }
 
@@ -321,7 +378,7 @@ pub async fn get_collection_by_version_id(
             Ok(Json(val))
         }
         Ok(None) => Ok(Json(serde_json::Value::Null)),
-        Err(e) => Err(HttpError::BadRequest(e)),
+        Err(e) => Err(http_error_from_backend_message(e)),
     }
 }
 
@@ -344,7 +401,7 @@ pub async fn delete_collection_versions(
     collection_mgmt
         .delete_collection_versions(version_ids)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(serde_json::json!({})))
 }
@@ -367,7 +424,7 @@ pub async fn get_all_collections(
     let collections = collection_mgmt
         .get_all_collections()
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(collections))
 }
@@ -391,107 +448,63 @@ pub async fn delete_collection(
     collection_mgmt
         .delete_collection(&name)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(http_error_from_backend_message)?;
 
     Ok(Json(serde_json::json!({})))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::identity_extractor::ExtractIdentity;
-    use crate::mock::{FailingMockRestOperations, MockQueryExecutor, MockRestOperations};
-    use crate::router::AppStateBuilder;
-    use query::executor::QueryExecutor;
-    use query::rest::RestOperations;
-    use std::sync::Arc;
+/// Delete one or more collections by name (Go #4688 parity).
+///
+/// DELETE /api/v0/collections?name=Users,Books&active-only=true
+///
+/// Query parameters:
+/// - `name` (required): comma-separated list of collection names.
+/// - `active-only` (optional, default false): if true, deletes only the active
+///   head version of each named collection; if false, deletes every version.
+///
+/// Requires `CollectionPatch` permission when NAC is enabled.
+pub async fn delete_collections_by_names(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<StatusCode, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
 
-    fn create_state() -> AppState {
-        AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
-            .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
-            .build()
+    let raw_names = params
+        .get("name")
+        .ok_or_else(|| HttpError::BadRequest("missing required 'name' query parameter".into()))?;
+
+    let names: Vec<String> = raw_names
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if names.is_empty() {
+        return Err(HttpError::BadRequest(
+            "'name' query parameter must contain at least one non-empty name".into(),
+        ));
     }
 
-    fn create_state_without_rest() -> AppState {
-        AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>).build()
-    }
+    let active_only = match params.get("active-only") {
+        Some(raw) => raw.parse::<bool>().map_err(|_| {
+            HttpError::BadRequest(format!(
+                "'active-only' must be true or false, got '{}'",
+                raw
+            ))
+        })?,
+        None => false,
+    };
 
-    fn create_failing_state() -> AppState {
-        AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
-            .with_rest(Arc::new(FailingMockRestOperations::new("test error")))
-            .build()
-    }
+    let collection_mgmt = state.require_collection_mgmt()?;
+    collection_mgmt
+        .delete_collections(names, active_only)
+        .await
+        .map_err(http_error_from_backend_message)?;
 
-    #[tokio::test]
-    async fn test_list_collections() {
-        let state = create_state();
-        let identity = ExtractIdentity::anonymous();
-        let result = list_collections(State(state), identity).await;
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert!(response.collections.contains(&"Users".to_string()));
-        assert!(response.collections.contains(&"Books".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_list_collections_no_rest() {
-        let state = create_state_without_rest();
-        let identity = ExtractIdentity::anonymous();
-        let result = list_collections(State(state), identity).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_list_collections_error() {
-        let state = create_failing_state();
-        let identity = ExtractIdentity::anonymous();
-        let result = list_collections(State(state), identity).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_get_collection_doc_ids() {
-        let state = create_state();
-        let identity = ExtractIdentity::anonymous();
-        let result =
-            get_collection_doc_ids(State(state), identity, Path("Users".to_string())).await;
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert_eq!(response.doc_ids.len(), 2);
-        assert!(response.doc_ids.contains(&"bae-123".to_string()));
-        assert!(response.doc_ids.contains(&"bae-456".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_get_collection_doc_ids_not_found() {
-        let state = create_state();
-        let identity = ExtractIdentity::anonymous();
-        let result =
-            get_collection_doc_ids(State(state), identity, Path("NonExistent".to_string())).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            HttpError::NotFound(msg) => assert!(msg.contains("NonExistent")),
-            _ => panic!("Expected NotFound error"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_get_collection_doc_ids_no_rest() {
-        let state = create_state_without_rest();
-        let identity = ExtractIdentity::anonymous();
-        let result =
-            get_collection_doc_ids(State(state), identity, Path("Users".to_string())).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_get_empty_collection() {
-        let state = create_state();
-        let identity = ExtractIdentity::anonymous();
-        let result =
-            get_collection_doc_ids(State(state), identity, Path("Books".to_string())).await;
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert!(response.doc_ids.is_empty());
-    }
+    Ok(StatusCode::OK)
 }
+
+#[cfg(test)]
+#[path = "collections_tests.rs"]
+mod tests;

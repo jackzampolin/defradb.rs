@@ -7,21 +7,27 @@ use super::eval::{eval_op, values_equal};
 use super::op::FilterOp;
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
-
-/// Maximum recursive depth for filter evaluation.
-///
-/// Filters with `_and`/`_or`/`_not` can nest arbitrarily. This limit prevents
-/// stack exhaustion from pathologically deep filter trees.
-const MAX_FILTER_DEPTH: usize = 50;
+use crate::limits::DEFAULT_MAX_FILTER_DEPTH;
 
 /// Filter condition containing parsed conditions.
 ///
 /// Conditions map field names to their filter values.
 /// Supports nested conditions for related objects.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Filter {
     /// Parsed filter conditions
     conditions: Map<String, JsonValue>,
+    /// Maximum recursive depth for this filter. `0` disables the limit.
+    max_depth: usize,
+}
+
+impl Default for Filter {
+    fn default() -> Self {
+        Self {
+            conditions: Map::new(),
+            max_depth: DEFAULT_MAX_FILTER_DEPTH,
+        }
+    }
 }
 
 impl Filter {
@@ -32,7 +38,37 @@ impl Filter {
 
     /// Create a filter from conditions map
     pub fn from_conditions(conditions: Map<String, JsonValue>) -> Self {
-        Self { conditions }
+        Self {
+            conditions,
+            max_depth: DEFAULT_MAX_FILTER_DEPTH,
+        }
+    }
+
+    /// Create a filter from conditions map with a custom recursive depth limit.
+    pub fn from_conditions_with_max_depth(
+        conditions: Map<String, JsonValue>,
+        max_depth: usize,
+    ) -> Self {
+        Self {
+            conditions,
+            max_depth,
+        }
+    }
+
+    /// Set the maximum recursive depth for this filter. `0` disables the limit.
+    pub fn set_max_depth(&mut self, max_depth: usize) {
+        self.max_depth = max_depth;
+    }
+
+    /// Return a copy of this filter with a custom recursive depth limit.
+    pub fn with_max_depth(mut self, max_depth: usize) -> Self {
+        self.set_max_depth(max_depth);
+        self
+    }
+
+    /// Get the maximum recursive depth configured for this filter.
+    pub fn max_depth(&self) -> usize {
+        self.max_depth
     }
 
     /// Check if the filter is empty
@@ -44,12 +80,16 @@ impl Filter {
     ///
     /// Returns a new filter where both conditions must be satisfied.
     pub fn and(&self, other: Filter) -> Filter {
+        let max_depth = match (self.max_depth, other.max_depth) {
+            (0, _) | (_, 0) => 0,
+            (left, right) => left.min(right),
+        };
         let mut combined_conditions = Map::new();
         combined_conditions.insert(
             "_and".to_string(),
-            serde_json::json!([self.conditions, other.conditions]),
+            serde_json::json!([self.conditions.clone(), other.conditions]),
         );
-        Filter::from_conditions(combined_conditions)
+        Filter::from_conditions_with_max_depth(combined_conditions, max_depth)
     }
 
     /// Get a reference to the conditions map
@@ -84,6 +124,71 @@ impl Filter {
         self.eval_conditions(&self.conditions, fields, mapping, 0)
     }
 
+    /// Validate this filter's recursive structure against its configured depth limit.
+    pub fn validate_depth(&self) -> Result<()> {
+        self.validate_conditions_depth(&self.conditions, 0)
+    }
+
+    pub(crate) fn check_depth(&self, depth: usize) -> Result<()> {
+        if self.max_depth > 0 && depth > self.max_depth {
+            return Err(QueryError::invalid_filter(format!(
+                "filter exceeds maximum nesting depth of {}",
+                self.max_depth
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_conditions_depth(
+        &self,
+        conditions: &Map<String, JsonValue>,
+        depth: usize,
+    ) -> Result<()> {
+        self.check_depth(depth)?;
+
+        for (key, value) in conditions {
+            match FilterOp::parse(key) {
+                Some(FilterOp::And | FilterOp::Or) => {
+                    if value.is_null() {
+                        continue;
+                    }
+                    let items = value.as_array().ok_or_else(|| {
+                        QueryError::invalid_filter(format!("{} requires array", key))
+                    })?;
+                    for item in items {
+                        let sub_conditions = item.as_object().ok_or_else(|| {
+                            QueryError::invalid_filter(format!("{} items must be objects", key))
+                        })?;
+                        self.validate_conditions_depth(sub_conditions, depth + 1)?;
+                    }
+                }
+                Some(FilterOp::Not) => {
+                    if value.is_null() {
+                        continue;
+                    }
+                    let sub_conditions = value
+                        .as_object()
+                        .ok_or_else(|| QueryError::invalid_filter("_not requires object"))?;
+                    self.validate_conditions_depth(sub_conditions, depth + 1)?;
+                }
+                _ if key == "_alias" => {
+                    if let Some(alias_conditions) = value.as_object() {
+                        self.validate_conditions_depth(alias_conditions, depth + 1)?;
+                    }
+                }
+                _ => {
+                    if let Some(obj) = value.as_object() {
+                        if obj.keys().any(|k| FilterOp::parse(k).is_none()) {
+                            self.validate_conditions_depth(obj, depth + 1)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn eval_conditions(
         &self,
         conditions: &Map<String, JsonValue>,
@@ -91,12 +196,7 @@ impl Filter {
         mapping: &DocumentMapping,
         depth: usize,
     ) -> Result<bool> {
-        if depth > MAX_FILTER_DEPTH {
-            return Err(QueryError::invalid_filter(format!(
-                "filter exceeds maximum nesting depth of {}",
-                MAX_FILTER_DEPTH
-            )));
-        }
+        self.check_depth(depth)?;
 
         for (key, value) in conditions {
             // Check for logical operators
@@ -176,7 +276,12 @@ impl Filter {
                     }
                 };
 
-                if !self.eval_alias_conditions(alias_conditions, fields, mapping)? {
+                if !self.eval_alias_conditions_at_depth(
+                    alias_conditions,
+                    fields,
+                    mapping,
+                    depth + 1,
+                )? {
                     return Ok(false);
                 }
                 continue;

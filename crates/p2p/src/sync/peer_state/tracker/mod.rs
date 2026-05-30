@@ -54,10 +54,31 @@ impl PeerInfo {
         }
     }
 
+    #[cfg(debug_assertions)]
+    pub(super) fn debug_assert_cid_tracking_consistent(&self) {
+        debug_assert_eq!(
+            self.known_cids.len(),
+            self.cid_order.len(),
+            "known_cids and cid_order must remain in lockstep"
+        );
+        debug_assert!(
+            self.cid_order
+                .iter()
+                .all(|cid| self.known_cids.contains(cid)),
+            "cid_order must not contain CIDs missing from known_cids"
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub(super) fn debug_assert_cid_tracking_consistent(&self) {}
+
     /// Add a CID with LRU eviction if at capacity.
     pub(super) fn add_cid(&mut self, cid: Cid, max_cids: usize) {
+        self.debug_assert_cid_tracking_consistent();
+
         // If already present, don't add again (maintains LRU order)
         if self.known_cids.contains(&cid) {
+            self.debug_assert_cid_tracking_consistent();
             return;
         }
 
@@ -73,6 +94,7 @@ impl PeerInfo {
         // Add the new CID
         self.known_cids.insert(cid);
         self.cid_order.push_back(cid);
+        self.debug_assert_cid_tracking_consistent();
     }
 }
 

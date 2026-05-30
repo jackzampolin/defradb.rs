@@ -88,6 +88,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "DEFRA_SECRET_FILE")]
     pub secret_file: Option<String>,
 
+    /// Enables development mode features
+    #[arg(long, global = true, env = "DEFRA_DEVELOPMENT", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub development: Option<bool>,
+
     /// Enable Node Access Control (NAC).
     ///
     /// When enabled, node operations require authentication and authorization

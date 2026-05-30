@@ -32,6 +32,16 @@ cargo clippy --all -- -D warnings      # Lint
 cargo fmt --all                        # Format
 ```
 
+## Configuration
+
+The CLI exposes GraphQL query guardrails on `defradb start`:
+
+| Flag | Default | Description |
+| --- | ---: | --- |
+| `--query-max-depth` | `20` | Max GraphQL selection nesting depth (`0` = unlimited). |
+| `--query-max-width` | `100` | Max fields at any GraphQL selection level (`0` = unlimited). |
+| `--query-max-filter-depth` | `50` | Max recursive filter nesting depth (`0` = unlimited). |
+
 ## Testing
 
 ### Integration Tests

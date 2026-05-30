@@ -17,7 +17,7 @@ use lens::MemoryTransformStore;
 use lens::TransformStore;
 #[cfg(feature = "native")]
 use lens::WasmTransformStore;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use storage::corekv::Store;
@@ -149,6 +149,11 @@ pub struct DB<S: Store> {
     /// Emulates Go's persistent headstore for CID computation during patching.
     /// Key: collection name, Value: (sorted heads as CIDs, max height)
     pub(crate) schema_heads: RwLock<HashMap<String, (Vec<Cid>, u64)>>,
+    /// Collection IDs whose last local version has been deleted.
+    ///
+    /// Go's collection repository forbids these immediately, including for
+    /// transactions that started before the deletion committed.
+    pub(crate) forbidden_collection_ids: RwLock<HashSet<String>>,
 }
 
 impl<S: Store> DB<S> {
@@ -176,6 +181,7 @@ impl<S: Store> DB<S> {
             lens_store,
             pending_migrations: RwLock::new(HashMap::new()),
             schema_heads: RwLock::new(HashMap::new()),
+            forbidden_collection_ids: RwLock::new(HashSet::new()),
         })
     }
 
@@ -225,6 +231,7 @@ impl<S: Store> DB<S> {
             lens_store,
             pending_migrations: RwLock::new(HashMap::new()),
             schema_heads: RwLock::new(HashMap::new()),
+            forbidden_collection_ids: RwLock::new(HashSet::new()),
         })
     }
 
@@ -406,48 +413,5 @@ impl<S: Store> DB<S> {
     /// Get the current transaction ID counter value.
     pub fn current_txn_id(&self) -> u64 {
         self.txn_id_counter.load(Ordering::SeqCst)
-    }
-
-    /// Extract a Merkle proof from the blockstore.
-    ///
-    /// This generates a proof demonstrating that the block at `leaf_cid` is part
-    /// of the Merkle chain leading to `root_cid`. The proof can be used to verify
-    /// data integrity without access to the full database.
-    pub async fn extract_proof(
-        &self,
-        leaf_cid: &cid::Cid,
-        root_cid: &cid::Cid,
-    ) -> Result<Option<crypto::MerkleProof>>
-    where
-        S: 'static,
-    {
-        let blockstore = blockstore::DefraBlockstore::new(self.store.clone(), false);
-        crypto::extract_proof(&blockstore, *leaf_cid, *root_cid)
-            .await
-            .map_err(|e| Error::Other(format!("failed to extract proof: {}", e)))
-    }
-
-    /// Extract and sign a Merkle proof.
-    ///
-    /// This is a convenience method that extracts a proof and signs it in one step.
-    pub async fn extract_signed_proof(
-        &self,
-        leaf_cid: &cid::Cid,
-        root_cid: &cid::Cid,
-        private_key: &dyn crypto::PrivateKey,
-    ) -> Result<Option<crypto::SignedMerkleProof>>
-    where
-        S: 'static,
-    {
-        let proof = self.extract_proof(leaf_cid, root_cid).await?;
-
-        match proof {
-            Some(p) => {
-                let signed = crypto::SignedMerkleProof::sign(p, private_key)
-                    .map_err(|e| Error::Other(format!("failed to sign proof: {}", e)))?;
-                Ok(Some(signed))
-            }
-            None => Ok(None),
-        }
     }
 }

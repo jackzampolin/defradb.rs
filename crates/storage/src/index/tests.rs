@@ -192,12 +192,14 @@ async fn test_unique_index_rejects_duplicates() {
 
     // Same value, different doc ID - should fail
     let result = index.save(&mut txn, "doc2", &values).await;
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("violates unique index"),
-        "error should mention unique index violation: {}",
-        err_msg
+    let error = result.expect_err("duplicate unique value should fail");
+    assert!(matches!(
+        error,
+        crate::corekv::Error::UniqueConstraintViolation
+    ));
+    assert_eq!(
+        error.to_string(),
+        crate::corekv::UNIQUE_CONSTRAINT_VIOLATION_MESSAGE
     );
 }
 
@@ -385,12 +387,14 @@ async fn test_unique_index_update_to_existing_value_fails() {
         )
         .await;
 
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("violates unique index"),
-        "error should mention unique index violation: {}",
-        err_msg
+    let error = result.expect_err("duplicate unique value should fail");
+    assert!(matches!(
+        error,
+        crate::corekv::Error::UniqueConstraintViolation
+    ));
+    assert_eq!(
+        error.to_string(),
+        crate::corekv::UNIQUE_CONSTRAINT_VIOLATION_MESSAGE
     );
 }
 
