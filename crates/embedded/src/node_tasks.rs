@@ -86,15 +86,14 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
                     continue;
                 }
                 p2p::TransportEvent::SEQueryRequest { peer_id, request } => {
-                    if let Ok(pid) = peer_id.as_str().parse::<libp2p::PeerId>() {
-                        db_merge::se::serve::handle_query_request(
-                            store.as_ref(),
-                            &handle,
-                            pid,
-                            request,
-                        )
-                        .await;
-                    }
+                    let transport = p2p::Libp2pTransport::new(handle.clone());
+                    db_merge::se::serve::handle_query_request(
+                        store.as_ref(),
+                        &transport,
+                        peer_id,
+                        request,
+                    )
+                    .await;
                     continue;
                 }
                 p2p::TransportEvent::SEQueryReply { reply, .. } => {

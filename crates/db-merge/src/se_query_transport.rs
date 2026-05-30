@@ -13,7 +13,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use document::encoding::json_to_normal_value;
 use p2p::message::{QuerySEArtifactsRequest, SEFieldQuery};
-use p2p::{P2PHostHandle, PeerId, ReplicatorRegistry, SeQueryCorrelator};
+use p2p::transport::{P2PTransport, PeerId};
+use p2p::{ReplicatorRegistry, SeQueryCorrelator};
 use serde_json::Value as JsonValue;
 use zeroize::Zeroizing;
 
@@ -22,10 +23,12 @@ use crate::se::{FieldValueQuery, SECoordinator};
 /// How long to wait for a replicator's reply before trying the next one.
 const SE_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// libp2p-backed SE query transport. Constructed once per node when the P2P
-/// stack comes up and injected into the `QueryRunner` via `with_se_transport`.
-pub struct DbMergeSeQueryTransport {
-    handle: P2PHostHandle,
+/// Transport-agnostic SE query transport. Constructed once per node when the
+/// P2P stack comes up and injected into the `QueryRunner` via
+/// `with_se_transport`. Generic over the concrete [`P2PTransport`] (libp2p or
+/// iroh); the genericity is erased when boxed into `Arc<dyn SeQueryTransport>`.
+pub struct DbMergeSeQueryTransport<T: P2PTransport> {
+    transport: T,
     correlator: SeQueryCorrelator,
     replicators: Arc<ReplicatorRegistry>,
     enc_key: Zeroizing<Vec<u8>>,
@@ -35,18 +38,18 @@ pub struct DbMergeSeQueryTransport {
     identity_pubkey: Option<Vec<u8>>,
 }
 
-impl DbMergeSeQueryTransport {
+impl<T: P2PTransport> DbMergeSeQueryTransport<T> {
     /// Create a transport. `enc_key` is the shared 32-byte SE key;
     /// `identity_pubkey` must equal the value used at artifact-generation time.
     pub fn new(
-        handle: P2PHostHandle,
+        transport: T,
         correlator: SeQueryCorrelator,
         replicators: Arc<ReplicatorRegistry>,
         enc_key: [u8; 32],
         identity_pubkey: Option<Vec<u8>>,
     ) -> Self {
         Self {
-            handle,
+            transport,
             correlator,
             replicators,
             enc_key: Zeroizing::new(enc_key.to_vec()),
@@ -94,14 +97,14 @@ impl DbMergeSeQueryTransport {
 
         // Sign FIRST: this generates the UUID message_id used as the correlation
         // key and is required by the receiver's verify_message check (trap 1).
-        p2p::sign_message(self.handle.keypair(), &mut request)
+        p2p::signing::sign_with_transport(&self.transport, &mut request)
             .map_err(|e| format!("failed to sign SE query request: {e}"))?;
 
         let message_id = request.message_id.clone();
         let mut pending = self.correlator.register(message_id.clone());
 
-        self.handle
-            .send_se_query_request(peer_id, request)
+        self.transport
+            .send_se_query_request(&peer_id, request)
             .await
             .map_err(|e| format!("failed to send SE query request: {e}"))?;
 
@@ -120,7 +123,7 @@ impl DbMergeSeQueryTransport {
 }
 
 #[async_trait]
-impl query::SeQueryTransport for DbMergeSeQueryTransport {
+impl<T: P2PTransport> query::SeQueryTransport for DbMergeSeQueryTransport<T> {
     async fn query_doc_ids(
         &self,
         collection_id: &str,
@@ -137,13 +140,7 @@ impl query::SeQueryTransport for DbMergeSeQueryTransport {
 
         let mut last_error = None;
         for peer_str in replicator_ids {
-            let peer_id: PeerId = match peer_str.parse() {
-                Ok(p) => p,
-                Err(e) => {
-                    last_error = Some(format!("invalid replicator peer id '{peer_str}': {e}"));
-                    continue;
-                }
-            };
+            let peer_id = PeerId::new(peer_str.clone());
 
             match self
                 .query_one(peer_id, collection_id, queries.clone())
@@ -151,7 +148,7 @@ impl query::SeQueryTransport for DbMergeSeQueryTransport {
             {
                 Ok(doc_ids) => return Ok(doc_ids),
                 Err(e) => {
-                    tracing::debug!(peer_id = %peer_id, error = %e, "SE query to replicator failed");
+                    tracing::debug!(peer_id = %peer_str, error = %e, "SE query to replicator failed");
                     last_error = Some(e);
                 }
             }

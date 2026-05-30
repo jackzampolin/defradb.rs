@@ -305,6 +305,7 @@ impl Node {
         let coordinator_for_events = coordinator.clone();
         let se_store = store.clone();
         let se_handle = handle.clone();
+        let se_transport_serve = p2p::Libp2pTransport::new(handle.clone());
         let se_correlator_for_events = se_correlator.clone();
         let se_event_bus = event_bus.clone();
         let event_handler_task = Some(tokio::spawn(async move {
@@ -374,20 +375,13 @@ impl Node {
                         continue;
                     }
                     p2p::TransportEvent::SEQueryRequest { peer_id, request } => {
-                        match peer_id.as_str().parse::<libp2p::PeerId>() {
-                            Ok(pid) => {
-                                db_merge::se::serve::handle_query_request(
-                                    se_store.as_ref(),
-                                    &se_handle,
-                                    pid,
-                                    request,
-                                )
-                                .await;
-                            }
-                            Err(e) => {
-                                warn!(peer_id = %peer_id, error = %e, "invalid SE query peer id");
-                            }
-                        }
+                        db_merge::se::serve::handle_query_request(
+                            se_store.as_ref(),
+                            &se_transport_serve,
+                            peer_id,
+                            request,
+                        )
+                        .await;
                         continue;
                     }
                     p2p::TransportEvent::SEQueryReply { reply, .. } => {
@@ -591,7 +585,7 @@ impl Node {
         // identity_pubkey: None), so write-tags and query-tags agree.
         let se_transport: Option<Arc<dyn query::SeQueryTransport>> = se_key.map(|key| {
             Arc::new(db_merge::DbMergeSeQueryTransport::new(
-                handle.clone(),
+                p2p::Libp2pTransport::new(handle.clone()),
                 se_correlator,
                 se_replicator_registry,
                 key,
@@ -675,6 +669,9 @@ impl Node {
             "Iroh transport initialized, peer ID: {}",
             transport.local_peer_id()
         );
+
+        let se_correlator = p2p::SeQueryCorrelator::new();
+        let se_replicator_registry = replicator_registry.clone();
 
         let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_head_provider(
             transport.clone(),
@@ -768,9 +765,49 @@ impl Node {
 
         let coordinator_for_events = coordinator.clone();
         let event_bus_for_handler = event_bus.clone();
+        let se_store = store.clone();
+        let se_transport_serve = transport.clone();
+        let se_correlator_for_events = se_correlator.clone();
+        let se_event_bus = event_bus.clone();
         let event_handler_task = Some(tokio::spawn(async move {
             let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
             while let Some(event) = iroh_events.recv().await {
+                // SE events: store inbound artifacts and serve/route SE queries
+                // over the iroh transport (mirrors the libp2p loop, #976). Rust
+                // -> Rust artifact push is fire-and-forget, so use the no-ack
+                // `handle_artifacts_received` (Go -> Rust over iroh, which
+                // expects a PushSEArtifactsReply ack, is a follow-up).
+                let event = match event {
+                    p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
+                        let doc_ids = db_merge::se::serve::handle_artifacts_received(
+                            se_store.as_ref(),
+                            &peer_id.to_string(),
+                            &data,
+                        )
+                        .await;
+                        for doc_id in doc_ids {
+                            se_event_bus.publish(events::Message::se_artifact_received(
+                                events::SEArtifactReceivedData { doc_id },
+                            ));
+                        }
+                        continue;
+                    }
+                    p2p::TransportEvent::SEQueryRequest { peer_id, request } => {
+                        db_merge::se::serve::handle_query_request(
+                            se_store.as_ref(),
+                            &se_transport_serve,
+                            peer_id,
+                            request,
+                        )
+                        .await;
+                        continue;
+                    }
+                    p2p::TransportEvent::SEQueryReply { reply, .. } => {
+                        se_correlator_for_events.deliver(reply);
+                        continue;
+                    }
+                    other => other,
+                };
                 match &event {
                     p2p::TransportEvent::PeerConnected(peer) => {
                         info!("Peer connected (iroh): {}", peer);
@@ -988,6 +1025,20 @@ impl Node {
 
         info!("P2P sync coordinator initialized (iroh)");
 
+        // Build the SE remote query transport over iroh so encrypted queries
+        // fan out to replicators (owner-queries-replicator, #976). Identity is
+        // None to match the write side (iroh SE options use identity_pubkey:
+        // None), so write-tags and query-tags agree.
+        let se_transport: Option<Arc<dyn query::SeQueryTransport>> = se_key.map(|key| {
+            Arc::new(db_merge::DbMergeSeQueryTransport::new(
+                transport.clone(),
+                se_correlator,
+                se_replicator_registry,
+                key,
+                None,
+            )) as Arc<dyn query::SeQueryTransport>
+        });
+
         Ok(P2PSetup {
             host_handle: None,
             p2p_tasks: Some(P2PTasks {
@@ -1020,9 +1071,7 @@ impl Node {
                 merge_handler_inner_for_kms.set_kms(kms);
             })),
             local_peer_id,
-            // SE remote query uses the libp2p two-stream send path; iroh does
-            // not wire it, so encrypted queries fall back to local plaintext.
-            se_transport: None,
+            se_transport,
         })
     }
 

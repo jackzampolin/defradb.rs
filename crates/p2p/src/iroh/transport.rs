@@ -162,9 +162,19 @@ impl P2PTransport for IrohTransport {
             .await
     }
 
-    // subscribe_raw inherits the default implementation. Iroh nodes use the
-    // two-stream path for DocSync/BranchableSync (#828); the KMS pubsub
-    // transport subscribes via DefraTopic::Encryption.
+    async fn subscribe_raw(&self, topic: String) -> Result<bool> {
+        // Iroh routes raw topics (e.g. the KMS `encryption/<peer>/_response`
+        // sub-topic) via `register_pubsub_rpc_topic`; the wire subscription is
+        // implicit in the gossip topic membership, so this is a no-op that
+        // simply registers the topic for raw routing. Without this override the
+        // default impl errors and the KMS pubsub transport (created
+        // unconditionally at iroh node startup) fails to construct, preventing
+        // the node from starting at all. Full KMS-over-iroh key fetch (response
+        // dispatch) remains a follow-up; SE query/serve does not use KMS.
+        self.send_command(|reply| IrohCommand::RegisterRawTopic { topic, reply })
+            .await?;
+        Ok(true)
+    }
 
     async fn send_pushlog_response(
         &self,

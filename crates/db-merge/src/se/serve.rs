@@ -9,7 +9,8 @@
 //! the serve/receive logic lives in one place.
 
 use p2p::message::{PushSEArtifactsReply, QuerySEArtifactsReply, QuerySEArtifactsRequest};
-use p2p::{P2PHostHandle, PeerId};
+use p2p::transport::{P2PTransport, PeerId};
+use p2p::P2PHostHandle;
 use storage::corekv::Store;
 
 use super::receive_and_store;
@@ -21,9 +22,9 @@ use super::storage::{fetch_doc_ids, FieldQuery};
 /// locally stored artifacts, and sends back a **signed** reply. On failure a
 /// signed error reply is sent so the requester's correlator slot resolves
 /// instead of timing out.
-pub async fn handle_query_request<S: Store>(
+pub async fn handle_query_request<S: Store, T: P2PTransport>(
     store: &S,
-    handle: &P2PHostHandle,
+    transport: &T,
     peer_id: PeerId,
     request: QuerySEArtifactsRequest,
 ) {
@@ -42,12 +43,12 @@ pub async fn handle_query_request<S: Store>(
     };
 
     let mut reply = reply;
-    if let Err(error) = p2p::sign_message(handle.keypair(), &mut reply) {
+    if let Err(error) = p2p::signing::sign_with_transport(transport, &mut reply) {
         tracing::warn!(peer_id = %peer_id, error = %error, "failed to sign SE query reply");
         return;
     }
 
-    if let Err(error) = handle.send_se_query_response(peer_id, reply).await {
+    if let Err(error) = transport.send_se_query_response(&peer_id, reply).await {
         tracing::warn!(peer_id = %peer_id, error = %error, "failed to send SE query reply");
     }
 }
@@ -143,7 +144,7 @@ fn extract_push_message_id(data: &[u8]) -> Option<String> {
 pub async fn handle_artifacts_push<S: Store>(
     store: &S,
     handle: &P2PHostHandle,
-    peer_id: PeerId,
+    peer_id: p2p::PeerId,
     data: &[u8],
 ) -> Vec<String> {
     let doc_ids = handle_artifacts_received(store, &peer_id.to_string(), data).await;
