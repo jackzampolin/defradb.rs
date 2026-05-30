@@ -21,7 +21,7 @@ pub mod txn_broadcaster;
 
 // Re-export primary types
 pub use acp_merge_handler::{AcpMergeError, AcpMergeHandler};
-pub use broadcast_mutator::{BroadcastMutator, BroadcastSeOptions};
+pub use broadcast_mutator::{BroadcastMutator, BroadcastSeOptions, SeArtifactRepusher};
 pub use head_provider::DbHeadProvider;
 pub use merge_handler::{DbMergeHandler, MergeError};
 pub use peer_identity::{

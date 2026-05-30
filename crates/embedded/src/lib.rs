@@ -16,6 +16,12 @@ pub use node_tasks::BackgroundTasks;
 type ReplicatorPushOptionsCallback =
     Arc<dyn Fn(ReplicatorPushOptions) -> Result<(), String> + Send + Sync>;
 
+/// On-demand replicator retry trigger. Runs a single retry pass that re-pushes
+/// failed doc blocks AND regenerates/re-pushes their SE artifacts. Backs the
+/// `p2p_retry_replicators` FFI op, mirroring Go's `RetryReplicators`.
+type RetryReplicatorsCallback =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
 /// Storage persistence hints for ACP/NAC setup.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -123,6 +129,7 @@ pub struct ManagedP2PSystem {
     ops: Arc<dyn defra_http::P2POperations>,
     replicator_push_options: ReplicatorPushOptionsState,
     on_replicator_push_options: Option<ReplicatorPushOptionsCallback>,
+    retry_replicators: std::sync::OnceLock<RetryReplicatorsCallback>,
     shutdown: node::ShutdownHandle,
 }
 
@@ -167,7 +174,25 @@ impl ManagedP2PSystem {
             ops,
             replicator_push_options,
             on_replicator_push_options,
+            retry_replicators: std::sync::OnceLock::new(),
             shutdown,
+        }
+    }
+
+    /// Install the on-demand replicator retry trigger. Set once during P2P setup.
+    pub fn set_retry_replicators(&self, callback: RetryReplicatorsCallback) {
+        let _ = self.retry_replicators.set(callback);
+    }
+
+    /// Run a single on-demand replicator retry pass (re-push failed doc blocks
+    /// and regenerate/re-push their SE artifacts). Backs `p2p_retry_replicators`.
+    pub async fn retry_replicators(&self) -> Result<(), String> {
+        match self.retry_replicators.get() {
+            Some(callback) => {
+                callback().await;
+                Ok(())
+            }
+            None => Err("retry_replicators trigger not installed".to_string()),
         }
     }
 

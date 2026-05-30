@@ -194,8 +194,17 @@ where
         replication.merge_handler_inner.clone(),
         database.clone(),
     ));
-    let retry_loop_task =
-        spawn_libp2p_retry_loop(store.clone(), handle.clone(), doc_pusher.clone());
+    let se_repusher: Arc<dyn db_merge::SeArtifactRepusher> = replication.broadcast_mutator.clone();
+    let retry_store = store.clone();
+    let retry_handle = handle.clone();
+    let retry_doc_pusher = doc_pusher.clone();
+    let retry_se_repusher = se_repusher.clone();
+    let retry_loop_task = spawn_libp2p_retry_loop(
+        store.clone(),
+        handle.clone(),
+        doc_pusher.clone(),
+        se_repusher,
+    );
 
     let restore_peerstore = storage::stores::Peerstore::new(store.clone());
     restore_libp2p_replicators(&handle, &restore_peerstore).await;
@@ -248,6 +257,22 @@ where
         replicator_push_options,
         Some(se_options_callback),
     ));
+    system.set_retry_replicators(Arc::new(move || {
+        let store = retry_store.clone();
+        let handle = retry_handle.clone();
+        let doc_pusher = retry_doc_pusher.clone();
+        let se_repusher = retry_se_repusher.clone();
+        Box::pin(async move {
+            crate::node_tasks::run_libp2p_retry_pass(
+                &store,
+                &handle,
+                &doc_pusher,
+                &se_repusher,
+                true,
+            )
+            .await;
+        })
+    }));
 
     Ok(P2PSetup {
         system,
@@ -398,7 +423,11 @@ where
         database.clone(),
         transport.clone(),
     ));
-    let retry_loop_task = spawn_iroh_retry_loop(store.clone(), doc_pusher.clone());
+    let se_repusher: Arc<dyn db_merge::SeArtifactRepusher> = replication.broadcast_mutator.clone();
+    let retry_store = store.clone();
+    let retry_doc_pusher = doc_pusher.clone();
+    let retry_se_repusher = se_repusher.clone();
+    let retry_loop_task = spawn_iroh_retry_loop(store.clone(), doc_pusher.clone(), se_repusher);
 
     let restore_peerstore = Peerstore::new(store.clone());
     restore_iroh_replicators(&coordinator, &restore_peerstore).await;
@@ -450,6 +479,14 @@ where
         replicator_push_options,
         Some(se_options_callback),
     ));
+    system.set_retry_replicators(Arc::new(move || {
+        let store = retry_store.clone();
+        let doc_pusher = retry_doc_pusher.clone();
+        let se_repusher = retry_se_repusher.clone();
+        Box::pin(async move {
+            crate::node_tasks::run_iroh_retry_pass(&store, &doc_pusher, &se_repusher, true).await;
+        })
+    }));
 
     Ok(P2PSetup {
         system,
