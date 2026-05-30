@@ -12,30 +12,24 @@
 //! so both nodes' getOrCreate find it instead of minting a fresh one. A doc
 //! is written + replicated, then the encrypted-index query runs on the peer.
 //!
-//! `rust_rust_se_cross_node` exercises Part 1's CLI SE wiring over two real
-//! `defra` processes: node A loads the seeded SE key, generates SE artifacts on
-//! write (logged `Sent PushSEArtifacts ... artifacts_count=1`), and the doc +
-//! encrypted-index query resolve on peer B.
+//! The standalone `defra` CLI now wires the SE query fan-out / serve loop
+//! (#976), mirroring Go's owner-queries-replicator model
+//! (`internal/se/coordinator.go::QueryDocIDsByValues`): the document *owner*
+//! runs the `encrypted_<Collection>` query, which generates search tags and
+//! fans them out to its replicators over the `/defradb/se_query_req/0.0.1`
+//! two-stream protocol; the replicator byte-matches the tags against the
+//! artifacts the owner pushed and returns the matching docIDs. The owner never
+//! resolves locally; zero replicators yields an empty result.
 //!
-//! The Go<->Rust variants are `#[ignore]`d on a CLI feature gap (NOT a keyring
-//! gap -- seeding works; both runtimes load the same key). Go's SE query model
-//! (`internal/se/coordinator.go::QueryDocIDsByValues`) runs on the document
-//! *owner*, which fans the search out to its replicators over the
-//! `/defradb/se_query_req/0.0.1` protocol; replicators serve docIDs from the
-//! artifacts the owner pushed. The standalone Rust `defra` CLI does not wire
-//! that SE query fan-out / serve loop nor `se::receive_and_store` (they live in
-//! `crates/embedded/src/node_tasks.rs`, used by the FFI, not the CLI). The
-//! CLI's `execute_encrypted_select` resolves encrypted queries against local
-//! plaintext only. So:
-//!   - Querying the Go *reader* directly returns empty (it has no replicators
-//!     to fan out to) -- verified: the doc replicates (plain `User` returns it)
-//!     but `encrypted_User` is empty.
-//!   - A Go owner querying a Rust replicator can't be served (CLI has no SE
-//!     query serve handler).
-//! Part 1 (load + push SE artifacts) is done and proven by the Rust writer log;
-//! the missing piece is the CLI SE *query* P2P loop -- a separate feature
-//! beyond #976's keyring-load scope. Un-ignore once the CLI wires the SE
-//! query/serve loop (mirror `embedded/src/node_tasks.rs`).
+//! Because the search tag binds the writer's identity, the WRITE-side and
+//! QUERY-side identities must agree. The CLI write side uses an anonymous
+//! identity (`identity_pubkey: None`), so the query side does too; this matches
+//! Go (which byte-matches on the serving node regardless of identity, as long
+//! as the owner that wrote and the owner that queries are the same node).
+//!
+//! Topology for every test below: the QUERIER is the document OWNER (the node
+//! that wrote the doc and set the replicator). The owner fans out to its
+//! replicator, which serves docIDs from the pushed artifacts.
 
 use std::time::{Duration, Instant};
 
@@ -128,18 +122,11 @@ async fn connect_and_replicate(
 }
 
 /// Two Rust `defra` processes share one SE key (seeded into both keyrings).
-/// Node A loads the seeded key (logs "Searchable encryption key loaded from
-/// keyring"), writes a User with an encrypted index on `name`, generates an SE
-/// artifact and pushes it to B (logs "Sent PushSEArtifacts ...
-/// artifacts_count=1"); the doc replicates and `encrypted_User` on B resolves
-/// it. End-to-end regression guard for Part 1's CLI SE-key wiring over real
-/// processes (the SE key feeds the broadcast mutator + merge handler).
-///
-/// Note: the CLI's encrypted query resolves against local plaintext, so this
-/// asserts the SE-keyed write path runs end-to-end without breaking
-/// replication/query -- it does not assert artifact-based remote tag matching
-/// (that needs the CLI SE query fan-out/serve loop; see the ignored Go<->Rust
-/// tests and module docs).
+/// Node A (the OWNER) writes a User with an encrypted index on `name`, pushes
+/// the SE artifact to its replicator B, then runs `encrypted_User` ON A. A
+/// generates the search tag, fans it out to B over the SE query protocol, and B
+/// byte-matches the artifact and returns the docID. End-to-end exercise of the
+/// CLI SE query/serve loop (#976).
 #[tokio::test]
 async fn rust_rust_se_cross_node() {
     let cluster = TestCluster::builder()
@@ -174,9 +161,10 @@ async fn rust_rust_se_cross_node() {
         .expect("missing _docID")
         .to_string();
 
+    // Query runs on the OWNER (node A), which fans out to replicator B.
     let deadline = Instant::now() + Duration::from_secs(30);
     wait_for_se_query(
-        &node_b,
+        &node_a,
         "User",
         r#"{name: {_eq: "John"}}"#,
         &doc_id,
@@ -185,18 +173,12 @@ async fn rust_rust_se_cross_node() {
     .await;
 }
 
-/// Rust writes; Go reads and runs the SE query. Go's encrypted-index query is
-/// artifact-based, so a match would prove Go recomputed the search tag from the
-/// shared key over the document Rust replicated. Node 0 = Rust (writer), node 1
-/// = Go (reader).
-///
-/// IGNORED (CLI feature gap, not a keyring gap): the doc replicates to Go and
-/// Rust pushes its SE artifact, but Go's reader-side `encrypted_User` query
-/// fans out to *its* replicators (it has none here) rather than searching the
-/// locally-stored artifacts, so it returns empty. The owner-queries-replicators
-/// model needs the CLI to implement the SE query fan-out/serve loop (see module
-/// docs). Verified: plain `User` on Go returns the doc; `encrypted_User` empty.
-#[ignore = "CLI lacks the SE query fan-out/serve P2P loop; Go owner-queries-replicator model can't resolve on the reader. Keyring seeding works (both nodes load the same key). See module docs."]
+/// Rust is the OWNER: Rust (node 0) writes a User, pushes the SE artifact to
+/// its replicator Go (node 1), then runs `encrypted_User` ON RUST. Rust
+/// generates the search tag and fans it out to the Go replicator, which
+/// byte-matches and returns the docID. Proves the Rust requester +
+/// tag-generation interoperate with a Go serve side. Node 0 = Rust (owner),
+/// node 1 = Go (replicator).
 #[tokio::test]
 async fn rust_to_go_se_cross_node() {
     let cluster = TestCluster::builder()
@@ -231,18 +213,15 @@ async fn rust_to_go_se_cross_node() {
         .expect("missing _docID")
         .to_string();
 
+    // Query runs on the OWNER (Rust, node 0), which fans out to Go replicator.
     let deadline = Instant::now() + Duration::from_secs(45);
-    wait_for_se_query(&go, "User", r#"{name: {_eq: "John"}}"#, &doc_id, deadline).await;
+    wait_for_se_query(&rust, "User", r#"{name: {_eq: "John"}}"#, &doc_id, deadline).await;
 }
 
-/// Go writes; Rust reads and runs the SE query. Node 0 = Rust (reader), node 1
-/// = Go (writer).
-///
-/// IGNORED (CLI feature gap, not a keyring gap): same root cause as
-/// `rust_to_go_se_cross_node` -- the standalone CLI's encrypted-index query
-/// resolves against local plaintext and does not fan out to / serve from
-/// replicators. Keyring seeding works (both nodes load the shared key).
-#[ignore = "CLI lacks the SE query fan-out/serve P2P loop; encrypted query resolves local plaintext only. Keyring seeding works. See module docs."]
+/// Go is the OWNER: Go (node 1) writes a User, pushes the SE artifact to its
+/// replicator Rust (node 0), then runs `encrypted_User` ON GO. Go fans the
+/// search tag out to the Rust replicator, which exercises the Rust SERVE loop
+/// (byte-match + signed reply). Node 0 = Rust (replicator), node 1 = Go (owner).
 #[tokio::test]
 async fn go_to_rust_se_cross_node() {
     let cluster = TestCluster::builder()
@@ -278,6 +257,8 @@ async fn go_to_rust_se_cross_node() {
         .expect("missing _docID")
         .to_string();
 
+    // Query runs on the OWNER (Go, node 1), which fans out to Rust replicator
+    // (node 0) -- this exercises the Rust SE serve loop.
     let deadline = Instant::now() + Duration::from_secs(45);
-    wait_for_se_query(&rust, "User", r#"{name: {_eq: "John"}}"#, &doc_id, deadline).await;
+    wait_for_se_query(&go, "User", r#"{name: {_eq: "John"}}"#, &doc_id, deadline).await;
 }

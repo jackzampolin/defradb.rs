@@ -60,13 +60,29 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
 
             let transport_event = match p2p::convert_host_event(event) {
                 p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
-                    handle_se_artifacts_received(
-                        store.clone(),
-                        event_bus.clone(),
-                        peer_id.to_string(),
-                        data,
-                    )
-                    .await;
+                    if let Ok(pid) = peer_id.as_str().parse::<libp2p::PeerId>() {
+                        // Stores artifacts AND sends the signed ack Go's push waits for.
+                        let doc_ids = db_merge::se::serve::handle_artifacts_push(
+                            store.as_ref(),
+                            &handle,
+                            pid,
+                            &data,
+                        )
+                        .await;
+                        for doc_id in doc_ids {
+                            event_bus.publish(events::Message::se_artifact_received(
+                                events::SEArtifactReceivedData { doc_id },
+                            ));
+                        }
+                    } else {
+                        handle_se_artifacts_received(
+                            store.clone(),
+                            event_bus.clone(),
+                            peer_id.to_string(),
+                            data,
+                        )
+                        .await;
+                    }
                     continue;
                 }
                 p2p::TransportEvent::SEQueryRequest { peer_id, request } => {

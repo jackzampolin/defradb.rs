@@ -347,12 +347,25 @@ impl Node {
                 // serve/route SE queries itself (the coordinator does not). #976.
                 let transport_event = match p2p::convert_host_event(event) {
                     p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
-                        let doc_ids = db_merge::se::serve::handle_artifacts_received(
-                            se_store.as_ref(),
-                            &peer_id.to_string(),
-                            &data,
-                        )
-                        .await;
+                        let doc_ids = match peer_id.as_str().parse::<libp2p::PeerId>() {
+                            Ok(pid) => {
+                                db_merge::se::serve::handle_artifacts_push(
+                                    se_store.as_ref(),
+                                    &se_handle,
+                                    pid,
+                                    &data,
+                                )
+                                .await
+                            }
+                            Err(_) => {
+                                db_merge::se::serve::handle_artifacts_received(
+                                    se_store.as_ref(),
+                                    &peer_id.to_string(),
+                                    &data,
+                                )
+                                .await
+                            }
+                        };
                         for doc_id in doc_ids {
                             se_event_bus.publish(events::Message::se_artifact_received(
                                 events::SEArtifactReceivedData { doc_id },

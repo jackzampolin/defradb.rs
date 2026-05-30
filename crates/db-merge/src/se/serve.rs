@@ -8,7 +8,7 @@
 //! Both the standalone CLI and the embedded node route inbound SE events here so
 //! the serve/receive logic lives in one place.
 
-use p2p::message::{QuerySEArtifactsReply, QuerySEArtifactsRequest};
+use p2p::message::{PushSEArtifactsReply, QuerySEArtifactsReply, QuerySEArtifactsRequest};
 use p2p::{P2PHostHandle, PeerId};
 use storage::corekv::Store;
 
@@ -121,4 +121,48 @@ pub async fn handle_artifacts_received<S: Store>(
     );
 
     result.doc_ids
+}
+
+/// Extract the `MessageID` from a CBOR-encoded `PushSEArtifactsRequest`.
+fn extract_push_message_id(data: &[u8]) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct MsgIdOnly {
+        #[serde(rename = "MessageID")]
+        message_id: String,
+    }
+    serde_cbor::from_slice::<MsgIdOnly>(data)
+        .ok()
+        .map(|m| m.message_id)
+}
+
+/// Store inbound SE artifacts AND send a signed `PushSEArtifactsReply` ack.
+///
+/// Go's artifact push (`storeSEProto.SendRequest`) blocks until it receives this
+/// reply, so a Rust replicator MUST acknowledge or the Go owner's write hangs.
+/// Returns the stored doc IDs for bus events.
+pub async fn handle_artifacts_push<S: Store>(
+    store: &S,
+    handle: &P2PHostHandle,
+    peer_id: PeerId,
+    data: &[u8],
+) -> Vec<String> {
+    let doc_ids = handle_artifacts_received(store, &peer_id.to_string(), data).await;
+
+    if let Some(message_id) = extract_push_message_id(data) {
+        let mut reply = PushSEArtifactsReply::success(&message_id);
+        match p2p::sign_message(handle.keypair(), &mut reply) {
+            Ok(()) => {
+                if let Err(error) = handle.send_se_artifacts_response(peer_id, reply).await {
+                    tracing::warn!(peer_id = %peer_id, error = %error, "failed to ack SE artifacts push");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(peer_id = %peer_id, error = %error, "failed to sign SE artifacts ack");
+            }
+        }
+    } else {
+        tracing::warn!(peer_id = %peer_id, "SE artifacts push missing MessageID; cannot ack");
+    }
+
+    doc_ids
 }

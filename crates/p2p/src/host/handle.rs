@@ -675,6 +675,27 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Send a PushSEArtifacts reply on the SE response protocol.
+    ///
+    /// Acknowledges an inbound artifact push. Go's push waits for this reply, so
+    /// a Rust replicator must send it after storing the artifacts.
+    pub async fn send_se_artifacts_response(
+        &self,
+        peer_id: PeerId,
+        reply: crate::message::PushSEArtifactsReply,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendSEArtifactsResponse {
+                peer_id,
+                reply,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Send an SE query request to a peer via the SE query two-stream protocol.
     ///
     /// The response arrives asynchronously as [`HostEvent::SEQueryReply`].
