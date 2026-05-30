@@ -341,7 +341,10 @@ async fn rust_unique_composite_prefix_after_paginates_via_slow_path() {
         } }"#,
         )
         .expect("page 1 unique composite prefix");
-    assert_eq!(p1["_cursor"]["User"][0]["name"], Value::String("alice".into()));
+    assert_eq!(
+        p1["_cursor"]["User"][0]["name"],
+        Value::String("alice".into())
+    );
     let end_cursor = p1["_cursor"]["_pageInfo"]["endCursor"]
         .as_str()
         .expect("endCursor present")

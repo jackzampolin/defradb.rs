@@ -137,6 +137,54 @@ pub fn json_to_normal_value(value: serde_json::Value) -> Result<NormalValue> {
     }
 }
 
+/// Coerce a JSON value to a `NormalValue` according to a declared scalar field
+/// kind. This is the single source of truth shared by the mutation-create path
+/// and the migration/reindex path so the two cannot drift on scalar encoding.
+///
+/// Critically, a `DateTime` field becomes `NormalValue::Time` (not a raw
+/// RFC3339 string) so that secondary-index entries are byte-identical whether a
+/// document is freshly written or rebuilt by a reindex. Divergence here
+/// silently corrupts index-seek pagination and range filters on the field: the
+/// index stores `encode_time_*` (nanoseconds) on the write path but would store
+/// `encode_string_*` (UTF-8) on the reindex path, so seeks land in the wrong
+/// place.
+///
+/// Returns `None` when `value` cannot be represented in `kind`; callers decide
+/// whether that is a hard error (strict create path) or a best-effort fallback
+/// (reindex path). Request-time sentinels (e.g. `UTC_NOW`) are resolved upstream
+/// and are not handled here.
+pub fn json_to_normal_value_for_kind(
+    value: &serde_json::Value,
+    kind: &schema::ScalarKind,
+) -> Option<NormalValue> {
+    use schema::ScalarKind;
+    use serde_json::Value as JsonValue;
+
+    match kind {
+        ScalarKind::Int => value.as_i64().map(NormalValue::Int),
+        ScalarKind::Float64 => value.as_f64().map(NormalValue::Float64),
+        ScalarKind::Float32 => value.as_f64().map(|f| NormalValue::Float32(f as f32)),
+        ScalarKind::Bool => value.as_bool().map(NormalValue::Bool),
+        ScalarKind::String | ScalarKind::DocID => {
+            value.as_str().map(|s| NormalValue::String(s.to_string()))
+        }
+        ScalarKind::Blob => value
+            .as_str()
+            .map(|s| NormalValue::Bytes(s.as_bytes().to_vec())),
+        ScalarKind::DateTime => match value {
+            JsonValue::String(s) => DateTime::parse_from_rfc3339(s).ok().map(NormalValue::Time),
+            JsonValue::Number(n) => n.as_i64().and_then(|ts| {
+                DateTime::from_timestamp(ts, 0).map(|dt| {
+                    NormalValue::Time(dt.with_timezone(&FixedOffset::east_opt(0).unwrap()))
+                })
+            }),
+            _ => None,
+        },
+        ScalarKind::Json | ScalarKind::None => None,
+        _ => None,
+    }
+}
+
 /// Convert a NormalValue to a JSON value.
 ///
 /// Returns an error if the value contains non-finite floats (NaN, Infinity),
@@ -239,5 +287,70 @@ pub fn canonical_cbor_key_order(a: &&str, b: &&str) -> std::cmp::Ordering {
     match a.len().cmp(&b.len()) {
         std::cmp::Ordering::Equal => a.cmp(b),
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod json_to_normal_value_for_kind_tests {
+    use super::*;
+    use schema::ScalarKind;
+    use serde_json::json;
+
+    #[test]
+    fn datetime_string_becomes_time_not_string() {
+        // The regression: a DateTime field MUST coerce to Time so reindexed
+        // index entries match freshly-written ones (encode_time, not encode_string).
+        let nv =
+            json_to_normal_value_for_kind(&json!("2026-05-29T13:06:28Z"), &ScalarKind::DateTime);
+        let expected = DateTime::parse_from_rfc3339("2026-05-29T13:06:28Z").unwrap();
+        assert_eq!(nv, Some(NormalValue::Time(expected)));
+    }
+
+    #[test]
+    fn datetime_unix_timestamp_becomes_time() {
+        let nv = json_to_normal_value_for_kind(&json!(1_764_421_588_i64), &ScalarKind::DateTime);
+        match nv {
+            Some(NormalValue::Time(_)) => {}
+            other => panic!("expected Time, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scalar_kinds_coerce_as_expected() {
+        assert_eq!(
+            json_to_normal_value_for_kind(&json!(42), &ScalarKind::Int),
+            Some(NormalValue::Int(42))
+        );
+        assert_eq!(
+            json_to_normal_value_for_kind(&json!(1.5), &ScalarKind::Float64),
+            Some(NormalValue::Float64(1.5))
+        );
+        assert_eq!(
+            json_to_normal_value_for_kind(&json!(1.5), &ScalarKind::Float32),
+            Some(NormalValue::Float32(1.5))
+        );
+        assert_eq!(
+            json_to_normal_value_for_kind(&json!(true), &ScalarKind::Bool),
+            Some(NormalValue::Bool(true))
+        );
+        assert_eq!(
+            json_to_normal_value_for_kind(&json!("hi"), &ScalarKind::String),
+            Some(NormalValue::String("hi".to_string()))
+        );
+    }
+
+    #[test]
+    fn unrepresentable_value_returns_none() {
+        // A non-RFC3339 string for a DateTime field cannot be coerced; the caller
+        // decides whether that's an error (create) or a fallback (reindex).
+        assert_eq!(
+            json_to_normal_value_for_kind(&json!("not-a-date"), &ScalarKind::DateTime),
+            None
+        );
+        // Json/None kinds are handled by callers, not here.
+        assert_eq!(
+            json_to_normal_value_for_kind(&json!({"a": 1}), &ScalarKind::Json),
+            None
+        );
     }
 }
