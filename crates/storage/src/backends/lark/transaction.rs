@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::iterator::MergingIterator;
 use crate::backends::shared::DurabilityMode;
-use crate::backends::shared::{CallbackManager, ConflictTracker};
+use crate::backends::shared::{CallbackManager, ConflictTracker, ReadSet};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
@@ -24,6 +24,7 @@ pub(crate) struct LarkTxn {
     active_txn_count: Arc<AtomicUsize>,
     read_version: u64,
     pending: Mutex<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
+    read_set: Mutex<ReadSet>,
     readonly: bool,
     discarded: Mutex<bool>,
     committed: Mutex<bool>,
@@ -74,6 +75,7 @@ impl LarkTxn {
             active_txn_count,
             read_version,
             pending: Mutex::new(BTreeMap::new()),
+            read_set: Mutex::new(ReadSet::default()),
             readonly,
             discarded: Mutex::new(false),
             committed: Mutex::new(false),
@@ -121,6 +123,7 @@ impl Reader for LarkTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
+        self.read_set.lock().record_key(key);
         self.get_internal(key)
     }
 
@@ -131,6 +134,7 @@ impl Reader for LarkTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
+        self.read_set.lock().record_key(key);
         self.has_internal(key)
     }
 
@@ -141,6 +145,7 @@ impl Reader for LarkTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
+        self.read_set.lock().record_key(key);
         Ok(self.get_internal(key)?.map(|v| v.len()))
     }
 
@@ -149,6 +154,7 @@ impl Reader for LarkTxn {
             return Err(Error::DiscardedTxn);
         }
 
+        self.read_set.lock().record_iter_options(&opts);
         let keys_only = opts.keys_only();
         let matches_prefix =
             |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
@@ -301,12 +307,13 @@ impl Txn for LarkTxn {
         }
 
         let pending = std::mem::take(&mut *self.pending.lock());
+        let read_set = self.read_set.lock().clone();
 
         if !pending.is_empty() {
             // Check conflicts
-            if let Err(e) = self
-                .conflict_tracker
-                .check_and_record(self.read_version, pending.keys())
+            if let Err(e) =
+                self.conflict_tracker
+                    .check_and_record(self.read_version, pending.keys(), &read_set)
             {
                 CallbackManager::execute_callbacks(self.callbacks.take_error());
                 CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
