@@ -657,12 +657,14 @@ impl P2PHostHandle {
     /// Send SE artifacts to a peer via the SE two-stream protocol.
     ///
     /// This sends a PushSEArtifactsRequest on the SE request protocol.
-    /// The response is not awaited (fire-and-forget).
+    /// The response is not awaited (fire-and-forget). The request is signed so
+    /// Go peers (which verify on receipt) accept it.
     pub async fn send_se_artifacts(
         &self,
         peer_id: PeerId,
-        request: crate::message::PushSEArtifactsRequest,
+        mut request: crate::message::PushSEArtifactsRequest,
     ) -> Result<()> {
+        sign_message(self.keypair(), &mut request)?;
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .send(HostCommand::SendSEArtifacts {
