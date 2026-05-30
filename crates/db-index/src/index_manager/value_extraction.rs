@@ -50,6 +50,19 @@ impl IndexManager {
 
             let value = doc.get(&field.name).cloned().unwrap_or(NormalValue::Null);
 
+            // Repair the schema-blind CBOR round-trip: a DateTime field loaded
+            // from storage comes back as a String (see document::encoding_cbor),
+            // which the index encoder would place in a disjoint byte range from
+            // live-written Time entries — silently hiding the row from DateTime
+            // cursor/range queries (#72). Coerce to the declared kind first.
+            let value = match schema.fields.iter().find(|f| f.name == field.name) {
+                Some(schema::FieldDescription {
+                    kind: schema::FieldKind::Scalar(kind),
+                    ..
+                }) => document::encoding::coerce_stored_value_for_kind(value, kind),
+                _ => value,
+            };
+
             let expanded = Self::expand_value_for_indexing(value);
             field_value_sets.push(expanded);
         }
@@ -233,5 +246,62 @@ impl IndexManager {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod coercion_tests {
+    use super::*;
+    use document::Document;
+    use schema::{
+        CollectionVersion, FieldDescription, FieldKind, IndexDescription, IndexedFieldDescription,
+    };
+
+    fn datetime_index() -> IndexDescription {
+        IndexDescription {
+            name: "idx_created_at".to_string(),
+            id: 1,
+            unique: false,
+            auto_generated: false,
+            fields: vec![IndexedFieldDescription {
+                name: "created_at".to_string(),
+                descending: true,
+            }],
+        }
+    }
+
+    /// #72 regression: a DateTime field loaded from CBOR storage comes back as a
+    /// String; the index builder must coerce it to Time so its entry lands in the
+    /// same byte range as live-written rows. Otherwise a `maintenance reindex`
+    /// hides every row from `order:[{created_at: DESC}]`.
+    #[test]
+    fn datetime_field_stored_as_string_is_indexed_as_time() {
+        let mut schema = CollectionVersion::new(
+            "CodingSession",
+            "v1",
+            "coll_cs",
+            vec![FieldDescription::new(
+                "1",
+                "created_at",
+                FieldKind::datetime(),
+            )],
+        );
+        schema.indexes = vec![datetime_index()];
+        let idx = datetime_index();
+        let mgr = IndexManager::from_collection(1, &schema).unwrap();
+
+        let mut doc = Document::new();
+        doc.set(
+            "created_at",
+            NormalValue::String("2026-05-29T13:06:28Z".to_string()),
+        );
+
+        let rows = mgr.extract_index_values(&doc, &idx, &schema).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            matches!(rows[0][0], NormalValue::Time(_)),
+            "String DateTime from storage must index as Time, got {:?}",
+            rows[0][0]
+        );
     }
 }

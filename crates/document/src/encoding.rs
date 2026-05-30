@@ -137,6 +137,33 @@ pub fn json_to_normal_value(value: serde_json::Value) -> Result<NormalValue> {
     }
 }
 
+/// Re-type a value read back from document storage against its declared scalar
+/// kind, repairing the schema-blind CBOR round-trip.
+///
+/// Document storage encodes a `DateTime` as an *untagged* CBOR text string
+/// (`encoding_cbor`: `Time` -> `Text`) and decodes every text back to
+/// `NormalValue::String` — the schema is not consulted. So any value loaded via
+/// `Document::from_cbor` carries a `DateTime` field as a `String`. Fed to the
+/// secondary-index encoder, that `String` is `encode_string_*` instead of
+/// `encode_time_*`: a different type marker and byte magnitude, landing in a
+/// disjoint range from live-written `Time` entries — so the rows silently
+/// vanish from `DateTime` cursor/range queries (the "#72" hidden-rows bug, and
+/// why a plain reindex re-encodes the whole index as String).
+///
+/// Coercing here makes index entries identical whether a document came from a
+/// live write (`Time`) or a storage round-trip (`String`). It is a no-op for
+/// already-correct values and for every non-`DateTime` kind.
+pub fn coerce_stored_value_for_kind(value: NormalValue, kind: &schema::ScalarKind) -> NormalValue {
+    use schema::ScalarKind;
+    match (kind, &value) {
+        (ScalarKind::DateTime, NormalValue::String(s)) => match DateTime::parse_from_rfc3339(s) {
+            Ok(dt) => NormalValue::Time(dt),
+            Err(_) => value,
+        },
+        _ => value,
+    }
+}
+
 /// Convert a NormalValue to a JSON value.
 ///
 /// Returns an error if the value contains non-finite floats (NaN, Infinity),
@@ -239,5 +266,35 @@ pub fn canonical_cbor_key_order(a: &&str, b: &&str) -> std::cmp::Ordering {
     match a.len().cmp(&b.len()) {
         std::cmp::Ordering::Equal => a.cmp(b),
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod coerce_stored_value_tests {
+    use super::*;
+    use schema::ScalarKind;
+
+    #[test]
+    fn datetime_string_coerces_to_time() {
+        let v = NormalValue::String("2026-05-29T13:06:28Z".to_string());
+        let got = coerce_stored_value_for_kind(v, &ScalarKind::DateTime);
+        let expected = DateTime::parse_from_rfc3339("2026-05-29T13:06:28Z").unwrap();
+        assert_eq!(got, NormalValue::Time(expected));
+    }
+
+    #[test]
+    fn noop_for_string_field_and_correct_values() {
+        let s = NormalValue::String("2026-05-29T13:06:28Z".to_string());
+        assert_eq!(coerce_stored_value_for_kind(s.clone(), &ScalarKind::String), s);
+        let t = NormalValue::Time(DateTime::parse_from_rfc3339("2026-05-29T13:06:28Z").unwrap());
+        assert_eq!(
+            coerce_stored_value_for_kind(t.clone(), &ScalarKind::DateTime),
+            t
+        );
+        let bad = NormalValue::String("not-a-date".to_string());
+        assert_eq!(
+            coerce_stored_value_for_kind(bad.clone(), &ScalarKind::DateTime),
+            bad
+        );
     }
 }
