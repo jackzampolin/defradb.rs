@@ -37,6 +37,11 @@ pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     /// (mirrors `wire_document_acp`). NAC/document_acp aren't available when
     /// the P2P system is created, so the KMS is built later in node.rs.
     pub wire_kms: Option<WireKmsCallback>,
+    /// SE remote query transport (owner-queries-replicator, #976). Lets this
+    /// embedded node act as an SE query OWNER, fanning `encrypted_<Collection>`
+    /// queries to replicators. The SE key is read lazily because it's
+    /// provisioned at runtime via `set_se_options`.
+    pub se_transport: Option<Arc<dyn query::SeQueryTransport>>,
 }
 
 pub(crate) async fn setup_libp2p<S>(
@@ -160,10 +165,11 @@ where
     }
 
     // SE query correlator: lets this node serve as an SE replicator and route
-    // any inbound replies. The embedded querier (owner) transport is not wired
-    // here because the SE key is provisioned at runtime via set_se_options, not
-    // at setup; embedded nodes acting as queriers is not yet supported (#976).
+    // any inbound replies. Cloned so the SAME correlator is shared between the
+    // event handler (which delivers replies) and the owner/querier transport
+    // (which awaits them) — they must agree on message_id correlation (#976).
     let se_correlator = p2p::SeQueryCorrelator::new();
+    let se_correlator_for_transport = se_correlator.clone();
     let host_event_task = spawn_libp2p_event_handler(
         event_rx,
         coordinator.clone(),
@@ -208,12 +214,24 @@ where
     let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
+    // Lazy SE-key handle: teed by the callback below (runtime provisioning),
+    // read by the owner/querier transport at query time (#976).
+    let se_key_handle = db_merge::empty_se_key_handle();
+    let se_key_handle_for_callback = se_key_handle.clone();
     let se_options_callback = Arc::new(move |options: ReplicatorPushOptions| {
+        tee_se_key(&se_key_handle_for_callback, &options);
         broadcast_mutator_for_se.set_se_options(db_merge::BroadcastSeOptions {
             encryption_key: options.se_encryption_key,
             identity_pubkey: options.se_identity_pubkey,
         })
     });
+    let se_transport: Option<Arc<dyn query::SeQueryTransport>> =
+        Some(Arc::new(db_merge::DbMergeSeQueryTransport::new(
+            p2p::Libp2pTransport::new(handle.clone()),
+            se_correlator_for_transport,
+            coordinator.replicators().clone(),
+            se_key_handle,
+        )) as Arc<dyn query::SeQueryTransport>);
     let system = Arc::new(ManagedP2PSystem::with_replicator_push_options_callback(
         TransportKind::Libp2p,
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
@@ -246,7 +264,31 @@ where
             doc_pusher_for_acp.set_document_acp(acp.clone());
             broadcast_mutator_for_acp.set_document_acp(acp);
         })),
+        se_transport,
     })
+}
+
+/// Tee the SE key material from runtime `set_se_options` into the lazy handle
+/// read by the owner/querier transport. Skips non-32-byte keys (#976).
+fn tee_se_key(handle: &db_merge::SeKeyHandle, options: &ReplicatorPushOptions) {
+    match &options.se_encryption_key {
+        Some(key_bytes) => match <[u8; 32]>::try_from(key_bytes.as_slice()) {
+            Ok(key) => db_merge::store_se_key(
+                handle,
+                Some(db_merge::SeKeyMaterial::new(
+                    key,
+                    options.se_identity_pubkey.clone(),
+                )),
+            ),
+            Err(_) => {
+                tracing::warn!(
+                    len = key_bytes.len(),
+                    "SE key from set_se_options is not 32 bytes; skipping owner-transport tee"
+                );
+            }
+        },
+        None => db_merge::store_se_key(handle, None),
+    }
 }
 
 #[cfg(feature = "iroh")]
@@ -324,13 +366,17 @@ where
         Err(error) => tracing::warn!(error = %error, "failed to load persisted P2P collections"),
     }
 
+    // Shared correlator between event handler (delivers replies) and the
+    // owner/querier transport (awaits them); see libp2p setup (#976).
     let se_correlator = p2p::SeQueryCorrelator::new();
+    let se_correlator_for_transport = se_correlator.clone();
     let event_handler_task = spawn_iroh_event_handler(
         event_rx,
         coordinator.clone(),
         store.clone(),
         event_bus.clone(),
         se_correlator,
+        transport.clone(),
     );
     let replication_task = spawn_replication_loop(
         coordinator.clone(),
@@ -371,12 +417,22 @@ where
     let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
+    let se_key_handle = db_merge::empty_se_key_handle();
+    let se_key_handle_for_callback = se_key_handle.clone();
     let se_options_callback = Arc::new(move |options: ReplicatorPushOptions| {
+        tee_se_key(&se_key_handle_for_callback, &options);
         broadcast_mutator_for_se.set_se_options(db_merge::BroadcastSeOptions {
             encryption_key: options.se_encryption_key,
             identity_pubkey: options.se_identity_pubkey,
         })
     });
+    let se_transport: Option<Arc<dyn query::SeQueryTransport>> =
+        Some(Arc::new(db_merge::DbMergeSeQueryTransport::new(
+            transport.clone(),
+            se_correlator_for_transport,
+            coordinator.replicators().clone(),
+            se_key_handle,
+        )) as Arc<dyn query::SeQueryTransport>);
     let system = Arc::new(ManagedP2PSystem::with_replicator_push_options_callback(
         TransportKind::Iroh,
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
@@ -410,5 +466,6 @@ where
             doc_pusher_for_acp.set_document_acp(acp.clone());
             broadcast_mutator_for_acp.set_document_acp(acp);
         })),
+        se_transport,
     })
 }

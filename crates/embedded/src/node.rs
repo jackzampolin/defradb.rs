@@ -81,6 +81,73 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
         Ok(())
     }
 
+    /// Add an equality encrypted (searchable-encryption) index on `field_name`
+    /// of `collection`. Embedded-native equivalent of the CLI
+    /// `encrypted_index_add` / HTTP `EncryptedIndexOperations::add_encrypted_index`,
+    /// so embedded nodes can write SE artifacts and act as SE query owners (#976).
+    pub async fn add_encrypted_index(&self, collection: &str, field_name: &str) -> Result<()> {
+        use storage::corekv::Key;
+
+        let col = self
+            .database
+            .get_collection(collection)
+            .map_err(|error| anyhow!("get collection error: {error}"))?
+            .ok_or_else(|| anyhow!("collection '{collection}' not found"))?;
+        let schema = col.schema();
+
+        if !schema.fields.iter().any(|f| f.name == field_name) {
+            return Err(anyhow!(
+                "encrypted index on non-existent field: {field_name}"
+            ));
+        }
+        if schema
+            .encrypted_indexes
+            .iter()
+            .any(|idx| idx.field_name == field_name)
+        {
+            return Err(anyhow!(
+                "encrypted index already exists on field: {field_name}"
+            ));
+        }
+
+        let txn = self
+            .database
+            .new_txn(false)
+            .await
+            .map_err(|error| anyhow!("failed to create transaction: {error}"))?;
+        {
+            let mut updated_schema = schema.clone();
+            updated_schema
+                .encrypted_indexes
+                .push(schema::EncryptedIndexDescription::new(field_name));
+
+            let collection_key =
+                storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
+            let schema_data = serde_json::to_vec(&updated_schema)
+                .map_err(|error| anyhow!("failed to serialize schema: {error}"))?;
+            let systemstore = txn
+                .systemstore()
+                .map_err(|error| anyhow!("failed to get systemstore: {error}"))?;
+            systemstore
+                .set(&collection_key.bytes(), &schema_data)
+                .await
+                .map_err(|error| anyhow!("failed to save schema: {error}"))?;
+            let name_key = storage::keys::systemstore::CollectionNameKey::new(collection);
+            systemstore
+                .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
+                .await
+                .map_err(|error| anyhow!("failed to save name mapping: {error}"))?;
+        }
+        txn.commit()
+            .await
+            .map_err(|error| anyhow!("failed to commit: {error}"))?;
+        self.database
+            .reload_cache()
+            .await
+            .map_err(|error| anyhow!("failed to reload cache: {error}"))?;
+        Ok(())
+    }
+
     /// Shut the node down cleanly.
     ///
     /// Order:
@@ -528,7 +595,7 @@ where
         None => db::DbTransactionRegistry::new(database.clone()),
     });
 
-    let query_runner = query::QueryRunner::with_arc_registry_and_provider(
+    let mut query_runner = query::QueryRunner::with_arc_registry_and_provider(
         fetcher,
         collection_provider,
         txn_registry.clone(),
@@ -542,6 +609,15 @@ where
     .with_acp(document_acp.clone())
     .with_lens_store(database.lens_store().clone())
     .with_query_limits(config.query_limits);
+
+    // Wire the SE remote query transport so this embedded node can act as an SE
+    // query OWNER, fanning encrypted_<Collection> queries to replicators (#976).
+    if let Some(se_transport) = p2p_setup
+        .as_ref()
+        .and_then(|setup| setup.se_transport.clone())
+    {
+        query_runner = query_runner.with_se_transport(se_transport);
+    }
 
     let query_runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
 

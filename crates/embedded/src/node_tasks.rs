@@ -122,6 +122,7 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
 }
 
 #[cfg(feature = "iroh")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
     mut events: tokio::sync::mpsc::Receiver<
         p2p::TransportEvent<<p2p::iroh::IrohTransport as P2PTransport>::ResponseToken>,
@@ -130,6 +131,7 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
     store: Arc<impl storage::corekv::Store + 'static>,
     event_bus: Arc<dyn events::Bus>,
     se_correlator: p2p::SeQueryCorrelator,
+    se_transport: p2p::iroh::IrohTransport,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
@@ -167,9 +169,21 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
                     .await;
                     continue;
                 }
+                p2p::TransportEvent::SEQueryRequest { peer_id, request } => {
+                    // Serve SE queries over iroh: byte-match the pushed artifacts
+                    // and return a signed reply (mirrors the libp2p loop, #976).
+                    db_merge::se::serve::handle_query_request(
+                        store.as_ref(),
+                        &se_transport,
+                        peer_id,
+                        request,
+                    )
+                    .await;
+                    continue;
+                }
                 p2p::TransportEvent::SEQueryReply { reply, .. } => {
-                    // SE query SEND is libp2p-only; deliver any inbound reply so a
-                    // correlator slot resolves rather than leaks.
+                    // Deliver inbound replies so the owner/querier transport's
+                    // awaiting correlator slot resolves (#976).
                     se_correlator.deliver(reply);
                     continue;
                 }

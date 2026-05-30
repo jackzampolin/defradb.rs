@@ -588,8 +588,7 @@ impl Node {
                 p2p::Libp2pTransport::new(handle.clone()),
                 se_correlator,
                 se_replicator_registry,
-                key,
-                None,
+                db_merge::filled_se_key_handle(key, None),
             )) as Arc<dyn query::SeQueryTransport>
         });
 
@@ -1034,8 +1033,7 @@ impl Node {
                 transport.clone(),
                 se_correlator,
                 se_replicator_registry,
-                key,
-                None,
+                db_merge::filled_se_key_handle(key, None),
             )) as Arc<dyn query::SeQueryTransport>
         });
 

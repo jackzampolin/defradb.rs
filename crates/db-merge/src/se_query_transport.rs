@@ -16,9 +16,9 @@ use p2p::message::{QuerySEArtifactsRequest, SEFieldQuery};
 use p2p::transport::{P2PTransport, PeerId};
 use p2p::{ReplicatorRegistry, SeQueryCorrelator};
 use serde_json::Value as JsonValue;
-use zeroize::Zeroizing;
 
 use crate::se::{FieldValueQuery, SECoordinator};
+use crate::se_key_handle::{load_se_key, SeKeyHandle, SeKeyMaterial};
 
 /// How long to wait for a replicator's reply before trying the next one.
 const SE_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -31,42 +31,41 @@ pub struct DbMergeSeQueryTransport<T: P2PTransport> {
     transport: T,
     correlator: SeQueryCorrelator,
     replicators: Arc<ReplicatorRegistry>,
-    enc_key: Zeroizing<Vec<u8>>,
-    /// Identity pubkey baked into search tags. MUST match the write side
-    /// (artifact generation). The CLI/embedded write side uses `None`
-    /// (anonymous), so the query side uses `None` too. See #976 trap 3.
-    identity_pubkey: Option<Vec<u8>>,
+    /// Lazily-read SE key material. The CLI pre-fills this; embedded nodes
+    /// receive the key at runtime via `set_se_options` (#976). `None` at query
+    /// time means "no SE key" → empty result (Go semantics, no local fallback).
+    key_handle: SeKeyHandle,
 }
 
 impl<T: P2PTransport> DbMergeSeQueryTransport<T> {
-    /// Create a transport. `enc_key` is the shared 32-byte SE key;
-    /// `identity_pubkey` must equal the value used at artifact-generation time.
+    /// Create a transport. `key_handle` provides the shared 32-byte SE key
+    /// lazily; the baked `identity_pubkey` must equal the value used at
+    /// artifact-generation time.
     pub fn new(
         transport: T,
         correlator: SeQueryCorrelator,
         replicators: Arc<ReplicatorRegistry>,
-        enc_key: [u8; 32],
-        identity_pubkey: Option<Vec<u8>>,
+        key_handle: SeKeyHandle,
     ) -> Self {
         Self {
             transport,
             correlator,
             replicators,
-            enc_key: Zeroizing::new(enc_key.to_vec()),
-            identity_pubkey,
+            key_handle,
         }
     }
 
     fn build_field_queries(
         &self,
         collection_id: &str,
+        material: &SeKeyMaterial,
         eq_conditions: Vec<(String, JsonValue)>,
     ) -> std::result::Result<Vec<SEFieldQuery>, String> {
-        let coordinator = match &self.identity_pubkey {
+        let coordinator = match &material.identity_pubkey {
             Some(pubkey) => {
-                SECoordinator::with_key_and_identity(self.enc_key.to_vec(), pubkey.clone())
+                SECoordinator::with_key_and_identity(material.key.to_vec(), pubkey.clone())
             }
-            None => SECoordinator::with_key(self.enc_key.to_vec()),
+            None => SECoordinator::with_key(material.key.to_vec()),
         };
 
         let mut value_queries = Vec::with_capacity(eq_conditions.len());
@@ -129,7 +128,16 @@ impl<T: P2PTransport> query::SeQueryTransport for DbMergeSeQueryTransport<T> {
         collection_id: &str,
         eq_conditions: Vec<(String, JsonValue)>,
     ) -> std::result::Result<Vec<String>, String> {
-        let queries = self.build_field_queries(collection_id, eq_conditions)?;
+        let material = match load_se_key(&self.key_handle) {
+            Some(material) => material,
+            None => {
+                // Go semantics: no SE key provisioned → can't resolve tags,
+                // empty result, no local fallback.
+                tracing::debug!(collection_id, "SE query: no SE key provisioned");
+                return Ok(Vec::new());
+            }
+        };
+        let queries = self.build_field_queries(collection_id, &material, eq_conditions)?;
 
         let replicator_ids = self.replicators.get_replicators(collection_id);
         if replicator_ids.is_empty() {
