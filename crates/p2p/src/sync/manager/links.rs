@@ -4,7 +4,6 @@ use std::collections::{HashSet, VecDeque};
 
 use bytes::Bytes;
 use cid::Cid;
-use libipld::{Block, DefaultParams};
 
 use blockstore::Blockstore;
 
@@ -26,21 +25,21 @@ use crate::error::{Error, Result};
 /// `decrypt_block_data` (KMS DEK fetch). Signature links are kept, matching
 /// Go's `hasAccess`, which serves signature blocks over Bitswap.
 fn extract_ipld_links(block_data: &[u8]) -> Result<Vec<Cid>> {
-    use libipld::multihash::{Code, MultihashDigest};
-    let hash = Code::Sha2_256.digest(block_data);
-    let dummy_cid = Cid::new_v1(0x71, hash); // 0x71 = DAG-CBOR codec
+    use ipld_core::codec::Links;
+    use serde_ipld_dagcbor::codec::DagCborCodec;
 
-    let mut refs = Vec::new();
-    let block = Block::<DefaultParams>::new_unchecked(dummy_cid, block_data.to_vec());
-    if let Err(e) = block.references(&mut refs) {
-        let error_msg = e.to_string();
-        if error_msg.contains("Unsupported codec") {
-            return Ok(Vec::new());
+    let mut refs: Vec<Cid> = match DagCborCodec::links(block_data) {
+        Ok(links) => links.collect(),
+        Err(e) => {
+            let error_msg = e.to_string();
+            if error_msg.contains("Unsupported codec") {
+                return Ok(Vec::new());
+            }
+            return Err(Error::BlockParseError {
+                reason: format!("Failed to extract references: {}. Block may be corrupt.", e),
+            });
         }
-        return Err(Error::BlockParseError {
-            reason: format!("Failed to extract references: {}. Block may be corrupt.", e),
-        });
-    }
+    };
 
     // Drop the encryption-metadata link if this is a DefraDB block. It is never
     // served over Bitswap (KMS-only), so requesting it stalls cross-runtime DAG
@@ -121,7 +120,7 @@ mod tests {
     use defra_core::{Block as DefraBlock, CrdtDelta, DAGLink, LwwDeltaPayload};
 
     fn dummy_cid(seed: u8) -> Cid {
-        use libipld::multihash::{Code, MultihashDigest};
+        use multihash_codetable::{Code, MultihashDigest};
         let hash = Code::Sha2_256.digest(&[seed; 4]);
         Cid::new_v1(0x71, hash)
     }

@@ -66,7 +66,7 @@ mod tests {
 
     /// Generate distinct test CIDs by hashing different data.
     fn make_cid(data: &[u8]) -> Cid {
-        use cid::multihash::{Code, MultihashDigest};
+        use multihash_codetable::{Code, MultihashDigest};
         let hash = Code::Sha2_256.digest(data);
         Cid::new_v1(0x55, hash) // 0x55 = raw codec
     }

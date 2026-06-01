@@ -3,9 +3,8 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use libipld::Ipld;
+use ipld_core::ipld::Ipld;
 
-use super::cid_convert::{cid_from_libipld, cid_to_libipld};
 use super::traversal::{collect_block_links, extract_links, walk_ipld, IpldVisitor};
 use crate::block::{
     Block, CollectionDefinitionDeltaPayload, CollectionDeltaPayload, CompositeDeltaPayload,
@@ -523,7 +522,7 @@ fn test_extract_links_empty_structures() {
 
 #[test]
 fn test_extract_links_handles_deeply_nested_lists_iteratively() {
-    let link = cid_to_libipld(&test_cid()).unwrap();
+    let link = test_cid();
     let mut ipld = Ipld::Link(link);
     for _ in 0..10_000 {
         ipld = Ipld::List(vec![ipld]);
@@ -612,7 +611,7 @@ fn test_walk_ipld_handles_deeply_nested_lists_iteratively() {
         }
     }
 
-    let mut ipld = Ipld::Link(cid_to_libipld(&test_cid()).unwrap());
+    let mut ipld = Ipld::Link(test_cid());
     for _ in 0..10_000 {
         ipld = Ipld::List(vec![ipld]);
     }
@@ -626,18 +625,6 @@ fn test_walk_ipld_handles_deeply_nested_lists_iteratively() {
     assert_eq!(visitor.links, 1);
     assert_eq!(visitor.visits, 10_001);
     std::mem::forget(ipld);
-}
-
-// ============================================================================
-// CID Conversion Tests
-// ============================================================================
-
-#[test]
-fn test_cid_conversion() {
-    let cid = test_cid();
-    let libipld_cid = cid_to_libipld(&cid).unwrap();
-    let back = cid_from_libipld(&libipld_cid).unwrap();
-    assert_eq!(cid, back);
 }
 
 // ============================================================================
@@ -706,10 +693,7 @@ fn test_counter_delta_nonce_i64_overflow_fails() {
 #[test]
 fn test_dag_link_missing_name_fails() {
     let mut map = BTreeMap::new();
-    map.insert(
-        "link".to_string(),
-        Ipld::Link(cid_to_libipld(&test_cid()).unwrap()),
-    );
+    map.insert("link".to_string(), Ipld::Link(test_cid()));
     // missing "name"
     let ipld = Ipld::Map(map);
     let result = DAGLink::try_from(&ipld);

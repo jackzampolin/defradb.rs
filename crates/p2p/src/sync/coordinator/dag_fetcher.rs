@@ -307,8 +307,9 @@ mod tests {
     use crate::{QueryId, ReplicatorInfo};
     use async_trait::async_trait;
     use blockstore::{Blockstore, DefraBlockstore};
-    use libipld::multihash::{Code, MultihashDigest};
-    use libipld::{cbor::DagCborCodec, codec::Codec, ipld};
+    use ipld_core::{codec::Codec, ipld, ipld::Ipld};
+    use multihash_codetable::{Code, MultihashDigest};
+    use serde_ipld_dagcbor::codec::DagCborCodec;
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -321,8 +322,8 @@ mod tests {
         Cid::new_v1(0x71, hash)
     }
 
-    fn encode_ipld(ipld: libipld::Ipld) -> Vec<u8> {
-        DagCborCodec.encode(&ipld).unwrap()
+    fn encode_ipld(ipld: Ipld) -> Vec<u8> {
+        DagCborCodec::encode_to_vec(&ipld).unwrap()
     }
 
     #[derive(Clone)]

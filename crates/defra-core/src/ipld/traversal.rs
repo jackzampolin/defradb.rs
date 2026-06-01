@@ -1,8 +1,7 @@
 //! IPLD traversal helpers and visitor pattern.
 
-use libipld::Ipld;
+use ipld_core::ipld::Ipld;
 
-use super::cid_convert::cid_from_libipld;
 use crate::block::Block;
 use crate::Result;
 
@@ -17,7 +16,7 @@ pub fn extract_links(ipld: &Ipld) -> Result<Vec<cid::Cid>> {
     while let Some(current) = stack.pop() {
         match current {
             Ipld::Link(cid) => {
-                links.push(cid_from_libipld(cid)?);
+                links.push(*cid);
             }
             Ipld::List(items) => {
                 for item in items.iter().rev() {
@@ -76,7 +75,7 @@ pub fn walk_ipld<V: IpldVisitor>(ipld: &Ipld, visitor: &mut V) -> Result<()> {
 
         match current {
             Ipld::Link(cid) => {
-                visitor.visit_link(&cid_from_libipld(cid)?);
+                visitor.visit_link(cid);
             }
             Ipld::List(items) => {
                 for item in items.iter().rev() {

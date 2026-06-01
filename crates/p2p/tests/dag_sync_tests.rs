@@ -376,7 +376,7 @@ async fn test_sync_state_eviction() {
                 i
             );
             // Use a simple hash-based approach to generate different CIDs
-            use cid::multihash::{Code, MultihashDigest};
+            use multihash_codetable::{Code, MultihashDigest};
             let hash = Code::Sha2_256.digest(bytes.as_bytes());
             Cid::new_v1(0x71, hash)
         })

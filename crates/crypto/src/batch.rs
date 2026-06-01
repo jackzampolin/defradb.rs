@@ -138,8 +138,8 @@ mod hex_bytes {
 mod tests {
     use super::*;
     use crate::keys::Key;
-    use cid::multihash::{Code, MultihashDigest};
     use defra_core::DAG_CBOR_CODEC;
+    use multihash_codetable::{Code, MultihashDigest};
 
     fn make_cid(data: &[u8]) -> Cid {
         let hash = Code::Sha2_256.digest(data);

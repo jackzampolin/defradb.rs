@@ -2,9 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use libipld::Ipld;
+use ipld_core::ipld::Ipld;
 
-use super::cid_convert::cid_to_libipld;
 use crate::block::{
     Block, CollectionDefinitionDeltaPayload, CollectionDeltaPayload, CompositeDeltaPayload,
     CounterDeltaPayload, CrdtDelta, DAGLink, Encryption, FieldDefinitionDeltaPayload,
@@ -23,7 +22,7 @@ impl TryFrom<&Block> for Ipld {
         if let Some(ref heads) = block.heads {
             let mut heads_ipld = Vec::with_capacity(heads.len());
             for cid in heads {
-                heads_ipld.push(Ipld::Link(cid_to_libipld(cid)?));
+                heads_ipld.push(Ipld::Link(*cid));
             }
             map.insert("heads".to_string(), Ipld::List(heads_ipld));
         }
@@ -37,11 +36,11 @@ impl TryFrom<&Block> for Ipld {
         }
 
         if let Some(ref enc) = block.encryption {
-            map.insert("encryption".to_string(), Ipld::Link(cid_to_libipld(enc)?));
+            map.insert("encryption".to_string(), Ipld::Link(*enc));
         }
 
         if let Some(ref sig) = block.signature {
-            map.insert("signature".to_string(), Ipld::Link(cid_to_libipld(sig)?));
+            map.insert("signature".to_string(), Ipld::Link(*sig));
         }
 
         Ok(Ipld::Map(map))
@@ -62,7 +61,7 @@ impl TryFrom<&DAGLink> for Ipld {
     fn try_from(link: &DAGLink) -> Result<Self> {
         let mut map = BTreeMap::new();
         map.insert("name".to_string(), Ipld::String(link.name.clone()));
-        map.insert("link".to_string(), Ipld::Link(cid_to_libipld(&link.link)?));
+        map.insert("link".to_string(), Ipld::Link(link.link));
         Ok(Ipld::Map(map))
     }
 }
@@ -224,10 +223,7 @@ impl TryFrom<&CollectionDefinitionDeltaPayload> for Ipld {
             map.insert("querySelect".to_string(), Ipld::Bytes(query_select.clone()));
         }
         if let Some(ref query_transform) = payload.query_transform {
-            map.insert(
-                "queryTransform".to_string(),
-                Ipld::Link(cid_to_libipld(query_transform)?),
-            );
+            map.insert("queryTransform".to_string(), Ipld::Link(*query_transform));
         }
         Ok(Ipld::Map(map))
     }

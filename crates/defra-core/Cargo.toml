@@ -23,7 +23,7 @@ cid.workspace = true
 multihash.workspace = true
 multicodec.workspace = true
 serde_ipld_dagcbor.workspace = true
-libipld.workspace = true
+ipld-core.workspace = true
 
 # Cryptography (for CID generation)
 sha2.workspace = true
@@ -38,6 +38,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+multihash-codetable.workspace = true
 
 [[bench]]
 name = "block"

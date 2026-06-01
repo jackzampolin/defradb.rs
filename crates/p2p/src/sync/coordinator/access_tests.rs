@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use blockstore::{Blockstore, DefraBlockstore, Error as BlockstoreError};
-use cid::multihash::{Code, MultihashDigest};
 use cid::Cid;
+use multihash_codetable::{Code, MultihashDigest};
 use storage::backends::MemoryStore;
 use tokio::time::timeout;
 

@@ -445,7 +445,7 @@ mod tests {
     use std::sync::Arc;
 
     use blockstore::DefraBlockstore;
-    use cid::multihash::{Code, MultihashDigest};
+    use multihash_codetable::{Code, MultihashDigest};
     use storage::backends::MemoryStore;
 
     use crate::sync::{PeerStateTracker, SyncConfig};

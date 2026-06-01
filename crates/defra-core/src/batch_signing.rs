@@ -120,7 +120,7 @@ pub fn get_batch_session_key() -> Option<String> {
 mod tests {
     use super::*;
     use crate::DAG_CBOR_CODEC;
-    use cid::multihash::{Code, MultihashDigest};
+    use multihash_codetable::{Code, MultihashDigest};
 
     fn make_cid(data: &[u8]) -> Cid {
         let hash = Code::Sha2_256.digest(data);

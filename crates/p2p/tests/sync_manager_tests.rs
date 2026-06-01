@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use blockstore::{Blockstore, DefraBlockstore};
-use cid::multihash::{Code, MultihashDigest};
 use cid::Cid;
 use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+use multihash_codetable::{Code, MultihashDigest};
 use storage::backends::MemoryStore;
 
 use p2p::error::Error;

@@ -6,8 +6,8 @@
 //! multihash prefix. Rust must derive an identical string or responses from
 //! Go won't correlate back to the outstanding request.
 
-use cid::multihash::{Code, MultihashDigest};
 use cid::Cid;
+use multihash_codetable::{Code, MultihashDigest};
 
 /// Multicodec for raw binary data. Matches Go's `cid.Raw`.
 const RAW_CODEC: u64 = 0x55;

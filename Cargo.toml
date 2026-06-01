@@ -89,7 +89,7 @@ ciborium = "0.2"
 # P2P networking
 # Note: Using 0.53 to match iroh-bitswap's dependency
 libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "relay", "dns", "quic", "websocket", "secp256k1"] }
-iroh-bitswap = { git = "https://github.com/sourcenetwork/beetle", branch = "main" }
+iroh-bitswap = { git = "https://github.com/sourcenetwork/beetle", rev = "6c8ed7a6d0616a9dd87cc2f0c6bf51cd2f289ed7" }
 libp2p-stream = "0.1.0-alpha.1"
 multiaddr = "0.18"
 
@@ -133,16 +133,14 @@ alloy-rlp = "0.3.15"
 bs58 = "0.5"
 
 # IPLD
-# Pinned together: libipld 0.16 is the last release and internally pins
-# cid 0.10 / multihash 0.18. Bumping cid or multihash here would create
-# duplicate types across the IPLD API boundary, so the whole stack moves
-# together once we either drop libipld or migrate to its successor.
-# Tracked in #652.
-cid = { version = "0.10", features = ["serde"] }
-multihash = "0.18"
+# Use cid 0.11.3+ through the ipld-core/serde_ipld_dagcbor stack so fresh
+# downstream resolution does not pull cid 0.10/0.11.1 and yanked core2 0.4.
+cid = { version = "0.11.3", features = ["serde"] }
+multihash = "0.19"
+multihash-codetable = { version = "0.2.2", features = ["sha2"] }
 multicodec = "0.1"
 serde_ipld_dagcbor = "0.6"
-libipld = { version = "0.16", features = ["serde-codec"] }
+ipld-core = { version = "0.4", features = ["codec", "serde"] }
 
 # Full-text search
 bm25 = "2.3"

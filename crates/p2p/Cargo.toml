@@ -47,7 +47,9 @@ uuid = { workspace = true }
 
 # IPLD
 cid = { workspace = true }
-libipld = { workspace = true }
+multihash-codetable = { workspace = true }
+ipld-core = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
 
 # Errors
 thiserror = { workspace = true }

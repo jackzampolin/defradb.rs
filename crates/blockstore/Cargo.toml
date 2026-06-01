@@ -17,6 +17,7 @@ defra-core = { path = "../defra-core" }
 # IPLD
 cid = { workspace = true }
 multihash = { workspace = true }
+multihash-codetable = { workspace = true }
 
 # Crypto (for hash verification)
 sha2 = { workspace = true }

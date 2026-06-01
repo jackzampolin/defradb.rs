@@ -79,8 +79,7 @@ zeroize = "1"
 # Base64 encoding/decoding (JWK export/import)
 base64 = { workspace = true }
 
-# IPLD (for Bitswap type parameters)
-libipld = { workspace = true }
+# IPLD
 cid = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 serde_bytes = { workspace = true }

@@ -2,9 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use libipld::Ipld;
+use ipld_core::ipld::Ipld;
 
-use super::cid_convert::cid_from_libipld;
 use crate::block::{
     Block, CollectionDefinitionDeltaPayload, CollectionDeltaPayload, CompositeDeltaPayload,
     CounterDeltaPayload, CrdtDelta, DAGLink, Encryption, FieldDefinitionDeltaPayload,
@@ -89,7 +88,7 @@ impl TryFrom<&Ipld> for DAGLink {
 
         let name = parse_string(map, "name")?;
         let link = match map.get("link") {
-            Some(Ipld::Link(cid)) => cid_from_libipld(cid)?,
+            Some(Ipld::Link(cid)) => *cid,
             Some(other) => {
                 return Err(Error::IpldError(format!(
                     "Field 'link' in DAGLink expected Link, got {}",
@@ -427,7 +426,7 @@ fn ipld_type_name(ipld: &Ipld) -> &'static str {
 
 fn parse_cid(ipld: &Ipld) -> Result<cid::Cid> {
     match ipld {
-        Ipld::Link(cid) => cid_from_libipld(cid),
+        Ipld::Link(cid) => Ok(*cid),
         _ => Err(Error::IpldError(format!(
             "Expected IPLD Link, got {}",
             ipld_type_name(ipld)
@@ -628,7 +627,7 @@ fn parse_optional_bytes(map: &BTreeMap<String, Ipld>, key: &str) -> Result<Optio
 /// Parse an optional CID/Link field. Returns error if field exists but has wrong type.
 fn parse_optional_cid(map: &BTreeMap<String, Ipld>, key: &str) -> Result<Option<cid::Cid>> {
     match map.get(key) {
-        Some(Ipld::Link(c)) => Ok(Some(cid_from_libipld(c)?)),
+        Some(Ipld::Link(c)) => Ok(Some(*c)),
         Some(other) => Err(Error::IpldError(format!(
             "Field '{}' expected Link, got {}",
             key,
