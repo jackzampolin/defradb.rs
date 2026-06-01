@@ -55,8 +55,8 @@ name = "p2p_iroh"
 path = "tests/p2p_iroh/main.rs"
 
 [dependencies]
-hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", branch = "main" }
-defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", branch = "main" }
+hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", branch = "feat/shared-se-key-harness" }
+defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", branch = "feat/shared-se-key-harness" }
 document = { path = "../../crates/document" }
 tokio = { version = "1.35", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }

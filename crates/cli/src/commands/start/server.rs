@@ -19,6 +19,7 @@ impl Node {
     ///
     /// Returns a tuple of (P2PHostHandle, P2PTasks, background tasks, HTTP Server)
     /// where the background tasks are tracked for graceful shutdown.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn init_store_and_server<S>(
         store: Arc<S>,
         config: &Config,
@@ -27,6 +28,7 @@ impl Node {
         acp_store: Arc<dyn acp::AcpStore>,
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         node_identity_did: Option<String>,
+        se_key: Option<[u8; 32]>,
     ) -> Result<(
         Option<p2p::P2PHostHandle>,
         Option<P2PTasks>,
@@ -144,6 +146,7 @@ impl Node {
             event_bus.clone(),
             config,
             peer_keypair,
+            se_key,
         )
         .await?;
 
@@ -164,6 +167,81 @@ impl Node {
         }
 
         let nac_adapter = Self::setup_nac_manager(config, user_did.as_ref()).await?;
+
+        // Build + wire the KMS (mirrors crates/embedded/src/node.rs). The P2P
+        // transport was created earlier; the NacDacPolicy needs document_acp +
+        // NAC which exist here (PR #4778 ordering).
+        {
+            // Blockstore-backed KeyStore (mirrors Go's internal/kms/enc_store.go):
+            // the KMS serves DEKs for ANY encrypted write by reading/writing the
+            // node's durable encstore→blockstore, not a RAM-only map. The DB owns
+            // the blockstore Arc (set_kms_blockstore) so the adapter can hold a
+            // Weak and avoid the lock-pinning cycle (#976) while sharing the cache.
+            let kms_blockstore = database.set_kms_blockstore(Arc::new(
+                blockstore::DefraBlockstore::new(store.clone(), true),
+            ));
+            let enc_block_store: Arc<dyn kms::EncBlockStore> =
+                Arc::new(db::DbEncBlockStore::new(database.clone(), kms_blockstore));
+            let kms_store: Arc<dyn kms::KeyStore> =
+                Arc::new(kms::BlockstoreKeyStore::new(enc_block_store));
+            let doc_lookup: Arc<dyn kms::DocCollectionLookup> =
+                Arc::new(db::DbDocCollectionLookup::new(database.clone()));
+            let policy = Arc::new(kms::NacDacPolicy::new(
+                acp_setup.document_acp.clone(),
+                doc_lookup,
+            ));
+            if let Some(adapter) = nac_adapter.as_ref() {
+                policy.set_node_acp(Arc::new(db::DbNodeAcpRead::new(adapter.nac_manager())));
+            }
+
+            // Node identity for the wire `identity` fallback on gossip-initiated
+            // fetches. Anonymous nodes use a stable placeholder DID.
+            let node_did = database.node_did().unwrap_or_else(|| {
+                identity::Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK")
+                    .expect("static anonymous DID parses")
+            });
+
+            let transports: Vec<Arc<dyn kms::KeyTransport>> = match p2p_setup.kms_transport.clone()
+            {
+                Some(t) => vec![t],
+                None => vec![],
+            };
+            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::new(
+                kms_store,
+                transports,
+                policy as Arc<dyn kms::AccessPolicy>,
+                node_did,
+            ));
+            kms_service.set_local_peer_id(p2p_setup.local_peer_id.clone());
+
+            // Serve handler with a Weak to break the transport↔kms Arc cycle.
+            if let Some(kt) = p2p_setup.kms_transport.as_ref() {
+                struct KmsServeHandler {
+                    kms: std::sync::Weak<dyn kms::KmsService>,
+                }
+                #[async_trait::async_trait]
+                impl kms::IncomingHandler for KmsServeHandler {
+                    async fn handle(
+                        &self,
+                        from: kms::PeerIdentity,
+                        req: kms::FetchEncryptionKeyRequest,
+                    ) -> kms::Result<kms::FetchEncryptionKeyReply> {
+                        match self.kms.upgrade() {
+                            Some(k) => k.serve_request(from, req).await,
+                            None => Err(kms::Error::Internal("kms dropped".into())),
+                        }
+                    }
+                }
+                kt.install_handler(Arc::new(KmsServeHandler {
+                    kms: Arc::downgrade(&kms_service),
+                }));
+            }
+            if let Some(wire_kms) = p2p_setup.wire_kms.take() {
+                wire_kms(kms_service.clone());
+            }
+            database.set_kms(kms_service.clone());
+        }
+
         let query_setup = Self::setup_query_runner(
             database.clone(),
             config,
@@ -172,6 +250,7 @@ impl Node {
             nac_adapter.clone(),
             p2p_setup.mutator.clone(),
             p2p_setup.txn_broadcaster.clone(),
+            p2p_setup.se_transport.take(),
         );
 
         let txn_cleanup_task = if config.api.transaction_idle_timeout > 0 {

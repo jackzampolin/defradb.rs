@@ -185,7 +185,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let effective_linked_delta = match &linked_block.delta {
             CrdtDelta::Lww(payload) if linked_block.encryption.is_some() => {
                 match self
-                    .decrypt_block_data(&payload.data, linked_block.encryption.as_ref())
+                    .decrypt_block_data(
+                        &payload.data,
+                        linked_block.encryption.as_ref(),
+                        Some(context.metadata),
+                    )
                     .await
                 {
                     Ok(decrypted) => {
@@ -204,7 +208,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
             CrdtDelta::Counter(payload) if linked_block.encryption.is_some() => {
                 match self
-                    .decrypt_block_data(&payload.data, linked_block.encryption.as_ref())
+                    .decrypt_block_data(
+                        &payload.data,
+                        linked_block.encryption.as_ref(),
+                        Some(context.metadata),
+                    )
                     .await
                 {
                     Ok(decrypted) => {

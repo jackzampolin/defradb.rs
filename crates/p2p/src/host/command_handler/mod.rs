@@ -142,6 +142,13 @@ impl<S: Store> P2PHost<S> {
             } => {
                 self.handle_send_se_artifacts(peer_id, request, response);
             }
+            HostCommand::SendSEArtifactsResponse {
+                peer_id,
+                reply,
+                response,
+            } => {
+                self.handle_send_se_artifacts_response(peer_id, reply, response);
+            }
             HostCommand::SendSEQueryRequest {
                 peer_id,
                 request,

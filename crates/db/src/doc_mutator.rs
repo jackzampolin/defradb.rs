@@ -219,6 +219,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             let schema_version_id = collection.version_id();
             let enc_config = get_encryption_config();
             let sign_config = get_signing_config();
+            let kms = self.db.kms();
 
             let block_result = write_document_blocks(
                 &blockstore,
@@ -228,6 +229,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 None,
                 enc_config.as_ref(),
                 sign_config.as_ref(),
+                kms.as_ref(),
             )
             .await
             .map_err(|e| {
@@ -331,6 +333,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             let enc_config = get_encryption_config()
                 .or_else(|| doc.id().and_then(|id| get_doc_encryption(&id.to_string())));
             let sign_config = get_signing_config();
+            let kms = self.db.kms();
 
             let block_result = write_document_blocks(
                 &blockstore,
@@ -340,6 +343,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 Some(&modified_fields),
                 enc_config.as_ref(),
                 sign_config.as_ref(),
+                kms.as_ref(),
             )
             .await
             .map_err(|e| {

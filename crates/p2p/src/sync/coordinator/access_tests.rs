@@ -163,6 +163,7 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
         },
         authorizer,
         document_acp: std::sync::OnceLock::new(),
+        kms_transport: std::sync::OnceLock::new(),
         pubsub_services: None,
     };
 

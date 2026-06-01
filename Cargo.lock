@@ -34,7 +34,7 @@ dependencies = [
 [[package]]
 name = "acp-light-client"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#ac6369450362f5d79d22c5521bbd2015c9872060"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
 dependencies = [
  "alloy-primitives",
  "borsh",
@@ -2143,6 +2143,7 @@ dependencies = [
  "identity",
  "iroh",
  "keyring 0.5.0",
+ "kms",
  "lens",
  "libipld",
  "libp2p",
@@ -2170,6 +2171,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "urlencoding",
+ "zeroize",
 ]
 
 [[package]]
@@ -3424,6 +3426,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "identity",
+ "kms",
  "lens",
  "libp2p",
  "multihash 0.18.1",
@@ -3474,6 +3477,7 @@ dependencies = [
  "document",
  "ed25519-dalek 2.2.0",
  "hex",
+ "kms",
  "multihash 0.18.1",
  "rand 0.8.5",
  "serde",
@@ -3520,6 +3524,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "identity",
+ "kms",
  "libp2p",
  "p2p",
  "parking_lot 0.12.5",
@@ -3641,7 +3646,7 @@ dependencies = [
 [[package]]
 name = "defra-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#ac6369450362f5d79d22c5521bbd2015c9872060"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
 dependencies = [
  "eyre",
  "futures",
@@ -4234,6 +4239,7 @@ dependencies = [
  "events",
  "hex",
  "identity",
+ "kms",
  "lens",
  "libp2p",
  "p2p",
@@ -4249,6 +4255,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -5502,7 +5509,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 [[package]]
 name = "hub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#ac6369450362f5d79d22c5521bbd2015c9872060"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -6715,6 +6722,35 @@ dependencies = [
  "security-framework 2.11.1",
  "security-framework 3.7.0",
  "windows-sys 0.60.2",
+ "zeroize",
+]
+
+[[package]]
+name = "kms"
+version = "0.5.0"
+dependencies = [
+ "acp",
+ "async-lock",
+ "async-trait",
+ "base64 0.22.1",
+ "blockstore",
+ "cid 0.10.1",
+ "crypto",
+ "defra-core",
+ "futures",
+ "identity",
+ "orbis",
+ "rand 0.8.5",
+ "serde",
+ "serde_bytes",
+ "serde_cbor",
+ "sourcehub",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "wasm-bindgen-futures",
+ "x25519-dalek",
  "zeroize",
 ]
 
@@ -8800,6 +8836,7 @@ dependencies = [
  "iroh-blobs",
  "iroh-gossip",
  "iroh-tickets",
+ "kms",
  "libipld",
  "libp2p",
  "libp2p-stream",
@@ -11833,7 +11870,7 @@ dependencies = [
 [[package]]
 name = "sourcehub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#ac6369450362f5d79d22c5521bbd2015c9872060"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
 dependencies = [
  "cosmrs",
  "eyre",
@@ -11978,6 +12015,7 @@ dependencies = [
  "chrono",
  "cid 0.10.1",
  "criterion 0.6.0",
+ "crypto",
  "defra-core",
  "document",
  "fjall",
@@ -12001,6 +12039,7 @@ dependencies = [
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "zeroize",
 ]
 
 [[package]]
@@ -12372,7 +12411,7 @@ dependencies = [
 [[package]]
 name = "test-infra"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#ac6369450362f5d79d22c5521bbd2015c9872060"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
 dependencies = [
  "eyre",
  "futures",

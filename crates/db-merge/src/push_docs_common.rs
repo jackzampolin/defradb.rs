@@ -135,10 +135,21 @@ pub(crate) async fn load_latest_composite_head_cids<R: Reader + ?Sized, B: Reade
 }
 
 fn extract_block_links(block_data: &[u8]) -> Vec<Cid> {
-    defra_core::Block::from_dag_cbor(block_data)
-        .ok()
-        .and_then(|block| defra_core::collect_block_links(&block).ok())
-        .unwrap_or_default()
+    let Some(block) = defra_core::Block::from_dag_cbor(block_data).ok() else {
+        return Vec::new();
+    };
+    let mut links = defra_core::collect_block_links(&block).unwrap_or_default();
+    // Drop the encryption-metadata link. The encryption block holds the
+    // plaintext DEK and is gated by the KMS access policy (NacDacPolicy):
+    // it must travel ONLY over the KMS `encryption` topic (ECIES-wrapped,
+    // permission-checked), never bundled into a replication pushlog. Walking
+    // it here would copy the DEK to a peer that has no DAC permission,
+    // bypassing the dual-gate (issue #976). Mirrors the Bitswap link walker
+    // in crates/p2p/src/sync/manager/links.rs.
+    if let Some(enc_cid) = block.encryption {
+        links.retain(|cid| *cid != enc_cid);
+    }
+    links
 }
 
 #[cfg(test)]

@@ -24,6 +24,7 @@ storage = { path = "../storage" }
 blockstore = { path = "../blockstore" }
 crypto = { path = "../crypto" }
 identity = { path = "../identity" }
+kms = { path = "../kms" }
 p2p = { path = "../p2p", features = ["libp2p-transport"] }
 defra-http = { path = "../http" }
 query = { path = "../query" }
@@ -70,6 +71,9 @@ getrandom = "0.2"
 
 # Hex encoding/decoding
 hex = "0.4"
+
+# Zeroizing wrapper for the searchable-encryption key passed to db-merge
+zeroize = "1"
 
 # Base64 encoding/decoding (JWK export/import)
 base64 = { workspace = true }
