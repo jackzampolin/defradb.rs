@@ -56,6 +56,29 @@ pub enum IrohCommand {
         topic: crate::topics::DefraTopic,
         reply: oneshot::Sender<crate::error::Result<Vec<PeerId>>>,
     },
+    /// Publish raw bytes on a gossip topic (no PushLogBroadcast encoding).
+    /// Used by the KMS pubsub transport. `topic` is the raw topic string.
+    PublishRaw {
+        topic: String,
+        data: Vec<u8>,
+        reply: oneshot::Sender<crate::error::Result<MessageId>>,
+    },
+    /// Mark a topic as raw-routed: inbound gossip on it is delivered as
+    /// `TransportEvent::GossipRawMessage` instead of decoded as PushLogBroadcast.
+    RegisterRawTopic {
+        topic: String,
+        reply: oneshot::Sender<crate::error::Result<()>>,
+    },
+    /// Join the gossip mesh for a raw string topic (e.g. the KMS
+    /// `encryption/<peer>/_response` sub-topic) AND mark it raw-routed, so
+    /// inbound messages are actually received and surfaced as
+    /// `TransportEvent::GossipRawMessage`. Unlike `RegisterRawTopic` (which only
+    /// classifies routing), this spawns a gossip reader — without it a topic is
+    /// classified but never subscribed, so replies never arrive (#976).
+    SubscribeRaw {
+        topic: String,
+        reply: oneshot::Sender<crate::error::Result<bool>>,
+    },
 
     // Messaging
     SendPushLogResponse {

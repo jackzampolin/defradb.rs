@@ -43,6 +43,23 @@ pub struct BroadcastSeOptions {
     pub identity_pubkey: Option<Vec<u8>>,
 }
 
+/// Regenerates and re-pushes searchable-encryption artifacts for a document to
+/// the collection's replicators.
+///
+/// Mirrors Go's `Coordinator.retrySEArtifacts` (`internal/se/coordinator_retry.go`):
+/// the producer never stores SE artifacts locally, so on reconnect it regenerates
+/// them from the document's current field values and re-pushes. Object-safe so the
+/// embedded retry loop and the `p2p_retry_replicators` FFI op can drive SE
+/// re-push without naming the transport type.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait SeArtifactRepusher: Send + Sync {
+    /// Regenerate SE artifacts for `doc_id` in `collection_id` and push them to
+    /// the collection's replicators. A no-op when the collection has no encrypted
+    /// indexes, no SE key is provisioned, or the document is absent.
+    async fn regenerate_and_push_se_artifacts(&self, collection_id: &str, doc_id: &str);
+}
+
 /// Document mutator that broadcasts changes to P2P network.
 ///
 /// Wraps `AutoCommitMutator` and adds P2P broadcast after successful mutations.
@@ -194,6 +211,44 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, 
         }
 
         Ok(())
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> SeArtifactRepusher
+    for BroadcastMutator<S, B, T>
+{
+    async fn regenerate_and_push_se_artifacts(&self, collection_id: &str, doc_id: &str) {
+        let collection = match self.db.find_collection_by_id(collection_id) {
+            Ok(Some(collection)) => collection,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(collection_id, error = %error, "SE retry: failed to load collection");
+                return;
+            }
+        };
+        if collection.schema().encrypted_indexes.is_empty() {
+            return;
+        }
+
+        let document =
+            match db::block_reader::read_document_for_se(&self.db, collection_id, doc_id).await {
+                Ok(Some(document)) => document,
+                Ok(None) => return,
+                Err(error) => {
+                    tracing::warn!(doc_id, error = %error, "SE retry: failed to read document");
+                    return;
+                }
+            };
+
+        let artifacts = self.generate_se_artifacts(collection.schema(), doc_id, &document, &[]);
+        if artifacts.is_empty() {
+            return;
+        }
+        self.sync
+            .push_se_artifacts_to_replicators(collection_id, artifacts)
+            .await;
     }
 }
 

@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use p2p::P2PTransport;
 
 type WireDocumentAcp = Option<Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>>;
+type WireKms = Option<Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Send>>;
 
 async fn set_persisted_replicator_status<S: storage::corekv::Store>(
     peerstore: &storage::stores::Peerstore<S>,
@@ -52,6 +53,21 @@ pub(super) struct P2PSetup {
     /// Hook for forwarding committed `/tx` writes to P2P peers. `Some` when the
     /// P2P stack is up; `None` for the non-P2P fallback path.
     pub(super) txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>>,
+    /// Type-erased KMS transport for this node's P2P system. server.rs adds it
+    /// to the DefraKms transports list and installs the serve handler. `None`
+    /// on the non-P2P fallback path.
+    pub(super) kms_transport: Option<Arc<dyn kms::KeyTransport>>,
+    /// Defers wiring the late-built KMS into the inner merge handler (mirrors
+    /// `wire_merge_acp`). NAC/document_acp aren't available when the P2P system
+    /// is created, so the KMS is built later in server.rs.
+    pub(super) wire_kms: WireKms,
+    /// This node's transport-level peer id (stringified). server.rs binds it
+    /// into the KMS so served ECIES replies carry the correct AAD peer id.
+    pub(super) local_peer_id: String,
+    /// SE remote query transport (owner-queries-replicator, #976). `Some` on the
+    /// libp2p path when an SE key is present; `None` for iroh (the SE-query
+    /// send path is libp2p-only) and the non-P2P fallback.
+    pub(super) se_transport: Option<Arc<dyn query::SeQueryTransport>>,
 }
 
 impl Node {
@@ -61,6 +77,7 @@ impl Node {
         event_bus: Arc<dyn events::Bus>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
+        se_key: Option<[u8; 32]>,
     ) -> Result<P2PSetup>
     where
         S: storage::corekv::Store + 'static,
@@ -72,19 +89,26 @@ impl Node {
         if config.net.transport == TransportType::Iroh {
             #[cfg(feature = "iroh")]
             {
-                return Self::setup_iroh_p2p(store, database, event_bus, config, peer_keypair)
-                    .await;
+                return Self::setup_iroh_p2p(
+                    store,
+                    database,
+                    event_bus,
+                    config,
+                    peer_keypair,
+                    se_key,
+                )
+                .await;
             }
             #[cfg(not(feature = "iroh"))]
             {
-                let _ = (store, database, event_bus, peer_keypair);
+                let _ = (store, database, event_bus, peer_keypair, se_key);
                 return Err(Error::InvalidTransport(
                     "iroh transport not enabled. Rebuild with --features iroh".into(),
                 ));
             }
         }
 
-        Self::setup_libp2p_p2p(store, database, event_bus, config, peer_keypair).await
+        Self::setup_libp2p_p2p(store, database, event_bus, config, peer_keypair, se_key).await
     }
 
     fn p2p_disabled<S>(database: Arc<db::DB<S>>) -> P2PSetup
@@ -99,6 +123,10 @@ impl Node {
             wire_merge_acp: None,
             wire_doc_pusher_acp: None,
             txn_broadcaster: None,
+            kms_transport: None,
+            wire_kms: None,
+            local_peer_id: String::new(),
+            se_transport: None,
         }
     }
 
@@ -108,6 +136,7 @@ impl Node {
         event_bus: Arc<dyn events::Bus>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
+        se_key: Option<[u8; 32]>,
     ) -> Result<P2PSetup>
     where
         S: storage::corekv::Store + 'static,
@@ -123,6 +152,13 @@ impl Node {
             config.net.pubsub_enabled,
         )
         .await?;
+
+        // SE query correlator + replicator registry handle for the
+        // owner-queries-replicator loop (#976). The registry returned by
+        // start_p2p is the same Arc the host updates via create_replicator, so
+        // it reflects live `p2p replicator set` calls.
+        let se_correlator = p2p::SeQueryCorrelator::new();
+        let se_replicator_registry = replicator_registry.clone();
 
         let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
         let merge_blockstore = sync_blockstore.clone();
@@ -146,6 +182,21 @@ impl Node {
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         let coordinator_for_acp = coordinator.clone();
+
+        // Build the KMS pubsub transport and install it on the coordinator so
+        // raw gossip on the encryption topic is routed to it (mirrors
+        // crates/embedded/src/node_p2p.rs::setup_libp2p).
+        let kms_transport =
+            p2p::kms::PubsubKeyTransport::new(p2p::Libp2pTransport::new(handle.clone()))
+                .await
+                .map_err(|e| Error::Server(format!("failed to create KMS transport: {e}")))?;
+        coordinator.install_kms_transport(kms_transport.clone());
+        let local_peer_id = {
+            use p2p::transport::P2PTransport;
+            p2p::Libp2pTransport::new(handle.clone())
+                .local_peer_id()
+                .to_string()
+        };
 
         match db_merge::load_persisted_collections(&coordinator).await {
             Ok(count) => {
@@ -172,9 +223,29 @@ impl Node {
         );
         let merge_handler_for_loop = replication.merge_handler.clone();
         let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();
+        let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
         let broadcast_mutator = replication.broadcast_mutator.clone();
+        let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
         let merge_handler_for_acp = replication.merge_handler.clone();
         let txn_broadcaster = replication.txn_broadcaster.clone();
+
+        // Feed the keyring-loaded searchable-encryption key into the same SE
+        // path the FFI uses (BroadcastMutator::set_se_options for live writes,
+        // DbMergeHandler::set_se_enc_key for merged/replicated docs). This lets
+        // a `defra start` node produce and verify SE artifacts.
+        if let Some(key) = se_key {
+            if let Err(e) =
+                replication
+                    .broadcast_mutator
+                    .set_se_options(db_merge::BroadcastSeOptions {
+                        encryption_key: Some(zeroize::Zeroizing::new(key.to_vec())),
+                        identity_pubkey: None,
+                    })
+            {
+                warn!(error = %e, "failed to set searchable encryption options on broadcast mutator");
+            }
+            replication.merge_handler_inner.set_se_enc_key(key.to_vec());
+        }
 
         let coordinator_for_replication = coordinator.clone();
         let replication_task = tokio::spawn(async move {
@@ -232,6 +303,11 @@ impl Node {
         });
 
         let coordinator_for_events = coordinator.clone();
+        let se_store = store.clone();
+        let se_handle = handle.clone();
+        let se_transport_serve = p2p::Libp2pTransport::new(handle.clone());
+        let se_correlator_for_events = se_correlator.clone();
+        let se_event_bus = event_bus.clone();
         let event_handler_task = Some(tokio::spawn(async move {
             let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
             while let Some(event) = events.recv().await {
@@ -268,7 +344,52 @@ impl Node {
                     _ => {}
                 }
 
-                let transport_event = p2p::convert_host_event(event);
+                // Intercept SE events: the CLI must store inbound artifacts and
+                // serve/route SE queries itself (the coordinator does not). #976.
+                let transport_event = match p2p::convert_host_event(event) {
+                    p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
+                        let doc_ids = match peer_id.as_str().parse::<libp2p::PeerId>() {
+                            Ok(pid) => {
+                                db_merge::se::serve::handle_artifacts_push(
+                                    se_store.as_ref(),
+                                    &se_handle,
+                                    pid,
+                                    &data,
+                                )
+                                .await
+                            }
+                            Err(_) => {
+                                db_merge::se::serve::handle_artifacts_received(
+                                    se_store.as_ref(),
+                                    &peer_id.to_string(),
+                                    &data,
+                                )
+                                .await
+                            }
+                        };
+                        for doc_id in doc_ids {
+                            se_event_bus.publish(events::Message::se_artifact_received(
+                                events::SEArtifactReceivedData { doc_id },
+                            ));
+                        }
+                        continue;
+                    }
+                    p2p::TransportEvent::SEQueryRequest { peer_id, request } => {
+                        db_merge::se::serve::handle_query_request(
+                            se_store.as_ref(),
+                            &se_transport_serve,
+                            peer_id,
+                            request,
+                        )
+                        .await;
+                        continue;
+                    }
+                    p2p::TransportEvent::SEQueryReply { reply, .. } => {
+                        se_correlator_for_events.deliver(reply);
+                        continue;
+                    }
+                    other => other,
+                };
                 if transport_event.requires_inline_ordering() {
                     if let Err(e) = coordinator_for_events
                         .handle_transport_event(transport_event)
@@ -459,6 +580,18 @@ impl Node {
         );
         adapter.set_initial_tracked_documents(restored_doc_ids);
 
+        // Build the SE remote query transport (owner-queries-replicator, #976).
+        // Identity is None to match the write side (server_p2p SE options use
+        // identity_pubkey: None), so write-tags and query-tags agree.
+        let se_transport: Option<Arc<dyn query::SeQueryTransport>> = se_key.map(|key| {
+            Arc::new(db_merge::DbMergeSeQueryTransport::new(
+                p2p::Libp2pTransport::new(handle.clone()),
+                se_correlator,
+                se_replicator_registry,
+                db_merge::filled_se_key_handle(key, None),
+            )) as Arc<dyn query::SeQueryTransport>
+        });
+
         info!("P2P sync coordinator initialized");
 
         Ok(P2PSetup {
@@ -475,12 +608,25 @@ impl Node {
             http_adapter: Some(Arc::new(adapter)),
             wire_merge_acp: Some(Box::new(move |acp| {
                 coordinator_for_acp.set_document_acp(acp.clone());
+                // Wire the document ACP into the broadcast mutator so newly
+                // created ACP-protected docs are registered *before* their
+                // detached P2P broadcast fires (#976). Without this, the
+                // mutator's pre-broadcast registration is skipped (ACP handle
+                // absent) and an encrypted doc's DEK can leak during the
+                // ~4.5s SourceHub registration window.
+                broadcast_mutator_for_acp.set_document_acp(acp.clone());
                 merge_handler_for_acp.set_document_acp(acp);
             })),
             wire_doc_pusher_acp: Some(Box::new(move |acp| {
                 doc_pusher_for_acp.set_document_acp(acp);
             })),
             txn_broadcaster: Some(txn_broadcaster),
+            kms_transport: Some(kms_transport as Arc<dyn kms::KeyTransport>),
+            wire_kms: Some(Box::new(move |kms| {
+                merge_handler_inner_for_kms.set_kms(kms);
+            })),
+            local_peer_id,
+            se_transport,
         })
     }
 
@@ -491,6 +637,7 @@ impl Node {
         event_bus: Arc<dyn events::Bus>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
+        se_key: Option<[u8; 32]>,
     ) -> Result<P2PSetup>
     where
         S: storage::corekv::Store + 'static,
@@ -522,6 +669,9 @@ impl Node {
             transport.local_peer_id()
         );
 
+        let se_correlator = p2p::SeQueryCorrelator::new();
+        let se_replicator_registry = replicator_registry.clone();
+
         let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_head_provider(
             transport.clone(),
             sync_blockstore,
@@ -537,6 +687,15 @@ impl Node {
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         let coordinator_for_acp = coordinator.clone();
+
+        // Build the KMS pubsub transport and install it on the coordinator so
+        // raw gossip on the encryption topic is routed to it (mirrors
+        // crates/embedded/src/node_p2p.rs::setup_iroh).
+        let local_peer_id = transport.local_peer_id().to_string();
+        let kms_transport = p2p::kms::PubsubKeyTransport::new(transport.clone())
+            .await
+            .map_err(|e| Error::Server(format!("failed to create KMS transport: {e}")))?;
+        coordinator.install_kms_transport(kms_transport.clone());
 
         match db_merge::load_persisted_collections(&coordinator).await {
             Ok(count) => {
@@ -563,9 +722,27 @@ impl Node {
         );
         let merge_handler_for_loop = replication.merge_handler.clone();
         let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();
+        let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
         let broadcast_mutator = replication.broadcast_mutator.clone();
+        let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
         let merge_handler_for_acp = replication.merge_handler.clone();
         let txn_broadcaster = replication.txn_broadcaster.clone();
+
+        // Mirror the libp2p SE wiring (keyring-loaded SE key into the FFI's SE
+        // path) so an iroh `defra start` node produces/verifies SE artifacts.
+        if let Some(key) = se_key {
+            if let Err(e) =
+                replication
+                    .broadcast_mutator
+                    .set_se_options(db_merge::BroadcastSeOptions {
+                        encryption_key: Some(zeroize::Zeroizing::new(key.to_vec())),
+                        identity_pubkey: None,
+                    })
+            {
+                warn!(error = %e, "failed to set searchable encryption options on broadcast mutator");
+            }
+            replication.merge_handler_inner.set_se_enc_key(key.to_vec());
+        }
 
         let coordinator_for_replication = coordinator.clone();
         let replication_task = tokio::spawn(async move {
@@ -587,9 +764,49 @@ impl Node {
 
         let coordinator_for_events = coordinator.clone();
         let event_bus_for_handler = event_bus.clone();
+        let se_store = store.clone();
+        let se_transport_serve = transport.clone();
+        let se_correlator_for_events = se_correlator.clone();
+        let se_event_bus = event_bus.clone();
         let event_handler_task = Some(tokio::spawn(async move {
             let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
             while let Some(event) = iroh_events.recv().await {
+                // SE events: store inbound artifacts and serve/route SE queries
+                // over the iroh transport (mirrors the libp2p loop, #976). Rust
+                // -> Rust artifact push is fire-and-forget, so use the no-ack
+                // `handle_artifacts_received` (Go -> Rust over iroh, which
+                // expects a PushSEArtifactsReply ack, is a follow-up).
+                let event = match event {
+                    p2p::TransportEvent::SEArtifactsReceived { peer_id, data } => {
+                        let doc_ids = db_merge::se::serve::handle_artifacts_received(
+                            se_store.as_ref(),
+                            &peer_id.to_string(),
+                            &data,
+                        )
+                        .await;
+                        for doc_id in doc_ids {
+                            se_event_bus.publish(events::Message::se_artifact_received(
+                                events::SEArtifactReceivedData { doc_id },
+                            ));
+                        }
+                        continue;
+                    }
+                    p2p::TransportEvent::SEQueryRequest { peer_id, request } => {
+                        db_merge::se::serve::handle_query_request(
+                            se_store.as_ref(),
+                            &se_transport_serve,
+                            peer_id,
+                            request,
+                        )
+                        .await;
+                        continue;
+                    }
+                    p2p::TransportEvent::SEQueryReply { reply, .. } => {
+                        se_correlator_for_events.deliver(reply);
+                        continue;
+                    }
+                    other => other,
+                };
                 match &event {
                     p2p::TransportEvent::PeerConnected(peer) => {
                         info!("Peer connected (iroh): {}", peer);
@@ -807,6 +1024,19 @@ impl Node {
 
         info!("P2P sync coordinator initialized (iroh)");
 
+        // Build the SE remote query transport over iroh so encrypted queries
+        // fan out to replicators (owner-queries-replicator, #976). Identity is
+        // None to match the write side (iroh SE options use identity_pubkey:
+        // None), so write-tags and query-tags agree.
+        let se_transport: Option<Arc<dyn query::SeQueryTransport>> = se_key.map(|key| {
+            Arc::new(db_merge::DbMergeSeQueryTransport::new(
+                transport.clone(),
+                se_correlator,
+                se_replicator_registry,
+                db_merge::filled_se_key_handle(key, None),
+            )) as Arc<dyn query::SeQueryTransport>
+        });
+
         Ok(P2PSetup {
             host_handle: None,
             p2p_tasks: Some(P2PTasks {
@@ -822,11 +1052,24 @@ impl Node {
             txn_broadcaster: Some(txn_broadcaster),
             wire_merge_acp: Some(Box::new(move |acp| {
                 coordinator_for_acp.set_document_acp(acp.clone());
+                // Wire the document ACP into the broadcast mutator so newly
+                // created ACP-protected docs are registered *before* their
+                // detached P2P broadcast fires (#976). Without this, the
+                // mutator's pre-broadcast registration is skipped (ACP handle
+                // absent) and an encrypted doc's DEK can leak during the
+                // ~4.5s SourceHub registration window.
+                broadcast_mutator_for_acp.set_document_acp(acp.clone());
                 merge_handler_for_acp.set_document_acp(acp);
             })),
             wire_doc_pusher_acp: Some(Box::new(move |acp| {
                 doc_pusher_for_acp.set_document_acp(acp);
             })),
+            kms_transport: Some(kms_transport as Arc<dyn kms::KeyTransport>),
+            wire_kms: Some(Box::new(move |kms| {
+                merge_handler_inner_for_kms.set_kms(kms);
+            })),
+            local_peer_id,
+            se_transport,
         })
     }
 

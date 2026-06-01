@@ -280,7 +280,11 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
             match &block.delta {
                 CrdtDelta::Lww(payload) => {
                     match self
-                        .decrypt_block_data(&payload.data, block.encryption.as_ref())
+                        .decrypt_block_data(
+                            &payload.data,
+                            block.encryption.as_ref(),
+                            Some(&metadata),
+                        )
                         .await
                     {
                         Ok(decrypted_data) => {
@@ -300,7 +304,11 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 }
                 CrdtDelta::Counter(payload) => {
                     match self
-                        .decrypt_block_data(&payload.data, block.encryption.as_ref())
+                        .decrypt_block_data(
+                            &payload.data,
+                            block.encryption.as_ref(),
+                            Some(&metadata),
+                        )
                         .await
                     {
                         Ok(decrypted_data) => {

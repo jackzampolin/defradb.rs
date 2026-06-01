@@ -78,6 +78,7 @@ query = { path = "../query" }
 blockstore = { path = "../blockstore" }
 crypto = { path = "../crypto" }
 defra-core = { path = "../defra-core" }
+kms = { path = "../kms" }
 identity = { path = "../identity" }
 acp = { path = "../acp", default-features = false }
 crdt = { path = "../crdt" }

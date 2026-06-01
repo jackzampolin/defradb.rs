@@ -21,6 +21,7 @@ pub(crate) type EmbeddedBlockstore<S> = blockstore::DefraBlockstore<S>;
 pub(crate) type EmbeddedMergeHandler<S> = db_merge::AcpMergeHandler<S, EmbeddedBlockstore<S>>;
 type EmbeddedTxnRegistry<S> = db::DbTransactionRegistry<S>;
 pub(crate) type WireDocumentAcpCallback = Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>;
+pub(crate) type WireKmsCallback = Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Send>;
 
 /// Embedded DefraDB node assembled for native/mobile embedding.
 pub struct EmbeddedNode<S: storage::corekv::Store> {
@@ -77,6 +78,73 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
                 .map_err(|error| anyhow!("create collection error: {error}"))?;
         }
 
+        Ok(())
+    }
+
+    /// Add an equality encrypted (searchable-encryption) index on `field_name`
+    /// of `collection`. Embedded-native equivalent of the CLI
+    /// `encrypted_index_add` / HTTP `EncryptedIndexOperations::add_encrypted_index`,
+    /// so embedded nodes can write SE artifacts and act as SE query owners (#976).
+    pub async fn add_encrypted_index(&self, collection: &str, field_name: &str) -> Result<()> {
+        use storage::corekv::Key;
+
+        let col = self
+            .database
+            .get_collection(collection)
+            .map_err(|error| anyhow!("get collection error: {error}"))?
+            .ok_or_else(|| anyhow!("collection '{collection}' not found"))?;
+        let schema = col.schema();
+
+        if !schema.fields.iter().any(|f| f.name == field_name) {
+            return Err(anyhow!(
+                "encrypted index on non-existent field: {field_name}"
+            ));
+        }
+        if schema
+            .encrypted_indexes
+            .iter()
+            .any(|idx| idx.field_name == field_name)
+        {
+            return Err(anyhow!(
+                "encrypted index already exists on field: {field_name}"
+            ));
+        }
+
+        let txn = self
+            .database
+            .new_txn(false)
+            .await
+            .map_err(|error| anyhow!("failed to create transaction: {error}"))?;
+        {
+            let mut updated_schema = schema.clone();
+            updated_schema
+                .encrypted_indexes
+                .push(schema::EncryptedIndexDescription::new(field_name));
+
+            let collection_key =
+                storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
+            let schema_data = serde_json::to_vec(&updated_schema)
+                .map_err(|error| anyhow!("failed to serialize schema: {error}"))?;
+            let systemstore = txn
+                .systemstore()
+                .map_err(|error| anyhow!("failed to get systemstore: {error}"))?;
+            systemstore
+                .set(&collection_key.bytes(), &schema_data)
+                .await
+                .map_err(|error| anyhow!("failed to save schema: {error}"))?;
+            let name_key = storage::keys::systemstore::CollectionNameKey::new(collection);
+            systemstore
+                .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
+                .await
+                .map_err(|error| anyhow!("failed to save name mapping: {error}"))?;
+        }
+        txn.commit()
+            .await
+            .map_err(|error| anyhow!("failed to commit: {error}"))?;
+        self.database
+            .reload_cache()
+            .await
+            .map_err(|error| anyhow!("failed to reload cache: {error}"))?;
         Ok(())
     }
 
@@ -165,6 +233,7 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
 pub struct NodeBuilder {
     data_path: Option<PathBuf>,
     config: EmbeddedNodeConfig,
+    at_rest_encryption_key: Option<[u8; 32]>,
 }
 
 impl NodeBuilder {
@@ -216,6 +285,13 @@ impl NodeBuilder {
         self
     }
 
+    /// Enable transparent at-rest value encryption for the storage backend,
+    /// keyed by the given 32-byte AES-256 key. Opt-in; off by default.
+    pub fn with_at_rest_encryption_key(mut self, key: [u8; 32]) -> Self {
+        self.at_rest_encryption_key = Some(key);
+        self
+    }
+
     pub async fn build(mut self) -> Result<EmbeddedNode<EmbeddedStore>> {
         let (store, persistence) = if let Some(path) = self.data_path.take() {
             if let Some(parent) = path.parent() {
@@ -244,16 +320,24 @@ impl NodeBuilder {
             )
             .with_context(|| format!("failed to open redb store at '{}'", path.display()))?;
 
-            (Arc::new(EmbeddedStore::Redb(redb)), Persistence::Persistent)
+            (EmbeddedStore::Redb(redb), Persistence::Persistent)
         } else {
             tracing::info!(
                 storage_backend = "memory",
                 "embedded node starting (ephemeral, no data_path)"
             );
             (
-                Arc::new(EmbeddedStore::Memory(storage::MemoryStore::new())),
+                EmbeddedStore::Memory(storage::MemoryStore::new()),
                 Persistence::Memory,
             )
+        };
+
+        let store = match self.at_rest_encryption_key.take() {
+            Some(key) => {
+                tracing::info!("at-rest encryption enabled (value-only, AES-256-GCM)");
+                Arc::new(store.encrypted(key))
+            }
+            None => Arc::new(store),
         };
 
         self.config.persistence = persistence;
@@ -419,6 +503,87 @@ where
         }
     }
 
+    // Build the KMS once document ACP + NAC manager exist (PR #4778 ordering:
+    // the P2P transport was created earlier; the policy needs ACP/NAC which
+    // initialize here).
+    let kms: Arc<dyn kms::KmsService> = {
+        // Blockstore-backed KeyStore (mirrors Go's internal/kms/enc_store.go):
+        // the KMS serves DEKs for ANY encrypted write by reading/writing the
+        // node's durable encstore→blockstore, not a RAM-only map. The DB owns
+        // the blockstore Arc (set_kms_blockstore) so the adapter can hold a Weak
+        // and avoid the lock-pinning cycle (#976) while sharing the block cache.
+        let kms_blockstore = database.set_kms_blockstore(Arc::new(
+            blockstore::DefraBlockstore::new(store.clone(), true),
+        ));
+        let enc_block_store: Arc<dyn kms::EncBlockStore> =
+            Arc::new(db::DbEncBlockStore::new(database.clone(), kms_blockstore));
+        let store: Arc<dyn kms::KeyStore> = Arc::new(kms::BlockstoreKeyStore::new(enc_block_store));
+        let doc_lookup: Arc<dyn kms::DocCollectionLookup> =
+            Arc::new(db::DbDocCollectionLookup::new(database.clone()));
+        let policy = Arc::new(kms::NacDacPolicy::new(document_acp.clone(), doc_lookup));
+        policy.set_node_acp(Arc::new(db::DbNodeAcpRead::new(nac_manager.clone())));
+
+        // Node identity for the wire `identity` fallback on gossip-initiated
+        // fetches. Anonymous nodes use a stable placeholder DID.
+        let node_did = database.node_did().unwrap_or_else(|| {
+            identity::Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK")
+                .expect("static anonymous DID parses")
+        });
+
+        let transports: Vec<Arc<dyn kms::KeyTransport>> = match p2p_setup.as_ref() {
+            Some(setup) => vec![setup.kms_transport.clone()],
+            None => vec![],
+        };
+
+        Arc::new(kms::DefraKms::new(
+            store,
+            transports,
+            policy as Arc<dyn kms::AccessPolicy>,
+            node_did,
+        ))
+    };
+
+    // Bind this node's transport peer id into the KMS so served ECIES
+    // replies carry the correct AAD peer id (Go's `makeAssociatedData`).
+    if let Some(ref setup) = p2p_setup {
+        kms.set_local_peer_id(setup.local_peer_id.clone());
+    }
+
+    // Wire the KMS into the P2P transport (serve handler) + merge handler.
+    if let Some(ref mut setup) = p2p_setup {
+        // Install the serve handler. Use a Weak ref to break the
+        // transport↔kms Arc cycle (transport holds handler → kms →
+        // transports → transport).
+        struct KmsServeHandler {
+            kms: std::sync::Weak<dyn kms::KmsService>,
+        }
+        #[async_trait::async_trait]
+        impl kms::IncomingHandler for KmsServeHandler {
+            async fn handle(
+                &self,
+                from: kms::PeerIdentity,
+                req: kms::FetchEncryptionKeyRequest,
+            ) -> kms::Result<kms::FetchEncryptionKeyReply> {
+                match self.kms.upgrade() {
+                    Some(kms) => kms.serve_request(from, req).await,
+                    None => Err(kms::Error::Internal("kms dropped".into())),
+                }
+            }
+        }
+        setup
+            .kms_transport
+            .install_handler(Arc::new(KmsServeHandler {
+                kms: Arc::downgrade(&kms),
+            }));
+
+        if let Some(wire_kms) = setup.wire_kms.take() {
+            wire_kms(kms.clone());
+        }
+    }
+
+    // Wire the KMS into the write path (DB-held, read by doc_mutator).
+    database.set_kms(kms.clone());
+
     let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
     let collection_provider: Arc<dyn query::CollectionProvider> =
         db::DbCollectionProvider::new_arc(database.clone());
@@ -430,7 +595,7 @@ where
         None => db::DbTransactionRegistry::new(database.clone()),
     });
 
-    let query_runner = query::QueryRunner::with_arc_registry_and_provider(
+    let mut query_runner = query::QueryRunner::with_arc_registry_and_provider(
         fetcher,
         collection_provider,
         txn_registry.clone(),
@@ -444,6 +609,15 @@ where
     .with_acp(document_acp.clone())
     .with_lens_store(database.lens_store().clone())
     .with_query_limits(config.query_limits);
+
+    // Wire the SE remote query transport so this embedded node can act as an SE
+    // query OWNER, fanning encrypted_<Collection> queries to replicators (#976).
+    if let Some(se_transport) = p2p_setup
+        .as_ref()
+        .and_then(|setup| setup.se_transport.clone())
+    {
+        query_runner = query_runner.with_se_transport(se_transport);
+    }
 
     let query_runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
 

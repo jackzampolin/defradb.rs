@@ -26,6 +26,7 @@ members = [
     "crates/db-merge",
     "crates/db-search",
     "crates/keyring",
+    "crates/kms",
     "crates/identity",
     "crates/zanzibar",
     "crates/acp",

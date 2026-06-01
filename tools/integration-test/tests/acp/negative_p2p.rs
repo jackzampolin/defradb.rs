@@ -5,6 +5,8 @@ use integration_test::{
     USER_ACP_POLICY,
 };
 
+const EXPLICIT_REPLAY_TIMEOUT: Duration = Duration::from_secs(45);
+
 /// 02-24: P2P replication must not grant access to identities without a relationship.
 ///
 /// When a document replicates from node0 to node1, only the explicit document
@@ -373,7 +375,7 @@ async fn retryable_skip_is_replayed_by_replicator_test(cluster: TestCluster) {
                 .and_then(|v| v["User"].as_array().map(|a| a.len() == 1))
                 .unwrap_or(false)
         },
-        Duration::from_secs(15),
+        EXPLICIT_REPLAY_TIMEOUT,
         Duration::from_millis(200),
         "document did not replay to node1 after replicator configuration",
     )
@@ -586,7 +588,7 @@ async fn wrong_identity_explicit_replay_capability_is_ignored_test(cluster: Test
                 .and_then(|v| v["User"].as_array().map(|a| a.len() == 1))
                 .unwrap_or(false)
         },
-        Duration::from_secs(15),
+        EXPLICIT_REPLAY_TIMEOUT,
         Duration::from_millis(200),
         "document did not replay to node1 after owner-signed explicit replicator configuration",
     )

@@ -59,6 +59,7 @@ identity = { path = "../identity" }
 acp = { path = "../acp", default-features = false }
 events = { path = "../events", default-features = false }
 p2p = { path = "../p2p", features = ["libp2p-transport"] }
+kms = { path = "../kms" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -364,6 +364,23 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     error = %error,
                     "Failed to push SE artifacts to replicator"
                 );
+                // Record a retry entry per (peer, doc) so the replicator retry
+                // pass regenerates and re-pushes the SE artifacts once the peer
+                // reconnects. Mirrors Go's independent `seRetryInfo`; the doc
+                // block push failure is racy and may not fire when the SE push
+                // does, so SE pushes must record their own retries.
+                for doc_id in artifacts
+                    .iter()
+                    .map(|artifact| artifact.doc_id.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                {
+                    Self::report_push_failure(
+                        &self.runtime.failure_tx,
+                        &peer_id,
+                        doc_id,
+                        collection_id.to_string(),
+                    );
+                }
             }
         }
     }

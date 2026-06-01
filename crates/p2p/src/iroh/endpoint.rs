@@ -155,6 +155,8 @@ async fn run_event_loop(
     >::new()));
     let connection_cache: ConnectionCache = Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let mut subscriptions: HashMap<String, TopicSubscription> = HashMap::new();
+    let raw_topics: Arc<parking_lot::Mutex<std::collections::HashSet<String>>> =
+        Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
     let mut active_syncs: HashMap<u64, ActiveSync> = HashMap::new();
     let spawned_tasks: SpawnedTasks = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let mut next_query_id: u64 = 1;
@@ -183,6 +185,7 @@ async fn run_event_loop(
                         &pending_pushlog_replies,
                         &connection_cache,
                         &mut subscriptions,
+                        &raw_topics,
                         &replicators,
                         &mut active_syncs,
                         &spawned_tasks,
