@@ -217,6 +217,15 @@ pub struct DatastoreConfig {
     /// Max DAG recursion depth for merge operations. Default: 1024.
     #[serde(default = "default_max_merge_depth")]
     pub max_merge_depth: usize,
+    /// Enable transparent at-rest value encryption for the storage backend.
+    ///
+    /// When enabled, all stored values are encrypted with AES-256-GCM keyed by
+    /// the keyring `encryption-key` (generated on first use if absent). Keys
+    /// remain plaintext to preserve prefix/range iteration. Default: false.
+    /// Once enabled for a store, it must stay enabled: reading without the
+    /// matching key fails loudly rather than returning garbage.
+    #[serde(default)]
+    pub at_rest_encryption: bool,
 }
 
 fn default_max_merge_depth() -> usize {
@@ -236,6 +245,7 @@ impl Default for DatastoreConfig {
             default_key_type: "secp256k1".to_string(),
             durability: DurabilityMode::default(),
             max_merge_depth: default_max_merge_depth(),
+            at_rest_encryption: false,
         }
     }
 }

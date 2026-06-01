@@ -64,11 +64,14 @@ pub mod error;
 mod explicit_replay;
 #[cfg(feature = "libp2p-transport")]
 pub mod host;
+#[cfg(feature = "libp2p-transport")]
+pub mod kms;
 pub mod message;
 pub mod protocol;
 #[cfg(feature = "libp2p-transport")]
 pub mod pubsub_rpc;
 pub mod replicator;
+pub mod se_correlator;
 pub mod signing;
 pub mod sync;
 #[cfg(all(any(test, feature = "test-utils"), feature = "libp2p-transport"))]
@@ -149,6 +152,9 @@ pub struct QueryId(pub u64);
 
 // Re-export replicator types
 pub use replicator::{ReplicatorInfo, ReplicatorStatus};
+
+// Re-export SE query correlator
+pub use se_correlator::{PendingSeQuery, SeQueryCorrelator};
 
 // Re-export two-stream protocol types
 #[cfg(feature = "libp2p-transport")]

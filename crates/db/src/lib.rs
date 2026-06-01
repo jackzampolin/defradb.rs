@@ -57,6 +57,7 @@ pub(crate) mod collection_loader;
 pub(crate) mod collection_name;
 pub(crate) mod collection_ops;
 pub(crate) mod collection_provider;
+mod collection_retriever;
 pub(crate) mod collection_snapshot;
 mod commit_priority_index;
 pub(crate) mod commits_fetcher;
@@ -75,6 +76,7 @@ pub use event_emission::{TxnBroadcastEvent, TxnBroadcaster};
 // Index manager extracted to standalone db-index crate.
 pub use db_index as index_manager;
 pub(crate) mod json_patch;
+pub mod kms_adapters;
 #[allow(dead_code)]
 pub(crate) mod lens_utils;
 pub(crate) mod lensed_auto_commit_fetcher;
@@ -107,6 +109,7 @@ pub use collection_acp::{
 pub use collection_cache::CollectionCache;
 pub use collection_name::CollectionName;
 pub use collection_provider::DbCollectionProvider;
+pub use collection_retriever::{resolve_collection_from_doc_id, DocCollectionInfo};
 pub use collection_snapshot::CollectionSnapshot;
 pub use commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
 pub use database::{DbOptions, EmbeddingClientConfig, DB};
@@ -121,6 +124,7 @@ pub use doc_mutator::DbDocMutator;
 pub use downsample::GcDownsampleHistoriesOptions;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
+pub use kms_adapters::{DbDocCollectionLookup, DbEncBlockStore, DbNodeAcpRead};
 pub use lensed_auto_commit_fetcher::LensedAutoCommitFetcher;
 pub use lensed_fetcher::LensedDocFetcher;
 pub use schema_loader::{

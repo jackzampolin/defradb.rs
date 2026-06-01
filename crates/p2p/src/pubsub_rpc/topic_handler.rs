@@ -222,7 +222,7 @@ impl TopicHandler {
                     return DeliveryOutcome::Ignored;
                 }
             };
-            if self.inner.correlator.deliver(from, envelope) {
+            if self.inner.correlator.deliver(from.to_string(), envelope) {
                 DeliveryOutcome::Forwarded
             } else {
                 DeliveryOutcome::Ignored
@@ -296,7 +296,7 @@ mod tests {
         assert!(matches!(ret, DeliveryOutcome::Forwarded));
 
         let got = prep.responses.recv().await.expect("response arrives");
-        assert_eq!(got.from, bob);
+        assert_eq!(got.from, bob.to_string());
         assert_eq!(got.data, b"hello");
         assert_eq!(got.id, prep.id);
         assert!(got.err.is_none());
@@ -439,7 +439,7 @@ mod tests {
         let second = rx.recv().await.expect("second");
         assert_eq!(
             {
-                let s: std::collections::HashSet<PeerId> =
+                let s: std::collections::HashSet<String> =
                     [first.from, second.from].into_iter().collect();
                 s.len()
             },

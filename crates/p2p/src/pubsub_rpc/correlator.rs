@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use cid::Cid;
-use libp2p::PeerId;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tracing::debug;
@@ -39,8 +38,11 @@ pub const DEFAULT_MULTI_RESPONSE_BUFFER: usize = 128;
 pub struct PubsubResponse {
     /// The request-ID echoed by the responder.
     pub id: Cid,
-    /// Responder peer, populated from the verified gossipsub message source.
-    pub from: PeerId,
+    /// Responder peer, populated from the verified gossip message source. Held
+    /// as the transport-native peer-id string (libp2p base58 or iroh hex) since
+    /// it is only forwarded to the caller (e.g. for the KMS ECIES AAD), never
+    /// used as a correlation key — that is the request [`Cid`].
+    pub from: String,
     /// Raw response payload.
     pub data: Vec<u8>,
     /// Error string produced by the responder, if any.
@@ -179,7 +181,7 @@ impl Correlator {
     ///
     /// Returns `true` if a waiting caller received the response,
     /// `false` if the response was stale (late arrival or fire-and-forget).
-    pub fn deliver(&self, from: PeerId, response: InternalResponse) -> bool {
+    pub fn deliver(&self, from: String, response: InternalResponse) -> bool {
         let Ok(id) = response.id.parse::<Cid>() else {
             return false;
         };
@@ -214,10 +216,10 @@ impl Correlator {
                 map.remove(&id);
                 false
             }
-            Err(mpsc::error::TrySendError::Full(_)) => {
+            Err(mpsc::error::TrySendError::Full(dropped)) => {
                 // Full: backpressure trap. Keep the entry but report drop.
                 debug!(
-                    from = %from,
+                    from = %dropped.from,
                     request_id = %id,
                     "pubsub_rpc: response dropped due to full buffer"
                 );
@@ -238,8 +240,8 @@ mod tests {
     use super::*;
     use libp2p::identity::Keypair;
 
-    fn a_peer() -> PeerId {
-        PeerId::from_public_key(&Keypair::generate_ed25519().public())
+    fn a_peer() -> String {
+        libp2p::PeerId::from_public_key(&Keypair::generate_ed25519().public()).to_string()
     }
 
     fn internal_for(id: &Cid, data: &[u8], err: &str) -> InternalResponse {
@@ -258,7 +260,7 @@ mod tests {
         assert_eq!(c.in_flight(), 1);
 
         let from = a_peer();
-        let delivered = c.deliver(from, internal_for(&prep.id, b"resp", ""));
+        let delivered = c.deliver(from.clone(), internal_for(&prep.id, b"resp", ""));
         assert!(delivered);
         assert_eq!(c.in_flight(), 0, "single-response entry must auto-remove");
 
@@ -282,8 +284,8 @@ mod tests {
 
         let p1 = a_peer();
         let p2 = a_peer();
-        assert!(c.deliver(p1, internal_for(&prep.id, b"r1", "")));
-        assert!(c.deliver(p2, internal_for(&prep.id, b"r2", "boom")));
+        assert!(c.deliver(p1.clone(), internal_for(&prep.id, b"r1", "")));
+        assert!(c.deliver(p2.clone(), internal_for(&prep.id, b"r2", "boom")));
         assert_eq!(
             c.in_flight(),
             1,
@@ -345,7 +347,7 @@ mod tests {
         let id = derive_request_id(b"req");
         let p = a_peer();
         // First send fills the 1-slot buffer.
-        assert!(c.deliver(p, internal_for(&id, b"a", "")));
+        assert!(c.deliver(p.clone(), internal_for(&id, b"a", "")));
         // Second send should report false (backpressure drop) but keep the entry.
         assert!(!c.deliver(p, internal_for(&id, b"b", "")));
         assert_eq!(

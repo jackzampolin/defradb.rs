@@ -29,6 +29,7 @@
 mod artifact_gen;
 mod coordinator;
 pub mod receiver;
+pub mod serve;
 mod storage;
 pub mod validate;
 

@@ -4,6 +4,65 @@
 //! need access to `DB` and `DbTxn` which would create a circular dependency.
 
 use db_blocks::{get_all_field_heads, BlockResult};
+use document::{DocID, Document};
+
+/// Read a committed document by ID from a collection, in a `Send`-safe way.
+///
+/// Used by the SE artifact retry path to regenerate search tags from a
+/// document's current field values (mirrors Go's
+/// `Coordinator.retrySEArtifacts`). The read transaction is owned and discarded
+/// internally; no transaction reference crosses an `.await`, so the returned
+/// future is `Send` and can run on the background retry task.
+pub async fn read_document_for_se<S: storage::corekv::Store>(
+    db: &crate::database::DB<S>,
+    collection_id: &str,
+    doc_id: &str,
+) -> Result<Option<Document>, String> {
+    let collection = match db
+        .find_collection_by_id(collection_id)
+        .map_err(|e| format!("failed to load collection: {e}"))?
+    {
+        Some(collection) => collection,
+        None => return Ok(None),
+    };
+
+    let parsed_doc_id =
+        DocID::from_string(doc_id).map_err(|e| format!("invalid doc id '{doc_id}': {e}"))?;
+    let doc_key = collection.doc_key(&parsed_doc_id);
+    let version_key = collection.version_key(&parsed_doc_id);
+
+    let txn = db
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("failed to create read txn: {e}"))?;
+    let datastore = txn
+        .datastore()
+        .map_err(|e| format!("failed to get datastore: {e}"))?;
+
+    let doc_bytes = datastore
+        .get(&doc_key)
+        .await
+        .map_err(|e| format!("failed to read document: {e}"))?;
+    let version_bytes = datastore
+        .get(&version_key)
+        .await
+        .map_err(|e| format!("failed to read document version: {e}"))?;
+    drop(datastore);
+    let _ = txn.force_discard();
+
+    let Some(doc_bytes) = doc_bytes else {
+        return Ok(None);
+    };
+    let mut document =
+        Document::from_cbor(&doc_bytes).map_err(|e| format!("failed to decode document: {e}"))?;
+    document.set_id(parsed_doc_id);
+    if let Some(version_bytes) = version_bytes {
+        if let Ok(version) = String::from_utf8(version_bytes) {
+            document.set_schema_version_id(version);
+        }
+    }
+    Ok(Some(document))
+}
 
 /// Read the latest composite block for a document from the committed store.
 ///

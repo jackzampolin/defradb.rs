@@ -11,6 +11,8 @@ repository.workspace = true
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 schema = { path = "../schema" }
+crypto = { path = "../crypto" }
+zeroize = "1.8"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Async runtime

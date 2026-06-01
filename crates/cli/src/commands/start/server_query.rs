@@ -16,6 +16,7 @@ pub(super) struct QueryRunnerSetup<S: storage::corekv::Store + 'static> {
 }
 
 impl Node {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn setup_query_runner<S>(
         database: Arc<db::DB<S>>,
         config: &Config,
@@ -24,6 +25,7 @@ impl Node {
         nac_adapter: Option<Arc<crate::nac_adapter::NacAdapter>>,
         mutator: Arc<dyn query::mutator::DocMutator>,
         txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>>,
+        se_transport: Option<Arc<dyn query::SeQueryTransport>>,
     ) -> QueryRunnerSetup<S>
     where
         S: storage::corekv::Store + 'static,
@@ -70,6 +72,11 @@ impl Node {
 
         if let Some(adapter) = &nac_adapter {
             query_runner = query_runner.with_nac(adapter.clone() as Arc<dyn query::NacChecker>);
+        }
+
+        if let Some(transport) = se_transport {
+            info!("Query runner configured with SE remote query transport");
+            query_runner = query_runner.with_se_transport(transport);
         }
 
         let runner = Arc::new(query_runner);

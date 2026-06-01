@@ -43,6 +43,7 @@ pub(super) async fn handle_command(
     >,
     connection_cache: &ConnectionCache,
     subscriptions: &mut HashMap<String, TopicSubscription>,
+    raw_topics: &Arc<parking_lot::Mutex<HashSet<String>>>,
     replicators: &Arc<ReplicatorRegistry>,
     active_syncs: &mut HashMap<u64, ActiveSync>,
     spawned_tasks: &SpawnedTasks,
@@ -97,7 +98,9 @@ pub(super) async fn handle_command(
             let _ = reply.send(Ok(()));
         }
         IrohCommand::Subscribe { topic, reply } => {
-            let result = handle_subscribe(gossip, subscriptions, peer_map, topic, event_tx).await;
+            let result =
+                handle_subscribe(gossip, subscriptions, peer_map, raw_topics, topic, event_tx)
+                    .await;
             let _ = reply.send(result);
         }
         IrohCommand::Unsubscribe { topic, reply } => {
@@ -111,6 +114,25 @@ pub(super) async fn handle_command(
         }
         IrohCommand::Publish { topic, msg, reply } => {
             let result = handle_publish(gossip, subscriptions, peer_map, topic, msg, spawned_tasks);
+            let _ = reply.send(result);
+        }
+        IrohCommand::RegisterRawTopic { topic, reply } => {
+            raw_topics.lock().insert(topic);
+            let _ = reply.send(Ok(()));
+        }
+        IrohCommand::SubscribeRaw { topic, reply } => {
+            // Mark as raw-routed first so the reader spawned below emits
+            // GossipRawMessage (not a decoded PushLogBroadcast) for it, then
+            // join the gossip mesh with a real reader task.
+            raw_topics.lock().insert(topic.clone());
+            let result =
+                subscribe_topic_str(gossip, subscriptions, peer_map, raw_topics, topic, event_tx)
+                    .await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::PublishRaw { topic, data, reply } => {
+            let result =
+                handle_publish_raw(gossip, subscriptions, peer_map, topic, data, spawned_tasks);
             let _ = reply.send(result);
         }
         IrohCommand::TopicPeers { topic, reply } => {
@@ -645,12 +667,40 @@ pub(super) async fn handle_subscribe(
     gossip: &Gossip,
     subscriptions: &mut HashMap<String, TopicSubscription>,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    raw_topics: &Arc<parking_lot::Mutex<HashSet<String>>>,
     topic: crate::topics::DefraTopic,
+    event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
+) -> crate::error::Result<bool> {
+    subscribe_topic_str(
+        gossip,
+        subscriptions,
+        peer_map,
+        raw_topics,
+        topic.to_string(),
+        event_tx,
+    )
+    .await
+}
+
+/// Join the gossip mesh for an arbitrary topic string and spawn a reader task.
+///
+/// Shared by [`handle_subscribe`] (typed `DefraTopic`) and the `SubscribeRaw`
+/// command (raw string sub-topics such as the KMS `encryption/<peer>/_response`
+/// reply topic). The topic id is derived via [`topic_to_id`] from the same
+/// string `handle_publish_raw` uses, so a subscriber and a publisher of the
+/// same string topic meet on the same iroh-gossip `TopicId`. The reader emits
+/// [`TransportEvent::GossipRawMessage`] for any topic present in `raw_topics`,
+/// and a decoded [`TransportEvent::GossipMessage`] otherwise.
+pub(super) async fn subscribe_topic_str(
+    gossip: &Gossip,
+    subscriptions: &mut HashMap<String, TopicSubscription>,
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    raw_topics: &Arc<parking_lot::Mutex<HashSet<String>>>,
+    topic_str: String,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> crate::error::Result<bool> {
     use futures::StreamExt;
 
-    let topic_str = topic.to_string();
     if subscriptions.contains_key(&topic_str) {
         return Ok(false);
     }
@@ -670,15 +720,33 @@ pub(super) async fn handle_subscribe(
     let event_tx = event_tx.clone();
     let topic_str_clone = topic_str.clone();
     let reader_neighbors = Arc::clone(&neighbors);
+    let raw_topics_reader = Arc::clone(raw_topics);
     let reader_task = tokio::spawn(async move {
         while let Some(result) = receiver.next().await {
             match result {
                 Ok(event) => match event {
                     iroh_gossip::api::Event::Received(msg) => {
+                        let sender_peer_id = endpoint_id_to_peer_id(&msg.delivered_from);
+                        if raw_topics_reader.lock().contains(&topic_str_clone) {
+                            let msg_id = MessageId::new(uuid::Uuid::new_v4().to_string());
+                            if event_tx
+                                .send(TransportEvent::GossipRawMessage {
+                                    propagation_source: sender_peer_id,
+                                    message_id: msg_id,
+                                    topic: topic_str_clone.clone(),
+                                    data: msg.content.to_vec(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                debug!("Event channel closed, stopping gossip reader");
+                                break;
+                            }
+                            continue;
+                        }
                         match crate::message::PushLogBroadcast::decode_gossip_payload(&msg.content)
                         {
                             Ok((broadcast, encoding)) => {
-                                let sender_peer_id = endpoint_id_to_peer_id(&msg.delivered_from);
                                 if encoding != crate::message::PushLogGossipPayloadEncoding::PostcardBroadcast {
                                     debug!(
                                         peer_id = %sender_peer_id,
@@ -708,7 +776,6 @@ pub(super) async fn handle_subscribe(
                                     crate::message::PushLogBroadcast::inspect_gossip_payload(
                                         &msg.content,
                                     );
-                                let sender_peer_id = endpoint_id_to_peer_id(&msg.delivered_from);
                                 let sample = crate::sync::GossipDecodeFailureSample {
                                     transport: crate::sync::GossipTransport::Iroh,
                                     peer_id: sender_peer_id.to_string(),
@@ -854,6 +921,76 @@ fn handle_publish(
 
     Ok(message_id)
 }
+
+/// Publish raw bytes on a gossip topic (no PushLogBroadcast encoding).
+///
+/// Used by the KMS pubsub transport. Mirrors `handle_publish` but broadcasts
+/// `data` directly instead of encoding a `PushLogBroadcast`.
+fn handle_publish_raw(
+    gossip: &Gossip,
+    subscriptions: &HashMap<String, TopicSubscription>,
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    topic_str: String,
+    data: Vec<u8>,
+    spawned_tasks: &SpawnedTasks,
+) -> crate::error::Result<MessageId> {
+    let topic_id = topic_to_id(&topic_str);
+    let sender = subscriptions.get(&topic_str).map(|sub| sub.sender.clone());
+    let gossip = gossip.clone();
+    let initial_peers: Vec<iroh::EndpointId> = peer_map.lock().endpoint_ids().collect();
+    let message_id = MessageId::new(uuid::Uuid::new_v4().to_string());
+
+    let task = tokio::spawn(async move {
+        let sender = if let Some(sender) = sender {
+            sender
+        } else {
+            // No persistent subscription for this topic (the responder side of a
+            // KMS `_response` reply, which only ever publishes here). Join
+            // ephemerally and WAIT for the mesh to graft to at least one
+            // neighbor before broadcasting — iroh-gossip has no store-and-
+            // forward, so a broadcast on a freshly-joined, ungrafted topic
+            // reaches nobody and the reply is silently lost (#976).
+            match gossip.subscribe(topic_id, initial_peers).await {
+                Ok(mut topic) => {
+                    if let Err(error) =
+                        tokio::time::timeout(RAW_PUBLISH_JOIN_TIMEOUT, topic.joined()).await
+                    {
+                        warn!(
+                            topic = %topic_str,
+                            error = %error,
+                            "Timed out waiting for raw Iroh gossip mesh to graft; broadcasting anyway"
+                        );
+                    }
+                    topic.split().0
+                }
+                Err(error) => {
+                    warn!(
+                        topic = %topic_str,
+                        error = %error,
+                        "Failed to create ephemeral Iroh gossip publisher (raw)"
+                    );
+                    return;
+                }
+            }
+        };
+
+        if let Err(error) = sender.broadcast(Bytes::from(data)).await {
+            warn!(
+                topic = %topic_str,
+                error = %error,
+                "Failed to publish raw Iroh gossip message"
+            );
+        }
+    });
+    track_task(spawned_tasks, task);
+
+    Ok(message_id)
+}
+
+/// Upper bound on how long a raw publish waits for its freshly-joined gossip
+/// topic to graft to a neighbor before broadcasting anyway. Bounds the KMS
+/// reply path so a permanently-unreachable peer cannot wedge the publish task.
+const RAW_PUBLISH_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Hash a topic string to an iroh-gossip `TopicId`.
 fn topic_to_id(topic: &str) -> TopicId {

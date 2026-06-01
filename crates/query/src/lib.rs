@@ -76,7 +76,7 @@ pub use rest::{
     CollectionDocIdsPage, CollectionDocIdsPagination, RestError, RestOperations,
     RestOperationsImpl, RestResult,
 };
-pub use runner::{DocFetcher, FetchByIdsResult, NacChecker, QueryRunner};
+pub use runner::{DocFetcher, FetchByIdsResult, NacChecker, QueryRunner, SeQueryTransport};
 pub use sdl_parse::{parse_sdl, parse_sdl_with_known_types};
 pub use select_convert::select_to_go_json;
 pub use txn::{

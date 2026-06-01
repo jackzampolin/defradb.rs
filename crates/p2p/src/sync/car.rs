@@ -231,6 +231,20 @@ fn extract_links(block_data: &[u8]) -> Vec<Cid> {
     if block.references(&mut refs).is_err() {
         return Vec::new();
     }
+
+    // Drop the encryption-metadata link. The encryption block holds the
+    // plaintext DEK and is gated by the KMS access policy (NacDacPolicy): it
+    // must travel ONLY over the KMS `encryption` topic (ECIES-wrapped,
+    // permission-checked), never bundled into a CAR DAG transfer. Including it
+    // here ships the DEK to a peer that may lack DAC read permission, bypassing
+    // the dual-gate (issue #976). Mirrors the Bitswap link walker in
+    // crates/p2p/src/sync/manager/links.rs.
+    if let Ok(defra_block) = defra_core::Block::from_dag_cbor(block_data) {
+        if let Some(enc_cid) = defra_block.encryption {
+            refs.retain(|cid| *cid != enc_cid);
+        }
+    }
+
     refs
 }
 
@@ -339,6 +353,41 @@ mod tests {
 
     fn encode_ipld(ipld: libipld::Ipld) -> Vec<u8> {
         DagCborCodec.encode(&ipld).unwrap()
+    }
+
+    /// The `encryption` link of an encrypted block must NOT be walked when
+    /// building a CAR. The encryption block holds the plaintext DEK and is
+    /// distributed only over the gated KMS topic — bundling it into a CAR would
+    /// ship the key to a peer that may lack DAC read permission (issue #976).
+    /// Named field links are still walked.
+    #[test]
+    fn extract_links_excludes_encryption_link() {
+        use defra_core::{Block as DefraBlock, CrdtDelta, DAGLink, LwwDeltaPayload};
+
+        let field_link = make_cid(b"field-block");
+        let enc_cid = make_cid(b"encryption-block");
+
+        let block = DefraBlock::new_with_options(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                doc_id: b"doc1".to_vec(),
+                field_name: "secret".to_string(),
+                priority: 1,
+                schema_version_id: "schema1".to_string(),
+                data: b"ciphertext".to_vec(),
+            }),
+            vec![],
+            vec![DAGLink::new("secret", field_link)],
+            Some(enc_cid),
+            None,
+        );
+        let bytes = block.to_dag_cbor().expect("encode encrypted block");
+
+        let links = extract_links(&bytes);
+        assert!(links.contains(&field_link), "named field link must be kept");
+        assert!(
+            !links.contains(&enc_cid),
+            "encryption link must be excluded from CAR DAG walk"
+        );
     }
 
     #[cfg(feature = "iroh-transport")]

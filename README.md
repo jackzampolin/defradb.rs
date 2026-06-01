@@ -42,6 +42,82 @@ The CLI exposes GraphQL query guardrails on `defradb start`:
 | `--query-max-width` | `100` | Max fields at any GraphQL selection level (`0` = unlimited). |
 | `--query-max-filter-depth` | `50` | Max recursive filter nesting depth (`0` = unlimited). |
 
+## Telemetry (OpenTelemetry)
+
+Opt in at compile time with `--features otel`:
+
+```bash
+cargo build --release -p cli --features otel
+```
+
+Mirrors Go DefraDB's `//go:build telemetry` tag — when not compiled in, zero OTel dependencies and zero runtime cost. When compiled in, **traces** export to `http://localhost:4318` (OTLP/HTTP) by default, same endpoint as Go.
+
+Metrics are a separate opt-in (the `metrics` feature on the `telemetry` crate). They're off by default because nothing in defradb.rs records metric instruments yet — enabling the metric pipeline would just export empty batches every 60 s. Turn it on once instruments exist.
+
+| Flag / env var | Effect |
+| --- | --- |
+| `--no-telemetry` / `DEFRA_NO_TELEMETRY=true` | Disable exporters at runtime. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Override collector URL (standard OTel env var). |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Add headers, e.g. for auth. |
+| `OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES` | Override service name / extra attributes. |
+| `OTEL_TRACES_SAMPLER` | Configure sampling (default: parent-based always-on, matching Go). |
+
+When no collector is reachable, the OTel SDK's repeated export errors are suppressed and a single actionable hint — `OpenTelemetry export failed, ensure your OTLP collector is running and reachable` — is emitted once per process. This ports Go's `otel.SetErrorHandler + sync.Once` behavior (issue #977); genuine non-connectivity OTel errors still log normally.
+
+### Embedded usage
+
+Library consumers (via `defra-node`) own the OTel lifecycle and hand the resulting handle to the node. The node flushes it via `Drop` or via an explicit `shutdown()` — explicit is preferred because `Drop` blocks for up to ~5 s on the SDK's trace batch-thread join (double that if you also enable the `metrics` feature).
+
+Add `telemetry` to your `Cargo.toml` (add `"metrics"` alongside `"otlp"` if you record metric instruments):
+
+```toml
+[dependencies]
+defra-node = { version = "0.5", features = ["otel"] }
+telemetry  = { version = "0.5", features = ["otlp"] }
+```
+
+```rust
+use defra_node::EmbeddedNode;
+use telemetry::TelemetryConfig;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+let (handle, tracer) = telemetry::init(
+    TelemetryConfig::new("my-service", env!("CARGO_PKG_VERSION"))
+)?;
+
+// Compose the OTel bridge onto your tracing subscriber so spans flow
+// to the collector. `try_init()` returns Err if a global subscriber is
+// already installed — preferred over `.init()` (which panics).
+tracing_subscriber::registry()
+    .with(tracing_subscriber::fmt::layer())
+    .with(telemetry::otel_layer(tracer))
+    .try_init()?;
+
+let node = EmbeddedNode::builder()
+    .with_telemetry(handle)
+    .build()
+    .await?;
+
+// ... use the node ...
+
+// Explicit shutdown flushes the buffered batch. Drop is a safety net,
+// but blocks the calling thread on the SDK batch-thread join (~5 s for
+// traces, double with the metrics feature); call shutdown() explicitly
+// from an async-aware path when possible. Note that the node should not
+// be used after shutdown — subsequent spans go to a no-op tracer.
+node.shutdown().await;
+```
+
+If the host process already runs its own OTel stack and you don't want `telemetry::init` to clobber your globals, use `.without_global()`:
+
+```rust
+let (handle, _tracer) = telemetry::init(
+    TelemetryConfig::new("my-service", "1.0.0").without_global()
+)?;
+// You'd compose `_tracer` into a layer of your own choosing instead of
+// installing it as the process-wide global tracer.
+```
+
 ## Testing
 
 ### Integration Tests

@@ -58,6 +58,20 @@ impl VersionInfo {
         format!("defradb {}", self.version)
     }
 
+    /// Single-line descriptive build string, used as the OTLP
+    /// `service.version` resource attribute. Mirrors the shape of Go
+    /// DefraDB's version string (`defradb <ver> (<commit8> <date>) built
+    /// with ...`) so a collector grouping on `service.version` sees the
+    /// same cardinality/format across the two implementations. The commit
+    /// is truncated to 8 chars to match Go.
+    pub fn descriptive(&self) -> String {
+        let commit8: String = self.commit.chars().take(8).collect();
+        format!(
+            "defradb {} ({} {}) built with {}",
+            self.version, commit8, self.commit_date, self.rust
+        )
+    }
+
     /// Full human-readable text output.
     pub fn full(&self) -> String {
         let mut out = format!(
@@ -106,6 +120,16 @@ mod tests {
     fn short_format() {
         let info = VersionInfo::new();
         assert!(info.short().starts_with("defradb "));
+    }
+
+    #[test]
+    fn descriptive_format_matches_go_shape() {
+        let info = VersionInfo::new();
+        let d = info.descriptive();
+        // `defradb <ver> (<commit8> <date>) built with <rust>`
+        assert!(d.starts_with(&format!("defradb {} (", info.version)));
+        assert!(d.contains(") built with "));
+        assert!(d.ends_with(&info.rust));
     }
 
     #[test]
