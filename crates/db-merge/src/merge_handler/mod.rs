@@ -232,10 +232,27 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     /// falling back to the P2P blockstore when the metadata arrived via replay,
     /// extracts the AES key, and decrypts the data. Returns data unchanged if
     /// no encryption CID is present.
+    fn kms_request_context(metadata: Option<&BlockMetadata<'_>>) -> kms::RequestContext {
+        let Some(metadata) = metadata else {
+            return kms::RequestContext::anonymous();
+        };
+        let Some(collection_id) = metadata.collection_id else {
+            return kms::RequestContext::anonymous();
+        };
+        let Some(authorizer) = metadata.explicit_replay_authorizer_for(collection_id) else {
+            return kms::RequestContext::anonymous();
+        };
+        match identity::Did::new(authorizer) {
+            Ok(did) => kms::RequestContext::with_user(did),
+            Err(_) => kms::RequestContext::anonymous(),
+        }
+    }
+
     pub(crate) async fn decrypt_block_data(
         &self,
         data: &[u8],
         encryption_cid: Option<&Cid>,
+        metadata: Option<&BlockMetadata<'_>>,
     ) -> std::result::Result<Vec<u8>, MergeError> {
         let enc_cid = match encryption_cid {
             Some(cid) => cid,
@@ -246,7 +263,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // resolves the key locally or via cross-peer fetch and returns the
         // plaintext key; we then AES-GCM decrypt the block data.
         if let Some(kms) = self.kms() {
-            let ctx = kms::RequestContext::anonymous();
+            let ctx = Self::kms_request_context(metadata);
             let results = kms
                 .get_keys(&ctx, std::slice::from_ref(enc_cid))
                 .await
@@ -512,7 +529,11 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
             match &block.delta {
                 CrdtDelta::Lww(payload) => {
                     match self
-                        .decrypt_block_data(&payload.data, block.encryption.as_ref())
+                        .decrypt_block_data(
+                            &payload.data,
+                            block.encryption.as_ref(),
+                            Some(&metadata),
+                        )
                         .await
                     {
                         Ok(decrypted_data) => {
@@ -541,7 +562,11 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                 }
                 CrdtDelta::Counter(payload) => {
                     match self
-                        .decrypt_block_data(&payload.data, block.encryption.as_ref())
+                        .decrypt_block_data(
+                            &payload.data,
+                            block.encryption.as_ref(),
+                            Some(&metadata),
+                        )
                         .await
                     {
                         Ok(decrypted_data) => {
@@ -1802,7 +1827,7 @@ mod tests {
         handler.set_kms(Arc::new(StubKms { key }));
 
         let decrypted = handler
-            .decrypt_block_data(&ciphertext, Some(&enc_cid))
+            .decrypt_block_data(&ciphertext, Some(&enc_cid), None)
             .await
             .expect("kms-keyed decryption should succeed");
         assert_eq!(decrypted, plaintext);
@@ -1812,7 +1837,7 @@ mod tests {
     async fn decrypt_block_data_no_kms_no_cid_passthrough() {
         let (handler, _blockstore) = make_handler();
         let data = b"plaintext".to_vec();
-        let out = handler.decrypt_block_data(&data, None).await.unwrap();
+        let out = handler.decrypt_block_data(&data, None, None).await.unwrap();
         assert_eq!(out, data);
     }
 }

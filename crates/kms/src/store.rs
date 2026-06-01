@@ -4,6 +4,7 @@
 //! `EnclaveKeyStore` (M5), `ThresholdKeyStore` (M6). All share this trait.
 
 use async_trait::async_trait;
+use defra_core::thread_bounds::MaybeSendSync;
 use zeroize::ZeroizeOnDrop;
 
 use crate::error::Result;
@@ -27,8 +28,9 @@ pub struct StoredKey {
 }
 
 /// Pluggable storage for DEKs + their on-disk block bytes.
-#[async_trait]
-pub trait KeyStore: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait KeyStore: MaybeSendSync {
     /// Persist a DEK + block bytes under the content-addressed CID.
     /// Idempotent: re-putting the same CID overwrites.
     async fn put(&self, cid: EncryptionCid, stored: StoredKey) -> Result<()>;

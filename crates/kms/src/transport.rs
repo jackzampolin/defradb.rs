@@ -6,6 +6,7 @@
 //! fetch requests across them.
 
 use async_trait::async_trait;
+use defra_core::thread_bounds::MaybeSendSync;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -38,8 +39,9 @@ pub type TransportReplyStream = mpsc::Receiver<(FetchEncryptionKeyReply, String)
 
 /// Handler invoked by a transport when an inbound request arrives.
 /// `DefraKms` installs itself as the handler at startup.
-#[async_trait]
-pub trait IncomingHandler: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait IncomingHandler: MaybeSendSync {
     /// Process an incoming request and produce a reply.
     async fn handle(
         &self,
@@ -49,8 +51,9 @@ pub trait IncomingHandler: Send + Sync {
 }
 
 /// Pluggable transport for KMS request/reply.
-#[async_trait]
-pub trait KeyTransport: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait KeyTransport: MaybeSendSync {
     /// Carrier name, used in tracing and metrics (e.g. `"libp2p-pubsub"`).
     fn name(&self) -> &'static str;
 

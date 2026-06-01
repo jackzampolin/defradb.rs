@@ -28,7 +28,8 @@ impl<S: storage::corekv::Store + Send + Sync + 'static> DbDocCollectionLookup<S>
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: storage::corekv::Store + Send + Sync + 'static> DocCollectionLookup
     for DbDocCollectionLookup<S>
 {
@@ -94,7 +95,8 @@ where
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S, B> EncBlockStore for DbEncBlockStore<S, B>
 where
     S: storage::corekv::Store + Send + Sync + 'static,
@@ -157,7 +159,8 @@ impl DbNodeAcpRead {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl NodeAcpRead for DbNodeAcpRead {
     async fn check_node_permission(
         &self,

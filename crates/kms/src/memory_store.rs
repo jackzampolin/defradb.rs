@@ -27,7 +27,8 @@ impl MemoryKeyStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl KeyStore for MemoryKeyStore {
     async fn put(&self, cid: EncryptionCid, stored: StoredKey) -> Result<()> {
         self.inner.write().await.insert(cid, stored);

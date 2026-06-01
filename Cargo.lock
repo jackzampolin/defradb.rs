@@ -6739,7 +6739,6 @@ dependencies = [
  "defra-core",
  "futures",
  "identity",
- "keyring 0.5.0",
  "orbis",
  "rand 0.8.5",
  "serde",
@@ -6750,6 +6749,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "wasm-bindgen-futures",
  "x25519-dalek",
  "zeroize",
 ]

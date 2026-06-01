@@ -19,6 +19,22 @@ use crate::transport::{EncodedFetchRequest, KeyTransport};
 use crate::types::{EncryptionCid, KeyScope, PolicyDecision};
 use crate::wire::{FetchEncryptionKeyReply, FetchEncryptionKeyRequest};
 
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_task<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(future);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn spawn_task<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(future);
+}
+
 /// Default `KmsService` implementation.
 pub struct DefraKms {
     store: Arc<dyn KeyStore>,
@@ -107,7 +123,8 @@ impl DefraKms {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl KmsService for DefraKms {
     async fn get_keys(&self, ctx: &RequestContext, cids: &[EncryptionCid]) -> Result<KeyResults> {
         let (results, tx) = KeyResults::new(cids.len().max(1));
@@ -185,7 +202,7 @@ impl KmsService for DefraKms {
                     let our_eph_pub = x25519_dalek::PublicKey::from(&eph_clone)
                         .as_bytes()
                         .to_vec();
-                    tokio::spawn(async move {
+                    spawn_task(async move {
                         while let Some((reply, responder_peer_id)) = rx.recv().await {
                             tracing::debug!(
                                 responder = %responder_peer_id,

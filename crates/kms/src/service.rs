@@ -1,6 +1,7 @@
 //! Top-level KMS service trait.
 
 use async_trait::async_trait;
+use defra_core::thread_bounds::MaybeSendSync;
 
 use crate::context::RequestContext;
 use crate::error::Result;
@@ -20,8 +21,9 @@ pub struct PeerIdentity {
 /// Top-level KMS surface. One concrete implementation (`DefraKms`) lives
 /// alongside test-only `NoopKms`; future milestones may add `RemoteHttpKms`,
 /// `SubscriberKms`, etc.
-#[async_trait]
-pub trait KmsService: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait KmsService: MaybeSendSync {
     /// Fetch DEKs for the given Encryption-block CIDs. Returns a streaming
     /// aggregator because keys may arrive from peers asynchronously.
     /// `ctx` carries the caller identity (set at HTTP/CLI entry points).

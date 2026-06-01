@@ -72,7 +72,8 @@ fn classify_acp_error(e: acp::Error) -> Error {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl AccessPolicy for NacDacPolicy {
     async fn check_release(&self, actor: Option<&Did>, scope: &KeyScope) -> Result<PolicyDecision> {
         match scope {

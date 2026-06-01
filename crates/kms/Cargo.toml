@@ -24,7 +24,6 @@ sourcehub = ["dep:sourcehub"]
 [dependencies]
 defra-core = { path = "../defra-core" }
 crypto = { path = "../crypto" }
-keyring = { path = "../keyring" }
 acp = { path = "../acp" }
 identity = { path = "../identity" }
 blockstore = { path = "../blockstore" }
@@ -45,9 +44,12 @@ zeroize = "1.8"
 rand = { workspace = true }
 uuid = { workspace = true }
 cid = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { version = "1.35", default-features = false, features = ["rt", "sync"] }
 futures = { workspace = true }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

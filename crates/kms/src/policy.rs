@@ -1,6 +1,7 @@
 //! Authorization gate for DEK release + supporting lookup traits.
 
 use async_trait::async_trait;
+use defra_core::thread_bounds::MaybeSendSync;
 use identity::Did;
 
 use crate::error::Result;
@@ -12,8 +13,9 @@ use crate::types::{KeyScope, PolicyDecision};
 /// a reply block, and (defense-in-depth) on the requesting peer before
 /// caching a received DEK. `NacDacPolicy` is the M1 default; M4 adds
 /// `SourceHubAttestedPolicy`.
-#[async_trait]
-pub trait AccessPolicy: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait AccessPolicy: MaybeSendSync {
     /// Per-key authorization check. Returns `Allow` to release the DEK,
     /// `Deny` to refuse.
     async fn check_release(&self, actor: Option<&Did>, scope: &KeyScope) -> Result<PolicyDecision>;
@@ -31,8 +33,9 @@ pub trait AccessPolicy: Send + Sync {
 /// KMS doesn't take a direct dep on `crates/db/`'s NacManagerApi; the
 /// embedded-node layer (Phase K) provides an adapter that wraps the real
 /// NacManager.
-#[async_trait]
-pub trait NodeAcpRead: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait NodeAcpRead: MaybeSendSync {
     /// Check whether `actor` holds the named node-level permission.
     /// Permission strings match NAC's internal names (e.g. `"read-document"`).
     async fn check_node_permission(&self, actor: &Did, permission: &str) -> acp::Result<bool>;
@@ -46,8 +49,9 @@ pub trait NodeAcpRead: Send + Sync {
 /// collection + its policy. Implementation lives in the embedded-node
 /// layer (Phase K); kms keeps this trait abstract so unit tests can
 /// inject fakes.
-#[async_trait]
-pub trait DocCollectionLookup: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait DocCollectionLookup: MaybeSendSync {
     /// Returns `None` if the doc is unknown locally.
     async fn collection_for_doc(&self, doc_id: &str) -> Result<Option<DocCollectionInfo>>;
 }

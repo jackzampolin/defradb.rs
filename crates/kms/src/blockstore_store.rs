@@ -11,6 +11,7 @@
 //! implements over its encstore→blockstore.
 
 use async_trait::async_trait;
+use defra_core::thread_bounds::MaybeSendSync;
 use rand::RngCore;
 
 use defra_core::block::generate_cid_from_bytes;
@@ -25,8 +26,9 @@ use crate::types::{EncryptionCid, KeyScope};
 /// The node provides an impl that reads its encstore→blockstore (mirroring the
 /// merge decrypt path) and writes to its blockstore. Keeps `kms` free of a
 /// `db` dependency.
-#[async_trait]
-pub trait EncBlockStore: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait EncBlockStore: MaybeSendSync {
     /// Fetch the raw CBOR bytes of the `Encryption` block for this CID.
     /// `None` if not held in the durable store.
     async fn get_block(&self, cid: &EncryptionCid) -> Result<Option<Vec<u8>>>;
@@ -63,7 +65,8 @@ fn decode_stored(block_bytes: Vec<u8>) -> Result<StoredKey> {
     Ok(StoredKey { key, block_bytes })
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl KeyStore for BlockstoreKeyStore {
     async fn put(&self, cid: EncryptionCid, stored: StoredKey) -> Result<()> {
         self.inner.put_block(cid, stored.block_bytes.clone()).await
