@@ -294,6 +294,12 @@ impl P2PHostHandle {
     /// Publish a message to a GossipSub topic.
     ///
     /// Returns the message ID on success.
+    #[tracing::instrument(
+        name = "p2p.gossip.publish",
+        level = "debug",
+        skip(self, message),
+        fields(topic = ?topic),
+    )]
     pub async fn publish(
         &self,
         topic: DefraTopic,
@@ -557,6 +563,12 @@ impl P2PHostHandle {
     /// Send a PushLog request via two-stream protocol and wait for response.
     ///
     /// This uses Go's two-stream pattern: request on one stream, response on another.
+    #[tracing::instrument(
+        name = "p2p.push_log.send",
+        level = "debug",
+        skip(self, request),
+        fields(peer = %peer_id),
+    )]
     pub async fn send_two_stream_request(
         &self,
         peer_id: PeerId,

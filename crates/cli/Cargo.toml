@@ -40,6 +40,7 @@ orbis = { path = "../orbis" }
 sourcehub = { path = "../sourcehub" }
 defra-version = { path = "../defra-version" }
 pg-compat = { path = "../pg-compat" }
+telemetry = { path = "../telemetry", default-features = false }
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -118,6 +119,10 @@ rocksdb = ["storage/rocksdb"]
 vendored-openssl = ["dep:openssl-sys"]
 iroh = ["p2p/iroh-transport", "dep:iroh-net", "dep:rand"]
 profiling = ["dep:tracing-chrome"]
+# OpenTelemetry OTLP exporter. Mirrors Go's `//go:build telemetry`: compile-time
+# opt-in. When built with this feature, runtime default is on (Go parity); use
+# `--no-telemetry` to disable at runtime.
+otel = ["telemetry/otlp"]
 
 [dev-dependencies]
 tempfile = "3.17"

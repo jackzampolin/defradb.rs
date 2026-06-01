@@ -30,8 +30,10 @@ async fn run() -> Result<()> {
     // Load configuration (flags → env → config file → defaults)
     let config = Config::load(&cli)?;
 
-    // Initialize logging based on config
-    let logging = cli::logging::init(&config, should_profile(&cli))?;
+    // Initialize logging based on config. Telemetry only initializes for the
+    // `start` command (matching Go, which configures it only in start.go) so
+    // ephemeral commands like `version` / `client` don't spin up the exporter.
+    let logging = cli::logging::init(&config, should_profile(&cli), enable_telemetry(&cli))?;
 
     // Execute the command
     let result = cli.execute(config).await;
@@ -41,4 +43,8 @@ async fn run() -> Result<()> {
 
 fn should_profile(cli: &Cli) -> bool {
     matches!(&cli.command, Command::Start(args) if args.profile)
+}
+
+fn enable_telemetry(cli: &Cli) -> bool {
+    matches!(&cli.command, Command::Start(_))
 }

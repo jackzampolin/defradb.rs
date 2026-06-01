@@ -48,6 +48,8 @@ pub use lens::{LensConfig, LensModule, TransformId};
 pub use query::QueryLimits;
 pub use query::{QueryExecutor, QueryRequest, QueryResponse};
 pub use schema::CollectionVersion;
+#[cfg(feature = "otel")]
+pub use telemetry::{TelemetryConfig, TelemetryHandle};
 
 /// Type-erased schema operations so we can store DB<S> without leaking the Store generic.
 #[async_trait::async_trait]
@@ -83,6 +85,8 @@ pub struct EmbeddedNode {
     p2p_ops: Option<Arc<dyn defra_http::P2POperations>>,
     #[cfg(feature = "p2p")]
     p2p_lifecycle: Option<P2PLifecycle>,
+    #[cfg(feature = "otel")]
+    telemetry: std::sync::Mutex<Option<TelemetryHandle>>,
 }
 
 #[cfg(feature = "p2p")]
@@ -384,6 +388,13 @@ impl EmbeddedNode {
     }
 
     /// Gracefully stop background services owned by this embedded node.
+    ///
+    /// **The node should not be used after this call.** When the `otel`
+    /// feature is on, `shutdown` calls `TelemetryHandle::shutdown` which
+    /// flushes and disables the global tracer provider. Subsequent calls
+    /// that emit spans (e.g. `execute`, `add_schema`) go to a no-op
+    /// tracer — they still work functionally, but observability is gone
+    /// with no error surfaced. Drop the node after shutdown completes.
     pub async fn shutdown(&self) {
         #[cfg(feature = "http")]
         if let Some(task) = self.txn_cleanup_task.lock().await.take() {
@@ -394,6 +405,24 @@ impl EmbeddedNode {
         #[cfg(feature = "p2p")]
         if let Some(lifecycle) = &self.p2p_lifecycle {
             lifecycle.shutdown().await;
+        }
+
+        // Flush buffered spans / metrics. Done after P2P shutdown so trailing
+        // shutdown spans are still captured. Go DefraDB never calls provider
+        // shutdown — we don't repeat that bug.
+        //
+        // `handle.shutdown()` synchronously joins the SDK batch-exporter
+        // thread (up to ~5 s, double with metrics), so run it on a blocking
+        // thread rather than stalling this Tokio worker / reactor.
+        #[cfg(feature = "otel")]
+        {
+            let handle = match self.telemetry.lock() {
+                Ok(mut guard) => guard.take(),
+                Err(poisoned) => poisoned.into_inner().take(),
+            };
+            if let Some(handle) = handle {
+                let _ = tokio::task::spawn_blocking(move || handle.shutdown()).await;
+            }
         }
     }
 }
@@ -509,6 +538,8 @@ pub struct NodeBuilder {
     http_config: Option<HttpConfig>,
     #[cfg(feature = "p2p")]
     p2p_config: Option<P2PConfig>,
+    #[cfg(feature = "otel")]
+    telemetry_handle: Option<TelemetryHandle>,
 }
 
 struct StoreBuildArgs {
@@ -523,6 +554,8 @@ struct StoreBuildArgs {
     transaction_cleanup_config: Option<TransactionCleanupConfig>,
     #[cfg(feature = "p2p")]
     p2p_config: Option<P2PConfig>,
+    #[cfg(feature = "otel")]
+    telemetry_handle: Option<TelemetryHandle>,
 }
 
 impl NodeBuilder {
@@ -604,6 +637,23 @@ impl NodeBuilder {
         self
     }
 
+    /// Hand a pre-built telemetry handle to the node so it owns shutdown.
+    ///
+    /// The caller is responsible for calling [`telemetry::init`] and
+    /// composing the bridge layer onto their `tracing` subscriber — this
+    /// method just transfers ownership of the lifecycle handle so the node
+    /// flushes providers when it shuts down. Because the handle is moved,
+    /// calling this twice is a compile error rather than a silent overwrite.
+    ///
+    /// For a one-call ergonomic version, callers can write
+    /// `.with_telemetry(telemetry::init(cfg)?.0)` — `init` requires a Tokio
+    /// runtime and returns `(TelemetryHandle, SdkTracer)`.
+    #[cfg(feature = "otel")]
+    pub fn with_telemetry(mut self, handle: TelemetryHandle) -> Self {
+        self.telemetry_handle = Some(handle);
+        self
+    }
+
     /// Build and start the embedded DefraDB node.
     pub async fn build(self) -> anyhow::Result<EmbeddedNode> {
         let node_identity_did = self.node_identity_did.clone();
@@ -661,6 +711,13 @@ impl NodeBuilder {
         let query_timeout = self.query_timeout;
         let query_limits = self.query_limits;
 
+        // Telemetry handle (if any) was moved into the builder via
+        // `with_telemetry`. Threaded through `StoreBuildArgs` to the
+        // `EmbeddedNode` construction site so its Drop / explicit
+        // `shutdown()` runs at the right point.
+        #[cfg(feature = "otel")]
+        let telemetry_handle: Option<TelemetryHandle> = self.telemetry_handle;
+
         // 3. Storage backend + database
         let node = if let Some(path) = self.data_path {
             tokio::fs::create_dir_all(&path).await?;
@@ -696,6 +753,8 @@ impl NodeBuilder {
                             transaction_cleanup_config,
                             #[cfg(feature = "p2p")]
                             p2p_config,
+                            #[cfg(feature = "otel")]
+                            telemetry_handle,
                         },
                     )
                     .await?
@@ -729,6 +788,8 @@ impl NodeBuilder {
                             transaction_cleanup_config,
                             #[cfg(feature = "p2p")]
                             p2p_config,
+                            #[cfg(feature = "otel")]
+                            telemetry_handle,
                         },
                     )
                     .await?
@@ -763,6 +824,8 @@ impl NodeBuilder {
                     transaction_cleanup_config,
                     #[cfg(feature = "p2p")]
                     p2p_config,
+                    #[cfg(feature = "otel")]
+                    telemetry_handle,
                 },
             )
             .await?
@@ -851,6 +914,8 @@ impl NodeBuilder {
             transaction_cleanup_config,
             #[cfg(feature = "p2p")]
             p2p_config,
+            #[cfg(feature = "otel")]
+            telemetry_handle,
         } = args;
 
         let embedding_config = db_options.embedding_config();
@@ -958,6 +1023,8 @@ impl NodeBuilder {
             p2p_ops,
             #[cfg(feature = "p2p")]
             p2p_lifecycle,
+            #[cfg(feature = "otel")]
+            telemetry: std::sync::Mutex::new(telemetry_handle),
         })
     }
 
