@@ -116,6 +116,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         Some(&modified_fields),
                         enc_config.as_ref(),
                         sign_config.as_ref(),
+                        None,
                     )
                     .await
                     {

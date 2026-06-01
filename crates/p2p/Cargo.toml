@@ -17,6 +17,7 @@ crdt = { path = "../crdt" }
 storage = { path = "../storage" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
+kms = { path = "../kms" }
 
 # libp2p transport
 libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "request-response", "macros", "tokio", "gossipsub", "kad", "relay", "dns", "quic", "websocket", "memory-connection-limits"], optional = true }

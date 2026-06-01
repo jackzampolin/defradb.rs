@@ -294,6 +294,12 @@ impl P2PHostHandle {
     /// Publish a message to a GossipSub topic.
     ///
     /// Returns the message ID on success.
+    #[tracing::instrument(
+        name = "p2p.gossip.publish",
+        level = "debug",
+        skip(self, message),
+        fields(topic = ?topic),
+    )]
     pub async fn publish(
         &self,
         topic: DefraTopic,
@@ -557,6 +563,12 @@ impl P2PHostHandle {
     /// Send a PushLog request via two-stream protocol and wait for response.
     ///
     /// This uses Go's two-stream pattern: request on one stream, response on another.
+    #[tracing::instrument(
+        name = "p2p.push_log.send",
+        level = "debug",
+        skip(self, request),
+        fields(peer = %peer_id),
+    )]
     pub async fn send_two_stream_request(
         &self,
         peer_id: PeerId,
@@ -657,17 +669,40 @@ impl P2PHostHandle {
     /// Send SE artifacts to a peer via the SE two-stream protocol.
     ///
     /// This sends a PushSEArtifactsRequest on the SE request protocol.
-    /// The response is not awaited (fire-and-forget).
+    /// The response is not awaited (fire-and-forget). The request is signed so
+    /// Go peers (which verify on receipt) accept it.
     pub async fn send_se_artifacts(
         &self,
         peer_id: PeerId,
-        request: crate::message::PushSEArtifactsRequest,
+        mut request: crate::message::PushSEArtifactsRequest,
     ) -> Result<()> {
+        sign_message(self.keypair(), &mut request)?;
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .send(HostCommand::SendSEArtifacts {
                 peer_id,
                 request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Send a PushSEArtifacts reply on the SE response protocol.
+    ///
+    /// Acknowledges an inbound artifact push. Go's push waits for this reply, so
+    /// a Rust replicator must send it after storing the artifacts.
+    pub async fn send_se_artifacts_response(
+        &self,
+        peer_id: PeerId,
+        reply: crate::message::PushSEArtifactsReply,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendSEArtifactsResponse {
+                peer_id,
+                reply,
                 response: response_tx,
             })
             .await

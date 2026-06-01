@@ -220,6 +220,13 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<()>>,
     },
 
+    /// Send a PushSEArtifacts reply on the SE response protocol (ack a push).
+    SendSEArtifactsResponse {
+        peer_id: PeerId,
+        reply: crate::message::PushSEArtifactsReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
     /// Send an SE query request to a peer via SE query two-stream protocol.
     SendSEQueryRequest {
         peer_id: PeerId,

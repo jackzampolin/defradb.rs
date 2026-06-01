@@ -6,6 +6,8 @@ use tracing_subscriber::layer::SubscriberExt;
 #[cfg(feature = "profiling")]
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
+#[cfg(feature = "otel")]
+use tracing_subscriber::Layer;
 use tracing_subscriber::{EnvFilter, Registry};
 
 #[cfg(feature = "profiling")]
@@ -19,6 +21,20 @@ use tracing_chrome::{ChromeLayerBuilder, FlushGuard};
 
 use crate::config::{Config, LogFormat, LogLevel, LogOutput};
 use crate::error::{Error, Result};
+
+/// Build the OTLP bridge layer paired with a fresh dedup filter, for a given
+/// inner-subscriber type `S`. Generic over `S` because the registry's type
+/// differs between the profiling (fmt + chrome) and non-profiling (fmt only)
+/// branches — a plain `let` binding would fix `S` at first use and fail at
+/// the second, which is why this is a function rather than a hoisted local.
+/// Returns `None` when no tracer was configured (telemetry off/failed).
+#[cfg(feature = "otel")]
+fn otel_dedup_layer<S>(tracer: Option<telemetry::Tracer>) -> Option<impl Layer<S>>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    tracer.map(|t| telemetry::otel_layer(t).with_filter(telemetry::OtelDedupFilter::new()))
+}
 
 fn with_default_transport_noise_filters(filter: EnvFilter) -> EnvFilter {
     filter
@@ -37,6 +53,7 @@ fn with_default_transport_noise_filters(filter: EnvFilter) -> EnvFilter {
 pub struct LoggingHandle {
     #[cfg(feature = "profiling")]
     profiling: Option<ProfilingTrace>,
+    telemetry: telemetry::TelemetryHandle,
 }
 
 #[cfg(feature = "profiling")]
@@ -46,17 +63,19 @@ struct ProfilingTrace {
 }
 
 impl LoggingHandle {
-    fn none() -> Self {
+    fn new(telemetry: telemetry::TelemetryHandle) -> Self {
         Self {
             #[cfg(feature = "profiling")]
             profiling: None,
+            telemetry,
         }
     }
 
     #[cfg(feature = "profiling")]
-    fn with_profile(profiling: ProfilingTrace) -> Self {
+    fn with_profile(profiling: ProfilingTrace, telemetry: telemetry::TelemetryHandle) -> Self {
         Self {
             profiling: Some(profiling),
+            telemetry,
         }
     }
 
@@ -67,11 +86,22 @@ impl LoggingHandle {
             drop(profiling.guard);
             eprintln!("Chrome trace written to {}", path.display());
         }
+        self.telemetry.shutdown();
     }
 }
 
 /// Initialize logging based on configuration.
-pub fn init(config: &Config, enable_profiling: bool) -> Result<LoggingHandle> {
+///
+/// `enable_telemetry` gates the OTLP exporter independently of logging: only
+/// the `start` command sets it, matching Go (which configures telemetry only
+/// in `cli/start.go`). Ephemeral commands like `version` / `client` keep the
+/// fmt subscriber but never spin up the exporter thread or pay its shutdown
+/// cost.
+pub fn init(
+    config: &Config,
+    enable_profiling: bool,
+    enable_telemetry: bool,
+) -> Result<LoggingHandle> {
     let level = match config.log.level {
         LogLevel::Debug => Level::DEBUG,
         LogLevel::Info => Level::INFO,
@@ -102,21 +132,29 @@ pub fn init(config: &Config, enable_profiling: bool) -> Result<LoggingHandle> {
             filter,
             builder.json().with_writer(std::io::stdout),
             enable_profiling,
+            enable_telemetry,
+            config,
         ),
         (LogFormat::Json, LogOutput::Stderr) => init_subscriber(
             filter,
             builder.json().with_writer(std::io::stderr),
             enable_profiling,
+            enable_telemetry,
+            config,
         ),
         (LogFormat::Text, LogOutput::Stdout) => init_subscriber(
             filter,
             builder.with_writer(std::io::stdout),
             enable_profiling,
+            enable_telemetry,
+            config,
         ),
         (LogFormat::Text, LogOutput::Stderr) => init_subscriber(
             filter,
             builder.with_writer(std::io::stderr),
             enable_profiling,
+            enable_telemetry,
+            config,
         ),
     }
 }
@@ -125,6 +163,8 @@ fn init_subscriber<L>(
     filter: EnvFilter,
     fmt_layer: L,
     enable_profiling: bool,
+    enable_telemetry: bool,
+    config: &Config,
 ) -> Result<LoggingHandle>
 where
     L: tracing_subscriber::Layer<Registry> + Send + Sync + 'static,
@@ -136,26 +176,75 @@ where
         ));
     }
 
+    // Telemetry init. Mirrors Go's default-on behavior: when compiled with
+    // `--features otel`, the exporter is active for the `start` command
+    // (enable_telemetry) unless `--no-telemetry` / `DEFRA_NO_TELEMETRY` /
+    // `telemetry_disabled` opts out. If exporter construction fails (e.g.
+    // malformed env var), we log and continue with no telemetry — matches
+    // Go's `log.ErrorContextE` + continue path.
+    #[cfg(feature = "otel")]
+    let (telemetry_handle, tracer) = if config.telemetry_disabled || !enable_telemetry {
+        (telemetry::TelemetryHandle::noop(), None)
+    } else {
+        // Source a Go-style descriptive build string for service.version
+        // (`defradb <ver> (<commit8> <date>) built with ...`) so OTLP
+        // receivers grouping on service.version see the same shape Go emits,
+        // not the telemetry crate's bare semver.
+        let telemetry_config = telemetry::TelemetryConfig::new(
+            "DefraDB",
+            defra_version::VersionInfo::new().descriptive(),
+        );
+        match telemetry::init(telemetry_config) {
+            Ok((handle, tracer)) => (handle, Some(tracer)),
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to configure OpenTelemetry, continuing without telemetry: {err}"
+                );
+                (telemetry::TelemetryHandle::noop(), None)
+            }
+        }
+    };
+
+    #[cfg(not(feature = "otel"))]
+    let telemetry_handle = {
+        let _ = (config, enable_telemetry); // unused when otel is off
+        telemetry::TelemetryHandle::noop()
+    };
+
+    // Suppress exporter-unreachable spam on every layer that ingests OTel
+    // events. The filter is stateless and the one-shot operator hint it
+    // emits is guarded by a process-global latch, so attaching a fresh
+    // instance to each layer is fine — the hint still appears exactly once
+    // across all of them.
+    #[cfg(feature = "otel")]
+    let fmt_layer = fmt_layer.with_filter(telemetry::OtelDedupFilter::new());
+
     #[cfg(feature = "profiling")]
     if enable_profiling {
-        let (chrome_layer, profiling) =
-            build_chrome_layer::<tracing_subscriber::layer::Layered<L, Registry>>()?;
-        tracing_subscriber::registry()
+        let (chrome_layer, profiling) = build_chrome_layer()?;
+        #[cfg(feature = "otel")]
+        let chrome_layer = chrome_layer.with_filter(telemetry::OtelDedupFilter::new());
+        let registry = tracing_subscriber::registry()
             .with(fmt_layer)
-            .with(chrome_layer)
+            .with(chrome_layer);
+        #[cfg(feature = "otel")]
+        let registry = registry.with(otel_dedup_layer(tracer));
+        registry
             .with(filter)
             .try_init()
             .map_err(|error| Error::LoggingInit(error.to_string()))?;
-        return Ok(LoggingHandle::with_profile(profiling));
+        return Ok(LoggingHandle::with_profile(profiling, telemetry_handle));
     }
 
-    tracing_subscriber::registry()
-        .with(fmt_layer)
+    let registry = tracing_subscriber::registry().with(fmt_layer);
+    #[cfg(feature = "otel")]
+    let registry = registry.with(otel_dedup_layer(tracer));
+    registry
         .with(filter)
         .try_init()
         .map_err(|error| Error::LoggingInit(error.to_string()))?;
 
-    Ok(LoggingHandle::none())
+    Ok(LoggingHandle::new(telemetry_handle))
 }
 
 #[cfg(feature = "profiling")]

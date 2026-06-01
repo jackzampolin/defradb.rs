@@ -4,7 +4,9 @@ use anyhow::{anyhow, Result};
 use p2p::sync::SyncConfig;
 use p2p::topics::DefraTopic;
 
-use crate::node::{EmbeddedBlockstore, EmbeddedMergeHandler, WireDocumentAcpCallback};
+use crate::node::{
+    EmbeddedBlockstore, EmbeddedMergeHandler, WireDocumentAcpCallback, WireKmsCallback,
+};
 use crate::node_recovery::{restore_libp2p_documents, restore_libp2p_replicators};
 use crate::node_tasks::{
     spawn_failure_recorder, spawn_libp2p_event_handler, spawn_libp2p_retry_loop,
@@ -25,6 +27,21 @@ pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     /// `P2PSetup` exposes. Without this, transactional writes commit locally
     /// but never replicate.
     pub txn_broadcaster: Arc<dyn db::event_emission::TxnBroadcaster>,
+    /// Type-erased KMS transport for this node's P2P system. node.rs adds it
+    /// to the DefraKms transports list and installs the serve handler.
+    pub kms_transport: Arc<dyn kms::KeyTransport>,
+    /// This node's transport-level peer id (stringified). node.rs binds it
+    /// into the KMS so served ECIES replies carry the correct AAD peer id.
+    pub local_peer_id: String,
+    /// Defers wiring the late-built KMS into the inner merge handler
+    /// (mirrors `wire_document_acp`). NAC/document_acp aren't available when
+    /// the P2P system is created, so the KMS is built later in node.rs.
+    pub wire_kms: Option<WireKmsCallback>,
+    /// SE remote query transport (owner-queries-replicator, #976). Lets this
+    /// embedded node act as an SE query OWNER, fanning `encrypted_<Collection>`
+    /// queries to replicators. The SE key is read lazily because it's
+    /// provisioned at runtime via `set_se_options`.
+    pub se_transport: Option<Arc<dyn query::SeQueryTransport>>,
 }
 
 pub(crate) async fn setup_libp2p<S>(
@@ -124,6 +141,17 @@ where
         coordinator.clone(),
     );
 
+    let kms_libp2p_transport = p2p::Libp2pTransport::new(handle.clone());
+    let local_peer_id = {
+        use p2p::transport::P2PTransport;
+        kms_libp2p_transport.local_peer_id().to_string()
+    };
+    let kms_transport = p2p::kms::PubsubKeyTransport::new(kms_libp2p_transport)
+        .await
+        .map_err(|e| anyhow!("failed to create KMS transport: {e}"))?;
+    coordinator.install_kms_transport(kms_transport.clone());
+    let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
+
     match db_merge::load_persisted_collections(&coordinator).await {
         Ok(count) if count > 0 => tracing::debug!(count, "loaded persisted P2P collections"),
         Ok(_) => {}
@@ -136,11 +164,19 @@ where
         tracing::warn!(error = %error, "failed to start pubsub_rpc services");
     }
 
+    // SE query correlator: lets this node serve as an SE replicator and route
+    // any inbound replies. Cloned so the SAME correlator is shared between the
+    // event handler (which delivers replies) and the owner/querier transport
+    // (which awaits them) — they must agree on message_id correlation (#976).
+    let se_correlator = p2p::SeQueryCorrelator::new();
+    let se_correlator_for_transport = se_correlator.clone();
     let host_event_task = spawn_libp2p_event_handler(
         event_rx,
         coordinator.clone(),
         store.clone(),
         event_bus.clone(),
+        handle.clone(),
+        se_correlator,
     );
     let replication_task = spawn_replication_loop(
         coordinator.clone(),
@@ -158,8 +194,17 @@ where
         replication.merge_handler_inner.clone(),
         database.clone(),
     ));
-    let retry_loop_task =
-        spawn_libp2p_retry_loop(store.clone(), handle.clone(), doc_pusher.clone());
+    let se_repusher: Arc<dyn db_merge::SeArtifactRepusher> = replication.broadcast_mutator.clone();
+    let retry_store = store.clone();
+    let retry_handle = handle.clone();
+    let retry_doc_pusher = doc_pusher.clone();
+    let retry_se_repusher = se_repusher.clone();
+    let retry_loop_task = spawn_libp2p_retry_loop(
+        store.clone(),
+        handle.clone(),
+        doc_pusher.clone(),
+        se_repusher,
+    );
 
     let restore_peerstore = storage::stores::Peerstore::new(store.clone());
     restore_libp2p_replicators(&handle, &restore_peerstore).await;
@@ -178,12 +223,24 @@ where
     let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
+    // Lazy SE-key handle: teed by the callback below (runtime provisioning),
+    // read by the owner/querier transport at query time (#976).
+    let se_key_handle = db_merge::empty_se_key_handle();
+    let se_key_handle_for_callback = se_key_handle.clone();
     let se_options_callback = Arc::new(move |options: ReplicatorPushOptions| {
+        tee_se_key(&se_key_handle_for_callback, &options);
         broadcast_mutator_for_se.set_se_options(db_merge::BroadcastSeOptions {
             encryption_key: options.se_encryption_key,
             identity_pubkey: options.se_identity_pubkey,
         })
     });
+    let se_transport: Option<Arc<dyn query::SeQueryTransport>> =
+        Some(Arc::new(db_merge::DbMergeSeQueryTransport::new(
+            p2p::Libp2pTransport::new(handle.clone()),
+            se_correlator_for_transport,
+            coordinator.replicators().clone(),
+            se_key_handle,
+        )) as Arc<dyn query::SeQueryTransport>);
     let system = Arc::new(ManagedP2PSystem::with_replicator_push_options_callback(
         TransportKind::Libp2p,
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
@@ -200,18 +257,63 @@ where
         replicator_push_options,
         Some(se_options_callback),
     ));
+    system.set_retry_replicators(Arc::new(move || {
+        let store = retry_store.clone();
+        let handle = retry_handle.clone();
+        let doc_pusher = retry_doc_pusher.clone();
+        let se_repusher = retry_se_repusher.clone();
+        Box::pin(async move {
+            crate::node_tasks::run_libp2p_retry_pass(
+                &store,
+                &handle,
+                &doc_pusher,
+                &se_repusher,
+                true,
+            )
+            .await;
+        })
+    }));
 
     Ok(P2PSetup {
         system,
         mutator: replication.broadcast_mutator,
         merge_handler: replication.merge_handler,
         txn_broadcaster: replication.txn_broadcaster,
+        kms_transport: kms_transport as Arc<dyn kms::KeyTransport>,
+        local_peer_id,
+        wire_kms: Some(Box::new(move |kms| {
+            merge_handler_inner_for_kms.set_kms(kms);
+        })),
         wire_document_acp: Some(Box::new(move |acp| {
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());
             broadcast_mutator_for_acp.set_document_acp(acp);
         })),
+        se_transport,
     })
+}
+
+/// Tee the SE key material from runtime `set_se_options` into the lazy handle
+/// read by the owner/querier transport. Skips non-32-byte keys (#976).
+fn tee_se_key(handle: &db_merge::SeKeyHandle, options: &ReplicatorPushOptions) {
+    match &options.se_encryption_key {
+        Some(key_bytes) => match <[u8; 32]>::try_from(key_bytes.as_slice()) {
+            Ok(key) => db_merge::store_se_key(
+                handle,
+                Some(db_merge::SeKeyMaterial::new(
+                    key,
+                    options.se_identity_pubkey.clone(),
+                )),
+            ),
+            Err(_) => {
+                tracing::warn!(
+                    len = key_bytes.len(),
+                    "SE key from set_se_options is not 32 bytes; skipping owner-transport tee"
+                );
+            }
+        },
+        None => db_merge::store_se_key(handle, None),
+    }
 }
 
 #[cfg(feature = "iroh")]
@@ -273,17 +375,33 @@ where
         coordinator.clone(),
     );
 
+    let local_peer_id = {
+        use p2p::transport::P2PTransport;
+        transport.local_peer_id().to_string()
+    };
+    let kms_transport = p2p::kms::PubsubKeyTransport::new(transport.clone())
+        .await
+        .map_err(|e| anyhow!("failed to create KMS transport: {e}"))?;
+    coordinator.install_kms_transport(kms_transport.clone());
+    let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
+
     match db_merge::load_persisted_collections(&coordinator).await {
         Ok(count) if count > 0 => tracing::debug!(count, "loaded persisted P2P collections"),
         Ok(_) => {}
         Err(error) => tracing::warn!(error = %error, "failed to load persisted P2P collections"),
     }
 
+    // Shared correlator between event handler (delivers replies) and the
+    // owner/querier transport (awaits them); see libp2p setup (#976).
+    let se_correlator = p2p::SeQueryCorrelator::new();
+    let se_correlator_for_transport = se_correlator.clone();
     let event_handler_task = spawn_iroh_event_handler(
         event_rx,
         coordinator.clone(),
         store.clone(),
         event_bus.clone(),
+        se_correlator,
+        transport.clone(),
     );
     let replication_task = spawn_replication_loop(
         coordinator.clone(),
@@ -305,7 +423,11 @@ where
         database.clone(),
         transport.clone(),
     ));
-    let retry_loop_task = spawn_iroh_retry_loop(store.clone(), doc_pusher.clone());
+    let se_repusher: Arc<dyn db_merge::SeArtifactRepusher> = replication.broadcast_mutator.clone();
+    let retry_store = store.clone();
+    let retry_doc_pusher = doc_pusher.clone();
+    let retry_se_repusher = se_repusher.clone();
+    let retry_loop_task = spawn_iroh_retry_loop(store.clone(), doc_pusher.clone(), se_repusher);
 
     let restore_peerstore = Peerstore::new(store.clone());
     restore_iroh_replicators(&coordinator, &restore_peerstore).await;
@@ -324,12 +446,22 @@ where
     let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
+    let se_key_handle = db_merge::empty_se_key_handle();
+    let se_key_handle_for_callback = se_key_handle.clone();
     let se_options_callback = Arc::new(move |options: ReplicatorPushOptions| {
+        tee_se_key(&se_key_handle_for_callback, &options);
         broadcast_mutator_for_se.set_se_options(db_merge::BroadcastSeOptions {
             encryption_key: options.se_encryption_key,
             identity_pubkey: options.se_identity_pubkey,
         })
     });
+    let se_transport: Option<Arc<dyn query::SeQueryTransport>> =
+        Some(Arc::new(db_merge::DbMergeSeQueryTransport::new(
+            transport.clone(),
+            se_correlator_for_transport,
+            coordinator.replicators().clone(),
+            se_key_handle,
+        )) as Arc<dyn query::SeQueryTransport>);
     let system = Arc::new(ManagedP2PSystem::with_replicator_push_options_callback(
         TransportKind::Iroh,
         Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
@@ -347,16 +479,30 @@ where
         replicator_push_options,
         Some(se_options_callback),
     ));
+    system.set_retry_replicators(Arc::new(move || {
+        let store = retry_store.clone();
+        let doc_pusher = retry_doc_pusher.clone();
+        let se_repusher = retry_se_repusher.clone();
+        Box::pin(async move {
+            crate::node_tasks::run_iroh_retry_pass(&store, &doc_pusher, &se_repusher, true).await;
+        })
+    }));
 
     Ok(P2PSetup {
         system,
         mutator: replication.broadcast_mutator,
         merge_handler: replication.merge_handler,
         txn_broadcaster: replication.txn_broadcaster,
+        kms_transport: kms_transport as Arc<dyn kms::KeyTransport>,
+        local_peer_id,
+        wire_kms: Some(Box::new(move |kms| {
+            merge_handler_inner_for_kms.set_kms(kms);
+        })),
         wire_document_acp: Some(Box::new(move |acp| {
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());
             broadcast_mutator_for_acp.set_document_acp(acp);
         })),
+        se_transport,
     })
 }

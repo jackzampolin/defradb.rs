@@ -22,6 +22,7 @@ use super::*;
 /// # Returns
 ///
 /// Returns `BlockResult` containing the composite block and metadata.
+#[allow(clippy::too_many_arguments)]
 pub async fn write_document_blocks(
     blockstore: &NamespaceView,
     headstore: &NamespaceView,
@@ -30,6 +31,7 @@ pub async fn write_document_blocks(
     modified_fields: Option<&std::collections::HashSet<String>>,
     encryption_config: Option<&EncryptionConfig>,
     signing_config: Option<&SigningConfig>,
+    kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
 ) -> Result<BlockResult, String> {
     let doc_id = doc
         .id()
@@ -93,34 +95,58 @@ pub async fn write_document_blocks(
                     } else {
                         None
                     };
-                    let key = defra_core::encryption::generate_encryption_key_for(
-                        &doc_id_str,
-                        key_field_name,
-                    );
-                    let encrypted = encrypt_delta(&value_bytes, &key)?;
 
-                    tracing::debug!(
-                        field = %field_name,
-                        ciphertext_len = encrypted.len(),
-                        "Encrypted field delta"
-                    );
+                    if let Some(kms_svc) = kms {
+                        // KMS path: the KMS generates + persists the Encryption
+                        // block (in its KeyStore) and returns the CID + plain key
+                        // for us to encrypt the field delta with.
+                        let scope = kms::KeyScope::Document {
+                            doc_id: doc_id_str.clone(),
+                            field: key_field_name.map(str::to_owned),
+                        };
+                        let ctx = kms::RequestContext::anonymous();
+                        let (enc_cid, key) = kms_svc
+                            .generate_key(&ctx, scope)
+                            .await
+                            .map_err(|e| format!("kms generate_key: {e}"))?;
+                        let encrypted = encrypt_delta(&value_bytes, &key)?;
+                        tracing::debug!(
+                            field = %field_name,
+                            ciphertext_len = encrypted.len(),
+                            "Encrypted field delta via KMS"
+                        );
+                        (encrypted, Some(enc_cid))
+                    } else {
+                        // Legacy path (unchanged): inline key generation + direct block store.
+                        let key = defra_core::encryption::generate_encryption_key_for(
+                            &doc_id_str,
+                            key_field_name,
+                        );
+                        let encrypted = encrypt_delta(&value_bytes, &key)?;
 
-                    let enc_block = Encryption {
-                        doc_id: doc_id_bytes.clone(),
-                        field_name: key_field_name.map(ToOwned::to_owned),
-                        key: key.to_vec(),
-                    };
-                    let enc_bytes = enc_block
-                        .to_dag_cbor()
-                        .map_err(|e| format!("Failed to encode encryption block: {}", e))?;
-                    let enc_cid = generate_cid_from_bytes(&enc_bytes)
-                        .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
-                    blockstore
-                        .set(&enc_cid.to_bytes(), &enc_bytes)
-                        .await
-                        .map_err(|e| format!("Failed to store encryption block: {}", e))?;
+                        tracing::debug!(
+                            field = %field_name,
+                            ciphertext_len = encrypted.len(),
+                            "Encrypted field delta"
+                        );
 
-                    (encrypted, Some(enc_cid))
+                        let enc_block = Encryption {
+                            doc_id: doc_id_bytes.clone(),
+                            field_name: key_field_name.map(ToOwned::to_owned),
+                            key: key.to_vec(),
+                        };
+                        let enc_bytes = enc_block
+                            .to_dag_cbor()
+                            .map_err(|e| format!("Failed to encode encryption block: {}", e))?;
+                        let enc_cid = generate_cid_from_bytes(&enc_bytes)
+                            .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
+                        blockstore
+                            .set(&enc_cid.to_bytes(), &enc_bytes)
+                            .await
+                            .map_err(|e| format!("Failed to store encryption block: {}", e))?;
+
+                        (encrypted, Some(enc_cid))
+                    }
                 } else {
                     (value_bytes, None)
                 }
@@ -432,4 +458,123 @@ pub async fn write_delete_block(
         doc_id: doc_id.to_string(),
         field_cids: vec![],
     })
+}
+
+#[cfg(test)]
+mod kms_write_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use datastore::{NamespaceView, SharedTxn};
+    use defra_core::encryption::EncryptionConfig;
+    use std::sync::Arc;
+    use storage::backends::MemoryStore;
+    use storage::corekv::Store;
+    use storage::namespace::Namespace;
+
+    /// Stub KMS that mirrors the real `MemoryKeyStore::generate` block shape so
+    /// the returned CID matches what the legacy path would produce for the same
+    /// scope. The key is fixed to make the assertion deterministic.
+    struct StubKms;
+
+    #[async_trait]
+    impl kms::KmsService for StubKms {
+        async fn get_keys(
+            &self,
+            _: &kms::RequestContext,
+            _: &[kms::EncryptionCid],
+        ) -> kms::Result<kms::KeyResults> {
+            let (r, tx) = kms::KeyResults::new(1);
+            drop(tx);
+            Ok(r)
+        }
+
+        async fn generate_key(
+            &self,
+            _: &kms::RequestContext,
+            scope: kms::KeyScope,
+        ) -> kms::Result<(kms::EncryptionCid, [u8; 32])> {
+            let (doc_id_bytes, field_name) = match scope {
+                kms::KeyScope::Document { doc_id, field } => (doc_id.into_bytes(), field),
+                kms::KeyScope::Collection { collection_id } => (Vec::new(), Some(collection_id)),
+            };
+            let block = defra_core::Encryption {
+                doc_id: doc_id_bytes,
+                field_name,
+                key: vec![5u8; 32],
+            };
+            let bytes = block.to_dag_cbor().unwrap();
+            let cid = defra_core::block::generate_cid_from_bytes(&bytes).unwrap();
+            Ok((cid, [5u8; 32]))
+        }
+
+        async fn serve_request(
+            &self,
+            _: kms::PeerIdentity,
+            _: kms::FetchEncryptionKeyRequest,
+        ) -> kms::Result<kms::FetchEncryptionKeyReply> {
+            Err(kms::Error::Unsupported("stub"))
+        }
+    }
+
+    /// Recompute the CID the stub KMS would return for a per-field key, so the
+    /// test asserts against the KMS-derived CID rather than a hardcoded value.
+    fn expected_field_cid(doc_id: &str, field: &str) -> Cid {
+        let block = defra_core::Encryption {
+            doc_id: doc_id.as_bytes().to_vec(),
+            field_name: Some(field.to_string()),
+            key: vec![5u8; 32],
+        };
+        let bytes = block.to_dag_cbor().unwrap();
+        generate_cid_from_bytes(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn kms_write_path_links_field_block_to_kms_encryption_cid() {
+        let store = MemoryStore::new();
+        let txn = store.new_txn(false).await.unwrap();
+        let shared = SharedTxn::new(txn);
+        let blockstore = NamespaceView::new(shared.clone(), Namespace::Blockstore);
+        let headstore = NamespaceView::new(shared.clone(), Namespace::Headstore);
+
+        let mut doc = Document::new();
+        doc.generate_and_set_doc_id().unwrap();
+        doc.set("secret", NormalValue::String("classified".to_string()));
+        let doc_id = doc.id().unwrap().to_string();
+
+        let enc = EncryptionConfig {
+            encrypt_doc: false,
+            encrypt_fields: vec!["secret".to_string()],
+        };
+
+        let kms: Arc<dyn kms::KmsService> = Arc::new(StubKms);
+
+        let result = write_document_blocks(
+            &blockstore,
+            &headstore,
+            &doc,
+            "schema-v1",
+            None,
+            Some(&enc),
+            None,
+            Some(&kms),
+        )
+        .await
+        .expect("KMS write path should succeed");
+
+        assert_eq!(result.field_cids.len(), 1);
+        let field_cid = result.field_cids[0];
+        let field_bytes = blockstore
+            .get(&field_cid.to_bytes())
+            .await
+            .unwrap()
+            .expect("field block stored");
+        let field_block = Block::from_dag_cbor(&field_bytes).unwrap();
+
+        let expected = expected_field_cid(&doc_id, "secret");
+        assert_eq!(
+            field_block.encryption,
+            Some(expected),
+            "field block must link to the KMS-generated encryption CID"
+        );
+    }
 }

@@ -1,0 +1,24 @@
+services:
+  otelcol:
+    # Pinned to a recent contrib build. Bump as needed; this matches the
+    # `opentelemetry-otlp` 0.32 wire format.
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    container_name: defra-otel-smoke-otelcol
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otelcol.yaml:/etc/otelcol/config.yaml:ro
+      - ./output:/output
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: defra-otel-smoke-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "14250:14250" # Jaeger gRPC (from otelcol)

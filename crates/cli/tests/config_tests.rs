@@ -28,6 +28,7 @@ fn cli_with_defaults() -> Cli {
         source_hub_chain_id: None,
         hub_rs_address: None,
         secret_file: None,
+        no_telemetry: None,
         development: None,
         acp_node_enable: None,
         acp_document_type: None,
@@ -36,6 +37,47 @@ fn cli_with_defaults() -> Cli {
             full: false,
         }),
     }
+}
+
+#[test]
+fn test_apply_cli_flags_no_telemetry_sets_telemetry_disabled() {
+    // Coverage for the global Cli::no_telemetry → config.telemetry_disabled
+    // plumbing. Issue #977 deleted the duplicate StartArgs version (which
+    // had its own assertion in start_tests.rs); this is the replacement
+    // covering the canonical path.
+    let mut config = Config::default();
+    assert!(!config.telemetry_disabled, "default expected to be false");
+    let mut cli = cli_with_defaults();
+    cli.no_telemetry = Some(true);
+
+    config
+        .apply_cli_flags(&cli)
+        .expect("apply_cli_flags should succeed");
+    assert!(
+        config.telemetry_disabled,
+        "--no-telemetry / DEFRA_NO_TELEMETRY=true should flip config.telemetry_disabled"
+    );
+}
+
+#[test]
+fn test_apply_cli_flags_no_telemetry_false_re_enables_telemetry() {
+    // Seed with telemetry_disabled = true (e.g. from a config file) so the
+    // assertion actually exercises the write path: a CLI `--no-telemetry=false`
+    // must be able to override a disabled config back to enabled.
+    let mut config = Config {
+        telemetry_disabled: true,
+        ..Config::default()
+    };
+    let mut cli = cli_with_defaults();
+    cli.no_telemetry = Some(false);
+
+    config
+        .apply_cli_flags(&cli)
+        .expect("apply_cli_flags should succeed");
+    assert!(
+        !config.telemetry_disabled,
+        "--no-telemetry=false should override a disabled config back to enabled"
+    );
 }
 
 #[test]

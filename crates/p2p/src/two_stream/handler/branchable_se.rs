@@ -4,7 +4,9 @@ use libp2p::PeerId;
 
 use crate::codec::write_message;
 use crate::error::{Error, Result};
-use crate::message::{BranchableSyncReply, BranchableSyncRequest, PushSEArtifactsRequest};
+use crate::message::{
+    BranchableSyncReply, BranchableSyncRequest, PushSEArtifactsReply, PushSEArtifactsRequest,
+};
 
 use super::{PendingResponseKey, TwoStreamHandler};
 
@@ -115,6 +117,35 @@ impl TwoStreamHandler {
             artifacts_count = artifacts_count,
             collection_id = %request.collection_id,
             "Sent PushSEArtifacts request on SE protocol (fire-and-forget)"
+        );
+
+        Ok(())
+    }
+
+    /// Send a PushSEArtifacts reply on the SE response protocol.
+    ///
+    /// Go's SE artifact push (`storeSEProto.SendRequest`) WAITS for this reply on
+    /// the response stream; without it a Go owner's write blocks. Rust must
+    /// acknowledge inbound artifact pushes.
+    pub async fn send_se_artifacts_response(
+        &mut self,
+        peer_id: PeerId,
+        reply: PushSEArtifactsReply,
+    ) -> Result<()> {
+        let mut stream = self
+            .control
+            .open_stream(peer_id, Self::se_response_protocol())
+            .await
+            .map_err(|e| Error::Transport(format!("failed to open SE response stream: {}", e)))?;
+
+        write_message(&mut stream, &reply)
+            .await
+            .map_err(|e| Error::CborSerialization(format!("failed to write SE reply: {}", e)))?;
+
+        tracing::debug!(
+            peer_id = %peer_id,
+            message_id = %reply.message_id,
+            "Sent PushSEArtifacts reply on SE response protocol"
         );
 
         Ok(())

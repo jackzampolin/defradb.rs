@@ -36,7 +36,10 @@ mod plan_aggregates;
 mod plan_formatting;
 mod plan_validation;
 mod query;
+mod se_transport;
 mod version;
+
+pub use se_transport::SeQueryTransport;
 
 use acp::nac::NodePermission;
 use acp::{DocumentACP, Identity as AcpIdentity, ReplicatedActorRelationship};
@@ -194,6 +197,12 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     pub(crate) query_timeout: u64,
     /// Query parsing and filter evaluation guardrails.
     pub(crate) query_limits: QueryLimits,
+    /// Optional searchable-encryption remote query transport.
+    ///
+    /// When set, `encrypted_<Collection>` queries fan search tags out to
+    /// replicators (Go semantics) instead of resolving against local plaintext.
+    /// `None` keeps the back-compat local-plaintext path (unit/FFI/non-P2P).
+    pub(crate) se_transport: Option<Arc<dyn SeQueryTransport>>,
 }
 
 impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
@@ -213,6 +222,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
             query_limits: QueryLimits::default(),
+            se_transport: None,
         }
     }
 
@@ -232,6 +242,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
             query_limits: QueryLimits::default(),
+            se_transport: None,
         }
     }
 }
@@ -253,6 +264,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
             query_limits: QueryLimits::default(),
+            se_transport: None,
         }
     }
 
@@ -277,6 +289,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
             query_limits: QueryLimits::default(),
+            se_transport: None,
         }
     }
 
@@ -300,6 +313,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
             query_limits: QueryLimits::default(),
+            se_transport: None,
         }
     }
 
@@ -317,6 +331,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Collections with a policy will have ACP enforced; others are unaffected.
     pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>) -> Self {
         self.acp = acp;
+        self
+    }
+
+    /// Set the searchable-encryption remote query transport.
+    ///
+    /// When set, `encrypted_<Collection>` queries resolve by fanning search tags
+    /// out to replicators (Go's owner-queries-replicator model) rather than
+    /// matching local plaintext.
+    pub fn with_se_transport(mut self, transport: Arc<dyn SeQueryTransport>) -> Self {
+        self.se_transport = Some(transport);
         self
     }
 

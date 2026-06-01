@@ -5,7 +5,7 @@ use identity::Did;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::error::{QueryError, Result};
-use crate::mapper::{Requestable, Select};
+use crate::mapper::{Filter, Requestable, Select};
 use crate::planner::index_selection::{can_be_ordered_by_index, can_or_filter_use_index};
 use crate::txn::TransactionRegistry;
 
@@ -346,6 +346,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        // Remote-only SE path (Go semantics): when a transport is wired, fan the
+        // search tags out to replicators instead of scanning local plaintext.
+        // The querying node is the document owner; replicators serve docIDs from
+        // the artifacts the owner pushed. Zero replicators yields empty.
+        if let Some(transport) = self.se_transport.clone() {
+            let eq_conditions = select
+                .filter
+                .as_ref()
+                .map(Self::extract_eq_conditions)
+                .unwrap_or_default();
+
+            let ids = transport
+                .query_doc_ids(&collection.collection_id, eq_conditions)
+                .await
+                .map_err(QueryError::execution)?;
+
+            let filtered_ids =
+                Self::filter_ids_by_acp(&ids, self.acp.as_ref(), &collection, caller_identity)
+                    .await;
+
+            return Ok(serde_json::json!([{"docIDs": filtered_ids}]));
+        }
+
         let docs = fetcher.get_all(&select.collection_name).await?;
 
         let matching_ids: Vec<String> = if let Some(ref filter) = select.filter {
@@ -379,6 +402,22 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         .await;
 
         Ok(serde_json::json!([{"docIDs": filtered_ids}]))
+    }
+
+    /// Extract `(field, value)` equality conditions from an `encrypted_*`
+    /// filter. SE supports only top-level `{field: {_eq: value}}` conditions
+    /// (Go's `QueryDocIDsByValues` likewise builds one tag per field/value).
+    /// Non-`_eq` operators and nested/logical conditions are skipped.
+    fn extract_eq_conditions(filter: &Filter) -> Vec<(String, JsonValue)> {
+        let mut pairs = Vec::new();
+        for (field, value) in filter.conditions() {
+            if let Some(ops) = value.as_object() {
+                if let Some(eq_value) = ops.get("_eq") {
+                    pairs.push((field.clone(), eq_value.clone()));
+                }
+            }
+        }
+        pairs
     }
 
     /// Filter document IDs through ACP, removing those the caller cannot read.

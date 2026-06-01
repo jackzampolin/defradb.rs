@@ -56,7 +56,7 @@ alloy-rlp.workspace = true
 bs58.workspace = true
 
 # ACP light client (proof-validated cache)
-acp-light-client = { git = "https://github.com/sourcenetwork/backbone.git", branch = "main" }
+acp-light-client = { git = "https://github.com/sourcenetwork/backbone.git", branch = "feat/shared-se-key-harness" }
 
 [lints]
 workspace = true

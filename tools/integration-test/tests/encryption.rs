@@ -8,3 +8,5 @@ mod cross_runtime_p2p;
 mod index;
 #[path = "encryption/key_management.rs"]
 mod key_management;
+#[path = "encryption/se_cross_runtime.rs"]
+mod se_cross_runtime;

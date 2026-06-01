@@ -56,7 +56,7 @@ pub struct StartArgs {
     pub p2paddr: Option<Vec<String>>,
 
     /// Disable the peer-to-peer network synchronization system
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = crate::cli::bool_value_parser())]
     pub no_p2p: Option<bool>,
 
     /// List of origins to allow for CORS requests
@@ -72,15 +72,11 @@ pub struct StartArgs {
     pub privkeypath: Option<String>,
 
     /// Skip generating an encryption key. Encryption at rest will be disabled.
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = crate::cli::bool_value_parser())]
     pub no_encryption: Option<bool>,
 
-    /// Disable telemetry reporting
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
-    pub no_telemetry: Option<bool>,
-
     /// Disable signing of commits
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = crate::cli::bool_value_parser())]
     pub no_signing: Option<bool>,
 
     /// Default key type to generate new node identity
@@ -88,8 +84,13 @@ pub struct StartArgs {
     pub default_key_type: Option<String>,
 
     /// Skip generating a searchable encryption key
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = crate::cli::bool_value_parser())]
     pub no_searchable_encryption: Option<bool>,
+
+    /// Enable transparent at-rest value encryption for the storage backend,
+    /// keyed by the keyring `encryption-key`. Default: false.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub at_rest_encryption: Option<bool>,
 
     /// Hex formatted private key used to authenticate with ACP.
     ///
@@ -414,9 +415,6 @@ impl StartArgs {
         if let Some(no_enc) = self.no_encryption {
             config.datastore.no_encryption = no_enc;
         }
-        if let Some(no_tel) = self.no_telemetry {
-            config.telemetry_disabled = no_tel;
-        }
         if let Some(no_sign) = self.no_signing {
             config.datastore.no_signing = no_sign;
         }
@@ -425,6 +423,9 @@ impl StartArgs {
         }
         if let Some(no_se) = self.no_searchable_encryption {
             config.datastore.no_searchable_encryption = no_se;
+        }
+        if let Some(at_rest) = self.at_rest_encryption {
+            config.datastore.at_rest_encryption = at_rest;
         }
         if let Some(ref intervals) = self.replicator_retry_intervals {
             config.replicator_retry_intervals = intervals.clone();

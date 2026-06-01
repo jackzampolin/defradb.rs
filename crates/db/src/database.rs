@@ -154,6 +154,18 @@ pub struct DB<S: Store> {
     /// Go's collection repository forbids these immediately, including for
     /// transactions that started before the deletion committed.
     pub(crate) forbidden_collection_ids: RwLock<HashSet<String>>,
+    /// Optional KMS service. When set, the document write path generates
+    /// encrypted-field DEKs through the KMS (which persists them in its
+    /// KeyStore for cross-peer serving) instead of inline-and-blockstore.
+    /// Set once at node startup via [`DB::set_kms`].
+    kms: std::sync::OnceLock<std::sync::Arc<dyn kms::KmsService>>,
+    /// Owning handle to the KMS durable blockstore. The KMS adapter
+    /// (`DbEncBlockStore`) references this weakly to avoid the
+    /// DB→KMS→`KeyStore`→adapter→blockstore→store Arc cycle that would pin the
+    /// storage lock past node close (#976). Parking the owning `Arc` here means
+    /// it shares the DB's lifetime — and its in-process block cache — and drops
+    /// with the DB, releasing the lock. Set once at startup.
+    kms_blockstore: std::sync::OnceLock<Arc<blockstore::DefraBlockstore<S>>>,
 }
 
 impl<S: Store> DB<S> {
@@ -182,6 +194,8 @@ impl<S: Store> DB<S> {
             pending_migrations: RwLock::new(HashMap::new()),
             schema_heads: RwLock::new(HashMap::new()),
             forbidden_collection_ids: RwLock::new(HashSet::new()),
+            kms: std::sync::OnceLock::new(),
+            kms_blockstore: std::sync::OnceLock::new(),
         })
     }
 
@@ -232,6 +246,8 @@ impl<S: Store> DB<S> {
             pending_migrations: RwLock::new(HashMap::new()),
             schema_heads: RwLock::new(HashMap::new()),
             forbidden_collection_ids: RwLock::new(HashSet::new()),
+            kms: std::sync::OnceLock::new(),
+            kms_blockstore: std::sync::OnceLock::new(),
         })
     }
 
@@ -264,6 +280,33 @@ impl<S: Store> DB<S> {
     /// Get a reference to the event bus, if configured.
     pub fn event_bus(&self) -> Option<&Arc<dyn Bus>> {
         self.event_bus.as_ref()
+    }
+
+    /// Install the KMS service. First call wins (OnceLock); subsequent calls
+    /// are silently discarded. Called once at node startup.
+    pub fn set_kms(&self, kms: std::sync::Arc<dyn kms::KmsService>) {
+        let _ = self.kms.set(kms);
+    }
+
+    /// Get the KMS service, if one has been installed.
+    pub fn kms(&self) -> Option<std::sync::Arc<dyn kms::KmsService>> {
+        self.kms.get().cloned()
+    }
+
+    /// Park the KMS durable blockstore on the DB so its owning `Arc` shares the
+    /// DB's lifetime (and block cache) without forming a lock-pinning cycle
+    /// (#976). First call wins. Returns the stored handle (the just-set one, or
+    /// the existing one if already set) so the caller can build a `Weak` from
+    /// the canonical instance.
+    pub fn set_kms_blockstore(
+        &self,
+        blockstore: Arc<blockstore::DefraBlockstore<S>>,
+    ) -> Arc<blockstore::DefraBlockstore<S>> {
+        let _ = self.kms_blockstore.set(blockstore);
+        self.kms_blockstore
+            .get()
+            .expect("kms_blockstore set above")
+            .clone()
     }
 
     /// Get the next transaction ID.
@@ -413,5 +456,58 @@ impl<S: Store> DB<S> {
     /// Get the current transaction ID counter value.
     pub fn current_txn_id(&self) -> u64 {
         self.txn_id_counter.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use storage::backends::MemoryStore;
+
+    struct StubKms;
+
+    #[async_trait]
+    impl kms::KmsService for StubKms {
+        async fn get_keys(
+            &self,
+            _: &kms::RequestContext,
+            _: &[kms::EncryptionCid],
+        ) -> kms::Result<kms::KeyResults> {
+            let (r, tx) = kms::KeyResults::new(1);
+            drop(tx);
+            Ok(r)
+        }
+
+        async fn generate_key(
+            &self,
+            _: &kms::RequestContext,
+            _: kms::KeyScope,
+        ) -> kms::Result<(kms::EncryptionCid, [u8; 32])> {
+            Err(kms::Error::Unsupported("stub"))
+        }
+
+        async fn serve_request(
+            &self,
+            _: kms::PeerIdentity,
+            _: kms::FetchEncryptionKeyRequest,
+        ) -> kms::Result<kms::FetchEncryptionKeyReply> {
+            Err(kms::Error::Unsupported("stub"))
+        }
+    }
+
+    #[test]
+    fn db_kms_accessor_round_trips() {
+        let db = DB::new(MemoryStore::new()).unwrap();
+        assert!(db.kms().is_none());
+
+        let first: Arc<dyn kms::KmsService> = Arc::new(StubKms);
+        db.set_kms(first);
+        assert!(db.kms().is_some());
+
+        // OnceLock: second set is silently ignored.
+        let second: Arc<dyn kms::KmsService> = Arc::new(StubKms);
+        db.set_kms(second);
+        assert!(db.kms().is_some());
     }
 }

@@ -167,6 +167,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 None,
                 enc_config.as_ref(),
                 sign_config.as_ref(),
+                None,
             )
             .await
             .map_err(|e| {
@@ -288,6 +289,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 Some(&modified_fields),
                 enc_config.as_ref(),
                 sign_config.as_ref(),
+                None,
             )
             .await
             .map_err(|e| {
