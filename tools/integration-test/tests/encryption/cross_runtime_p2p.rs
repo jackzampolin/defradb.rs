@@ -8,7 +8,7 @@
 //!
 //! `rust_rust_encrypted_p2p_replication` covers the pure-Rust path.
 //!
-//! `go_to_rust_encrypted_p2p_replication` / `rust_to_go_encrypted_p2p_replication`
+//! `go_to_rust_encrypted_p2p_replication` / `go_rust_encrypted_p2p_replication_rust_writer`
 //! exercise Go↔Rust KMS wire-compat over libp2p: the reader must fetch the DEK
 //! from the writer's KMS over the `encryption` gossip topic (bare CBOR
 //! `FetchEncryptionKeyRequest`/`Reply`, ECIES-wrapped key blocks) and decrypt.
@@ -272,7 +272,7 @@ async fn go_to_rust_encrypted_p2p_replication() {
 /// blockstore-backed KeyStore (#976), so the Go reader's
 /// `FetchEncryptionKeyRequest` is answered for any encrypted write.
 #[tokio::test]
-async fn rust_to_go_encrypted_p2p_replication() {
+async fn go_rust_encrypted_p2p_replication_rust_writer() {
     // index 0 = Rust (writer), index 1 = Go (reader)
     go_rust_kms_interop(0, 1).await;
 }

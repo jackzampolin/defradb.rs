@@ -180,7 +180,7 @@ async fn rust_rust_se_cross_node() {
 /// tag-generation interoperate with a Go serve side. Node 0 = Rust (owner),
 /// node 1 = Go (replicator).
 #[tokio::test]
-async fn rust_to_go_se_cross_node() {
+async fn go_rust_se_cross_node_rust_owner() {
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .go_nodes(1)
