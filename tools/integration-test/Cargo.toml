@@ -54,6 +54,10 @@ path = "tests/fts.rs"
 name = "p2p_iroh"
 path = "tests/p2p_iroh/main.rs"
 
+[[test]]
+name = "cursor"
+path = "tests/cursor.rs"
+
 [dependencies]
 hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", branch = "feat/shared-se-key-harness" }
 defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", branch = "feat/shared-se-key-harness" }

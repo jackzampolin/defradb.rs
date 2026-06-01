@@ -2,11 +2,14 @@
 //!
 //! Converts Select operations into executable plan trees.
 
+mod cursor;
 mod filter_prep;
 mod groupby;
 mod index_methods;
 mod scan_setup;
 pub(crate) mod se_detection;
+
+pub(in crate::planner) use cursor::expand_cursor_plan;
 
 #[cfg(test)]
 mod tests;

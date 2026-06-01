@@ -8,6 +8,7 @@ use storage::corekv::Store;
 use storage::index::IndexIterator;
 
 use crate::index_manager::IndexManager;
+use crate::index_seek::apply_cursor_seek_to_iterator;
 
 use super::LensedAutoCommitFetcher;
 
@@ -101,6 +102,8 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         let vf = params.value_filter.as_ref();
         let (raw_doc_ids, raw_fetches): (Vec<String>, u64) = match &params.scan_type {
             IndexScanType::ExactMatch { values } => {
+                // Cursor seek is intentionally not applied: ExactMatch fetches a single
+                // value; pagination over a single value is meaningless.
                 let mut iter = index.get(&datastore, values).await.map_err(|e| {
                     query::error::QueryError::execution(format!("index error: {}", e))
                 })?;
@@ -110,6 +113,8 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                 values,
                 suffix_values,
             } => {
+                // Cursor seek is intentionally not applied: InScan fetches a fixed set
+                // of values; pagination over an unordered set is meaningless.
                 let is_composite = index.description().fields.len() > 1;
                 let has_full_key = !suffix_values.is_empty()
                     && suffix_values.len() == index.description().fields.len() - 1;
@@ -171,6 +176,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
+                apply_cursor_seek_to_iterator(&mut iter, &params.cursor_seek).await?;
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::RangeScan {
@@ -191,9 +197,13 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
+                apply_cursor_seek_to_iterator(&mut iter, &params.cursor_seek).await?;
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::OrScan { branches } => {
+                // Cursor seek is intentionally not applied: each branch gets cursor_seek: None
+                // because OrScan merges independent sets; applying a cursor to individual
+                // branches would arbitrarily exclude results from other branches.
                 let _ = txn.discard();
                 let mut all_doc_ids = Vec::new();
                 let mut total_raw_fetches = 0u64;
@@ -204,6 +214,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                         limit: None,
                         offset: 0,
                         value_filter: None,
+                        cursor_seek: None,
                     };
                     let branch_result = self
                         .get_by_index_scan_impl(collection_name, &branch_params)

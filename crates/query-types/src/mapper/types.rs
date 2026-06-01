@@ -1,6 +1,7 @@
 //! Core mapper types for query operations
 
 use crate::document::DocumentMapping;
+use crate::mapper::cursor::{CursorAliases, CursorPageInfoFields, CursorParams};
 use crate::mapper::filter::Filter;
 
 /// Order direction for sorting
@@ -437,6 +438,17 @@ pub struct Select {
     pub document_mapping: DocumentMapping,
     /// Whether @exhaustive directive is active
     pub exhaustive: bool,
+    /// Whether this select originates from a `_cursor { ... }` GraphQL wrapper.
+    /// When true, the planner installs a CursorNode and forces planner routing.
+    pub is_cursor: bool,
+    /// Cursor pagination args (Some when `is_cursor`, None otherwise).
+    pub cursor_params: Option<CursorParams>,
+    /// Which `_pageInfo` fields were selected on the cursor wrapper.
+    pub cursor_page_info: CursorPageInfoFields,
+    /// GraphQL aliases on the cursor wrapper (`select.field.alias` continues
+    /// to track the inner collection's alias; `cursor_aliases.wrapper_alias`
+    /// tracks the `_cursor` field's alias).
+    pub cursor_aliases: CursorAliases,
 }
 
 impl Select {
@@ -459,6 +471,10 @@ impl Select {
             selection_type: SelectionType::Object,
             document_mapping: DocumentMapping::new(),
             exhaustive: false,
+            is_cursor: false,
+            cursor_params: None,
+            cursor_page_info: CursorPageInfoFields::default(),
+            cursor_aliases: CursorAliases::default(),
         }
     }
 

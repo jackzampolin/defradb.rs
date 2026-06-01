@@ -10,6 +10,7 @@ description = "Query plan tree, planner, and fetcher/mutator/txn abstractions fo
 
 [dependencies]
 # Internal crates
+cursor = { path = "../cursor" }
 query-types = { path = "../query-types" }
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }

@@ -1,0 +1,22 @@
+[
+  {
+    "name": "doc_id_only",
+    "token": "eyJkIjoiZG9jLTEiLCJvIjoiIn0",
+    "decoded": { "d": "doc-1", "o": "" }
+  },
+  {
+    "name": "single_string_key",
+    "token": "eyJkIjoiZG9jLTEiLCJrIjp7Im5hbWUiOiJhbGljZSJ9LCJvIjoiIn0",
+    "decoded": { "d": "doc-1", "k": { "name": "alice" }, "o": "" }
+  },
+  {
+    "name": "multi_key_alphabetical",
+    "token": "eyJkIjoiZG9jLTIiLCJrIjp7ImFnZSI6MzAsIm5hbWUiOiJib2IifSwibyI6IiJ9",
+    "decoded": { "d": "doc-2", "k": { "age": 30, "name": "bob" }, "o": "" }
+  },
+  {
+    "name": "numeric_value",
+    "token": "eyJkIjoiZG9jLTMiLCJrIjp7InNjb3JlIjoxMjMuNDV9LCJvIjoiIn0",
+    "decoded": { "d": "doc-3", "k": { "score": 123.45 }, "o": "" }
+  }
+]

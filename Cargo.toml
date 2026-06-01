@@ -15,6 +15,7 @@ members = [
     "crates/p2p",
     "crates/p2p-adapter",
     "crates/crypto",
+    "crates/cursor",
     "crates/http",
     "crates/cli",
     "crates/datastore",

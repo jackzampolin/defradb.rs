@@ -96,9 +96,13 @@ impl SdlGenerateArgs {
             output_parts.push(schema.order_input.to_sdl());
         }
 
-        // Generate Query and Mutation types
+        // Generate singleton types (PageInfo, CursorQuery) and root operation types
+        let page_info_type = query::schema_gen::gen_page_info_type();
+        let cursor_query_type = query::schema_gen::generate_cursor_query_type(&collection_refs);
         let query_type = query::schema_gen::generate_query_type(&collection_refs);
         let mutation_type = query::schema_gen::generate_mutation_type(&collection_refs);
+        output_parts.push(page_info_type.to_sdl());
+        output_parts.push(cursor_query_type.to_sdl());
         output_parts.push(query_type.to_sdl());
         output_parts.push(mutation_type.to_sdl());
 

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 
-use crate::planner::{Doc, ExecInfo, PlanNode};
+use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
 use query_types::document::DocumentMapping;
 use query_types::error::Result;
 use query_types::mapper::OrderDirection;
@@ -401,6 +401,20 @@ impl PlanNode for GroupByNode {
         }
 
         serde_json::Value::Object(obj)
+    }
+
+    fn set_cursor_seek(&mut self, seek: CursorSeek) -> bool {
+        self.source.set_cursor_seek(seek)
+    }
+
+    fn set_cursor_fetch_limit(&mut self, _limit: u64) -> bool {
+        // GroupBy buffers all input to form groups; bounding the scan below
+        // would drop rows from groups. Do not forward.
+        false
+    }
+
+    fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
+        self.source.page_info()
     }
 
     fn current_group_docs(&self) -> Option<&[Doc]> {

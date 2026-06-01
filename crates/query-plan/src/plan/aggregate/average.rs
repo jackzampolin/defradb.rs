@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 
-use crate::planner::{Doc, ExecInfo, PlanNode};
+use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
 use query_types::document::DocumentMapping;
 use query_types::error::Result;
 use query_types::mapper::{Filter, Limit};
@@ -327,6 +327,20 @@ impl PlanNode for AverageNode {
 
     fn document_map(&self) -> &DocumentMapping {
         &self.document_mapping
+    }
+
+    fn set_cursor_seek(&mut self, seek: CursorSeek) -> bool {
+        self.source.set_cursor_seek(seek)
+    }
+
+    fn set_cursor_fetch_limit(&mut self, _limit: u64) -> bool {
+        // Average consumes all input rows; bounding the scan below would
+        // produce a wrong aggregate. Do not forward.
+        false
+    }
+
+    fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
+        self.source.page_info()
     }
 
     fn kind(&self) -> &'static str {
