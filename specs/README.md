@@ -28,7 +28,9 @@ a metadir collision.)
 # Run 2 — RED    Naive fetch violates Converge: reproduces Go #2721 "never merges" (S1)
 ./tools/tlc -config M1Naive.cfg M1Convergence.tla
 
-# Run 3 — GREEN  WholeDoc+Immutable: INV_SubsetConverge + INV_RelRefSafe + INV_NoSplitOwnership (S2)
+# Run 3 — GREEN  WholeDoc+Immutable: INV_SubsetConverge + INV_RelRefSafe (S2)
+#                (INV_NoSplitOwnership also holds here, but trivially — single owner, no
+#                 reassignment; the real split-ownership test is run 4/S3)
 ./tools/tlc -config MC_S2.cfg MC_S2.tla
 
 # Run 4 — RED    Mutable filter key: INV_NoSplitOwnership violated (split ownership) (S3)

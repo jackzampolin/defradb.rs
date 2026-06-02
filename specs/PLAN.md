@@ -1,5 +1,13 @@
 # Filtered P2P Replication — TLA+ Model Implementation Plan
 
+> **STATUS: IMPLEMENTED.** This is the original plan; the shipped specs evolved
+> beyond it during execution (e.g. `INV_RelRefSafe` is now a real invariant not a
+> stub, `INV_NoFilteredFetch` + the FullWalkA over-fetch run were added, S3 uses a
+> 3-node custom-Init setup, Model B's fetch was corrected to anchor on
+> `wanted ∪ merged`). For the authoritative current state see `README.md` (runs +
+> verdicts) and `DESIGN.md` (rationale). Kept as a record of the build; safe to
+> delete before any merge to main.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build TLA+/TLC models that (a) reproduce the Go `#2721` "partial DAG sync will never merge" failure, (b) prove Model A (full-ancestry walk) restores convergence, and (c) prove that filtering defra-agent's `agent_did` is safe **iff** the filter key is immutable — producing the recommendation consumed by `defradb.rs-p2p-control`.
