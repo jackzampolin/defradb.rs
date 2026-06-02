@@ -306,7 +306,7 @@ async fn manage_request_decodes() {
 **Files:** the two-stream protocol registration site; `crates/p2p/src/host/p2p_host/two_stream.rs` (:279-296 SE mapping); `crates/p2p/src/host/libp2p_transport.rs` (:441-445).
 
 - [ ] **Step 1–2:** `grep -rn "SE_QUERY_REQUEST_PROTOCOL\|handle_se_query_request_stream\|SEQueryRequest\|send_se_query" crates/p2p/src/host crates/p2p/src/two_stream`.
-- [ ] **Step 3:** at each SE-query site, add the four manage parallels: register inbound `MANAGE_*` protocols → route to Task 3.2 handlers (pass `protocols::MAX_MANAGE_MSG_SIZE as u64` + existing timeout); map `TwoStreamEvent::Manage*` → `TransportEvent::Manage*` in `two_stream.rs`; implement `send_manage_*` trait methods in `libp2p_transport.rs` (sign with host keypair, call the fire-and-forget senders) mirroring `send_se_query_*`. **No consumer yet** (Phase 6) — side-effect-free.
+- [ ] **Step 3:** at each SE-query site, add the four manage parallels: register inbound `MANAGE_*` protocols → route to Task 3.2 handlers (pass `protocols::MAX_MANAGE_MSG_SIZE as u64` + existing timeout); add four `HostEvent::Manage*` variants to the `HostEvent` enum and map `TwoStreamEvent::Manage*` → `HostEvent::Manage*` (`two_stream.rs:279-296`), then `HostEvent::Manage*` → `TransportEvent::Manage*` in `convert_host_event` (`libp2p_transport.rs:320,441-449`); implement `send_manage_*` trait methods in `libp2p_transport.rs` (sign with host keypair, call the fire-and-forget senders) mirroring `send_se_query_*`. **No consumer yet** (Phase 6) — side-effect-free.
 - [ ] **Step 4:** `cargo build -p p2p` → clean.
 - [ ] **Step 5:** `git commit -m "feat(p2p): libp2p manage registration/routing/send"`
 
@@ -333,7 +333,7 @@ async fn manage_request_decodes() {
 
 ### Task 4.2: `verify_actor_token` (crate: `p2p-adapter`)
 
-**Files:** Create `crates/p2p-adapter/src/manage/mod.rs` + `crates/p2p-adapter/src/manage/auth.rs`; Modify `crates/p2p-adapter/src/lib.rs`, `crates/p2p-adapter/Cargo.toml` (add `identity = { path = "../identity" }`).
+**Files:** Create `crates/p2p-adapter/src/manage/mod.rs` + `crates/p2p-adapter/src/manage/auth.rs`; Modify `crates/p2p-adapter/src/lib.rs`, `crates/p2p-adapter/Cargo.toml` (add `identity = { path = "../identity" }` **and `db-nac = { path = "../db-nac" }`** — the serve test mock must return `db_nac::Result<bool>` to match the `NacManagerApi` trait, and `p2p-adapter` currently deps only `db`, not `db-nac`).
 
 - [ ] **Step 1: Write the failing test** — confirm a `FullIdentity` test builder: `grep -rn "FullIdentity\|fn test_identity\|new_token" crates/identity/src`. Then:
 
@@ -351,7 +351,7 @@ fn accepts_matching_audience_returns_did() {
 ```
 (`mint_token_for(aud)` builds a `FullIdentity` and calls `identity::new_token(&id, std::time::Duration::from_secs(300), Some(aud.into()), None)`, returning `(Vec<u8>, Did)` — base it on identity's own token tests.)
 
-- [ ] **Step 2:** `cargo test -p p2p-adapter manage::auth` → FAIL.
+- [ ] **Step 2:** `cargo test -p defra-p2p-adapter manage::auth` → FAIL.
 - [ ] **Step 3:**
 
 ```rust
@@ -364,9 +364,9 @@ pub fn verify_actor_token(token: &[u8], expected_audience: &str) -> Result<Did, 
     ti.did().map_err(|e| format!("token has no DID: {e}"))
 }
 ```
-Register `pub mod manage;` in `lib.rs`, with `pub mod auth;` in `manage/mod.rs`.
+Register `pub mod manage;` in `lib.rs`, with `pub mod auth;` in `manage/mod.rs`. Put the test helper `mint_token_for` as a `#[cfg(test)] pub(crate) fn` in `auth.rs` **outside** the inner `mod tests` (so the Phase 5 serve test can call `crate::manage::auth::mint_token_for`).
 
-- [ ] **Step 4:** `cargo test -p p2p-adapter manage::auth` → PASS.
+- [ ] **Step 4:** `cargo test -p defra-p2p-adapter manage::auth` → PASS.
 - [ ] **Step 5:** `git commit -m "feat(p2p-adapter): verify_actor_token with audience binding"`
 
 ---
@@ -397,8 +397,8 @@ impl defra_http::P2POperations for MockOps {
 struct DenyNac;
 #[async_trait]
 impl db::NacManagerApi for DenyNac {
-    async fn check_permission(&self, _: &Did, _: acp::NodePermission) -> db::Result<bool> { Ok(false) }
-    // ... other NacManagerApi methods minimal ...
+    async fn check_permission(&self, _: &Did, _: acp::NodePermission) -> db_nac::Result<bool> { Ok(false) }
+    // ... 17 other NacManagerApi methods: unimplemented!() ...
 }
 
 #[tokio::test]
@@ -412,13 +412,14 @@ async fn unauthorized_rejected_before_side_effects() {
 }
 ```
 
-> Implementing the full `P2POperations`/`NacManagerApi` mocks is verbose. Confirm the complete method lists (`sed -n '52,135p' crates/http/src/router/traits.rs`, `crates/db-nac/src/lib.rs:72-105`) and stub the unused ones with `unimplemented!()`. This is acceptable test scaffolding.
+> Implementing the full mocks is verbose but bounded: **`P2POperations` has 22 methods** (all of `traits.rs:52-133` — `local_peer_id`, `listen_addresses`, `connected_peers`, the replicator/collection/document ops, `republish_document`, `sync_documents`, `sync_branchable_collection`, `sync_collection_versions`; it is a *separate* trait from `AcpOperations`/`IndexOperations` further down the file, so those are NOT part of the mock). **`NacManagerApi` has 18 methods** (`db-nac/src/lib.rs`: `initialize, status, owner, is_enabled, check_permission, is_admin, is_admin_persisted, is_owner, enable, disable, re_enable, purge, add_admin, remove_admin, add_permission_grant, remove_permission_grant, info` + any sibling). Stub all unused with `unimplemented!()`. **`check_permission` returns `db_nac::Result<bool>`** (not `db::Result`) — these are distinct alias types; the mock must use `db_nac::Result`. The `NodePermission` param is `acp::NodePermission` (same type `op.permission()` returns — no mismatch).
 
-- [ ] **Step 2:** `cargo test -p p2p-adapter manage::serve` → FAIL.
+- [ ] **Step 2:** `cargo test -p defra-p2p-adapter manage::serve` → FAIL.
 - [ ] **Step 3: Write minimal implementation**
 
 ```rust
-use defra_http::{P2POperations, P2pDocumentRequest};
+use defra_http::P2POperations;          // re-exported at crate root
+use defra_http::router::P2pDocumentRequest;  // NOT root-re-exported — lives in router::
 use p2p::message::{
     ManageMutateOp, ManageQueryOp, ManageQueryReply, ManageQueryRequest, ManageQueryResult,
     ManageReply, ManageRequest,
@@ -482,36 +483,53 @@ pub async fn build_manage_query_reply(ops: &dyn P2POperations, nac: &dyn db::Nac
 
 > Confirm `P2pDocumentRequest` is exported from `defra_http` (`grep -n "pub use.*P2pDocumentRequest\|pub struct P2pDocumentRequest" crates/http/src`); if it lives behind a module, adjust the path. Confirm `db::Result`/`NacManagerApi` import paths (`grep -n "pub use" crates/db/src/lib.rs`). `actor.to_string()` gives the DID string for `expected_authorizer_did` (mirrors `replicators.rs:128`).
 
-- [ ] **Step 4:** `cargo test -p p2p-adapter manage::serve` → PASS.
+- [ ] **Step 4:** `cargo test -p defra-p2p-adapter manage::serve` → PASS.
 - [ ] **Step 5:** `git commit -m "feat(p2p-adapter): manage serve handlers (auth + NAC + controller dispatch)"`
 
 ---
 
 ## Phase 6: Enable the channel + requester (crates: `embedded`, `cli`, `p2p-adapter`)
 
-### Task 6.1: Construct + thread correlators and handles
+### Task 6.1: Construct correlators + make controller/NAC reachable at the event loops
 
-**Files:** `crates/embedded/src/node_p2p.rs` (mirror SE correlator :171-179), `crates/cli/src/commands/start/server_p2p.rs`.
+**Files:** `crates/embedded/src/{node_p2p.rs,node_tasks.rs,node.rs}`, `crates/cli/src/commands/start/server_p2p.rs`, `crates/cli/Cargo.toml`.
 
-- [ ] **Step 3:** where `SeQueryCorrelator::new()` is built and cloned into transport + event loop, add `ManageCorrelator::new()` + `ManageQueryCorrelator::new()` the same way. Thread the existing `Arc<dyn defra_http::P2POperations>` controller (already built at `node_p2p.rs:246`) and the `Arc<dyn db::NacManagerApi>` NAC handle into the event handler.
+> **This is real wiring work, not a trivial thread-through.** The event handlers
+> spawn *before* the things they need exist:
+> - `spawn_libp2p_event_handler`/`spawn_iroh_event_handler`
+>   (`node_tasks.rs:28-35,126-135`) take only `events, coordinator, store,
+>   event_bus, handle/se_transport, se_correlator` — no controller/nac/manage
+>   correlators.
+> - The `Arc<dyn defra_http::P2POperations>` controller (`adapter`) is built at
+>   `node_p2p.rs:214/246`, **after** the libp2p handler spawns at `:173`; its
+>   inputs (`doc_pusher`:189, `version_syncer`:192) are also built after `:173`.
+> - `nac_manager` is created in `node.rs:494`, **after** `setup_libp2p`/`setup_iroh`
+>   (called at node.rs:470/481) and is not a param to them (`node_p2p.rs:47-53`).
+
+- [ ] **Step 1:** Decide the delivery mechanism. Recommended: **deferred wiring via a settable hook**, mirroring the existing `set_document_acp`/`wire_document_acp` pattern (`node.rs:497-503`) — store the manage serve dependencies (`Arc<dyn P2POperations>`, `Arc<dyn NacManagerApi>`, the two correlators) behind an `Arc<OnceCell<…>>` (or a small `ManageHooks` struct) that the event loop reads lazily, and populate it after the controller + nac_manager are built. This avoids reordering the whole assembly. Alternative: reorder so nac_manager + an early `Arc<dyn P2POperations>` are built before the spawns and threaded as new params (both spawn fns already carry `#[allow(clippy::too_many_arguments)]`).
+- [ ] **Step 2–3:**
+  - In `node_p2p.rs`, build `ManageCorrelator::new()` + `ManageQueryCorrelator::new()` next to `SeQueryCorrelator::new()` (:171), clone one copy for the requester (`ManageClient`) and pass the other into the event handler (via the hook from Step 1).
+  - Populate the hook with the `adapter` controller clone (`Arc<dyn defra_http::P2POperations>`) and the `nac_manager` handle (`Arc<dyn db::NacManagerApi>`) after both exist (controller at :246; nac after `node.rs:494`).
+  - **CLI:** add `defra-p2p-adapter = { path = "../p2p-adapter" }` to `crates/cli/Cargo.toml` (it currently does not depend on the adapter crate). In `server_p2p.rs`, apply the same hook/threading; the controller is built at `:574` (after the loops at ~308/771) and no `nac` is in scope in `setup_libp2p_p2p`/`setup_iroh_p2p` (:131-138) — so the deferred-hook approach is the lower-risk path here too.
 - [ ] **Step 4:** `cargo build -p embedded -p cli` → clean.
-- [ ] **Step 5:** `git commit -m "feat(embedded,cli): construct manage correlators + thread controller/nac"`
+- [ ] **Step 5:** `git commit -m "feat(embedded,cli): manage correlators + deferred controller/nac hook"`
 
 ### Task 6.2: Route manage events (enables the channel)
 
 **Files:** `crates/embedded/src/node_tasks.rs` (:88-102, :172-189), `crates/cli/src/commands/start/server_p2p.rs` (:377-387, :794-804).
 
-- [ ] **Step 3:** in every SE-query event match (libp2p + iroh, embedded + cli), add the four manage arms:
+- [ ] **Step 3:** in every SE-query event match (libp2p + iroh, embedded + cli), add the four manage arms. **Crate path:** the adapter crate is `defra-p2p-adapter`, imported as **`defra_p2p_adapter`** (as in `node_p2p.rs:16`) — NOT `p2p_adapter` (which is a CLI-local module; fully-qualify to avoid the name collision). **Transport handle:** use the loop's own handle, whose name differs per site — embedded libp2p builds `let transport = p2p::Libp2pTransport::new(handle.clone())` inside the SEQuery arm (`node_tasks.rs:89`); embedded iroh uses the `se_transport` param (`:134`); CLI uses `se_transport_serve` (`server_p2p.rs:380,797`). All impl `P2PTransport`, so clone the same handle the SE arm uses:
 
 ```rust
+// `ops`, `nac`, `manage_correlator`, `manage_query_correlator` come from the Task 6.1 hook.
 TransportEvent::ManageRequest { peer_id, request } => {
-    let mut reply = p2p_adapter::manage::serve::build_manage_reply(controller.as_ref(), nac.as_ref(), request).await;
+    let mut reply = defra_p2p_adapter::manage::serve::build_manage_reply(ops.as_ref(), nac.as_ref(), request).await;
     if p2p::signing::sign_with_transport(&transport, &mut reply).is_ok() {
         let _ = transport.send_manage_response(&peer_id, reply).await;
     }
 }
 TransportEvent::ManageQueryRequest { peer_id, request } => {
-    let mut reply = p2p_adapter::manage::serve::build_manage_query_reply(controller.as_ref(), nac.as_ref(), request).await;
+    let mut reply = defra_p2p_adapter::manage::serve::build_manage_query_reply(ops.as_ref(), nac.as_ref(), request).await;
     if p2p::signing::sign_with_transport(&transport, &mut reply).is_ok() {
         let _ = transport.send_manage_query_response(&peer_id, reply).await;
     }
@@ -529,8 +547,8 @@ TransportEvent::ManageQueryReply { reply, .. } => { manage_query_correlator.deli
 
 **Files:** Create `crates/p2p-adapter/src/manage/client.rs`; Modify `manage/mod.rs`. (Mirror the SE requester — `grep -rn "SeQueryCorrelator\|register(" crates/db-merge/src crates/p2p-adapter/src`.)
 
-- [ ] **Step 3:** a `ManageClient` holding `transport` + the two correlators, with `manage(&self, peer_id: &PeerId, op: ManageMutateOp, auth_token: Vec<u8>) -> Result<ManageReply>` and `manage_query(...)`:
-  - build `ManageRequest::new(op, auth_token)`; `p2p::signing::sign_message(keypair, &mut req)?` (sets message_id) or `sign_with_transport`;
+- [ ] **Step 3:** a `ManageClient<T: P2PTransport>` holding `transport: T` + the two correlators, with `manage(&self, peer_id: &PeerId, op: ManageMutateOp, auth_token: Vec<u8>) -> Result<ManageReply>` and `manage_query(...)`:
+  - build `ManageRequest::new(op, auth_token)`; **`p2p::signing::sign_with_transport(&self.transport, &mut req)?`** (sets message_id; works on libp2p AND iroh — iroh exposes no `keypair()`, so `sign_message` would not compile for it; the existing iroh SE requester uses `sign_with_transport`, `p2p-adapter/src/iroh.rs:722`);
   - `let mut pending = self.manage_correlator.register(req.message_id.clone());`
   - `self.transport.send_manage_request(peer_id, req).await?;`
   - `tokio::time::timeout(REQUEST_TIMEOUT, pending.recv()).await` → map timeout → `Error::ResponseTimeout`.
@@ -585,7 +603,7 @@ async fn denied_for_unauthorized_actor() {
 
 - [ ] `cargo fmt --all`
 - [ ] `cargo clippy --all -- -D warnings` (fix all)
-- [ ] `cargo test -p p2p -p p2p-adapter` green
+- [ ] `cargo test -p p2p -p defra-p2p-adapter` green
 - [ ] `cargo test -p integration-test --test p2p` and `--test p2p_iroh` green
 - [ ] `cargo test -p acp` green (NAC unaffected)
 - [ ] `git commit -m "chore: fmt + clippy clean for management channel"`
