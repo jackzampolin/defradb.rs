@@ -156,6 +156,7 @@ impl Node {
             acp_store,
             zanzibar_store.clone(),
             event_bus.clone(),
+            db::node_access_checker(database.clone()),
         )
         .await?;
 

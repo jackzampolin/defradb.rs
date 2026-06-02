@@ -577,6 +577,7 @@ impl Node {
             doc_pusher,
             event_bus,
             Some(version_syncer),
+            db::node_access_checker(database.clone()),
         );
         adapter.set_initial_tracked_documents(restored_doc_ids);
 
@@ -1019,6 +1020,7 @@ impl Node {
             doc_pusher,
             event_bus,
             Some(version_syncer),
+            db::node_access_checker(database.clone()),
         );
         adapter.set_initial_tracked_documents(restored_doc_ids);
 

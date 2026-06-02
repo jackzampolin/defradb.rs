@@ -13,9 +13,12 @@
 use acp::nac::NodePermission::{self, *};
 
 /// Gated at the DB layer via `DB::check_node_access` — either on a `db`-crate
-/// method (document mutators) or at the cli adapter boundary that holds an
-/// `Arc<DB<S>>`. These fire for the HTTP/CLI path and, where the gate is on a
-/// `db`-crate method (document writes), for the embedded path too.
+/// method (document mutators) or at an adapter boundary that delegates through
+/// the type-erased `db::NodeAccessChecker` (ACP policy add + P2P management ops,
+/// whose adapters are store-typed/type-erased and hold the checker instead of
+/// an `Arc<DB<S>>`). These fire for the HTTP/CLI path and, where the gate is on
+/// a `db`-crate method (document writes) or a shared `defra-p2p-adapter` op, for
+/// the embedded path too.
 const DB_LAYER_GATED: &[NodePermission] = &[
     CollectionPatch,
     CollectionTruncate,
@@ -36,6 +39,18 @@ const DB_LAYER_GATED: &[NodePermission] = &[
     LensList,
     DacRelationAdd,
     DacRelationDelete,
+    DacPolicyAdd, // ACP adapter gates via db::NodeAccessChecker
+    P2pPeerConnect,
+    P2pPeerActive,
+    P2pReplicatorAdd,
+    P2pReplicatorDelete,
+    P2pReplicatorList,
+    P2pCollectionAdd,
+    P2pCollectionDelete,
+    P2pCollectionList,
+    P2pDocumentAdd,
+    P2pDocumentDelete,
+    P2pDocumentList,
 ];
 
 /// Authorization enforced inside `NacManager` itself: each method takes an
@@ -52,32 +67,21 @@ const NAC_MANAGER_ENFORCED: &[NodePermission] = &[
 
 /// Enforced only at the HTTP boundary (`auth_middleware` + `route_permissions`,
 /// plus per-handler `require_permission`). DB-layer gating is either unsafe
-/// (pervasive internal callers — reads) or not cleanly reachable (the ACP/P2P
-/// adapters are store-typed/type-erased with no `DB` handle, and the sole
-/// DB-bearing P2P component is a shared internal funnel). Mirrors Go, which
-/// leaves the internal collection/document fetch ungated and relies on DAC.
+/// (pervasive internal callers — reads) or not a discrete adapter op. Mirrors
+/// Go, which leaves the internal collection/document fetch ungated and relies
+/// on DAC. `P2pPeerInfo` is served by transport-info handlers (`local_peer_id`/
+/// `listen_addresses`/`shareable_address`), not a gated management op, so it
+/// stays HTTP-boundary-only.
 const HTTP_BOUNDARY_ONLY: &[NodePermission] = &[
     CollectionGet, // pervasive internal getter; gating it would break internal lookups
     DocumentRead,  // query fetch is DAC-gated, like Go's ungated fetch
-    DacPolicyAdd,  // ACP adapter is store-typed, no DB handle
     DacStatus,
     DacBypass, // resolved during request setup, not a gated DB op
     DacEnable,
     DacDisable,
     DacPurge,
     SignatureVerify,
-    P2pPeerInfo,
-    P2pPeerConnect,
-    P2pPeerActive,
-    P2pReplicatorAdd,
-    P2pReplicatorDelete,
-    P2pReplicatorList,
-    P2pCollectionAdd,
-    P2pCollectionDelete,
-    P2pCollectionList,
-    P2pDocumentAdd,
-    P2pDocumentDelete,
-    P2pDocumentList,
+    P2pPeerInfo, // transport-info handlers, not a discrete management op
 ];
 
 /// Ungated by design, mirroring Go: the merge/replication apply path and the

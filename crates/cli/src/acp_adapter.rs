@@ -12,18 +12,23 @@ use defra_http::router::{AcpOperations, PolicyInfo};
 pub struct AcpAdapter {
     store: Arc<dyn ZanzibarStore>,
     counter: AtomicU64,
+    nac_checker: Arc<dyn db::NodeAccessChecker>,
 }
 
 impl AcpAdapter {
-    pub fn new(store: Arc<dyn ZanzibarStore>) -> Self {
+    pub fn new(store: Arc<dyn ZanzibarStore>, nac_checker: Arc<dyn db::NodeAccessChecker>) -> Self {
         Self {
             store,
             counter: AtomicU64::new(1),
+            nac_checker,
         }
     }
 
-    pub fn new_arc(store: Arc<dyn ZanzibarStore>) -> Arc<dyn AcpOperations> {
-        Arc::new(Self::new(store))
+    pub fn new_arc(
+        store: Arc<dyn ZanzibarStore>,
+        nac_checker: Arc<dyn db::NodeAccessChecker>,
+    ) -> Arc<dyn AcpOperations> {
+        Arc::new(Self::new(store, nac_checker))
     }
 }
 
@@ -58,6 +63,11 @@ fn policy_to_info(policy: &Policy) -> PolicyInfo {
 #[async_trait]
 impl AcpOperations for AcpAdapter {
     async fn add_policy(&self, yaml: &str) -> Result<String, String> {
+        self.nac_checker
+            .check_node_access(acp::nac::NodePermission::DacPolicyAdd)
+            .await
+            .map_err(|e| e.to_string())?;
+
         acp::policy_yaml::check_duplicate_yaml_keys(yaml)?;
 
         let parsed = acp::policy_yaml::parse_policy_yaml(yaml)?;

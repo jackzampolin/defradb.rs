@@ -114,7 +114,10 @@ impl Node {
         let acp_adapter_for_schema: Option<Arc<dyn defra_http::router::AcpOperations>> =
             if config.acp.document_type != AcpDocumentType::None {
                 let acp_adapter = acp_setup.http_adapter.clone().unwrap_or_else(|| {
-                    crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store.clone())
+                    crate::acp_adapter::AcpAdapter::new_arc(
+                        zanzibar_store.clone(),
+                        db::node_access_checker(database.clone()),
+                    )
                 });
                 server = server.with_acp_arc(acp_adapter.clone());
                 info!(
@@ -228,10 +231,12 @@ impl Node {
         // Mirrors the HTTP server's behavior — without this, PG users would
         // be able to register schemas referencing nonexistent policies.
         let pg_schema_manager = if config.acp.document_type != AcpDocumentType::None {
-            let acp_adapter = acp_setup
-                .http_adapter
-                .clone()
-                .unwrap_or_else(|| crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store));
+            let acp_adapter = acp_setup.http_adapter.clone().unwrap_or_else(|| {
+                crate::acp_adapter::AcpAdapter::new_arc(
+                    zanzibar_store,
+                    db::node_access_checker(database.clone()),
+                )
+            });
             crate::schema_adapter::SchemaAdapter::new_pg_arc_with_acp(database, acp_adapter)
         } else {
             crate::schema_adapter::SchemaAdapter::new_pg_arc(database)

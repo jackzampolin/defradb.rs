@@ -1226,6 +1226,7 @@ impl NodeBuilder {
             doc_pusher,
             event_bus,
             version_syncer,
+            db::node_access_checker(database.clone()),
         );
         adapter.set_initial_tracked_documents(restored_doc_ids);
         let ops: Arc<dyn defra_http::P2POperations> = Arc::new(adapter);

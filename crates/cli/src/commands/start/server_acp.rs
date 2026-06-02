@@ -21,6 +21,7 @@ impl Node {
         _acp_store: Arc<dyn acp::AcpStore>,
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         event_bus: Arc<dyn events::Bus>,
+        nac_checker: Arc<dyn db::NodeAccessChecker>,
     ) -> Result<DocumentAcpSetup> {
         if config.acp.document_type == AcpDocumentType::SourceHub {
             if config.acp.sourcehub_address.is_empty() {
@@ -72,6 +73,7 @@ impl Node {
             let http_adapter = crate::sourcehub_acp_adapter::SourceHubAcpAdapter::new_arc(
                 document_acp.clone(),
                 zanzibar_store,
+                nac_checker,
             );
 
             info!("Document ACP configured (SourceHub)");
@@ -127,6 +129,7 @@ impl Node {
             let http_adapter = crate::sourcehub_acp_adapter::SourceHubAcpAdapter::new_arc(
                 document_acp.clone(),
                 zanzibar_store,
+                nac_checker,
             );
 
             info!("Document ACP configured (hub.rs)");
@@ -139,7 +142,10 @@ impl Node {
             let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
             Ok(DocumentAcpSetup {
                 document_acp,
-                http_adapter: Some(crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store)),
+                http_adapter: Some(crate::acp_adapter::AcpAdapter::new_arc(
+                    zanzibar_store,
+                    nac_checker,
+                )),
             })
         }
     }

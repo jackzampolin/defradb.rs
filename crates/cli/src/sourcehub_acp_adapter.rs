@@ -16,25 +16,29 @@ pub struct SourceHubAcpAdapter {
     sourcehub_acp: Arc<sourcehub::SourceHubDocumentACP>,
     local_store: Arc<dyn ZanzibarStore>,
     counter: AtomicU64,
+    nac_checker: Arc<dyn db::NodeAccessChecker>,
 }
 
 impl SourceHubAcpAdapter {
     pub fn new(
         sourcehub_acp: Arc<sourcehub::SourceHubDocumentACP>,
         local_store: Arc<dyn ZanzibarStore>,
+        nac_checker: Arc<dyn db::NodeAccessChecker>,
     ) -> Self {
         Self {
             sourcehub_acp,
             local_store,
             counter: AtomicU64::new(1),
+            nac_checker,
         }
     }
 
     pub fn new_arc(
         sourcehub_acp: Arc<sourcehub::SourceHubDocumentACP>,
         local_store: Arc<dyn ZanzibarStore>,
+        nac_checker: Arc<dyn db::NodeAccessChecker>,
     ) -> Arc<dyn AcpOperations> {
-        Arc::new(Self::new(sourcehub_acp, local_store))
+        Arc::new(Self::new(sourcehub_acp, local_store, nac_checker))
     }
 
     async fn get_or_cache_policy(&self, policy_id: &str) -> Result<Option<Policy>, String> {
@@ -83,6 +87,11 @@ fn policy_to_info(policy: &Policy) -> PolicyInfo {
 #[async_trait]
 impl AcpOperations for SourceHubAcpAdapter {
     async fn add_policy(&self, yaml: &str) -> Result<String, String> {
+        self.nac_checker
+            .check_node_access(acp::nac::NodePermission::DacPolicyAdd)
+            .await
+            .map_err(|e| e.to_string())?;
+
         // Validate locally first (same checks as local adapter)
         acp::policy_yaml::check_duplicate_yaml_keys(yaml)?;
 
