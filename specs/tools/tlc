@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Run TLC from the specs/ directory: ./tools/tlc -config M1Convergence.cfg M1Convergence.tla
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Resolve java: prefer JAVA env var, then JAVA_HOME, then Homebrew, then PATH.
+# On macOS the /usr/bin/java stub shows a dialog instead of running; bypass it.
+if [ -n "${JAVA:-}" ]; then
+  : # use caller-supplied JAVA
+elif [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+  JAVA="$JAVA_HOME/bin/java"
+elif [ -x /opt/homebrew/opt/java/bin/java ]; then
+  JAVA=/opt/homebrew/opt/java/bin/java
+elif [ -x /usr/local/opt/java/bin/java ]; then
+  JAVA=/usr/local/opt/java/bin/java
+elif command -v java >/dev/null 2>&1 && [ "$(command -v java)" != /usr/bin/java ]; then
+  JAVA=java   # a real java on PATH that is not the macOS stub
+else
+  echo "error: no usable Java found. Install a JDK (e.g. 'brew install java') or set JAVA=/path/to/java." >&2
+  echo "       (macOS /usr/bin/java is a stub and is intentionally not used.)" >&2
+  exit 1
+fi
+
+exec "$JAVA" -XX:+UseParallelGC -cp "$DIR/tla2tools.jar" tlc2.TLC "$@"
