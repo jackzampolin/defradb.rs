@@ -36,6 +36,11 @@ async-trait.workspace = true
 # Logging
 tracing.workspace = true
 
+# Request-scoped ambient identity (task_local). Not needed on wasm, where the
+# runtime is single-threaded and HTTP-server-side scoping does not apply.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["rt"] }
+
 [dev-dependencies]
 criterion.workspace = true
 multihash-codetable.workspace = true

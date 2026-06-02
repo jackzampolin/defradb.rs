@@ -23,11 +23,14 @@ impl<S: Store> DB<S> {
         if !nac.is_enabled().await {
             return Ok(());
         }
-        // Resolve the acting identity: explicit param wins, otherwise fall
-        // back to the ambient request identity set at the HTTP/FFI boundary.
+        // Resolve the acting identity: explicit param wins, otherwise fall back
+        // to the ambient request identity. The task_local scope (set by the HTTP
+        // middleware on the multithreaded REST path) takes priority over the
+        // thread_local (set on the pinned query/FFI path).
         let resolved: Option<Did> = match identity {
             Some(d) => Some(d.clone()),
-            None => defra_core::current_identity::get_current_identity()
+            None => defra_core::current_identity::try_get_scoped_identity()
+                .or_else(defra_core::current_identity::get_current_identity)
                 .and_then(|s| Did::new(s).ok()),
         };
         // Node's own identity always has access (mirrors Go db_nac.go).

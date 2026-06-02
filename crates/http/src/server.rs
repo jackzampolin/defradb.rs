@@ -441,6 +441,13 @@ impl Server {
             crate::auth_middleware::auth_middleware,
         ));
 
+        // Request-scoped acting identity: binds the caller's DID to the request
+        // task so DB-layer NAC checks on REST paths resolve who is acting.
+        // Outer of the auth middleware so the scope covers the whole request.
+        router = router.layer(axum::middleware::from_fn(
+            crate::identity_scope::scope_identity,
+        ));
+
         // Apply global body limit (0 = unlimited)
         if self.config.max_body_size > 0 {
             router = router.layer(DefaultBodyLimit::max(self.config.max_body_size as usize));

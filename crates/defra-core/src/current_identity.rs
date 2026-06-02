@@ -46,6 +46,50 @@ pub fn scoped_current_identity(did: Option<String>) -> CurrentIdentityGuard {
     CurrentIdentityGuard
 }
 
+// Request-scoped acting identity for the multithreaded async (REST) path.
+//
+// REST handlers run on the multithreaded tokio runtime where `.await` may hop
+// OS threads, so the `thread_local` above cannot carry the caller's identity
+// through to DB-layer NAC checks. A `task_local` is bound to the request task
+// and survives `.await`, mirroring Go's `identity.FromContext(ctx)`. The HTTP
+// middleware scopes it around the whole request.
+#[cfg(not(target_arch = "wasm32"))]
+tokio::task_local! {
+    static SCOPED_IDENTITY: Option<String>;
+}
+
+/// Read the request-scoped acting identity, if a scope is active.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn try_get_scoped_identity() -> Option<String> {
+    SCOPED_IDENTITY.try_with(|v| v.clone()).ok().flatten()
+}
+
+/// On wasm there is no multithreaded request task; no scope is ever active.
+#[cfg(target_arch = "wasm32")]
+pub fn try_get_scoped_identity() -> Option<String> {
+    None
+}
+
+/// Run `fut` with the request-scoped acting identity set. Used by the HTTP
+/// middleware to make the caller's DID available to DB-layer NAC checks
+/// throughout the request task (survives `.await`, unlike the thread_local).
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn with_scoped_identity<F, T>(did: Option<String>, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    SCOPED_IDENTITY.scope(did, fut).await
+}
+
+/// On wasm, the scope is a no-op pass-through.
+#[cfg(target_arch = "wasm32")]
+pub async fn with_scoped_identity<F, T>(_did: Option<String>, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    fut.await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,5 +110,17 @@ mod tests {
         assert_eq!(get_current_identity(), Some("did:key:bob".to_string()));
         set_current_identity(None);
         assert_eq!(get_current_identity(), None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn scoped_identity_visible_inside_scope_only() {
+        assert_eq!(try_get_scoped_identity(), None);
+        let inside = with_scoped_identity(Some("did:key:carol".to_string()), async {
+            try_get_scoped_identity()
+        })
+        .await;
+        assert_eq!(inside, Some("did:key:carol".to_string()));
+        assert_eq!(try_get_scoped_identity(), None);
     }
 }
