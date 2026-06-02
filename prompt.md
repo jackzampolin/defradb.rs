@@ -8,31 +8,44 @@ Branch: `feat/p2p-tla-modeling` · Worktree adjacent to `defradb.rs/`
 > (TLC vs Apalache, Model A vs B for B3). Invoke it with the Skill tool
 > (`superpowers:brainstorming`). Capture the outcome back into this file first.
 
-> ### ✅ Brainstorm outcome (2026-06-02) — decisions locked, see `specs/DESIGN.md`
-> - **Tooling:** TLC first (explicit-state, good for liveness at N=2–3), written
->   Apalache-compatible; re-evaluate after the M1 spike if state explodes.
+> ### ✅ Brainstorm outcome (2026-06-02, rev 2 — assumptions verified) — see `specs/DESIGN.md`
+> - **Tooling:** TLC for everything (it's the liveness/convergence props that
+>   matter). Apalache is at most a *safety-only* scaling fallback — it does **not**
+>   check liveness (rev-1 "Apalache-compatible" claim corrected).
 > - **Scope this session:** M1 (convergence baseline) + M2 (the filter). M3 auth
 >   (`#1012 A2`) deferred to its own spec.
-> - **Grounded in defra-agent:** `AgentRequest` is `@branchable`; `agent_did` is
->   the recipient filter and is **immutable**; filtering is read-time today
->   (every agent replicates everyone — noisy). B3 = push the DID predicate down
->   to the subscription layer.
-> - **Key insight:** immutable `agent_did` ⇒ a doc never flips in/out of the
->   filter ⇒ defra-agent's filter is purely **document-grain**, splitting
->   correctness into two classes:
->   1. within a subscribed doc (branching + partial sync = `#2721`) → **Model A**
->      (full within-doc ancestry walk; the already-shipped Go fix);
->   2. across docs (relational FKs to other DIDs) → safe to drop, proven by
->      `INV_RelRefSafe` (relational FK ≠ CRDT merge dependency).
-> - **A-vs-B recommendation:** **Model A for defra-agent's `agent_did` filter;
->   Model B is needed only if/when field-level GraphSync filtering ships** for
->   resource-constrained peers. The field-grain branch of M2 characterizes that
->   trade-off (Model A defeats resource-savings there; Model B preserves it).
-> - **Invariants:** `INV_DagComplete`, `INV_Converge` (M1); `INV_SubsetConverge`,
->   `INV_RelRefSafe` (M2 doc grain); `INV_VisibleConverge` (M2 field grain / B).
+> - **Grounded in defra-agent (verified):** `AgentRequest` is `@branchable`,
+>   multi-writer (requester + claimer) so branching is real; `agent_did` is the
+>   sole P2P filter key; filtering is read-time today (every agent replicates
+>   everyone — noisy). B3 = push the DID predicate down to the subscription layer.
+> - **Two corrections from fresh review:**
+>   1. ✅ `INV_RelRefSafe` **CONFIRMED** — cross-request refs are scalar `String`
+>      FKs (not `@relation`); merge never dereferences them; dangling → query-time
+>      "absent." Dropping foreign-DID docs is safe.
+>   2. ⚠️ `agent_did` immutability **REFUTED as a guarantee** — production sets it
+>      only at create (write-once *by convention*), but **nothing enforces it**
+>      (no constraint, `@branchable`, a test mutates it). Rev-1's "clean Model A"
+>      story depended on an unenforced assumption.
+> - **Corrected framing — two orthogonal axes:** (1) ancestry fetch policy
+>   (Naive/FullWalkA/FilteredMergeB) → DAG-completeness; (2) filter-key stability
+>   (Immutable/Mutable) → whether a doc flips in/out of a peer's subscription
+>   mid-history → ownership/access hazard. defra-agent is WholeDoc scope (Axis 1 =
+>   Model A) but Mutable-key-by-default (Axis 2 live). GraphSync future is SubDoc
+>   scope (where Model B earns its keep).
+> - **Recommendation:** (1) **Model A** (full within-doc ancestry walk — already
+>   shipped). (2) Foreign-DID docs safe to drop (`INV_RelRefSafe`). (3) **Filtering
+>   on `agent_did` is safe only if the key is immutable, which the schema does NOT
+>   enforce → recommend a schema/ACP immutability constraint (or an ownership-
+>   handoff protocol)**; else split-ownership hazard (`INV_NoSplitOwnership`).
+>   (4) **Model B only if field-level GraphSync filtering ships.**
+> - **Invariants:** `INV_DagComplete`, `INV_Converge` (M1, ref-observer);
+>   `INV_SubsetConverge`, `INV_RelRefSafe`, `INV_ClaimUnique` (M2 WholeDoc/immutable);
+>   `INV_NoSplitOwnership` (M2 WholeDoc/mutable — expected to fail, mitigations
+>   close it); `INV_VisibleConverge` (M2 SubDoc / Model B). Env assumption:
+>   `ProviderAvailable`.
 > - **Layout:** `specs/M1Convergence.tla` spike → parametric `specs/DagReplication.tla`
->   (`Grain × FetchPolicy` via `.cfg`s) → `specs/README.md` (invariant→verdict map).
->   Confirm `specs/` placement with Jack before any merge to main.
+>   (`FilterScope × KeyMutability × FetchPolicy` via S1–S4 `.cfg`s) → `specs/README.md`
+>   (invariant→verdict map). Confirm `specs/` placement with Jack before merge to main.
 
 Goal: build **TLA+ models of DefraDB.rs's P2P protocols** so we can check the
 correctness-critical properties (convergence, DAG-completeness, auth) *before*
