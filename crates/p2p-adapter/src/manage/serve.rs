@@ -142,8 +142,13 @@ pub async fn build_manage_query_reply(
 /// The HTTP type carries a single best `address` and an `Option<u8>` status,
 /// whereas the wire type carries an `addresses` list and a typed
 /// `ReplicatorStatus`. An unknown status byte falls back to the default. The
-/// HTTP type does not round-trip a parseable timestamp, so `last_status_change`
-/// is left at the Go zero value (via `from_raw`).
+/// single `address` is lossy at the HTTP boundary (multi-address replicators
+/// collapse to one); that loss is upstream of this conversion.
+///
+/// The HTTP `last_status_change` is an RFC3339 string produced by
+/// `last_status_change_go_string()`; we parse it back into the wire type's
+/// `DateTime<Utc>` so the timestamp survives the round-trip. An absent or
+/// unparseable value leaves the Go zero default from `from_raw`.
 fn to_p2p_replicator_info(info: defra_http::router::ReplicatorInfo) -> p2p::ReplicatorInfo {
     let mut out = p2p::ReplicatorInfo::from_raw(
         info.id.unwrap_or_default(),
@@ -154,6 +159,13 @@ fn to_p2p_replicator_info(info: defra_http::router::ReplicatorInfo) -> p2p::Repl
         .status
         .map(|s| p2p::ReplicatorStatus::try_from(s).unwrap_or_default())
         .unwrap_or_default();
+    if let Some(ts) = info
+        .last_status_change
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+    {
+        out.last_status_change = ts.with_timezone(&chrono::Utc);
+    }
     out
 }
 
@@ -258,17 +270,19 @@ mod tests {
         }
     }
 
-    /// NAC mock that denies every permission check.
-    struct DenyNac;
+    /// NAC mock whose `check_permission` returns the wrapped bool; every other
+    /// method is unreachable in these tests. `BoolNac(false)` denies,
+    /// `BoolNac(true)` allows.
+    struct BoolNac(bool);
 
     #[async_trait]
-    impl db::NacManagerApi for DenyNac {
+    impl db::NacManagerApi for BoolNac {
         async fn check_permission(
             &self,
             _identity: &Did,
             _permission: acp::NodePermission,
         ) -> db_nac::Result<bool> {
-            Ok(false)
+            Ok(self.0)
         }
         async fn initialize(&self, _owner_identity: Option<&Did>) -> db_nac::Result<()> {
             unimplemented!()
@@ -330,76 +344,22 @@ mod tests {
         }
     }
 
-    /// NAC mock that allows every permission check.
-    struct AllowNac;
-
-    #[async_trait]
-    impl db::NacManagerApi for AllowNac {
-        async fn check_permission(
-            &self,
-            _identity: &Did,
-            _permission: acp::NodePermission,
-        ) -> db_nac::Result<bool> {
-            Ok(true)
-        }
-        async fn initialize(&self, _owner_identity: Option<&Did>) -> db_nac::Result<()> {
-            unimplemented!()
-        }
-        async fn status(&self) -> acp::nac::NacStatus {
-            unimplemented!()
-        }
-        async fn owner(&self) -> Option<Did> {
-            unimplemented!()
-        }
-        async fn is_enabled(&self) -> bool {
-            unimplemented!()
-        }
-        async fn is_admin(&self, _identity: &Did) -> db_nac::Result<bool> {
-            unimplemented!()
-        }
-        async fn is_admin_persisted(&self, _identity: &Did) -> db_nac::Result<bool> {
-            unimplemented!()
-        }
-        async fn is_owner(&self, _identity: &Did) -> bool {
-            unimplemented!()
-        }
-        async fn enable(&self, _owner: &Did) -> db_nac::Result<()> {
-            unimplemented!()
-        }
-        async fn disable(&self, _requestor: &Did) -> db_nac::Result<()> {
-            unimplemented!()
-        }
-        async fn re_enable(&self, _requestor: &Did) -> db_nac::Result<()> {
-            unimplemented!()
-        }
-        async fn purge(&self, _requestor: &Did) -> db_nac::Result<()> {
-            unimplemented!()
-        }
-        async fn add_admin(&self, _requestor: &Did, _target: &Did) -> db_nac::Result<bool> {
-            unimplemented!()
-        }
-        async fn remove_admin(&self, _requestor: &Did, _target: &Did) -> db_nac::Result<bool> {
-            unimplemented!()
-        }
-        async fn add_permission_grant(
-            &self,
-            _requestor: &Did,
-            _target: &Did,
-            _permission: acp::NodePermission,
-        ) -> db_nac::Result<bool> {
-            unimplemented!()
-        }
-        async fn remove_permission_grant(
-            &self,
-            _requestor: &Did,
-            _target: &Did,
-            _permission: acp::NodePermission,
-        ) -> db_nac::Result<bool> {
-            unimplemented!()
-        }
-        async fn info(&self) -> db_nac::NacInfo {
-            unimplemented!()
-        }
+    #[test]
+    fn replicator_timestamp_survives_round_trip() {
+        let http = ReplicatorInfo {
+            id: Some("12D3KooW-PEER".into()),
+            collections: vec!["c1".into()],
+            address: Some("/ip4/1.2.3.4/tcp/9000".into()),
+            status: Some(1),
+            last_status_change: Some("2024-03-14T15:09:26.535Z".into()),
+        };
+        let out = to_p2p_replicator_info(http);
+        assert_eq!(
+            out.last_status_change_go_string(),
+            "2024-03-14T15:09:26.535Z"
+        );
+        assert_eq!(out.status, p2p::ReplicatorStatus::Inactive);
+        assert_eq!(out.addresses_str(), &["/ip4/1.2.3.4/tcp/9000".to_string()]);
     }
 
     #[tokio::test]
@@ -412,7 +372,7 @@ mod tests {
             },
             token,
         );
-        let reply = build_manage_reply(&ops, &DenyNac, req).await;
+        let reply = build_manage_reply(&ops, &BoolNac(false), req).await;
         assert_eq!(reply.err_message(), Some("unauthorized"));
         assert!(
             ops.added_collections().is_empty(),
@@ -432,7 +392,7 @@ mod tests {
             },
             token,
         );
-        let reply = build_manage_reply(&ops, &AllowNac, req).await;
+        let reply = build_manage_reply(&ops, &BoolNac(true), req).await;
         assert!(reply.err_message().is_some());
         assert!(
             ops.added_collections().is_empty(),
@@ -450,7 +410,7 @@ mod tests {
             },
             token,
         );
-        let reply = build_manage_reply(&ops, &AllowNac, req).await;
+        let reply = build_manage_reply(&ops, &BoolNac(true), req).await;
         assert_eq!(reply.err_message(), None);
         assert_eq!(ops.added_collections(), vec!["c1".to_string()]);
     }
