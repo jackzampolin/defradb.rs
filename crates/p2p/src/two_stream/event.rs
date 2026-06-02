@@ -5,8 +5,8 @@ use libp2p::PeerId;
 
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, IdentityRequest,
-    IdentityResponse, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
-    QuerySEArtifactsRequest,
+    IdentityResponse, ManageQueryReply, ManageQueryRequest, ManageReply, ManageRequest,
+    PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest,
 };
 
 /// Event emitted by the two-stream handler.
@@ -71,6 +71,45 @@ pub enum TwoStreamEvent {
         peer_id: PeerId,
         reply: QuerySEArtifactsReply,
     },
+    /// Received a management request from a peer (mutating operation).
+    ManageRequest {
+        peer_id: PeerId,
+        request: ManageRequest,
+    },
+    /// Received a management reply from a peer (mutating operation ack/error).
+    ManageReply {
+        peer_id: PeerId,
+        reply: ManageReply,
+    },
+    /// Received a management query request from a peer (read-only operation).
+    ManageQueryRequest {
+        peer_id: PeerId,
+        request: ManageQueryRequest,
+    },
+    /// Received a management query reply from a peer (read-only operation result).
+    ManageQueryReply {
+        peer_id: PeerId,
+        reply: ManageQueryReply,
+    },
     /// Failed to decode an incoming message.
     DecodeError { peer_id: PeerId, error: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TwoStreamEvent;
+
+    #[test]
+    fn manage_variants_exist() {
+        fn _a(e: TwoStreamEvent) -> bool {
+            matches!(
+                e,
+                TwoStreamEvent::ManageRequest { .. }
+                    | TwoStreamEvent::ManageReply { .. }
+                    | TwoStreamEvent::ManageQueryRequest { .. }
+                    | TwoStreamEvent::ManageQueryReply { .. }
+            )
+        }
+        let _ = _a;
+    }
 }

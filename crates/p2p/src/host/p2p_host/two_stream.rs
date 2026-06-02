@@ -316,6 +316,24 @@ impl<S: Store> P2PHost<S> {
                     "Failed to decode two-stream message"
                 );
             }
+            TwoStreamEvent::ManageRequest { peer_id, .. } => {
+                debug!(peer_id = %peer_id, "Received ManageRequest; routing not yet implemented");
+            }
+            TwoStreamEvent::ManageReply { peer_id, .. } => {
+                debug!(peer_id = %peer_id, "Received ManageReply; routing not yet implemented");
+            }
+            TwoStreamEvent::ManageQueryRequest { peer_id, .. } => {
+                debug!(
+                    peer_id = %peer_id,
+                    "Received ManageQueryRequest; routing not yet implemented"
+                );
+            }
+            TwoStreamEvent::ManageQueryReply { peer_id, .. } => {
+                debug!(
+                    peer_id = %peer_id,
+                    "Received ManageQueryReply; routing not yet implemented"
+                );
+            }
         }
     }
 }

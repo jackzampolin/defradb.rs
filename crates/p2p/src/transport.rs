@@ -13,7 +13,8 @@ use cid::Cid;
 use crate::error::Result;
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, CarFetchRequest, DocSyncReply, DocSyncRequest,
-    PushLogBroadcast, PushLogReply, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
+    ManageQueryReply, ManageQueryRequest, ManageReply, ManageRequest, PushLogBroadcast,
+    PushLogReply, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
     QuerySEArtifactsRequest,
 };
 use crate::replicator::ReplicatorInfo;
@@ -215,6 +216,22 @@ pub enum TransportEvent<ResponseToken> {
     SEQueryReply {
         peer_id: PeerId,
         reply: QuerySEArtifactsReply,
+    },
+    ManageRequest {
+        peer_id: PeerId,
+        request: ManageRequest,
+    },
+    ManageReply {
+        peer_id: PeerId,
+        reply: ManageReply,
+    },
+    ManageQueryRequest {
+        peer_id: PeerId,
+        request: ManageQueryRequest,
+    },
+    ManageQueryReply {
+        peer_id: PeerId,
+        reply: ManageQueryReply,
     },
     Listening(PeerAddr),
 }
