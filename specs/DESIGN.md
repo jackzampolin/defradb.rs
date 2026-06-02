@@ -55,6 +55,29 @@ Two load-bearing claims were adversarially verified:
   suffices" story holds *only under an unenforced immutability assumption*, and
   the model must treat filter-key stability as an explicit variable, not a fact.
 
+**Rev 2.1 — two follow-up verifications on the immutability question:**
+- **No production reassignment exists (verified).** Every "move to another agent"
+  — delegation (`toolset/delegate.rs:77`), subagent spawn
+  (`tool_call_lifecycle/subagent_request.rs:88`), retry/supersede, failover
+  (re-claim under the *same* DID via CAS) — creates a **new request document**
+  linked by `caused_by_parent_request_id`/`retry_parent_request`, never an
+  in-place `agent_did` change. `override_child_agent_did` is a test fixture only.
+  ⇒ **Enforcing immutability breaks no real feature.** The S3 "immutability *or*
+  handoff" choice collapses to **immutability only** (handoff was only needed if
+  reassignment were real).
+- **DefraDB has no field-immutability mechanism today (verified).** No
+  write-once/`@immutable` constraint on document field *values* exists in
+  defradb.rs or Go (the `immutable.*` hits are schema-metadata IDs and the
+  `immutable.Option` library). So enforcement is real work with two shapes:
+  **(E1) a merge-time write-once field constraint** in defradb.rs (P2P-safe:
+  must reject an `agent_did`-changing delta at *merge*, since a peer can author
+  one); or **(E2) structural** — key the subscription filter on the
+  **content-addressed create-block** value of `agent_did` (immutable by
+  construction; no new DB feature, but trusts the create block as the source of
+  truth). The model abstracts over E1/E2 — it proves immutability is
+  necessary+sufficient; the mechanism is a downstream implementation choice for
+  p2p-control / defradb.rs.
+
 ---
 
 ## Corrected core framing: two orthogonal axes
@@ -144,9 +167,10 @@ The Naive / A / B difference is a single guard on the fetch action.
   (filter-matched + actionable) by two distinct DIDs in their respective local
   views. *Expected to FAIL under Mutable + naive subscription:* the old owner
   filters out the very reassignment block that would tell it to stop. The model
-  produces this counterexample, then checks that **(i) enforcing key
-  immutability** or **(ii) an explicit ownership-handoff** (old owner must
-  receive the reassignment before unsubscribing) closes it.
+  produces this counterexample, then shows **enforcing filter-key immutability
+  closes it**. (The ownership-handoff alternative is dropped: rev 2.1 verified no
+  production reassignment exists, so handoff solves a non-problem — immutability
+  is both safe and sufficient.)
 
 ### M2 — SubDoc filter (GraphSync future / resource-constrained peers)
 - Show *naive* field-level filtering re-creates a `#2721` hole *inside* a doc's
@@ -180,11 +204,17 @@ The Naive / A / B difference is a single guard on the fetch action.
 > relational FKs are scalar, not merge dependencies.
 >
 > **3. Filtering on `agent_did` is only safe if the filter key is immutable —
-> which the schema does NOT currently enforce.** Recommend adding a schema/ACP
-> immutability constraint on `agent_did` (cheap; production already treats it as
-> write-once), **or** an explicit ownership-handoff protocol. Without one,
-> filtered replication admits a split-ownership / lost-reassignment hazard
-> (`INV_NoSplitOwnership`) that unfiltered replication does not have.
+> which DefraDB does NOT currently enforce.** Verified: no production code
+> reassigns `agent_did` (all ownership moves are new docs), so immutability is
+> safe to enforce and breaks nothing. But DefraDB has **no field-immutability
+> mechanism today**, so this is real work — either **(E1)** a merge-time
+> write-once field constraint in defradb.rs (rejects an `agent_did`-changing
+> delta at merge, since a peer can author one), or **(E2)** key the subscription
+> filter on the **content-addressed create-block** value (immutable by
+> construction). Without one of these, filtered replication admits a
+> split-ownership hazard (`INV_NoSplitOwnership`) that unfiltered replication
+> does not have. *This enforcement is downstream implementation (defradb.rs /
+> defra-agent), not TLA+ work — the model proves it is necessary+sufficient.*
 >
 > **4. Model B is needed only if/when field-level GraphSync filtering ships** for
 > resource-constrained peers (SubDoc scope). Not required for the `agent_did`
