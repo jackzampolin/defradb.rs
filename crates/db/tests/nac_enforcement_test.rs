@@ -56,8 +56,7 @@ async fn owner_allowed_via_ambient_identity() {
     let db = DB::new(MemoryStore::new()).unwrap();
     db.set_nac_manager(enabled_manager().await);
 
-    let guard =
-        defra_core::current_identity::scoped_current_identity(Some(OWNER_DID.to_string()));
+    let guard = defra_core::current_identity::scoped_current_identity(Some(OWNER_DID.to_string()));
     db.check_node_access(None, NodePermission::DocumentUpdate)
         .await
         .expect("owner must be allowed via ambient thread-local identity");
