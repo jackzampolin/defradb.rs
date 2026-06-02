@@ -77,7 +77,6 @@ pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
 pub const MAX_CAR_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
 
 /// Maximum size for management messages.
-#[allow(dead_code)]
 pub const MAX_MANAGE_MSG_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 
 /// Read a length-prefixed CBOR message from a QUIC recv stream.
