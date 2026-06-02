@@ -13,9 +13,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
 use crate::message::{
-    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
-    PushLogReply, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
-    QuerySEArtifactsRequest,
+    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, ManageQueryReply,
+    ManageQueryRequest, ManageReply, ManageRequest, PushLogBroadcast, PushLogReply, PushLogRequest,
+    PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest,
 };
 use crate::replicator::ReplicatorInfo;
 use crate::topics::DefraTopic;
@@ -344,6 +344,50 @@ impl P2PTransport for IrohTransport {
         reply_msg: QuerySEArtifactsReply,
     ) -> Result<()> {
         self.send_command(|reply| IrohCommand::SendSEQueryResponse {
+            peer_id: peer_id.clone(),
+            reply_msg,
+            reply,
+        })
+        .await
+    }
+
+    async fn send_manage_request(&self, peer_id: &PeerId, req: ManageRequest) -> Result<()> {
+        self.send_command(|reply| IrohCommand::SendManageRequest {
+            peer_id: peer_id.clone(),
+            request: req,
+            reply,
+        })
+        .await
+    }
+
+    async fn send_manage_response(&self, peer_id: &PeerId, reply_msg: ManageReply) -> Result<()> {
+        self.send_command(|reply| IrohCommand::SendManageResponse {
+            peer_id: peer_id.clone(),
+            reply_msg,
+            reply,
+        })
+        .await
+    }
+
+    async fn send_manage_query_request(
+        &self,
+        peer_id: &PeerId,
+        req: ManageQueryRequest,
+    ) -> Result<()> {
+        self.send_command(|reply| IrohCommand::SendManageQueryRequest {
+            peer_id: peer_id.clone(),
+            request: req,
+            reply,
+        })
+        .await
+    }
+
+    async fn send_manage_query_response(
+        &self,
+        peer_id: &PeerId,
+        reply_msg: ManageQueryReply,
+    ) -> Result<()> {
+        self.send_command(|reply| IrohCommand::SendManageQueryResponse {
             peer_id: peer_id.clone(),
             reply_msg,
             reply,

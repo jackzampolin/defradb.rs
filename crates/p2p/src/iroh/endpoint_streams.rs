@@ -430,6 +430,90 @@ async fn dispatch_stream(
                 warn!("Event channel closed, cannot emit SEQueryReply");
             }
         }
+        x if x == protocols::ALPN_MANAGE_REQ => {
+            let request: crate::message::ManageRequest =
+                protocols::read_message(recv, protocols::MAX_MANAGE_MSG_SIZE).await?;
+            verify_iroh_message(&request)?;
+            ensure_iroh_signed_sender(peer_id, request.sender_id.as_str())?;
+            debug!(
+                peer_id = %peer_id,
+                message_id = %request.message_id,
+                "Received manage request"
+            );
+            if event_tx
+                .send(TransportEvent::ManageRequest {
+                    peer_id: peer_id.clone(),
+                    request,
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit ManageRequest");
+            }
+        }
+        x if x == protocols::ALPN_MANAGE_RESP => {
+            let reply: crate::message::ManageReply =
+                protocols::read_message(recv, protocols::MAX_MANAGE_MSG_SIZE).await?;
+            verify_iroh_message(&reply)?;
+            ensure_iroh_signed_sender(peer_id, reply.sender_id.as_str())?;
+            debug!(
+                peer_id = %peer_id,
+                message_id = %reply.message_id,
+                "Received manage reply"
+            );
+            if event_tx
+                .send(TransportEvent::ManageReply {
+                    peer_id: peer_id.clone(),
+                    reply,
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit ManageReply");
+            }
+        }
+        x if x == protocols::ALPN_MANAGE_QUERY_REQ => {
+            let request: crate::message::ManageQueryRequest =
+                protocols::read_message(recv, protocols::MAX_MANAGE_MSG_SIZE).await?;
+            verify_iroh_message(&request)?;
+            ensure_iroh_signed_sender(peer_id, request.sender_id.as_str())?;
+            debug!(
+                peer_id = %peer_id,
+                message_id = %request.message_id,
+                "Received manage query request"
+            );
+            if event_tx
+                .send(TransportEvent::ManageQueryRequest {
+                    peer_id: peer_id.clone(),
+                    request,
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit ManageQueryRequest");
+            }
+        }
+        x if x == protocols::ALPN_MANAGE_QUERY_RESP => {
+            let reply: crate::message::ManageQueryReply =
+                protocols::read_message(recv, protocols::MAX_MANAGE_MSG_SIZE).await?;
+            verify_iroh_message(&reply)?;
+            ensure_iroh_signed_sender(peer_id, reply.sender_id.as_str())?;
+            debug!(
+                peer_id = %peer_id,
+                message_id = %reply.message_id,
+                "Received manage query reply"
+            );
+            if event_tx
+                .send(TransportEvent::ManageQueryReply {
+                    peer_id: peer_id.clone(),
+                    reply,
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit ManageQueryReply");
+            }
+        }
         _ => {
             debug!("Unknown ALPN: {:?}", String::from_utf8_lossy(alpn));
         }
