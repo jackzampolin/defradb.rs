@@ -112,3 +112,39 @@ requiring care: getting convergence right is non-trivial, and the relaxed
    a resource-constrained node needs to skip individual field-blocks inside a
    doc's DAG (runs 6-8). Its relaxed `INV_DagComplete` guard and the convergence
    subtlety in the Findings section above must be understood before implementing it.
+
+---
+
+## Management-Channel Auth Runs
+
+Design notes live in [Auth_DESIGN.md](Auth_DESIGN.md). These runs model the
+remote node-configuration gate for P2P collections, P2P replicators, DAC policy,
+and NAC relationships.
+
+```bash
+# RED: PeerID-only management entry point reaches executed with no actor token.
+./tools/tlc -metadir states/auth_red_peeronly -config MC_Auth_Red_PeerOnly.cfg MC_Auth_Red_PeerOnly.tla
+
+# RED: cached authorization admits a token after expiry/revocation.
+./tools/tlc -metadir states/auth_red_stale -config MC_Auth_Red_Stale.cfg MC_Auth_Red_Stale.tla
+
+# RED: token-only authorization ignores the mutation's required permission.
+./tools/tlc -metadir states/auth_red_wrongscope -config MC_Auth_Red_WrongScope.cfg MC_Auth_Red_WrongScope.tla
+
+# GREEN: strict actor-DID + current NAC permission gate.
+./tools/tlc -metadir states/auth_green -config MC_Auth_Green.cfg MC_Auth_Green.tla
+```
+
+| Invariant | Plain English | Verdict | Source note |
+|---|---|---|---|
+| `INV_NoMutationWithoutVerifiedActor` | no node-config mutation executes without a fresh signature-verified actor-DID; PeerID alone never authorizes | RED `MC_Auth_Red_PeerOnly`, GREEN `MC_Auth_Green` | HTTP `auth_middleware.rs` + `identity_extractor.rs`; Iroh `endpoint_streams.rs` is transport PeerID/signature, not actor-DID auth |
+| `INV_NoStaleReplay` | expired, revoked, invalid, absent, or replayed credentials cannot reach `authorized` | RED `MC_Auth_Red_Stale`, GREEN `MC_Auth_Green` | token freshness from `identity_extractor.rs`; current NAC check from `nac_guard.rs` |
+| `INV_PermissionScoped` | execution requires the exact node permission for that mutation, not just any valid token | RED `MC_Auth_Red_WrongScope`, GREEN `MC_Auth_Green` | `route_permissions.rs`; P2P, DAC, and NAC handlers repeat `require_permission` |
+| `INV_AllEntryPointsGated` | every mutating remote management entry point uses the actor-DID gate | GREEN `MC_Auth_Green` | HTTP P2P collection/replicator, DAC policy, and NAC relationship routes are gated; current Iroh sync streams are not modeled as node-config mutation entry points |
+
+Auth finding: no node-config mutation executes without a fresh, scope-correct,
+non-revoked actor-DID on the gated HTTP management paths. The source review did
+not find a current Iroh stream that mutates node configuration; if one is added,
+PeerID/transport signatures are insufficient and it must receive an actor-DID
+gate equivalent to the HTTP path. Embedded/direct adapter calls are internal or
+FFI-wrapped surfaces; exposing them to untrusted callers requires the same gate.
