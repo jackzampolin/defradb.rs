@@ -8,6 +8,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
+        self.db
+            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .await
+            .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
+
         let collection = self.get_collection_or_err(collection_name)?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
