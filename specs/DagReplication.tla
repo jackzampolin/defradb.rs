@@ -10,7 +10,10 @@ CONSTANTS
   OwnerWrite, CreateOwner, RelRef, FilterScope,
   KeyMutability,   \* "Immutable" | "Mutable" — documentation knob for the wrappers;
                    \* the actual behavioral difference is realized by the OwnerWrite data.
-  FetchPolicy
+  FetchPolicy,
+  FilteredBlocks   \* [Nodes -> SUBSET Blocks] — the blocks each node filters out
+                   \* under SubDoc field-grain filtering (Model B treats them as
+                   \* placeholder/skip nodes; Naive/Model A never set them non-empty).
 
 \* The set of documents present in the DAG (Doc : Blocks -> Docs).
 Docs == { Doc[b] : b \in Blocks }
@@ -74,6 +77,11 @@ Announce(m, n, h) ==
 FetchTarget(n, b) ==
   CASE FetchPolicy = "Naive"     -> b \in wanted[n]
     [] FetchPolicy = "FullWalkA" -> \E h \in wanted[n] : b = h \/ b \in AncestorsOf(h)
+    \* Model B anchors the walk on merged heads too, not just wanted: MergeB's relaxed
+    \* guard can merge a head before its non-filtered ancestors arrive (clearing wanted),
+    \* which would otherwise strand those visible ancestors. (Plain Merge's parent-guard
+    \* prevents this, so FullWalkA needs only wanted.)
+    [] FetchPolicy = "FilteredMergeB" -> \E h \in (wanted[n] \cup merged[n]) : (b = h \/ b \in AncestorsOf(h)) /\ b \notin FilteredBlocks[n]
 
 Fetch(n, b) ==
   /\ FetchTarget(n, b)
@@ -90,15 +98,29 @@ Merge(n, b) ==
   /\ wanted' = [wanted EXCEPT ![n] = @ \ {b}]
   /\ UNCHANGED have
 
+\* Model B: like Merge, but a parent requirement is satisfied if the parent is merged
+\* OR is filtered out by this node (treated as a placeholder/skip node). This relaxes
+\* the strict Parents-subseteq-merged guard of Merge, so INV_DagComplete no longer holds.
+MergeB(n, b) ==
+  /\ b \in have[n]
+  /\ b \notin merged[n]
+  /\ b \notin FilteredBlocks[n]
+  /\ \A p \in Parents[b] : p \in merged[n] \/ p \in FilteredBlocks[n]
+  /\ merged' = [merged EXCEPT ![n] = @ \cup {b}]
+  /\ wanted' = [wanted EXCEPT ![n] = @ \ {b}]
+  /\ UNCHANGED have
+
+MergeAction(n, b) == IF FetchPolicy = "FilteredMergeB" THEN MergeB(n, b) ELSE Merge(n, b)
+
 Next ==
   \/ \E m \in Nodes, n \in Nodes, h \in Heads  : Announce(m, n, h)
   \/ \E n \in Nodes, b \in Blocks : Fetch(n, b)
-  \/ \E n \in Nodes, b \in Blocks : Merge(n, b)
+  \/ \E n \in Nodes, b \in Blocks : MergeAction(n, b)
 
 Fairness ==
   /\ \A m \in Nodes, n \in Nodes, h \in Heads  : WF_vars(Announce(m, n, h))
   /\ \A n \in Nodes, b \in Blocks : WF_vars(Fetch(n, b))
-  /\ \A n \in Nodes, b \in Blocks : WF_vars(Merge(n, b))
+  /\ \A n \in Nodes, b \in Blocks : WF_vars(MergeAction(n, b))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -129,4 +151,12 @@ INV_RelRefSafe ==
 ActiveNodes(d) == { m \in Nodes : Subscribed(m, d) /\ \E b \in merged[m] : Doc[b] = d }
 ActionableOwners(d) == { DidOf[n] : n \in ActiveNodes(d) }
 INV_NoSplitOwnership == \A d \in Docs : Cardinality(ActionableOwners(d)) <= 1
+
+\* Blocks a node should converge on, EXCLUDING the ones it filters out (Model B target).
+VisibleBlocks(n) == SubBlocks(n) \ FilteredBlocks[n]
+INV_VisibleConverge == <>[](\A n \in Nodes : VisibleBlocks(n) \subseteq merged[n])
+
+\* Resource-savings check: a node never fetches a block it filters out. (Scenarios
+\* must keep FilteredBlocks[Creator] empty, since Init gives the Creator all blocks.)
+INV_NoFilteredFetch == \A n \in Nodes : \A b \in have[n] : b \notin FilteredBlocks[n]
 ====

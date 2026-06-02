@@ -39,5 +39,7 @@ InitS3 ==
   \* (Merge clears wanted), and the other nodes have not started one.
   /\ wanted = [n \in mcNodes |-> {}]
 
+mcFiltered == [n \in mcNodes |-> {}]
+
 SpecS3 == InitS3 /\ [][Next]_vars /\ Fairness
 ====

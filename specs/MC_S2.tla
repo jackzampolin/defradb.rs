@@ -13,4 +13,5 @@ mcHeads      == {"x1", "y0"}
 mcOwnerWrite == [b \in mcBlocks |-> "none"]        \* immutable: no owner rewrites
 mcCreateOwner == [d \in {"dX","dY"} |-> IF d = "dX" THEN "X" ELSE "Y"]
 mcRelRef     == [d \in {"dX","dY"} |-> IF d = "dX" THEN {"dY"} ELSE {}]
+mcFiltered   == [n \in mcNodes |-> {}]
 ====
