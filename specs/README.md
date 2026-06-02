@@ -1,8 +1,17 @@
 # B3 P2P Replication — TLA+ Specs
 
-Formal models for DefraDB.rs filtered P2P replication (defra-agent's B3 requirement).
-The design rationale, grounded facts, and full invariant derivations live in [DESIGN.md](DESIGN.md).
-This file is the operational guide: how to run TLC, what each run proves, and the recommendation.
+Formal models for DefraDB.rs P2P protocols. The B3 filtered-replication model (the
+first slice) leads; later slices model adjacent P2P concerns. Design rationale and
+grounded facts for B3 live in [DESIGN.md](DESIGN.md); each later slice has its own
+`*_DESIGN.md`. This file is the operational guide: how to run TLC, what each run proves.
+
+**Model families** (all under `specs/`, run with `./tools/tlc`):
+- **B3 filtered replication** — the eight runs below (`DESIGN.md`).
+- **DAG convergence** under partition/restart/eviction (`Convergence_DESIGN.md`) +
+  the Lean merge-algebra half under [`../proofs/`](../proofs/README.md).
+- **Multi-instance claim-uniqueness** (`Claim_DESIGN.md`).
+- **KMS key distribution** (`Kms_DESIGN.md`).
+- **Management-channel auth** (`Auth_DESIGN.md`).
 
 ---
 
@@ -148,3 +157,76 @@ not find a current Iroh stream that mutates node configuration; if one is added,
 PeerID/transport signatures are insufficient and it must receive an actor-DID
 gate equivalent to the HTTP path. Embedded/direct adapter calls are internal or
 FFI-wrapped surfaces; exposing them to untrusted callers requires the same gate.
+
+---
+
+## DAG Convergence Runs (partition / restart / eviction)
+
+Design notes in [Convergence_DESIGN.md](Convergence_DESIGN.md). Strengthens the B3
+fair-delivery model to **eventual connectivity** + bounded synced-CID eviction + node
+restart. The order-independence half (CRDT merge is a commutative monoid) is proved in
+Lean under [`../proofs/`](../proofs/README.md).
+
+```bash
+# GREEN: under eventual connectivity + fair head rediscovery, a partitioned node
+#        eventually receives and merges every accepted head history.
+./tools/tlc -metadir states/conv_eventual    -config MC_Conv_Eventual.cfg        MC_Conv_Eventual.tla
+# GREEN: same, with MaxSynced=1 FIFO eviction + one restart per node (hints cleared,
+#        durable merge state preserved).
+./tools/tlc -metadir states/conv_restart     -config MC_Conv_RestartEviction.cfg MC_Conv_RestartEviction.tla
+# RED: without head rediscovery, reconnected peers never learn missed heads → no convergence.
+./tools/tlc -metadir states/conv_norediscov  -config MC_Conv_NoHeadRediscovery.cfg MC_Conv_NoHeadRediscovery.tla
+```
+
+Convergence = (TLA+: delivery under eventual connectivity, above) × (Lean: merge is
+commutative/associative/idempotent, `proofs/lean/`). Neither half alone suffices.
+
+---
+
+## Multi-Instance Claim-Uniqueness Runs
+
+Design notes in [Claim_DESIGN.md](Claim_DESIGN.md). N agent instances sharing one
+`agent_did` claim a request via CRDT compare-and-swap. All target `MC_Claim_Common.tla`.
+
+```bash
+# GREEN: eventual claim-uniqueness (one winner in the merged state), unfiltered and filtered.
+./tools/tlc -metadir states/claim_u_e -config MC_Claim_Unfiltered_Eventual.cfg  MC_Claim_Common.tla
+./tools/tlc -metadir states/claim_f_e -config MC_Claim_Filtered_Eventual.cfg    MC_Claim_Common.tla
+# RED: execution-uniqueness FAILS — both instances start work after concurrent local CAS
+#      (a pre-existing CRDT-CAS property, NOT introduced by filtering; same filtered/unfiltered).
+./tools/tlc -metadir states/claim_u_x -config MC_Claim_Unfiltered_Execution.cfg MC_Claim_Common.tla
+./tools/tlc -metadir states/claim_f_x -config MC_Claim_Filtered_Execution.cfg   MC_Claim_Common.tla
+# RED: if filtering SPLITS same-DID instances into different replication sets, even
+#      eventual claim-uniqueness breaks.
+./tools/tlc -metadir states/claim_split -config MC_Claim_Split_Eventual.cfg     MC_Claim_Common.tla
+```
+
+Finding: filtering is **claim-neutral** as long as same-DID instances stay mutually
+replicating; CRDT-CAS does not guarantee execution-uniqueness; the filter partition
+MUST contain the full same-DID instance set.
+
+---
+
+## KMS Key-Distribution Runs
+
+Design notes in [Kms_DESIGN.md](Kms_DESIGN.md). Encryption-key gossip over pubsub
+(libp2p+iroh) with a recipient-bound ECIES envelope abstraction (a node can use an
+envelope iff it is the intended recipient; real ECIES math is an assumed boundary).
+
+```bash
+# GREEN: policy-gated distribution; authorized nodes get the key, others can't use the envelope.
+./tools/tlc -metadir states/kms_g   -config MC_Kms_Green.cfg              MC_Kms_Gossip.tla
+# GREEN: revocation/replay checked against authorization at response time.
+./tools/tlc -metadir states/kms_rrg -config MC_Kms_RevokeReplay_Green.cfg MC_Kms_Replay.tla
+# RED: no policy gate → unauthorized node obtains key (INV_OnlyAuthorizedHasKey).
+./tools/tlc -metadir states/kms_np  -config MC_Kms_NoPolicy_Red.cfg       MC_Kms_Gossip.tla
+# RED: ciphertext broadcast to a non-recipient (INV_OnlyIntendedRecipientDecrypts).
+./tools/tlc -metadir states/kms_bc  -config MC_Kms_BroadcastCiphertext_Red.cfg MC_Kms_Gossip.tla
+# RED: revoked node still obtains key (INV_RevokedCannotObtain).
+./tools/tlc -metadir states/kms_rv  -config MC_Kms_Revoke_Red.cfg         MC_Kms_Replay.tla
+# RED: replayed request grants key to a now-unauthorized node (INV_NoReplayGrant).
+./tools/tlc -metadir states/kms_rp  -config MC_Kms_Replay_Red.cfg         MC_Kms_Replay.tla
+```
+
+Finding: every authorized node eventually gets the key (under eventual connectivity); no
+unauthorized/revoked/replaying node obtains a usable key — modulo the ECIES recipient-binding assumption.
