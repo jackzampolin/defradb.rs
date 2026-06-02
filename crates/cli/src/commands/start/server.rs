@@ -168,6 +168,30 @@ impl Node {
 
         let nac_adapter = Self::setup_nac_manager(config, user_did.as_ref()).await?;
 
+        // Populate the manage-channel serve deps now that the controller and
+        // NAC manager exist; until this fires the event loop drops inbound
+        // manage requests rather than serving them unauthenticated.
+        if let (
+            Some(hooks),
+            Some(controller),
+            Some(correlator),
+            Some(query_correlator),
+            Some(nac),
+        ) = (
+            p2p_setup.manage_hooks.as_ref(),
+            p2p_setup.manage_controller.as_ref(),
+            p2p_setup.manage_correlator.as_ref(),
+            p2p_setup.manage_query_correlator.as_ref(),
+            nac_adapter.as_ref().map(|a| a.nac_manager()),
+        ) {
+            let _ = hooks.set(defra_p2p_adapter::manage::hooks::ManageHooks {
+                ops: controller.clone(),
+                nac,
+                correlator: correlator.clone(),
+                query_correlator: query_correlator.clone(),
+            });
+        }
+
         // Build + wire the KMS (mirrors crates/embedded/src/node.rs). The P2P
         // transport was created earlier; the NacDacPolicy needs document_acp +
         // NAC which exist here (PR #4778 ordering).

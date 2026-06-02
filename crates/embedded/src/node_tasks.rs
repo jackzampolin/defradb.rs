@@ -32,8 +32,10 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
     event_bus: Arc<dyn events::Bus>,
     handle: p2p::P2PHostHandle,
     se_correlator: p2p::SeQueryCorrelator,
+    manage_hooks: defra_p2p_adapter::manage::hooks::ManageHooksCell,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        use p2p::P2PTransport as _;
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
         while let Some(event) = events.recv().await {
             match &event {
@@ -100,6 +102,60 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
                     se_correlator.deliver(reply);
                     continue;
                 }
+                p2p::TransportEvent::ManageRequest { peer_id, request } => {
+                    if let Some(hooks) = manage_hooks.get() {
+                        let transport = p2p::Libp2pTransport::new(handle.clone());
+                        let mut reply = defra_p2p_adapter::manage::serve::build_manage_reply(
+                            hooks.ops.as_ref(),
+                            hooks.nac.as_ref(),
+                            request,
+                        )
+                        .await;
+                        if p2p::signing::sign_with_transport(&transport, &mut reply).is_ok() {
+                            if let Err(error) =
+                                transport.send_manage_response(&peer_id, reply).await
+                            {
+                                tracing::warn!(error = %error, "failed to send manage response");
+                            }
+                        }
+                    } else {
+                        tracing::debug!(%peer_id, "manage request before hooks ready; dropping");
+                    }
+                    continue;
+                }
+                p2p::TransportEvent::ManageQueryRequest { peer_id, request } => {
+                    if let Some(hooks) = manage_hooks.get() {
+                        let transport = p2p::Libp2pTransport::new(handle.clone());
+                        let mut reply = defra_p2p_adapter::manage::serve::build_manage_query_reply(
+                            hooks.ops.as_ref(),
+                            hooks.nac.as_ref(),
+                            request,
+                        )
+                        .await;
+                        if p2p::signing::sign_with_transport(&transport, &mut reply).is_ok() {
+                            if let Err(error) =
+                                transport.send_manage_query_response(&peer_id, reply).await
+                            {
+                                tracing::warn!(error = %error, "failed to send manage query response");
+                            }
+                        }
+                    } else {
+                        tracing::debug!(%peer_id, "manage query request before hooks ready; dropping");
+                    }
+                    continue;
+                }
+                p2p::TransportEvent::ManageReply { reply, .. } => {
+                    if let Some(hooks) = manage_hooks.get() {
+                        hooks.correlator.deliver(reply);
+                    }
+                    continue;
+                }
+                p2p::TransportEvent::ManageQueryReply { reply, .. } => {
+                    if let Some(hooks) = manage_hooks.get() {
+                        hooks.query_correlator.deliver(reply);
+                    }
+                    continue;
+                }
                 other => other,
             };
             if transport_event.requires_inline_ordering() {
@@ -132,6 +188,7 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
     event_bus: Arc<dyn events::Bus>,
     se_correlator: p2p::SeQueryCorrelator,
     se_transport: p2p::iroh::IrohTransport,
+    manage_hooks: defra_p2p_adapter::manage::hooks::ManageHooksCell,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
@@ -185,6 +242,59 @@ pub(crate) fn spawn_iroh_event_handler<B: blockstore::Blockstore + 'static>(
                     // Deliver inbound replies so the owner/querier transport's
                     // awaiting correlator slot resolves (#976).
                     se_correlator.deliver(reply);
+                    continue;
+                }
+                p2p::TransportEvent::ManageRequest { peer_id, request } => {
+                    if let Some(hooks) = manage_hooks.get() {
+                        let mut reply = defra_p2p_adapter::manage::serve::build_manage_reply(
+                            hooks.ops.as_ref(),
+                            hooks.nac.as_ref(),
+                            request,
+                        )
+                        .await;
+                        if p2p::signing::sign_with_transport(&se_transport, &mut reply).is_ok() {
+                            if let Err(error) =
+                                se_transport.send_manage_response(&peer_id, reply).await
+                            {
+                                tracing::warn!(error = %error, "failed to send manage response");
+                            }
+                        }
+                    } else {
+                        tracing::debug!(%peer_id, "manage request before hooks ready; dropping");
+                    }
+                    continue;
+                }
+                p2p::TransportEvent::ManageQueryRequest { peer_id, request } => {
+                    if let Some(hooks) = manage_hooks.get() {
+                        let mut reply = defra_p2p_adapter::manage::serve::build_manage_query_reply(
+                            hooks.ops.as_ref(),
+                            hooks.nac.as_ref(),
+                            request,
+                        )
+                        .await;
+                        if p2p::signing::sign_with_transport(&se_transport, &mut reply).is_ok() {
+                            if let Err(error) = se_transport
+                                .send_manage_query_response(&peer_id, reply)
+                                .await
+                            {
+                                tracing::warn!(error = %error, "failed to send manage query response");
+                            }
+                        }
+                    } else {
+                        tracing::debug!(%peer_id, "manage query request before hooks ready; dropping");
+                    }
+                    continue;
+                }
+                p2p::TransportEvent::ManageReply { reply, .. } => {
+                    if let Some(hooks) = manage_hooks.get() {
+                        hooks.correlator.deliver(reply);
+                    }
+                    continue;
+                }
+                p2p::TransportEvent::ManageQueryReply { reply, .. } => {
+                    if let Some(hooks) = manage_hooks.get() {
+                        hooks.query_correlator.deliver(reply);
+                    }
                     continue;
                 }
                 other => other,
