@@ -58,6 +58,18 @@ pub const SE_QUERY_REQUEST_PROTOCOL: &str = "/defradb/se_query_req/0.0.1";
 /// Go uses "se_query" as the channel name: `/defradb/se_query_resp/0.0.1`
 pub const SE_QUERY_RESPONSE_PROTOCOL: &str = "/defradb/se_query_resp/0.0.1";
 
+/// Management mutate request protocol ID.
+pub const MANAGE_REQUEST_PROTOCOL: &str = "/defradb/manage_req/0.0.1";
+
+/// Management mutate response protocol ID.
+pub const MANAGE_RESPONSE_PROTOCOL: &str = "/defradb/manage_resp/0.0.1";
+
+/// Management query request protocol ID.
+pub const MANAGE_QUERY_REQUEST_PROTOCOL: &str = "/defradb/manage_query_req/0.0.1";
+
+/// Management query response protocol ID.
+pub const MANAGE_QUERY_RESPONSE_PROTOCOL: &str = "/defradb/manage_query_resp/0.0.1";
+
 /// CAR (Content ARchive) request protocol ID.
 pub const CAR_REQUEST_PROTOCOL: &str = "/defradb/car_req/0.0.1";
 
@@ -92,6 +104,30 @@ pub fn se_query_request_protocol() -> StreamProtocol {
 #[cfg(feature = "libp2p-transport")]
 pub fn se_query_response_protocol() -> StreamProtocol {
     StreamProtocol::new(SE_QUERY_RESPONSE_PROTOCOL)
+}
+
+/// StreamProtocol for the management mutate request protocol.
+#[cfg(feature = "libp2p-transport")]
+pub fn manage_request_protocol() -> StreamProtocol {
+    StreamProtocol::new(MANAGE_REQUEST_PROTOCOL)
+}
+
+/// StreamProtocol for the management mutate response protocol.
+#[cfg(feature = "libp2p-transport")]
+pub fn manage_response_protocol() -> StreamProtocol {
+    StreamProtocol::new(MANAGE_RESPONSE_PROTOCOL)
+}
+
+/// StreamProtocol for the management query request protocol.
+#[cfg(feature = "libp2p-transport")]
+pub fn manage_query_request_protocol() -> StreamProtocol {
+    StreamProtocol::new(MANAGE_QUERY_REQUEST_PROTOCOL)
+}
+
+/// StreamProtocol for the management query response protocol.
+#[cfg(feature = "libp2p-transport")]
+pub fn manage_query_response_protocol() -> StreamProtocol {
+    StreamProtocol::new(MANAGE_QUERY_RESPONSE_PROTOCOL)
 }
 
 /// StreamProtocol for the CAR request protocol.

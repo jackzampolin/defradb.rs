@@ -32,6 +32,18 @@ pub const ALPN_SE_QUERY_REQ: &[u8] = b"/defra-iroh/se-query/0.1/req";
 /// ALPN for searchable encryption artifact query responses.
 pub const ALPN_SE_QUERY_RESP: &[u8] = b"/defra-iroh/se-query/0.1/resp";
 
+/// ALPN for management mutate requests.
+pub const ALPN_MANAGE_REQ: &[u8] = b"/defra-iroh/manage/0.1/req";
+
+/// ALPN for management mutate responses.
+pub const ALPN_MANAGE_RESP: &[u8] = b"/defra-iroh/manage/0.1/resp";
+
+/// ALPN for management query requests.
+pub const ALPN_MANAGE_QUERY_REQ: &[u8] = b"/defra-iroh/manage-query/0.1/req";
+
+/// ALPN for management query responses.
+pub const ALPN_MANAGE_QUERY_RESP: &[u8] = b"/defra-iroh/manage-query/0.1/resp";
+
 /// ALPN for two-stream push protocol.
 pub const ALPN_TWOSTREAM: &[u8] = b"/defra-iroh/twostream/0.1";
 
@@ -52,6 +64,10 @@ pub const ALL_ALPNS: &[&[u8]] = &[
     ALPN_SE_QUERY_RESP,
     ALPN_TWOSTREAM,
     ALPN_TWOSTREAM_RESP,
+    ALPN_MANAGE_REQ,
+    ALPN_MANAGE_RESP,
+    ALPN_MANAGE_QUERY_REQ,
+    ALPN_MANAGE_QUERY_RESP,
 ];
 
 /// Maximum size for general messages (matches libp2p default).
@@ -59,6 +75,10 @@ pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
 
 /// Maximum size for CAR block transfers (matches libp2p default).
 pub const MAX_CAR_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
+
+/// Maximum size for management messages.
+#[allow(dead_code)]
+pub const MAX_MANAGE_MSG_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 
 /// Read a length-prefixed CBOR message from a QUIC recv stream.
 ///
@@ -114,4 +134,21 @@ pub async fn write_message<T: serde::Serialize>(
         .map_err(|e| crate::error::Error::Codec(format!("failed to write payload: {}", e)))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manage_alpns_registered() {
+        for a in [
+            ALPN_MANAGE_REQ,
+            ALPN_MANAGE_RESP,
+            ALPN_MANAGE_QUERY_REQ,
+            ALPN_MANAGE_QUERY_RESP,
+        ] {
+            assert!(ALL_ALPNS.contains(&a));
+        }
+    }
 }
