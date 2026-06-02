@@ -85,6 +85,7 @@ pub(crate) mod lensed_fetcher;
 pub(crate) mod migration;
 // NAC extracted to standalone db-nac crate.
 pub(crate) use db_nac as nac;
+mod nac_guard;
 pub(crate) mod patch;
 pub mod schema_loader;
 pub mod txn;
