@@ -12,6 +12,7 @@ mod car;
 mod doc_sync;
 mod identity;
 mod inbound;
+mod manage;
 mod pushlog;
 mod se_query;
 
@@ -32,9 +33,10 @@ use libp2p::PeerId;
 use crate::message::{DocSyncReply, IdentityResponse, PushLogReply, PushLogRequest};
 use crate::protocol::{
     CAR_REQUEST_PROTOCOL, CAR_RESPONSE_PROTOCOL, IDENTITY_REQUEST_PROTOCOL,
-    IDENTITY_RESPONSE_PROTOCOL, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
-    SE_QUERY_REQUEST_PROTOCOL, SE_QUERY_RESPONSE_PROTOCOL, SE_REQUEST_PROTOCOL,
-    SE_RESPONSE_PROTOCOL,
+    IDENTITY_RESPONSE_PROTOCOL, MANAGE_QUERY_REQUEST_PROTOCOL, MANAGE_QUERY_RESPONSE_PROTOCOL,
+    MANAGE_REQUEST_PROTOCOL, MANAGE_RESPONSE_PROTOCOL, REP_REQUEST_PROTOCOL,
+    REP_RESPONSE_PROTOCOL, SE_QUERY_REQUEST_PROTOCOL, SE_QUERY_RESPONSE_PROTOCOL,
+    SE_REQUEST_PROTOCOL, SE_RESPONSE_PROTOCOL,
 };
 use crate::{error::Error, message::Message, Result};
 
@@ -169,6 +171,26 @@ impl TwoStreamHandler {
     /// Get the SE query response protocol.
     pub fn se_query_response_protocol() -> StreamProtocol {
         StreamProtocol::new(SE_QUERY_RESPONSE_PROTOCOL)
+    }
+
+    /// Get the management mutate request protocol.
+    pub fn manage_request_protocol() -> StreamProtocol {
+        StreamProtocol::new(MANAGE_REQUEST_PROTOCOL)
+    }
+
+    /// Get the management mutate response protocol.
+    pub fn manage_response_protocol() -> StreamProtocol {
+        StreamProtocol::new(MANAGE_RESPONSE_PROTOCOL)
+    }
+
+    /// Get the management query request protocol.
+    pub fn manage_query_request_protocol() -> StreamProtocol {
+        StreamProtocol::new(MANAGE_QUERY_REQUEST_PROTOCOL)
+    }
+
+    /// Get the management query response protocol.
+    pub fn manage_query_response_protocol() -> StreamProtocol {
+        StreamProtocol::new(MANAGE_QUERY_RESPONSE_PROTOCOL)
     }
 
     /// Get the CAR request protocol.
