@@ -434,18 +434,12 @@ impl Server {
         let state_for_middleware = state.clone();
         let mut router = create_router_with_state(state);
 
-        // Global auth middleware: enforces route-level permissions before handlers run.
-        // Applied via route_layer so MatchedPath is available (routing has completed).
+        // Global auth middleware: enforces route-level permissions before handlers
+        // run, and binds the caller's identity to the request task for DB-layer
+        // NAC checks. Applied via route_layer so MatchedPath is available.
         router = router.route_layer(axum::middleware::from_fn_with_state(
             state_for_middleware,
             crate::auth_middleware::auth_middleware,
-        ));
-
-        // Request-scoped acting identity: binds the caller's DID to the request
-        // task so DB-layer NAC checks on REST paths resolve who is acting.
-        // Outer of the auth middleware so the scope covers the whole request.
-        router = router.layer(axum::middleware::from_fn(
-            crate::identity_scope::scope_identity,
         ));
 
         // Apply global body limit (0 = unlimited)

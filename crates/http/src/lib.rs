@@ -86,7 +86,6 @@ pub mod auth_middleware;
 pub mod error;
 pub mod handlers;
 pub mod identity_extractor;
-pub mod identity_scope;
 pub mod nac_guard;
 pub mod query_context;
 pub mod route_permissions;
