@@ -75,51 +75,57 @@ Components (following the SE pattern at each layer):
   drop at `:434`. Each arm **only decodes → verifies signature → emits a
   `TransportEvent`** (it does *not* serve or correlate inline — that happens in
   the runtime handler, exactly like SE query).
-- **Serve + correlate in the assembly layer:** the request handler lives in
-  `crates/db-merge/src/manage/serve.rs` (mirroring `db-merge/src/se/serve.rs`),
-  wired into the runtime event loop (`crates/embedded/src/node_tasks.rs`,
-  `crates/cli/.../server_p2p.rs`). It runs auth/NAC (A2), dispatches to the
-  **existing** coordinator/transport ops, **signs the reply**
-  (`sign_with_transport`, like `se/serve.rs:46`), and sends it. Reply correlation
-  (`ManageCorrelator::deliver`) also happens in the runtime handler.
+- **Serve in `crates/p2p-adapter`:** the request handler
+  (`p2p-adapter/src/manage/serve.rs`) verifies the actor token, checks NAC, and
+  dispatches through the **existing `defra_http::P2POperations` controller** —
+  the same transport-agnostic surface the HTTP handlers use, with
+  transport-correct address parsing/dial for **both libp2p and iroh**. The
+  runtime event loops (`embedded/src/node_tasks.rs`, `cli/.../server_p2p.rs`)
+  route the four events, **sign the reply** (`sign_with_transport`, once, at the
+  call site), send it, and `deliver` replies to the correlators.
 
-> **Revised after code review (see plan doc):** (1) replies are signed before
-> send — receivers verify; (2) the NAC adapter lives in the assembly layer
-> (`db-merge`), not `acp` — `p2p` already depends on `acp`, so `acp` importing
-> `p2p` would be a cycle; ops map directly to `acp::NodePermission` (no p2p-local
-> permission enum); (3) `PeerRemove` and `DocumentList` are deferred — the
-> transport has no `disconnect` primitive and per-document subscriptions have no
-> listable backing state.
+> **Revised twice after code review (see plan doc). Net architecture:**
+> (1) replies are signed before send — receivers verify; (2) **reuse existing
+> seams** — auth via the object-safe `db::NacManagerApi::check_permission`
+> (already held next to the p2p host; no new adapter), ops via the
+> `defra_http::P2POperations` controller (already implemented transport-correctly
+> in `p2p-adapter` for libp2p + iroh; no inline `parse_multiaddr`, which would
+> break iroh — the primary target); (3) the serve handler lives in `p2p-adapter`
+> (deps `db` + `defra-http` + `p2p` + `acp`, plus `identity`), **`db-merge` is
+> untouched**; (4) ops map directly to `acp::NodePermission` (no p2p-local
+> permission enum); (5) `PeerRemove` and `DocumentList` deferred.
 
 ## A1/A3 — Verb set, dispatch & permission mapping
 
 `manage` (mutate) → `ManageMutateOp`:
 
-| Op | Coordinator/transport call | `acp::NodePermission` |
+| Op | `P2POperations` call | `acp::NodePermission` |
 |---|---|---|
-| `ReplicatorAdd{addresses, collection_ids}` | `dial` each addr → `create_replicator` | `P2pReplicatorAdd` |
-| `ReplicatorDelete{peer_id, collection_ids?}` | `delete_replicator` / `remove_replicator_collections` | `P2pReplicatorDelete` |
-| `CollectionAdd{ids}` | `subscribe_collection` | `P2pCollectionAdd` |
-| `CollectionRemove{ids}` | `unsubscribe_collection` | `P2pCollectionDelete` |
-| `DocumentAdd{ids}` | `subscribe_document` | `P2pDocumentAdd` |
-| `DocumentRemove{ids}` | `unsubscribe_document` | `P2pDocumentDelete` |
-| `PeerConnect{address}` (A3) | parse multiaddr → `dial` | `P2pPeerConnect` |
+| `ReplicatorAdd{addresses, collection_ids}` | `add_replicator(collection_ids, addr, [], actor_did)` | `P2pReplicatorAdd` |
+| `ReplicatorDelete{addresses, collection_ids}` | `remove_replicator(collection_ids, addr)` | `P2pReplicatorDelete` |
+| `CollectionAdd{ids}` | `add_collections(ids)` | `P2pCollectionAdd` |
+| `CollectionRemove{ids}` | `remove_collections(ids)` | `P2pCollectionDelete` |
+| `DocumentAdd{docs}` | `add_documents(docs)` | `P2pDocumentAdd` |
+| `DocumentRemove{docs}` | `remove_documents(docs)` | `P2pDocumentDelete` |
+| `PeerConnect{address}` (A3) | `connect_peer(address)` | `P2pPeerConnect` |
 | ~~`PeerRemove`~~ **(deferred)** | needs `P2PTransport::disconnect` (absent) | — |
 
 `manage_query` (read) → `ManageQueryOp`:
 
-| Op | Coordinator call | `acp::NodePermission` | Reply payload |
+| Op | `P2POperations` call | `acp::NodePermission` | Reply payload |
 |---|---|---|---|
-| `ReplicatorList` | `list_replicators` | `P2pReplicatorList` | `Vec<ReplicatorInfo>` |
-| `CollectionList` | `get_subscribed_collections` | `P2pCollectionList` | `Vec<String>` |
+| `ReplicatorList` | `get_replicators()` | `P2pReplicatorList` | `Vec<ReplicatorInfo>` |
+| `CollectionList` | `get_collections()` | `P2pCollectionList` | `Vec<String>` |
 | ~~`DocumentList`~~ **(deferred)** | no listable doc-subscription state | — | — |
 
 Notes:
 
 - These are the **exact same `acp::NodePermission::P2p*` variants** the HTTP routes
-  map to (`crates/http/src/route_permissions.rs`). One permission vocabulary, two
-  transports. `p2p` already depends on `acp`, so `op.permission()` returns
-  `acp::NodePermission` directly — no p2p-local permission enum.
+  map to (`crates/http/src/route_permissions.rs`) — and the **same
+  `P2POperations` controller** those routes dispatch through. One permission
+  vocabulary, one ops surface, two transports. `p2p` already depends on `acp`, so
+  `op.permission()` returns `acp::NodePermission` directly — no p2p-local
+  permission enum.
 - **`PeerRemove` deferred:** `P2PTransport` exposes `dial` but no `disconnect`
   primitive; adding one touches the trait + libp2p + iroh + the test mock. Ship
   `PeerConnect`; track `PeerRemove` + the disconnect primitive as a follow-up.
@@ -162,36 +168,27 @@ Per-request flow (transport layer steps 1–2; serve-handler steps 3–7):
    X cannot be replayed at node Y; the window is bounded. The caller knows the
    target PeerID because it is dialing that specific peer, so it mints the token
    for that audience.
-5. **Authorize:** `nac.check_permission(&actor_did, op.permission())?`.
-6. **Execute:** dispatch to the existing coordinator/transport op.
-7. **Reply:** build `ManageReply`/`ManageQueryReply` (Ok payload or `Err`
-   message), **sign it** (`sign_with_transport`), and send. NAC denial returns a
-   clean `unauthorized` error reply, never a panic.
+5. **Authorize:** `nac.check_permission(&actor_did, op.permission())?` via
+   `db::NacManagerApi` *(serve handler)*.
+6. **Execute:** dispatch through the `defra_http::P2POperations` controller
+   (transport-correct for libp2p + iroh) *(serve handler)*.
+7. **Reply:** `build_manage_reply` returns `ManageReply`/`ManageQueryReply`
+   (Ok payload or `Err` message, unsigned); the runtime wiring **signs it once**
+   (`sign_with_transport`) and sends. NAC denial returns a clean `unauthorized`
+   reply, never a panic.
 
-### Wiring NAC (no HTTP refactor, no dependency cycle)
+### Wiring NAC (no HTTP refactor, no new adapter)
 
 HTTP keeps its existing `auth_middleware` → `require_permission` →
-`check_permission` path untouched. The **serve handler lives in `crates/db-merge`**
-(which already depends on `acp`, `identity`, and `p2p`), so it calls the
-transport-agnostic core primitive `NodeACP::check_permission` directly. The NAC
-engine is generic over its store, so it is erased behind a small object-safe
-trait defined **in `db-merge`** (not `p2p`, not `acp`), injected as
-`Arc<dyn ManageAccessCheck>` — mirroring how handlers are injected elsewhere:
-
-```rust
-// crates/db-merge/src/manage/access.rs
-#[async_trait]
-trait ManageAccessCheck: Send + Sync {
-    async fn check(&self, actor: &Did, perm: acp::NodePermission) -> Result<bool, String>;
-}
-// blanket impl over NodeACP<S>, constructed at node assembly time.
-```
-
-The adapter is **not** in `acp` — `crates/p2p` already depends on `acp`
-(`p2p/Cargo.toml:19`), so an `acp → p2p` import would be a cycle. When NAC is
-disabled the underlying `check_permission` returns `Ok(true)` (parity with
-today). This is the #633 co-design seam: NAC enforcement becomes a service-layer
-invariant reachable from any transport, while HTTP enforcement stays as-is.
+`check_permission` path untouched. The serve handler (in `p2p-adapter`) calls the
+**already-existing object-safe** `db::NacManagerApi::check_permission(&Did,
+NodePermission) -> Result<bool>` (`crates/db-nac/src/lib.rs:72,77`), which the
+node already holds as `Arc<dyn NacManagerApi>` next to the p2p host. No new NAC
+trait or adapter is built — an earlier draft's `ManageAccessCheck`/`NacAccess<S>`
+was both redundant (this API exists) and unbuildable (the node never exposes a
+bare `NodeACP<S>`). When NAC is disabled `check_permission` returns `Ok(true)`
+(parity). This is the #633 co-design seam: NAC enforcement is reachable from any
+transport via the same `NacManagerApi`, while HTTP enforcement stays as-is.
 
 ## Hardening (port the Go fixes, not the bugs)
 
@@ -252,11 +249,15 @@ Mirrors how SE / p2p are tested today.
 - `crates/p2p/src/host/{libp2p_transport.rs,p2p_host/two_stream.rs}` — libp2p
   send impls + event mapping.
 - `crates/p2p/src/error.rs` — `Error::Unauthorized`.
-- `crates/db-merge/src/manage/{auth.rs,access.rs,serve.rs}` — token verification,
-  `ManageAccessCheck` + NAC adapter, serve handlers.
+- `crates/p2p-adapter/src/manage/{auth.rs,serve.rs,client.rs}` (+ `Cargo.toml`
+  adds `identity`) — token verification, serve handlers dispatching through
+  `P2POperations` + `db::NacManagerApi`, and the `ManageClient` requester.
 - `crates/embedded/src/{node_p2p.rs,node_tasks.rs}`, `crates/cli/.../server_p2p.rs`
-  — construct correlators + NAC access; route the four manage events; requester API.
+  — construct correlators; thread the existing controller + NAC handle; route the
+  four manage events (sign reply once at the call site).
 - `tools/integration-test/tests/p2p*` — new `management` module.
+- **Untouched:** `crates/db-merge`, `crates/http`, the `P2PTransport`/coordinator
+  op signatures.
 
 ## Out of scope
 
