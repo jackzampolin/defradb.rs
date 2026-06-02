@@ -19,6 +19,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::AsyncReadExt;
+use libp2p::Stream;
+
 use libp2p::StreamProtocol;
 use libp2p_stream as stream;
 use parking_lot::Mutex;
@@ -229,6 +232,36 @@ impl TwoStreamHandler {
     pub fn error_reply(request: &PushLogRequest, error: &str) -> PushLogReply {
         PushLogReply::error(&request.message_id, error)
     }
+}
+
+/// Read a bounded, timed CBOR message from a stream.
+///
+/// Reads at most `max_msg_size` bytes within `stream_read_timeout`, then
+/// deserializes the buffer as CBOR into `T`.
+pub(super) async fn read_cbor_message<T>(
+    peer_id: PeerId,
+    mut stream: Stream,
+    max_msg_size: u64,
+    stream_read_timeout: std::time::Duration,
+    label: &'static str,
+) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let mut buf = Vec::new();
+    tokio::time::timeout(
+        stream_read_timeout,
+        (&mut stream).take(max_msg_size).read_to_end(&mut buf),
+    )
+    .await
+    .map_err(|_| {
+        tracing::warn!(peer_id = %peer_id, "SE query stream read timed out");
+        Error::CborDeserialization(format!("{label} stream read timed out"))
+    })?
+    .map_err(|e| Error::CborDeserialization(format!("failed to read {label}: {e}")))?;
+
+    serde_cbor::from_slice(&buf)
+        .map_err(|e| Error::CborDeserialization(format!("failed to decode {label}: {e}")))
 }
 
 #[cfg(test)]
