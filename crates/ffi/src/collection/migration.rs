@@ -53,7 +53,7 @@ pub unsafe extern "C" fn set_migration(
 
             // Register the migration with the lens store
             let transform_id = database
-                .set_migration(lens_config)
+                .set_migration(lens_config, None)
                 .await
                 .map_err(|e| format!("failed to set migration: {}", e))?;
 
@@ -113,7 +113,7 @@ pub unsafe extern "C" fn set_migration_in_txn(
 
             // Register the migration within the transaction
             let transform_id = registry
-                .set_migration_in_txn(&txn_str, lens_config)
+                .set_migration_in_txn(&txn_str, lens_config, None)
                 .await
                 .map_err(|e| format!("failed to set migration in txn: {}", e))?;
 

@@ -111,7 +111,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
         collection_name: &str,
         patch: &str,
     ) -> anyhow::Result<CollectionVersion> {
-        db::DB::patch_collection(&self.database, collection_name, patch)
+        db::DB::patch_collection(&self.database, collection_name, patch, None)
             .await
             .map_err(anyhow::Error::new)
     }
@@ -123,7 +123,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
     }
 
     async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
-        db::DB::set_migration(&self.database, config)
+        db::DB::set_migration(&self.database, config, None)
             .await
             .map_err(anyhow::Error::new)
     }

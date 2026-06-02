@@ -162,7 +162,13 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// Processes deletes in chunks to avoid building a massive uncommitted write set.
     #[instrument(skip(self), fields(collection = %name), name = "db.truncate_collection")]
-    pub async fn truncate_collection(&self, name: &str) -> Result<()> {
+    pub async fn truncate_collection(
+        &self,
+        name: &str,
+        identity: Option<&identity::Did>,
+    ) -> Result<()> {
+        self.check_node_access(identity, acp::nac::NodePermission::CollectionTruncate)
+            .await?;
         let collection = self
             .get_collection(name)?
             .ok_or_else(|| Error::CollectionNotFound(name.to_string()))?;

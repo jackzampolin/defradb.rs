@@ -28,7 +28,7 @@ impl<S: Store + 'static> LensOperations for LensAdapter<S> {
 
         let transform_id = self
             .database
-            .set_migration(lens_config)
+            .set_migration(lens_config, None)
             .await
             .map_err(|e| format!("failed to set migration: {}", e))?;
 
@@ -52,7 +52,7 @@ impl<S: Store + 'static> LensOperations for LensAdapter<S> {
         {
             let transform_id = self
                 .database
-                .set_migration(lens_config)
+                .set_migration(lens_config, None)
                 .await
                 .map_err(|e| format!("failed to set migration: {}", e))?;
             return Ok(transform_id.to_string());

@@ -34,7 +34,7 @@ impl<S: Store + 'static> CollectionManagementOperations for CollectionManagement
     ) -> Result<serde_json::Value, String> {
         let version = self
             .database
-            .patch_collection(collection_name, patch)
+            .patch_collection(collection_name, patch, None)
             .await
             .map_err(|e| format!("{}", e))?;
 
@@ -51,7 +51,7 @@ impl<S: Store + 'static> CollectionManagementOperations for CollectionManagement
 
     async fn truncate_collection(&self, name: &str) -> Result<(), String> {
         self.database
-            .truncate_collection(name)
+            .truncate_collection(name, None)
             .await
             .map_err(|e| format!("{}", e))
     }

@@ -23,6 +23,12 @@ impl<S: Store> DB<S> {
         if !nac.is_enabled().await {
             return Ok(());
         }
+        // Node's own identity always has access (mirrors Go db_nac.go).
+        if let Some(node) = self.node_did() {
+            if identity == Some(&node) {
+                return Ok(());
+            }
+        }
         let did = identity.cloned().unwrap_or_else(Did::wildcard);
         let allowed = nac
             .check_permission(&did, permission)

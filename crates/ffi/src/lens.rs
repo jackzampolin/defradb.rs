@@ -64,7 +64,7 @@ pub unsafe extern "C" fn lens_add(
 
                 let result = rt.block_on(async {
                     let transform_id = database
-                        .set_migration(full_config)
+                        .set_migration(full_config, None)
                         .await
                         .map_err(|e| format!("failed to set migration: {}", e))?;
                     Ok::<String, String>(transform_id.to_string())
