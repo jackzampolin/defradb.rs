@@ -2,31 +2,45 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an authenticated P2P request/response management channel so a peer can add/remove/list replicators, P2P collections, P2P documents, and connect/remove peers over the P2P wire — gated by the existing NAC engine keyed on the remote actor's DID.
+**Goal:** Add an authenticated P2P request/response management channel so a peer can add/remove/list replicators, add/remove/list P2P collections, add/remove P2P documents, and connect peers over the P2P wire — gated by the existing NAC engine keyed on the remote actor's DID.
 
-**Architecture:** Two request/response channels mirroring the existing SE store/query split — `manage` (mutations → ack reply) and `manage_query` (reads → typed reply). Each is implemented exactly like the SE query two-stream protocol (`two_stream/handler/se_query.rs`) plus the parallel iroh ALPN dispatch, reusing `signing::sign_message`/`verify_message`, the bounded+timed `read_cbor_message`, and a `SeQueryCorrelator`-shaped correlator. Authorization is enforced in the request handler: verify the per-message host-key signature, verify an embedded actor JWT, bind it to this node via `aud`, then call `nac.check_permission(actor_did, perm)` before dispatching to the existing coordinator method. HTTP `/p2p/*` is left untouched.
+**Architecture:** Two request/response channels mirroring the existing SE store/query split — `manage` (mutations → ack reply) and `manage_query` (reads → typed reply). The transport layers (`two_stream` handler, iroh `endpoint_streams`, the `P2PTransport` trait) only **decode → verify signature → emit a `TransportEvent`** — exactly like SE query. The **serve + correlate + authorize logic lives in the assembly layer** (`crates/db-merge/src/manage/serve.rs`, mirroring `crates/db-merge/src/se/serve.rs`), wired into the runtime event loop (`crates/embedded/src/node_tasks.rs`, `crates/cli/.../server_p2p.rs`). The serve handler verifies an embedded actor JWT (audience-bound to the serving node's PeerID), calls `NodeACP::check_permission`, dispatches to the existing coordinator/transport operations, signs the reply, and sends it. HTTP `/p2p/*` is left untouched.
 
-**Tech Stack:** Rust, libp2p (`Stream`/stream-control), iroh (ALPN/QUIC), `serde`/`serde_cbor` (Go-byte-compatible CBOR), `tokio`, the `identity` crate (JWT `TokenIdentity`/`verify_auth_token`), the `acp` crate (`NodeACP::check_permission`, `NodePermission`).
+**Tech Stack:** Rust, libp2p (`Stream`/stream-control), iroh (ALPN/QUIC), `serde`/`serde_cbor`, `tokio`, `identity` crate (`from_token`/`verify_auth_token`/`new_token`, `TokenIdentity`), `acp` crate (`NodeACP::check_permission`, `acp::NodePermission`).
 
-**Reference templates (read these first):**
-- Message types: `crates/p2p/src/message/se.rs`
-- Two-stream req/resp handler: `crates/p2p/src/two_stream/handler/se_query.rs`
-- Reply correlation: `crates/p2p/src/se_correlator.rs`
-- iroh ALPNs + wire helpers: `crates/p2p/src/iroh/protocols.rs`
-- libp2p protocol IDs: `crates/p2p/src/protocol.rs`
-- Signing/verify (already clears sig before signing): `crates/p2p/src/signing.rs`
-- NAC check: `crates/acp/src/nac/node_acp/operations.rs:17`
-- Coordinator methods: `crates/p2p/src/sync/coordinator/{replicators,subscriptions}.rs`
+### Scope decisions (from review)
 
-**Design spec:** `docs/superpowers/specs/2026-06-02-p2p-management-channel-design.md`
+- **Defer `PeerRemove`.** `P2PTransport` has no `disconnect` primitive (only `dial`); adding one touches the trait + libp2p + iroh + the test mock. Ship `PeerConnect` (uses existing dial); track `PeerRemove` as a follow-up. (A3's `AddPeer` ships; `RemovePeer` defers.)
+- **Defer `DocumentList`.** `subscribe_document`/`unsubscribe_document` only delegate to the broadcaster (`subscriptions.rs:62-64,95-97`); there is no listable document-subscription set (unlike collections). Building enumeration storage around per-document P2P invests in the non-scaling primitive #1013 replaces. Ship `DocumentAdd`/`DocumentRemove` (one-line broadcaster delegations, existing perms); track `DocumentList` + the scalable replacement under #1013.
+- **No Go wire-compat for the op payload.** There is no Go management channel, so only the shared `MetaData` envelope (`Version`/`MessageID`/`SenderID`/`Pubkey`/`Signature`/`ErrMessage`) is Go-byte-compatible (it must be, for the shared `signing`/`verify_message` path). The `Manage*Op` enums are Rust-native and versioned via the `Version` field. Tests assert CBOR self-round-trip, not Go fixtures.
 
-**Sequencing rule (critical):** The channel must never be registered/dialed-handled without the A2 auth check (Phase 4) in place. Phases 1–3 build inert message/transport plumbing that is not wired into the host event loop until Phase 4 adds the authorizing handler. Do not enable dispatch arms to mutate state before Phase 4.
+### Verified facts this plan depends on (file:line)
+
+- `crates/p2p/Cargo.toml:19` — **p2p already depends on acp**, so p2p may name `acp::NodePermission` directly. (No p2p-local permission enum.)
+- `crates/db-merge/Cargo.toml:58-61` — db-merge depends on `identity`, `acp`, `p2p`. The serve handler + NAC check + token verification all live here. (Avoids the p2p↔acp cycle: the adapter is NOT in acp.)
+- SE serve template: `crates/db-merge/src/se/serve.rs:25-54` — builds reply, `p2p::signing::sign_with_transport(transport, &mut reply)` (line 46), `transport.send_se_query_response(&peer_id, reply)` (line 51).
+- Runtime routing template: `crates/embedded/src/node_tasks.rs:88-101` — `TransportEvent::SEQueryRequest{peer_id,request}` → serve; `TransportEvent::SEQueryReply{reply,..}` → `se_correlator.deliver(reply)`. Iroh variants at `node_tasks.rs:172,184`. CLI variants at `crates/cli/.../server_p2p.rs:377,387,794,804`.
+- Correlator construction: `crates/embedded/src/node_p2p.rs:171-179` — `SeQueryCorrelator::new()`, cloned into transport + event loop.
+- `P2PTransport` trait (`crates/p2p/src/transport.rs`): methods have **default impls returning `Error::Transport("not supported")`** (e.g. `send_se_query_request` :370, `send_se_query_response` :380). `dial(&self, &PeerId, Vec<PeerAddr>)` :254. `create_replicator(&self, &PeerId, Vec<String>)` :403 (**no addresses**). `PeerId` is a **string newtype** (`PeerId::new(String)`, `as_str()`) at :23-57 — NOT `libp2p::PeerId`, no `.parse()`.
+- Coordinator: `create_replicator(&self, &PeerId, Vec<String>, auto_subscribe: bool)` (`replicators.rs:13`). HTTP derives the peer/addr from the request multiaddr; the manage handler mirrors the HTTP facade flow (`crates/http/src/handlers/p2p/replicators.rs:109-141`, `peers.rs:140-157` `connect_peer(&multiaddr_str)`).
+- `acp::NodePermission` P2p variants (`crates/acp/src/nac/permission.rs:114-157`): `P2pPeerConnect`, `P2pReplicatorAdd/Delete/List`, `P2pCollectionAdd/Delete/List`, `P2pDocumentAdd/Delete/List` (+ others). Exported as `acp::NodePermission` (`crates/acp/src/lib.rs:65`).
+- `acp`: `NodeACP::check_permission(&self, &Did, NodePermission) -> Result<bool>` (`node_acp/operations.rs:17`) — returns `Ok(true)` when NAC disabled.
+- identity: `from_token(&[u8]) -> Result<TokenIdentity>` (`token/mod.rs:263`), `verify_auth_token(&TokenIdentity, expected_audience: &str) -> Result<()>` (`:179`), DID via the `Identity` trait `fn did(&self) -> Result<Did>` (`token/identity.rs`), `new_token(&I, Duration, audience: Option<String>, authorized_account: Option<String>) -> Result<Vec<u8>>` (`:66`).
+- `p2p::error::Error` (`crates/p2p/src/error.rs`): has `Transport`, `InvalidPeerId(String)` (:113), `InvalidMultiaddress(String)` (:77); **no `Unauthorized`, no `Other`, no `InvalidInput`** — add `Unauthorized` (Task 4.1), reuse the others.
+
+### Sequencing invariant (softened per review)
+
+**No state-mutating consumer is wired before the authorizing serve handler exists.** Phases 0–3 add message types, ALPNs/protocol registration, and transport handlers that only decode → verify → **emit an event with no consumer** (events fall through / are logged). The serve handler that mutates node state is added in Phase 5 and only *enabled* (routed to) in Phase 6. Accepting an ALPN and emitting an unconsumed event is side-effect-free, so adding the four ALPNs to `ALL_ALPNS` in Phase 2 is safe.
+
+**Reference templates to read first:** `message/se.rs`, `two_stream/handler/se_query.rs`, `se_correlator.rs`, `db-merge/src/se/serve.rs`, `embedded/src/node_tasks.rs`, `embedded/src/node_p2p.rs`, `iroh/protocols.rs`, `iroh/endpoint_streams.rs`, `signing.rs`.
+
+**Design spec:** `docs/superpowers/specs/2026-06-02-p2p-management-channel-design.md`.
 
 ---
 
-## Phase 0: Scaffolding & constants
+## Phase 0: Message types
 
-### Task 0.1: Add op enums and the message module skeleton
+### Task 0.1: Op enums + `permission()` mapping
 
 **Files:**
 - Create: `crates/p2p/src/message/manage.rs`
@@ -34,7 +48,7 @@
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/p2p/src/message/manage.rs` with only the enums + a round-trip test:
+Create `crates/p2p/src/message/manage.rs`:
 
 ```rust
 //! P2P management channel message types.
@@ -42,18 +56,22 @@ Create `crates/p2p/src/message/manage.rs` with only the enums + a round-trip tes
 //! Two request/reply pairs mirroring `se.rs` (the SE store/query split):
 //! `Manage*` (mutations, ack reply) and `ManageQuery*` (reads, typed reply).
 //! The `MetaData` envelope fields are byte-identical to `se.rs` for the shared
-//! `signing`/`verify_message` path.
+//! `signing`/`verify_message` path. The op enums are Rust-native (no Go peer).
 
 use serde::{Deserialize, Serialize};
 
-/// Mutating management operations (ack reply). One channel, request-side enum.
+use super::cbor::{nullable_bytes, optional_bytes};
+use super::traits::Message;
+use crate::protocol::MESSAGE_VERSION;
+
+/// Mutating management operations (ack reply).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "Kind")]
 pub enum ManageMutateOp {
+    /// Install a replicator. `addresses` are dialable multiaddrs (peer ID embedded),
+    /// mirroring the HTTP replicator-add request.
     ReplicatorAdd {
-        #[serde(rename = "PeerID")]
-        peer_id: String,
-        #[serde(rename = "Addresses", default)]
+        #[serde(rename = "Addresses")]
         addresses: Vec<String>,
         #[serde(rename = "CollectionIDs", default)]
         collection_ids: Vec<String>,
@@ -80,13 +98,10 @@ pub enum ManageMutateOp {
         #[serde(rename = "DocIDs")]
         doc_ids: Vec<String>,
     },
+    /// Connect to a peer by multiaddr (mirrors HTTP connect_peer).
     PeerConnect {
-        #[serde(rename = "Addresses")]
-        addresses: Vec<String>,
-    },
-    PeerRemove {
-        #[serde(rename = "PeerID")]
-        peer_id: String,
+        #[serde(rename = "Address")]
+        address: String,
     },
 }
 
@@ -96,7 +111,6 @@ pub enum ManageMutateOp {
 pub enum ManageQueryOp {
     ReplicatorList,
     CollectionList,
-    DocumentList,
 }
 
 /// Typed payload for a `manage_query` reply.
@@ -113,33 +127,53 @@ pub enum ManageQueryResult {
     },
 }
 
+impl ManageMutateOp {
+    /// The NAC permission required to perform this op.
+    pub fn permission(&self) -> acp::NodePermission {
+        use acp::NodePermission as P;
+        match self {
+            ManageMutateOp::ReplicatorAdd { .. } => P::P2pReplicatorAdd,
+            ManageMutateOp::ReplicatorDelete { .. } => P::P2pReplicatorDelete,
+            ManageMutateOp::CollectionAdd { .. } => P::P2pCollectionAdd,
+            ManageMutateOp::CollectionRemove { .. } => P::P2pCollectionDelete,
+            ManageMutateOp::DocumentAdd { .. } => P::P2pDocumentAdd,
+            ManageMutateOp::DocumentRemove { .. } => P::P2pDocumentDelete,
+            ManageMutateOp::PeerConnect { .. } => P::P2pPeerConnect,
+        }
+    }
+}
+
+impl ManageQueryOp {
+    pub fn permission(&self) -> acp::NodePermission {
+        use acp::NodePermission as P;
+        match self {
+            ManageQueryOp::ReplicatorList => P::P2pReplicatorList,
+            ManageQueryOp::CollectionList => P::P2pCollectionList,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn mutate_op_cbor_round_trip() {
-        let op = ManageMutateOp::CollectionAdd {
-            collection_ids: vec!["bafy-col".to_string()],
-        };
+        let op = ManageMutateOp::CollectionAdd { collection_ids: vec!["bafy-col".into()] };
         let bytes = serde_cbor::to_vec(&op).unwrap();
-        let back: ManageMutateOp = serde_cbor::from_slice(&bytes).unwrap();
-        assert_eq!(op, back);
+        assert_eq!(op, serde_cbor::from_slice::<ManageMutateOp>(&bytes).unwrap());
     }
 
     #[test]
-    fn query_result_strings_round_trip() {
-        let r = ManageQueryResult::Strings {
-            values: vec!["a".into(), "b".into()],
-        };
-        let bytes = serde_cbor::to_vec(&r).unwrap();
-        let back: ManageQueryResult = serde_cbor::from_slice(&bytes).unwrap();
-        assert_eq!(r, back);
+    fn ops_map_to_expected_permissions() {
+        use acp::NodePermission as P;
+        assert_eq!(ManageMutateOp::DocumentAdd { doc_ids: vec![] }.permission(), P::P2pDocumentAdd);
+        assert_eq!(ManageQueryOp::ReplicatorList.permission(), P::P2pReplicatorList);
     }
 }
 ```
 
-Add to `crates/p2p/src/message/mod.rs` (mirror the existing `mod se;` + `pub use` lines):
+Add to `crates/p2p/src/message/mod.rs` (mirror the `mod se;` block):
 
 ```rust
 mod manage;
@@ -149,9 +183,11 @@ pub use manage::{ManageMutateOp, ManageQueryOp, ManageQueryResult};
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p p2p message::manage`
-Expected: COMPILE FAIL initially if `mod manage` not yet wired, then PASS once both files exist. (The enums have no dependencies beyond `ReplicatorInfo`, which already exists in `crate::replicator`.)
+Expected: FAIL/compile-error until the file + mod wiring exist; then PASS.
 
-- [ ] **Step 3: (covered by Step 1 — files contain the implementation)**
+> If `acp::NodePermission` is not in scope, confirm the import path with `grep -n "NodePermission" crates/acp/src/lib.rs` and use `acp::NodePermission`. Confirm the exact variant idents with `grep -n "P2p" crates/acp/src/nac/permission.rs`.
+
+- [ ] **Step 3:** (implementation is in Step 1's file).
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -162,79 +198,68 @@ Expected: PASS (2 tests).
 
 ```bash
 git add crates/p2p/src/message/manage.rs crates/p2p/src/message/mod.rs
-git commit -m "feat(p2p): manage channel op enums + query result type"
+git commit -m "feat(p2p): manage op enums + acp permission mapping"
 ```
 
----
-
-## Phase 1: Message envelopes
-
-### Task 1.1: `ManageRequest` / `ManageReply` (mutate channel)
+### Task 0.2: Request/reply envelopes (both channels)
 
 **Files:**
-- Modify: `crates/p2p/src/message/manage.rs`
+- Modify: `crates/p2p/src/message/manage.rs`, `crates/p2p/src/message/mod.rs`
 
-These four structs are mechanically identical to `QuerySEArtifactsRequest`/`QuerySEArtifactsReply` in `se.rs` — same `MetaData` fields (`Version`, `MessageID`, `SenderID`, `Pubkey`, `Signature`, `ErrMessage`), same serde attributes (`nullable_bytes`/`optional_bytes`), same `impl Message`. **Copy the `se.rs` template exactly; change only the type names and the payload fields.** Add an `auth_token` field (the actor JWT) and an `op` field.
+The four envelope structs are mechanically identical to `QuerySEArtifactsRequest` / `PushSEArtifactsReply` in `se.rs` (same six `MetaData` fields, same serde attrs, same `impl Message`). **Copy the `se.rs` template; change names and payload fields.** Requests add `auth_token: Vec<u8>` (the actor JWT) + `op`. The mutate reply is ack-only (`PushSEArtifactsReply` shape). The query reply carries `result: Option<ManageQueryResult>`.
 
 - [ ] **Step 1: Write the failing test**
-
-Add to the `tests` module in `manage.rs`:
 
 ```rust
 use super::super::traits::Message;
 
 #[test]
-fn manage_request_round_trip_and_message_trait() {
+fn manage_request_round_trip_and_trait() {
     let mut req = ManageRequest::new(
         ManageMutateOp::DocumentRemove { doc_ids: vec!["bae-1".into()] },
-        b"jwt-bytes".to_vec(),
+        b"jwt".to_vec(),
     );
-    req.set_message_id("mid-1".to_string());
-    let bytes = serde_cbor::to_vec(&req).unwrap();
-    let back: ManageRequest = serde_cbor::from_slice(&bytes).unwrap();
+    req.set_message_id("mid-1".into());
+    let back: ManageRequest = serde_cbor::from_slice(&serde_cbor::to_vec(&req).unwrap()).unwrap();
     assert_eq!(back.message_id(), "mid-1");
-    assert_eq!(back.auth_token, b"jwt-bytes");
+    assert_eq!(back.auth_token, b"jwt");
     assert!(matches!(back.op, ManageMutateOp::DocumentRemove { .. }));
 }
 
 #[test]
 fn manage_reply_success_and_error() {
-    let ok = ManageReply::success("mid-1");
-    assert_eq!(ok.message_id(), "mid-1");
-    assert!(ok.err_message().is_none());
-    let err = ManageReply::error("mid-1", "unauthorized");
-    assert_eq!(err.err_message(), Some("unauthorized"));
+    assert!(ManageReply::success("mid-1").err_message().is_none());
+    assert_eq!(ManageReply::error("mid-1", "unauthorized").err_message(), Some("unauthorized"));
+}
+
+#[test]
+fn manage_query_reply_carries_typed_result() {
+    let reply = ManageQueryReply::success("mid-q", ManageQueryResult::Strings { values: vec!["c1".into()] });
+    let back: ManageQueryReply = serde_cbor::from_slice(&serde_cbor::to_vec(&reply).unwrap()).unwrap();
+    match back.result {
+        Some(ManageQueryResult::Strings { values }) => assert_eq!(values, vec!["c1"]),
+        other => panic!("unexpected: {other:?}"),
+    }
 }
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p p2p message::manage::tests::manage_request_round_trip_and_message_trait`
-Expected: FAIL — `ManageRequest` not found.
+Run: `cargo test -p p2p message::manage::tests::manage_request_round_trip_and_trait`
+Expected: FAIL — types not found.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Add `ManageRequest` and `ManageReply` to `manage.rs`, copying the `QuerySEArtifactsRequest`/`PushSEArtifactsReply` shape from `se.rs`. Use these imports at the top of the file (matching `se.rs`):
-
-```rust
-use super::cbor::{nullable_bytes, optional_bytes};
-use super::traits::Message;
-use crate::protocol::MESSAGE_VERSION;
-```
-
-`ManageRequest` = the six `QuerySEArtifactsRequest` MetaData fields, then:
+Add `ManageRequest` (six MetaData fields from `QuerySEArtifactsRequest` + the two new fields):
 
 ```rust
     /// Signed actor auth token (JWT). Authenticates the actor DID for NAC.
     #[serde(rename = "AuthToken", with = "serde_bytes")]
     pub auth_token: Vec<u8>,
-
     /// The management operation to perform.
     #[serde(rename = "Op")]
     pub op: ManageMutateOp,
 ```
-
-with:
 
 ```rust
 impl ManageRequest {
@@ -253,89 +278,22 @@ impl ManageRequest {
 }
 ```
 
-`ManageReply` = exactly `PushSEArtifactsReply` (ack-only: the six MetaData fields, no payload), renamed, with the same `success(request_message_id)` / `error(request_message_id, err)` constructors. Copy both `impl Message` blocks verbatim from `se.rs`, changing only the type name.
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cargo test -p p2p message::manage`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add crates/p2p/src/message/manage.rs
-git commit -m "feat(p2p): ManageRequest/ManageReply envelopes"
-```
-
-### Task 1.2: `ManageQueryRequest` / `ManageQueryReply` (query channel)
-
-**Files:**
-- Modify: `crates/p2p/src/message/manage.rs`, `crates/p2p/src/message/mod.rs`
-
-- [ ] **Step 1: Write the failing test**
-
-```rust
-#[test]
-fn manage_query_reply_carries_typed_result() {
-    let reply = ManageQueryReply::success(
-        "mid-q",
-        ManageQueryResult::Strings { values: vec!["c1".into()] },
-    );
-    let bytes = serde_cbor::to_vec(&reply).unwrap();
-    let back: ManageQueryReply = serde_cbor::from_slice(&bytes).unwrap();
-    assert_eq!(back.message_id(), "mid-q");
-    match back.result {
-        Some(ManageQueryResult::Strings { values }) => assert_eq!(values, vec!["c1"]),
-        other => panic!("unexpected result: {other:?}"),
-    }
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p p2p message::manage::tests::manage_query_reply_carries_typed_result`
-Expected: FAIL — `ManageQueryRequest`/`ManageQueryReply` not found.
-
-- [ ] **Step 3: Write minimal implementation**
-
-Add `ManageQueryRequest` (six MetaData fields + `auth_token` + `op: ManageQueryOp`, mirroring Task 1.1's request) and `ManageQueryReply` (six MetaData fields + an optional payload):
-
-```rust
-    /// Typed result payload (absent on error).
-    #[serde(rename = "Result", skip_serializing_if = "Option::is_none", default)]
-    pub result: Option<ManageQueryResult>,
-```
-
-Constructors:
+`ManageReply` = `PushSEArtifactsReply` (ack-only) renamed, with `success(id)`/`error(id, err)`. `ManageQueryRequest` = `ManageRequest` shape but `op: ManageQueryOp`. `ManageQueryReply` = the six fields + `result: Option<ManageQueryResult>` with:
 
 ```rust
 impl ManageQueryReply {
     pub fn success(request_message_id: &str, result: ManageQueryResult) -> Self {
-        Self {
-            version: MESSAGE_VERSION.to_string(),
-            message_id: request_message_id.to_string(),
-            sender_id: String::new(),
-            pubkey: Vec::new(),
-            signature: None,
-            err_message: None,
-            result: Some(result),
-        }
+        Self { version: MESSAGE_VERSION.to_string(), message_id: request_message_id.to_string(),
+            sender_id: String::new(), pubkey: Vec::new(), signature: None, err_message: None, result: Some(result) }
     }
     pub fn error(request_message_id: &str, err: &str) -> Self {
-        Self {
-            version: MESSAGE_VERSION.to_string(),
-            message_id: request_message_id.to_string(),
-            sender_id: String::new(),
-            pubkey: Vec::new(),
-            signature: None,
-            err_message: Some(err.to_string()),
-            result: None,
-        }
+        Self { version: MESSAGE_VERSION.to_string(), message_id: request_message_id.to_string(),
+            sender_id: String::new(), pubkey: Vec::new(), signature: None, err_message: Some(err.to_string()), result: None }
     }
 }
 ```
 
-Copy the `impl Message` blocks for both (verbatim from `se.rs`, renamed). Export all four types from `mod.rs`:
+Copy the `impl Message` block from `se.rs` for all four (verbatim, renamed). The `result` field uses `#[serde(rename = "Result", skip_serializing_if = "Option::is_none", default)]`. Export from `mod.rs`:
 
 ```rust
 pub use manage::{ManageReply, ManageRequest, ManageQueryReply, ManageQueryRequest};
@@ -344,65 +302,59 @@ pub use manage::{ManageReply, ManageRequest, ManageQueryReply, ManageQueryReques
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p p2p message::manage`
-Expected: PASS (all manage tests).
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add crates/p2p/src/message/manage.rs crates/p2p/src/message/mod.rs
-git commit -m "feat(p2p): ManageQueryRequest/ManageQueryReply envelopes"
+git commit -m "feat(p2p): manage request/reply envelopes"
 ```
 
 ---
 
-## Phase 2: Protocol IDs, ALPNs, correlators
+## Phase 1: Protocol IDs & ALPNs
 
-### Task 2.1: libp2p protocol IDs + iroh ALPNs
+### Task 1.1: libp2p protocol IDs + iroh ALPNs + size cap
 
 **Files:**
-- Modify: `crates/p2p/src/protocol.rs`
-- Modify: `crates/p2p/src/iroh/protocols.rs`
+- Modify: `crates/p2p/src/protocol.rs`, `crates/p2p/src/iroh/protocols.rs`
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `crates/p2p/src/iroh/protocols.rs` tests (or a new `#[cfg(test)]` block):
+In `iroh/protocols.rs`:
 
 ```rust
-#[test]
-fn manage_alpns_are_registered() {
-    assert!(ALL_ALPNS.contains(&ALPN_MANAGE_REQ));
-    assert!(ALL_ALPNS.contains(&ALPN_MANAGE_RESP));
-    assert!(ALL_ALPNS.contains(&ALPN_MANAGE_QUERY_REQ));
-    assert!(ALL_ALPNS.contains(&ALPN_MANAGE_QUERY_RESP));
+#[cfg(test)]
+mod manage_alpn_tests {
+    use super::*;
+    #[test]
+    fn manage_alpns_registered() {
+        for a in [ALPN_MANAGE_REQ, ALPN_MANAGE_RESP, ALPN_MANAGE_QUERY_REQ, ALPN_MANAGE_QUERY_RESP] {
+            assert!(ALL_ALPNS.contains(&a));
+        }
+    }
 }
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p p2p manage_alpns_are_registered`
-Expected: FAIL — `ALPN_MANAGE_REQ` not found.
+Run: `cargo test -p p2p manage_alpns_registered`
+Expected: FAIL — consts not found.
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `iroh/protocols.rs`, add (mirroring the SE query ALPN pair at lines 29–33):
+`iroh/protocols.rs` (mirror SE query ALPNs at :29-33, append all four to `ALL_ALPNS`):
 
 ```rust
-/// ALPN for management mutate requests.
 pub const ALPN_MANAGE_REQ: &[u8] = b"/defra-iroh/manage/0.1/req";
-/// ALPN for management mutate responses.
 pub const ALPN_MANAGE_RESP: &[u8] = b"/defra-iroh/manage/0.1/resp";
-/// ALPN for management query requests.
 pub const ALPN_MANAGE_QUERY_REQ: &[u8] = b"/defra-iroh/manage-query/0.1/req";
-/// ALPN for management query responses.
 pub const ALPN_MANAGE_QUERY_RESP: &[u8] = b"/defra-iroh/manage-query/0.1/resp";
-
-/// Maximum size for management messages.
 pub const MAX_MANAGE_MSG_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 ```
 
-Append all four to the `ALL_ALPNS` array.
-
-In `protocol.rs`, add (mirroring `SE_QUERY_REQUEST_PROTOCOL` at lines 55–59):
+`protocol.rs` (mirror `SE_QUERY_REQUEST_PROTOCOL` at :55-59, plus any `StreamProtocol` helper fns):
 
 ```rust
 pub const MANAGE_REQUEST_PROTOCOL: &str = "/defradb/manage_req/0.0.1";
@@ -411,65 +363,52 @@ pub const MANAGE_QUERY_REQUEST_PROTOCOL: &str = "/defradb/manage_query_req/0.0.1
 pub const MANAGE_QUERY_RESPONSE_PROTOCOL: &str = "/defradb/manage_query_resp/0.0.1";
 ```
 
-If `protocol.rs` has `StreamProtocol` helper fns for the SE query protocols, add the four parallel helpers the same way.
-
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p p2p manage_alpns_are_registered`
+Run: `cargo test -p p2p manage_alpns_registered`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add crates/p2p/src/protocol.rs crates/p2p/src/iroh/protocols.rs
-git commit -m "feat(p2p): manage + manage_query protocol IDs and ALPNs"
+git commit -m "feat(p2p): manage protocol IDs, ALPNs, size cap"
 ```
 
-### Task 2.2: Reply correlators
+---
+
+## Phase 2: Correlators, events, transport-trait send methods
+
+### Task 2.1: Reply correlators
 
 **Files:**
 - Create: `crates/p2p/src/manage_correlator.rs`
 - Modify: `crates/p2p/src/lib.rs`
 
-The correlator is a verbatim copy of `se_correlator.rs` parameterized to the two manage reply types. Create two correlators (`ManageCorrelator` for `ManageReply`, `ManageQueryCorrelator` for `ManageQueryReply`) by copying `SeQueryCorrelator` and changing the reply type — or one generic correlator. Use the copy approach to match the existing per-type style.
+Verbatim copy of `se_correlator.rs` for each reply type.
 
-- [ ] **Step 1: Write the failing test**
-
-Copy the `se_correlator.rs` test module into `manage_correlator.rs`, swapping in `ManageReply::success(id)` (no doc_ids arg) as the reply constructor. Key test:
+- [ ] **Step 1: Write the failing test** — copy `se_correlator.rs`'s test module, using `ManageReply::success("msg-1")` (no doc_ids):
 
 ```rust
 #[tokio::test]
 async fn register_then_deliver_routes_reply() {
     let c = ManageCorrelator::new();
-    let mut pending = c.register("msg-1".to_string());
-    assert_eq!(c.in_flight(), 1);
+    let mut pending = c.register("msg-1".into());
     assert!(c.deliver(ManageReply::success("msg-1")));
-    assert_eq!(c.in_flight(), 0);
-    let got = pending.recv().await.expect("reply");
-    assert_eq!(got.message_id, "msg-1");
+    assert_eq!(pending.recv().await.unwrap().message_id, "msg-1");
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2:** Run `cargo test -p p2p manage_correlator` → FAIL.
 
-Run: `cargo test -p p2p manage_correlator`
-Expected: FAIL — module/type not found.
-
-- [ ] **Step 3: Write minimal implementation**
-
-Copy `se_correlator.rs` to `manage_correlator.rs`. Replace `QuerySEArtifactsReply` → `ManageReply`, `SeQueryCorrelator` → `ManageCorrelator`, `PendingSeQuery` → `PendingManage`, and the `deliver` keyed on `reply.message_id` (same field). Then add a second trio (`ManageQueryCorrelator`/`PendingManageQuery` over `ManageQueryReply`) in the same file. Register the module in `lib.rs`:
+- [ ] **Step 3:** Copy `se_correlator.rs` → `manage_correlator.rs`. Replace `QuerySEArtifactsReply`→`ManageReply`, `SeQueryCorrelator`→`ManageCorrelator`, `PendingSeQuery`→`PendingManage`. Add a parallel `ManageQueryCorrelator`/`PendingManageQuery` over `ManageQueryReply` in the same file. In `lib.rs` (mirror the `se_correlator` decl/export):
 
 ```rust
 mod manage_correlator;
 pub use manage_correlator::{ManageCorrelator, ManageQueryCorrelator};
 ```
 
-(Match how `se_correlator` is declared/exported in `lib.rs`.)
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cargo test -p p2p manage_correlator`
-Expected: PASS.
+- [ ] **Step 4:** Run `cargo test -p p2p manage_correlator` → PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -478,157 +417,138 @@ git add crates/p2p/src/manage_correlator.rs crates/p2p/src/lib.rs
 git commit -m "feat(p2p): manage reply correlators"
 ```
 
----
-
-## Phase 3: Transport handlers (libp2p two-stream + iroh)
-
-### Task 3.1: `TwoStreamEvent` variants for manage
+### Task 2.2: `TransportEvent` + `TwoStreamEvent` manage variants
 
 **Files:**
-- Modify: `crates/p2p/src/two_stream/event.rs`
+- Modify: `crates/p2p/src/transport.rs` (the `TransportEvent` enum), `crates/p2p/src/two_stream/event.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1:** Run `grep -rn "SEQueryRequest\|SEQueryReply" crates/p2p/src/transport.rs crates/p2p/src/two_stream/event.rs` to find both enums' SE variants.
 
-Add a compile-asserting test in `two_stream/event.rs`:
+- [ ] **Step 2: Write the failing test** in `two_stream/event.rs`:
 
 ```rust
 #[test]
-fn manage_event_variants_exist() {
-    fn _assert(e: TwoStreamEvent) -> bool {
-        matches!(
-            e,
-            TwoStreamEvent::ManageRequest { .. }
-                | TwoStreamEvent::ManageReply { .. }
-                | TwoStreamEvent::ManageQueryRequest { .. }
-                | TwoStreamEvent::ManageQueryReply { .. }
-        )
+fn manage_two_stream_variants_exist() {
+    fn _a(e: TwoStreamEvent) -> bool {
+        matches!(e, TwoStreamEvent::ManageRequest { .. } | TwoStreamEvent::ManageReply { .. }
+            | TwoStreamEvent::ManageQueryRequest { .. } | TwoStreamEvent::ManageQueryReply { .. })
     }
-    let _ = _assert;
+    let _ = _a;
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+Run: `cargo test -p p2p manage_two_stream_variants_exist` → FAIL.
 
-Run: `cargo test -p p2p two_stream::event::`
-Expected: FAIL — variants not found.
-
-- [ ] **Step 3: Write minimal implementation**
-
-Add to the `TwoStreamEvent` enum (mirror `SEQueryRequest`/`SEQueryReply`):
+- [ ] **Step 3: Write minimal implementation** — add the four variants to BOTH enums, mirroring `SEQueryRequest{peer_id, request}` / `SEQueryReply{peer_id, reply}` (use the exact `PeerId` type each enum uses — `TransportEvent` uses `crate::transport::PeerId`; `TwoStreamEvent` uses `libp2p::PeerId`):
 
 ```rust
-    ManageRequest { peer_id: libp2p::PeerId, request: crate::message::ManageRequest },
-    ManageReply { peer_id: libp2p::PeerId, reply: crate::message::ManageReply },
-    ManageQueryRequest { peer_id: libp2p::PeerId, request: crate::message::ManageQueryRequest },
-    ManageQueryReply { peer_id: libp2p::PeerId, reply: crate::message::ManageQueryReply },
+// transport.rs TransportEvent:
+ManageRequest { peer_id: PeerId, request: crate::message::ManageRequest },
+ManageReply { peer_id: PeerId, reply: crate::message::ManageReply },
+ManageQueryRequest { peer_id: PeerId, request: crate::message::ManageQueryRequest },
+ManageQueryReply { peer_id: PeerId, reply: crate::message::ManageQueryReply },
 ```
 
-(Match the exact `PeerId` import path used by the existing variants.)
+(and the `libp2p::PeerId` equivalents in `two_stream/event.rs`).
 
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cargo test -p p2p two_stream::event::`
-Expected: PASS.
+- [ ] **Step 4:** Run `cargo test -p p2p manage_two_stream_variants_exist` → PASS, `cargo build -p p2p` clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/p2p/src/two_stream/event.rs
-git commit -m "feat(p2p): TwoStreamEvent manage variants"
+git add crates/p2p/src/transport.rs crates/p2p/src/two_stream/event.rs
+git commit -m "feat(p2p): manage transport + two-stream event variants"
 ```
 
-### Task 3.2: libp2p two-stream handler methods
+### Task 2.3: `P2PTransport` trait send methods (default unsupported)
+
+**Files:**
+- Modify: `crates/p2p/src/transport.rs`
+
+- [ ] **Step 1: Write the failing test** — none needed beyond compile; the default impls are inert.
+
+- [ ] **Step 2:** Run `grep -n "fn send_se_query_request\|fn send_se_query_response" crates/p2p/src/transport.rs`.
+
+- [ ] **Step 3: Write minimal implementation** — add four trait methods mirroring `send_se_query_request`/`send_se_query_response` (default body returns `Err(Error::Transport("… not supported".into()))`):
+
+```rust
+async fn send_manage_request(&self, _peer_id: &PeerId, _req: crate::message::ManageRequest) -> Result<()> {
+    Err(crate::error::Error::Transport("send_manage_request is not supported on this transport".into()))
+}
+async fn send_manage_response(&self, _peer_id: &PeerId, _reply: crate::message::ManageReply) -> Result<()> {
+    Err(crate::error::Error::Transport("send_manage_response is not supported on this transport".into()))
+}
+async fn send_manage_query_request(&self, _peer_id: &PeerId, _req: crate::message::ManageQueryRequest) -> Result<()> {
+    Err(crate::error::Error::Transport("send_manage_query_request is not supported on this transport".into()))
+}
+async fn send_manage_query_response(&self, _peer_id: &PeerId, _reply: crate::message::ManageQueryReply) -> Result<()> {
+    Err(crate::error::Error::Transport("send_manage_query_response is not supported on this transport".into()))
+}
+```
+
+(The `RecordingTransport` test mock in `subscriptions.rs` inherits these defaults — no change needed there unless a test exercises them.)
+
+- [ ] **Step 4:** Run `cargo build -p p2p` → clean.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/p2p/src/transport.rs
+git commit -m "feat(p2p): P2PTransport manage send methods (default unsupported)"
+```
+
+---
+
+## Phase 3: Transport handlers (decode → verify → emit only)
+
+### Task 3.1: libp2p two-stream handler methods
 
 **Files:**
 - Create: `crates/p2p/src/two_stream/handler/manage.rs`
-- Modify: `crates/p2p/src/two_stream/handler/mod.rs` (or wherever `se_query` is declared)
+- Modify: `crates/p2p/src/two_stream/handler/mod.rs`
 
-This file is a direct copy of `two_stream/handler/se_query.rs` with the manage types. It provides, for **each** channel: `send_*_request_fire_and_forget`, `send_*_response`, `handle_*_request_stream`, `handle_*_response_stream`. The request must be signed before sending (the SE path signs upstream of this fire-and-forget call; for manage we sign in the host command path — Task 5.x). The handler verifies the per-message signature via `crate::verify_message` and bounds the read via the existing `read_cbor_message` helper.
+Direct copy of `two_stream/handler/se_query.rs` (read it). For each channel provide `send_*_request_fire_and_forget`, `send_*_response`, `handle_*_request_stream`, `handle_*_response_stream`. The handlers call `read_cbor_message` (already bounded by `max_msg_size` + timed out — the #4718 fix), then `crate::verify_message(&msg)?` + `ensure_transport_sender(&peer_id, &msg)?`, then emit the event. No serve logic here.
 
-- [ ] **Step 1: Write the failing test**
-
-Add an integration-style unit test at the bottom of `manage.rs` that exercises just the read/verify helper round-trip is deferred to Phase 6 (needs two live nodes). For this task, write a decode test:
+- [ ] **Step 1: Write the failing test** (decode round-trip; full flow is Phase 7):
 
 ```rust
 #[tokio::test]
-async fn manage_request_decodes_from_cbor() {
+async fn manage_request_decodes() {
     use crate::message::{ManageMutateOp, ManageRequest};
-    let req = ManageRequest::new(
-        ManageMutateOp::CollectionAdd { collection_ids: vec!["c1".into()] },
-        b"tok".to_vec(),
-    );
-    let bytes = serde_cbor::to_vec(&req).unwrap();
-    let back: ManageRequest = serde_cbor::from_slice(&bytes).unwrap();
+    let req = ManageRequest::new(ManageMutateOp::CollectionAdd { collection_ids: vec!["c1".into()] }, b"t".to_vec());
+    let back: ManageRequest = serde_cbor::from_slice(&serde_cbor::to_vec(&req).unwrap()).unwrap();
     assert!(matches!(back.op, ManageMutateOp::CollectionAdd { .. }));
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2:** Run `cargo test -p p2p two_stream::handler::manage` → FAIL (module missing).
 
-Run: `cargo test -p p2p two_stream::handler::manage`
-Expected: FAIL — module not found.
-
-- [ ] **Step 3: Write minimal implementation**
-
-Copy `se_query.rs` → `manage.rs`. For the mutate channel, produce:
+- [ ] **Step 3: Write minimal implementation** — copy `se_query.rs` → `manage.rs`, producing for the mutate channel (and the parallel query channel):
 
 ```rust
 impl TwoStreamHandler {
-    pub async fn send_manage_request_fire_and_forget(
-        &mut self,
-        peer_id: PeerId,
-        request: crate::message::ManageRequest,
-    ) -> Result<()> {
-        let mut stream = self
-            .control
-            .open_stream(peer_id, Self::manage_request_protocol())
-            .await
+    pub async fn send_manage_request_fire_and_forget(&mut self, peer_id: PeerId, request: crate::message::ManageRequest) -> Result<()> {
+        let mut stream = self.control.open_stream(peer_id, Self::manage_request_protocol()).await
             .map_err(|e| Error::Transport(format!("failed to open manage stream: {e}")))?;
-        write_message(&mut stream, &request).await.map_err(|e| {
-            Error::CborSerialization(format!("failed to write manage request: {e}"))
-        })?;
+        write_message(&mut stream, &request).await
+            .map_err(|e| Error::CborSerialization(format!("failed to write manage request: {e}")))?;
         Ok(())
     }
-
-    pub async fn send_manage_response(
-        &mut self,
-        peer_id: PeerId,
-        reply: crate::message::ManageReply,
-    ) -> Result<()> {
-        let mut stream = self
-            .control
-            .open_stream(peer_id, Self::manage_response_protocol())
-            .await
+    pub async fn send_manage_response(&mut self, peer_id: PeerId, reply: crate::message::ManageReply) -> Result<()> {
+        let mut stream = self.control.open_stream(peer_id, Self::manage_response_protocol()).await
             .map_err(|e| Error::Transport(format!("failed to open manage resp stream: {e}")))?;
-        write_message(&mut stream, &reply).await.map_err(|e| {
-            Error::CborSerialization(format!("failed to write manage reply: {e}"))
-        })?;
+        write_message(&mut stream, &reply).await
+            .map_err(|e| Error::CborSerialization(format!("failed to write manage reply: {e}")))?;
         Ok(())
     }
-
-    pub async fn handle_manage_request_stream(
-        peer_id: PeerId,
-        stream: Stream,
-        max_msg_size: u64,
-        stream_read_timeout: std::time::Duration,
-    ) -> Result<TwoStreamEvent> {
-        let request = read_cbor_message::<crate::message::ManageRequest>(
-            peer_id, stream, max_msg_size, stream_read_timeout, "manage request",
-        ).await?;
+    pub async fn handle_manage_request_stream(peer_id: PeerId, stream: Stream, max_msg_size: u64, t: std::time::Duration) -> Result<TwoStreamEvent> {
+        let request = read_cbor_message::<crate::message::ManageRequest>(peer_id, stream, max_msg_size, t, "manage request").await?;
         crate::verify_message(&request)?;
         ensure_transport_sender(&peer_id, &request)?;
         Ok(TwoStreamEvent::ManageRequest { peer_id, request })
     }
-
-    pub async fn handle_manage_response_stream(
-        peer_id: PeerId,
-        stream: Stream,
-        max_msg_size: u64,
-        stream_read_timeout: std::time::Duration,
-    ) -> Result<TwoStreamEvent> {
-        let reply = read_cbor_message::<crate::message::ManageReply>(
-            peer_id, stream, max_msg_size, stream_read_timeout, "manage response",
-        ).await?;
+    pub async fn handle_manage_response_stream(peer_id: PeerId, stream: Stream, max_msg_size: u64, t: std::time::Duration) -> Result<TwoStreamEvent> {
+        let reply = read_cbor_message::<crate::message::ManageReply>(peer_id, stream, max_msg_size, t, "manage response").await?;
         crate::verify_message(&reply)?;
         ensure_transport_sender(&peer_id, &reply)?;
         Ok(TwoStreamEvent::ManageReply { peer_id, reply })
@@ -636,12 +556,9 @@ impl TwoStreamHandler {
 }
 ```
 
-Repeat the four methods for the query channel (`send_manage_query_request_fire_and_forget`, `send_manage_query_response`, `handle_manage_query_request_stream`, `handle_manage_query_response_stream`) over `ManageQueryRequest`/`ManageQueryReply`. Add the `manage_request_protocol()`/`manage_response_protocol()`/`manage_query_request_protocol()`/`manage_query_response_protocol()` helper fns mirroring `se_query_request_protocol()` (return `StreamProtocol::new(crate::protocol::MANAGE_REQUEST_PROTOCOL)` etc.). Copy the private `read_cbor_message` helper into this file (it is file-private in `se_query.rs`) or hoist it to the parent module and reuse. Declare `mod manage;` next to `mod se_query;`.
+Repeat for the query channel (`…manage_query…` over `ManageQueryRequest`/`ManageQueryReply`). Add the four `*_protocol()` helpers (return `StreamProtocol::new(crate::protocol::MANAGE_REQUEST_PROTOCOL)` etc., mirroring `se_query_request_protocol()`). Copy the private `read_cbor_message` helper into the file (or hoist it). Declare `mod manage;` beside `mod se_query;`.
 
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cargo test -p p2p two_stream::handler::manage`
-Expected: PASS.
+- [ ] **Step 4:** Run `cargo test -p p2p two_stream::handler::manage` → PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -650,770 +567,430 @@ git add crates/p2p/src/two_stream/handler/manage.rs crates/p2p/src/two_stream/ha
 git commit -m "feat(p2p): libp2p two-stream manage handler methods"
 ```
 
-### Task 3.3: libp2p stream-protocol registration + inbound routing
+### Task 3.2: libp2p inbound protocol registration/routing + `send_manage_*` impls
 
 **Files:**
-- Modify: the two-stream behaviour/protocol-registration site (find via `grep -rn "se_query_request_protocol\|SE_QUERY_REQUEST_PROTOCOL" crates/p2p/src/two_stream crates/p2p/src/behaviour*`)
+- Modify: the two-stream protocol registration/routing site and `crates/p2p/src/host/libp2p_transport.rs` (HostEvent→TransportEvent map at :441-445), `crates/p2p/src/host/p2p_host/two_stream.rs` (:279-296)
 
-- [ ] **Step 1: Write the failing test** — N/A (wiring task; covered by Phase 6 integration). Instead, add an assertion test where the protocol list is built, if one exists, asserting the four manage protocols are advertised. If no such test seam exists, skip to Step 3 and rely on Phase 6.
+- [ ] **Step 1:** Run `grep -rn "SE_QUERY_REQUEST_PROTOCOL\|handle_se_query_request_stream\|SEQueryRequest" crates/p2p/src/host crates/p2p/src/two_stream` to list every SE query registration/routing/mapping site.
 
-- [ ] **Step 2:** Run: `grep -rn "SE_QUERY_REQUEST_PROTOCOL" crates/p2p/src` to find every site that registers the SE query inbound stream protocol and routes accepted streams to `handle_se_query_request_stream` / `handle_se_query_response_stream`.
+- [ ] **Step 2–3: Write minimal implementation** — at each site, add the four parallel manage protocols:
+  - Register inbound `MANAGE_REQUEST_PROTOCOL`/`MANAGE_RESPONSE_PROTOCOL` (+ query) and route accepted streams to the Task 3.1 handlers, passing `protocols::MAX_MANAGE_MSG_SIZE as u64` and the existing stream-read timeout.
+  - In `host/p2p_host/two_stream.rs`, map `TwoStreamEvent::Manage*` → `TransportEvent::Manage*` (mirror the SEQuery mapping at :279-296).
+  - In `host/libp2p_transport.rs`, implement the trait `send_manage_request`/`send_manage_response`/query variants by signing with the host keypair and calling the Task 3.1 fire-and-forget senders (mirror how `send_se_query_request`/`send_se_query_response` are implemented here — find via `grep -n "send_se_query" crates/p2p/src/host/libp2p_transport.rs`).
 
-- [ ] **Step 3: Write minimal implementation**
+> **No consumer yet:** the emitted `TransportEvent::Manage*` events have no handler until Phase 6, so this is side-effect-free per the sequencing invariant.
 
-At each such site, add parallel registration + routing for the four manage protocols, calling the Task 3.2 handler methods. Route `MANAGE_REQUEST_PROTOCOL` → `handle_manage_request_stream`, `MANAGE_RESPONSE_PROTOCOL` → `handle_manage_response_stream`, and the two query equivalents. Pass `protocols::MAX_MANAGE_MSG_SIZE as u64` and the existing stream-read timeout.
-
-- [ ] **Step 4: Run test to verify it builds**
-
-Run: `cargo build -p p2p`
-Expected: builds clean.
+- [ ] **Step 4:** `cargo build -p p2p` → clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add -A
-git commit -m "feat(p2p): register + route libp2p manage stream protocols"
+git commit -m "feat(p2p): register/route libp2p manage protocols + send impls"
 ```
 
-### Task 3.4: iroh ALPN dispatch arms
+### Task 3.3: iroh ALPN dispatch arms + `send_manage_*` impls
 
 **Files:**
-- Modify: `crates/p2p/src/iroh/endpoint_streams.rs`
-- Modify: `crates/p2p/src/iroh/command.rs` and/or `crates/p2p/src/iroh/transport.rs` (send side — mirror the SE query iroh send path)
+- Modify: `crates/p2p/src/iroh/endpoint_streams.rs`, `crates/p2p/src/iroh/transport.rs`, `crates/p2p/src/iroh/command.rs`
 
-- [ ] **Step 1: Write the failing test** — N/A directly (covered by Phase 6 iroh integration). 
+- [ ] **Step 1:** Run `grep -n "ALPN_SE_QUERY_REQ\|ALPN_SE_QUERY_RESP\|SEQueryRequest\|SEQueryReply" crates/p2p/src/iroh/endpoint_streams.rs crates/p2p/src/iroh/transport.rs crates/p2p/src/iroh/command.rs`.
 
-- [ ] **Step 2:** Run: `grep -n "ALPN_SE_QUERY_REQ\|ALPN_SE_QUERY_RESP" crates/p2p/src/iroh/endpoint_streams.rs` to find the SE query arms in `dispatch_stream`.
+- [ ] **Step 2–3: Write minimal implementation** — mirroring the SE query arms (`endpoint_streams.rs:401,423`; transport extract at `iroh/transport.rs:508,535`):
+  - In `dispatch_stream`, add four arms: `ALPN_MANAGE_REQ` → `read_message::<ManageRequest>(&mut recv, MAX_MANAGE_MSG_SIZE)`, `verify_message`, **emit `TransportEvent::ManageRequest`** (do NOT call a correlator here — correlation is in the runtime handler, Phase 6). `ALPN_MANAGE_RESP` → read `ManageReply`, verify, **emit `TransportEvent::ManageReply`**. Same for the two query ALPNs.
+  - Implement the iroh `send_manage_*` trait methods (sign + open ALPN stream + `write_message`), mirroring the iroh SE query send path in `iroh/transport.rs`/`command.rs`.
 
-- [ ] **Step 3: Write minimal implementation**
-
-In `dispatch_stream` (the match at `endpoint_streams.rs:~195`, unknown-ALPN drop at `:434`), add four arms mirroring the `ALPN_SE_QUERY_REQ`/`ALPN_SE_QUERY_RESP` arms:
-
-- `x if x == protocols::ALPN_MANAGE_REQ` → read `ManageRequest` via `protocols::read_message::<ManageRequest>(&mut recv, protocols::MAX_MANAGE_MSG_SIZE)`, `crate::verify_message(&request)?`, emit `TransportEvent::…ManageRequest { peer_id, request }`.
-- `x if x == protocols::ALPN_MANAGE_RESP` → read `ManageReply`, verify, deliver to the `ManageCorrelator` (mirror how the SE query resp arm calls the correlator).
-- The two `MANAGE_QUERY` arms likewise over `ManageQueryRequest`/`ManageQueryReply` + `ManageQueryCorrelator`.
-
-Add the matching `TransportEvent` variants (mirror the SE query transport events) and the iroh send methods (mirror the SE query iroh send in `iroh/command.rs`/`transport.rs`).
-
-- [ ] **Step 4: Run test to verify it builds**
-
-Run: `cargo build -p p2p`
-Expected: builds clean.
+- [ ] **Step 4:** `cargo build -p p2p` → clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add -A
-git commit -m "feat(p2p): iroh manage ALPN dispatch + send"
+git commit -m "feat(p2p): iroh manage ALPN dispatch (emit events) + send impls"
 ```
 
 ---
 
-## Phase 4: Authorization (the gating correctness work)
+## Phase 4: Error variant + actor-token verification
 
-### Task 4.1: `NodeAccessCheck` trait
-
-**Files:**
-- Create: `crates/p2p/src/node_access.rs`
-- Modify: `crates/p2p/src/lib.rs`
-
-- [ ] **Step 1: Write the failing test**
-
-Create `crates/p2p/src/node_access.rs`:
-
-```rust
-//! Transport-agnostic node-access check seam for the management channel.
-//!
-//! Implemented by the NAC engine in the `acp` crate and injected as
-//! `Arc<dyn NodeAccessCheck>`, mirroring how `MergeHandler` is injected into the
-//! replication loop. Keeps `crates/p2p` free of a heavy `acp` dependency.
-
-use async_trait::async_trait;
-use identity::Did;
-
-pub use crate::message::manage_permission::ManagePermission;
-
-#[async_trait]
-pub trait NodeAccessCheck: Send + Sync {
-    /// Return `true` if `actor` may perform `permission`. Implementations return
-    /// `true` when NAC is disabled (parity with current behaviour).
-    async fn check(&self, actor: &Did, permission: ManagePermission) -> crate::error::Result<bool>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-
-    struct AllowAll;
-    #[async_trait]
-    impl NodeAccessCheck for AllowAll {
-        async fn check(&self, _actor: &Did, _permission: ManagePermission) -> crate::error::Result<bool> {
-            Ok(true)
-        }
-    }
-
-    #[tokio::test]
-    async fn allow_all_grants() {
-        let checker: Arc<dyn NodeAccessCheck> = Arc::new(AllowAll);
-        let did = Did::try_from("did:key:z6Mkexample").unwrap_or_else(|_| Did::default());
-        assert!(checker.check(&did, ManagePermission::ReplicatorList).await.unwrap());
-    }
-}
-```
-
-> NOTE: `ManagePermission` is a small p2p-local enum (Task 4.2) — `crates/p2p` must NOT depend on `acp`'s `NodePermission` directly (would invert the dependency). The `acp`-side impl maps `ManagePermission` → `NodePermission`.
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p p2p node_access`
-Expected: FAIL — `ManagePermission`/module not found.
-
-- [ ] **Step 3: Write minimal implementation**
-
-Add `mod node_access; pub use node_access::NodeAccessCheck;` to `lib.rs`. Ensure `async-trait` is a dependency of `crates/p2p` (it almost certainly already is — check `Cargo.toml`; if not, add it). `ManagePermission` lands in Task 4.2; do that task before re-running.
-
-- [ ] **Step 4: Run test to verify it passes** (after Task 4.2)
-
-Run: `cargo test -p p2p node_access`
-Expected: PASS.
-
-- [ ] **Step 5: Commit** (combined with 4.2)
-
-### Task 4.2: `ManagePermission` enum + op→permission mapping
+### Task 4.1: `Error::Unauthorized`
 
 **Files:**
-- Create: `crates/p2p/src/message/manage_permission.rs`
-- Modify: `crates/p2p/src/message/mod.rs`, `crates/p2p/src/message/manage.rs`
+- Modify: `crates/p2p/src/error.rs`
 
-- [ ] **Step 1: Write the failing test**
-
-Create `manage_permission.rs`:
-
-```rust
-//! P2P-local permission enum for management ops. Mapped to `acp::NodePermission`
-//! by the NAC-side `NodeAccessCheck` impl, so `crates/p2p` stays acp-free.
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManagePermission {
-    ReplicatorAdd,
-    ReplicatorDelete,
-    ReplicatorList,
-    CollectionAdd,
-    CollectionDelete,
-    CollectionList,
-    DocumentAdd,
-    DocumentDelete,
-    DocumentList,
-    PeerConnect,
-}
-```
-
-Add `permission()` methods on the op enums in `manage.rs` and a test:
+- [ ] **Step 1: Write the failing test** in `error.rs`:
 
 ```rust
 #[test]
-fn mutate_ops_map_to_permissions() {
-    use crate::message::manage_permission::ManagePermission as P;
-    assert_eq!(
-        ManageMutateOp::PeerRemove { peer_id: "p".into() }.permission(),
-        P::PeerConnect, // PeerRemove reuses PeerConnect per design
-    );
-    assert_eq!(
-        ManageMutateOp::DocumentAdd { doc_ids: vec![] }.permission(),
-        P::DocumentAdd,
-    );
+fn unauthorized_displays() {
+    assert_eq!(Error::Unauthorized("nope".into()).to_string(), "unauthorized: nope");
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2:** `cargo test -p p2p unauthorized_displays` → FAIL.
 
-Run: `cargo test -p p2p mutate_ops_map_to_permissions`
-Expected: FAIL — `permission()`/`ManagePermission` not found.
-
-- [ ] **Step 3: Write minimal implementation**
-
-Register `pub mod manage_permission;` in `message/mod.rs` and `pub use manage_permission::ManagePermission;`. Add to `manage.rs`:
+- [ ] **Step 3:** Add to the `Error` enum:
 
 ```rust
-use crate::message::manage_permission::ManagePermission;
-
-impl ManageMutateOp {
-    pub fn permission(&self) -> ManagePermission {
-        match self {
-            ManageMutateOp::ReplicatorAdd { .. } => ManagePermission::ReplicatorAdd,
-            ManageMutateOp::ReplicatorDelete { .. } => ManagePermission::ReplicatorDelete,
-            ManageMutateOp::CollectionAdd { .. } => ManagePermission::CollectionAdd,
-            ManageMutateOp::CollectionRemove { .. } => ManagePermission::CollectionDelete,
-            ManageMutateOp::DocumentAdd { .. } => ManagePermission::DocumentAdd,
-            ManageMutateOp::DocumentRemove { .. } => ManagePermission::DocumentDelete,
-            ManageMutateOp::PeerConnect { .. } => ManagePermission::PeerConnect,
-            ManageMutateOp::PeerRemove { .. } => ManagePermission::PeerConnect,
-        }
-    }
-}
-
-impl ManageQueryOp {
-    pub fn permission(&self) -> ManagePermission {
-        match self {
-            ManageQueryOp::ReplicatorList => ManagePermission::ReplicatorList,
-            ManageQueryOp::CollectionList => ManagePermission::CollectionList,
-            ManageQueryOp::DocumentList => ManagePermission::DocumentList,
-        }
-    }
-}
+#[error("unauthorized: {0}")]
+Unauthorized(String),
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cargo test -p p2p manage`
-Expected: PASS, plus `node_access` tests from Task 4.1 now pass.
+- [ ] **Step 4:** `cargo test -p p2p unauthorized_displays` → PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/p2p/src/node_access.rs crates/p2p/src/message/manage_permission.rs crates/p2p/src/message/mod.rs crates/p2p/src/message/manage.rs crates/p2p/src/lib.rs
-git commit -m "feat(p2p): NodeAccessCheck trait + ManagePermission mapping"
+git add crates/p2p/src/error.rs
+git commit -m "feat(p2p): Error::Unauthorized variant"
 ```
 
-### Task 4.3: Actor token verification + audience binding
+### Task 4.2: `verify_actor_token` (assembly layer)
 
 **Files:**
-- Create: `crates/p2p/src/manage_auth.rs`
-- Modify: `crates/p2p/src/lib.rs`
+- Create: `crates/db-merge/src/manage/auth.rs`
+- Modify: `crates/db-merge/src/manage/mod.rs` (create), `crates/db-merge/src/lib.rs`
 
-This isolates the "bytes → verified actor `Did`" step so it is unit-testable without a live network. It wraps the `identity` crate's `verify_auth_token` and enforces `aud == this node's identity`.
+This wraps the identity crate: bytes → verified actor `Did`, with audience binding. Lives in db-merge (which depends on `identity`).
 
-- [ ] **Step 1: Write the failing test**
-
-First inspect the identity API: `grep -rn "pub fn verify_auth_token\|pub fn from_token\|fn new_token" crates/identity/src`. Then create `manage_auth.rs` with a function `verify_actor_token(token: &[u8], expected_audience: &str) -> Result<Did>` and a test that mints a token for the wrong audience and asserts rejection, and one for the right audience and asserts the DID round-trips. Use the same minting helper the identity tests use (find via `grep -rn "new_token\|new_token_from" crates/identity/src --include=*.rs` and the identity test module).
+- [ ] **Step 1: Write the failing test** — first confirm the identity token-minting test helper: `grep -rn "new_token\|FullIdentity\|fn test_identity" crates/identity/src --include=*.rs`. Then:
 
 ```rust
-#[tokio::test]
-async fn rejects_wrong_audience() {
-    let (token, _did) = mint_test_token("did:node:OTHER");
-    assert!(verify_actor_token(&token, "did:node:THIS").is_err());
+#[test]
+fn rejects_wrong_audience() {
+    let (token, _did) = mint_token_for("12D3KooW-OTHER");
+    assert!(verify_actor_token(&token, "12D3KooW-THIS").is_err());
 }
-
-#[tokio::test]
-async fn accepts_matching_audience_and_returns_did() {
-    let (token, did) = mint_test_token("did:node:THIS");
-    assert_eq!(verify_actor_token(&token, "did:node:THIS").unwrap(), did);
+#[test]
+fn accepts_matching_audience_returns_did() {
+    let (token, did) = mint_token_for("12D3KooW-THIS");
+    assert_eq!(verify_actor_token(&token, "12D3KooW-THIS").unwrap(), did);
 }
 ```
 
-(`mint_test_token` is a test helper in this module built from the identity crate's token-creation API — fill in once the identity API is confirmed in Step 1.)
+(`mint_token_for(aud)` builds a `FullIdentity` and calls `identity::token::new_token(&id, Duration::from_secs(300), Some(aud.into()), None)`, returning `(Vec<u8>, Did)`. Base it on the identity crate's own token tests.)
 
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p p2p manage_auth`
-Expected: FAIL — module not found.
+- [ ] **Step 2:** `cargo test -p db-merge manage::auth` → FAIL.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Implement `verify_actor_token`: deserialize the `TokenIdentity` from the token bytes (`from_token` or equivalent), call the identity crate's `verify_auth_token(&identity, expected_audience)`, and on success return `identity.did`. Map verification failure to `crate::error::Error::Unauthorized` (add that variant to `error.rs` if absent — `grep -n "Unauthorized" crates/p2p/src/error.rs`; if missing add `#[error("unauthorized: {0}")] Unauthorized(String)`). Register `mod manage_auth;` in `lib.rs`.
+```rust
+use identity::token::{from_token, verify_auth_token};
+use identity::{Did, Identity};
 
-Add `crates/identity` to `crates/p2p/Cargo.toml` dependencies if not already present (`grep -n "identity" crates/p2p/Cargo.toml`).
+/// Verify an actor JWT and return its DID, requiring `aud == expected_audience`.
+pub fn verify_actor_token(token: &[u8], expected_audience: &str) -> Result<Did, String> {
+    let ti = from_token(token).map_err(|e| format!("invalid actor token: {e}"))?;
+    verify_auth_token(&ti, expected_audience).map_err(|e| format!("actor token rejected: {e}"))?;
+    ti.did().map_err(|e| format!("token has no DID: {e}"))
+}
+```
 
-- [ ] **Step 4: Run test to verify it passes**
+Confirm the import paths (`grep -n "pub fn from_token\|pub fn verify_auth_token" crates/identity/src/token/mod.rs` and how they're re-exported from `identity` root). Register `pub mod manage;` with `pub mod auth;` inside it.
 
-Run: `cargo test -p p2p manage_auth`
-Expected: PASS.
+- [ ] **Step 4:** `cargo test -p db-merge manage::auth` → PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/p2p/src/manage_auth.rs crates/p2p/src/lib.rs crates/p2p/src/error.rs crates/p2p/Cargo.toml
-git commit -m "feat(p2p): actor token verification with audience binding"
+git add crates/db-merge/src/manage/ crates/db-merge/src/lib.rs
+git commit -m "feat(db-merge): verify_actor_token with audience binding"
 ```
 
-### Task 4.4: Request processors (auth → NAC → coordinator → reply)
+---
+
+## Phase 5: Serve handler (auth → NAC → dispatch → sign → send)
+
+### Task 5.1: NAC check seam (object-safe, assembly layer)
 
 **Files:**
-- Create: `crates/p2p/src/sync/coordinator/manage.rs`
-- Modify: `crates/p2p/src/sync/coordinator/mod.rs`
+- Create: `crates/db-merge/src/manage/access.rs`
 
-This is the heart: the function that consumes a decoded `ManageRequest`, authorizes it, dispatches to the existing coordinator method, and produces a `ManageReply`. It takes the injected `Arc<dyn NodeAccessCheck>` and this node's audience string.
+`NodeACP<S>` is generic; the serve handler takes an object-safe checker so it isn't generic over the store. Trait + blanket impl live in db-merge (which depends on `acp`).
+
+- [ ] **Step 1: Write the failing test**
+
+```rust
+struct AllowAll;
+#[async_trait::async_trait]
+impl ManageAccessCheck for AllowAll {
+    async fn check(&self, _: &identity::Did, _: acp::NodePermission) -> Result<bool, String> { Ok(true) }
+}
+#[tokio::test]
+async fn allow_all_grants() {
+    let c: std::sync::Arc<dyn ManageAccessCheck> = std::sync::Arc::new(AllowAll);
+    assert!(c.check(&test_did(), acp::NodePermission::P2pReplicatorList).await.unwrap());
+}
+```
+
+- [ ] **Step 2:** `cargo test -p db-merge manage::access` → FAIL.
+
+- [ ] **Step 3: Write minimal implementation**
+
+```rust
+use async_trait::async_trait;
+use identity::Did;
+
+#[async_trait]
+pub trait ManageAccessCheck: Send + Sync {
+    async fn check(&self, actor: &Did, permission: acp::NodePermission) -> Result<bool, String>;
+}
+
+/// Adapter over the NAC engine. Generic over the Zanzibar store; erased behind
+/// `Arc<dyn ManageAccessCheck>` at construction.
+pub struct NacAccess<S>(pub std::sync::Arc<acp::NodeACP<S>>);
+
+#[async_trait]
+impl<S: zanzibar::ZanzibarStore + Send + Sync + 'static> ManageAccessCheck for NacAccess<S> {
+    async fn check(&self, actor: &Did, permission: acp::NodePermission) -> Result<bool, String> {
+        self.0.check_permission(actor, permission).await.map_err(|e| e.to_string())
+    }
+}
+```
+
+Confirm `acp::NodeACP` and the `ZanzibarStore` bound paths (`grep -n "pub use" crates/acp/src/lib.rs`; `grep -rn "ZanzibarStore" crates/zanzibar/src/lib.rs`). Add `zanzibar` to db-merge deps if needed for the bound (or relax to whatever bound `NodeACP`'s impl block uses — match `operations.rs:11`).
+
+- [ ] **Step 4:** `cargo test -p db-merge manage::access` → PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/db-merge/src/manage/access.rs
+git commit -m "feat(db-merge): ManageAccessCheck NAC seam + adapter"
+```
+
+### Task 5.2: Serve handlers
+
+**Files:**
+- Create: `crates/db-merge/src/manage/serve.rs`
+
+Mirror `db-merge/src/se/serve.rs`. The audience the token must target is the **serving node's PeerID** (`transport.local_peer_id().to_string()`). Dispatch reuses the coordinator/transport ops; replicator-add dials the addresses first (mirroring the HTTP facade), then creates the replicator; peer-connect parses the multiaddr.
 
 - [ ] **Step 1: Write the failing test**
 
 ```rust
 #[tokio::test]
-async fn unauthorized_actor_is_rejected_before_side_effects() {
-    // A checker that denies everything.
+async fn unauthorized_actor_rejected_before_side_effects() {
     struct DenyAll;
     #[async_trait::async_trait]
-    impl crate::NodeAccessCheck for DenyAll {
-        async fn check(&self, _: &identity::Did, _: crate::message::ManagePermission)
-            -> crate::error::Result<bool> { Ok(false) }
+    impl ManageAccessCheck for DenyAll {
+        async fn check(&self, _: &identity::Did, _: acp::NodePermission) -> Result<bool, String> { Ok(false) }
     }
-    let coordinator = test_coordinator().await; // existing test helper in this module's tests
-    let (token, _did) = mint_valid_token_for(coordinator.node_audience());
-    let req = signed_manage_request(
-        ManageMutateOp::CollectionAdd { collection_ids: vec!["c1".into()] },
-        token,
-    );
-    let reply = coordinator
-        .process_manage_request(req, Arc::new(DenyAll))
-        .await;
+    let (coordinator, transport) = test_coordinator_and_transport().await; // mirror se serve tests / subscriptions.rs RecordingTransport
+    let token = mint_token_for(transport.local_peer_id().as_str());
+    let req = unsigned_manage_request(ManageMutateOp::CollectionAdd { collection_ids: vec!["c1".into()] }, token);
+    let reply = handle_manage_request(&coordinator, &transport, &DenyAll, transport.local_peer_id().clone(), req).await;
     assert_eq!(reply.err_message(), Some("unauthorized"));
     assert!(coordinator.get_subscribed_collections().await.unwrap().is_empty());
 }
 ```
 
-(`test_coordinator`, `mint_valid_token_for`, `signed_manage_request` are small helpers; base `test_coordinator` on existing coordinator tests — `grep -rn "fn test_coordinator\|async fn .*coordinator.*test\|SyncCoordinator::new" crates/p2p/src/sync/coordinator`.)
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p p2p coordinator::manage`
-Expected: FAIL — `process_manage_request` not found.
+- [ ] **Step 2:** `cargo test -p db-merge manage::serve` → FAIL.
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```rust
-use std::sync::Arc;
-use crate::message::{ManageMutateOp, ManageQueryOp, ManageQueryReply, ManageQueryResult, ManageReply, ManageRequest, ManageQueryRequest};
-use crate::node_access::NodeAccessCheck;
-use crate::manage_auth::verify_actor_token;
-
-impl<B, T> SyncCoordinator<B, T>
-where
-    B: blockstore::Blockstore + 'static,
-    T: crate::transport::P2PTransport,
-{
-    /// This node's audience string for actor-token `aud` binding.
-    pub fn node_audience(&self) -> String {
-        // The node's own identity (PeerID or node-DID). Mirror how the node's
-        // identity string is produced elsewhere (grep `local_peer_id`/node DID).
-        self.local_identity_string()
-    }
-
-    pub async fn process_manage_request(
-        &self,
-        request: ManageRequest,
-        nac: Arc<dyn NodeAccessCheck>,
-    ) -> ManageReply {
-        let mid = request.message_id.clone();
-        match self.authorize_and_apply_mutate(&request, nac).await {
-            Ok(()) => ManageReply::success(&mid),
-            Err(e) => ManageReply::error(&mid, &e.to_string()),
-        }
-    }
-
-    async fn authorize_and_apply_mutate(
-        &self,
-        request: &ManageRequest,
-        nac: Arc<dyn NodeAccessCheck>,
-    ) -> crate::error::Result<()> {
-        // 1. actor identity + audience binding
-        let actor = verify_actor_token(&request.auth_token, &self.node_audience())?;
-        // 2. NAC
-        let perm = request.op.permission();
-        if !nac.check(&actor, perm).await? {
-            return Err(crate::error::Error::Unauthorized("unauthorized".into()));
-        }
-        // 3. dispatch to existing coordinator methods
-        match &request.op {
-            ManageMutateOp::ReplicatorAdd { peer_id, addresses, collection_ids } => {
-                let pid = peer_id.parse().map_err(|_| crate::error::Error::InvalidInput("bad peer id".into()))?;
-                // addresses are applied by create_replicator's existing path; pass through as the HTTP handler does
-                let _ = addresses;
-                self.create_replicator(&pid, collection_ids.clone(), false).await?;
-            }
-            ManageMutateOp::ReplicatorDelete { peer_id, collection_ids } => {
-                let pid = peer_id.parse().map_err(|_| crate::error::Error::InvalidInput("bad peer id".into()))?;
-                if collection_ids.is_empty() {
-                    self.delete_replicator(&pid).await?;
-                } else {
-                    self.remove_replicator_collections(&pid, collection_ids.clone()).await?;
-                }
-            }
-            ManageMutateOp::CollectionAdd { collection_ids } => {
-                for id in collection_ids { self.subscribe_collection(id).await?; }
-            }
-            ManageMutateOp::CollectionRemove { collection_ids } => {
-                for id in collection_ids { self.unsubscribe_collection(id).await?; }
-            }
-            ManageMutateOp::DocumentAdd { doc_ids } => {
-                for id in doc_ids { self.subscribe_document(id).await?; }
-            }
-            ManageMutateOp::DocumentRemove { doc_ids } => {
-                for id in doc_ids { self.unsubscribe_document(id).await?; }
-            }
-            ManageMutateOp::PeerConnect { addresses } => {
-                self.connect_peer_addrs(addresses.clone()).await?;
-            }
-            ManageMutateOp::PeerRemove { peer_id } => {
-                let pid = peer_id.parse().map_err(|_| crate::error::Error::InvalidInput("bad peer id".into()))?;
-                self.disconnect_peer(&pid).await?;
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn process_manage_query_request(
-        &self,
-        request: ManageQueryRequest,
-        nac: Arc<dyn NodeAccessCheck>,
-    ) -> ManageQueryReply {
-        let mid = request.message_id.clone();
-        match self.authorize_and_apply_query(&request, nac).await {
-            Ok(result) => ManageQueryReply::success(&mid, result),
-            Err(e) => ManageQueryReply::error(&mid, &e.to_string()),
-        }
-    }
-
-    async fn authorize_and_apply_query(
-        &self,
-        request: &ManageQueryRequest,
-        nac: Arc<dyn NodeAccessCheck>,
-    ) -> crate::error::Result<ManageQueryResult> {
-        let actor = verify_actor_token(&request.auth_token, &self.node_audience())?;
-        if !nac.check(&actor, request.op.permission()).await? {
-            return Err(crate::error::Error::Unauthorized("unauthorized".into()));
-        }
-        Ok(match request.op {
-            ManageQueryOp::ReplicatorList => {
-                ManageQueryResult::Replicators { replicators: self.list_replicators().await? }
-            }
-            ManageQueryOp::CollectionList => {
-                ManageQueryResult::Strings { values: self.get_subscribed_collections().await? }
-            }
-            ManageQueryOp::DocumentList => {
-                ManageQueryResult::Strings { values: self.get_subscribed_documents().await? }
-            }
-        })
-    }
-}
-```
-
-> The methods `connect_peer_addrs`, `disconnect_peer`, `local_identity_string`, and `get_subscribed_documents` may not exist yet — Tasks 5.1–5.2 add the missing ones. If `connect_peer_addrs`/`disconnect_peer` already exist under different names, use those (grep `fn connect`/`fn disconnect` in `sync/coordinator` and `transport.rs`). `Error::InvalidInput` — confirm the variant name in `error.rs`; use the existing bad-input variant.
-
-Register `mod manage;` in `sync/coordinator/mod.rs`.
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cargo test -p p2p coordinator::manage`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add crates/p2p/src/sync/coordinator/manage.rs crates/p2p/src/sync/coordinator/mod.rs
-git commit -m "feat(p2p): manage request processors (auth + NAC + dispatch)"
-```
-
----
-
-## Phase 5: Coordinator method gaps + host wiring
-
-### Task 5.1: `get_subscribed_documents` getter
-
-**Files:**
-- Modify: `crates/p2p/src/sync/coordinator/subscriptions.rs`
-
-- [ ] **Step 1: Write the failing test**
-
-Add next to the existing subscriptions tests:
-
-```rust
-#[tokio::test]
-async fn subscribe_document_then_list_returns_it() {
-    let coordinator = test_coordinator().await;
-    coordinator.subscribe_document("bae-doc-1").await.unwrap();
-    let docs = coordinator.get_subscribed_documents().await.unwrap();
-    assert!(docs.contains(&"bae-doc-1".to_string()));
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p p2p subscribe_document_then_list_returns_it`
-Expected: FAIL — `get_subscribed_documents` not found.
-
-- [ ] **Step 3: Write minimal implementation**
-
-Mirror `get_subscribed_collections` (`subscriptions.rs:100-103`) exactly, reading from the document subscription store/in-memory set instead of the collection one:
-
-```rust
-/// Return the set of currently subscribed document IDs.
-pub async fn get_subscribed_documents(&self) -> Result<Vec<String>> {
-    // Mirror get_subscribed_collections, reading the document subscription set.
-    Ok(self.subscribed_documents().await)
-}
-```
-
-(Use the same backing field/store that `subscribe_document`/`unsubscribe_document` mutate — grep those methods to find it.)
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cargo test -p p2p subscribe_document_then_list_returns_it`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add crates/p2p/src/sync/coordinator/subscriptions.rs
-git commit -m "feat(p2p): get_subscribed_documents coordinator getter"
-```
-
-### Task 5.2: Peer connect/disconnect + node audience helpers (only if missing)
-
-**Files:**
-- Modify: `crates/p2p/src/sync/coordinator/*.rs` and/or `crates/p2p/src/transport.rs`
-
-- [ ] **Step 1:** Run `grep -rn "fn connect\|fn disconnect\|fn dial\|local_peer_id\|node.*did" crates/p2p/src/sync/coordinator crates/p2p/src/transport.rs crates/p2p/src/host`. If coordinator-level connect/disconnect and a node-identity string already exist, **skip this task** and wire Task 4.4 to the existing names.
-
-- [ ] **Step 2–4:** If missing, add thin `connect_peer_addrs(&self, Vec<String>)`, `disconnect_peer(&self, &PeerId)`, and `local_identity_string(&self) -> String` on `SyncCoordinator`, each delegating to the existing `P2PTransport` trait methods (the transport already exposes `local_peer_id()` at `transport.rs:246` and dial/connect primitives used by the HTTP peer handlers — reuse those). Add one unit test per added method using `test_coordinator`.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A
-git commit -m "feat(p2p): coordinator peer connect/disconnect + identity helpers"
-```
-
-### Task 5.3: Wire manage events into the host event loop + register channels
-
-**Files:**
-- Modify: the host/two-stream event consumer (find via `grep -rn "TwoStreamEvent::SEQueryRequest" crates/p2p/src`)
-- Modify: the iroh transport-event consumer (find via `grep -rn "SEQueryRequest\|SEQueryReply" crates/p2p/src/iroh crates/p2p/src/host`)
-- Modify: node/host construction to inject `Arc<dyn NodeAccessCheck>`
-
-This is the step that **enables** the channel — do it only now (Phases 1–4 complete).
-
-- [ ] **Step 1: Write the failing test** — N/A in unit scope; verified by Phase 6.
-
-- [ ] **Step 2:** Locate every place SE query request/reply events are consumed.
-
-- [ ] **Step 3: Write minimal implementation**
-
-- Where `TwoStreamEvent::SEQueryRequest`/`SEQueryReply` (and the iroh `TransportEvent` equivalents) are handled, add arms for the four manage variants:
-  - `ManageRequest { peer_id, request }` → `let reply = coordinator.process_manage_request(request, nac.clone()).await; two_stream.send_manage_response(peer_id, reply).await?;`
-  - `ManageQueryRequest { peer_id, request }` → `process_manage_query_request` then `send_manage_query_response`.
-  - `ManageReply { reply, .. }` → `manage_correlator.deliver(reply);`
-  - `ManageQueryReply { reply, .. }` → `manage_query_correlator.deliver(reply);`
-- Thread an `Arc<dyn NodeAccessCheck>` and the two correlators into the host/coordinator runtime struct (mirror how the `SeQueryCorrelator` is stored and how handlers are injected).
-- Add a public requester API on the host handle: `manage(peer_id, ManageMutateOp, auth_token) -> Result<ManageReply>` and `manage_query(peer_id, ManageQueryOp, auth_token) -> Result<ManageQueryReply>`. Each: build the request, `signing::sign_message(self.keypair(), &mut request)?` (mirror `host/handle.rs:578`), `correlator.register(message_id)`, `send_*_request_fire_and_forget`, then `pending.recv()` with a timeout (mirror the SE query requester path).
-
-- [ ] **Step 4: Run test to verify it builds + unit suite passes**
-
-Run: `cargo build -p p2p && cargo test -p p2p`
-Expected: builds clean, all unit tests pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A
-git commit -m "feat(p2p): enable manage channel — event wiring, correlators, requester API"
-```
-
-### Task 5.4: NAC-side `NodeAccessCheck` impl
-
-**Files:**
-- Create: `crates/acp/src/nac/node_access_check.rs` (or the node-level crate that constructs the P2P host with a NAC handle)
-- Modify: the node/db assembly that builds the P2P host (find via `grep -rn "SyncCoordinator::new\|build.*p2p\|P2PHost" crates/db crates/http`)
-
-- [ ] **Step 1: Write the failing test**
-
-```rust
-#[tokio::test]
-async fn maps_manage_permission_to_node_permission_and_checks() {
-    let nac = test_nac_enabled_with_owner(&owner_did).await;
-    let check = NacNodeAccessCheck::new(nac.clone());
-    // owner is granted, a stranger is denied
-    assert!(check.check(&owner_did, ManagePermission::ReplicatorAdd).await.unwrap());
-    assert!(!check.check(&stranger_did, ManagePermission::ReplicatorAdd).await.unwrap());
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p acp node_access_check` (or the crate hosting the impl)
-Expected: FAIL — `NacNodeAccessCheck` not found.
-
-- [ ] **Step 3: Write minimal implementation**
-
-```rust
-use async_trait::async_trait;
 use identity::Did;
-use p2p::message::ManagePermission;
-use p2p::NodeAccessCheck;
+use p2p::message::{ManageMutateOp, ManageQueryOp, ManageQueryReply, ManageQueryRequest, ManageQueryResult, ManageReply, ManageRequest};
+use p2p::message::traits::Message;
+use p2p::transport::{P2PTransport, PeerAddr, PeerId};
 
-use crate::nac::permission::NodePermission;
-use crate::nac::node_acp::NodeACP;
+use super::access::ManageAccessCheck;
+use super::auth::verify_actor_token;
 
-pub struct NacNodeAccessCheck<S> { nac: std::sync::Arc<NodeACP<S>> }
-
-impl<S> NacNodeAccessCheck<S> {
-    pub fn new(nac: std::sync::Arc<NodeACP<S>>) -> Self { Self { nac } }
-}
-
-fn to_node_permission(p: ManagePermission) -> NodePermission {
-    match p {
-        ManagePermission::ReplicatorAdd => NodePermission::P2pReplicatorAdd,
-        ManagePermission::ReplicatorDelete => NodePermission::P2pReplicatorDelete,
-        ManagePermission::ReplicatorList => NodePermission::P2pReplicatorList,
-        ManagePermission::CollectionAdd => NodePermission::P2pCollectionAdd,
-        ManagePermission::CollectionDelete => NodePermission::P2pCollectionDelete,
-        ManagePermission::CollectionList => NodePermission::P2pCollectionList,
-        ManagePermission::DocumentAdd => NodePermission::P2pDocumentAdd,
-        ManagePermission::DocumentDelete => NodePermission::P2pDocumentDelete,
-        ManagePermission::DocumentList => NodePermission::P2pDocumentList,
-        ManagePermission::PeerConnect => NodePermission::P2pPeerConnect,
+/// Serve a mutate request: authorize, dispatch, return a (still-unsigned) reply.
+/// Signing + sending is done by the caller (runtime wiring), like se serve.
+pub async fn build_manage_reply<C, T, A>(coordinator: &C, transport: &T, nac: &A, request: ManageRequest) -> ManageReply
+where
+    C: ManageOps, T: P2PTransport, A: ManageAccessCheck + ?Sized,
+{
+    let mid = request.message_id.clone();
+    match authorize_and_apply(coordinator, transport, nac, &request).await {
+        Ok(()) => ManageReply::success(&mid),
+        Err(e) => ManageReply::error(&mid, &e),
     }
 }
 
-#[async_trait]
-impl<S: zanzibar::ZanzibarStore + Send + Sync> NodeAccessCheck for NacNodeAccessCheck<S> {
-    async fn check(&self, actor: &Did, permission: ManagePermission) -> p2p::error::Result<bool> {
-        self.nac
-            .check_permission(actor, to_node_permission(permission))
-            .await
-            .map_err(|e| p2p::error::Error::Other(e.to_string()))
+async fn authorize_and_apply<C, T, A>(coordinator: &C, transport: &T, nac: &A, request: &ManageRequest) -> Result<(), String>
+where C: ManageOps, T: P2PTransport, A: ManageAccessCheck + ?Sized {
+    let audience = transport.local_peer_id().to_string();
+    let actor: Did = verify_actor_token(&request.auth_token, &audience)?;
+    if !nac.check(&actor, request.op.permission()).await.map_err(|e| e)? {
+        return Err("unauthorized".into());
+    }
+    coordinator.apply_mutate(transport, &request.op).await.map_err(|e| e.to_string())
+}
+
+pub async fn build_manage_query_reply<C, T, A>(coordinator: &C, transport: &T, nac: &A, request: ManageQueryRequest) -> ManageQueryReply
+where C: ManageOps, T: P2PTransport, A: ManageAccessCheck + ?Sized {
+    let mid = request.message_id.clone();
+    let audience = transport.local_peer_id().to_string();
+    let run = async {
+        let actor = verify_actor_token(&request.auth_token, &audience)?;
+        if !nac.check(&actor, request.op.permission()).await? { return Err("unauthorized".to_string()); }
+        coordinator.apply_query(&request.op).await.map_err(|e| e.to_string())
+    };
+    match run.await {
+        Ok(result) => ManageQueryReply::success(&mid, result),
+        Err(e) => ManageQueryReply::error(&mid, &e),
     }
 }
 ```
 
-> Confirm the exact `NodePermission` variant identifiers via `grep -n "P2p" crates/acp/src/nac/permission.rs`. Confirm `acp` may depend on `p2p` without a cycle (p2p must NOT depend on acp — that's why `ManagePermission` lives in p2p). If `acp`→`p2p` would create a cycle, place this impl in the higher-level node/db crate that already depends on both.
+Define a small `ManageOps` trait in this file implemented for the concrete `SyncCoordinator` used by db-merge, so the serve fns stay store-generic-free:
 
-Wire it at host construction: pass `Arc::new(NacNodeAccessCheck::new(nac))` as the `Arc<dyn NodeAccessCheck>` into the P2P runtime (Task 5.3's injection point).
+```rust
+#[async_trait::async_trait]
+pub trait ManageOps {
+    async fn apply_mutate<T: P2PTransport>(&self, transport: &T, op: &ManageMutateOp) -> p2p::error::Result<()>;
+    async fn apply_query(&self, op: &ManageQueryOp) -> p2p::error::Result<ManageQueryResult>;
+}
+```
 
-- [ ] **Step 4: Run test to verify it passes**
+Implement `apply_mutate` by dispatching to the existing coordinator/transport methods:
+- `ReplicatorAdd { addresses, collection_ids }`: for each multiaddr in `addresses`, parse → `(PeerId, PeerAddr)` using the **existing** address parser (find via `grep -rn "fn parse\|multiaddr" crates/p2p/src/address.rs`), `transport.dial(&peer_id, vec![addr]).await?`, then `coordinator.create_replicator(&peer_id, collection_ids.clone(), false).await?`.
+- `ReplicatorDelete { peer_id, collection_ids }`: `let pid = PeerId::new(peer_id.clone());` then `delete_replicator(&pid)` (empty `collection_ids`) or `remove_replicator_collections(&pid, collection_ids.clone())`.
+- `CollectionAdd/Remove`: loop `subscribe_collection`/`unsubscribe_collection`.
+- `DocumentAdd/Remove`: loop `subscribe_document`/`unsubscribe_document`.
+- `PeerConnect { address }`: parse multiaddr → `(PeerId, PeerAddr)`, `transport.dial(&peer_id, vec![addr]).await?`.
 
-Run: `cargo test -p acp node_access_check`
-Expected: PASS.
+`apply_query`: `ReplicatorList` → `ManageQueryResult::Replicators { replicators: coordinator.list_replicators().await? }`; `CollectionList` → `ManageQueryResult::Strings { values: coordinator.get_subscribed_collections().await? }`.
+
+> Use `p2p::error::Error::InvalidMultiaddress`/`InvalidPeerId` for parse failures — NOT `InvalidInput`/`Other`. `PeerId` is the string newtype: `PeerId::new(s.clone())`, never `s.parse()`.
+
+- [ ] **Step 4:** `cargo test -p db-merge manage::serve` → PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add -A
-git commit -m "feat(acp): NacNodeAccessCheck wiring manage perms into NAC"
+git add crates/db-merge/src/manage/serve.rs
+git commit -m "feat(db-merge): manage serve handlers (auth + NAC + dispatch)"
 ```
 
 ---
 
-## Phase 6: Integration tests (both transports)
+## Phase 6: Enable the channel (runtime wiring) + requester API
 
-### Task 6.1: P2P management integration module
+### Task 6.1: Construct + thread the manage correlators
 
 **Files:**
-- Create: `tools/integration-test/tests/p2p/management.rs`
-- Modify: `tools/integration-test/tests/p2p.rs` (or the `--test p2p` module root) to add `mod management;`
+- Modify: `crates/embedded/src/node_p2p.rs` (mirror `se_correlator` at :171-179), `crates/cli/src/commands/start/server_p2p.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1–3:** Where `SeQueryCorrelator::new()` is constructed and cloned into the transport + event loop, add `ManageCorrelator::new()` and `ManageQueryCorrelator::new()` the same way: one clone for the requester API (Task 6.3), one passed into the event handler (Task 6.2). Thread an `Arc<dyn ManageAccessCheck>` built from the node's `NodeACP` (`Arc::new(NacAccess(nac.clone()))`) into the event handler.
+- [ ] **Step 4:** `cargo build -p embedded -p cli` → clean.
+- [ ] **Step 5: Commit** `feat(embedded,cli): construct manage correlators + NAC access`
 
-Model on an existing `--test p2p` submodule (read `tools/integration-test/tests/p2p/replication.rs` for the two-node harness pattern). Write a test that starts node A and node B, where **B is reachable only via P2P** (do not call B's HTTP for the management ops), then drives the management channel from A:
+### Task 6.2: Route manage events to serve + correlator
+
+**Files:**
+- Modify: `crates/embedded/src/node_tasks.rs` (:88-101 libp2p, :172-184 iroh), `crates/cli/src/commands/start/server_p2p.rs` (:377-387, :794-804)
+
+- [ ] **Step 1–3:** In every SE-query event match (libp2p + iroh, embedded + cli), add the four manage arms:
+  - `TransportEvent::ManageRequest { peer_id, request }` →
+    ```rust
+    let mut reply = db_merge::manage::serve::build_manage_reply(coordinator.as_ref(), &transport, nac.as_ref(), request).await;
+    if p2p::signing::sign_with_transport(&transport, &mut reply).is_ok() {
+        let _ = transport.send_manage_response(&peer_id, reply).await;
+    }
+    ```
+  - `TransportEvent::ManageQueryRequest { peer_id, request }` → `build_manage_query_reply` then `sign_with_transport` then `send_manage_query_response`.
+  - `TransportEvent::ManageReply { reply, .. }` → `manage_correlator.deliver(reply);`
+  - `TransportEvent::ManageQueryReply { reply, .. }` → `manage_query_correlator.deliver(reply);`
+
+  This mirrors `se::serve::handle_query_request` + `se_correlator.deliver` exactly, with the sign-before-send step (the #1 review fix).
+
+- [ ] **Step 4:** `cargo build -p embedded -p cli` → clean; `cargo test -p db-merge` → green.
+- [ ] **Step 5: Commit** `feat: enable manage channel — serve + correlate wiring (libp2p + iroh)`
+
+### Task 6.3: Requester API
+
+**Files:**
+- Modify: the host handle / a db-merge requester module (mirror the SE query requester — find via `grep -rn "SeQueryCorrelator\|register(" crates/db-merge/src crates/p2p/src/host/handle.rs`)
+
+- [ ] **Step 1: Write the failing test** — covered by Phase 7 (needs two nodes). For this task, add a unit test that `register` + `deliver` round-trips through the requester wrapper if it is pure-async-testable; otherwise defer to Phase 7.
+
+- [ ] **Step 2–3:** Add `manage(peer_id, op, auth_token) -> Result<ManageReply>` and `manage_query(peer_id, op, auth_token) -> Result<ManageQueryReply>` on the requester:
+  - build `ManageRequest::new(op, auth_token)`, `signing::sign_message(keypair, &mut req)?` (or `sign_with_transport`) — this sets `message_id`;
+  - `let mut pending = manage_correlator.register(req.message_id.clone());`
+  - `transport.send_manage_request(&peer_id, req).await?;`
+  - `tokio::time::timeout(REQUEST_TIMEOUT, pending.recv()).await` → map timeout to `Error::ResponseTimeout`.
+  - mirror the exact SE query requester (`grep -rn "PendingSeQuery\|se_correlator" crates`).
+
+- [ ] **Step 4:** `cargo build` workspace → clean.
+- [ ] **Step 5: Commit** `feat: manage channel requester API`
+
+---
+
+## Phase 7: Integration tests (both transports)
+
+### Task 7.1: `--test p2p` management module
+
+**Files:**
+- Create: `tools/integration-test/tests/p2p/management.rs`; Modify the `--test p2p` module root.
+
+- [ ] **Step 1: Write the failing test** — model on `tools/integration-test/tests/p2p/replication.rs`. Node A drives B **over P2P only** (no HTTP to B). A mints actor tokens with `aud = B.peer_id()`:
 
 ```rust
 #[tokio::test]
-async fn manage_replicator_add_list_remove_over_p2p() {
-    let net = TwoNodeNet::start().await; // existing harness or equivalent
+async fn manage_replicator_add_then_list_over_p2p() {
+    let net = TwoNodeNet::start().await;
     let (a, b) = (net.node_a(), net.node_b());
-
-    // A asks B (over P2P only) to add a replicator back to A for `Users`.
-    let reply = a.manage_to(
-        b.peer_id(),
-        ManageMutateOp::ReplicatorAdd {
-            peer_id: a.peer_id().to_string(),
-            addresses: a.listen_addrs(),
-            collection_ids: vec![b.collection_id("Users").await],
-        },
-        a.actor_token_for(b.node_audience()),
-    ).await.expect("manage call");
+    let token = a.actor_token_for(b.peer_id().as_str());
+    let reply = a.manage_to(b.peer_id(), ManageMutateOp::ReplicatorAdd {
+        addresses: a.listen_multiaddrs(), collection_ids: vec![b.collection_id("Users").await],
+    }, token.clone()).await.expect("manage");
     assert!(reply.err_message().is_none());
-
-    // list over the query channel reflects it
-    let listed = a.manage_query_to(
-        b.peer_id(),
-        ManageQueryOp::ReplicatorList,
-        a.actor_token_for(b.node_audience()),
-    ).await.expect("query");
+    let listed = a.manage_query_to(b.peer_id(), ManageQueryOp::ReplicatorList, token).await.expect("query");
     assert!(matches!(listed.result, Some(ManageQueryResult::Replicators { .. })));
-
-    // remove
-    let removed = a.manage_to(
-        b.peer_id(),
-        ManageMutateOp::ReplicatorDelete { peer_id: a.peer_id().to_string(), collection_ids: vec![] },
-        a.actor_token_for(b.node_audience()),
-    ).await.expect("manage remove");
-    assert!(removed.err_message().is_none());
 }
 
 #[tokio::test]
 async fn manage_denied_for_unauthorized_actor() {
-    let net = TwoNodeNet::start_with_nac().await; // B has NAC enabled, A's actor is not owner/admin
-    let reply = net.node_a().manage_to(
-        net.node_b().peer_id(),
+    let net = TwoNodeNet::start_with_nac().await; // B NAC-enabled; A's actor not owner/admin
+    let reply = net.node_a().manage_to(net.node_b().peer_id(),
         ManageMutateOp::CollectionAdd { collection_ids: vec!["c1".into()] },
-        net.node_a().actor_token_for(net.node_b().node_audience()),
+        net.node_a().actor_token_for(net.node_b().peer_id().as_str()),
     ).await.expect("call completes");
     assert_eq!(reply.err_message(), Some("unauthorized"));
 }
 ```
 
-(The `manage_to`/`manage_query_to`/`actor_token_for`/`node_audience` helpers are thin wrappers over the Task 5.3 host-handle API + the integration harness's identity helpers. Add them to the harness support module alongside the existing P2P helpers.)
+- [ ] **Step 2:** `cargo test -p integration-test --test p2p -- management::` → FAIL; iterate.
+- [ ] **Step 3:** Add harness helpers (`manage_to`/`manage_query_to`/`actor_token_for`) wrapping the Task 6.3 API + the harness identity helpers.
+- [ ] **Step 4:** `cargo test -p integration-test --test p2p -- management::` → PASS.
+- [ ] **Step 5: Commit** `test(integration): p2p management channel over libp2p`
 
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p integration-test --test p2p -- management::`
-Expected: FAIL (helpers/wiring incomplete) — iterate until the two tests pass.
-
-- [ ] **Step 3: Implement harness helpers** as needed (no production code should be missing after Phase 5; fill only test-support glue).
-
-- [ ] **Step 4: Run to verify it passes**
-
-Run: `cargo test -p integration-test --test p2p -- management::`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add tools/integration-test/tests/p2p/management.rs tools/integration-test/tests/p2p.rs
-git commit -m "test(integration): p2p management channel over libp2p"
-```
-
-### Task 6.2: Mirror under `--test p2p_iroh`
+### Task 7.2: `--test p2p_iroh` mirror
 
 **Files:**
-- Create: `tools/integration-test/tests/p2p_iroh/management.rs`
-- Modify: the `--test p2p_iroh` module root
+- Create: `tools/integration-test/tests/p2p_iroh/management.rs`; Modify the `--test p2p_iroh` root.
 
-- [ ] **Step 1–4:** Copy Task 6.1's tests into the iroh test binary, configured for the iroh transport (mirror how an existing `p2p_iroh` submodule selects the iroh transport). Iroh is the primary target (defra-agent runs Iroh in prod).
-
-Run: `cargo test -p integration-test --test p2p_iroh -- management::`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A
-git commit -m "test(integration): p2p management channel over iroh"
-```
+- [ ] **Steps:** Copy Task 7.1 configured for iroh (primary target — defra-agent runs Iroh). Run `cargo test -p integration-test --test p2p_iroh -- management::` → PASS. Commit `test(integration): p2p management channel over iroh`.
 
 ---
 
-## Phase 7: Final verification
+## Phase 8: Final gate
 
-### Task 7.1: Full gate
+### Task 8.1
 
-- [ ] **Step 1:** `cargo fmt --all`
-- [ ] **Step 2:** `cargo clippy --all -- -D warnings` — fix all warnings.
-- [ ] **Step 3:** `cargo test -p p2p` — all unit tests pass.
-- [ ] **Step 4:** `cargo test -p integration-test --test p2p` and `--test p2p_iroh` — pass.
-- [ ] **Step 5:** `cargo test -p acp` — NAC suite still green (no regression from the new impl).
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A
-git commit -m "chore(p2p): fmt + clippy clean for management channel"
-```
+- [ ] `cargo fmt --all`
+- [ ] `cargo clippy --all -- -D warnings` — fix all.
+- [ ] `cargo test -p p2p` and `cargo test -p db-merge` — green.
+- [ ] `cargo test -p integration-test --test p2p` and `--test p2p_iroh` — green.
+- [ ] `cargo test -p acp` — NAC suite unaffected.
+- [ ] Commit `chore: fmt + clippy clean for management channel`.
 
 ---
 
 ## Self-review notes (for the implementer)
 
-- **Sequencing invariant:** Phase 5.3 is the only step that enables the channel. Confirm no earlier dispatch arm mutates state without the Phase 4 auth path. If the iroh `dispatch_stream` arms (Task 3.4) emit events that an existing consumer would auto-handle, gate them behind the authorizing handler from the start.
-- **No new wire fork of `ReplicatorInfo`:** this plan only *reads* `ReplicatorInfo` in `ManageQueryResult` — it does not add fields, so Go `client.Replicator` wire compat is unaffected (that concern belongs to #1013/B1, out of scope).
-- **Grep-confirm before coding** every symbol marked "confirm via grep": `Error` variants (`Unauthorized`, `InvalidInput`, `Other`), the identity token API (`verify_auth_token`/`from_token`/token minting), coordinator connect/disconnect/identity helpers, and the exact `NodePermission::P2p*` variant names.
-- **Dependency direction:** `crates/p2p` must not depend on `crates/acp`. `ManagePermission` lives in `p2p`; the mapping to `NodePermission` lives on the `acp` (or node) side. If `acp`→`p2p` is a cycle, host the `NacNodeAccessCheck` impl in the node/db crate.
+- **Replies MUST be signed** (review #1): every `send_manage_*` of a reply is preceded by `sign_with_transport(&transport, &mut reply)` in the runtime wiring (Task 6.2), exactly as `se/serve.rs:46`. The receive handler calls `verify_message`, so an unsigned reply is rejected by the requester.
+- **No dependency cycle** (review #2): `crates/p2p` already depends on `acp`, so op→`acp::NodePermission` lives in p2p; the NAC adapter (`NacAccess`) lives in `crates/db-merge` (depends on acp + p2p + identity). Nothing in `acp` imports `p2p`.
+- **Sequencing** (review #3): softened to "no state-mutating consumer before auth." Phases 1–3 only register protocols and emit unconsumed events; the serve handler is added in Phase 5 and routed in Phase 6.
+- **DocumentList / PeerRemove deferred** (review #3/#4): not in v1. Open follow-up issues; PeerRemove needs a `P2PTransport::disconnect` primitive, DocumentList needs document-subscription storage (or the #1013 filtered-replication replacement).
+- **PeerId is a string newtype** (review #4): `PeerId::new(s)` / `as_str()`, never `s.parse()`. Replicator/peer addresses are dialed via `transport.dial`, using the existing multiaddr parser in `crates/p2p/src/address.rs`.
+- **iroh correlation in the runtime handler** (review #5/#6): `endpoint_streams` only emits `TransportEvent::Manage*`; `deliver` happens in `node_tasks.rs`/`server_p2p.rs`, like SE.
+- **Symbols** (review #6): `Error::Unauthorized` is added (Task 4.1); use `InvalidMultiaddress`/`InvalidPeerId`/`Transport` elsewhere; the DID comes from `TokenIdentity::did()` (the `Identity` trait), not a field; no `Did::default()`.
+- **Go-compat scope:** only the `MetaData` envelope is Go-byte-compatible; op enums are Rust-native (versioned). Tests assert CBOR self-round-trip.
+- **No new `ReplicatorInfo` wire field:** the channel only reads it; Go `client.Replicator` compat is unaffected (that's #1013/B1, out of scope).
