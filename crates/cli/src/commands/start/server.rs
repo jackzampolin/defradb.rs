@@ -168,6 +168,13 @@ impl Node {
 
         let nac_adapter = Self::setup_nac_manager(config, user_did.as_ref()).await?;
 
+        // Wire the NAC manager into the DB so DB-layer `check_node_access` calls
+        // go live (first-call-wins via the DB's OnceLock). Without this the CLI
+        // server's DB-layer NAC checks are inert.
+        if let Some(adapter) = nac_adapter.as_ref() {
+            database.set_nac_manager(adapter.nac_manager());
+        }
+
         // Build + wire the KMS (mirrors crates/embedded/src/node.rs). The P2P
         // transport was created earlier; the NacDacPolicy needs document_acp +
         // NAC which exist here (PR #4778 ordering).
