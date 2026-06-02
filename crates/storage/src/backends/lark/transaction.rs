@@ -160,33 +160,12 @@ impl Reader for LarkTxn {
             |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
 
         let (start_bound, end_bound) = compute_range_bounds(&opts);
-
-        // Compute scan bounds for lark
-        let scan_start = match &start_bound {
-            Bound::Included(v) => Some(v.as_slice()),
-            Bound::Excluded(v) => Some(v.as_slice()),
-            Bound::Unbounded => None,
-        };
-        let scan_end = match &end_bound {
-            Bound::Included(v) => Some(v.as_slice()),
-            Bound::Excluded(v) => Some(v.as_slice()),
-            Bound::Unbounded => None,
-        };
-
-        // Read matching items from snapshot
-        let snapshot_items: Vec<(Vec<u8>, Vec<u8>)> = self
-            .snapshot
-            .scan(scan_start, scan_end)
-            .map_err(|e| Error::Backend(e.to_string()))?
-            .into_iter()
-            .filter(|(k, _)| matches_prefix(k))
-            .map(|(k, v)| if keys_only { (k, Vec::new()) } else { (k, v) })
-            .collect();
+        let snapshot_iter = self.snapshot.owned_iter();
 
         // Extract pending items in range
         let pending = self.pending.lock();
         let pending_items: Vec<(Vec<u8>, Option<Vec<u8>>)> = pending
-            .range((start_bound, end_bound))
+            .range((start_bound.clone(), end_bound.clone()))
             .filter(|(k, _)| matches_prefix(k))
             .map(|(k, v)| {
                 (
@@ -198,10 +177,12 @@ impl Reader for LarkTxn {
             .collect();
 
         Ok(Box::new(MergingIterator::new(
-            snapshot_items,
+            snapshot_iter,
             pending_items,
             opts,
-        )))
+            start_bound,
+            end_bound,
+        )?))
     }
 }
 
