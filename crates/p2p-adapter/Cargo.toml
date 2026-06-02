@@ -11,12 +11,15 @@ description = "DefraDB P2P adapters for HTTP-facing operations"
 [dependencies]
 acp = { path = "../acp" }
 blockstore = { path = "../blockstore" }
+crypto = { path = "../crypto" }
 db = { path = "../db" }
 db-merge = { path = "../db-merge" }
+db-nac = { path = "../db-nac" }
 defra-core = { path = "../defra-core" }
 defra-http = { path = "../http" }
 document = { path = "../document" }
 events = { path = "../events" }
+identity = { path = "../identity" }
 lens = { path = "../lens" }
 p2p = { path = "../p2p", default-features = false }
 storage = { path = "../storage" }

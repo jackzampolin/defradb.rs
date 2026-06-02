@@ -10,6 +10,7 @@ mod iroh;
 mod libp2p;
 #[cfg(feature = "libp2p")]
 mod libp2p_doc_pusher;
+pub mod manage;
 mod replicator_status;
 #[cfg(feature = "iroh")]
 mod transport_doc_pusher;
