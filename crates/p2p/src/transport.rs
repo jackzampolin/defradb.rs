@@ -404,6 +404,46 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
         ))
     }
 
+    async fn send_manage_request(
+        &self,
+        _peer_id: &PeerId,
+        _req: ManageRequest,
+    ) -> Result<()> {
+        Err(crate::error::Error::Transport(
+            "send_manage_request is not supported on this transport".to_string(),
+        ))
+    }
+
+    async fn send_manage_response(
+        &self,
+        _peer_id: &PeerId,
+        _reply: ManageReply,
+    ) -> Result<()> {
+        Err(crate::error::Error::Transport(
+            "send_manage_response is not supported on this transport".to_string(),
+        ))
+    }
+
+    async fn send_manage_query_request(
+        &self,
+        _peer_id: &PeerId,
+        _req: ManageQueryRequest,
+    ) -> Result<()> {
+        Err(crate::error::Error::Transport(
+            "send_manage_query_request is not supported on this transport".to_string(),
+        ))
+    }
+
+    async fn send_manage_query_response(
+        &self,
+        _peer_id: &PeerId,
+        _reply: ManageQueryReply,
+    ) -> Result<()> {
+        Err(crate::error::Error::Transport(
+            "send_manage_query_response is not supported on this transport".to_string(),
+        ))
+    }
+
     // ---- Block sync ----
 
     async fn sync_blocks(
