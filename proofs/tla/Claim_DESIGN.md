@@ -3,7 +3,7 @@
 Date: 2026-06-02. Branch: `feat/p2p-tla-claim`.
 
 This is the B3 follow-on model for same-DID `AgentRequest` claim races. It keeps
-`specs/DagReplication.tla` read-only and models only the extra behavior needed
+`proofs/tla/DagReplication.tla` read-only and models only the extra behavior needed
 for CRDT-CAS claims, LWW convergence, and execution side effects.
 
 ## Grounding
@@ -41,7 +41,7 @@ claim uniqueness fails.
 
 ## Model
 
-`specs/Claim.tla` represents:
+`proofs/tla/Claim.tla` represents:
 
 | Spec symbol | Meaning |
 |---|---|
@@ -68,7 +68,7 @@ Actions:
 
 ## TLC Runs
 
-Run from `specs/`:
+Run from `proofs/tla/`:
 
 ```bash
 ./tools/tlc -config MC_Claim_Unfiltered_Eventual.cfg MC_Claim_Common.tla

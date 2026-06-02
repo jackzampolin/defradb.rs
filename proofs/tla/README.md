@@ -5,10 +5,10 @@ first slice) leads; later slices model adjacent P2P concerns. Design rationale a
 grounded facts for B3 live in [DESIGN.md](DESIGN.md); each later slice has its own
 `*_DESIGN.md`. This file is the operational guide: how to run TLC, what each run proves.
 
-**Model families** (all under `specs/`, run with `./tools/tlc`):
+**Model families** (all under `proofs/tla/`, run with `./tools/tlc`):
 - **B3 filtered replication** — the eight runs below (`DESIGN.md`).
 - **DAG convergence** under partition/restart/eviction (`Convergence_DESIGN.md`) +
-  the Lean merge-algebra half under [`../proofs/`](../proofs/README.md).
+  the Lean merge-algebra half under [`../lean/`](../lean/README.md).
 - **Multi-instance claim-uniqueness** (`Claim_DESIGN.md`).
 - **KMS key distribution** (`Kms_DESIGN.md`).
 - **Management-channel auth** (`Auth_DESIGN.md`).
@@ -18,7 +18,7 @@ grounded facts for B3 live in [DESIGN.md](DESIGN.md); each later slice has its o
 ## Quick start
 
 ```
-cd specs
+cd proofs/tla
 ```
 
 All commands use `./tools/tlc -config <cfg> <module>.tla`. Run them one at a time.
@@ -165,7 +165,7 @@ FFI-wrapped surfaces; exposing them to untrusted callers requires the same gate.
 Design notes in [Convergence_DESIGN.md](Convergence_DESIGN.md). Strengthens the B3
 fair-delivery model to **eventual connectivity** + bounded synced-CID eviction + node
 restart. The order-independence half (CRDT merge is a commutative monoid) is proved in
-Lean under [`../proofs/`](../proofs/README.md).
+Lean under [`../lean/`](../lean/README.md).
 
 ```bash
 # GREEN: under eventual connectivity + fair head rediscovery, a partitioned node

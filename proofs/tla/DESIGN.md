@@ -233,17 +233,17 @@ The Naive / A / B difference is a single guard on the fetch action.
   space explodes; the liveness props stay on TLC. Write specs to avoid TLC-only
   idioms where free, but do not claim full Apalache portability.
 - **Spike-then-parametric** layout:
-  - `specs/M1Convergence.tla` (+ `.cfg`) — tiny, get TLC green fast (S1/S1′).
-  - `specs/DagReplication.tla` — one parametric spec over `FilterScope ∈
+  - `proofs/tla/M1Convergence.tla` (+ `.cfg`) — tiny, get TLC green fast (S1/S1′).
+  - `proofs/tla/DagReplication.tla` — one parametric spec over `FilterScope ∈
     {None,WholeDoc,SubDoc}` × `KeyMutability ∈ {Immutable,Mutable}` × `FetchPolicy
     ∈ {Naive,FullWalkA,FilteredMergeB}`, driven by the S1–S4 `.cfg` files.
-  - `specs/README.md` — plain-English invariant → TLC verdict → source-module map.
+  - `proofs/tla/README.md` — plain-English invariant → TLC verdict → source-module map.
 - **Bounds (TLC):** N=2–3 agents/DIDs, ≤2 docs, ≤6 blocks, ≤1 owner-reassignment.
   Minimal `#2721` needs 1 doc + 3 blocks (root + 2 concurrent children) + 2 nodes;
   `INV_NoSplitOwnership` needs 2 DIDs + 1 reassignment; `INV_RelRefSafe` needs 2
   docs + a cross-ref. All within TLC reach.
 - Per CLAUDE.md's "no `docs/`, no planning documents" rule, these specs are the
-  research work-product of this branch, kept under `specs/`. **Confirm placement
+  research work-product of this branch, kept under `proofs/tla/`. **Confirm placement
   with Jack before any merge to main.** If the branch stays unmerged research,
   the constraint does not bite.
 

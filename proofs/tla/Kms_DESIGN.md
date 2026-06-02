@@ -73,7 +73,7 @@ stale-auth mode serves it.
 
 ## TLC Runs
 
-Run from `specs/`:
+Run from `proofs/tla/`:
 
 ```bash
 # GREEN: policy-gated response, recipient-only decryptability, liveness.
