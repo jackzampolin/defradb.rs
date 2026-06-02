@@ -6,5 +6,5 @@ mod transaction;
 #[cfg(test)]
 mod tests;
 
-pub use config::LarkStoreOptions;
+pub use config::{CompactionStyle, CompressionType, LarkStoreOptions};
 pub use store::LarkStore;
