@@ -127,6 +127,7 @@ impl EventAccessContext {
                 QueryRequest::new(query).with_identity(self.did.clone()),
                 self.signing_config.clone(),
                 self.dac_bypass,
+                self.did.as_ref().map(|d| d.as_str().to_string()),
             )
             .await;
 
@@ -143,6 +144,7 @@ impl EventAccessContext {
             QueryRequest::new(query).with_identity(self.did.clone()),
             self.signing_config.clone(),
             self.dac_bypass,
+            self.did.as_ref().map(|d| d.as_str().to_string()),
         )
         .await;
 

@@ -33,8 +33,10 @@ pub async fn execute_with_context(
     let handle = tokio::runtime::Handle::current();
 
     let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
+    let acting_did = identity.did().map(|d| d.as_str().to_string());
 
     match tokio::task::spawn_blocking(move || {
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(acting_did);
         defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         defra_core::dac_bypass::set_dac_bypass(dac_bypass);
@@ -67,8 +69,10 @@ pub async fn execute_in_txn_with_context(
     let handle = tokio::runtime::Handle::current();
 
     let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
+    let acting_did = identity.did().map(|d| d.as_str().to_string());
 
     match tokio::task::spawn_blocking(move || {
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(acting_did);
         defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         defra_core::dac_bypass::set_dac_bypass(dac_bypass);
@@ -90,12 +94,14 @@ pub async fn execute_with_resolved_context(
     request: QueryRequest,
     signing_config: Option<defra_core::signing::SigningConfig>,
     dac_bypass: bool,
+    acting_did: Option<String>,
 ) -> QueryResponse {
     let handle = tokio::runtime::Handle::current();
 
     let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
 
     match tokio::task::spawn_blocking(move || {
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(acting_did);
         defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         defra_core::dac_bypass::set_dac_bypass(dac_bypass);

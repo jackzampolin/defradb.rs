@@ -23,13 +23,20 @@ impl<S: Store> DB<S> {
         if !nac.is_enabled().await {
             return Ok(());
         }
+        // Resolve the acting identity: explicit param wins, otherwise fall
+        // back to the ambient request identity set at the HTTP/FFI boundary.
+        let resolved: Option<Did> = match identity {
+            Some(d) => Some(d.clone()),
+            None => defra_core::current_identity::get_current_identity()
+                .and_then(|s| Did::new(s).ok()),
+        };
         // Node's own identity always has access (mirrors Go db_nac.go).
         if let Some(node) = self.node_did() {
-            if identity == Some(&node) {
+            if resolved.as_ref() == Some(&node) {
                 return Ok(());
             }
         }
-        let did = identity.cloned().unwrap_or_else(Did::wildcard);
+        let did = resolved.unwrap_or_else(Did::wildcard);
         let allowed = nac
             .check_permission(&did, permission)
             .await
