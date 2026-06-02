@@ -34,6 +34,7 @@ mod identity;
 mod metadata;
 pub mod pubsub;
 mod pushlog;
+mod manage;
 mod se;
 mod traits;
 
@@ -48,6 +49,7 @@ pub use se::{
     PushSEArtifactsReply, PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest,
     SEArtifact, SEFieldQuery,
 };
+pub use manage::{ManageDocRef, ManageMutateOp, ManageQueryOp, ManageQueryResult};
 pub use traits::Message;
 
 // Re-export CBOR helpers for use by other modules that need wire compatibility
