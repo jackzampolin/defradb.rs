@@ -547,8 +547,8 @@ impl Message for ManageQueryReply {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::Message;
+    use super::*;
 
     #[test]
     fn mutate_op_cbor_round_trip() {
@@ -591,7 +591,10 @@ mod tests {
             .permission(),
             P::P2pPeerConnect
         );
-        assert_eq!(ManageQueryOp::ReplicatorList.permission(), P::P2pReplicatorList);
+        assert_eq!(
+            ManageQueryOp::ReplicatorList.permission(),
+            P::P2pReplicatorList
+        );
         assert_eq!(
             ManageMutateOp::CollectionRemove {
                 collection_ids: vec![]
@@ -615,9 +618,13 @@ mod tests {
 
     #[test]
     fn request_round_trip_and_trait() {
-        let mut req = ManageRequest::new(ManageMutateOp::DocumentRemove { docs: vec![] }, b"jwt".to_vec());
+        let mut req = ManageRequest::new(
+            ManageMutateOp::DocumentRemove { docs: vec![] },
+            b"jwt".to_vec(),
+        );
         req.set_message_id("mid-1".into());
-        let back: ManageRequest = serde_cbor::from_slice(&serde_cbor::to_vec(&req).unwrap()).unwrap();
+        let back: ManageRequest =
+            serde_cbor::from_slice(&serde_cbor::to_vec(&req).unwrap()).unwrap();
         assert_eq!(back.message_id(), "mid-1");
         assert_eq!(back.auth_token, b"jwt");
     }
@@ -625,8 +632,16 @@ mod tests {
     #[test]
     fn replies_build() {
         assert!(ManageReply::success("m").err_message().is_none());
-        assert_eq!(ManageReply::error("m", "unauthorized").err_message(), Some("unauthorized"));
-        let q = ManageQueryReply::success("m", ManageQueryResult::Strings { values: vec!["c".into()] });
+        assert_eq!(
+            ManageReply::error("m", "unauthorized").err_message(),
+            Some("unauthorized")
+        );
+        let q = ManageQueryReply::success(
+            "m",
+            ManageQueryResult::Strings {
+                values: vec!["c".into()],
+            },
+        );
         assert!(matches!(q.result, Some(ManageQueryResult::Strings { .. })));
     }
 }

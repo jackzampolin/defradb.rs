@@ -77,10 +77,7 @@ pub enum TwoStreamEvent {
         request: ManageRequest,
     },
     /// Received a management reply from a peer (mutating operation ack/error).
-    ManageReply {
-        peer_id: PeerId,
-        reply: ManageReply,
-    },
+    ManageReply { peer_id: PeerId, reply: ManageReply },
     /// Received a management query request from a peer (read-only operation).
     ManageQueryRequest {
         peer_id: PeerId,

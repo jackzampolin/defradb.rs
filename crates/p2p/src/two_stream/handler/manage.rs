@@ -9,8 +9,6 @@ use crate::two_stream::event::TwoStreamEvent;
 
 use super::{ensure_transport_sender, TwoStreamHandler};
 
-// Methods are wired into the inbound dispatcher in Task 3.3.
-#[allow(dead_code)]
 impl TwoStreamHandler {
     /// Send a management mutate request to a peer without waiting for response.
     ///

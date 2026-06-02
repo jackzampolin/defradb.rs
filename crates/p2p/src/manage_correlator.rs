@@ -45,9 +45,7 @@ pub struct PendingManage {
 impl PendingManage {
     /// Await the reply for this request. Returns `Err` if the slot was
     /// cancelled (sender dropped) before a reply arrived.
-    pub async fn recv(
-        &mut self,
-    ) -> std::result::Result<ManageReply, oneshot::error::RecvError> {
+    pub async fn recv(&mut self) -> std::result::Result<ManageReply, oneshot::error::RecvError> {
         (&mut self.receiver).await
     }
 }
@@ -254,10 +252,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn query_reply(message_id: &str) -> ManageQueryReply {
-        ManageQueryReply::success(
-            message_id,
-            ManageQueryResult::Strings { values: vec![] },
-        )
+        ManageQueryReply::success(message_id, ManageQueryResult::Strings { values: vec![] })
     }
 
     #[tokio::test]

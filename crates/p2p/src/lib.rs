@@ -66,12 +66,12 @@ mod explicit_replay;
 pub mod host;
 #[cfg(feature = "libp2p-transport")]
 pub mod kms;
+pub mod manage_correlator;
 pub mod message;
 pub mod protocol;
 #[cfg(feature = "libp2p-transport")]
 pub mod pubsub_rpc;
 pub mod replicator;
-pub mod manage_correlator;
 pub mod se_correlator;
 pub mod signing;
 pub mod sync;
