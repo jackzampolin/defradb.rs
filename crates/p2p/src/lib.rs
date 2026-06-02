@@ -71,6 +71,7 @@ pub mod protocol;
 #[cfg(feature = "libp2p-transport")]
 pub mod pubsub_rpc;
 pub mod replicator;
+pub mod manage_correlator;
 pub mod se_correlator;
 pub mod signing;
 pub mod sync;
@@ -152,6 +153,11 @@ pub struct QueryId(pub u64);
 
 // Re-export replicator types
 pub use replicator::{ReplicatorInfo, ReplicatorStatus};
+
+// Re-export management correlators
+pub use manage_correlator::{
+    ManageCorrelator, ManageQueryCorrelator, PendingManage, PendingManageQuery,
+};
 
 // Re-export SE query correlator
 pub use se_correlator::{PendingSeQuery, SeQueryCorrelator};
