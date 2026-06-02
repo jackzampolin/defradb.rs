@@ -58,6 +58,11 @@ impl<S: Store + 'static> LensOperations for LensAdapter<S> {
             return Ok(transform_id.to_string());
         }
 
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::LensCreate)
+            .await
+            .map_err(|e| format!("{}", e))?;
+
         // Build IPLD blocks, store in blockstore, register with real CID
         let transform_id = self
             .database
@@ -69,6 +74,11 @@ impl<S: Store + 'static> LensOperations for LensAdapter<S> {
     }
 
     async fn list(&self) -> Result<serde_json::Value, String> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::LensList)
+            .await
+            .map_err(|e| format!("{}", e))?;
+
         let modules = self
             .database
             .lens_store()
