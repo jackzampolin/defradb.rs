@@ -106,30 +106,6 @@ pub fn se_query_response_protocol() -> StreamProtocol {
     StreamProtocol::new(SE_QUERY_RESPONSE_PROTOCOL)
 }
 
-/// StreamProtocol for the management mutate request protocol.
-#[cfg(feature = "libp2p-transport")]
-pub fn manage_request_protocol() -> StreamProtocol {
-    StreamProtocol::new(MANAGE_REQUEST_PROTOCOL)
-}
-
-/// StreamProtocol for the management mutate response protocol.
-#[cfg(feature = "libp2p-transport")]
-pub fn manage_response_protocol() -> StreamProtocol {
-    StreamProtocol::new(MANAGE_RESPONSE_PROTOCOL)
-}
-
-/// StreamProtocol for the management query request protocol.
-#[cfg(feature = "libp2p-transport")]
-pub fn manage_query_request_protocol() -> StreamProtocol {
-    StreamProtocol::new(MANAGE_QUERY_REQUEST_PROTOCOL)
-}
-
-/// StreamProtocol for the management query response protocol.
-#[cfg(feature = "libp2p-transport")]
-pub fn manage_query_response_protocol() -> StreamProtocol {
-    StreamProtocol::new(MANAGE_QUERY_RESPONSE_PROTOCOL)
-}
-
 /// StreamProtocol for the CAR request protocol.
 #[cfg(feature = "libp2p-transport")]
 pub fn car_request_protocol() -> StreamProtocol {

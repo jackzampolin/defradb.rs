@@ -34,9 +34,9 @@ use crate::message::{DocSyncReply, IdentityResponse, PushLogReply, PushLogReques
 use crate::protocol::{
     CAR_REQUEST_PROTOCOL, CAR_RESPONSE_PROTOCOL, IDENTITY_REQUEST_PROTOCOL,
     IDENTITY_RESPONSE_PROTOCOL, MANAGE_QUERY_REQUEST_PROTOCOL, MANAGE_QUERY_RESPONSE_PROTOCOL,
-    MANAGE_REQUEST_PROTOCOL, MANAGE_RESPONSE_PROTOCOL, REP_REQUEST_PROTOCOL,
-    REP_RESPONSE_PROTOCOL, SE_QUERY_REQUEST_PROTOCOL, SE_QUERY_RESPONSE_PROTOCOL,
-    SE_REQUEST_PROTOCOL, SE_RESPONSE_PROTOCOL,
+    MANAGE_REQUEST_PROTOCOL, MANAGE_RESPONSE_PROTOCOL, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
+    SE_QUERY_REQUEST_PROTOCOL, SE_QUERY_RESPONSE_PROTOCOL, SE_REQUEST_PROTOCOL,
+    SE_RESPONSE_PROTOCOL,
 };
 use crate::{error::Error, message::Message, Result};
 
@@ -277,7 +277,7 @@ where
     )
     .await
     .map_err(|_| {
-        tracing::warn!(peer_id = %peer_id, "SE query stream read timed out");
+        tracing::warn!(peer_id = %peer_id, "{label} stream read timed out");
         Error::CborDeserialization(format!("{label} stream read timed out"))
     })?
     .map_err(|e| Error::CborDeserialization(format!("failed to read {label}: {e}")))?;

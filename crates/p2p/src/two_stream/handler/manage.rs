@@ -53,9 +53,7 @@ impl TwoStreamHandler {
             .control
             .open_stream(peer_id, Self::manage_response_protocol())
             .await
-            .map_err(|e| {
-                Error::Transport(format!("failed to open manage response stream: {e}"))
-            })?;
+            .map_err(|e| Error::Transport(format!("failed to open manage response stream: {e}")))?;
 
         write_message(&mut stream, &reply).await.map_err(|e| {
             Error::CborSerialization(format!("failed to write manage response: {e}"))
@@ -248,8 +246,14 @@ mod tests {
     #[tokio::test]
     async fn manage_request_decodes() {
         use crate::message::{ManageMutateOp, ManageRequest};
-        let req = ManageRequest::new(ManageMutateOp::CollectionAdd { collection_ids: vec!["c1".into()] }, b"t".to_vec());
-        let back: ManageRequest = serde_cbor::from_slice(&serde_cbor::to_vec(&req).unwrap()).unwrap();
+        let req = ManageRequest::new(
+            ManageMutateOp::CollectionAdd {
+                collection_ids: vec!["c1".into()],
+            },
+            b"t".to_vec(),
+        );
+        let back: ManageRequest =
+            serde_cbor::from_slice(&serde_cbor::to_vec(&req).unwrap()).unwrap();
         assert!(matches!(back.op, ManageMutateOp::CollectionAdd { .. }));
     }
 }
