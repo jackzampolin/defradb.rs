@@ -1,8 +1,7 @@
-//! P2P management channel message types.
+//! P2P management channel operation enums and their NAC-permission mapping.
 //!
-//! Two request/reply pairs mirroring `se.rs` (the SE store/query split). The
-//! `MetaData` envelope fields are byte-identical to `se.rs` for the shared
-//! `signing`/`verify_message` path. The op enums are Rust-native (no Go peer).
+//! `ManageMutateOp` / `ManageQueryOp` describe the verbs the management channel
+//! exposes; `permission()` maps each to the `acp::NodePermission` it requires.
 
 use serde::{Deserialize, Serialize};
 
@@ -62,7 +61,7 @@ pub enum ManageQueryOp {
 }
 
 /// Typed payload for a `manage_query` reply.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "Kind")]
 pub enum ManageQueryResult {
     Replicators {
@@ -116,6 +115,26 @@ mod tests {
     }
 
     #[test]
+    fn query_op_cbor_round_trip() {
+        let op = ManageQueryOp::ReplicatorList;
+        assert_eq!(
+            op,
+            serde_cbor::from_slice(&serde_cbor::to_vec(&op).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn query_result_strings_cbor_round_trip() {
+        let result = ManageQueryResult::Strings {
+            values: vec!["col-a".into(), "col-b".into()],
+        };
+        assert_eq!(
+            result,
+            serde_cbor::from_slice(&serde_cbor::to_vec(&result).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
     fn ops_map_to_permissions() {
         use acp::NodePermission as P;
         assert_eq!(
@@ -126,5 +145,24 @@ mod tests {
             P::P2pPeerConnect
         );
         assert_eq!(ManageQueryOp::ReplicatorList.permission(), P::P2pReplicatorList);
+        assert_eq!(
+            ManageMutateOp::CollectionRemove {
+                collection_ids: vec![]
+            }
+            .permission(),
+            P::P2pCollectionDelete
+        );
+        assert_eq!(
+            ManageMutateOp::DocumentRemove { docs: vec![] }.permission(),
+            P::P2pDocumentDelete
+        );
+        assert_eq!(
+            ManageMutateOp::ReplicatorAdd {
+                addresses: vec![],
+                collection_ids: vec![],
+            }
+            .permission(),
+            P::P2pReplicatorAdd
+        );
     }
 }

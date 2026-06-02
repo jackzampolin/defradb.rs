@@ -45,11 +45,11 @@ pub use docsync::{DocSyncItem, DocSyncReply, DocSyncRequest, MAX_DOC_IDS};
 pub use identity::{IdentityRequest, IdentityResponse};
 pub use metadata::MetaData;
 pub use pushlog::{PushLogBroadcast, PushLogGossipPayloadEncoding, PushLogReply, PushLogRequest};
+pub use manage::{ManageDocRef, ManageMutateOp, ManageQueryOp, ManageQueryResult};
 pub use se::{
     PushSEArtifactsReply, PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest,
     SEArtifact, SEFieldQuery,
 };
-pub use manage::{ManageDocRef, ManageMutateOp, ManageQueryOp, ManageQueryResult};
 pub use traits::Message;
 
 // Re-export CBOR helpers for use by other modules that need wire compatibility
