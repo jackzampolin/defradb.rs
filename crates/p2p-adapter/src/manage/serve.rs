@@ -13,8 +13,47 @@ use p2p::message::{
     ManageDocRef, ManageMutateOp, ManageQueryOp, ManageQueryReply, ManageQueryRequest,
     ManageQueryResult, ManageReply, ManageRequest,
 };
+use p2p::transport::PeerId;
+use p2p::P2PTransport;
 
 use super::auth::verify_actor_token;
+use super::hooks::ManageHooks;
+
+/// Serve an inbound manage MUTATE request: authorize+dispatch (unsigned reply),
+/// sign once with this node's transport, then send the response. The
+/// sign-then-send ordering is security-sensitive and lives only here. Logs and
+/// drops on send failure; silently drops if signing fails (mirrors the SE serve
+/// pattern in `db_merge::se::serve`).
+pub async fn serve_manage_request<T: P2PTransport>(
+    hooks: &ManageHooks,
+    transport: &T,
+    peer_id: &PeerId,
+    request: ManageRequest,
+) {
+    let mut reply = build_manage_reply(hooks.ops.as_ref(), hooks.nac.as_ref(), request).await;
+    if p2p::signing::sign_with_transport(transport, &mut reply).is_ok() {
+        if let Err(error) = transport.send_manage_response(peer_id, reply).await {
+            tracing::warn!(error = %error, "failed to send manage response");
+        }
+    }
+}
+
+/// Serve an inbound manage QUERY request: authorize+dispatch (unsigned reply),
+/// sign once with this node's transport, then send the response. Same
+/// sign-then-send invariant and failure handling as [`serve_manage_request`].
+pub async fn serve_manage_query_request<T: P2PTransport>(
+    hooks: &ManageHooks,
+    transport: &T,
+    peer_id: &PeerId,
+    request: ManageQueryRequest,
+) {
+    let mut reply = build_manage_query_reply(hooks.ops.as_ref(), hooks.nac.as_ref(), request).await;
+    if p2p::signing::sign_with_transport(transport, &mut reply).is_ok() {
+        if let Err(error) = transport.send_manage_query_response(peer_id, reply).await {
+            tracing::warn!(error = %error, "failed to send manage query response");
+        }
+    }
+}
 
 /// Authorize and apply a mutating request; returns an UNSIGNED reply.
 pub async fn build_manage_reply(

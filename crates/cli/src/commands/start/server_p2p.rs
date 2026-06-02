@@ -335,7 +335,6 @@ impl Node {
         let se_correlator_for_events = se_correlator.clone();
         let se_event_bus = event_bus.clone();
         let event_handler_task = Some(tokio::spawn(async move {
-            use p2p::P2PTransport as _;
             let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
             while let Some(event) = events.recv().await {
                 match &event {
@@ -417,22 +416,13 @@ impl Node {
                     }
                     p2p::TransportEvent::ManageRequest { peer_id, request } => {
                         if let Some(hooks) = manage_hooks_for_events.get() {
-                            let mut reply = defra_p2p_adapter::manage::serve::build_manage_reply(
-                                hooks.ops.as_ref(),
-                                hooks.nac.as_ref(),
+                            defra_p2p_adapter::manage::serve::serve_manage_request(
+                                hooks,
+                                &se_transport_serve,
+                                &peer_id,
                                 request,
                             )
                             .await;
-                            if p2p::signing::sign_with_transport(&se_transport_serve, &mut reply)
-                                .is_ok()
-                            {
-                                if let Err(e) = se_transport_serve
-                                    .send_manage_response(&peer_id, reply)
-                                    .await
-                                {
-                                    warn!(error = %e, "failed to send manage response");
-                                }
-                            }
                         } else {
                             tracing::debug!(%peer_id, "manage request before hooks ready; dropping");
                         }
@@ -440,23 +430,13 @@ impl Node {
                     }
                     p2p::TransportEvent::ManageQueryRequest { peer_id, request } => {
                         if let Some(hooks) = manage_hooks_for_events.get() {
-                            let mut reply =
-                                defra_p2p_adapter::manage::serve::build_manage_query_reply(
-                                    hooks.ops.as_ref(),
-                                    hooks.nac.as_ref(),
-                                    request,
-                                )
-                                .await;
-                            if p2p::signing::sign_with_transport(&se_transport_serve, &mut reply)
-                                .is_ok()
-                            {
-                                if let Err(e) = se_transport_serve
-                                    .send_manage_query_response(&peer_id, reply)
-                                    .await
-                                {
-                                    warn!(error = %e, "failed to send manage query response");
-                                }
-                            }
+                            defra_p2p_adapter::manage::serve::serve_manage_query_request(
+                                hooks,
+                                &se_transport_serve,
+                                &peer_id,
+                                request,
+                            )
+                            .await;
                         } else {
                             tracing::debug!(%peer_id, "manage query request before hooks ready; dropping");
                         }
@@ -907,22 +887,13 @@ impl Node {
                     }
                     p2p::TransportEvent::ManageRequest { peer_id, request } => {
                         if let Some(hooks) = manage_hooks_for_events.get() {
-                            let mut reply = defra_p2p_adapter::manage::serve::build_manage_reply(
-                                hooks.ops.as_ref(),
-                                hooks.nac.as_ref(),
+                            defra_p2p_adapter::manage::serve::serve_manage_request(
+                                hooks,
+                                &se_transport_serve,
+                                &peer_id,
                                 request,
                             )
                             .await;
-                            if p2p::signing::sign_with_transport(&se_transport_serve, &mut reply)
-                                .is_ok()
-                            {
-                                if let Err(e) = se_transport_serve
-                                    .send_manage_response(&peer_id, reply)
-                                    .await
-                                {
-                                    warn!(error = %e, "failed to send manage response (iroh)");
-                                }
-                            }
                         } else {
                             tracing::debug!(%peer_id, "manage request before hooks ready; dropping");
                         }
@@ -930,23 +901,13 @@ impl Node {
                     }
                     p2p::TransportEvent::ManageQueryRequest { peer_id, request } => {
                         if let Some(hooks) = manage_hooks_for_events.get() {
-                            let mut reply =
-                                defra_p2p_adapter::manage::serve::build_manage_query_reply(
-                                    hooks.ops.as_ref(),
-                                    hooks.nac.as_ref(),
-                                    request,
-                                )
-                                .await;
-                            if p2p::signing::sign_with_transport(&se_transport_serve, &mut reply)
-                                .is_ok()
-                            {
-                                if let Err(e) = se_transport_serve
-                                    .send_manage_query_response(&peer_id, reply)
-                                    .await
-                                {
-                                    warn!(error = %e, "failed to send manage query response (iroh)");
-                                }
-                            }
+                            defra_p2p_adapter::manage::serve::serve_manage_query_request(
+                                hooks,
+                                &se_transport_serve,
+                                &peer_id,
+                                request,
+                            )
+                            .await;
                         } else {
                             tracing::debug!(%peer_id, "manage query request before hooks ready; dropping");
                         }
