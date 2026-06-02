@@ -86,6 +86,7 @@ pub(crate) mod migration;
 // NAC extracted to standalone db-nac crate.
 pub(crate) use db_nac as nac;
 mod nac_guard;
+pub mod node_access_checker;
 pub(crate) mod patch;
 pub mod schema_loader;
 pub mod txn;
@@ -127,6 +128,7 @@ pub use downsample::GcDownsampleHistoriesOptions;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
 pub use kms_adapters::{DbDocCollectionLookup, DbEncBlockStore, DbNodeAcpRead};
+pub use node_access_checker::{node_access_checker, NodeAccessChecker};
 pub use lensed_auto_commit_fetcher::LensedAutoCommitFetcher;
 pub use lensed_fetcher::LensedDocFetcher;
 pub use schema_loader::{
