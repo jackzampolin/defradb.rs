@@ -88,12 +88,16 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Boundary],
     },
     Property {
+        // Verify-before-merge fires only on the P2P merge path; injecting a
+        // forged/unsigned block needs an adversarial peer, not reachable through
+        // the public CLI. Rust makes signature verification mandatory (model->code
+        // audit) and EUF-CMA is a named crypto boundary, so this is structural.
         family: "Block integrity / signatures",
         name: "INV_OnlyVerifiedMerged — verify-before-merge, author bound to verified DID",
         axis: Tla,
         anchor: "crates/db-merge sig verify; crates/defra-core/src/batch_signing.rs",
         model_ref: "MC_Integrity_Green.cfg",
-        tiers: &[Behavioral, Boundary],
+        tiers: &[Boundary],
     },
     Property {
         family: "KMS key distribution",
@@ -128,12 +132,15 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral, Boundary],
     },
     Property {
+        // The replay-capability gate lives inside the P2P replication wire
+        // protocol; presenting a forged/expired capability needs a custom peer,
+        // not the public CLI. Rust-only hardening Go lacks; structural.
         family: "P2P explicit-replay capability gate",
         name: "INV_OnlyLegitAccepted — forged/expired/wrong-target capability rejected",
         axis: Tla,
         anchor: "crates/p2p capability replay gate",
         model_ref: "MC_Capability_Green.cfg",
-        tiers: &[Behavioral],
+        tiers: &[Boundary],
     },
     Property {
         family: "NAC lifecycle privilege-escalation",
@@ -144,12 +151,16 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral],
     },
     Property {
+        // Same-doc merge serialization is a race: forcing two concurrent merges
+        // of one document deterministically needs two peers pushing conflicting
+        // heads at once, and the txn-registry sweep is internal — neither is
+        // deterministically drivable through the public CLI. Structural.
         family: "Transaction & merge-queue concurrency",
         name: "INV_SameDocSerialized — per-doc merge serialized, no loss/double-apply",
         axis: Tla,
         anchor: "crates/db txn registry; crates/db-merge merge queue",
         model_ref: "MC_MergeQueue_Green.cfg / MC_TxnRegistry_Green.cfg",
-        tiers: &[Behavioral],
+        tiers: &[Boundary],
     },
     Property {
         // The DID-binding half (a distinct identity cannot impersonate another)
