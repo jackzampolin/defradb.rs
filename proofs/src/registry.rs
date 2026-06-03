@@ -152,12 +152,17 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral],
     },
     Property {
+        // The DID-binding half (a distinct identity cannot impersonate another)
+        // IS observed behaviorally by the ACP test (ungranted bob denied). The
+        // signer-binding half — forging a malformed / alg-confused token, or one
+        // whose iss/signer DID mismatches its signature — is unreachable through
+        // the public CLI (the client always signs correctly), so it is Boundary.
         family: "JWT issuer / algorithm binding",
         name: "INV_TokenBindsGenuineDid — alg/iss/sig bound to did(pubkey)",
         axis: Tla,
         anchor: "crates/identity token verification",
         model_ref: "MC_Jwt_Green.cfg",
-        tiers: &[Behavioral],
+        tiers: &[Boundary],
     },
     Property {
         family: "CID content-addressing determinism + Block canonicalization",

@@ -21,3 +21,12 @@ mod replication;
 
 #[path = "behavioral/index.rs"]
 mod index;
+
+#[path = "behavioral/nac.rs"]
+mod nac;
+
+#[path = "behavioral/nac_lifecycle.rs"]
+mod nac_lifecycle;
+
+#[path = "behavioral/replicator_lifecycle.rs"]
+mod replicator_lifecycle;
