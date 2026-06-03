@@ -163,6 +163,34 @@ impl<S: Store> P2PHost<S> {
             } => {
                 self.handle_send_se_query_response(peer_id, reply, response);
             }
+            HostCommand::SendManageRequest {
+                peer_id,
+                request,
+                response,
+            } => {
+                self.handle_send_manage_request(peer_id, request, response);
+            }
+            HostCommand::SendManageResponse {
+                peer_id,
+                reply,
+                response,
+            } => {
+                self.handle_send_manage_response(peer_id, reply, response);
+            }
+            HostCommand::SendManageQueryRequest {
+                peer_id,
+                request,
+                response,
+            } => {
+                self.handle_send_manage_query_request(peer_id, request, response);
+            }
+            HostCommand::SendManageQueryResponse {
+                peer_id,
+                reply,
+                response,
+            } => {
+                self.handle_send_manage_query_response(peer_id, reply, response);
+            }
             HostCommand::CreateReplicator {
                 peer_id,
                 collections,

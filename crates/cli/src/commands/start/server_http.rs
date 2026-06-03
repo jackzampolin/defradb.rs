@@ -18,6 +18,7 @@ pub(super) struct HttpServerArgs<'a, S: storage::corekv::Store + 'static> {
     pub(super) event_bus: Arc<dyn events::Bus>,
     pub(super) query_setup: &'a QueryRunnerSetup<S>,
     pub(super) p2p_adapter: Option<Arc<dyn defra_http::router::P2POperations>>,
+    pub(super) manage_requester: Option<Arc<dyn defra_http::router::ManageRequester>>,
     pub(super) nac_adapter: Option<Arc<crate::nac_adapter::NacAdapter>>,
     pub(super) acp_setup: &'a DocumentAcpSetup,
     pub(super) zanzibar_store: Arc<dyn acp::ZanzibarStore>,
@@ -36,6 +37,7 @@ impl Node {
             event_bus,
             query_setup,
             p2p_adapter,
+            manage_requester,
             nac_adapter,
             acp_setup,
             zanzibar_store,
@@ -95,6 +97,11 @@ impl Node {
             } else {
                 info!("P2P HTTP endpoints enabled");
             }
+        }
+
+        if let Some(requester) = &manage_requester {
+            server = server.with_manage_arc(requester.clone());
+            info!("P2P remote management requester enabled");
         }
 
         let lens_adapter = crate::lens_adapter::LensAdapter::new_arc(database.clone());

@@ -9,8 +9,8 @@ use query::QueryLimits;
 use super::{
     AcpOperations, BackupOperations, BlockOperations, CollectionManagementOperations,
     DocumentAcpOperations, DumpOperations, EncryptedIndexOperations, IndexOperations,
-    LensOperations, NodeAcpOperations, P2POperations, SchemaOperations, TransactionOperations,
-    ViewOperations,
+    LensOperations, ManageRequester, NodeAcpOperations, P2POperations, SchemaOperations,
+    TransactionOperations, ViewOperations,
 };
 
 /// Application state shared across handlers.
@@ -19,6 +19,7 @@ pub struct AppState {
     pub executor: Arc<dyn QueryExecutor>,
     pub rest: Option<Arc<dyn RestOperations>>,
     pub p2p: Option<Arc<dyn P2POperations>>,
+    pub manage: Option<Arc<dyn ManageRequester>>,
     pub acp: Option<Arc<dyn AcpOperations>>,
     pub index: Option<Arc<dyn IndexOperations>>,
     pub encrypted_index: Option<Arc<dyn EncryptedIndexOperations>>,
@@ -45,6 +46,7 @@ impl std::fmt::Debug for AppState {
             .field("executor", &"<QueryExecutor>")
             .field("rest", &self.rest.as_ref().map(|_| "<RestOperations>"))
             .field("p2p", &self.p2p.as_ref().map(|_| "<P2POperations>"))
+            .field("manage", &self.manage.as_ref().map(|_| "<ManageRequester>"))
             .field("acp", &self.acp.as_ref().map(|_| "<AcpOperations>"))
             .field("index", &self.index.as_ref().map(|_| "<IndexOperations>"))
             .field(
@@ -96,6 +98,15 @@ impl AppState {
         self.p2p.as_ref().ok_or_else(|| {
             crate::error::HttpError::ServiceUnavailable(
                 "P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()
+            )
+        })
+    }
+
+    /// Get the management requester or return ServiceUnavailable error.
+    pub fn require_manage(&self) -> Result<&Arc<dyn ManageRequester>, crate::error::HttpError> {
+        self.manage.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable(
+                "P2P management is not enabled. Start the server with P2P enabled to use this feature.".into()
             )
         })
     }
@@ -225,6 +236,7 @@ pub struct AppStateBuilder {
     executor: Arc<dyn QueryExecutor>,
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
+    manage: Option<Arc<dyn ManageRequester>>,
     acp: Option<Arc<dyn AcpOperations>>,
     index: Option<Arc<dyn IndexOperations>>,
     encrypted_index: Option<Arc<dyn EncryptedIndexOperations>>,
@@ -252,6 +264,7 @@ impl AppStateBuilder {
             executor,
             rest: None,
             p2p: None,
+            manage: None,
             acp: None,
             index: None,
             encrypted_index: None,
@@ -282,6 +295,12 @@ impl AppStateBuilder {
     /// Set P2P operations.
     pub fn with_p2p(mut self, p2p: Arc<dyn P2POperations>) -> Self {
         self.p2p = Some(p2p);
+        self
+    }
+
+    /// Set the remote management requester.
+    pub fn with_manage(mut self, manage: Arc<dyn ManageRequester>) -> Self {
+        self.manage = Some(manage);
         self
     }
 
@@ -405,6 +424,7 @@ impl AppStateBuilder {
             executor: self.executor,
             rest: self.rest,
             p2p: self.p2p,
+            manage: self.manage,
             acp: self.acp,
             index: self.index,
             encrypted_index: self.encrypted_index,

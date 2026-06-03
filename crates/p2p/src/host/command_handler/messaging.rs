@@ -9,8 +9,8 @@ use crate::error::{Error, Result};
 use crate::host::ResponseChannel;
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, IdentityRequest,
-    PushLogReply, PushLogRequest, PushSEArtifactsReply, PushSEArtifactsRequest,
-    QuerySEArtifactsReply, QuerySEArtifactsRequest,
+    ManageQueryReply, ManageQueryRequest, ManageReply, ManageRequest, PushLogReply, PushLogRequest,
+    PushSEArtifactsReply, PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest,
 };
 
 use super::super::p2p_host::P2PHost;
@@ -240,6 +240,74 @@ impl<S: Store> P2PHost<S> {
             let result = h.send_se_query_response(peer_id, reply).await;
             if response.send(result).is_err() {
                 debug!(peer_id = %peer_id, "SendSEQueryResponse command response dropped - caller cancelled");
+            }
+        });
+    }
+
+    pub(super) fn handle_send_manage_request(
+        &mut self,
+        peer_id: PeerId,
+        request: ManageRequest,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            let mut h = handler.lock().await;
+            let result = h
+                .send_manage_request_fire_and_forget(peer_id, request)
+                .await;
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "SendManageRequest command response dropped - caller cancelled");
+            }
+        });
+    }
+
+    pub(super) fn handle_send_manage_response(
+        &mut self,
+        peer_id: PeerId,
+        reply: ManageReply,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            let mut h = handler.lock().await;
+            let result = h.send_manage_response(peer_id, reply).await;
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "SendManageResponse command response dropped - caller cancelled");
+            }
+        });
+    }
+
+    pub(super) fn handle_send_manage_query_request(
+        &mut self,
+        peer_id: PeerId,
+        request: ManageQueryRequest,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            let mut h = handler.lock().await;
+            let result = h
+                .send_manage_query_request_fire_and_forget(peer_id, request)
+                .await;
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "SendManageQueryRequest command response dropped - caller cancelled");
+            }
+        });
+    }
+
+    pub(super) fn handle_send_manage_query_response(
+        &mut self,
+        peer_id: PeerId,
+        reply: ManageQueryReply,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            let mut h = handler.lock().await;
+            let result = h.send_manage_query_response(peer_id, reply).await;
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "SendManageQueryResponse command response dropped - caller cancelled");
             }
         });
     }

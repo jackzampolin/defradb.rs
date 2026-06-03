@@ -241,6 +241,34 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<()>>,
     },
 
+    /// Send a management mutate request to a peer via the manage two-stream protocol.
+    SendManageRequest {
+        peer_id: PeerId,
+        request: crate::message::ManageRequest,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send a management mutate response to a peer via the manage two-stream protocol.
+    SendManageResponse {
+        peer_id: PeerId,
+        reply: crate::message::ManageReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send a management query request to a peer via the manage query two-stream protocol.
+    SendManageQueryRequest {
+        peer_id: PeerId,
+        request: crate::message::ManageQueryRequest,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send a management query response to a peer via the manage query two-stream protocol.
+    SendManageQueryResponse {
+        peer_id: PeerId,
+        reply: crate::message::ManageQueryReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
     /// Send a CAR request to a peer (request DAG as CARv1).
     SendCarRequest {
         peer_id: PeerId,

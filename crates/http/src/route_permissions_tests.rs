@@ -133,6 +133,14 @@ mod tests {
             route_permission("/api/v0/p2p/documents/sync", &Method::POST),
             RoutePermission::Required(NodePermission::P2pSyncDocuments)
         );
+        assert_eq!(
+            route_permission("/api/v0/p2p/manage", &Method::POST),
+            RoutePermission::Required(NodePermission::P2pPeerConnect)
+        );
+        assert_eq!(
+            route_permission("/api/v0/p2p/manage/query", &Method::POST),
+            RoutePermission::Required(NodePermission::P2pPeerConnect)
+        );
     }
 
     #[test]

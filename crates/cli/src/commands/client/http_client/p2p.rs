@@ -1,10 +1,32 @@
 //! P2P HTTP client methods
 
-use defra_http::router::ExplicitReplayCapabilityInput;
+use defra_http::router::{ExplicitReplayCapabilityInput, RemoteManageOp, RemoteManageQueryOp};
 use serde::{Deserialize, Serialize};
 
 use super::HttpClient;
 use crate::error::Result;
+
+/// Body for a relayed mutating management request (mirrors `ManageRequestBody`).
+#[derive(Debug, Serialize)]
+struct ManageRequestBody<'a> {
+    #[serde(rename = "Target")]
+    target: &'a str,
+    #[serde(rename = "AuthToken")]
+    auth_token: &'a str,
+    #[serde(rename = "Op")]
+    op: RemoteManageOp,
+}
+
+/// Body for a relayed read-only management query (mirrors `ManageQueryRequestBody`).
+#[derive(Debug, Serialize)]
+struct ManageQueryRequestBody<'a> {
+    #[serde(rename = "Target")]
+    target: &'a str,
+    #[serde(rename = "AuthToken")]
+    auth_token: &'a str,
+    #[serde(rename = "Op")]
+    op: RemoteManageQueryOp,
+}
 
 /// P2P node info
 #[derive(Debug, Deserialize, Serialize)]
@@ -55,7 +77,12 @@ pub struct P2pReplicatorInfo {
     pub status: Option<u8>,
 
     /// Last time the replicator status changed.
-    #[serde(rename = "lastStatusChange", alias = "LastStatusChange", default)]
+    #[serde(
+        rename = "lastStatusChange",
+        alias = "LastStatusChange",
+        alias = "last_status_change",
+        default
+    )]
     pub last_status_change: Option<String>,
 }
 
@@ -196,6 +223,76 @@ impl HttpClient {
         }))?;
         self.request_void("POST", &url, Some(&body)).await
     }
+
+    /// Relay a mutating management request to a P2P-only peer via this node.
+    ///
+    /// `target` is the peer address this node dials; `auth_token` is the
+    /// caller-minted JWT (`aud` = target peer-id).
+    pub async fn p2p_manage(
+        &self,
+        target: &str,
+        auth_token: &str,
+        op: RemoteManageOp,
+    ) -> Result<()> {
+        let url = format!("{}/api/v0/p2p/manage", self.base_url);
+        let body = serde_json::to_string(&ManageRequestBody {
+            target,
+            auth_token,
+            op,
+        })?;
+        self.request_void("POST", &url, Some(&body)).await
+    }
+
+    /// Relay a read-only management query to a P2P-only peer via this node.
+    pub async fn p2p_manage_query(
+        &self,
+        target: &str,
+        auth_token: &str,
+        op: RemoteManageQueryOp,
+    ) -> Result<ManageQueryResultResponse> {
+        let url = format!("{}/api/v0/p2p/manage/query", self.base_url);
+        let body = serde_json::to_string(&ManageQueryRequestBody {
+            target,
+            auth_token,
+            op,
+        })?;
+        self.request_json("POST", &url, Some(&body)).await
+    }
+}
+
+/// Deserializable mirror of [`RemoteManageQueryResult`] for client responses.
+///
+/// The server-side `RemoteManageQueryResult` is serialize-only (it embeds a
+/// response type), so the client needs its own deserializable shape.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "Kind")]
+pub enum ManageQueryResultResponse {
+    Replicators { replicators: Vec<P2pReplicatorInfo> },
+    Strings { values: Vec<String> },
+}
+
+/// Mint an actor JWT for a P2P management request.
+///
+/// `private_key_hex` is the caller's identity private key (32-byte secp256k1 or
+/// 64-byte ed25519, hex-encoded). `target_peer_id` becomes the token audience so
+/// the target node (B) can reject tokens minted for any other peer.
+pub fn mint_manage_token(private_key_hex: &str, target_peer_id: &str) -> Result<String> {
+    let key_bytes = hex::decode(private_key_hex)
+        .map_err(|e| crate::error::Error::InvalidIdentity(format!("invalid hex: {e}")))?;
+    let id = super::super::raw_identity_from_key_bytes("manage", &key_bytes)?;
+
+    let token_bytes = identity::new_token(
+        &id,
+        std::time::Duration::from_secs(15 * 60),
+        Some(target_peer_id.to_string()),
+        None,
+    )
+    .map_err(|e| {
+        crate::error::Error::InvalidIdentity(format!("failed to mint manage token: {e}"))
+    })?;
+
+    String::from_utf8(token_bytes)
+        .map_err(|e| crate::error::Error::InvalidIdentity(format!("token is not valid UTF-8: {e}")))
 }
 
 #[cfg(test)]
@@ -210,6 +307,19 @@ mod tests {
         assert_eq!(info.id.as_deref(), Some("peer-1"));
         assert_eq!(info.collections, vec!["Users"]);
         assert_eq!(info.status, Some(1));
+        assert_eq!(
+            info.last_status_change.as_deref(),
+            Some("2026-04-26T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn replicator_info_accepts_snake_case_last_status_change() {
+        // The manage-query (ReplicatorList) path embeds the raw http
+        // `ReplicatorInfo`, which serializes `last_status_change` as snake_case.
+        let json = r#"{"id":"peer-1","collections":["Users"],"status":0,"last_status_change":"2026-04-26T10:00:00Z"}"#;
+        let info: P2pReplicatorInfo = serde_json::from_str(json).unwrap();
+
         assert_eq!(
             info.last_status_change.as_deref(),
             Some("2026-04-26T10:00:00Z")

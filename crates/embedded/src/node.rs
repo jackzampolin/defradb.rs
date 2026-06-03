@@ -501,6 +501,17 @@ where
         if let Some(wire_document_acp) = setup.wire_document_acp.take() {
             wire_document_acp(document_acp.clone());
         }
+        // Populate the manage-channel serve deps now that the controller and
+        // NAC manager exist; until this fires the event loop drops inbound
+        // manage requests rather than serving them unauthenticated.
+        let _ = setup
+            .manage_hooks
+            .set(defra_p2p_adapter::manage::hooks::ManageHooks {
+                ops: setup.manage_controller.clone(),
+                nac: nac_manager.clone(),
+                correlator: setup.manage_correlator.clone(),
+                query_correlator: setup.manage_query_correlator.clone(),
+            });
     }
 
     // Build the KMS once document ACP + NAC manager exist (PR #4778 ordering:

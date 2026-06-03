@@ -29,8 +29,9 @@ pub use encrypted_index::EncryptedIndexInfo;
 pub use index::{IndexCreateRequest, IndexFieldInfo, IndexInfo};
 pub use lens::LensSetMigrationResponse;
 pub use p2p::{
-    P2pCollectionRequest, P2pConnectRequest, P2pDocumentRequest, P2pInfo, P2pPeerAddRequest,
-    P2pPeerInfo, P2pReplicatorInfo, P2pReplicatorRequest,
+    mint_manage_token, ManageQueryResultResponse, P2pCollectionRequest, P2pConnectRequest,
+    P2pDocumentRequest, P2pInfo, P2pPeerAddRequest, P2pPeerInfo, P2pReplicatorInfo,
+    P2pReplicatorRequest,
 };
 pub use types::{ErrorResponse, GraphQLError, GraphQLRequest, GraphQLResponse, TxBeginResponse};
 

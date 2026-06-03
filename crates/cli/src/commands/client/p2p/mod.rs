@@ -2,6 +2,7 @@
 
 mod collection;
 mod document;
+mod manage;
 mod replicator;
 #[cfg(test)]
 mod tests;
@@ -14,6 +15,7 @@ use crate::error::Result;
 
 pub use collection::P2pCollectionArgs;
 pub use document::P2pDocumentArgs;
+pub use manage::P2pManageArgs;
 pub use replicator::P2pReplicatorArgs;
 
 /// Manage P2P network
@@ -37,6 +39,8 @@ pub enum P2pCommand {
     Document(P2pDocumentArgs),
     /// Show P2P node information
     Info(P2pInfoArgs),
+    /// Manage a remote P2P-only peer via this node's HTTP relay
+    Manage(P2pManageArgs),
     /// Manage replicators
     Replicator(P2pReplicatorArgs),
 }
@@ -66,6 +70,7 @@ impl P2pArgs {
             P2pCommand::Connect(args) => args.execute(ctx).await,
             P2pCommand::Document(args) => args.execute(ctx).await,
             P2pCommand::Info(args) => args.execute(ctx).await,
+            P2pCommand::Manage(args) => args.execute(ctx).await,
             P2pCommand::Replicator(args) => args.execute(ctx).await,
         }
     }
