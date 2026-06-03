@@ -15,21 +15,142 @@ use crate::corekv::{
 /// Lark transaction with snapshot isolation and buffered writes.
 ///
 /// Reads go through a `lark_kv::Snapshot` captured at transaction creation.
-/// Writes are buffered in a `BTreeMap` and applied atomically on commit
-/// via `lark_kv::WriteBatch`.
+/// Writes are buffered in insertion order and indexed lazily when a read or
+/// iterator needs pending-write visibility.
 pub(crate) struct LarkTxn {
     db: Arc<lark_kv::Db>,
     snapshot: lark_kv::Snapshot,
     conflict_tracker: Arc<ConflictTracker>,
     active_txn_count: Arc<AtomicUsize>,
     read_version: u64,
-    pending: Mutex<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
+    pending: Mutex<PendingWrites>,
     read_set: Mutex<ReadSet>,
     readonly: bool,
     discarded: Mutex<bool>,
     committed: Mutex<bool>,
     callbacks: CallbackManager,
     durability: DurabilityMode,
+}
+
+#[derive(Default)]
+struct PendingWrites {
+    ops: Vec<PendingWrite>,
+    index: Option<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
+}
+
+enum PendingWrite {
+    Put { key: Vec<u8>, value: Vec<u8> },
+    Delete { key: Vec<u8> },
+}
+
+impl PendingWrite {
+    fn key(&self) -> &Vec<u8> {
+        match self {
+            Self::Put { key, .. } | Self::Delete { key } => key,
+        }
+    }
+
+    fn apply_to_batch(self, batch: &mut lark_kv::WriteBatch) {
+        match self {
+            Self::Put { key, value } => batch.put(&key, &value),
+            Self::Delete { key } => batch.delete(&key),
+        }
+    }
+}
+
+impl PendingWrites {
+    fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+
+    fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        if let Some(index) = &mut self.index {
+            index.insert(key.clone(), Some(value.clone()));
+        }
+        self.ops.push(PendingWrite::Put { key, value });
+    }
+
+    fn delete(&mut self, key: Vec<u8>) {
+        if let Some(index) = &mut self.index {
+            index.insert(key.clone(), None);
+        }
+        self.ops.push(PendingWrite::Delete { key });
+    }
+
+    fn get(&mut self, key: &[u8]) -> Option<Option<Vec<u8>>> {
+        self.index().get(key).cloned()
+    }
+
+    fn range_items(
+        &mut self,
+        start_bound: Bound<Vec<u8>>,
+        end_bound: Bound<Vec<u8>>,
+        keys_only: bool,
+        matches_prefix: impl Fn(&[u8]) -> bool,
+    ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        self.index()
+            .range((start_bound, end_bound))
+            .filter(|(k, _)| matches_prefix(k))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.as_ref()
+                        .map(|value| if keys_only { Vec::new() } else { value.clone() }),
+                )
+            })
+            .collect()
+    }
+
+    fn check_and_record_conflicts(
+        &self,
+        conflict_tracker: &ConflictTracker,
+        read_version: u64,
+        read_set: &ReadSet,
+    ) -> Result<()> {
+        if let Some(index) = &self.index {
+            conflict_tracker.check_and_record(read_version, index.keys(), read_set)
+        } else {
+            conflict_tracker.check_and_record(
+                read_version,
+                self.ops.iter().map(PendingWrite::key),
+                read_set,
+            )
+        }
+    }
+
+    fn into_write_batch(self) -> lark_kv::WriteBatch {
+        let mut batch = lark_kv::WriteBatch::new();
+        if let Some(index) = self.index {
+            for (key, value) in index {
+                match value {
+                    Some(value) => batch.put(&key, &value),
+                    None => batch.delete(&key),
+                }
+            }
+        } else {
+            for op in self.ops {
+                op.apply_to_batch(&mut batch);
+            }
+        }
+        batch
+    }
+
+    fn index(&mut self) -> &BTreeMap<Vec<u8>, Option<Vec<u8>>> {
+        self.index.get_or_insert_with(|| {
+            let mut index = BTreeMap::new();
+            for op in &self.ops {
+                match op {
+                    PendingWrite::Put { key, value } => {
+                        index.insert(key.clone(), Some(value.clone()));
+                    }
+                    PendingWrite::Delete { key } => {
+                        index.insert(key.clone(), None);
+                    }
+                }
+            }
+            index
+        })
+    }
 }
 
 impl Drop for LarkTxn {
@@ -74,7 +195,7 @@ impl LarkTxn {
             conflict_tracker,
             active_txn_count,
             read_version,
-            pending: Mutex::new(BTreeMap::new()),
+            pending: Mutex::new(PendingWrites::default()),
             read_set: Mutex::new(ReadSet::default()),
             readonly,
             discarded: Mutex::new(false),
@@ -86,9 +207,9 @@ impl LarkTxn {
 
     fn get_internal(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         // Check pending changes first
-        let pending = self.pending.lock();
+        let mut pending = self.pending.lock();
         if let Some(pending_value) = pending.get(key) {
-            return Ok(pending_value.clone());
+            return Ok(pending_value);
         }
         drop(pending);
 
@@ -105,7 +226,7 @@ impl LarkTxn {
     }
 
     fn has_internal(&self, key: &[u8]) -> Result<bool> {
-        let pending = self.pending.lock();
+        let mut pending = self.pending.lock();
         if let Some(pending_value) = pending.get(key) {
             return Ok(pending_value.is_some());
         }
@@ -189,18 +310,12 @@ impl Reader for LarkTxn {
         let pending_items = if self.readonly {
             Vec::new()
         } else {
-            let pending = self.pending.lock();
-            pending
-                .range((start_bound.clone(), end_bound.clone()))
-                .filter(|(k, _)| matches_prefix(k))
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v.as_ref()
-                            .map(|value| if keys_only { Vec::new() } else { value.clone() }),
-                    )
-                })
-                .collect()
+            self.pending.lock().range_items(
+                start_bound.clone(),
+                end_bound.clone(),
+                keys_only,
+                matches_prefix,
+            )
         };
 
         Ok(Box::new(MergingIterator::new(
@@ -278,9 +393,7 @@ impl Writer for LarkTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
-        self.pending
-            .lock()
-            .insert(key.to_vec(), Some(value.to_vec()));
+        self.pending.lock().put(key.to_vec(), value.to_vec());
         Ok(())
     }
 
@@ -294,7 +407,7 @@ impl Writer for LarkTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
-        self.pending.lock().insert(key.to_vec(), None);
+        self.pending.lock().delete(key.to_vec());
         Ok(())
     }
 }
@@ -319,23 +432,18 @@ impl Txn for LarkTxn {
 
         if !pending.is_empty() {
             // Check conflicts
-            if let Err(e) =
-                self.conflict_tracker
-                    .check_and_record(self.read_version, pending.keys(), &read_set)
-            {
+            if let Err(e) = pending.check_and_record_conflicts(
+                &self.conflict_tracker,
+                self.read_version,
+                &read_set,
+            ) {
                 CallbackManager::execute_callbacks(self.callbacks.take_error());
                 CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
                 return Err(e);
             }
 
             // Apply via lark WriteBatch
-            let mut batch = lark_kv::WriteBatch::new();
-            for (key, value) in &pending {
-                match value {
-                    Some(v) => batch.put(key, v),
-                    None => batch.delete(key),
-                }
-            }
+            let batch = pending.into_write_batch();
             let durability = match self.durability {
                 DurabilityMode::Immediate => lark_kv::DurabilityMode::Immediate,
                 DurabilityMode::Eventual => lark_kv::DurabilityMode::Eventual,
@@ -415,5 +523,24 @@ impl Txn for LarkTxn {
 
     fn callback_count(&self) -> usize {
         self.callbacks.count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_writes_build_index_lazily_and_keep_last_write() {
+        let mut pending = PendingWrites::default();
+
+        pending.put(b"a".to_vec(), b"old".to_vec());
+        pending.delete(b"b".to_vec());
+        pending.put(b"a".to_vec(), b"new".to_vec());
+
+        assert!(pending.index.is_none());
+        assert_eq!(pending.get(b"a"), Some(Some(b"new".to_vec())));
+        assert_eq!(pending.get(b"b"), Some(None));
+        assert!(pending.index.is_some());
     }
 }
