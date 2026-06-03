@@ -32,12 +32,39 @@ end MergeOutcome
 def mergeOutcomes : List MergeOutcome :=
   [.applied, .rejectedLowerPriority, .rejectedTieBreak]
 
+/-- Mirrors `crates/zanzibar/src/expression/mod.rs` `enum RelationExpression` —
+    the domain of `Acp/Soundness.lean`'s `Expr` (the `eval_iff_derives`
+    soundness theorem inducts over these constructors). -/
+inductive RelExpr
+  | this
+  | computedUserset
+  | tupleToUserset
+  | union
+  | intersection
+  | difference
+
+namespace RelExpr
+
+def toDefraDB : RelExpr → String
+  | .this            => "This"
+  | .computedUserset => "ComputedUserset"
+  | .tupleToUserset  => "TupleToUserset"
+  | .union           => "Union"
+  | .intersection    => "Intersection"
+  | .difference      => "Difference"
+
+end RelExpr
+
+def relExprs : List RelExpr :=
+  [.this, .computedUserset, .tupleToUserset, .union, .intersection, .difference]
+
 structure Vocabulary where
   domain : String
   values : List String
 
 def vocabularies : List Vocabulary :=
-  [ { domain := "MergeResult", values := mergeOutcomes.map MergeOutcome.toDefraDB } ]
+  [ { domain := "MergeResult",        values := mergeOutcomes.map MergeOutcome.toDefraDB }
+  , { domain := "RelationExpression", values := relExprs.map RelExpr.toDefraDB } ]
 
 /-! ## Minimal JSON encoding (no mathlib) -/
 
