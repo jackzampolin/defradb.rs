@@ -264,7 +264,7 @@ impl HttpClient {
 ///
 /// The server-side `RemoteManageQueryResult` is serialize-only (it embeds a
 /// response type), so the client needs its own deserializable shape.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "Kind")]
 pub enum ManageQueryResultResponse {
     Replicators { replicators: Vec<P2pReplicatorInfo> },
