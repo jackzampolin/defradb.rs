@@ -72,13 +72,13 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Contract, Behavioral],
     },
     Property {
-        // Behavioral covers the backfill / existing-doc-replay leg (a write that
-        // pre-dates the replicator is still delivered). The full disconnect→resume
-        // leg is NOT cleanly testable with the current harness: config-level
-        // replicator delete does not gate sync between already-connected peers
-        // (connection-level sync continues), and `restart_node` respawns the
-        // workspace debug binary rather than the configured release Path, so a
-        // real partition can't be staged against the artifact. Backfill leg only.
+        // Two behavioral legs: backfill (a write that pre-dates the replicator is
+        // delivered) and full resume across a real disconnect (node1 restarted —
+        // its state survives on disk and a post-disconnect write arrives after
+        // reconnect). The resume leg needs an actual partition: config-level
+        // replicator delete does not gate sync between already-connected peers, so
+        // it restarts node1 via the harness `restart_node` (fixed upstream in
+        // backbone 025d396 to respawn the configured binary, not the debug path).
         family: "Replicator lifecycle (no-loss / resume)",
         name: "INV_NoLoss — reconnect recomputes the target gap, no block dropped",
         axis: Tla,

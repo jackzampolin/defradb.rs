@@ -34,7 +34,7 @@ dependencies = [
 [[package]]
 name = "acp-light-client"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#025d3964143a385f8dcd561642427b93cad40141"
 dependencies = [
  "alloy-primitives",
  "borsh",
@@ -3628,7 +3628,7 @@ dependencies = [
 [[package]]
 name = "defra-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#025d3964143a385f8dcd561642427b93cad40141"
 dependencies = [
  "eyre",
  "futures",
@@ -5492,7 +5492,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 [[package]]
 name = "hub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#025d3964143a385f8dcd561642427b93cad40141"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -11814,7 +11814,7 @@ dependencies = [
 [[package]]
 name = "sourcehub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#025d3964143a385f8dcd561642427b93cad40141"
 dependencies = [
  "cosmrs",
  "eyre",
@@ -12370,7 +12370,7 @@ dependencies = [
 [[package]]
 name = "test-infra"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#025d3964143a385f8dcd561642427b93cad40141"
 dependencies = [
  "eyre",
  "futures",
