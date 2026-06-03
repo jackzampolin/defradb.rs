@@ -32,26 +32,27 @@ section is the **diff**: what is proven vs. the accepted gap.
 | KMS key distribution | TLA+ | kms, db-merge |
 | Management-channel auth (NAC gate) | TLA+ | http, db-nac, pg-compat |
 | ACP soundness + revocation + dual-path commits | TLA+ & Lean | acp, zanzibar, sourcehub, query, db |
+| Storage SSI serializability (point keys) | TLA+ | storage |
+| P2P explicit-replay capability gate | TLA+ | p2p |
 
-### Backlog — want to model (13: 2 high, 11 medium)
-The accepted gap (from the survey accept/reject pass). Each new slice reads its crate's
-`survey/<crate>.md` first.
+### Backlog — want to model (10 medium)
+The accepted gap. **Completed since the survey:** Storage SSI serializability + the p2p
+explicit-replay capability gate are now *Modeled* (above); the capability slice's
+`INV_RevokedNeverAccepted` also subsumes the former "capability revocation consistency"
+item. Each new slice reads its crate's `survey/<crate>.md` first.
 
 | # | Candidate | Crate | Tool | Property to prove | Pri |
 |---|---|---|---|---|---|
-| 1 | SSI snapshot-isolation | storage | TLA+ | every accepted commit serializable; no lost-update / write-skew survives (`ConflictTracker`) | **high** |
-| 2 | Explicit-replay capability gate | p2p | TLA+ | capability tokens unforgeable, peer+collection-bound, TTL-capped, revocable | **high** |
-| 3 | SSI scan carve-out soundness | storage | TLA+ | scan-prefix carve-out drops only false positives, never a real write-skew | med |
-| 4 | Order-preserving encoding monotonicity | storage | Lean | a<b ⟹ encode_asc(a) <lex encode_asc(b); cross-type markers total order | med |
-| 5 | NAC lifecycle priv-esc safety | acp | TLA+ | enable→disable→re-enable: no non-admin mutates admin set; disabled-flag persists | med |
-| 6 | TxnRegistryCleanupRace | db | TLA+ | stale-txn sweep never evicts a still-live transaction | med |
-| 7 | merge-queue-serialization | db-merge | TLA+ | per-doc mutex serializes same-doc merges; bounded retry loses/dups no block; fails closed | med |
-| 8 | Deferred-ACP overlay consistency | query-plan | TLA+ | txn-local ACP projection gates as committed state; fail-closed across commit/rollback | med |
-| 9 | JWT issuer-binding / alg-confusion | identity | Lean/TLA+ | token→DID only iff iss==did(pubkey) & alg matches key — **discharges an Auth-slice assumption** | med |
-| 10 | Capability revocation consistency | p2p | TLA+ | once revoked, every later verify denies; monotone under concurrent verify/revoke | med |
-| 11 | CID content-addressing determinism | defra-core | Lean | equal blocks ⟹ same canonical CID; injective — **discharges a Convergence/Integrity assumption** | med |
-| 12 | Block.new canonicalization | defra-core | Lean | unique normal form (sorted heads/links); CID independent of input link order | med |
-| 13 | Index-maintenance consistency | db-index | Lean | after `on_document_update`, stored entries == `extract(new)`: no stale, none missing | med |
+| 1 | SSI scan carve-out soundness | storage | TLA+ | scan-prefix carve-out drops only false positives, never a real write-skew | med |
+| 2 | Order-preserving encoding monotonicity | storage | Lean | a<b ⟹ encode_asc(a) <lex encode_asc(b); cross-type markers total order | med |
+| 3 | NAC lifecycle priv-esc safety | acp | TLA+ | enable→disable→re-enable: no non-admin mutates admin set; disabled-flag persists | med |
+| 4 | TxnRegistryCleanupRace | db | TLA+ | stale-txn sweep never evicts a still-live transaction | med |
+| 5 | merge-queue-serialization | db-merge | TLA+ | per-doc mutex serializes same-doc merges; bounded retry loses/dups no block; fails closed | med |
+| 6 | Deferred-ACP overlay consistency | query-plan | TLA+ | txn-local ACP projection gates as committed state; fail-closed across commit/rollback | med |
+| 7 | JWT issuer-binding / alg-confusion | identity | Lean/TLA+ | token→DID only iff iss==did(pubkey) & alg matches key — **discharges an Auth-slice assumption** | med |
+| 8 | CID content-addressing determinism | defra-core | Lean | equal blocks ⟹ same canonical CID; injective — **discharges a Convergence/Integrity assumption** | med |
+| 9 | Block.new canonicalization | defra-core | Lean | unique normal form (sorted heads/links); CID independent of input link order | med |
+| 10 | Index-maintenance consistency | db-index | Lean | after `on_document_update`, stored entries == `extract(new)`: no stale, none missing | med |
 
 > Items 9 and 11–12 **discharge assumptions** existing slices currently take for granted
 > (content-addressing determinism; JWT identity binding) — proving them hardens what's
