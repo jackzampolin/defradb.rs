@@ -1,7 +1,10 @@
 use std::ffi::c_char;
 
+use acp::nac::NodePermission;
+
 use crate::helpers::{get_node_database, get_rt, require_c_str};
-use crate::types::FfiResult;
+use crate::nac_check::check_nac_for_node;
+use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, ffi_entry, try_ffi};
 
 use db::auto_commit_mutator::AutoCommitMutator;
@@ -30,12 +33,27 @@ use document::DocID;
 #[no_mangle]
 pub unsafe extern "C" fn delete_documents(
     node_ptr: usize,
-    _identity_did: *const c_char,
+    identity_did: *const c_char,
     collection_name: *const c_char,
     doc_ids_json: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
         let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::DocumentDelete
+        ));
+
+        // Bind the caller's identity so the NAC-gated document mutator delete
+        // resolves the actual caller instead of the wildcard. The body runs on
+        // this thread via `block_on`, so the thread-local is visible throughout;
+        // the guard restores on drop.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         let col_name = try_ffi!(require_c_str(collection_name, "collection_name"));
         let ids_json = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
         let database = try_ffi!(get_node_database(node_ptr));

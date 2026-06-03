@@ -32,6 +32,14 @@ pub unsafe extern "C" fn p2p_add_replicator(
             NodePermission::P2pReplicatorAdd
         ));
 
+        // Bind the caller's identity so the adapter's inner NAC check resolves the
+        // actual caller instead of the wildcard. The body runs on this thread via
+        // `block_on`, so the thread-local is visible throughout; the guard restores
+        // on drop so it never leaks into the next request on this pooled thread.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         let addr_str = try_ffi!(require_c_str(peer_addr, "peer_addr"));
         let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));
         let collections = match parse_collections_json(&collections_str) {
@@ -86,6 +94,14 @@ pub unsafe extern "C" fn p2p_delete_replicator(
             identity_did,
             NodePermission::P2pReplicatorDelete
         ));
+
+        // Bind the caller's identity so the adapter's inner NAC check resolves the
+        // actual caller instead of the wildcard. The body runs on this thread via
+        // `block_on`, so the thread-local is visible throughout; the guard restores
+        // on drop so it never leaks into the next request on this pooled thread.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
 
         let peer_str = try_ffi!(require_c_str(peer_id_str, "peer_id_str"));
         let collections = if collections_json.is_null() {
@@ -144,6 +160,14 @@ pub unsafe extern "C" fn p2p_list_replicators(
             identity_did,
             NodePermission::P2pReplicatorList
         ));
+
+        // Bind the caller's identity so the adapter's inner NAC check resolves the
+        // actual caller instead of the wildcard. The body runs on this thread via
+        // `block_on`, so the thread-local is visible throughout; the guard restores
+        // on drop so it never leaks into the next request on this pooled thread.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
 
         let result = NODES
             .get(node_ptr, |state| {

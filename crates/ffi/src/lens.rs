@@ -49,6 +49,16 @@ pub unsafe extern "C" fn lens_add(
             identity_did,
             NodePermission::LensCreate
         ));
+
+        // Bind the caller's identity so the NAC-gated DB ops (set_migration /
+        // add_lens) resolve the actual caller instead of the wildcard. The body
+        // runs on this thread via `block_on`, so the thread-local is visible
+        // throughout; the guard restores on drop. set_migration(.., None) falls
+        // back to this ambient identity.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         let lens_str = try_ffi!(require_c_str(lens_json, "lens_json"));
 
         // If the JSON contains version IDs, this is a full migration config — delegate to
