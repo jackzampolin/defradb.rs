@@ -15,6 +15,8 @@ impl<S: Store> crate::database::DB<S> {
     /// - `CollectionVersionNotFound` if no collection with the given version ID exists
     #[instrument(skip(self), fields(version_id = %version_id), name = "db.set_active_version")]
     pub async fn set_active_collection_version(&self, version_id: &str) -> Result<()> {
+        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .await?;
         if version_id.is_empty() {
             return Err(Error::CollectionVersionIDEmpty);
         }

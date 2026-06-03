@@ -70,6 +70,14 @@ pub unsafe extern "C" fn add_view(
             None => return FfiResult::error(crate::ERR_INVALID_NODE_HANDLE),
         };
 
+        // Bind the caller's identity into the ambient context so the DB-layer NAC
+        // gate on create_collections_atomic resolves the actual caller instead of
+        // the wildcard. The body runs on this thread via `block_on`, so the
+        // thread-local is visible throughout it; the guard restores on drop.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         ffi_async!(rt, {
             // Get existing collection names so the SDL parser can resolve external type references
             let known_types: std::collections::HashSet<String> = database

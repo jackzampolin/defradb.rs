@@ -46,6 +46,14 @@ pub unsafe extern "C" fn set_migration(
         let config_str = try_ffi!(require_c_str(config, "config"));
         let database = try_ffi!(get_node_database(node_ptr));
 
+        // Bind the caller's identity into the ambient context so the DB-layer NAC
+        // gate on set_migration resolves the actual caller instead of the
+        // wildcard. The body runs on this thread via `block_on`, so the
+        // thread-local is visible throughout it; the guard restores on drop.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         ffi_async!(rt, {
             // Parse the LensConfig from JSON
             let lens_config: lens::LensConfig = serde_json::from_str(&config_str)
@@ -105,6 +113,14 @@ pub unsafe extern "C" fn set_migration_in_txn(
             Some(r) => r,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
+
+        // Bind the caller's identity into the ambient context so the DB-layer NAC
+        // gate on set_migration_in_txn resolves the actual caller instead of the
+        // wildcard. The body runs on this thread via `block_on`, so the
+        // thread-local is visible throughout it; the guard restores on drop.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
 
         ffi_async!(rt, {
             // Parse the LensConfig from JSON
