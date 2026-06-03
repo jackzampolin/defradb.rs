@@ -6,10 +6,19 @@
 //! with that identity as owner, and asserts schema + document operations all
 //! succeed because the node operates as itself.
 
+use std::sync::LazyLock;
+
 use crypto::Key;
 use defra_core::signing::{SigningConfig, SigningKeyType};
 use defra_node::EmbeddedNode;
 use identity::{Identity as _, RawIdentity};
+use tokio::sync::Mutex;
+
+/// Both tests mutate the process-global signing identity store, so they must
+/// not run concurrently (cargo runs tests in a binary in parallel). Without
+/// this, one test's `clear_identity_store()` can wipe the other's node
+/// identity mid-run, making `execute()` fall back to the unauthenticated path.
+static SIGNING_STORE_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Generate a fresh Ed25519 node identity, register it in the process-local
 /// signing registry with exportable key bytes, and return its DID.
@@ -37,6 +46,7 @@ fn register_local_node_identity() -> String {
 
 #[tokio::test]
 async fn embedded_node_acts_as_self_with_nac_enabled() {
+    let _serial = SIGNING_STORE_GUARD.lock().await;
     defra_core::signing::clear_identity_store();
     let did = register_local_node_identity();
 
@@ -83,6 +93,7 @@ async fn embedded_node_acts_as_self_with_nac_enabled() {
 
 #[tokio::test]
 async fn node_acp_requires_node_identity() {
+    let _serial = SIGNING_STORE_GUARD.lock().await;
     defra_core::signing::clear_identity_store();
 
     let error = match EmbeddedNode::builder()
