@@ -94,6 +94,32 @@ substrate) — so a green run never reads as "this was proven against the
 artifact." `matrix::every_modeled_family_is_bound` fails if a model lands without
 a binding.
 
+### Realized status — all 18 families bound
+
+**9 behavioral tests** (driven against `target/release/defra`, each break-tested
+for non-vacuity), **2 Lean-axis contract bindings**, **7 honest Boundaries**:
+
+| Family | Binding | Where |
+|---|---|---|
+| B3 filtered replication | Behavioral | `replication.rs` |
+| DAG convergence | Behavioral | `replication.rs` (restart aspect → Boundary) |
+| Replicator lifecycle | Behavioral | `replicator_lifecycle.rs` (backfill no-loss) |
+| ACP soundness + revocation + commits | Behavioral + Contract | `acp.rs`; `RelationExpression` vocab |
+| Storage SSI serializability | Behavioral | `ssi.rs` (real `409 Conflict` on write-skew) |
+| Management-channel auth (NAC gate) | Behavioral | `nac.rs` |
+| NAC lifecycle priv-escalation | Behavioral | `nac_lifecycle.rs` |
+| Deferred-ACP overlay | Behavioral | `deferred_acp.rs` (txn-local gating) |
+| CID determinism | Behavioral | `cid.rs` |
+| Index-maintenance | Behavioral | `index.rs` |
+| CRDT merge laws | Contract | `MergeResult` vocab |
+| Multi-instance claim | Boundary | defra-agent substrate, not this binary |
+| Block integrity / signatures | Boundary | needs adversarial peer; Rust verify mandatory |
+| KMS key distribution | Boundary | denial = kms timeout; secrecy = ECIES unit tests |
+| P2P capability replay gate | Boundary | P2P-wire internal |
+| Transaction & merge-queue concurrency | Boundary | same-doc merge race, not CLI-forceable |
+| JWT issuer / algorithm binding | Boundary | DID-binding via `acp.rs`; forge unreachable via CLI |
+| Order-preserving key encoding | Boundary | ordered query may sort in memory; consts `pub(crate)` |
+
 ```bash
 proofs/verify-all.sh                 # TLA + Lean + conformance (behavioral if binary present)
 cargo build --release -p cli         # produce target/release/defra (the artifact under test)
