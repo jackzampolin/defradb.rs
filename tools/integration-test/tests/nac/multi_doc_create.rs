@@ -51,10 +51,18 @@ async fn nac_multi_doc_create_gate_test(cluster: TestCluster) {
         "admin multi-doc create should persist 2 documents"
     );
 
+    // Denial is parity-robust across runtimes: the Rust node's client returns
+    // an error (HTTP 401), while the Go node returns 200 with the error in the
+    // GraphQL `errors` array (which the harness strips), leaving the mutation's
+    // data field null. Either form means the create did not happen.
+    let outsider_multi = node.query_with_identity(multi_doc_create, outsider_key);
+    let multi_denied = match &outsider_multi {
+        Err(_) => true,
+        Ok(v) => v["add_Product"].is_null(),
+    };
     assert!(
-        node.query_with_identity(multi_doc_create, outsider_key)
-            .is_err(),
-        "outsider should be denied multi-doc create"
+        multi_denied,
+        "outsider should be denied multi-doc create: {outsider_multi:?}"
     );
 
     // =========================================================================
@@ -74,9 +82,13 @@ async fn nac_multi_doc_create_gate_test(cluster: TestCluster) {
         "admin implicit-batch create should resolve both aliases: {admin_batch}"
     );
 
+    let outsider_batch = node.query_with_identity(batch_create, outsider_key);
+    let batch_denied = match &outsider_batch {
+        Err(_) => true,
+        Ok(v) => v["c"].is_null() && v["d"].is_null(),
+    };
     assert!(
-        node.query_with_identity(batch_create, outsider_key)
-            .is_err(),
-        "outsider should be denied implicit-batch create"
+        batch_denied,
+        "outsider should be denied implicit-batch create: {outsider_batch:?}"
     );
 }
