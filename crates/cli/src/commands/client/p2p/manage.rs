@@ -10,7 +10,7 @@ use defra_http::router::{RemoteManageDocRef, RemoteManageOp, RemoteManageQueryOp
 
 use crate::commands::client::http_client::HttpClient;
 use crate::commands::client::http_client::{mint_manage_token, ManageQueryResultResponse};
-use crate::commands::client::{validate_identifier, ClientContext};
+use crate::commands::client::{generate_auth_token, validate_identifier, ClientContext};
 use crate::error::{Error, Result};
 
 /// Manage a remote P2P-only peer via this node's HTTP relay
@@ -53,17 +53,34 @@ pub struct ManageTarget {
     #[arg(long, value_name = "multiaddr")]
     pub target: String,
 
-    /// Caller's identity private key (hex). Falls back to the global --identity
-    /// / --identity-name if omitted.
+    /// Caller's identity private key (hex). This single identity drives BOTH
+    /// the actor token the target authorizes (`aud` = target peer-id) AND the
+    /// bearer that authenticates the request to the controller node
+    /// (`aud` = controller url). Falls back to the global --identity /
+    /// --identity-name if omitted.
     #[arg(long, value_name = "hex")]
     pub identity: Option<String>,
 }
 
+/// Resolved authentication material for a manage operation, all derived from a
+/// single caller identity.
+struct ManageAuth {
+    /// Actor JWT the target peer authorizes (`aud` = target peer-id).
+    actor_token: String,
+    /// Bearer that authenticates the relay request to the controller node
+    /// (`aud` = controller url). `None` only when no identity is available.
+    bearer: Option<String>,
+}
+
 impl ManageTarget {
-    /// Resolve the caller's identity key (hex) from the local `--identity`
-    /// override or the global client identity, then mint a manage token whose
-    /// audience is the target peer-id extracted from `--target`.
-    fn mint_token(&self, ctx: &ClientContext) -> Result<(String, String)> {
+    /// Resolve the caller's identity once and derive every token needed for a
+    /// manage operation.
+    ///
+    /// The caller is a single identity: it authenticates to the controller node
+    /// (bearer, `aud` = controller url) AND is the actor the target authorizes
+    /// (actor token, `aud` = target peer-id). Both come from the same resolved
+    /// key.
+    fn resolve(&self, ctx: &ClientContext) -> Result<ManageAuth> {
         let key_hex = if let Some(ref identity_hex) = self.identity {
             // Validate it is hex up-front for a clear error message.
             hex::decode(identity_hex)
@@ -78,8 +95,21 @@ impl ManageTarget {
         };
 
         let target_peer_id = extract_peer_id(&self.target)?;
-        let token = mint_manage_token(&key_hex, &target_peer_id)?;
-        Ok((token, target_peer_id))
+        let actor_token = mint_manage_token(&key_hex, &target_peer_id)?;
+
+        let bearer = if self.identity.is_some() {
+            // The local override also authenticates the request to the
+            // controller node, mirroring the global bearer (aud = url).
+            Some(generate_auth_token(&key_hex, &ctx.url)?)
+        } else {
+            // The global identity already minted the controller bearer.
+            ctx.auth_token.clone()
+        };
+
+        Ok(ManageAuth {
+            actor_token,
+            bearer,
+        })
     }
 }
 
@@ -107,9 +137,9 @@ fn extract_peer_id(addr: &str) -> Result<String> {
     }
 }
 
-fn client(ctx: &ClientContext) -> Result<HttpClient> {
+fn client(ctx: &ClientContext, bearer: Option<String>) -> Result<HttpClient> {
     Ok(HttpClient::new(&ctx.url)?
-        .with_auth_token(ctx.auth_token.clone())
+        .with_auth_token(bearer)
         .with_verbose(ctx.verbose))
 }
 
@@ -160,10 +190,14 @@ impl P2pManageCollectionArgs {
                 args.execute(ctx, /* add = */ false).await
             }
             P2pManageCollectionCommand::List(target) => {
-                let (token, _) = target.mint_token(ctx)?;
-                let client = client(ctx)?;
+                let auth = target.resolve(ctx)?;
+                let client = client(ctx, auth.bearer)?;
                 let result = client
-                    .p2p_manage_query(&target.target, &token, RemoteManageQueryOp::CollectionList)
+                    .p2p_manage_query(
+                        &target.target,
+                        &auth.actor_token,
+                        RemoteManageQueryOp::CollectionList,
+                    )
                     .await?;
                 print_query_result(&result)
             }
@@ -176,7 +210,7 @@ impl ManageCollectionMutateArgs {
         for col in &self.collection_ids {
             validate_identifier(col)?;
         }
-        let (token, _) = self.target.mint_token(ctx)?;
+        let auth = self.target.resolve(ctx)?;
         let op = if add {
             RemoteManageOp::CollectionAdd {
                 collection_ids: self.collection_ids.clone(),
@@ -186,8 +220,10 @@ impl ManageCollectionMutateArgs {
                 collection_ids: self.collection_ids.clone(),
             }
         };
-        let client = client(ctx)?;
-        client.p2p_manage(&self.target.target, &token, op).await?;
+        let client = client(ctx, auth.bearer)?;
+        client
+            .p2p_manage(&self.target.target, &auth.actor_token, op)
+            .await?;
         println!(
             "{} collection(s) on target peer: {}",
             if add { "Added" } else { "Removed" },
@@ -241,10 +277,14 @@ impl P2pManageReplicatorArgs {
                 args.execute(ctx, /* add = */ false).await
             }
             P2pManageReplicatorCommand::List(target) => {
-                let (token, _) = target.mint_token(ctx)?;
-                let client = client(ctx)?;
+                let auth = target.resolve(ctx)?;
+                let client = client(ctx, auth.bearer)?;
                 let result = client
-                    .p2p_manage_query(&target.target, &token, RemoteManageQueryOp::ReplicatorList)
+                    .p2p_manage_query(
+                        &target.target,
+                        &auth.actor_token,
+                        RemoteManageQueryOp::ReplicatorList,
+                    )
                     .await?;
                 print_query_result(&result)
             }
@@ -257,7 +297,7 @@ impl ManageReplicatorMutateArgs {
         for col in &self.collection_ids {
             validate_identifier(col)?;
         }
-        let (token, _) = self.target.mint_token(ctx)?;
+        let auth = self.target.resolve(ctx)?;
         // The server rejects more than one address; pass exactly one.
         let addresses = vec![self.address.clone()];
         let op = if add {
@@ -271,8 +311,10 @@ impl ManageReplicatorMutateArgs {
                 collection_ids: self.collection_ids.clone(),
             }
         };
-        let client = client(ctx)?;
-        client.p2p_manage(&self.target.target, &token, op).await?;
+        let client = client(ctx, auth.bearer)?;
+        client
+            .p2p_manage(&self.target.target, &auth.actor_token, op)
+            .await?;
         println!(
             "{} replicator on target peer for collection(s): {}",
             if add { "Added" } else { "Deleted" },
@@ -328,7 +370,7 @@ impl P2pManageDocumentArgs {
 impl ManageDocumentMutateArgs {
     async fn execute(&self, ctx: &ClientContext, add: bool) -> Result<()> {
         validate_identifier(&self.collection)?;
-        let (token, _) = self.target.mint_token(ctx)?;
+        let auth = self.target.resolve(ctx)?;
         let docs: Vec<RemoteManageDocRef> = self
             .doc_ids
             .iter()
@@ -342,8 +384,10 @@ impl ManageDocumentMutateArgs {
         } else {
             RemoteManageOp::DocumentRemove { docs }
         };
-        let client = client(ctx)?;
-        client.p2p_manage(&self.target.target, &token, op).await?;
+        let client = client(ctx, auth.bearer)?;
+        client
+            .p2p_manage(&self.target.target, &auth.actor_token, op)
+            .await?;
         println!(
             "{} document(s) on target peer in collection {}: {}",
             if add { "Added" } else { "Removed" },
@@ -392,12 +436,14 @@ impl P2pManagePeerArgs {
 
 impl ManagePeerConnectArgs {
     async fn execute(&self, ctx: &ClientContext) -> Result<()> {
-        let (token, _) = self.target.mint_token(ctx)?;
+        let auth = self.target.resolve(ctx)?;
         let op = RemoteManageOp::PeerConnect {
             address: self.address.clone(),
         };
-        let client = client(ctx)?;
-        client.p2p_manage(&self.target.target, &token, op).await?;
+        let client = client(ctx, auth.bearer)?;
+        client
+            .p2p_manage(&self.target.target, &auth.actor_token, op)
+            .await?;
         println!("Instructed target peer to connect to {}", self.address);
         Ok(())
     }
@@ -405,7 +451,8 @@ impl ManagePeerConnectArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_peer_id;
+    use super::{extract_peer_id, ManageTarget};
+    use crate::commands::client::ClientContext;
 
     #[test]
     fn extract_peer_id_from_libp2p_multiaddr() {
@@ -417,5 +464,49 @@ mod tests {
     #[test]
     fn extract_peer_id_rejects_address_without_peer_id() {
         assert!(extract_peer_id("/ip4/127.0.0.1/tcp/9000").is_err());
+    }
+
+    fn ctx_without_global_identity() -> ClientContext {
+        ClientContext {
+            url: "http://localhost:9181".to_string(),
+            auth_token: None,
+            identity_key_bytes: None,
+            tx_id: None,
+            development: false,
+            verbose: false,
+        }
+    }
+
+    fn random_target() -> String {
+        let peer_id = libp2p::PeerId::random().to_string();
+        format!("/ip4/127.0.0.1/tcp/9000/p2p/{peer_id}")
+    }
+
+    /// A local `--identity` must authenticate the controller request too: with
+    /// no global identity it still produces a controller bearer.
+    #[test]
+    fn local_identity_produces_controller_bearer() {
+        use crypto::keys::Key;
+        let key_hex = crypto::generate_ed25519().unwrap().to_hex_string();
+        let target = ManageTarget {
+            target: random_target(),
+            identity: Some(key_hex),
+        };
+
+        let auth = target.resolve(&ctx_without_global_identity()).unwrap();
+
+        let bearer = auth.bearer.expect("local identity must mint a bearer");
+        assert!(!bearer.is_empty());
+        assert!(!auth.actor_token.is_empty());
+    }
+
+    /// Without any identity (local or global) resolution fails with a clear error.
+    #[test]
+    fn no_identity_is_rejected() {
+        let target = ManageTarget {
+            target: random_target(),
+            identity: None,
+        };
+        assert!(target.resolve(&ctx_without_global_identity()).is_err());
     }
 }
