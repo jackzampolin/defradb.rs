@@ -84,9 +84,21 @@ fn is_value_compatible_with_scalar(value: &NormalValue, scalar: ScalarKind) -> b
                     | NormalValue::NillableInt(_)
             )
         }
-        ScalarKind::DateTime => {
-            matches!(value, NormalValue::Time(_) | NormalValue::NillableTime(_))
-        }
+        ScalarKind::DateTime => match value {
+            NormalValue::Time(_) | NormalValue::NillableTime(_) => true,
+            // Document storage is schema-blind for DateTime: a `Time` round-trips
+            // through CBOR as an untagged text string and reads back as `String`
+            // (see document::encoding::coerce_stored_value_for_kind, which the
+            // index path uses for the same reason). So updating ANY field on a
+            // document that already holds a DateTime re-validates the stored value
+            // as a String. Accept a String iff it parses as RFC3339 — a stored
+            // `Time` always does, while genuinely-wrong strings still fail.
+            NormalValue::String(s) => chrono::DateTime::parse_from_rfc3339(s).is_ok(),
+            NormalValue::NillableString(Some(s)) => {
+                chrono::DateTime::parse_from_rfc3339(s).is_ok()
+            }
+            _ => false,
+        },
         ScalarKind::String => {
             matches!(
                 value,
