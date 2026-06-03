@@ -21,7 +21,7 @@ impl<S: Store> crate::database::DB<S> {
     /// - `InvalidCollectionName` if the collection name is invalid
     /// - `CollectionAlreadyExists` if a collection with this name already exists
     #[instrument(skip(self, txn, schema), fields(collection = %schema.name), name = "db.create_collection")]
-    pub async fn create_collection_with_txn(
+    pub(crate) async fn create_collection_with_txn(
         &self,
         txn: &mut DbTxn<S>,
         mut schema: CollectionVersion,

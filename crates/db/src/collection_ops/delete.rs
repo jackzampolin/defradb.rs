@@ -12,7 +12,11 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// Note: This does NOT delete documents. Use `truncate_collection` first if needed.
     #[instrument(skip(self, txn), fields(collection = %name), name = "db.delete_collection")]
-    pub async fn delete_collection_with_txn(&self, txn: &mut DbTxn<S>, name: &str) -> Result<()> {
+    pub(crate) async fn delete_collection_with_txn(
+        &self,
+        txn: &mut DbTxn<S>,
+        name: &str,
+    ) -> Result<()> {
         // Get the collection to find its version_id and collection_id
         let collection = txn
             .get_collection(name)
