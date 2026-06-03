@@ -108,15 +108,15 @@ pub fn build_lens_ipld_blocks(
     arguments: &[(String, String)],
 ) -> Result<(Cid, Vec<CidBlock>), String> {
     use crate::{DAG_CBOR_CODEC, SHA2_256_CODE};
-    use multihash::MultihashGeneric;
+    use multihash::Multihash;
     use sha2::{Digest, Sha256};
 
     let compute_cid = |bytes: &[u8]| -> Result<Cid, String> {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
         let digest = hasher.finalize();
-        let mh = MultihashGeneric::<64>::wrap(*SHA2_256_CODE, &digest)
-            .map_err(|e| format!("multihash: {}", e))?;
+        let mh =
+            Multihash::wrap(*SHA2_256_CODE, &digest).map_err(|e| format!("multihash: {}", e))?;
         Ok(Cid::new_v1(*DAG_CBOR_CODEC, mh))
     };
 

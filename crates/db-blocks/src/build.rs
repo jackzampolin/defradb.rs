@@ -143,7 +143,7 @@ pub async fn build_blocks_from_document<B: Blockstore>(
 /// This function is kept for backward compatibility with non-P2P code paths.
 #[deprecated(since = "0.1.0", note = "Use build_blocks_from_document for P2P sync")]
 pub fn build_block_from_document(doc: &Document) -> Result<BlockResult, String> {
-    use multihash::MultihashGeneric;
+    use multihash::Multihash;
     use sha2::{Digest, Sha256};
 
     const DAG_CBOR_CODEC: u64 = 0x71;
@@ -164,7 +164,7 @@ pub fn build_block_from_document(doc: &Document) -> Result<BlockResult, String> 
     hasher.update(&block);
     let digest = hasher.finalize();
 
-    let mh = MultihashGeneric::<64>::wrap(SHA2_256_CODE, &digest)
+    let mh = Multihash::wrap(SHA2_256_CODE, &digest)
         .map_err(|e| format!("Failed to create multihash: {}", e))?;
 
     let cid = Cid::new_v1(DAG_CBOR_CODEC, mh);
