@@ -270,6 +270,21 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
 
     async fn dial(&self, peer_id: &PeerId, addrs: Vec<PeerAddr>) -> Result<()>;
 
+    /// Parse a peer address string into a transport-agnostic peer id and dial
+    /// hints. The accepted string format is transport-specific (libp2p
+    /// multiaddrs vs iroh tickets/endpoint ids), which is why this lives on the
+    /// transport rather than as a free function. Used by callers that need to
+    /// dial a peer given only its shareable address string (e.g. the outbound
+    /// management requester).
+    ///
+    /// The default implementation returns an error; concrete transports
+    /// override it.
+    fn parse_dial_addr(&self, _addr: &str) -> Result<(PeerId, Vec<PeerAddr>)> {
+        Err(crate::error::Error::Transport(
+            "parse_dial_addr is not supported on this transport".to_string(),
+        ))
+    }
+
     async fn listen(&self, addr: PeerAddr) -> Result<()>;
 
     async fn connected_peers(&self) -> Result<Vec<PeerId>>;

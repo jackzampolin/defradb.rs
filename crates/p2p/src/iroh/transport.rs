@@ -98,6 +98,10 @@ impl P2PTransport for IrohTransport {
         .await
     }
 
+    fn parse_dial_addr(&self, addr: &str) -> Result<(PeerId, Vec<PeerAddr>)> {
+        super::addr::parse_public_peer_addr(addr)
+    }
+
     async fn listen(&self, addr: PeerAddr) -> Result<()> {
         self.send_command(|reply| IrohCommand::Listen { addr, reply })
             .await

@@ -91,6 +91,14 @@ impl P2PTransport for Libp2pTransport {
         self.handle.dial(pid, multiaddrs).await
     }
 
+    fn parse_dial_addr(&self, addr: &str) -> Result<(PeerId, Vec<PeerAddr>)> {
+        let parsed = crate::address::parse_multiaddr_with_peer_id(addr)?;
+        Ok((
+            PeerId::from(parsed.peer_id),
+            vec![PeerAddr::from(parsed.transport_addr)],
+        ))
+    }
+
     async fn listen(&self, addr: PeerAddr) -> Result<()> {
         let multiaddr = parse_multiaddr(&addr)?;
         self.handle.listen(multiaddr).await

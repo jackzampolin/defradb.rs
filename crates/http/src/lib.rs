@@ -101,8 +101,9 @@ pub use identity_extractor::{ExtractIdentity, ExtractTokenIdentity, IdentityExtr
 pub use router::{
     create_router, create_router_with_rest, create_router_with_state, AcpLightClientStatus,
     AcpOperations, AppState, AppStateBuilder, BackupOperations, BlockOperations,
-    DocumentAcpOperations, IndexFieldInfo, IndexInfo, IndexOperations, NacStatus, NacStatusInfo,
-    NodeAcpOperations, NodePermission, P2PError, P2POperations, P2PResult, PolicyInfo,
+    DocumentAcpOperations, IndexFieldInfo, IndexInfo, IndexOperations, ManageRequester, NacStatus,
+    NacStatusInfo, NodeAcpOperations, NodePermission, P2PError, P2POperations, P2PResult,
+    PolicyInfo, RemoteManageDocRef, RemoteManageOp, RemoteManageQueryOp, RemoteManageQueryResult,
     ReplicatorInfo, TransactionOperations, ViewOperations,
 };
 pub use server::{Server, ServerConfig};

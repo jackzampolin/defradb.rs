@@ -309,6 +309,7 @@ impl Node {
             event_bus,
             query_setup: &query_setup,
             p2p_adapter: p2p_setup.http_adapter.clone(),
+            manage_requester: p2p_setup.manage_requester.clone(),
             nac_adapter,
             acp_setup: &acp_setup,
             zanzibar_store,

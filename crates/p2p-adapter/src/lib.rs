@@ -38,6 +38,20 @@ pub use defra_http::router::{
     P2pDocumentRequest, ReplicatorInfo,
 };
 
+/// Convert a p2p `ReplicatorInfo` into the HTTP-facing `ReplicatorInfo`.
+pub(crate) fn to_http_replicator_info(info: p2p::ReplicatorInfo) -> ReplicatorInfo {
+    let address = info.addresses_str().first().map(|addr| addr.to_string());
+    let status = Some(info.status.into());
+    let last_status_change = Some(info.last_status_change_go_string());
+    ReplicatorInfo {
+        id: Some(info.peer_id_str().to_string()),
+        collections: info.collections,
+        address,
+        status,
+        last_status_change,
+    }
+}
+
 /// Optional inputs used when pushing existing documents to replicators.
 #[derive(Debug, Clone, Default)]
 pub struct ReplicatorPushOptions {

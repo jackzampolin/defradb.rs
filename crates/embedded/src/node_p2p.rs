@@ -295,6 +295,17 @@ where
         })
     }));
 
+    // Outbound management requester over the same libp2p transport, sharing the
+    // requester-side manage correlators (Task 7a). Installed on the system so an
+    // HTTP consumer can wire it into `AppState` via `with_manage`.
+    system.set_manage_requester(Arc::new(
+        defra_p2p_adapter::manage::client::ManageClient::new(
+            p2p::Libp2pTransport::new(handle.clone()),
+            manage_correlator.clone(),
+            manage_query_correlator.clone(),
+        ),
+    ));
+
     Ok(P2PSetup {
         system,
         mutator: replication.broadcast_mutator,
@@ -517,6 +528,17 @@ where
             crate::node_tasks::run_iroh_retry_pass(&store, &doc_pusher, &se_repusher, true).await;
         })
     }));
+
+    // Outbound management requester over the same iroh transport, sharing the
+    // requester-side manage correlators (Task 7a). Installed on the system so an
+    // HTTP consumer can wire it into `AppState` via `with_manage`.
+    system.set_manage_requester(Arc::new(
+        defra_p2p_adapter::manage::client::ManageClient::new(
+            transport.clone(),
+            manage_correlator.clone(),
+            manage_query_correlator.clone(),
+        ),
+    ));
 
     Ok(P2PSetup {
         system,

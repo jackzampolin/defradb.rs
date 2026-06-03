@@ -10,8 +10,9 @@ pub use traits::{
     AcpLightClientStatus, AcpOperations, BackupOperations, BlockOperations,
     CollectionManagementOperations, DocumentAcpOperations, DumpOperations, EncryptedIndexInfo,
     EncryptedIndexOperations, ExplicitReplayCapabilityInput, ImportResult, IndexFieldInfo,
-    IndexInfo, IndexOperations, LensOperations, NacStatus, NacStatusInfo, NodeAcpOperations,
-    NodePermission, P2PError, P2POperations, P2PResult, P2pDocumentInfo, P2pDocumentRequest,
-    PolicyInfo, ReplicatorInfo, SchemaOperations, SyncBranchableRequest, SyncDocumentsRequest,
-    SyncVersionsRequest, TransactionOperations, ViewOperations,
+    IndexInfo, IndexOperations, LensOperations, ManageRequester, NacStatus, NacStatusInfo,
+    NodeAcpOperations, NodePermission, P2PError, P2POperations, P2PResult, P2pDocumentInfo,
+    P2pDocumentRequest, PolicyInfo, RemoteManageDocRef, RemoteManageOp, RemoteManageQueryOp,
+    RemoteManageQueryResult, ReplicatorInfo, SchemaOperations, SyncBranchableRequest,
+    SyncDocumentsRequest, SyncVersionsRequest, TransactionOperations, ViewOperations,
 };

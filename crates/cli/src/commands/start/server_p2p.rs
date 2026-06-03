@@ -82,6 +82,12 @@ pub(super) struct P2PSetup {
     /// correlation. `None` on the fallback path.
     pub(super) manage_correlator: Option<p2p::ManageCorrelator>,
     pub(super) manage_query_correlator: Option<p2p::ManageQueryCorrelator>,
+    /// Outbound management requester (Task 7a): relays management requests to
+    /// P2P-only peers on behalf of an HTTP caller. Built over the same concrete
+    /// transport the SE requester / serve loop use, sharing the requester-side
+    /// manage correlators. server.rs threads it into `AppState` via
+    /// `with_manage`. `None` on the non-P2P fallback path.
+    pub(super) manage_requester: Option<Arc<dyn defra_http::router::ManageRequester>>,
 }
 
 impl Node {
@@ -145,6 +151,7 @@ impl Node {
             manage_controller: None,
             manage_correlator: None,
             manage_query_correlator: None,
+            manage_requester: None,
         }
     }
 
@@ -662,6 +669,15 @@ impl Node {
 
         let manage_controller: Arc<dyn defra_http::router::P2POperations> = Arc::new(adapter);
 
+        // Outbound management requester over the same libp2p transport, sharing
+        // the requester-side manage correlators (Task 7a).
+        let manage_requester: Arc<dyn defra_http::router::ManageRequester> =
+            Arc::new(defra_p2p_adapter::manage::client::ManageClient::new(
+                p2p::Libp2pTransport::new(handle.clone()),
+                manage_correlator.clone(),
+                manage_query_correlator.clone(),
+            ));
+
         Ok(P2PSetup {
             host_handle: Some(handle),
             p2p_tasks: Some(P2PTasks {
@@ -699,6 +715,7 @@ impl Node {
             manage_controller: Some(manage_controller),
             manage_correlator: Some(manage_correlator),
             manage_query_correlator: Some(manage_query_correlator),
+            manage_requester: Some(manage_requester),
         })
     }
 
@@ -1159,6 +1176,15 @@ impl Node {
             )) as Arc<dyn query::SeQueryTransport>
         });
 
+        // Outbound management requester over the same iroh transport, sharing the
+        // requester-side manage correlators (Task 7a).
+        let manage_requester: Arc<dyn defra_http::router::ManageRequester> =
+            Arc::new(defra_p2p_adapter::manage::client::ManageClient::new(
+                transport.clone(),
+                manage_correlator.clone(),
+                manage_query_correlator.clone(),
+            ));
+
         Ok(P2PSetup {
             host_handle: None,
             p2p_tasks: Some(P2PTasks {
@@ -1196,6 +1222,7 @@ impl Node {
             manage_controller: Some(manage_controller),
             manage_correlator: Some(manage_correlator),
             manage_query_correlator: Some(manage_query_correlator),
+            manage_requester: Some(manage_requester),
         })
     }
 

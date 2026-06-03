@@ -44,19 +44,6 @@ pub struct P2PAdapter<B: Blockstore + 'static> {
 }
 
 impl<B: Blockstore + 'static> P2PAdapter<B> {
-    fn to_http_replicator_info(info: p2p::ReplicatorInfo) -> ReplicatorInfo {
-        let address = info.addresses_str().first().map(|addr| addr.to_string());
-        let status = Some(info.status.into());
-        let last_status_change = Some(info.last_status_change_go_string());
-        ReplicatorInfo {
-            id: Some(info.peer_id_str().to_string()),
-            collections: info.collections,
-            address,
-            status,
-            last_status_change,
-        }
-    }
-
     async fn resubscribe_tracked_document_topics(&self) {
         let doc_ids: Vec<String> = match self.tracked_documents.read() {
             Ok(docs) => docs.iter().cloned().collect(),
@@ -216,7 +203,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
         Ok(p2p_infos
             .into_iter()
-            .map(Self::to_http_replicator_info)
+            .map(crate::to_http_replicator_info)
             .collect())
     }
 

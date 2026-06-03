@@ -44,6 +44,12 @@ impl<T: P2PTransport> ManageClient<T> {
         }
     }
 
+    /// Borrow the underlying transport (used by the outbound requester to parse
+    /// + dial the target peer before sending a management request).
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
     /// Send a mutate op to `peer_id`, authenticated by `auth_token` (a JWT minted
     /// with `aud` = the TARGET node's peer-id). Returns the reply; an
     /// `unauthorized` reply is surfaced as [`Error::Unauthorized`], any other
