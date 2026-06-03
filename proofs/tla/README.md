@@ -12,6 +12,13 @@ grounded facts for B3 live in [DESIGN.md](DESIGN.md); each later slice has its o
 - **Multi-instance claim-uniqueness** (`Claim_DESIGN.md`).
 - **KMS key distribution** (`Kms_DESIGN.md`).
 - **Management-channel auth** (`Auth_DESIGN.md`).
+- **Replicator lifecycle** — backfill/live/resume delivery (`Replicator_DESIGN.md`).
+- **ACP-on-commits** — dual-path (User + Commits) access gating (`Commits_DESIGN.md`).
+- **Block integrity** — signature verification before merge (`Integrity_DESIGN.md`).
+- **ACP soundness** — no-escalation (Lean) + revocation consistency (`Acp_DESIGN.md`);
+  Lean half under [`../lean/`](../lean/README.md).
+
+Run **all 38 models** at once with `./run-all.sh` (red/green oracle, exits non-zero on mismatch).
 
 ---
 
@@ -230,3 +237,80 @@ envelope iff it is the intended recipient; real ECIES math is an assumed boundar
 
 Finding: every authorized node eventually gets the key (under eventual connectivity); no
 unauthorized/revoked/replaying node obtains a usable key — modulo the ECIES recipient-binding assumption.
+
+---
+
+## Replicator Lifecycle Runs
+
+Design notes in [Replicator_DESIGN.md](Replicator_DESIGN.md). A directional replicator
+(connect → backfill → live → backoff/resume) delivering to a target peer.
+
+```bash
+# RED: naive replicator drops its in-flight doc on disconnect and never re-backfills.
+./tools/tlc -metadir states/rep_naive -config MC_Replicator_Naive_Red.cfg       MC_Replicator_Naive_Red.tla
+# GREEN: resumable replicator re-checks target heads on reconnect and re-pushes the gap.
+./tools/tlc -metadir states/rep_green -config MC_Replicator_Resumable_Green.cfg MC_Replicator_Resumable_Green.tla
+```
+
+`INV_BackfillComplete` / `INV_LiveDelivery` / `INV_NoLoss` hold for the resumable model
+(no doc — even one dropped mid-push — is permanently lost under eventual connectivity);
+`INV_NoLoss` fails for the naive one.
+
+---
+
+## ACP-on-Commits (dual-path) Runs
+
+Design notes in [Commits_DESIGN.md](Commits_DESIGN.md). The CLAUDE.md footgun: ACP must
+gate **both** the User (materialized doc) and Commits (raw delta blocks) read paths, and
+the replication path.
+
+```bash
+# RED: only the User path is gated — Eve reads the document via _commits.
+./tools/tlc -metadir states/com_user -config MC_Commits_Red_UserOnly.cfg          MC_Commits_Red_UserOnly.tla
+# RED: replication ungated — Eve receives a commit block for a doc she can't access.
+./tools/tlc -metadir states/com_repl -config MC_Commits_Red_ReplicationUngated.cfg MC_Commits_Red_ReplicationUngated.tla
+# GREEN: both read paths + replication check ACP.
+./tools/tlc -metadir states/com_green -config MC_Commits_Green.cfg                 MC_Commits_Green.tla
+```
+
+`INV_BothPathsGated`: an unauthorized reader obtains the document's content via neither
+path, locally or over replication.
+
+---
+
+## Block Integrity Runs
+
+Design notes in [Integrity_DESIGN.md](Integrity_DESIGN.md). An adversary gossips forged
+blocks against a `VerifyThenMerge` gate (EUF-CMA unforgeability is the assumed boundary).
+All target `MC_Integrity_Attacks.tla`.
+
+```bash
+# RED: no signature check — a forged block merges (INV_NoForgedMerge).
+./tools/tlc -metadir states/int_nc -config MC_Integrity_Red_NoCheck.cfg       MC_Integrity_Attacks.tla
+# RED: sig checked but author not bound — a spoofed-author block merges (INV_AuthorBinding).
+./tools/tlc -metadir states/int_so -config MC_Integrity_Red_SigOnly.cfg       MC_Integrity_Attacks.tla
+# RED: a signature replayed over different content verifies (INV_NoReplayForge).
+./tools/tlc -metadir states/int_rp -config MC_Integrity_Red_ReplayNoCheck.cfg MC_Integrity_Attacks.tla
+# GREEN: VerifyThenMerge gate — nothing forged merges.
+./tools/tlc -metadir states/int_g  -config MC_Integrity_Green.cfg             MC_Integrity_Attacks.tla
+# GREEN: the gate does not block honest blocks from converging.
+./tools/tlc -metadir states/int_hc -config MC_Integrity_HonestConvergence.cfg MC_Integrity_Attacks.tla
+```
+
+---
+
+## ACP Soundness Runs (Lean + TLA+)
+
+Design notes in [Acp_DESIGN.md](Acp_DESIGN.md). **Lean** (`../lean/Acp/Soundness.lean`,
+`cd ../lean && lake build`) proves the check algebra: `INV_CheckSound`, `INV_NoEscalation`,
+and `INV_PositiveRemovalNoGrant` — plus `buggyDifferenceOverGrants`, a negative theorem
+showing a mishandled exclusion operator over-grants. All `[propext, Quot.sound]`, no `sorry`.
+
+**TLA+** proves revocation consistency over replicated tuples:
+
+```bash
+# GREEN: a revocation propagates; no node grants the revoked permission.
+./tools/tlc -metadir states/acp_g -config MC_Acp_Green.cfg          MC_Acp_Green.tla
+# RED: a stale policy cache still grants a revoked permission (INV_RevocationConsistent).
+./tools/tlc -metadir states/acp_r -config MC_Acp_StaleCache_Red.cfg MC_Acp_StaleCache_Red.tla
+```
