@@ -176,12 +176,17 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral],
     },
     Property {
+        // Lean marker values (mNull=0..mIntMax=253) verified to match the live
+        // `crates/storage/src/encoding/mod.rs` constants by inspection, but those
+        // are `pub(crate)` (no static assert without widening prod visibility) and
+        // a plain ordered query may sort in memory rather than exercise the index
+        // key encoding — so neither tier is cleanly realizable. Boundary.
         family: "Order-preserving key encoding",
         name: "asc_strictly_order_preserving_* — encoding is a strict-order embedding",
         axis: Lean,
-        anchor: "crates/storage order-preserving key encoding (CockroachDB-derived)",
+        anchor: "crates/storage/src/encoding/mod.rs type-marker constants",
         model_ref: "OrderEncoding (lake build)",
-        tiers: &[Behavioral, Contract],
+        tiers: &[Boundary],
     },
     Property {
         family: "Index-maintenance consistency",
