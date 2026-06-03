@@ -48,6 +48,11 @@ impl ScalarKind {
         )
     }
 
+    /// Returns true if this is a floating-point type (Float64, Float32).
+    pub fn is_float(&self) -> bool {
+        matches!(self, ScalarKind::Float64 | ScalarKind::Float32)
+    }
+
     /// Get the corresponding array kind for this scalar
     pub fn to_array_kind(&self) -> Option<ScalarArrayKind> {
         match self {
@@ -255,6 +260,14 @@ impl FieldKind {
     pub fn is_numeric(&self) -> bool {
         match self {
             FieldKind::Scalar(s) => s.is_numeric(),
+            _ => false,
+        }
+    }
+
+    /// Returns true if this kind is floating-point (Float64, Float32).
+    pub fn is_float(&self) -> bool {
+        match self {
+            FieldKind::Scalar(s) => s.is_float(),
             _ => false,
         }
     }
