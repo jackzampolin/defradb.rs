@@ -71,9 +71,8 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
         schema::definition_validation::validate_new_collections(&collections)
             .map_err(|error| anyhow!("schema validation error: {error}"))?;
 
-        let _id_guard = defra_core::current_identity::scoped_current_identity(
-            self.node_identity_did.clone(),
-        );
+        let _id_guard =
+            defra_core::current_identity::scoped_current_identity(self.node_identity_did.clone());
         for collection in collections {
             self.database
                 .create_collection(collection)

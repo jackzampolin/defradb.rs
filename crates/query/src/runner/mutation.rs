@@ -416,9 +416,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // override when there IS a caller identity; when absent, leave the
         // ambient untouched so an embedded node's outer node DID survives across
         // multiple mutations in one execute(). Restores the prior value on drop.
-        let _current_identity_guard = caller_identity
-            .as_ref()
-            .map(|did| defra_core::current_identity::scoped_current_identity(Some(did.to_string())));
+        let _current_identity_guard = caller_identity.as_ref().map(|did| {
+            defra_core::current_identity::scoped_current_identity(Some(did.to_string()))
+        });
 
         // Set broadcast identity for P2P: PushLog Creator field will carry this
         // DID instead of the node PeerId, enabling ACP owner registration on the

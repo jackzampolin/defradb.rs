@@ -10,7 +10,15 @@ use acp::nac::NodePermission;
 use acp::MemoryZanzibarStore;
 use db::{NacConfig, NacManager, DB};
 use identity::Did;
+use schema::{CollectionVersion, FieldDescription, FieldKind};
 use storage::backends::MemoryStore;
+use tokio::sync::Mutex;
+
+/// Tests that drive the ambient thread-local identity must not run concurrently:
+/// `scoped_current_identity` mutates process-global state, and parallel mutation
+/// would let one test observe another's identity. A tokio mutex is used (held
+/// across `.await`) to avoid `await_holding_lock`.
+static AMBIENT_GUARD: Mutex<()> = Mutex::const_new(());
 
 const OWNER_DID: &str = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
 const STRANGER_DID: &str = "did:key:z6MkfXG2FkNy3u7Eg3jm8e2YQpGz7Z1JqWgHDAP1hLk9r2bR";
@@ -96,5 +104,115 @@ async fn non_owner_is_denied() {
     assert!(
         matches!(err, db::error::Error::NotAuthorized { .. }),
         "expected NotAuthorized, got: {err:?}"
+    );
+}
+
+/// Minimal valid collection schema for raw `create_collection` gating tests.
+fn widget_schema() -> CollectionVersion {
+    CollectionVersion::new(
+        "Widget",
+        "v-widget-1",
+        "col-widget",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+        ],
+    )
+}
+
+// =============================================================================
+// Raw DB schema-mutation gate (`create_collection`).
+//
+// These prove `DB::create_collection` calls `check_node_access` directly,
+// independent of the GraphQL/HTTP surface. The DB has NAC enabled but NO node
+// identity configured, so the node-identity bypass cannot mask the check — the
+// only thing that authorizes is the ambient (or owner) identity.
+// =============================================================================
+
+#[tokio::test]
+async fn create_collection_denied_for_non_owner() {
+    let _serial = AMBIENT_GUARD.lock().await;
+
+    let db = DB::new(MemoryStore::new()).unwrap();
+    db.set_nac_manager(enabled_manager().await);
+
+    let guard =
+        defra_core::current_identity::scoped_current_identity(Some(STRANGER_DID.to_string()));
+    let err = db
+        .create_collection(widget_schema())
+        .await
+        .expect_err("non-owner must be denied raw create_collection");
+    drop(guard);
+
+    assert!(
+        matches!(err, db::error::Error::NotAuthorized { .. }),
+        "expected NotAuthorized from create_collection, got: {err:?}"
+    );
+    assert!(
+        db.get_collection("Widget").unwrap().is_none(),
+        "denied create_collection must not persist the collection"
+    );
+}
+
+#[tokio::test]
+async fn create_collection_allowed_for_owner() {
+    let _serial = AMBIENT_GUARD.lock().await;
+
+    let db = DB::new(MemoryStore::new()).unwrap();
+    db.set_nac_manager(enabled_manager().await);
+
+    let guard = defra_core::current_identity::scoped_current_identity(Some(OWNER_DID.to_string()));
+    db.create_collection(widget_schema())
+        .await
+        .expect("owner must be allowed to create_collection");
+    drop(guard);
+
+    assert!(
+        db.get_collection("Widget").unwrap().is_some(),
+        "owner create_collection must persist the collection"
+    );
+}
+
+#[tokio::test]
+async fn create_collection_allowed_when_nac_unset() {
+    // Guards against over-gating: with no NAC manager installed,
+    // `check_node_access` is a no-op and raw schema mutation must succeed
+    // regardless of ambient identity.
+    let _serial = AMBIENT_GUARD.lock().await;
+
+    let db = DB::new(MemoryStore::new()).unwrap();
+
+    let guard =
+        defra_core::current_identity::scoped_current_identity(Some(STRANGER_DID.to_string()));
+    db.create_collection(widget_schema())
+        .await
+        .expect("create_collection must succeed when NAC is unset (no-op gate)");
+    drop(guard);
+
+    assert!(
+        db.get_collection("Widget").unwrap().is_some(),
+        "create_collection with NAC unset must persist the collection"
+    );
+}
+
+#[tokio::test]
+async fn set_active_collection_version_denied_for_non_owner() {
+    // The other raw schema-mutation method is also gated.
+    let _serial = AMBIENT_GUARD.lock().await;
+
+    let db = DB::new(MemoryStore::new()).unwrap();
+    db.set_nac_manager(enabled_manager().await);
+
+    let guard =
+        defra_core::current_identity::scoped_current_identity(Some(STRANGER_DID.to_string()));
+    let err = db
+        .set_active_collection_version("v-widget-1")
+        .await
+        .expect_err("non-owner must be denied set_active_collection_version");
+    drop(guard);
+
+    assert!(
+        matches!(err, db::error::Error::NotAuthorized { .. }),
+        "expected NotAuthorized from set_active_collection_version, got: {err:?}"
     );
 }

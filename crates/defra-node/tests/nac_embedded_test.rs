@@ -92,6 +92,77 @@ async fn embedded_node_acts_as_self_with_nac_enabled() {
 }
 
 #[tokio::test]
+async fn embedded_multi_mutation_and_multi_doc_create_under_nac() {
+    let _serial = SIGNING_STORE_GUARD.lock().await;
+    defra_core::signing::clear_identity_store();
+    let did = register_local_node_identity();
+
+    let node = EmbeddedNode::builder()
+        .with_node_identity_did(&did)
+        .with_node_acp_enabled()
+        .build()
+        .await
+        .expect("node with NAC enabled should build");
+
+    node.add_schema("type Widget { name: String }")
+        .await
+        .expect("add_schema must succeed as node identity");
+
+    // Multiple mutations in a single execute() request route through the
+    // implicit BatchMutator (mutations.len() > 1). Without the restore-safe
+    // node-identity guard, the second mutation would lose the node identity and
+    // be denied by `check_node_access`. Assert NO errors and both docs land.
+    let batch = node
+        .execute(
+            r#"mutation {
+                a: create_Widget(input: {name: "x"}) { _docID }
+                b: create_Widget(input: {name: "y"}) { _docID }
+            }"#,
+        )
+        .await;
+    assert!(
+        batch.errors.is_empty(),
+        "multi-mutation batch must not be denied: {:?}",
+        batch.errors
+    );
+    let batch_data = batch.data.expect("batch mutation returns data");
+    let batch_str = batch_data.to_string();
+    assert!(
+        batch_str.contains('a') && batch_str.contains('b'),
+        "both aliased mutations should resolve: {batch_data}"
+    );
+
+    // Multi-doc create in a single mutation (array input) routes through
+    // AutoCommitMutator::create_many_impl's multi-doc branch, which is gated.
+    let many = node
+        .execute(
+            r#"mutation {
+                create_Widget(input: [{name: "m1"}, {name: "m2"}, {name: "m3"}]) { _docID }
+            }"#,
+        )
+        .await;
+    assert!(
+        many.errors.is_empty(),
+        "multi-doc create must not be denied as node identity: {:?}",
+        many.errors
+    );
+
+    let read = node.execute("query { Widget { name } }").await;
+    assert!(read.errors.is_empty(), "query must not be denied");
+    let data = read.data.expect("query returns data");
+    let rendered = data.to_string();
+    for name in ["x", "y", "m1", "m2", "m3"] {
+        assert!(
+            rendered.contains(name),
+            "expected document {name:?} to be present: {rendered}"
+        );
+    }
+
+    node.shutdown().await;
+    defra_core::signing::clear_identity_store();
+}
+
+#[tokio::test]
 async fn node_acp_requires_node_identity() {
     let _serial = SIGNING_STORE_GUARD.lock().await;
     defra_core::signing::clear_identity_store();
