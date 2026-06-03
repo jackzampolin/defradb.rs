@@ -149,7 +149,8 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
     }
 
     async fn connected_peers(&self) -> P2PResult<Vec<String>> {
-        self.check_nac(acp::nac::NodePermission::P2pPeerActive).await?;
+        self.check_nac(acp::nac::NodePermission::P2pPeerActive)
+            .await?;
 
         let connected = self
             .transport
