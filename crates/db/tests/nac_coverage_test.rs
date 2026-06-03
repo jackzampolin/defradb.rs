@@ -1,7 +1,7 @@
 //! NAC coverage audit.
 //!
 //! Every `NodePermission` must have a deliberate enforcement decision. This
-//! test partitions all permissions into exactly four categories and asserts
+//! test partitions all permissions into exactly five categories and asserts
 //! the partition is complete and disjoint. Adding a new permission breaks this
 //! test until it is categorized here — forcing a conscious NAC-coverage choice
 //! rather than a silent gap.
@@ -12,19 +12,44 @@
 
 use acp::nac::NodePermission::{self, *};
 
-/// Gated at the DB layer via `DB::check_node_access` — either on a `db`-crate
-/// method (document mutators) or at an adapter boundary that delegates through
-/// the type-erased `db::NodeAccessChecker` (ACP policy add + P2P management ops,
-/// whose adapters are store-typed/type-erased and hold the checker instead of
-/// an `Arc<DB<S>>`). These fire for the HTTP/CLI path and, where the gate is on
-/// a `db`-crate method (document writes) or a shared `defra-p2p-adapter` op, for
-/// the embedded path too.
-const DB_LAYER_GATED: &[NodePermission] = &[
+/// The operation's raw DB method(s) call `check_node_access`, so even a direct
+/// `DB<S>` handle holder is gated (no bypass). Verified locations:
+/// - `CollectionPatch`: gated on the raw DB methods (`create_collection`/
+///   `create_collections_atomic`/`delete_collection`/`delete_collections`/
+///   `delete_collection_version`/`delete_collection_versions_batch`/
+///   `set_active_collection_version`/`patch_collection` in `collection_ops/` +
+///   `patch/mod.rs`); `add_schema_in_txn` also gates on the registry.
+/// - `CollectionTruncate`: `truncate_collection` (`collection_ops/delete.rs`).
+/// - `MigrationSet`: raw `set_migration` (`migration/set_migration.rs`) +
+///   `set_migration_in_txn` (registry).
+/// - `DocumentUpdate`: `doc_mutator` create/update, `auto_commit_mutator`
+///   create/update/create_many/batch. (Go uses update-document for create too.)
+/// - `DocumentDelete`: `doc_mutator` delete, `auto_commit_mutator` delete/batch.
+const DB_METHOD_GATED: &[NodePermission] = &[
     CollectionPatch,
     CollectionTruncate,
     MigrationSet,
     DocumentUpdate, // Go uses update-document for both create and update
     DocumentDelete,
+];
+
+/// Gated at a boundary that holds a DB handle (cli adapter, `TxnRegistry` txn
+/// entry, or via the type-erased `db::NodeAccessChecker`), NOT on the raw DB
+/// method. The underlying raw DB write may be ungated because it has an
+/// internal/startup/commit/scheduler caller that must not be gated — e.g.
+/// `DB::add_lens` (commit callback from `add_lens_in_txn`), `refresh_views`
+/// (view-refresh scheduler), `gc_downsample_histories` (GC).
+///
+/// `ViewGc`: gated in the CLI `view_adapter` (`check_node_access(ViewGc)`), but
+/// FFI `gc_downsample_histories` is NOT gated — it has no `identity_did` param
+/// and no Go/cbindings binding, so gating it requires a coordinated Go-side
+/// signature change (follow-up). The CLI path is ViewGc-gated.
+const ADAPTER_GATED: &[NodePermission] = &[
+    LensCreate, // add_lens_in_txn gates (registry); raw DB::add_lens ungated (commit caller)
+    LensList,
+    ViewAdd,
+    ViewRefresh, // raw refresh_views ungated (scheduler caller); adapter gates
+    ViewGc,      // CLI adapter gates; FFI gc_downsample_histories ungated — see note above
     IndexCreate,
     IndexDelete,
     IndexList,
@@ -32,11 +57,6 @@ const DB_LAYER_GATED: &[NodePermission] = &[
     EncryptedIndexDelete,
     EncryptedIndexList,
     EncryptedIndexListAll,
-    ViewAdd,
-    ViewRefresh,
-    ViewGc,
-    LensCreate,
-    LensList,
     DacRelationAdd,
     DacRelationDelete,
     DacPolicyAdd, // ACP adapter gates via db::NodeAccessChecker
@@ -95,8 +115,11 @@ const UNGATED_BY_DESIGN: &[NodePermission] = &[
 
 fn category_of(perm: NodePermission) -> Vec<&'static str> {
     let mut found = Vec::new();
-    if DB_LAYER_GATED.contains(&perm) {
-        found.push("DB_LAYER_GATED");
+    if DB_METHOD_GATED.contains(&perm) {
+        found.push("DB_METHOD_GATED");
+    }
+    if ADAPTER_GATED.contains(&perm) {
+        found.push("ADAPTER_GATED");
     }
     if NAC_MANAGER_ENFORCED.contains(&perm) {
         found.push("NAC_MANAGER_ENFORCED");
@@ -125,7 +148,8 @@ fn every_permission_has_exactly_one_enforcement_decision() {
 
 #[test]
 fn categories_account_for_all_permissions() {
-    let total = DB_LAYER_GATED.len()
+    let total = DB_METHOD_GATED.len()
+        + ADAPTER_GATED.len()
         + NAC_MANAGER_ENFORCED.len()
         + HTTP_BOUNDARY_ONLY.len()
         + UNGATED_BY_DESIGN.len();

@@ -212,6 +212,14 @@ pub unsafe extern "C" fn p2p_connect(
             NodePermission::P2pPeerConnect
         ));
 
+        // Bind the caller's identity so the adapter's inner NAC check resolves the
+        // actual caller instead of the wildcard. The body runs on this thread via
+        // `block_on`, so the thread-local is visible throughout; the guard restores
+        // on drop so it never leaks into the next request on this pooled thread.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         let addr_str = try_ffi!(require_c_str(addr, "addr"));
 
         let result = NODES
