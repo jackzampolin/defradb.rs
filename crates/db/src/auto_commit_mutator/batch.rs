@@ -115,6 +115,11 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
+        self.db
+            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .await
+            .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
+
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
@@ -233,6 +238,11 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         mut doc: Document,
         mut modified_fields: HashSet<String>,
     ) -> query::error::Result<UpdateResult> {
+        self.db
+            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .await
+            .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
+
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
@@ -353,6 +363,11 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
+        self.db
+            .check_node_access(None, acp::nac::NodePermission::DocumentDelete)
+            .await
+            .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
+
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
