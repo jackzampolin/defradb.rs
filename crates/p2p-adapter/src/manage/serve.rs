@@ -83,57 +83,64 @@ async fn authorize_and_apply(
         return Err(MANAGE_UNAUTHORIZED.into());
     }
     let did_str = actor.to_string();
-    match &request.op {
-        ManageMutateOp::ReplicatorAdd {
-            addresses,
-            collection_ids,
-        } => {
-            if addresses.len() > 1 {
-                return Err("replicator add supports at most one address".to_string());
+    // Bind the manage-authorized actor as the ambient identity so the P2P
+    // adapter's DB-layer NAC check (`check_nac`) resolves this same, already
+    // authorized actor instead of the wildcard. The task-local scope survives
+    // the op `.await` regardless of which runtime thread executes it.
+    defra_core::current_identity::with_scoped_identity(Some(did_str.clone()), async {
+        match &request.op {
+            ManageMutateOp::ReplicatorAdd {
+                addresses,
+                collection_ids,
+            } => {
+                if addresses.len() > 1 {
+                    return Err("replicator add supports at most one address".to_string());
+                }
+                ops.add_replicator(
+                    collection_ids.clone(),
+                    addresses.first().map(|s| s.as_str()),
+                    vec![],
+                    Some(did_str.as_str()),
+                )
+                .await
+                .map_err(|e| e.to_string())
             }
-            ops.add_replicator(
-                collection_ids.clone(),
-                addresses.first().map(|s| s.as_str()),
-                vec![],
-                Some(did_str.as_str()),
-            )
-            .await
-            .map_err(|e| e.to_string())
-        }
-        ManageMutateOp::ReplicatorDelete {
-            addresses,
-            collection_ids,
-        } => {
-            if addresses.len() > 1 {
-                return Err("replicator delete supports at most one address".to_string());
+            ManageMutateOp::ReplicatorDelete {
+                addresses,
+                collection_ids,
+            } => {
+                if addresses.len() > 1 {
+                    return Err("replicator delete supports at most one address".to_string());
+                }
+                ops.remove_replicator(
+                    collection_ids.clone(),
+                    addresses.first().map(|s| s.as_str()),
+                )
+                .await
+                .map_err(|e| e.to_string())
             }
-            ops.remove_replicator(
-                collection_ids.clone(),
-                addresses.first().map(|s| s.as_str()),
-            )
-            .await
-            .map_err(|e| e.to_string())
+            ManageMutateOp::CollectionAdd { collection_ids } => ops
+                .add_collections(collection_ids.clone())
+                .await
+                .map_err(|e| e.to_string()),
+            ManageMutateOp::CollectionRemove { collection_ids } => ops
+                .remove_collections(collection_ids.clone())
+                .await
+                .map_err(|e| e.to_string()),
+            ManageMutateOp::DocumentAdd { docs } => ops
+                .add_documents(to_doc_reqs(docs))
+                .await
+                .map_err(|e| e.to_string()),
+            ManageMutateOp::DocumentRemove { docs } => ops
+                .remove_documents(to_doc_reqs(docs))
+                .await
+                .map_err(|e| e.to_string()),
+            ManageMutateOp::PeerConnect { address } => {
+                ops.connect_peer(address).await.map_err(|e| e.to_string())
+            }
         }
-        ManageMutateOp::CollectionAdd { collection_ids } => ops
-            .add_collections(collection_ids.clone())
-            .await
-            .map_err(|e| e.to_string()),
-        ManageMutateOp::CollectionRemove { collection_ids } => ops
-            .remove_collections(collection_ids.clone())
-            .await
-            .map_err(|e| e.to_string()),
-        ManageMutateOp::DocumentAdd { docs } => ops
-            .add_documents(to_doc_reqs(docs))
-            .await
-            .map_err(|e| e.to_string()),
-        ManageMutateOp::DocumentRemove { docs } => ops
-            .remove_documents(to_doc_reqs(docs))
-            .await
-            .map_err(|e| e.to_string()),
-        ManageMutateOp::PeerConnect { address } => {
-            ops.connect_peer(address).await.map_err(|e| e.to_string())
-        }
-    }
+    })
+    .await
 }
 
 fn to_doc_reqs(docs: &[ManageDocRef]) -> Vec<P2pDocumentRequest> {
@@ -162,20 +169,27 @@ pub async fn build_manage_query_reply(
         {
             return Err(MANAGE_UNAUTHORIZED.to_string());
         }
-        Ok(match request.op {
-            ManageQueryOp::ReplicatorList => ManageQueryResult::Replicators {
-                replicators: ops
-                    .get_replicators()
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .map(to_p2p_replicator_info)
-                    .collect(),
-            },
-            ManageQueryOp::CollectionList => ManageQueryResult::Strings {
-                values: ops.get_collections().await.map_err(|e| e.to_string())?,
-            },
+        let did_str = actor.to_string();
+        // Bind the manage-authorized actor so the P2P adapter's read-side NAC
+        // check resolves this actor instead of the wildcard (mirrors the mutate
+        // serve path in `authorize_and_apply`).
+        defra_core::current_identity::with_scoped_identity(Some(did_str), async move {
+            Ok(match request.op {
+                ManageQueryOp::ReplicatorList => ManageQueryResult::Replicators {
+                    replicators: ops
+                        .get_replicators()
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .map(to_p2p_replicator_info)
+                        .collect(),
+                },
+                ManageQueryOp::CollectionList => ManageQueryResult::Strings {
+                    values: ops.get_collections().await.map_err(|e| e.to_string())?,
+                },
+            })
         })
+        .await
     };
     match run.await {
         Ok(result) => ManageQueryReply::success(&mid, result),
