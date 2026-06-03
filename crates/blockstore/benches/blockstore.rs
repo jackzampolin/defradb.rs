@@ -19,7 +19,7 @@ fn cid_from_data(data: &[u8]) -> Cid {
     let mut hasher = Sha256::new();
     hasher.update(data);
     let digest = hasher.finalize();
-    let hash = Multihash::wrap(0x12, &digest).unwrap();
+    let hash = Multihash::<64>::wrap(0x12, &digest).unwrap();
     Cid::new_v1(0x55, hash)
 }
 

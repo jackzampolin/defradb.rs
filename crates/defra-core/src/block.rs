@@ -358,7 +358,7 @@ pub fn generate_cid_from_bytes(bytes: &[u8]) -> Result<Cid> {
     let digest = hasher.finalize();
 
     // Create multihash
-    let mh = Multihash::wrap(*SHA2_256_CODE, &digest)
+    let mh = Multihash::<64>::wrap(*SHA2_256_CODE, &digest)
         .map_err(|e| Error::BlockError(format!("Failed to create multihash: {}", e)))?;
 
     // Create CIDv1 with DAG-CBOR codec

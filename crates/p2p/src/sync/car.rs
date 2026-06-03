@@ -220,17 +220,13 @@ pub async fn collect_exact_blocks<B: Blockstore>(
 
 /// Extract CID links from a DAG-CBOR block.
 fn extract_links(block_data: &[u8]) -> Vec<Cid> {
-    use libipld::multihash::{Code, MultihashDigest};
-    use libipld::{Block, DefaultParams};
+    use ipld_core::codec::Links;
+    use serde_ipld_dagcbor::codec::DagCborCodec;
 
-    let hash = Code::Sha2_256.digest(block_data);
-    let dummy_cid = Cid::new_v1(0x71, hash);
-
-    let mut refs = Vec::new();
-    let block = Block::<DefaultParams>::new_unchecked(dummy_cid, block_data.to_vec());
-    if block.references(&mut refs).is_err() {
-        return Vec::new();
-    }
+    let mut refs: Vec<Cid> = match DagCborCodec::links(block_data) {
+        Ok(links) => links.collect(),
+        Err(_) => return Vec::new(),
+    };
 
     // Drop the encryption-metadata link. The encryption block holds the
     // plaintext DEK and is gated by the KMS access policy (NacDacPolicy): it
@@ -341,8 +337,9 @@ fn read_varint(cursor: &mut &[u8]) -> Result<u64> {
 mod tests {
     use super::*;
     use blockstore::{Blockstore, DefraBlockstore};
-    use libipld::multihash::{Code, MultihashDigest};
-    use libipld::{cbor::DagCborCodec, codec::Codec, ipld};
+    use ipld_core::{codec::Codec, ipld, ipld::Ipld};
+    use multihash_codetable::{Code, MultihashDigest};
+    use serde_ipld_dagcbor::codec::DagCborCodec;
     use std::sync::Arc;
     use storage::backends::MemoryStore;
 
@@ -351,8 +348,8 @@ mod tests {
         Cid::new_v1(0x71, hash)
     }
 
-    fn encode_ipld(ipld: libipld::Ipld) -> Vec<u8> {
-        DagCborCodec.encode(&ipld).unwrap()
+    fn encode_ipld(ipld: Ipld) -> Vec<u8> {
+        DagCborCodec::encode_to_vec(&ipld).unwrap()
     }
 
     /// The `encryption` link of an encrypted block must NOT be walked when

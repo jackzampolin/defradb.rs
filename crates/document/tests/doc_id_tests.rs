@@ -11,7 +11,7 @@ fn test_cid() -> Cid {
     let mut hasher = Sha256::new();
     hasher.update(b"test document content");
     let hash_bytes = hasher.finalize();
-    let mh: Multihash = Multihash::wrap(*SHA2_256_CODE, &hash_bytes).unwrap();
+    let mh: Multihash<64> = Multihash::wrap(*SHA2_256_CODE, &hash_bytes).unwrap();
     Cid::new_v1(Codec::Bin.code() as u64, mh)
 }
 
@@ -49,12 +49,12 @@ fn test_different_cids_produce_different_uuids() {
     let mut hasher1 = Sha256::new();
     hasher1.update(b"document 1");
     let hash1 = hasher1.finalize();
-    let mh1: Multihash = Multihash::wrap(*SHA2_256_CODE, &hash1).unwrap();
+    let mh1: Multihash<64> = Multihash::wrap(*SHA2_256_CODE, &hash1).unwrap();
 
     let mut hasher2 = Sha256::new();
     hasher2.update(b"document 2");
     let hash2 = hasher2.finalize();
-    let mh2: Multihash = Multihash::wrap(*SHA2_256_CODE, &hash2).unwrap();
+    let mh2: Multihash<64> = Multihash::wrap(*SHA2_256_CODE, &hash2).unwrap();
 
     let cid1 = Cid::new_v1(Codec::Bin.code() as u64, mh1);
     let cid2 = Cid::new_v1(Codec::Bin.code() as u64, mh2);

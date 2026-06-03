@@ -534,7 +534,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use cid::multihash::{Code, MultihashDigest};
+    use multihash_codetable::{Code, MultihashDigest};
 
     use crate::error::{Result as P2PResult, RATE_LIMITED_MESSAGE};
     use crate::message::{

@@ -23,6 +23,38 @@ pub struct IndexScanParams {
     /// Used for _like/_nlike on JSON fields where the index does a range scan
     /// and non-string entries must be filtered at the scan level (matching Go's indexLikeMatcher).
     pub value_filter: Option<ScanValueFilter>,
+    /// Optional cursor seek configuration. When `Some`, the fetcher
+    /// positions its iterator at `seek_key` before scanning, honoring
+    /// `inclusive` and `reversed`. Used by cursor pagination.
+    pub cursor_seek: Option<CursorSeek>,
+}
+
+/// Configuration for seeking into an index from a cursor token.
+/// Built by the planner from a cursor's `keys` map and passed through
+/// `IndexScanParams` to the concrete fetcher.
+#[derive(Debug, Clone)]
+pub struct CursorSeek {
+    /// Raw bytes of the storage-encoded index key to seek to.
+    pub seek_key: Vec<u8>,
+    /// `true` for backward pagination (seek inclusive, then iterate);
+    /// `false` for forward pagination (seek exclusive — skip the boundary).
+    pub inclusive: bool,
+    /// Iterate the index in reverse order.
+    pub reversed: bool,
+    /// Name of the index this seek was built for. The fetcher must reject
+    /// the seek if its scan uses a different index — otherwise seek bytes
+    /// encoded for one index's field positions would be applied to another
+    /// index, corrupting pagination. This catches the case where
+    /// `try_select_index` chose a filter-only index that doesn't match the
+    /// order-supporting index validated by `validate_cursor_index`.
+    pub expected_index_name: String,
+    /// Optional bound on the number of index entries to fetch (`page_size + 1`,
+    /// the `+1` being the has-next/has-prev probe row). When the seek APPLIES on
+    /// a scan with no residual filter, this is copied into
+    /// `IndexScanParams.limit` so the fetcher early-terminates after collecting
+    /// `fetch_limit` PASSING entries — matching Go's `indexFetches` count.
+    /// `None` leaves the scan unbounded (omitted `first`/`last`).
+    pub fetch_limit: Option<u64>,
 }
 
 /// Value-level filter applied to individual index entries during scan iteration.

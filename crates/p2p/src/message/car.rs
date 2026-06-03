@@ -58,7 +58,7 @@ fn dedupe_cids(cids: Vec<Cid>) -> Vec<Cid> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libipld::multihash::{Code, MultihashDigest};
+    use multihash_codetable::{Code, MultihashDigest};
 
     fn make_cid(label: &[u8]) -> Cid {
         let hash = Code::Sha2_256.digest(label);

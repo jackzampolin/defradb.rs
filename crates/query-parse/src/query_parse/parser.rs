@@ -107,6 +107,13 @@ fn parse_selection_to_selects<'a>(
                     "Cannot query field \"SIMILARITY\" on type \"Query\".".to_string(),
                 ));
             }
+            // Cursor wrapper — descend into _cursor { ... }
+            if field.name == "_cursor" {
+                let select =
+                    super::cursor::parse_cursor_wrapper(field, variables, fragments, visiting)?;
+                selects.push(select);
+                return Ok(());
+            }
             // Check if this is a top-level aggregate (e.g., _avg(Users: {field: Age}))
             if let Some(agg_type) = AggregateType::parse(&field.name) {
                 let select = parse_top_level_aggregate(field, agg_type, variables)?;
@@ -582,7 +589,7 @@ fn apply_limit_to_filter(
 }
 
 /// Parse a single GraphQL field into a Select operation.
-fn parse_field_to_select(
+pub(super) fn parse_field_to_select(
     field: &Field<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
     fragments: &FragmentMap<'_>,

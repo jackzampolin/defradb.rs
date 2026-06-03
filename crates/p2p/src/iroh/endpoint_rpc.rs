@@ -790,7 +790,7 @@ pub(super) async fn handle_block_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cid::multihash::{Code, MultihashDigest};
+    use multihash_codetable::{Code, MultihashDigest};
 
     fn peer_id(label: &[u8]) -> PeerId {
         let hash = Code::Sha2_256.digest(label);

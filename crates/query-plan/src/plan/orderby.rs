@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
 
-use crate::planner::{Doc, ExecInfo, PlanNode};
+use crate::planner::{index_selection::CursorSeek, Doc, ExecInfo, PlanNode};
 use query_types::document::DocumentMapping;
 use query_types::error::{QueryError, Result};
 use query_types::mapper::{OrderBy, OrderCondition, OrderDirection};
@@ -327,6 +327,20 @@ impl PlanNode for OrderByNode {
         }
 
         JsonValue::Object(obj)
+    }
+
+    fn set_cursor_seek(&mut self, seek: CursorSeek) -> bool {
+        self.source.set_cursor_seek(seek)
+    }
+
+    fn set_cursor_fetch_limit(&mut self, _limit: u64) -> bool {
+        // OrderBy buffers and re-sorts all input rows; bounding the scan below
+        // it would drop rows the sort needs. Do not forward.
+        false
+    }
+
+    fn page_info(&self) -> Option<crate::plan::CursorPageInfo> {
+        self.source.page_info()
     }
 
     fn exec_info(&self) -> ExecInfo {

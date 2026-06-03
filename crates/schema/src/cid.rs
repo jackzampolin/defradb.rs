@@ -186,7 +186,7 @@ fn generate_cid_from_bytes(cbor_bytes: &[u8]) -> crate::Result<Cid> {
     let hash_bytes = hasher.finalize();
 
     // Create multihash
-    let mh: Multihash = Multihash::wrap(*SHA2_256_CODE, &hash_bytes)
+    let mh: Multihash<64> = Multihash::wrap(*SHA2_256_CODE, &hash_bytes)
         .map_err(|e| crate::SchemaError::CidGeneration(e.to_string()))?;
 
     // Create CIDv1 with DAG-CBOR codec

@@ -164,7 +164,7 @@ pub fn build_block_from_document(doc: &Document) -> Result<BlockResult, String> 
     hasher.update(&block);
     let digest = hasher.finalize();
 
-    let mh = Multihash::wrap(SHA2_256_CODE, &digest)
+    let mh = Multihash::<64>::wrap(SHA2_256_CODE, &digest)
         .map_err(|e| format!("Failed to create multihash: {}", e))?;
 
     let cid = Cid::new_v1(DAG_CBOR_CODEC, mh);

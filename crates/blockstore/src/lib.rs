@@ -48,9 +48,9 @@ pub use verify::verify_block_cid;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use cid::multihash::Code;
 use cid::Cid;
 use lru::LruCache;
+use multihash_codetable::Code;
 use parking_lot::Mutex;
 use std::fmt;
 use std::num::NonZeroUsize;

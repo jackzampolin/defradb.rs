@@ -7,6 +7,9 @@ use storage::corekv::MaybeSendSync;
 use query_types::document::DocumentMapping;
 use query_types::error::Result;
 
+use crate::plan::CursorPageInfo;
+use crate::planner::index_selection::CursorSeek;
+
 // Doc, DocStatus, DocFields extracted to query-types crate.
 // Re-exported from planner/mod.rs for backwards compatibility.
 use query_types::doc::Doc;
@@ -71,6 +74,46 @@ pub trait PlanNode: MaybeSendSync {
     /// and yield a synthetic result instead of returning empty.
     fn is_grouped_source(&self) -> bool {
         false
+    }
+
+    /// Configure cursor seek on this node's underlying index scan, if any.
+    ///
+    /// Walks down the plan tree until it reaches an `IndexScanNode`, sets
+    /// `params.cursor_seek`, and returns `true`. Wrapper nodes forward to
+    /// their inner source. Non-index terminal nodes return `false`.
+    ///
+    /// Default: no-op, returns `false`.
+    fn set_cursor_seek(&mut self, _seek: CursorSeek) -> bool {
+        false
+    }
+
+    /// Bound the underlying index scan's fetch count for cursor pagination
+    /// early-termination, setting `IndexScanParams.limit = limit`.
+    ///
+    /// `limit` is the cursor's `page_size + 1` (the `+1` is the has-next/has-prev
+    /// probe row). Pass-through wrapper nodes that emit one output row per input
+    /// row (select, permission_filter, se_filter, limit, lens) forward to their
+    /// child. Nodes that CONSUME ALL input before emitting (orderby, groupby,
+    /// aggregate, allDocs, bm25, similarity) must NOT forward — bounding the scan
+    /// below them would drop rows they need — so they return `false`.
+    ///
+    /// `IndexScanNode` returns `true` only when it has NO residual filter (a
+    /// residual filter rejects rows AFTER the fetcher, which would cause
+    /// under-fetch if the scan were bounded).
+    ///
+    /// Default: no-op, returns `false`.
+    fn set_cursor_fetch_limit(&mut self, _limit: u64) -> bool {
+        false
+    }
+
+    /// Returns cursor page-info if this node is (or wraps) a `CursorNode`.
+    ///
+    /// Called after iteration is complete. `CursorNode` returns `Some(...)`;
+    /// wrapper nodes forward to their child. Terminal nodes return `None`.
+    ///
+    /// Default: `None`.
+    fn page_info(&self) -> Option<CursorPageInfo> {
+        None
     }
 
     /// Generate an explanation of this node for EXPLAIN queries.

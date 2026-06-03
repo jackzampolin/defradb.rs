@@ -10,6 +10,7 @@
 //! - `mutations`: Mutation operation parsing
 
 mod aggregates;
+mod cursor;
 mod explain;
 mod filters;
 pub mod limits;

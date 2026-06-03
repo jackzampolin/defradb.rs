@@ -5,7 +5,7 @@ use schema::{FieldKind, ScalarKind};
 use serde_json::Value as JsonValue;
 
 /// Convert JSON value to NormalValue.
-pub(super) fn json_to_normal_value(value: &JsonValue) -> Option<NormalValue> {
+pub(crate) fn json_to_normal_value(value: &JsonValue) -> Option<NormalValue> {
     match value {
         JsonValue::Null => Some(NormalValue::Null),
         JsonValue::Bool(b) => Some(NormalValue::Bool(*b)),
@@ -107,7 +107,7 @@ fn normalize_value_for_field(value: NormalValue, field_kind: &FieldKind) -> Norm
 }
 
 /// Normalize a NormalValue for a named index field using collection field metadata.
-pub(super) fn normalize_for_index_field(
+pub(crate) fn normalize_for_index_field(
     value: NormalValue,
     field_name: &str,
     collection_fields: &[schema::FieldDescription],

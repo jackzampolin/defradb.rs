@@ -294,7 +294,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             || has_ordering_index
             || has_or_filter_index
             || has_similarity
-            || has_fulltext_search;
+            || has_fulltext_search
+            // Cursor queries must go through the planner so CursorNode wraps the top.
+            || select.is_cursor;
 
         if needs_planner {
             // Use the Planner for queries with nested selections (joins) or relation filters.

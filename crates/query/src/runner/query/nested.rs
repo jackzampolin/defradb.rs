@@ -123,6 +123,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         let plan_exec_info = plan.exec_info();
+        // Capture cursor page-info BEFORE close() releases plan resources.
+        // Non-cursor selects don't need it, so skip the wrapper-node traversal
+        // entirely — it would just return `None` after walking the plan tree.
+        let cursor_page_info = if select.is_cursor {
+            plan.page_info()
+        } else {
+            None
+        };
         let plan_close_start = Instant::now();
         plan.close().await?;
         profile.plan_close_elapsed = plan_close_start.elapsed();
@@ -190,6 +198,41 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             result_count = profile.result_count,
             "nested query profile"
         );
+
+        // For cursor queries, wrap results in the cursor response envelope.
+        if let Some(pi) = cursor_page_info {
+            let inner_key = select.field.output_name().to_string();
+            let mut cursor_obj = serde_json::Map::new();
+            cursor_obj.insert(inner_key, JsonValue::Array(results));
+            if pi.fields.any_selected() {
+                let mut pageinfo = serde_json::Map::new();
+                if let Some(key) = pi.fields.has_next.as_ref() {
+                    pageinfo.insert(key.clone(), JsonValue::Bool(pi.has_next));
+                }
+                if let Some(key) = pi.fields.has_prev.as_ref() {
+                    pageinfo.insert(key.clone(), JsonValue::Bool(pi.has_prev));
+                }
+                if let Some(key) = pi.fields.start_cursor.as_ref() {
+                    pageinfo.insert(
+                        key.clone(),
+                        pi.start_cursor
+                            .map(JsonValue::String)
+                            .unwrap_or(JsonValue::Null),
+                    );
+                }
+                if let Some(key) = pi.fields.end_cursor.as_ref() {
+                    pageinfo.insert(
+                        key.clone(),
+                        pi.end_cursor
+                            .map(JsonValue::String)
+                            .unwrap_or(JsonValue::Null),
+                    );
+                }
+                // Go always renders the literal `_pageInfo` key regardless of any alias.
+                cursor_obj.insert("_pageInfo".to_string(), JsonValue::Object(pageinfo));
+            }
+            return Ok(JsonValue::Object(cursor_obj));
+        }
 
         Ok(JsonValue::Array(results))
     }

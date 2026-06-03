@@ -868,21 +868,27 @@ fn test_composite_status_zero_cbor_rejected() {
 #[test]
 fn test_composite_missing_status_cbor_rejected() {
     let mut composite = std::collections::BTreeMap::new();
-    composite.insert("docID".to_string(), libipld::Ipld::Bytes(b"doc-1".to_vec()));
+    composite.insert(
+        "docID".to_string(),
+        ipld_core::ipld::Ipld::Bytes(b"doc-1".to_vec()),
+    );
     composite.insert(
         "schemaVersionID".to_string(),
-        libipld::Ipld::String("schema-v1".to_string()),
+        ipld_core::ipld::Ipld::String("schema-v1".to_string()),
     );
-    composite.insert("priority".to_string(), libipld::Ipld::Integer(1));
+    composite.insert("priority".to_string(), ipld_core::ipld::Ipld::Integer(1));
 
     let mut delta = std::collections::BTreeMap::new();
-    delta.insert("composite".to_string(), libipld::Ipld::Map(composite));
+    delta.insert(
+        "composite".to_string(),
+        ipld_core::ipld::Ipld::Map(composite),
+    );
 
     let mut block = std::collections::BTreeMap::new();
-    block.insert("delta".to_string(), libipld::Ipld::Map(delta));
+    block.insert("delta".to_string(), ipld_core::ipld::Ipld::Map(delta));
 
-    let bytes =
-        serde_ipld_dagcbor::to_vec(&libipld::Ipld::Map(block)).expect("manual block should encode");
+    let bytes = serde_ipld_dagcbor::to_vec(&ipld_core::ipld::Ipld::Map(block))
+        .expect("manual block should encode");
     let result = Block::from_dag_cbor(&bytes);
 
     assert!(result.is_err());

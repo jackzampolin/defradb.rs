@@ -205,6 +205,7 @@ impl TypeJoinMany {
                     limit: None,
                     offset: 0,
                     value_filter: None,
+                    cursor_seek: None,
                 },
             )
             .await?;
