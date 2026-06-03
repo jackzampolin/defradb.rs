@@ -102,6 +102,15 @@ pub unsafe extern "C" fn collection_create(
         defra_core::batch_signing::set_batch_session_key(session_key);
         defra_core::signing::set_signing_config(signing);
 
+        // Bind the caller's identity into the ambient context so DB-layer NAC
+        // checks resolve the actual caller instead of the wildcard. The body
+        // runs on this thread via `block_on`, so the thread-local is visible
+        // throughout it, and the guard restores the prior value on drop so it
+        // never leaks into the next request on this pooled thread.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            identity_str.as_ref().filter(|s| !s.is_empty()).cloned(),
+        );
+
         // Parse JSON to detect array vs object
         let parsed: JsonValue = match serde_json::from_str(&json_str) {
             Ok(v) => v,
