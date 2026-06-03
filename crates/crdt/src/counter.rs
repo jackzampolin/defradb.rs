@@ -16,12 +16,25 @@ use serde::{Deserialize, Serialize};
 use std::any::Any;
 use storage::{corekv::Key, keys::CRDTValueKey, Reader, ReaderWriter};
 
-/// Numeric kind for counter values
+/// Numeric kind for counter values.
+///
+/// # Convergence warning (Float32/Float64)
+///
+/// Counter merge is unconditional addition. For `Int64` this is order-independent
+/// (wrapping addition is associative — proven in `proofs/lean` as `word64Add_assoc`).
+/// For `Float32`/`Float64` it is **NOT**: IEEE-754 addition is not associative
+/// (`(0.1 + 0.2) + 0.3 != 0.1 + (0.2 + 0.3)`; proven as `float_add_not_assoc`), so two
+/// replicas applying the same float deltas in different merge orders can converge to
+/// **different values**. This matches Go DefraDB exactly (both use raw IEEE-754 `+`), so
+/// the behavior is retained for parity — but float counter fields are not convergence-safe.
+/// Prefer `Int64` (or a fixed-point/scaled integer) when cross-replica convergence matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum NumericKind {
     Int64,
+    /// Non-convergent across replicas — see the type-level convergence warning above.
     Float32,
+    /// Non-convergent across replicas — see the type-level convergence warning above.
     Float64,
 }
 
