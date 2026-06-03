@@ -55,9 +55,18 @@ Read this before trusting a verdict; it states the model's honest reach.
   the convergence liveness results; weak fairness on protocol actions.
 - **Crypto boundary (KMS):** ECIES is abstracted — a node can use an envelope iff it is
   the intended recipient. Real ECIES/IND-CCA security is assumed, not modeled.
-- **Excluded by design:** Float32/64 counter merge laws (IEEE-754 addition is not
-  associative); key rotation (a node revoked *after* already holding a key is out of
-  scope). Model B's `INV_DagComplete` is deliberately relaxed (documented in `tla/README.md`).
+- **Float counter divergence (proven, real):** IEEE-754 addition is not associative, so
+  float counters are NOT order-independent — proven by `float_add_not_assoc` in
+  `lean/DefraConvergence/LocalState.lean`. The 2026-06-03 model→code audit confirmed both
+  Go and Rust ship `Float32/64` counters with raw `+` and no mitigation: a real latent
+  replica divergence (fix is a Go-parity-constrained product decision, tracked separately).
+- **Excluded by design:** key rotation (a node revoked *after* already holding a key is
+  out of scope). Model B's `INV_DagComplete` is deliberately relaxed (see `tla/README.md`).
+- **Audit outcomes (2026-06-03):** model→code audit of all 9 families confirmed the GREEN
+  claims hold in Go+Rust, and surfaced real Go-side gaps the models predicted — `_commits`
+  is ACP-ungated in Go (Rust gates it; a known DefraDB limitation), and Go's P2P block
+  signature verification is optional with an unverified author/creator field (Rust is
+  hardened: mandatory verify + author-binding). See the slice `*_DESIGN.md` for details.
 - **Model ≠ code.** These prove properties of the *models*. They are anchored to source by
   the `*_DESIGN.md` docs, but there is **no automated conformance harness yet** — keeping
   the models in step with the code is currently a manual discipline. (defra-agent's

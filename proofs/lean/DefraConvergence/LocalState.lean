@@ -94,6 +94,18 @@ theorem word64Add_not_idempotent : Not (word64Add 1 1 = 1) := by
   native_decide
 
 /--
+Float counters are NOT order-independent: IEEE-754 addition is not associative, so
+two replicas applying the SAME set of float deltas in different merge orders can
+converge to DIFFERENT values. The convergence proof above therefore covers only the
+Int64 (`word64Add`) counter; this negative theorem makes the float exclusion
+machine-evident. (Audit 2026-06-03: both Go and Rust ship `Float32/64` counter
+fields with raw IEEE-754 `+` and no mitigation — a real latent divergence.)
+-/
+theorem float_add_not_assoc :
+    (((0.1 + 0.2) + 0.3 : Float) == (0.1 + (0.2 + 0.3))) = false := by
+  native_decide
+
+/--
 Abstract canonical representation of the durable merged-CID/applied-delta set.
 The model uses `max` as the join over canonical set ranks; the important local
 state-machine fact is that this layer is idempotent, unlike raw counter addition.
