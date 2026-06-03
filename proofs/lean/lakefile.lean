@@ -11,3 +11,9 @@ lean_lib Acp where
 
 @[default_target]
 lean_lib Cid where
+
+@[default_target]
+lean_lib OrderEncoding where
+
+@[default_target]
+lean_lib IndexMaintenance where

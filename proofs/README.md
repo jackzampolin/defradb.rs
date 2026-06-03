@@ -38,19 +38,16 @@ section is the **diff**: what is proven vs. the accepted gap.
 | Transaction & merge-queue concurrency | TLA+ | db, db-merge |
 | JWT issuer / algorithm binding | TLA+ | identity |
 | CID content-addressing determinism + Block canonicalization | Lean | defra-core |
+| Deferred-ACP overlay consistency | TLA+ | query-plan |
+| Order-preserving key encoding | Lean | storage |
+| Index-maintenance consistency | Lean | db-index |
 
-### Backlog — want to model (3 medium)
-The accepted gap. **Completed (batch 1 + 2):** the 2 highs (SSI serializability, p2p
-capability) and 7 mediums (SSI range carve-out, NAC lifecycle, txn cleanup, merge-queue,
-JWT binding, CID determinism, Block canonicalization) are now *Modeled* above. The CID
-slice also discharges the content-addressing assumption, and JWT the Auth-DID assumption.
-Each remaining slice reads its crate's `survey/<crate>.md` first.
-
-| # | Candidate | Crate | Tool | Property to prove | Pri |
-|---|---|---|---|---|---|
-| 1 | Order-preserving encoding monotonicity | storage | Lean | a<b ⟹ encode_asc(a) <lex encode_asc(b); cross-type markers total order | med |
-| 2 | Deferred-ACP overlay consistency | query-plan | TLA+ | txn-local ACP projection gates as committed state; fail-closed across commit/rollback | med |
-| 3 | Index-maintenance consistency | db-index | Lean | after `on_document_update`, stored entries == `extract(new)`: no stale, none missing | med |
+### Backlog — want to model: **none**
+**The medium-and-up correctness surface is fully modeled.** All 2 high + 11 medium backlog
+items from the 40-crate survey are now in *Modeled* above (built across three
+builder→verifier batches, each integrator-verified). The remaining work is the explicitly
+deferred low-priority Lean-lemma appendix below; new modelable surfaces would come from a
+re-survey as the code evolves.
 
 ### Deferred — Lean-lemma appendix (13 low)
 Low-risk hardening lemmas parked for later: index-extraction determinism, cartesian-product
