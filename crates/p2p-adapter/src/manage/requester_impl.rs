@@ -7,7 +7,7 @@
 
 use defra_http::{
     ManageRequester, RemoteManageDocRef, RemoteManageOp, RemoteManageQueryOp,
-    RemoteManageQueryResult,
+    RemoteManageQueryResult, MANAGE_UNAUTHORIZED,
 };
 use p2p::message::{ManageDocRef, ManageMutateOp, ManageQueryOp, ManageQueryResult};
 use p2p::{Error, P2PTransport};
@@ -15,7 +15,8 @@ use p2p::{Error, P2PTransport};
 use super::client::ManageClient;
 
 /// The error string the http layer matches to detect a remote NAC denial.
-const UNAUTHORIZED: &str = "unauthorized";
+/// Aliased to the shared http wire sentinel so there is one source of truth.
+const UNAUTHORIZED: &str = MANAGE_UNAUTHORIZED;
 
 #[async_trait::async_trait]
 impl<T: P2PTransport> ManageRequester for ManageClient<T> {

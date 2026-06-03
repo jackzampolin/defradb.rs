@@ -8,7 +8,7 @@
 //! Replies are returned UNSIGNED; the runtime signs them before sending.
 
 use defra_http::router::P2pDocumentRequest;
-use defra_http::P2POperations;
+use defra_http::{P2POperations, MANAGE_UNAUTHORIZED};
 use p2p::message::{
     ManageDocRef, ManageMutateOp, ManageQueryOp, ManageQueryReply, ManageQueryRequest,
     ManageQueryResult, ManageReply, ManageRequest,
@@ -80,7 +80,7 @@ async fn authorize_and_apply(
         .await
         .map_err(|e| e.to_string())?
     {
-        return Err("unauthorized".into());
+        return Err(MANAGE_UNAUTHORIZED.into());
     }
     let did_str = actor.to_string();
     match &request.op {
@@ -152,7 +152,7 @@ pub async fn build_manage_query_reply(
             .await
             .map_err(|e| e.to_string())?
         {
-            return Err("unauthorized".to_string());
+            return Err(MANAGE_UNAUTHORIZED.to_string());
         }
         Ok(match request.op {
             ManageQueryOp::ReplicatorList => ManageQueryResult::Replicators {

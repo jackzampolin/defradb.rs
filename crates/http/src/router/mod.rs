@@ -15,4 +15,5 @@ pub use traits::{
     P2pDocumentRequest, PolicyInfo, RemoteManageDocRef, RemoteManageOp, RemoteManageQueryOp,
     RemoteManageQueryResult, ReplicatorInfo, SchemaOperations, SyncBranchableRequest,
     SyncDocumentsRequest, SyncVersionsRequest, TransactionOperations, ViewOperations,
+    MANAGE_UNAUTHORIZED,
 };

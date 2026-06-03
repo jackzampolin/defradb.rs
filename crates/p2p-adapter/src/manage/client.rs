@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use defra_http::MANAGE_UNAUTHORIZED;
 use p2p::message::{
     ManageMutateOp, ManageQueryOp, ManageQueryReply, ManageQueryRequest, ManageReply, ManageRequest,
 };
@@ -21,7 +22,7 @@ const MANAGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The sentinel `err_message` the serve side returns when authorization fails;
 /// mapped to [`Error::Unauthorized`]. Any other `err_message` is a remote
 /// operational failure and is surfaced as [`Error::Transport`].
-const UNAUTHORIZED_ERR: &str = "unauthorized";
+const UNAUTHORIZED_ERR: &str = MANAGE_UNAUTHORIZED;
 
 /// Sends management requests to peers and correlates the replies.
 #[derive(Clone)]

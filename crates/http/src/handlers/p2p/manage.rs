@@ -12,14 +12,15 @@ use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{
     AppState, NodePermission, RemoteManageOp, RemoteManageQueryOp, RemoteManageQueryResult,
+    MANAGE_UNAUTHORIZED,
 };
 
 /// Map a [`ManageRequester`](crate::router::ManageRequester) error string to an
 /// HTTP error. A remote NAC denial surfaces as `"unauthorized"` → 403 Forbidden;
 /// any other failure is a relayed remote-op failure → 400 Bad Request.
 fn map_manage_err(message: String) -> HttpError {
-    if message == "unauthorized" {
-        HttpError::Forbidden("unauthorized".into())
+    if message == MANAGE_UNAUTHORIZED {
+        HttpError::Forbidden(MANAGE_UNAUTHORIZED.into())
     } else {
         HttpError::BadRequest(message)
     }

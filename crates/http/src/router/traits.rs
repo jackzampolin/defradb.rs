@@ -243,6 +243,14 @@ pub enum RemoteManageQueryResult {
     Strings { values: Vec<String> },
 }
 
+/// Wire sentinel for a remote NAC denial on the management channel.
+///
+/// This is the contract between the manage serve side (which produces it when
+/// authorization fails), the [`ManageRequester`] implementation (which
+/// normalizes denials to it), and the HTTP handler (which maps it to 403). It is
+/// the single source of truth for the `"unauthorized"` string.
+pub const MANAGE_UNAUTHORIZED: &str = "unauthorized";
+
 /// Relays management requests to P2P-only peers on behalf of an HTTP caller.
 ///
 /// In the management deployment model, the target node (B) exposes only its P2P

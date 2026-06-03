@@ -77,7 +77,12 @@ pub struct P2pReplicatorInfo {
     pub status: Option<u8>,
 
     /// Last time the replicator status changed.
-    #[serde(rename = "lastStatusChange", alias = "LastStatusChange", default)]
+    #[serde(
+        rename = "lastStatusChange",
+        alias = "LastStatusChange",
+        alias = "last_status_change",
+        default
+    )]
     pub last_status_change: Option<String>,
 }
 
@@ -302,6 +307,19 @@ mod tests {
         assert_eq!(info.id.as_deref(), Some("peer-1"));
         assert_eq!(info.collections, vec!["Users"]);
         assert_eq!(info.status, Some(1));
+        assert_eq!(
+            info.last_status_change.as_deref(),
+            Some("2026-04-26T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn replicator_info_accepts_snake_case_last_status_change() {
+        // The manage-query (ReplicatorList) path embeds the raw http
+        // `ReplicatorInfo`, which serializes `last_status_change` as snake_case.
+        let json = r#"{"id":"peer-1","collections":["Users"],"status":0,"last_status_change":"2026-04-26T10:00:00Z"}"#;
+        let info: P2pReplicatorInfo = serde_json::from_str(json).unwrap();
+
         assert_eq!(
             info.last_status_change.as_deref(),
             Some("2026-04-26T10:00:00Z")
