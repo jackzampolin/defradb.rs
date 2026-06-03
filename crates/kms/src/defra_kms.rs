@@ -343,8 +343,13 @@ impl KmsService for DefraKms {
                 .map_err(|e| Error::Storage(format!("decode local block: {e}")))?;
             let scope = Self::scope_from_block(&block)?;
             match self.policy.check_release(actor.as_ref(), &scope).await? {
-                PolicyDecision::Allow => {}
-                PolicyDecision::Deny => continue,
+                PolicyDecision::Allow => {
+                    tracing::debug!(cid = %cid, "KMS serve_request: DEK release GRANTED");
+                }
+                PolicyDecision::Deny => {
+                    tracing::warn!(cid = %cid, "KMS serve_request: DEK release DENIED");
+                    continue;
+                }
             }
             let wrapped = crate::ecies_envelope::wrap_for_requester(
                 &stored.block_bytes,

@@ -96,14 +96,14 @@ a binding.
 
 ### Realized status — all 18 families bound
 
-**9 behavioral tests** (driven against `target/release/defra`, each break-tested
-for non-vacuity), **2 Lean-axis contract bindings**, **7 honest Boundaries**:
+**10 behavioral tests** (driven against `target/release/defra`, each break-tested
+for non-vacuity), **2 Lean-axis contract bindings**, **6 honest Boundaries**:
 
 | Family | Binding | Where |
 |---|---|---|
 | B3 filtered replication | Behavioral | `replication.rs` |
 | DAG convergence | Behavioral | `replication.rs` (restart aspect → Boundary) |
-| Replicator lifecycle | Behavioral | `replicator_lifecycle.rs` (backfill no-loss) |
+| Replicator lifecycle | Behavioral | `replicator_lifecycle.rs` (backfill no-loss; full resume blocked by harness `restart_node`) |
 | ACP soundness + revocation + commits | Behavioral + Contract | `acp.rs`; `RelationExpression` vocab |
 | Storage SSI serializability | Behavioral | `ssi.rs` (real `409 Conflict` on write-skew) |
 | Management-channel auth (NAC gate) | Behavioral | `nac.rs` |
@@ -111,10 +111,10 @@ for non-vacuity), **2 Lean-axis contract bindings**, **7 honest Boundaries**:
 | Deferred-ACP overlay | Behavioral | `deferred_acp.rs` (txn-local gating) |
 | CID determinism | Behavioral | `cid.rs` |
 | Index-maintenance | Behavioral | `index.rs` |
+| KMS key distribution | Behavioral | `kms.rs` (node0 denies the DEK to unauthorized node1) |
 | CRDT merge laws | Contract | `MergeResult` vocab |
 | Multi-instance claim | Boundary | defra-agent substrate, not this binary |
 | Block integrity / signatures | Boundary | needs adversarial peer; Rust verify mandatory |
-| KMS key distribution | Boundary | denial = kms timeout; secrecy = ECIES unit tests |
 | P2P capability replay gate | Boundary | P2P-wire internal |
 | Transaction & merge-queue concurrency | Boundary | same-doc merge race, not CLI-forceable |
 | JWT issuer / algorithm binding | Boundary | DID-binding via `acp.rs`; forge unreachable via CLI |

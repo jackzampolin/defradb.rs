@@ -72,6 +72,13 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Contract, Behavioral],
     },
     Property {
+        // Behavioral covers the backfill / existing-doc-replay leg (a write that
+        // pre-dates the replicator is still delivered). The full disconnect→resume
+        // leg is NOT cleanly testable with the current harness: config-level
+        // replicator delete does not gate sync between already-connected peers
+        // (connection-level sync continues), and `restart_node` respawns the
+        // workspace debug binary rather than the configured release Path, so a
+        // real partition can't be staged against the artifact. Backfill leg only.
         family: "Replicator lifecycle (no-loss / resume)",
         name: "INV_NoLoss — reconnect recomputes the target gap, no block dropped",
         axis: Tla,
@@ -100,18 +107,18 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Boundary],
     },
     Property {
-        // Authorized cross-node decrypt is already covered by the encryption
-        // integration tests; the *unauthorized-denied* leg is unobservable here:
-        // without a DAC policy the DEK is freely released (no auth class), and
-        // with one the denial manifests only as a kms wait_all() timeout
-        // indistinguishable from slow replication. Secrecy is the ECIES boundary
-        // (proven by crates/kms ecies_envelope unit tests). Structural.
+        // The unauthorized-denied leg is now observable: a serve-side
+        // `tracing::warn!("DEK release DENIED")` at the KMS policy check makes the
+        // previously-silent denial loggable, and the behavioral test reads node0's
+        // log to confirm node0 denies the DEK to an unauthorized node1's fetch.
+        // ECIES secrecy of a released envelope remains a crypto Boundary (proven
+        // by crates/kms ecies_envelope unit tests).
         family: "KMS key distribution",
         name: "INV_AuthorizedEventuallyGets / no-unauthorized-usable",
         axis: Tla,
-        anchor: "crates/kms PubsubKeyTransport; crates/kms/src/ecies_envelope.rs",
+        anchor: "crates/kms/src/defra_kms.rs serve_request; crates/kms/src/nac_dac_policy.rs",
         model_ref: "MC_Kms_Green.cfg",
-        tiers: &[Boundary],
+        tiers: &[Behavioral, Boundary],
     },
     Property {
         family: "Management-channel auth (NAC gate)",

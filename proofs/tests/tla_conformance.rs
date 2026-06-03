@@ -36,3 +36,6 @@ mod replicator_lifecycle;
 
 #[path = "behavioral/ssi.rs"]
 mod ssi;
+
+#[path = "behavioral/kms.rs"]
+mod kms;
