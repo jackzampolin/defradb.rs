@@ -44,6 +44,7 @@ members = [
     "tools/lens-host",
     "tools/ffi-test",
     "tools/integration-test",
+    "proofs",
 ]
 
 [workspace.package]

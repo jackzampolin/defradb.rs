@@ -75,6 +75,31 @@ cd proofs/lean && lake build    # all Lean proofs (builds clean, zero `sorry`)
 
 `proofs/tla/tools/tla2tools.jar` is git-ignored; the wrapper re-downloads it if missing.
 
+## Conformance — binding the models to the real binary
+
+The models prove properties of *abstractions*. The `conformance` crate (rooted
+here in `proofs/`, alongside `tla/` and `lean/`) keeps them honest against the
+shipped code, on two axes matching the two tools:
+
+| Axis | What it checks | Needs a binary? | Entry |
+|---|---|---|---|
+| **Lean (auto)** | `lean/Conformance.lean` emits a JSON contract (vocabularies derived from the Lean models); the live Rust types are asserted to still match — anti-drift | no | `tests/lean_conformance.rs` |
+| **TLA (behavioral)** | each family's invariant is driven against the **running release binary** via the backbone `defra-harness` | yes | `tests/tla_conformance.rs` |
+
+[`src/registry.rs`] (`PROPERTIES`) is the spine: every *Modeled* family above maps
+to its headline invariant, source anchor, the model that proves it, and its
+binding tier (`Behavioral` / `Contract` / `Boundary`). `Boundary` marks what is
+*assumed*, never asserted (crypto, eventual connectivity, bounded-N, foreign
+substrate) — so a green run never reads as "this was proven against the
+artifact." `matrix::every_modeled_family_is_bound` fails if a model lands without
+a binding.
+
+```bash
+proofs/verify-all.sh                 # TLA + Lean + conformance (behavioral if binary present)
+cargo build --release -p cli         # produce target/release/defra (the artifact under test)
+cargo test -p conformance            # Lean axis + behavioral; DEFRA_CONFORMANCE_BINARY overrides target
+```
+
 ## Conventions (follow these in new slices)
 
 - **One model family per concern.** Each family = a base spec (`tla/<Family>.tla`) plus
@@ -117,6 +142,8 @@ Read this before trusting a verdict; it states the model's honest reach.
   signature verification is optional with an unverified author/creator field (Rust is
   hardened: mandatory verify + author-binding). See the slice `*_DESIGN.md` for details.
 - **Model ≠ code.** These prove properties of the *models*. They are anchored to source by
-  the `*_DESIGN.md` docs, but there is **no automated conformance harness yet** — keeping
-  the models in step with the code is currently a manual discipline. (defra-agent's
-  `lean_vocab_test.rs` JSON-extraction approach is the reference if/when we add one.)
+  the `*_DESIGN.md` docs and bound to the implementation by the `conformance` crate (see
+  *Conformance* above) — the Lean axis asserts model vocabularies against live Rust types,
+  the TLA axis drives the real release binary. What conformance does **not** reach is marked
+  `Boundary` in the registry (crypto, eventual connectivity, bounded-N, the defra-agent
+  claim substrate): assumed, never asserted against the artifact.
