@@ -6731,7 +6731,7 @@ dependencies = [
 [[package]]
 name = "lark-kv"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/lark.git?rev=5ddc43dbb08f21bd4078ff89b06fb57bde9398f3#5ddc43dbb08f21bd4078ff89b06fb57bde9398f3"
+source = "git+https://github.com/sourcenetwork/lark.git?rev=ab924471c2e376591c1e3b3cd419655f9c7c6dc4#ab924471c2e376591c1e3b3cd419655f9c7c6dc4"
 dependencies = [
  "crossbeam-skiplist",
  "lru 0.16.4",
