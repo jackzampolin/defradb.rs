@@ -302,10 +302,179 @@ async fn manage_query_collection_list_over_p2p() {
     );
 }
 
+/// SECURITY: a relayed actor token whose `aud` is NOT node B's peer-id must be
+/// rejected by node B. The HTTP caller is still admin (passes node A's relay
+/// gate), so the request reaches B; B's `verify_auth_token` fails the audience
+/// check, which is a malformed-for-B token (not a NAC denial) and surfaces as a
+/// 400 (transport error), distinct from the 403 a NAC denial produces. Node B
+/// must not subscribe. This proves the replay/audience binding is enforced
+/// end-to-end through the relay.
+#[tokio::test]
+#[serial]
+async fn manage_wrong_audience_token_rejected() {
+    let (cluster, admin_key, addr_b, _peer_id_b) = setup().await;
+    let api_a = cluster.api_url(0).to_string();
+
+    // Mint the actor token with the WRONG audience: node A's own peer-id, not B's.
+    let node_a = cluster.client(0);
+    let info_a = node_a
+        .p2p_info_with_identity(&admin_key)
+        .expect("p2p_info node A");
+    let addr_a = info_a
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .expect("node A has no P2P address")
+        .to_string();
+    let peer_id_a = peer_id_of(&addr_a).to_string();
+
+    // Wrong-audience token: signed by admin, but bound to A's peer-id.
+    let wrong_aud_token = crate::manage_relay_common::mint_manage_token(&admin_key, &peer_id_a);
+
+    let status = post_manage(
+        &api_a,
+        &admin_key,
+        &addr_b,
+        &wrong_aud_token,
+        json!({ "Kind": "CollectionAdd", "collection_ids": ["User"] }),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a wrong-audience token must NOT be accepted by node B"
+    );
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a wrong-audience token is malformed-for-B (transport error) → 400, not a 403 NAC denial"
+    );
+
+    // Node B must not have subscribed.
+    let node_b = cluster.client(1);
+    let direct = node_b
+        .p2p_collection_list_with_identity(&admin_key)
+        .expect("node B p2p_collection_list");
+    assert!(
+        direct.as_array().map(|a| a.is_empty()).unwrap_or(true),
+        "node B must not subscribe after a wrong-audience relay"
+    );
+}
+
+/// Admin token (`aud` = B peer-id) relays a `ReplicatorAdd` to node B (replicating
+/// the `User` collection back to node A), then a `ReplicatorList` query over the
+/// same relay reflects it. Proves the ReplicatorAdd dispatch path AND the
+/// `ReplicatorInfo` → wire-type round-trip in the typed `Replicators` reply.
+#[tokio::test]
+#[serial]
+async fn manage_replicator_add_and_list_over_p2p() {
+    let (cluster, admin_key, addr_b, peer_id_b) = setup().await;
+    let api_a = cluster.api_url(0).to_string();
+
+    // Node A's listen address: B will replicate the User collection back to A.
+    let node_a = cluster.client(0);
+    let info_a = node_a
+        .p2p_info_with_identity(&admin_key)
+        .expect("p2p_info node A");
+    let addr_a = info_a
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .expect("node A has no P2P address")
+        .to_string();
+
+    let token = crate::manage_relay_common::mint_manage_token(&admin_key, &peer_id_b);
+
+    let status = post_manage(
+        &api_a,
+        &admin_key,
+        &addr_b,
+        &token,
+        json!({
+            "Kind": "ReplicatorAdd",
+            "addresses": [addr_a],
+            "collection_ids": ["User"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "authorized ReplicatorAdd relay should return 200"
+    );
+
+    // ReplicatorList over the relay must reflect the newly-added replicator.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, body) = post_manage_query(
+            &api_a,
+            &admin_key,
+            &addr_b,
+            &token,
+            json!({ "Kind": "ReplicatorList" }),
+        )
+        .await;
+        if status == StatusCode::OK && replicator_list_nonempty(&body) {
+            assert_eq!(
+                body["Kind"], "Replicators",
+                "ReplicatorList must return a typed Replicators result, got {body}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node B did not report the added replicator over the relay"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Admin token (`aud` = B peer-id) relays a `DocumentAdd`. Document subscribe is a
+/// broadcaster delegation that succeeds even for a not-yet-existing doc id (the
+/// p2p document tests treat doc ids the same way), so a 200 proves the dispatch
+/// path is wired.
+#[tokio::test]
+#[serial]
+async fn manage_document_add_over_p2p() {
+    let (cluster, admin_key, addr_b, peer_id_b) = setup().await;
+    let api_a = cluster.api_url(0).to_string();
+
+    let token = crate::manage_relay_common::mint_manage_token(&admin_key, &peer_id_b);
+
+    // A syntactically-valid bae- doc id; subscribe does not require the doc to exist.
+    let doc_id = "bae-0e7c3bb5-4917-46e2-b36e-3f8d0c4b3f5d";
+    let status = post_manage(
+        &api_a,
+        &admin_key,
+        &addr_b,
+        &token,
+        json!({
+            "Kind": "DocumentAdd",
+            "docs": [{ "collection": "User", "doc_id": doc_id }],
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "authorized DocumentAdd relay should return 200"
+    );
+}
+
 /// True when a `RemoteManageQueryResult::Strings` body carries at least one value.
 fn collection_list_nonempty(body: &Value) -> bool {
     body["Kind"] == "Strings"
         && body["values"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+}
+
+/// True when a `RemoteManageQueryResult::Replicators` body carries at least one
+/// replicator entry.
+fn replicator_list_nonempty(body: &Value) -> bool {
+    body["Kind"] == "Replicators"
+        && body["replicators"]
             .as_array()
             .map(|a| !a.is_empty())
             .unwrap_or(false)

@@ -182,6 +182,161 @@ async fn iroh_manage_query_collection_list_over_p2p() {
     );
 }
 
+/// Bring up a 2-node iroh cluster WITHOUT NAC (the CLI default), deploy the
+/// `User` schema on node B, and return a freshly generated actor key plus node B's
+/// peer-id and dial address.
+///
+/// With NAC disabled, node A's relay gate and node B's manage authorization both
+/// resolve permissively, so any validly-audienced actor token is accepted. This
+/// covers the NAC-disabled parity case on the primary production transport.
+async fn setup_no_nac() -> (TestCluster, String, String, String) {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_acp_local()
+        .with_iroh_transport()
+        .build()
+        .await
+        .unwrap();
+
+    let timeout = Duration::from_secs(15);
+    cluster
+        .wait_for_log(0, "p2p_listening", timeout)
+        .await
+        .expect("node0 P2P listener did not start");
+    cluster
+        .wait_for_log(1, "p2p_listening", timeout)
+        .await
+        .expect("node1 P2P listener did not start");
+
+    let node_b = cluster.client(1);
+    let actor_key = generate_identity(node_b.binary_path())
+        .expect("actor identity")
+        .private_key_hex;
+
+    node_b.schema_add(SCHEMA).expect("deploy schema on node B");
+
+    let info_b = node_b.p2p_info().expect("p2p_info node B");
+    let addr_b = info_b
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .expect("node B has no P2P address")
+        .to_string();
+    let peer_id_b = peer_id_of(&addr_b).to_string();
+
+    (cluster, actor_key, addr_b, peer_id_b)
+}
+
+/// With NAC disabled (the CLI default), a CollectionAdd manage request relayed via
+/// node A still subscribes node B over iroh. iroh is the primary production
+/// transport, so the NAC-disabled parity case must hold there too.
+#[tokio::test]
+#[serial]
+async fn iroh_manage_collection_add_over_p2p_nac_disabled() {
+    let (cluster, actor_key, addr_b, peer_id_b) = setup_no_nac().await;
+    let api_a = cluster.api_url(0).to_string();
+
+    let token = mint_manage_token(&actor_key, &peer_id_b);
+
+    let status = post_manage(
+        &api_a,
+        &actor_key,
+        &addr_b,
+        &token,
+        json!({ "Kind": "CollectionAdd", "collection_ids": ["User"] }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "CollectionAdd relay should return 200 with NAC disabled"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, body) = post_manage_query(
+            &api_a,
+            &actor_key,
+            &addr_b,
+            &token,
+            json!({ "Kind": "CollectionList" }),
+        )
+        .await;
+        if status == StatusCode::OK && collection_list_nonempty(&body) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node B did not report the subscribed collection over the iroh relay (NAC disabled)"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let node_b = cluster.client(1);
+    let direct = node_b
+        .p2p_collection_list()
+        .expect("node B p2p_collection_list");
+    assert_eq!(
+        direct.as_array().map(|a| a.len()).unwrap_or(0),
+        1,
+        "node B should have exactly one subscribed collection (NAC disabled)"
+    );
+}
+
+/// SECURITY (iroh): a relayed actor token whose `aud` is NOT node B's peer-id is
+/// rejected by node B's `verify_auth_token` audience check and surfaces as 400
+/// (malformed-for-B transport error, not a 403 NAC denial); node B must not
+/// subscribe. Mirrors the libp2p wrong-audience test on the primary transport.
+#[tokio::test]
+#[serial]
+async fn iroh_manage_wrong_audience_token_rejected() {
+    let (cluster, admin_key, addr_b, _peer_id_b) = setup().await;
+    let api_a = cluster.api_url(0).to_string();
+
+    // Mint the actor token with the WRONG audience: node A's own peer-id.
+    let node_a = cluster.client(0);
+    let info_a = node_a
+        .p2p_info_with_identity(&admin_key)
+        .expect("p2p_info node A");
+    let addr_a = info_a
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .expect("node A has no P2P address")
+        .to_string();
+    let peer_id_a = peer_id_of(&addr_a).to_string();
+
+    let wrong_aud_token = mint_manage_token(&admin_key, &peer_id_a);
+
+    let status = post_manage(
+        &api_a,
+        &admin_key,
+        &addr_b,
+        &wrong_aud_token,
+        json!({ "Kind": "CollectionAdd", "collection_ids": ["User"] }),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a wrong-audience token must NOT be accepted by node B"
+    );
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a wrong-audience token is malformed-for-B (transport error) → 400, not a 403 NAC denial"
+    );
+
+    let node_b = cluster.client(1);
+    let direct = node_b
+        .p2p_collection_list_with_identity(&admin_key)
+        .expect("node B p2p_collection_list");
+    assert!(
+        direct.as_array().map(|a| a.is_empty()).unwrap_or(true),
+        "node B must not subscribe after a wrong-audience relay"
+    );
+}
+
 /// True when a `RemoteManageQueryResult::Strings` body carries at least one value.
 fn collection_list_nonempty(body: &Value) -> bool {
     body["Kind"] == "Strings"
