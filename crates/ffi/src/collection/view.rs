@@ -218,6 +218,12 @@ pub unsafe extern "C" fn refresh_views(
         ));
         let database = try_ffi!(get_node_database(node_ptr));
 
+        // Bind the caller's identity so any DB-layer NAC gate reached by the body
+        // resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         let refresh_options =
             parse_view_names_options(c_str_to_string(options)).map(db::RefreshViewsOptions::with_names);
 

@@ -142,6 +142,14 @@ pub unsafe extern "C" fn add_schema_in_txn(
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
+        // Bind the caller's identity into the ambient context so the registry-layer
+        // NAC gate on add_schema_in_txn resolves the actual caller instead of the
+        // wildcard. The body runs on this thread via `block_on`, so the
+        // thread-local is visible throughout it; the guard restores on drop.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         ffi_async!(rt, {
             let known_types: std::collections::HashSet<String> = registry
                 .get_collections_in_txn(&txn_str)
@@ -198,6 +206,12 @@ pub unsafe extern "C" fn get_collections(
         ));
         let database = try_ffi!(get_node_database(node_ptr));
 
+        // Bind the caller's identity so any DB-layer NAC gate reached by the body
+        // resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         ffi_async!(rt, {
             // Return all collection versions from the system store (active + inactive + placeholders).
             // The Go wrapper handles GetInactive filtering on its side.
@@ -243,6 +257,12 @@ pub unsafe extern "C" fn get_collections_in_txn(
             Some(r) => r,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
+
+        // Bind the caller's identity so any registry-layer NAC gate reached by the
+        // body resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
 
         ffi_async!(rt, {
             let collections = registry

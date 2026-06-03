@@ -173,6 +173,12 @@ pub unsafe extern "C" fn delete_collection_versions(
         let ids_str = try_ffi!(require_c_str(version_ids_json, "version_ids_json"));
         let database = try_ffi!(get_node_database(node_ptr));
 
+        // Bind the caller's identity so any DB-layer NAC gate reached by the body
+        // resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         ffi_async!(rt, {
             let version_ids: Vec<String> = serde_json::from_str(&ids_str)
                 .map_err(|e| format!("failed to parse version IDs JSON: {}", e))?;

@@ -39,6 +39,12 @@ pub unsafe extern "C" fn p2p_sync_documents(
             Err(error) => return FfiResult::error(error.message),
         };
 
+        // Bind the caller's identity so any NAC-gated method reached by the body's
+        // block_on resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         let result = NODES
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
@@ -84,6 +90,12 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
         ));
 
         let collection_id_str = try_ffi!(require_c_str(collection_id, "collection_id"));
+
+        // Bind the caller's identity so any NAC-gated method reached by the body's
+        // block_on resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
 
         let result = NODES
             .get(node_ptr, |state| {
