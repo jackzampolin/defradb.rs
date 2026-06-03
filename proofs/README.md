@@ -12,6 +12,62 @@ Some results need both. **DAG convergence = (TLA+: every node receives every del
 under eventual connectivity) × (Lean: applying deltas in any order yields the same
 state).** Neither half alone is convergence.
 
+## Coverage map
+
+Status of the effort across the 40-crate surface, from the per-crate survey in
+[`survey/`](survey/) (full index, incl. out-of-scope rationale, in
+[`survey/INDEX.md`](survey/INDEX.md)). Of 40 crates, **12 are model-worthy**; the other 28
+are plumbing covered by integration tests / Go-FFI parity / unit tests. The point of this
+section is the **diff**: what is proven vs. the accepted gap.
+
+### Modeled — 9 families (proven)
+| Family | Tool | Crates it covers |
+|---|---|---|
+| B3 filtered replication | TLA+ | p2p, db-merge |
+| DAG convergence (partition / eviction / restart) | TLA+ | p2p, db-merge, blockstore |
+| CRDT merge laws | Lean | crdt, defra-core |
+| Replicator lifecycle (no-loss / resume) | TLA+ | p2p, db-merge, embedded |
+| Multi-instance claim | TLA+ | defra-agent |
+| Block integrity / signatures | TLA+ | db-merge, defra-core, blockstore |
+| KMS key distribution | TLA+ | kms, db-merge |
+| Management-channel auth (NAC gate) | TLA+ | http, db-nac, pg-compat |
+| ACP soundness + revocation + dual-path commits | TLA+ & Lean | acp, zanzibar, sourcehub, query, db |
+
+### Backlog — want to model (13: 2 high, 11 medium)
+The accepted gap (from the survey accept/reject pass). Each new slice reads its crate's
+`survey/<crate>.md` first.
+
+| # | Candidate | Crate | Tool | Property to prove | Pri |
+|---|---|---|---|---|---|
+| 1 | SSI snapshot-isolation | storage | TLA+ | every accepted commit serializable; no lost-update / write-skew survives (`ConflictTracker`) | **high** |
+| 2 | Explicit-replay capability gate | p2p | TLA+ | capability tokens unforgeable, peer+collection-bound, TTL-capped, revocable | **high** |
+| 3 | SSI scan carve-out soundness | storage | TLA+ | scan-prefix carve-out drops only false positives, never a real write-skew | med |
+| 4 | Order-preserving encoding monotonicity | storage | Lean | a<b ⟹ encode_asc(a) <lex encode_asc(b); cross-type markers total order | med |
+| 5 | NAC lifecycle priv-esc safety | acp | TLA+ | enable→disable→re-enable: no non-admin mutates admin set; disabled-flag persists | med |
+| 6 | TxnRegistryCleanupRace | db | TLA+ | stale-txn sweep never evicts a still-live transaction | med |
+| 7 | merge-queue-serialization | db-merge | TLA+ | per-doc mutex serializes same-doc merges; bounded retry loses/dups no block; fails closed | med |
+| 8 | Deferred-ACP overlay consistency | query-plan | TLA+ | txn-local ACP projection gates as committed state; fail-closed across commit/rollback | med |
+| 9 | JWT issuer-binding / alg-confusion | identity | Lean/TLA+ | token→DID only iff iss==did(pubkey) & alg matches key — **discharges an Auth-slice assumption** | med |
+| 10 | Capability revocation consistency | p2p | TLA+ | once revoked, every later verify denies; monotone under concurrent verify/revoke | med |
+| 11 | CID content-addressing determinism | defra-core | Lean | equal blocks ⟹ same canonical CID; injective — **discharges a Convergence/Integrity assumption** | med |
+| 12 | Block.new canonicalization | defra-core | Lean | unique normal form (sorted heads/links); CID independent of input link order | med |
+| 13 | Index-maintenance consistency | db-index | Lean | after `on_document_update`, stored entries == `extract(new)`: no stale, none missing | med |
+
+> Items 9 and 11–12 **discharge assumptions** existing slices currently take for granted
+> (content-addressing determinism; JWT identity binding) — proving them hardens what's
+> already built, not just new surface.
+
+### Deferred — Lean-lemma appendix (13 low)
+Low-risk hardening lemmas parked for later: index-extraction determinism, cartesian-product
+laws, LWW tie-break total order, storage encode round-trip, EncryptedStore key-binding,
+capability rate-limiter fairness, Merkle batch-root determinism, DocID parse round-trip,
+token clock-skew validity, DID-derivation determinism, schema update-immutability,
+single-active-version invariant, blockstore cache↔storage coherence. (Full rows: `survey/INDEX.md` §2.)
+
+### Out of scope — 28 crates
+Plumbing/glue with no novel modelable invariant; one-line rationale per crate in
+`survey/INDEX.md` §3 (cli, ffi, wasm, http-transport, storage-encoding-glue, query-parse, …).
+
 ## Build / run everything
 
 Prereqs: **Java 11+** (TLC) and **Lean via elan** (`lean-toolchain` pins the version).
