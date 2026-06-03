@@ -98,6 +98,12 @@ impl LarkTxn {
             .map_err(|e| Error::Backend(e.to_string()))
     }
 
+    fn snapshot_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.snapshot
+            .get(key)
+            .map_err(|e| Error::Backend(e.to_string()))
+    }
+
     fn has_internal(&self, key: &[u8]) -> Result<bool> {
         let pending = self.pending.lock();
         if let Some(pending_value) = pending.get(key) {
@@ -105,6 +111,13 @@ impl LarkTxn {
         }
         drop(pending);
 
+        self.snapshot
+            .get(key)
+            .map(|v| v.is_some())
+            .map_err(|e| Error::Backend(e.to_string()))
+    }
+
+    fn snapshot_has(&self, key: &[u8]) -> Result<bool> {
         self.snapshot
             .get(key)
             .map(|v| v.is_some())
@@ -123,6 +136,9 @@ impl Reader for LarkTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
+        if self.readonly {
+            return self.snapshot_get(key);
+        }
         self.read_set.lock().record_key(key);
         self.get_internal(key)
     }
@@ -133,6 +149,9 @@ impl Reader for LarkTxn {
         }
         if key.is_empty() {
             return Err(Error::EmptyKey);
+        }
+        if self.readonly {
+            return self.snapshot_has(key);
         }
         self.read_set.lock().record_key(key);
         self.has_internal(key)
@@ -145,6 +164,9 @@ impl Reader for LarkTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
+        if self.readonly {
+            return Ok(self.snapshot_get(key)?.map(|v| v.len()));
+        }
         self.read_set.lock().record_key(key);
         Ok(self.get_internal(key)?.map(|v| v.len()))
     }
@@ -154,7 +176,9 @@ impl Reader for LarkTxn {
             return Err(Error::DiscardedTxn);
         }
 
-        self.read_set.lock().record_iter_options(&opts);
+        if !self.readonly {
+            self.read_set.lock().record_iter_options(&opts);
+        }
         let keys_only = opts.keys_only();
         let matches_prefix =
             |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
@@ -162,19 +186,22 @@ impl Reader for LarkTxn {
         let (start_bound, end_bound) = compute_range_bounds(&opts);
         let snapshot_iter = self.snapshot.owned_iter();
 
-        // Extract pending items in range
-        let pending = self.pending.lock();
-        let pending_items: Vec<(Vec<u8>, Option<Vec<u8>>)> = pending
-            .range((start_bound.clone(), end_bound.clone()))
-            .filter(|(k, _)| matches_prefix(k))
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    v.as_ref()
-                        .map(|value| if keys_only { Vec::new() } else { value.clone() }),
-                )
-            })
-            .collect();
+        let pending_items = if self.readonly {
+            Vec::new()
+        } else {
+            let pending = self.pending.lock();
+            pending
+                .range((start_bound.clone(), end_bound.clone()))
+                .filter(|(k, _)| matches_prefix(k))
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_ref()
+                            .map(|value| if keys_only { Vec::new() } else { value.clone() }),
+                    )
+                })
+                .collect()
+        };
 
         Ok(Box::new(MergingIterator::new(
             snapshot_iter,

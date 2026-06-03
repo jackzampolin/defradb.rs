@@ -1,5 +1,5 @@
 use super::*;
-use crate::corekv::{Dropable, Store, Txn};
+use crate::corekv::{Dropable, IterOptions, Store, Txn};
 
 mod shared_tests {
     use super::*;
@@ -48,4 +48,44 @@ mod shared_tests {
     generate_backend_tests!(create_store);
     generate_backend_concurrency_tests!(create_arc_store);
     generate_backend_dropable_tests!(create_store);
+}
+
+#[tokio::test]
+async fn readonly_reads_preserve_snapshot_after_later_writes() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let store = LarkStore::open(temp_dir.path()).unwrap();
+
+    let mut setup = store.new_txn(false).await.unwrap();
+    setup.set(b"a", b"old").await.unwrap();
+    setup.set(b"b", b"keep").await.unwrap();
+    setup.commit().await.unwrap();
+
+    let readonly = store.new_txn(true).await.unwrap();
+
+    let mut writer = store.new_txn(false).await.unwrap();
+    writer.set(b"a", b"new").await.unwrap();
+    writer.delete(b"b").await.unwrap();
+    writer.set(b"c", b"later").await.unwrap();
+    writer.commit().await.unwrap();
+
+    assert_eq!(readonly.get(b"a").await.unwrap(), Some(b"old".to_vec()));
+    assert!(readonly.has(b"b").await.unwrap());
+    assert_eq!(readonly.get_size(b"b").await.unwrap(), Some(4));
+    assert_eq!(readonly.get(b"c").await.unwrap(), None);
+
+    let mut iter = readonly.iterator(IterOptions::new()).await.unwrap();
+    let mut items = Vec::new();
+    while let Some(pair) = iter.next().await.unwrap() {
+        items.push((pair.key, pair.value));
+    }
+    assert_eq!(
+        items,
+        vec![
+            (b"a".to_vec(), b"old".to_vec()),
+            (b"b".to_vec(), b"keep".to_vec())
+        ]
+    );
+
+    readonly.discard();
+    store.close().await.unwrap();
 }
