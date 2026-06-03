@@ -14,6 +14,7 @@ use crate::router::P2PError;
 
 mod collections;
 mod documents;
+mod manage;
 mod peers;
 mod replicators;
 
@@ -41,6 +42,7 @@ pub use collections::{
     add_collections, list_collections, remove_collections, sync_branchable, sync_versions,
 };
 pub use documents::{add_documents, list_documents, remove_documents, sync_documents};
+pub use manage::{manage, manage_query};
 pub use peers::{
     active_peers, connect, connect_peer, get_info, get_shareable_address, list_peers,
     ConnectPeerRequest, P2pInfoResponse, PeerInfo, ShareableAddressResponse,
