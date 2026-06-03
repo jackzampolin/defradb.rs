@@ -29,21 +29,27 @@ pub fn get_current_identity() -> Option<String> {
     CURRENT_IDENTITY.with(|c| c.borrow().clone())
 }
 
-/// RAII guard that clears the ambient identity on drop. MUST be used at
-/// request boundaries to prevent identity leaking across pooled-thread reuse.
-pub struct CurrentIdentityGuard;
+/// RAII guard that restores the ambient identity to its prior value on drop.
+/// Nested scopes therefore compose correctly (an inner scope does not wipe an
+/// outer one). Used at request boundaries; restoring (not clearing) prevents a
+/// nested per-mutation scope from erasing an outer node identity.
+pub struct CurrentIdentityGuard {
+    previous: Option<String>,
+}
 
 impl Drop for CurrentIdentityGuard {
     fn drop(&mut self) {
-        set_current_identity(None);
+        set_current_identity(self.previous.take());
     }
 }
 
-/// Set the ambient identity and return a guard that clears it on drop.
+/// Set the ambient identity for the current thread and return a guard that
+/// restores the previous value on drop.
 #[must_use]
 pub fn scoped_current_identity(did: Option<String>) -> CurrentIdentityGuard {
+    let previous = get_current_identity();
     set_current_identity(did);
-    CurrentIdentityGuard
+    CurrentIdentityGuard { previous }
 }
 
 // Request-scoped acting identity for the multithreaded async (REST) path.
@@ -95,11 +101,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scoped_identity_clears_on_drop() {
+    fn scoped_identity_restores_previous_on_drop() {
         assert_eq!(get_current_identity(), None);
         {
             let _guard = scoped_current_identity(Some("did:key:alice".to_string()));
             assert_eq!(get_current_identity(), Some("did:key:alice".to_string()));
+        }
+        // No outer scope was active, so it restores to None.
+        assert_eq!(get_current_identity(), None);
+    }
+
+    #[test]
+    fn scoped_identity_nesting_restores_outer() {
+        assert_eq!(get_current_identity(), None);
+        {
+            let _outer = scoped_current_identity(Some("did:key:outer".to_string()));
+            assert_eq!(get_current_identity(), Some("did:key:outer".to_string()));
+            {
+                let _inner = scoped_current_identity(Some("did:key:inner".to_string()));
+                assert_eq!(get_current_identity(), Some("did:key:inner".to_string()));
+            }
+            // Inner dropped: outer identity is restored, NOT cleared.
+            assert_eq!(get_current_identity(), Some("did:key:outer".to_string()));
         }
         assert_eq!(get_current_identity(), None);
     }

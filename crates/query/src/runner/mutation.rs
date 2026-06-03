@@ -52,20 +52,6 @@ impl Drop for BroadcastCreatorDidGuard {
     }
 }
 
-/// RAII guard that clears the ambient `current_identity` thread-local on Drop.
-///
-/// Mirrors `BroadcastCreatorDidGuard`: a panicking or early-returning
-/// mutation must not leave the caller's DID on the blocking-pool worker,
-/// where the next request would inherit it as the acting identity for
-/// DB-layer NAC checks.
-struct CurrentIdentityGuard;
-
-impl Drop for CurrentIdentityGuard {
-    fn drop(&mut self) {
-        defra_core::current_identity::set_current_identity(None);
-    }
-}
-
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Execute a GraphQL mutation and return JSON results.
     ///
@@ -425,16 +411,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // someone else's identity. See #757.
         let _broadcast_creator_did_guard = BroadcastCreatorDidGuard;
 
-        // Bind a RAII guard for the ambient acting identity so DB-layer NAC
-        // checks can resolve the caller, and so it is always cleared on exit.
-        let _current_identity_guard = CurrentIdentityGuard;
+        // Scope the ambient acting identity to the caller for the duration of
+        // this mutation so DB-layer NAC checks can resolve who is acting. Only
+        // override when there IS a caller identity; when absent, leave the
+        // ambient untouched so an embedded node's outer node DID survives across
+        // multiple mutations in one execute(). Restores the prior value on drop.
+        let _current_identity_guard = caller_identity
+            .as_ref()
+            .map(|did| defra_core::current_identity::scoped_current_identity(Some(did.to_string())));
 
         // Set broadcast identity for P2P: PushLog Creator field will carry this
         // DID instead of the node PeerId, enabling ACP owner registration on the
         // receiving node during merge.
         if let Some(ref did) = caller_identity {
             defra_core::signing::set_broadcast_creator_did(Some(did.to_string()));
-            defra_core::current_identity::set_current_identity(Some(did.to_string()));
         }
 
         let _signing_config_reset = if matches!(mutation.mutation_type, MutationType::Create) {
