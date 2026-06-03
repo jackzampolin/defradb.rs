@@ -100,12 +100,18 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Boundary],
     },
     Property {
+        // Authorized cross-node decrypt is already covered by the encryption
+        // integration tests; the *unauthorized-denied* leg is unobservable here:
+        // without a DAC policy the DEK is freely released (no auth class), and
+        // with one the denial manifests only as a kms wait_all() timeout
+        // indistinguishable from slow replication. Secrecy is the ECIES boundary
+        // (proven by crates/kms ecies_envelope unit tests). Structural.
         family: "KMS key distribution",
         name: "INV_AuthorizedEventuallyGets / no-unauthorized-usable",
         axis: Tla,
-        anchor: "crates/kms PubsubKeyTransport",
+        anchor: "crates/kms PubsubKeyTransport; crates/kms/src/ecies_envelope.rs",
         model_ref: "MC_Kms_Green.cfg",
-        tiers: &[Behavioral, Boundary],
+        tiers: &[Boundary],
     },
     Property {
         family: "Management-channel auth (NAC gate)",

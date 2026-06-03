@@ -16,6 +16,9 @@ mod cid;
 #[path = "behavioral/acp.rs"]
 mod acp;
 
+#[path = "behavioral/deferred_acp.rs"]
+mod deferred_acp;
+
 #[path = "behavioral/replication.rs"]
 mod replication;
 
@@ -30,3 +33,6 @@ mod nac_lifecycle;
 
 #[path = "behavioral/replicator_lifecycle.rs"]
 mod replicator_lifecycle;
+
+#[path = "behavioral/ssi.rs"]
+mod ssi;
