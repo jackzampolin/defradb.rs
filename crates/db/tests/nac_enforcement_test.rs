@@ -196,6 +196,64 @@ async fn create_collection_allowed_when_nac_unset() {
 }
 
 #[tokio::test]
+async fn delete_collection_gated_by_nac() {
+    // Proves the raw `delete_collection` honors `check_node_access`:
+    // a non-owner is denied (and the collection survives), the owner succeeds.
+    let _serial = AMBIENT_GUARD.lock().await;
+
+    let db = DB::new(MemoryStore::new()).unwrap();
+    db.set_nac_manager(enabled_manager().await);
+
+    // Seed: owner creates the collection so there is something to delete.
+    {
+        let guard =
+            defra_core::current_identity::scoped_current_identity(Some(OWNER_DID.to_string()));
+        db.create_collection(widget_schema())
+            .await
+            .expect("owner must be allowed to create_collection");
+        drop(guard);
+    }
+    assert!(
+        db.get_collection("Widget").unwrap().is_some(),
+        "collection must exist before delete test"
+    );
+
+    // Non-owner: denied, collection survives.
+    {
+        let guard =
+            defra_core::current_identity::scoped_current_identity(Some(STRANGER_DID.to_string()));
+        let err = db
+            .delete_collection("Widget")
+            .await
+            .expect_err("non-owner must be denied raw delete_collection");
+        drop(guard);
+
+        assert!(
+            matches!(err, db::error::Error::NotAuthorized { .. }),
+            "expected NotAuthorized from delete_collection, got: {err:?}"
+        );
+    }
+    assert!(
+        db.get_collection("Widget").unwrap().is_some(),
+        "denied delete_collection must not remove the collection"
+    );
+
+    // Owner: delete succeeds.
+    {
+        let guard =
+            defra_core::current_identity::scoped_current_identity(Some(OWNER_DID.to_string()));
+        db.delete_collection("Widget")
+            .await
+            .expect("owner must be allowed to delete_collection");
+        drop(guard);
+    }
+    assert!(
+        db.get_collection("Widget").unwrap().is_none(),
+        "owner delete_collection must remove the collection"
+    );
+}
+
+#[tokio::test]
 async fn set_active_collection_version_denied_for_non_owner() {
     // The other raw schema-mutation method is also gated.
     let _serial = AMBIENT_GUARD.lock().await;

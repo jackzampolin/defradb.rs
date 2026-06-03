@@ -231,6 +231,8 @@ impl<S: Store> crate::database::DB<S> {
         version_id: &str,
         also_deleting: &[String],
     ) -> Result<()> {
+        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .await?;
         // Load the version from KV store
         let txn = self.new_txn(true).await?;
         let target_schema = {
@@ -362,6 +364,8 @@ impl<S: Store> crate::database::DB<S> {
     /// PreviousVersion) and deleted in that order. When checking for child
     /// references, other versions in the batch are excluded from validation.
     pub async fn delete_collection_versions_batch(&self, version_ids: Vec<String>) -> Result<()> {
+        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .await?;
         if version_ids.is_empty() {
             return Ok(());
         }

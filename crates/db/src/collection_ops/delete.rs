@@ -66,6 +66,8 @@ impl<S: Store> crate::database::DB<S> {
     /// Note: This does NOT delete documents. Use `truncate_collection` first if needed.
     #[instrument(skip(self), fields(collection = %name), name = "db.delete_collection_auto")]
     pub async fn delete_collection(&self, name: &str) -> Result<()> {
+        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .await?;
         let mut txn = self.new_txn(false).await?;
 
         match self.delete_collection_with_txn(&mut txn, name).await {
@@ -106,6 +108,8 @@ impl<S: Store> crate::database::DB<S> {
     /// orphan child versions outside the batch) is delegated to
     /// `delete_collection_versions_batch`.
     pub async fn delete_collections(&self, names: Vec<String>, active_only: bool) -> Result<()> {
+        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .await?;
         if names.is_empty() {
             return Err(Error::InvalidPatch(
                 "collection name required: pass at least one name to delete".into(),
