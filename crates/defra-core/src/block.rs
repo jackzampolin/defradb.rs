@@ -5,7 +5,7 @@
 
 use cid::Cid;
 use multicodec::Codec;
-use multihash::MultihashGeneric;
+use multihash::Multihash;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::LazyLock;
@@ -358,7 +358,7 @@ pub fn generate_cid_from_bytes(bytes: &[u8]) -> Result<Cid> {
     let digest = hasher.finalize();
 
     // Create multihash
-    let mh = MultihashGeneric::<64>::wrap(*SHA2_256_CODE, &digest)
+    let mh = Multihash::<64>::wrap(*SHA2_256_CODE, &digest)
         .map_err(|e| Error::BlockError(format!("Failed to create multihash: {}", e)))?;
 
     // Create CIDv1 with DAG-CBOR codec
