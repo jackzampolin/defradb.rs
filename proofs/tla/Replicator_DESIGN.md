@@ -25,7 +25,7 @@ transitive head history has parent-guarded merged at the target.
 
 | Fact | Source |
 |---|---|
-| `ReplicatorInfo` is the persisted peer/collection configuration; `ReplicatorStatus` is active/inactive. | `crates/p2p/src/replicator.rs:35`, `crates/p2p/src/replicator.rs:129` |
+| `ReplicatorInfo` is the persisted peer/collection configuration; `ReplicatorStatus` is active/inactive. | `crates/p2p/src/replicator.rs` `struct ReplicatorInfo` (`:135`), `enum ReplicatorStatus` (`:43`) |
 | Existing-doc replay waits for the target connection before it begins. | `crates/db-merge/src/push_docs_transport.rs:49` |
 | Backfill enumerates local document ids from the datastore, then loads the latest composite heads. | `crates/db-merge/src/push_docs_transport.rs:109`, `crates/db-merge/src/push_docs_transport.rs:157` |
 | Backfill expands each head into an ordered transitive DAG block list. | `crates/db-merge/src/push_docs_transport.rs:167`, `crates/db-merge/src/push_docs_common.rs:8` |

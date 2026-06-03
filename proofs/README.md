@@ -65,11 +65,12 @@ Plumbing/glue with no novel modelable invariant; one-line rationale per crate in
 Prereqs: **Java 11+** (TLC) and **Lean via elan** (`lean-toolchain` pins the version).
 
 ```bash
-# all TLA+ models (26 runs, red+green oracle, exits non-zero on any mismatch):
-cd proofs/tla && ./run-all.sh
+# everything — TLA+ red/green oracle + Lean build, single exit code:
+proofs/verify-all.sh
 
-# all Lean proofs (builds clean, zero `sorry`):
-cd proofs/lean && lake build
+# or each half on its own:
+cd proofs/tla && ./run-all.sh   # all TLA+ models (red+green oracle, non-zero on any mismatch)
+cd proofs/lean && lake build    # all Lean proofs (builds clean, zero `sorry`)
 ```
 
 `proofs/tla/tools/tla2tools.jar` is git-ignored; the wrapper re-downloads it if missing.
