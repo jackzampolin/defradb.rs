@@ -87,25 +87,33 @@ async fn authorize_and_apply(
         ManageMutateOp::ReplicatorAdd {
             addresses,
             collection_ids,
-        } => ops
-            .add_replicator(
+        } => {
+            if addresses.len() > 1 {
+                return Err("replicator add supports at most one address".to_string());
+            }
+            ops.add_replicator(
                 collection_ids.clone(),
                 addresses.first().map(|s| s.as_str()),
                 vec![],
                 Some(did_str.as_str()),
             )
             .await
-            .map_err(|e| e.to_string()),
+            .map_err(|e| e.to_string())
+        }
         ManageMutateOp::ReplicatorDelete {
             addresses,
             collection_ids,
-        } => ops
-            .remove_replicator(
+        } => {
+            if addresses.len() > 1 {
+                return Err("replicator delete supports at most one address".to_string());
+            }
+            ops.remove_replicator(
                 collection_ids.clone(),
                 addresses.first().map(|s| s.as_str()),
             )
             .await
-            .map_err(|e| e.to_string()),
+            .map_err(|e| e.to_string())
+        }
         ManageMutateOp::CollectionAdd { collection_ids } => ops
             .add_collections(collection_ids.clone())
             .await
@@ -224,6 +232,7 @@ mod tests {
     struct MockOps {
         peer_id: String,
         added_collections: Mutex<Vec<String>>,
+        added_replicators: Mutex<Vec<(Vec<String>, Option<String>)>>,
     }
 
     impl MockOps {
@@ -231,11 +240,16 @@ mod tests {
             Self {
                 peer_id: peer_id.to_string(),
                 added_collections: Mutex::new(Vec::new()),
+                added_replicators: Mutex::new(Vec::new()),
             }
         }
 
         fn added_collections(&self) -> Vec<String> {
             self.added_collections.lock().unwrap().clone()
+        }
+
+        fn added_replicators(&self) -> Vec<(Vec<String>, Option<String>)> {
+            self.added_replicators.lock().unwrap().clone()
         }
     }
 
@@ -258,12 +272,16 @@ mod tests {
         }
         async fn add_replicator(
             &self,
-            _collections: Vec<String>,
-            _addr: Option<&str>,
+            collections: Vec<String>,
+            addr: Option<&str>,
             _explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
             _expected_authorizer_did: Option<&str>,
         ) -> P2PResult<()> {
-            unimplemented!()
+            self.added_replicators
+                .lock()
+                .unwrap()
+                .push((collections, addr.map(|s| s.to_string())));
+            Ok(())
         }
         async fn remove_replicator(
             &self,
@@ -452,5 +470,54 @@ mod tests {
         let reply = build_manage_reply(&ops, &BoolNac(true), req).await;
         assert_eq!(reply.err_message(), None);
         assert_eq!(ops.added_collections(), vec!["c1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn replicator_add_multi_address_rejected_without_side_effects() {
+        let ops = MockOps::new("12D3KooW-THIS");
+        let token = crate::manage::auth::mint_token_for("12D3KooW-THIS").0;
+        let req = ManageRequest::new(
+            ManageMutateOp::ReplicatorAdd {
+                addresses: vec![
+                    "/ip4/1.1.1.1/tcp/9000".into(),
+                    "/ip4/2.2.2.2/tcp/9000".into(),
+                ],
+                collection_ids: vec!["c1".into()],
+            },
+            token,
+        );
+        let reply = build_manage_reply(&ops, &BoolNac(true), req).await;
+        let msg = reply.err_message().expect("expected an error reply");
+        assert_ne!(msg, "unauthorized");
+        assert!(
+            msg.contains("at most one address"),
+            "error should explain the address-count limit, got: {msg}"
+        );
+        assert!(
+            ops.added_replicators().is_empty(),
+            "no side effect when rejecting multi-address replicator add"
+        );
+    }
+
+    #[tokio::test]
+    async fn replicator_add_single_address_dispatches() {
+        let ops = MockOps::new("12D3KooW-THIS");
+        let token = crate::manage::auth::mint_token_for("12D3KooW-THIS").0;
+        let req = ManageRequest::new(
+            ManageMutateOp::ReplicatorAdd {
+                addresses: vec!["/ip4/1.1.1.1/tcp/9000".into()],
+                collection_ids: vec!["c1".into()],
+            },
+            token,
+        );
+        let reply = build_manage_reply(&ops, &BoolNac(true), req).await;
+        assert_eq!(reply.err_message(), None);
+        assert_eq!(
+            ops.added_replicators(),
+            vec![(
+                vec!["c1".to_string()],
+                Some("/ip4/1.1.1.1/tcp/9000".to_string())
+            )]
+        );
     }
 }
