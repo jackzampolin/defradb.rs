@@ -147,4 +147,28 @@ pub enum HostEvent {
         peer_id: PeerId,
         reply: crate::message::QuerySEArtifactsReply,
     },
+
+    /// Received a management mutate request from a peer.
+    ManageRequest {
+        peer_id: PeerId,
+        request: crate::message::ManageRequest,
+    },
+
+    /// Received a management mutate reply from a peer.
+    ManageReply {
+        peer_id: PeerId,
+        reply: crate::message::ManageReply,
+    },
+
+    /// Received a management query request from a peer.
+    ManageQueryRequest {
+        peer_id: PeerId,
+        request: crate::message::ManageQueryRequest,
+    },
+
+    /// Received a management query reply from a peer.
+    ManageQueryReply {
+        peer_id: PeerId,
+        reply: crate::message::ManageQueryReply,
+    },
 }

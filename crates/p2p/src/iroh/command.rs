@@ -5,9 +5,9 @@ use iroh::endpoint::SendStream;
 use tokio::sync::oneshot;
 
 use crate::message::{
-    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
-    PushLogReply, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
-    QuerySEArtifactsRequest,
+    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, ManageQueryReply,
+    ManageQueryRequest, ManageReply, ManageRequest, PushLogBroadcast, PushLogReply, PushLogRequest,
+    PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest,
 };
 use crate::replicator::ReplicatorInfo;
 use crate::transport::{MessageId, PeerAddr, PeerId};
@@ -149,6 +149,26 @@ pub enum IrohCommand {
     SendSEQueryResponse {
         peer_id: PeerId,
         reply_msg: QuerySEArtifactsReply,
+        reply: oneshot::Sender<crate::error::Result<()>>,
+    },
+    SendManageRequest {
+        peer_id: PeerId,
+        request: ManageRequest,
+        reply: oneshot::Sender<crate::error::Result<()>>,
+    },
+    SendManageResponse {
+        peer_id: PeerId,
+        reply_msg: ManageReply,
+        reply: oneshot::Sender<crate::error::Result<()>>,
+    },
+    SendManageQueryRequest {
+        peer_id: PeerId,
+        request: ManageQueryRequest,
+        reply: oneshot::Sender<crate::error::Result<()>>,
+    },
+    SendManageQueryResponse {
+        peer_id: PeerId,
+        reply_msg: ManageQueryReply,
         reply: oneshot::Sender<crate::error::Result<()>>,
     },
 

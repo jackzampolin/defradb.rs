@@ -1,6 +1,5 @@
 //! Searchable Encryption query request and response methods.
 
-use futures::AsyncReadExt;
 use libp2p::{PeerId, Stream};
 
 use crate::codec::write_message;
@@ -81,7 +80,7 @@ impl TwoStreamHandler {
         max_msg_size: u64,
         stream_read_timeout: std::time::Duration,
     ) -> Result<TwoStreamEvent> {
-        let request = read_cbor_message::<QuerySEArtifactsRequest>(
+        let request = super::read_cbor_message::<QuerySEArtifactsRequest>(
             peer_id,
             stream,
             max_msg_size,
@@ -111,7 +110,7 @@ impl TwoStreamHandler {
         max_msg_size: u64,
         stream_read_timeout: std::time::Duration,
     ) -> Result<TwoStreamEvent> {
-        let reply = read_cbor_message::<QuerySEArtifactsReply>(
+        let reply = super::read_cbor_message::<QuerySEArtifactsReply>(
             peer_id,
             stream,
             max_msg_size,
@@ -132,30 +131,4 @@ impl TwoStreamHandler {
 
         Ok(TwoStreamEvent::SEQueryReply { peer_id, reply })
     }
-}
-
-async fn read_cbor_message<T>(
-    peer_id: PeerId,
-    mut stream: Stream,
-    max_msg_size: u64,
-    stream_read_timeout: std::time::Duration,
-    label: &'static str,
-) -> Result<T>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let mut buf = Vec::new();
-    tokio::time::timeout(
-        stream_read_timeout,
-        (&mut stream).take(max_msg_size).read_to_end(&mut buf),
-    )
-    .await
-    .map_err(|_| {
-        tracing::warn!(peer_id = %peer_id, "SE query stream read timed out");
-        Error::CborDeserialization(format!("{label} stream read timed out"))
-    })?
-    .map_err(|e| Error::CborDeserialization(format!("failed to read {label}: {e}")))?;
-
-    serde_cbor::from_slice(&buf)
-        .map_err(|e| Error::CborDeserialization(format!("failed to decode {label}: {e}")))
 }

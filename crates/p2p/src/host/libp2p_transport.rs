@@ -11,9 +11,9 @@ use cid::Cid;
 use crate::error::{Error, Result};
 use crate::host::{P2PHostHandle, ResponseChannel};
 use crate::message::{
-    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
-    PushLogReply, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
-    QuerySEArtifactsRequest,
+    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, ManageQueryReply,
+    ManageQueryRequest, ManageReply, ManageRequest, PushLogBroadcast, PushLogReply, PushLogRequest,
+    PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest,
 };
 use crate::replicator::ReplicatorInfo;
 use crate::topics::DefraTopic;
@@ -89,6 +89,14 @@ impl P2PTransport for Libp2pTransport {
             .map(parse_multiaddr)
             .collect::<Result<Vec<_>>>()?;
         self.handle.dial(pid, multiaddrs).await
+    }
+
+    fn parse_dial_addr(&self, addr: &str) -> Result<(PeerId, Vec<PeerAddr>)> {
+        let parsed = crate::address::parse_multiaddr_with_peer_id(addr)?;
+        Ok((
+            PeerId::from(parsed.peer_id),
+            vec![PeerAddr::from(parsed.transport_addr)],
+        ))
     }
 
     async fn listen(&self, addr: PeerAddr) -> Result<()> {
@@ -260,6 +268,34 @@ impl P2PTransport for Libp2pTransport {
     ) -> Result<()> {
         let pid = parse_libp2p_peer_id(peer_id)?;
         self.handle.send_se_query_response(pid, reply).await
+    }
+
+    async fn send_manage_request(&self, peer_id: &PeerId, req: ManageRequest) -> Result<()> {
+        let pid = parse_libp2p_peer_id(peer_id)?;
+        self.handle.send_manage_request(pid, req).await
+    }
+
+    async fn send_manage_response(&self, peer_id: &PeerId, reply: ManageReply) -> Result<()> {
+        let pid = parse_libp2p_peer_id(peer_id)?;
+        self.handle.send_manage_response(pid, reply).await
+    }
+
+    async fn send_manage_query_request(
+        &self,
+        peer_id: &PeerId,
+        req: ManageQueryRequest,
+    ) -> Result<()> {
+        let pid = parse_libp2p_peer_id(peer_id)?;
+        self.handle.send_manage_query_request(pid, req).await
+    }
+
+    async fn send_manage_query_response(
+        &self,
+        peer_id: &PeerId,
+        reply: ManageQueryReply,
+    ) -> Result<()> {
+        let pid = parse_libp2p_peer_id(peer_id)?;
+        self.handle.send_manage_query_response(pid, reply).await
     }
 
     async fn sync_blocks(
@@ -443,6 +479,22 @@ pub fn convert_host_event(event: crate::host::HostEvent) -> TransportEvent<Respo
             request,
         },
         HostEvent::SEQueryReply { peer_id, reply } => TransportEvent::SEQueryReply {
+            peer_id: PeerId::from(peer_id),
+            reply,
+        },
+        HostEvent::ManageRequest { peer_id, request } => TransportEvent::ManageRequest {
+            peer_id: PeerId::from(peer_id),
+            request,
+        },
+        HostEvent::ManageReply { peer_id, reply } => TransportEvent::ManageReply {
+            peer_id: PeerId::from(peer_id),
+            reply,
+        },
+        HostEvent::ManageQueryRequest { peer_id, request } => TransportEvent::ManageQueryRequest {
+            peer_id: PeerId::from(peer_id),
+            request,
+        },
+        HostEvent::ManageQueryReply { peer_id, reply } => TransportEvent::ManageQueryReply {
             peer_id: PeerId::from(peer_id),
             reply,
         },

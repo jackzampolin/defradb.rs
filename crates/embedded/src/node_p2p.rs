@@ -42,6 +42,19 @@ pub(crate) struct P2PSetup<S: storage::corekv::Store + 'static> {
     /// queries to replicators. The SE key is read lazily because it's
     /// provisioned at runtime via `set_se_options`.
     pub se_transport: Option<Arc<dyn query::SeQueryTransport>>,
+    /// Inbound management-channel serve deps, read lazily by the event loop and
+    /// populated by node.rs once the controller (`P2POperations`) and NAC
+    /// manager are built. The event loop drops manage requests until then.
+    pub manage_hooks: defra_p2p_adapter::manage::hooks::ManageHooksCell,
+    /// The `P2POperations` controller (the `adapter`) bound into `manage_hooks`
+    /// after the NAC manager exists. node.rs uses it as `hooks.ops`.
+    pub manage_controller: Arc<dyn defra_http::P2POperations>,
+    /// Requester-side manage correlators (mutating + query). The event-loop
+    /// clones deliver inbound replies; these clones are for the requester API
+    /// (Task 6.3) and are bound into `manage_hooks` so requester and event loop
+    /// agree on message_id correlation.
+    pub manage_correlator: p2p::ManageCorrelator,
+    pub manage_query_correlator: p2p::ManageQueryCorrelator,
 }
 
 pub(crate) async fn setup_libp2p<S>(
@@ -170,6 +183,12 @@ where
     // (which awaits them) — they must agree on message_id correlation (#976).
     let se_correlator = p2p::SeQueryCorrelator::new();
     let se_correlator_for_transport = se_correlator.clone();
+    // Manage channel: correlators shared between the event loop (which delivers
+    // inbound replies) and the requester API (Task 6.3), and a deferred hooks
+    // cell node.rs populates once the controller + NAC manager exist.
+    let manage_correlator = p2p::ManageCorrelator::new();
+    let manage_query_correlator = p2p::ManageQueryCorrelator::new();
+    let manage_hooks = defra_p2p_adapter::manage::hooks::new_manage_hooks_cell();
     let host_event_task = spawn_libp2p_event_handler(
         event_rx,
         coordinator.clone(),
@@ -177,6 +196,7 @@ where
         event_bus.clone(),
         handle.clone(),
         se_correlator,
+        manage_hooks.clone(),
     );
     let replication_task = spawn_replication_loop(
         coordinator.clone(),
@@ -242,9 +262,10 @@ where
             coordinator.replicators().clone(),
             se_key_handle,
         )) as Arc<dyn query::SeQueryTransport>);
+    let manage_controller: Arc<dyn defra_http::P2POperations> = Arc::new(adapter);
     let system = Arc::new(ManagedP2PSystem::with_replicator_push_options_callback(
         TransportKind::Libp2p,
-        Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
+        manage_controller.clone(),
         crate::node::ShutdownHandle::libp2p(
             handle.clone(),
             coordinator.shutdown_handle(),
@@ -275,6 +296,17 @@ where
         })
     }));
 
+    // Outbound management requester over the same libp2p transport, sharing the
+    // requester-side manage correlators (Task 7a). Installed on the system so an
+    // HTTP consumer can wire it into `AppState` via `with_manage`.
+    system.set_manage_requester(Arc::new(
+        defra_p2p_adapter::manage::client::ManageClient::new(
+            p2p::Libp2pTransport::new(handle.clone()),
+            manage_correlator.clone(),
+            manage_query_correlator.clone(),
+        ),
+    ));
+
     Ok(P2PSetup {
         system,
         mutator: replication.broadcast_mutator,
@@ -291,6 +323,10 @@ where
             broadcast_mutator_for_acp.set_document_acp(acp);
         })),
         se_transport,
+        manage_hooks,
+        manage_controller,
+        manage_correlator,
+        manage_query_correlator,
     })
 }
 
@@ -396,6 +432,9 @@ where
     // owner/querier transport (awaits them); see libp2p setup (#976).
     let se_correlator = p2p::SeQueryCorrelator::new();
     let se_correlator_for_transport = se_correlator.clone();
+    let manage_correlator = p2p::ManageCorrelator::new();
+    let manage_query_correlator = p2p::ManageQueryCorrelator::new();
+    let manage_hooks = defra_p2p_adapter::manage::hooks::new_manage_hooks_cell();
     let event_handler_task = spawn_iroh_event_handler(
         event_rx,
         coordinator.clone(),
@@ -403,6 +442,7 @@ where
         event_bus.clone(),
         se_correlator,
         transport.clone(),
+        manage_hooks.clone(),
     );
     let replication_task = spawn_replication_loop(
         coordinator.clone(),
@@ -464,9 +504,10 @@ where
             coordinator.replicators().clone(),
             se_key_handle,
         )) as Arc<dyn query::SeQueryTransport>);
+    let manage_controller: Arc<dyn defra_http::P2POperations> = Arc::new(adapter);
     let system = Arc::new(ManagedP2PSystem::with_replicator_push_options_callback(
         TransportKind::Iroh,
-        Arc::new(adapter) as Arc<dyn defra_http::P2POperations>,
+        manage_controller.clone(),
         crate::node::ShutdownHandle::iroh(
             transport.clone(),
             coordinator.shutdown_handle(),
@@ -490,6 +531,17 @@ where
         })
     }));
 
+    // Outbound management requester over the same iroh transport, sharing the
+    // requester-side manage correlators (Task 7a). Installed on the system so an
+    // HTTP consumer can wire it into `AppState` via `with_manage`.
+    system.set_manage_requester(Arc::new(
+        defra_p2p_adapter::manage::client::ManageClient::new(
+            transport.clone(),
+            manage_correlator.clone(),
+            manage_query_correlator.clone(),
+        ),
+    ));
+
     Ok(P2PSetup {
         system,
         mutator: replication.broadcast_mutator,
@@ -506,5 +558,9 @@ where
             broadcast_mutator_for_acp.set_document_acp(acp);
         })),
         se_transport,
+        manage_hooks,
+        manage_controller,
+        manage_correlator,
+        manage_query_correlator,
     })
 }
