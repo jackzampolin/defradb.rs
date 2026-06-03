@@ -96,13 +96,13 @@ a binding.
 
 ### Realized status — all 18 families bound
 
-**11 behavioral tests** (driven against `target/release/defra`, each break-tested
+**12 behavioral tests** (driven against `target/release/defra`, each break-tested
 for non-vacuity), **2 Lean-axis contract bindings**, **6 honest Boundaries**:
 
 | Family | Binding | Where |
 |---|---|---|
 | B3 filtered replication | Behavioral | `replication.rs` |
-| DAG convergence | Behavioral | `replication.rs` (restart aspect → Boundary) |
+| DAG convergence | Behavioral | `replication.rs` (live-forward) + `partition.rs` (converge across a node-restart partition) |
 | Replicator lifecycle | Behavioral | `replicator_lifecycle.rs` (backfill no-loss + resume across node restart) |
 | ACP soundness + revocation + commits | Behavioral + Contract | `acp.rs`; `RelationExpression` vocab |
 | Storage SSI serializability | Behavioral | `ssi.rs` (real `409 Conflict` on write-skew) |

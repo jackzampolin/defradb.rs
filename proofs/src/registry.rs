@@ -56,6 +56,10 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral],
     },
     Property {
+        // Two behavioral legs: live-forward convergence (replication.rs) and
+        // convergence across a real partition (partition.rs) — node1 is restarted
+        // to sever the link, each side writes independently, and both converge to
+        // hold every write once reconnected.
         family: "DAG convergence (partition / eviction / restart)",
         name: "INV_Converged — every node receives every delta under eventual connectivity",
         axis: Tla,

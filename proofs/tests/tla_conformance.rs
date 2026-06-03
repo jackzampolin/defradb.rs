@@ -22,6 +22,9 @@ mod deferred_acp;
 #[path = "behavioral/replication.rs"]
 mod replication;
 
+#[path = "behavioral/partition.rs"]
+mod partition;
+
 #[path = "behavioral/index.rs"]
 mod index;
 
