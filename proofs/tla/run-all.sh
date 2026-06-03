@@ -53,6 +53,25 @@ RUNS=(
   "MC_Capability_Red_Ttl.cfg       MC_Capability_Common.tla   RED"   # capability: over-cap TTL accepted (INV_TtlCapped)
   "MC_Capability_Red_WrongTarget.cfg MC_Capability_Common.tla RED"   # capability: wrong peer/collection accepted (INV_TargetBound)
   "MC_Capability_Red_Revoked.cfg   MC_Capability_Common.tla   RED"   # capability: revoked token accepted (INV_RevokedNeverAccepted)
+  "MC_SsiRange_Green_Correct.cfg          MC_SsiRange_Green_Correct.tla          GREEN" # SSI carve-out: doc-scan carve tracks index-range skew
+  "MC_SsiRange_Red_TooAggressive.cfg      MC_SsiRange_Red_TooAggressive.tla      RED"   # SSI carve-out: over-broad carve drops a real skew
+  "MC_SsiRange_Green_DocScanFalsePositive.cfg MC_SsiRange_Green_DocScanFalsePositive.tla GREEN" # carve drops only a false positive
+  "MC_SsiRange_Green_NoCarveBaseline.cfg  MC_SsiRange_Green_NoCarveBaseline.tla  GREEN" # anti-vacuity baseline (cycle is caused by the carve)
+  "MC_SsiRange_Probe_DocScanSkew.cfg      MC_SsiRange_Probe_DocScanSkew.tla      RED"   # boundary probe: unsound IF keyspaces overlap (they don't)
+  "MC_Nac_Green.cfg                MC_Nac_Green.tla                GREEN" # NAC lifecycle: no priv-esc across enable/disable
+  "MC_Nac_Red_NoPersist.cfg        MC_Nac_Red_NoPersist.tla        RED"   # NAC: disabled-flag not persisted across restart
+  "MC_Nac_Red_ReEnableLive.cfg     MC_Nac_Red_ReEnableLive.tla     RED"   # NAC: re-enable from stale live admin (escalation)
+  "MC_Nac_Red_WriteWhileDisabled.cfg MC_Nac_Red_WriteWhileDisabled.tla RED" # NAC: admin write accepted while disabled
+  "MC_TxnRegistry_Green.cfg        MC_TxnRegistry_Green.tla        GREEN" # txn cleanup never evicts a live transaction
+  "MC_TxnRegistry_Red_NaiveSweep.cfg MC_TxnRegistry_Red_NaiveSweep.tla RED" # naive sweep evicts a still-live txn
+  "MC_MergeQueue_Green.cfg         MC_MergeQueue_Green.tla         GREEN" # per-doc merge serialized; no loss/dup; fails closed
+  "MC_MergeQueue_CrossDocParallel.cfg MC_MergeQueue_CrossDocParallel.tla RED" # anti-vacuity probe: cross-doc merges DO parallelize
+  "MC_MergeQueue_Red_FailOpen.cfg  MC_MergeQueue_Red_FailOpen.tla  RED"   # retry exhaustion silently drops a block
+  "MC_MergeQueue_Red_NoMutex.cfg   MC_MergeQueue_Red_NoMutex.tla   RED"   # no per-doc mutex -> same-doc double-apply
+  "MC_Jwt_Green.cfg                MC_Jwt_Green.tla                GREEN" # token->DID binds genuine signer DID
+  "MC_Jwt_Red_NoAlgBinding.cfg     MC_Jwt_Red_NoAlgBinding.tla     RED"   # alg-confusion: header alg not bound to key type
+  "MC_Jwt_Red_NoIssBinding.cfg     MC_Jwt_Red_NoIssBinding.tla     RED"   # iss not bound to did(pubkey)
+  "MC_Jwt_Red_NoSig.cfg            MC_Jwt_Red_NoSig.tla            RED"   # signature not verified -> forged token
 )
 
 fails=0; n=0
