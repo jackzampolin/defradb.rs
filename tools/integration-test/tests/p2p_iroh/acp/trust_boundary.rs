@@ -1,14 +1,16 @@
 //! Trust boundary tests for iroh P2P transport.
 //!
-//! Tests asymmetric trust ring: Core (node0) ↔ Near (node1)
-//! with ACP policy enforcement across iroh replication.
+//! Tests Core (node0) ↔ Near (node1) with Local ACP across iroh replication.
+//!
+//! Local (DAC) ACP is node-local: a document is gated only on the node where its
+//! owner was registered (the creating node, Core). A replicated copy is NOT gated
+//! on the peer (Near) — the unregistered doc is public there (matches Go).
 //!
 //! Validates:
 //! - ACP-protected docs replicate from Core to Near
 //! - Owner sees both public and protected docs on Core
-//! - Anonymous sees only public doc on Core
-//! - Receiving-node visibility still respects ACP after replication
-//! - Non-owner identity visibility rules
+//! - Anonymous sees only public doc on Core (creating node gates)
+//! - On Near (the peer): the replicated doc is public, everyone sees it
 //!
 //! Run with:
 //!   cargo test -p integration-test --test p2p_iroh_trust_boundary -- --ignored
@@ -182,8 +184,8 @@ async fn iroh_trust_boundary() {
     )
     .await;
 
-    // On Near: ACP IS registered during merge.
-    // Jack (owner) sees both docs: his protected doc + public doc = 2
+    // On Near (the peer): Local ACP is node-local; the replicated protected doc is
+    // public there (matches Go). Jack (owner) sees both docs: protected + public = 2.
     let jack_near = near
         .query_with_identity("query { User { name } }", &jack.private_key_hex)
         .expect("jack query near");
@@ -208,18 +210,21 @@ async fn iroh_trust_boundary() {
         "jack should see Public Info on near"
     );
 
-    // vps_service on Near: not the owner, sees only public doc
+    // vps_service on Near: Local ACP is node-local; the replicated protected doc is
+    // public on the peer (matches Go), so the ungranted, non-owner vps_service sees
+    // BOTH docs here even without any grant.
     let vps_near = near
         .query_with_identity("query { User { name } }", &vps_service.private_key_hex)
         .expect("vps query near");
     let vps_near_count = vps_near["User"].as_array().map(|a| a.len()).unwrap_or(0);
     assert_eq!(
-        vps_near_count, 1,
-        "vps on near should see only public doc (ACP registered during merge), got {}",
+        vps_near_count, 2,
+        "vps on near sees both docs (Local ACP is node-local; protected doc is public there), got {}",
         vps_near_count
     );
 
-    // Anonymous on Near: sees only public doc
+    // Anonymous on Near: the protected doc is public on the peer, so anonymous sees
+    // BOTH docs too (Local ACP is node-local; matches Go).
     let anon_near = near
         .query("query { User { name } }")
         .expect("anon query near");
@@ -231,12 +236,16 @@ async fn iroh_trust_boundary() {
         .collect();
     assert_eq!(
         anon_near_names.len(),
-        1,
-        "anonymous should see only public doc on near, got {:?}",
+        2,
+        "anonymous sees both docs on the peer (Local ACP is node-local; protected doc is public there), got {:?}",
         anon_near_names
     );
-    assert_eq!(
-        anon_near_names[0], "Public Info",
-        "anonymous should only see Public Info on near"
+    assert!(
+        anon_near_names.contains(&"Public Info"),
+        "anonymous should see Public Info on near"
+    );
+    assert!(
+        anon_near_names.contains(&"Core Secret"),
+        "anonymous should see the now-public Core Secret on near"
     );
 }

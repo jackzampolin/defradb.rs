@@ -1,11 +1,12 @@
 //! ACP-protected document replication over iroh transport.
 //!
-//! Verifies that ACP policies work correctly with iroh P2P replication:
+//! Local (DAC) ACP is node-local: a document is gated only on the node where its
+//! owner was registered (the creating node). A replicated copy is NOT gated on the
+//! peer — the unregistered doc is public there (matches Go). Verifies:
 //! - Both public and protected docs replicate
-//! - ACP-enforced visibility is preserved on the receiving node
+//! - On the originating node: owner sees protected docs, anonymous sees only public
+//! - On the receiving node: the replicated protected doc is public to everyone
 //! - Relationship replication is covered by the DAC-specific ACP P2P tests
-//! - Owner identity sees protected docs on originating node
-//! - Anonymous sees only public docs on originating node
 //!
 //! Run with:
 //!   cargo test -p integration-test --test p2p_iroh_acp -- --ignored
@@ -186,18 +187,25 @@ async fn iroh_acp_replication() {
         }
     }
 
-    // Anonymous on node1 sees only the public doc (ACP registered during merge)
+    // Local ACP is node-local; the replicated protected doc is public on the peer
+    // (matches Go). The owner is registered only on node0, so on node1 the
+    // unregistered protected doc is public and anonymous sees BOTH docs.
     let anon_node1 = node1
         .query("query { User { name } }")
         .expect("anon query on node1");
     let anon_node1_users = anon_node1["User"].as_array().expect("not array");
     assert_eq!(
         anon_node1_users.len(),
-        1,
-        "anonymous should see only public doc on node1, got {:?}",
+        2,
+        "anonymous sees both docs on the peer (Local ACP is node-local; protected doc is public there), got {:?}",
         anon_node1_users
     );
-    assert_eq!(anon_node1_users[0]["name"], "Public");
+    let anon_node1_names: Vec<&str> = anon_node1_users
+        .iter()
+        .filter_map(|u| u["name"].as_str())
+        .collect();
+    assert!(anon_node1_names.contains(&"Public"));
+    assert!(anon_node1_names.contains(&"Protected"));
 }
 
 /// Multiple identities with ACP: owner vs non-owner access over iroh.
@@ -350,113 +358,58 @@ async fn iroh_acp_multi_identity() {
         "anonymous should only see public doc"
     );
 
-    // Wait for Alice's docs to replicate (she sees her doc + public = 2).
-    // ACP is registered during merge, so anonymous can't see protected docs.
+    // Wait for all three docs to replicate to node1. Local ACP is node-local: the
+    // protected docs are NOT registered on the peer, so they are public there and
+    // any caller sees all three once replicated. Poll anonymously for len == 3.
     let node1_ref = &node1;
-    let alice_key_clone = alice.private_key_hex.clone();
     poll_until(
         || {
             let result = node1_ref
-                .query_with_identity("query { User { _docID } }", &alice_key_clone)
+                .query("query { User { _docID } }")
                 .unwrap_or_default();
             result["User"]
                 .as_array()
-                .map(|arr| arr.len() == 2)
+                .map(|arr| arr.len() == 3)
                 .unwrap_or(false)
         },
         Duration::from_secs(15),
         Duration::from_millis(200),
-        "Alice's docs did not replicate to node1",
+        "docs did not replicate to node1",
     )
     .await;
 
-    // Also wait for Bob's doc to replicate (he sees his doc + public = 2).
-    let bob_key_clone = bob.private_key_hex.clone();
-    poll_until(
-        || {
-            let result = node1_ref
-                .query_with_identity("query { User { _docID } }", &bob_key_clone)
-                .unwrap_or_default();
-            result["User"]
-                .as_array()
-                .map(|arr| arr.len() == 2)
-                .unwrap_or(false)
-        },
-        Duration::from_secs(15),
-        Duration::from_millis(200),
-        "Bob's docs did not replicate to node1",
-    )
-    .await;
+    // On node1 (the peer): Local ACP is node-local; the replicated protected docs are
+    // public there (matches Go). Alice, Bob, and anonymous all see ALL THREE docs.
+    let expect_all_three = |label: &str, value: &serde_json::Value| {
+        let names: Vec<&str> = value["User"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{label} node1 result not array"))
+            .iter()
+            .filter_map(|u| u["name"].as_str())
+            .collect();
+        assert_eq!(
+            names.len(),
+            3,
+            "{label} sees all three docs on the peer (Local ACP is node-local), got {:?}",
+            names
+        );
+        assert!(names.contains(&"Alice Secret"));
+        assert!(names.contains(&"Bob Secret"));
+        assert!(names.contains(&"Public"));
+    };
 
-    // On node1: ACP IS registered during merge.
-    // Alice sees her doc + public = 2
     let node1_alice = node1
         .query_with_identity("query { User { name } }", &alice.private_key_hex)
         .expect("Alice query on node1");
-    let node1_alice_names: Vec<&str> = node1_alice["User"]
-        .as_array()
-        .expect("Alice node1 result not array")
-        .iter()
-        .filter_map(|u| u["name"].as_str())
-        .collect();
-    assert_eq!(
-        node1_alice_names.len(),
-        2,
-        "Alice should see 2 docs on node1, got {:?}",
-        node1_alice_names
-    );
-    assert!(
-        node1_alice_names.contains(&"Alice Secret"),
-        "Alice should see her own doc on node1"
-    );
-    assert!(
-        node1_alice_names.contains(&"Public"),
-        "Alice should see public doc on node1"
-    );
+    expect_all_three("Alice", &node1_alice);
 
-    // Bob sees his doc + public = 2
     let node1_bob = node1
         .query_with_identity("query { User { name } }", &bob.private_key_hex)
         .expect("Bob query on node1");
-    let node1_bob_names: Vec<&str> = node1_bob["User"]
-        .as_array()
-        .expect("Bob node1 result not array")
-        .iter()
-        .filter_map(|u| u["name"].as_str())
-        .collect();
-    assert_eq!(
-        node1_bob_names.len(),
-        2,
-        "Bob should see 2 docs on node1, got {:?}",
-        node1_bob_names
-    );
-    assert!(
-        node1_bob_names.contains(&"Bob Secret"),
-        "Bob should see his own doc on node1"
-    );
-    assert!(
-        node1_bob_names.contains(&"Public"),
-        "Bob should see public doc on node1"
-    );
+    expect_all_three("Bob", &node1_bob);
 
-    // Anonymous sees only public doc on node1
     let node1_anon = node1
         .query("query { User { name } }")
         .expect("anon query on node1");
-    let node1_anon_names: Vec<&str> = node1_anon["User"]
-        .as_array()
-        .expect("anon node1 result not array")
-        .iter()
-        .filter_map(|u| u["name"].as_str())
-        .collect();
-    assert_eq!(
-        node1_anon_names.len(),
-        1,
-        "anonymous should see only public doc on node1, got {:?}",
-        node1_anon_names
-    );
-    assert_eq!(
-        node1_anon_names[0], "Public",
-        "anonymous should only see public doc on node1"
-    );
+    expect_all_three("anonymous", &node1_anon);
 }
