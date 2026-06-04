@@ -213,7 +213,12 @@ async fn convergence_partition_both_directions_merge() {
 /// priority. The fix is in the local-update / headstore<->datastore priority
 /// handling, not a single merge-handler line — needs deliberate engine work.
 /// Un-ignore once that lands.
-#[ignore = "exposes a real restart-induced CRDT field-priority convergence bug; see doc comment"]
+///
+/// PARITY (see parity.rs): this is RUST-SPECIFIC. Under the identical scenario
+/// go<->go CONVERGES (both nodes -> city=LA) and go<->rust live-converges, while
+/// rust<->rust diverges — a Rust regression from Go's behavior, not a shared
+/// CRDT-design issue.
+#[ignore = "exposes a real restart-induced CRDT field-priority convergence bug (Rust-specific); see doc comment"]
 #[tokio::test]
 async fn convergence_concurrent_same_doc_writes_merge() {
     let mut cluster = TestCluster::builder()

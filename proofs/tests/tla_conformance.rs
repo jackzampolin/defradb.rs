@@ -25,6 +25,9 @@ mod replication;
 #[path = "behavioral/partition.rs"]
 mod partition;
 
+#[path = "behavioral/parity.rs"]
+mod parity;
+
 #[path = "behavioral/index.rs"]
 mod index;
 
