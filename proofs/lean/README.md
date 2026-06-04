@@ -31,6 +31,18 @@ The model proves:
 - `word64Add_assoc`: `[propext, Quot.sound]`
 - `word64Add_not_idempotent`: `[Lean.ofReduceBool]`
 - `composite_merge_assoc`: `[propext]`
+- `reconciled_merge_ge_committed`: `[propext, Quot.sound]`
+- `unreconciled_merge_can_clobber`: *(no axioms)*
 
 No theorem uses `sorry` or custom axioms. Float32/Float64 counter laws are not
 claimed here because IEEE-754 addition is not generally associative.
+
+`DefraConvergence/PriorityReconcile.lean` proves the invariant behind the
+same-doc convergence bug this project found and fixed: a field's priority lives
+in two stores (the headstore, advanced by local writes *and* merges; the
+datastore LWW view, advanced only by merges). `reconciled_merge_ge_committed`
+shows that re-seeding the view to the committed priority before merging
+guarantees no delta can drop the field below its committed priority (no clobber);
+`unreconciled_merge_can_clobber` is the constructive witness that, without the
+reconcile, the bug is reachable — the live repro, encoded in Lean. The fix lives
+in `crates/db-merge/src/merge_handler/lww.rs` (`seed_lww_from_existing_doc`).
