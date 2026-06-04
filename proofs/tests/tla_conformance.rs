@@ -25,6 +25,9 @@ mod replication;
 #[path = "behavioral/partition.rs"]
 mod partition;
 
+#[path = "behavioral/acp_partition.rs"]
+mod acp_partition;
+
 #[path = "behavioral/parity.rs"]
 mod parity;
 
