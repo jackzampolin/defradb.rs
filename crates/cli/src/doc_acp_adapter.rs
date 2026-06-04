@@ -149,19 +149,8 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
             .await
             .map_err(|e| format!("{}", e))?;
 
-        if added {
-            if let Some(p2p) = &self.p2p {
-                if let Err(error) = p2p.republish_document(collection, doc_id).await {
-                    tracing::debug!(
-                        error = %error,
-                        collection,
-                        doc_id,
-                        "best-effort DAC republish after grant failed"
-                    );
-                }
-            }
-        }
-
+        // Local ACP relationships are node-local (matches Go): a grant is not
+        // propagated to peers. Cross-node access control is SourceHub's role.
         Ok(added)
     }
 
@@ -201,19 +190,8 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
             .await
             .map_err(|e| format!("{}", e))?;
 
-        if deleted {
-            if let Some(p2p) = &self.p2p {
-                if let Err(error) = p2p.republish_document(collection, doc_id).await {
-                    tracing::debug!(
-                        error = %error,
-                        collection,
-                        doc_id,
-                        "best-effort DAC republish after revoke failed"
-                    );
-                }
-            }
-        }
-
+        // Local ACP relationships are node-local (matches Go): a revoke is not
+        // propagated to peers. Cross-node access control is SourceHub's role.
         Ok(deleted)
     }
 }
