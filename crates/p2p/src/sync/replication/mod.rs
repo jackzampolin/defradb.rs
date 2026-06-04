@@ -31,9 +31,7 @@ pub use result::ReplicationResult;
 
 #[cfg(test)]
 mod tests {
-    use super::handlers::{
-        handle_block_received, is_mergeable_event, process_event, process_merge_batch,
-    };
+    use super::handlers::{handle_block_received, process_event, process_merge_batch};
     use super::*;
     use crate::bitswap::AccessMode;
     use crate::error::Result as P2PResult;
@@ -903,7 +901,6 @@ mod tests {
             sender_peer: None,
             is_explicit_replicator: false,
             explicit_replay_authorization: None,
-            acp_actor_relationships: None,
         })
         .await
         .unwrap();
@@ -1010,7 +1007,6 @@ mod tests {
             &config,
             cid,
             BlockMetadata::normal("doc1", "col1", "peer1", Some("sender1"), true),
-            None,
         )
         .await;
 
@@ -1033,7 +1029,6 @@ mod tests {
             &config,
             cid,
             BlockMetadata::normal("doc1", "col1", "peer1", Some("sender1"), true),
-            None,
         )
         .await;
 
@@ -1073,7 +1068,6 @@ mod tests {
             &ReplicationConfig::default(),
             cid,
             BlockMetadata::recovery(),
-            None,
         )
         .await;
 
@@ -1129,7 +1123,6 @@ mod tests {
                 Some("unauthorized-peer"),
                 false,
             ),
-            None,
         )
         .await;
 
@@ -1167,7 +1160,6 @@ mod tests {
             &ReplicationConfig::default(),
             cid,
             BlockMetadata::recovery(),
-            None,
         )
         .await;
 
@@ -1380,7 +1372,6 @@ mod tests {
             sender_peer: None,
             is_explicit_replicator: false,
             explicit_replay_authorization: None,
-            acp_actor_relationships: None,
         })
         .await
         .unwrap();
@@ -1445,7 +1436,6 @@ mod tests {
                 sender_peer: Some("sender1".to_string()),
                 is_explicit_replicator: true,
                 explicit_replay_authorization: None,
-                acp_actor_relationships: None,
             })
             .await
             .unwrap();
@@ -1535,7 +1525,6 @@ mod tests {
                 sender_peer: None,
                 is_explicit_replicator: false,
                 explicit_replay_authorization: None,
-                acp_actor_relationships: None,
             })
             .await
             .unwrap();
@@ -1587,7 +1576,6 @@ mod tests {
             sender_peer: None,
             is_explicit_replicator: false,
             explicit_replay_authorization: None,
-            acp_actor_relationships: None,
         }];
         let config = ReplicationConfig {
             continue_on_error: true,
@@ -1607,106 +1595,6 @@ mod tests {
             transport_handle.publish_calls(),
             2,
             "document and collection topics should be rebroadcast"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_acp_events_are_batch_mergeable() {
-        use acp::{ReplicatedActorRelationship, ReplicatedDocActorRelationships, READER_RELATION};
-
-        let event = SyncEvent::BlockReceived {
-            cid: test_cid(),
-            doc_id: "doc1".to_string(),
-            collection_id: "col1".to_string(),
-            creator: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string(),
-            sender_peer: None,
-            is_explicit_replicator: false,
-            explicit_replay_authorization: None,
-            acp_actor_relationships: Some(ReplicatedDocActorRelationships {
-                policy_id: "policy1".to_string(),
-                resource_name: "users".to_string(),
-                relationships: vec![ReplicatedActorRelationship {
-                    relation: READER_RELATION.to_string(),
-                    actor: "did:key:z6MkfXG2FkNy3u7Eg3jm8e2YQpGz7Z1JqWgHDAP1hLk9r2bR".to_string(),
-                }],
-            }),
-        };
-
-        assert!(
-            is_mergeable_event(&event),
-            "ACP-bearing events must stay eligible for batch merge"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_batch_terminal_skip_applies_acp_relationships() {
-        use acp::{
-            DocumentACP, LocalDocumentACP, MemoryAcpStore, ReplicatedActorRelationship,
-            ReplicatedDocActorRelationships, READER_RELATION,
-        };
-
-        let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
-        let reader = "did:key:z6MkfXG2FkNy3u7Eg3jm8e2YQpGz7Z1JqWgHDAP1hLk9r2bR";
-        let store = Arc::new(MemoryStore::new());
-        let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let cid = make_cid(b"acp-terminal-skip");
-        blockstore.put(&cid, b"acp-terminal-skip").await.unwrap();
-
-        let (coordinator, _events) =
-            crate::sync::coordinator::SyncCoordinator::with_access_control(
-                NoopTransport::new(),
-                blockstore,
-                crate::sync::SyncConfig::default(),
-                AccessMode::Open,
-                Arc::new(crate::ReplicatorRegistry::new()),
-                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
-            )
-            .await
-            .unwrap();
-        let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
-        coordinator.set_document_acp(acp.clone());
-
-        let relationships = vec![ReplicatedActorRelationship {
-            relation: READER_RELATION.to_string(),
-            actor: reader.to_string(),
-        }];
-        let events = vec![SyncEvent::BlockReceived {
-            cid,
-            doc_id: "doc1".to_string(),
-            collection_id: "col1".to_string(),
-            creator: owner.to_string(),
-            sender_peer: None,
-            is_explicit_replicator: false,
-            explicit_replay_authorization: None,
-            acp_actor_relationships: Some(ReplicatedDocActorRelationships {
-                policy_id: "policy1".to_string(),
-                resource_name: "users".to_string(),
-                relationships: relationships.clone(),
-            }),
-        }];
-
-        let handler = TestMergeHandler::new(true, true);
-        let results = process_merge_batch(
-            &coordinator,
-            events,
-            &handler,
-            &ReplicationConfig::default(),
-        )
-        .await;
-
-        assert!(matches!(
-            results.as_slice(),
-            [ReplicationResult::Skipped { terminal: true, .. }]
-        ));
-        assert!(acp
-            .is_doc_registered("policy1", "users", "doc1")
-            .await
-            .unwrap());
-        assert_eq!(
-            acp.export_actor_relationships("policy1", "users", "doc1")
-                .await
-                .unwrap(),
-            relationships
         );
     }
 
@@ -1743,7 +1631,6 @@ mod tests {
                 authorizer_did: "did:key:authorizer".to_string(),
                 expires_at: u64::MAX,
             }),
-            acp_actor_relationships: None,
         }];
 
         let results = process_merge_batch(

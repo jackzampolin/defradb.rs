@@ -3,8 +3,6 @@
 use blockstore::Blockstore;
 use cid::Cid;
 
-use acp::ReplicatedDocActorRelationships;
-
 use super::config::ReplicationConfig;
 use super::result::ReplicationResult;
 use crate::sync::coordinator::dag_context::DagFetchContext;
@@ -25,7 +23,6 @@ pub(super) struct DagFetchRequest {
     sender_peer: Option<String>,
     is_explicit_replicator: bool,
     explicit_replay_authorization: Option<crate::ExplicitReplayAuthorization>,
-    acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
 }
 
 struct MergeEventMetadata {
@@ -36,7 +33,6 @@ struct MergeEventMetadata {
     sender_peer: Option<String>,
     is_explicit_replicator: bool,
     explicit_replay_authorization: Option<crate::ExplicitReplayAuthorization>,
-    acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
 }
 
 fn merge_block_from_metadata(
@@ -108,7 +104,6 @@ where
         sender_peer,
         is_explicit_replicator,
         explicit_replay_authorization,
-        acp_actor_relationships,
     } = request;
 
     tracing::debug!(
@@ -133,8 +128,7 @@ where
         let permit_peer = source_peer.clone();
         let context = DagFetchContext::new(doc_id, collection_id, creator, source_peer)
             .with_explicit_replicator(is_explicit_replicator)
-            .with_explicit_replay_authorization(explicit_replay_authorization)
-            .with_acp_actor_relationships(acp_actor_relationships);
+            .with_explicit_replay_authorization(explicit_replay_authorization);
 
         coordinator.spawn_background_task("pushlog_fetch_dag", async move {
             let Some(_permits) = limiter.acquire(&permit_peer).await else {
@@ -196,7 +190,6 @@ pub(super) async fn handle_block_received<B, T, H>(
     config: &ReplicationConfig,
     cid: Cid,
     metadata: BlockMetadata<'_>,
-    acp_actor_relationships: Option<&ReplicatedDocActorRelationships>,
 ) -> ReplicationResult
 where
     B: Blockstore + 'static,
@@ -262,7 +255,6 @@ where
     let doc_id_for_result = metadata.doc_id.unwrap_or("").to_string();
     let collection_id_for_result = metadata.collection_id.unwrap_or("").to_string();
     let collection_id_for_broadcast = metadata.collection_id.unwrap_or("");
-    let effective_creator = metadata.effective_creator().map(str::to_string);
 
     // Delegate merge to handler
     match handler.handle_block(&cid, &block_data, metadata).await {
@@ -327,20 +319,6 @@ where
                 }
             }
 
-            if let Err(error) = coordinator
-                .apply_replicated_actor_relationships(
-                    &doc_id_for_result,
-                    effective_creator.as_deref(),
-                    acp_actor_relationships,
-                )
-                .await
-            {
-                return ReplicationResult::Failed {
-                    cid,
-                    error: error.to_string(),
-                };
-            }
-
             ReplicationResult::Merged {
                 cid,
                 doc_id: doc_id_for_result,
@@ -353,19 +331,6 @@ where
                     return ReplicationResult::MergedButNotMarked {
                         cid,
                         error: format!("skipped but failed to mark: {}", e),
-                    };
-                }
-                if let Err(error) = coordinator
-                    .apply_replicated_actor_relationships(
-                        &doc_id_for_result,
-                        effective_creator.as_deref(),
-                        acp_actor_relationships,
-                    )
-                    .await
-                {
-                    return ReplicationResult::Failed {
-                        cid,
-                        error: error.to_string(),
                     };
                 }
             }
@@ -416,40 +381,16 @@ where
             SyncEvent::BlockReceived {
                 doc_id,
                 collection_id,
-                creator,
-                acp_actor_relationships,
                 ..
-            } => Some(
-                already_merged_result(
-                    coordinator,
-                    cid,
-                    doc_id,
-                    collection_id,
-                    creator,
-                    acp_actor_relationships.as_ref(),
-                )
-                .await,
-            ),
+            } => Some(already_merged_result(cid, doc_id, collection_id)),
             SyncEvent::DagReady {
                 root_cid,
                 doc_id,
                 collection_id,
-                creator,
-                acp_actor_relationships,
                 ..
             } => {
                 coordinator.clear_pending_dag(root_cid);
-                Some(
-                    already_merged_result(
-                        coordinator,
-                        cid,
-                        doc_id,
-                        collection_id,
-                        creator,
-                        acp_actor_relationships.as_ref(),
-                    )
-                    .await,
-                )
+                Some(already_merged_result(cid, doc_id, collection_id))
             }
             _ => None,
         },
@@ -460,28 +401,7 @@ where
     }
 }
 
-async fn already_merged_result<B, T>(
-    coordinator: &SyncCoordinator<B, T>,
-    cid: Cid,
-    doc_id: &str,
-    collection_id: &str,
-    creator: &str,
-    acp_actor_relationships: Option<&ReplicatedDocActorRelationships>,
-) -> ReplicationResult
-where
-    B: Blockstore + 'static,
-    T: P2PTransport,
-{
-    if let Err(error) = coordinator
-        .apply_replicated_actor_relationships(doc_id, Some(creator), acp_actor_relationships)
-        .await
-    {
-        return ReplicationResult::Failed {
-            cid,
-            error: error.to_string(),
-        };
-    }
-
+fn already_merged_result(cid: Cid, doc_id: &str, collection_id: &str) -> ReplicationResult {
     ReplicationResult::Skipped {
         cid,
         doc_id: doc_id.to_string(),
@@ -502,7 +422,6 @@ fn event_to_merge_metadata(event: &SyncEvent) -> MergeEventMetadata {
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
-            acp_actor_relationships,
             ..
         } => MergeEventMetadata {
             cid: *cid,
@@ -512,7 +431,6 @@ fn event_to_merge_metadata(event: &SyncEvent) -> MergeEventMetadata {
             sender_peer: sender_peer.clone(),
             is_explicit_replicator: *is_explicit_replicator,
             explicit_replay_authorization: explicit_replay_authorization.clone(),
-            acp_actor_relationships: acp_actor_relationships.clone(),
         },
         SyncEvent::DagReady {
             root_cid,
@@ -522,7 +440,6 @@ fn event_to_merge_metadata(event: &SyncEvent) -> MergeEventMetadata {
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
-            acp_actor_relationships,
             ..
         } => MergeEventMetadata {
             cid: *root_cid,
@@ -532,7 +449,6 @@ fn event_to_merge_metadata(event: &SyncEvent) -> MergeEventMetadata {
             sender_peer: sender_peer.clone(),
             is_explicit_replicator: *is_explicit_replicator,
             explicit_replay_authorization: explicit_replay_authorization.clone(),
-            acp_actor_relationships: acp_actor_relationships.clone(),
         },
         _ => unreachable!("is_mergeable_event should have filtered this"),
     }
@@ -554,7 +470,6 @@ where
     H: MergeHandler + ?Sized + 'static,
 {
     let mut merge_blocks = Vec::with_capacity(events.len());
-    let mut acp_actor_relationships = Vec::with_capacity(events.len());
     let mut results = Vec::new();
 
     // Load block data for each event from blockstore
@@ -567,7 +482,6 @@ where
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
-            acp_actor_relationships: relationships,
         } = event_to_merge_metadata(event);
 
         if matches!(event, SyncEvent::DagReady { .. }) {
@@ -600,7 +514,6 @@ where
                 }
 
                 merge_blocks.push(block);
-                acp_actor_relationships.push(relationships);
             }
             Ok(None) => {
                 results.push(ReplicationResult::Failed {
@@ -741,42 +654,6 @@ where
         }
     }
 
-    for ((block, relationships), result) in merge_blocks
-        .iter()
-        .zip(acp_actor_relationships.iter())
-        .zip(results[batch_result_start..].iter_mut())
-    {
-        let should_apply = match result {
-            ReplicationResult::Merged { .. } => true,
-            ReplicationResult::Skipped { terminal, .. } => *terminal,
-            _ => false,
-        };
-
-        if !should_apply {
-            continue;
-        }
-
-        let effective_creator = Some(
-            block
-                .verified_creator
-                .as_deref()
-                .unwrap_or(block.creator.as_str()),
-        );
-        if let Err(error) = coordinator
-            .apply_replicated_actor_relationships(
-                &block.doc_id,
-                effective_creator,
-                relationships.as_ref(),
-            )
-            .await
-        {
-            *result = ReplicationResult::Failed {
-                cid: block.cid,
-                error: error.to_string(),
-            };
-        }
-    }
-
     results
 }
 
@@ -801,7 +678,6 @@ where
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
-            acp_actor_relationships,
         } => {
             handle_block_received(
                 coordinator,
@@ -816,7 +692,6 @@ where
                     is_explicit_replicator,
                 )
                 .with_explicit_replay_authorization(explicit_replay_authorization),
-                acp_actor_relationships.as_ref(),
             )
             .await
         }
@@ -824,31 +699,14 @@ where
             cid,
             doc_id,
             collection_id,
-            creator,
-            acp_actor_relationships,
-        } => {
-            if let Err(error) = coordinator
-                .apply_replicated_actor_relationships(
-                    &doc_id,
-                    Some(&creator),
-                    acp_actor_relationships.as_ref(),
-                )
-                .await
-            {
-                ReplicationResult::Failed {
-                    cid,
-                    error: error.to_string(),
-                }
-            } else {
-                ReplicationResult::Skipped {
-                    cid,
-                    doc_id,
-                    collection_id,
-                    reason: "already merged".to_string(),
-                    terminal: true,
-                }
-            }
-        }
+            creator: _,
+        } => ReplicationResult::Skipped {
+            cid,
+            doc_id,
+            collection_id,
+            reason: "already merged".to_string(),
+            terminal: true,
+        },
         SyncEvent::SyncError { cid, error } => ReplicationResult::Failed { cid, error },
         SyncEvent::DagNeedsFetch {
             root_cid,
@@ -860,7 +718,6 @@ where
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
-            acp_actor_relationships,
         } => {
             handle_dag_needs_fetch(
                 coordinator,
@@ -874,7 +731,6 @@ where
                     sender_peer,
                     is_explicit_replicator,
                     explicit_replay_authorization,
-                    acp_actor_relationships,
                 },
             )
             .await
@@ -887,7 +743,6 @@ where
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
-            acp_actor_relationships,
         } => {
             coordinator.clear_pending_dag(&root_cid);
             // DAG is complete after Bitswap fetch - process as block received
@@ -909,7 +764,6 @@ where
                     is_explicit_replicator,
                 )
                 .with_explicit_replay_authorization(explicit_replay_authorization),
-                acp_actor_relationships.as_ref(),
             )
             .await
         }

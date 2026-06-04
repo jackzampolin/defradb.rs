@@ -12,7 +12,6 @@ pub struct DocumentAcpAdapter<S: Store> {
     database: Arc<db::DB<S>>,
     acp: Arc<dyn acp::DocumentACP>,
     store: Arc<dyn acp::ZanzibarStore>,
-    p2p: Option<Arc<dyn defra_http::router::P2POperations>>,
 }
 
 impl<S: Store + 'static> DocumentAcpAdapter<S> {
@@ -21,13 +20,11 @@ impl<S: Store + 'static> DocumentAcpAdapter<S> {
         database: Arc<db::DB<S>>,
         acp: Arc<dyn acp::DocumentACP>,
         store: Arc<dyn acp::ZanzibarStore>,
-        p2p: Option<Arc<dyn defra_http::router::P2POperations>>,
     ) -> Self {
         Self {
             database,
             acp,
             store,
-            p2p,
         }
     }
 
@@ -36,9 +33,8 @@ impl<S: Store + 'static> DocumentAcpAdapter<S> {
         database: Arc<db::DB<S>>,
         acp: Arc<dyn acp::DocumentACP>,
         store: Arc<dyn acp::ZanzibarStore>,
-        p2p: Option<Arc<dyn defra_http::router::P2POperations>>,
     ) -> Arc<dyn DocumentAcpOperations> {
-        Arc::new(Self::new(database, acp, store, p2p))
+        Arc::new(Self::new(database, acp, store))
     }
 
     /// Look up policy info for a collection by name.
@@ -154,19 +150,8 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
             .await
             .map_err(|e| format!("{}", e))?;
 
-        if added {
-            if let Some(p2p) = &self.p2p {
-                if let Err(error) = p2p.republish_document(collection, doc_id).await {
-                    tracing::debug!(
-                        error = %error,
-                        collection,
-                        doc_id,
-                        "best-effort DAC republish after grant failed"
-                    );
-                }
-            }
-        }
-
+        // Local ACP relationships are node-local (matches Go): a grant is not
+        // propagated to peers. Cross-node access control is SourceHub's role.
         Ok(added)
     }
 
@@ -211,19 +196,8 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
             .await
             .map_err(|e| format!("{}", e))?;
 
-        if deleted {
-            if let Some(p2p) = &self.p2p {
-                if let Err(error) = p2p.republish_document(collection, doc_id).await {
-                    tracing::debug!(
-                        error = %error,
-                        collection,
-                        doc_id,
-                        "best-effort DAC republish after revoke failed"
-                    );
-                }
-            }
-        }
-
+        // Local ACP relationships are node-local (matches Go): a revoke is not
+        // propagated to peers. Cross-node access control is SourceHub's role.
         Ok(deleted)
     }
 }

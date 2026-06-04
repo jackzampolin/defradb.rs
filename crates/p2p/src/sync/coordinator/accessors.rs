@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use acp::{DocumentACP, ReplicatedDocActorRelationships};
+use acp::DocumentACP;
 use blockstore::Blockstore;
 
 use super::{DagFetchLimiter, SyncCoordinator, SyncShutdownHandle};
@@ -58,66 +58,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         &self.manager
     }
 
-    /// Wire document ACP into the coordinator for local ACP relationship replay.
+    /// Wire document ACP into the coordinator.
     pub fn set_document_acp(&self, acp: Arc<dyn DocumentACP>) {
         let _ = self.document_acp.set(acp);
-    }
-
-    pub(crate) async fn apply_replicated_actor_relationships(
-        &self,
-        doc_id: &str,
-        creator: Option<&str>,
-        snapshot: Option<&ReplicatedDocActorRelationships>,
-    ) -> crate::Result<()> {
-        let Some(snapshot) = snapshot else {
-            return Ok(());
-        };
-        let Some(acp) = self.document_acp.get() else {
-            return Ok(());
-        };
-
-        if let Some(creator) = creator {
-            let creator_did = identity::Did::new(creator).map_err(|error| {
-                crate::Error::Behaviour(format!(
-                    "failed to parse replicated ACP creator DID '{creator}': {error}"
-                ))
-            })?;
-            let is_registered = acp
-                .is_doc_registered(&snapshot.policy_id, &snapshot.resource_name, doc_id)
-                .await
-                .map_err(|error| {
-                    crate::Error::Behaviour(format!(
-                        "failed to check replicated ACP registration: {error}"
-                    ))
-                })?;
-
-            if !is_registered {
-                acp.register_doc_object(
-                    &creator_did,
-                    &snapshot.policy_id,
-                    &snapshot.resource_name,
-                    doc_id,
-                )
-                .await
-                .map_err(|error| {
-                    crate::Error::Behaviour(format!(
-                        "failed to register replicated ACP document owner: {error}"
-                    ))
-                })?;
-            }
-        }
-
-        acp.replace_actor_relationships(
-            &snapshot.policy_id,
-            &snapshot.resource_name,
-            doc_id,
-            &snapshot.relationships,
-        )
-        .await
-        .map_err(|error| {
-            crate::Error::Behaviour(format!(
-                "failed to apply replicated ACP relationships: {error}"
-            ))
-        })
     }
 }

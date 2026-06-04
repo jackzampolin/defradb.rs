@@ -150,7 +150,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                                 doc_id: msg.doc_id.clone(),
                                 collection_id: msg.collection_id.clone(),
                                 creator: msg.creator.clone(),
-                                acp_actor_relationships: msg.acp_actor_relationships.clone(),
                             })
                             .await
                             .is_err()
@@ -212,7 +211,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         doc_id: msg.doc_id.clone(),
                         collection_id: msg.collection_id.clone(),
                         creator: msg.creator.clone(),
-                        acp_actor_relationships: msg.acp_actor_relationships.clone(),
                     })
                     .await
                     .is_err()
@@ -307,7 +305,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     sender_peer: sender_peer.map(str::to_owned),
                     is_explicit_replicator,
                     explicit_replay_authorization,
-                    acp_actor_relationships: msg.acp_actor_relationships.clone(),
                 })
                 .await
                 .is_err()
@@ -372,7 +369,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         source_peer: sender_peer.map(str::to_owned),
                         is_explicit_replicator,
                         explicit_replay_authorization: explicit_replay_authorization.clone(),
-                        acp_actor_relationships: msg.acp_actor_relationships.clone(),
                         inserted_at: Instant::now(),
                         attempts: 0,
                         fetch_failures: 0,
@@ -409,7 +405,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     sender_peer: sender_peer.map(str::to_owned),
                     is_explicit_replicator,
                     explicit_replay_authorization,
-                    acp_actor_relationships: msg.acp_actor_relationships.clone(),
                 })
                 .await
                 .is_err()
@@ -526,7 +521,6 @@ mod tests {
             collection_id.to_string(),
             "creator1".to_string(),
             Bytes::from(block),
-            None,
         )
     }
 

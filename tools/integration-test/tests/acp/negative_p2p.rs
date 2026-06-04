@@ -7,15 +7,17 @@ use integration_test::{
 
 const EXPLICIT_REPLAY_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// 02-24: P2P replication must not grant access to identities without a relationship.
+/// 02-24: Local (DAC) ACP is node-local.
 ///
-/// When a document replicates from node0 to node1, only the explicit document
-/// relationships should carry across. An unrelated identity must not gain read
-/// access on the receiving node just because the document replicated.
+/// A document protected by a Local ACP policy is gated only on the node where its
+/// owner was registered (the creating node, node0). A copy replicated to a peer is
+/// NOT gated on that peer — the unregistered doc is treated as public there, so any
+/// caller (anonymous, ungranted, or owner) can read it on node1 (matches Go).
+/// Grants/revokes do NOT propagate to peers. Cross-node access control is
+/// SourceHub ACP's job (separate, unaffected).
 ///
-/// This keeps the merge-denial property: receiving a replicated block must not
-/// automatically grant read permission to identities without a matching ACP
-/// relationship.
+/// This test verifies node0 still gates (Bob needs an explicit grant) while the
+/// replicated copy is public on the peer.
 async fn p2p_merge_denial_test(cluster: TestCluster) {
     let node0 = cluster.client(0);
     let node1 = cluster.client(1);
@@ -83,6 +85,20 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
         .expect("_docID")
         .to_string();
 
+    // node0 is the creating node and still gates: Charlie (no relationship) sees
+    // nothing here before any grant.
+    let charlie_node0 = node0
+        .query_with_identity("query { User { _docID name } }", &charlie.private_key_hex)
+        .expect("Charlie query on node0");
+    assert_eq!(
+        charlie_node0["User"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0),
+        0,
+        "Charlie (no relationship) must not see the doc on the creating node0"
+    );
+
     node0
         .acp_relationship_add("User", &doc_id, "reader", &bob.did, &alice.private_key_hex)
         .expect("grant Bob reader on node0");
@@ -98,14 +114,14 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
     );
 
     // Wait for the document to replicate to node1.
-    // Use Alice's identity: after the ACP fix, anonymous queries cannot see
-    // ACP-registered documents, so we poll as the owner.
+    // Local ACP is node-local; the replicated doc is public on the peer (matches Go).
+    // node1 never registered the owner, so any caller (including anonymous) sees it.
     let node1_ref = &node1;
     let alice_key = alice.private_key_hex.clone();
     poll_until(
         || {
             node1_ref
-                .query_with_identity("query { User { _docID } }", &alice_key)
+                .query("query { User { _docID } }")
                 .ok()
                 .and_then(|v| v["User"].as_array().map(|a| !a.is_empty()))
                 .unwrap_or(false)
@@ -116,108 +132,66 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
     )
     .await;
 
-    let node1_ref = &node1;
-    let bob_key = bob.private_key_hex.clone();
-    poll_until(
-        || {
-            node1_ref
-                .query_with_identity("query { User { _docID name } }", &bob_key)
-                .ok()
-                .and_then(|v| v["User"].as_array().map(|a| a.len() == 1))
-                .unwrap_or(false)
-        },
-        Duration::from_secs(15),
-        Duration::from_millis(200),
-        "Bob did not gain access on node1 after the replicated reader grant",
-    )
-    .await;
-
-    // Bob queries node1. His reader grant from node0 should now replicate.
+    // On the peer the doc is public: Bob sees it even though grants do not propagate.
     let bob_node1 = node1
         .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
         .expect("Bob query on node1");
-    let bob_node1_count = bob_node1["User"].as_array().map(|a| a.len()).unwrap_or(0);
     assert_eq!(
-        bob_node1_count, 1,
-        "Bob must see the replicated document on node1 after the reader grant replicates"
+        bob_node1["User"].as_array().map(|a| a.len()).unwrap_or(0),
+        1,
+        "Bob must see the replicated doc on the peer (public there; Local ACP is node-local)"
     );
 
-    poll_until(
-        || {
-            node1_ref
-                .query_with_identity(
-                    &format!(
-                        r#"query {{ _commits(docID: "{}") {{ cid height }} }}"#,
-                        doc_id
-                    ),
-                    &bob_key,
-                )
-                .ok()
-                .and_then(|v| v["_commits"].as_array().map(|a| !a.is_empty()))
-                .unwrap_or(false)
-        },
-        Duration::from_secs(15),
-        Duration::from_millis(200),
-        "Bob did not gain _commits visibility on node1 after the replicated reader grant",
-    )
-    .await;
+    // Charlie has no relationship anywhere, yet on the peer the doc is public, so he
+    // sees it too. This is the inverse of the old cross-node peer-gating assertion:
+    // Local ACP does not gate on the peer (cross-node control is SourceHub's job).
+    let charlie_node1 = node1
+        .query_with_identity("query { User { _docID name } }", &charlie.private_key_hex)
+        .expect("Charlie query on node1");
+    assert_eq!(
+        charlie_node1["User"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0),
+        1,
+        "Charlie (no relationship) must see the replicated doc on the peer (public there)"
+    );
 
-    let bob_commits_node1 = node1
+    let charlie_commits_node1 = node1
         .query_with_identity(
             &format!(
                 r#"query {{ _commits(docID: "{}") {{ cid height }} }}"#,
                 doc_id
             ),
-            &bob.private_key_hex,
+            &charlie.private_key_hex,
         )
-        .expect("Bob commits query on node1");
-    let bob_commits_count = bob_commits_node1["_commits"]
-        .as_array()
-        .map(|a| a.len())
-        .unwrap_or(0);
+        .expect("Charlie commits query on node1");
     assert!(
-        bob_commits_count > 0,
-        "Bob must read _commits on node1 after the reader grant replicates"
+        charlie_commits_node1["_commits"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "Charlie must read _commits on the peer (the replicated doc is public there)"
     );
 
-    let node1_ref = &node1;
-    let charlie_key = charlie.private_key_hex.clone();
-    let doc_id_for_charlie = doc_id.clone();
-    poll_until(
-        || {
-            let visible_docs = node1_ref
-                .query_with_identity("query { User { _docID name } }", &charlie_key)
-                .ok()
-                .and_then(|value| value["User"].as_array().map(|rows| rows.len()))
-                .unwrap_or(usize::MAX);
-            let visible_commits = node1_ref
-                .query_with_identity(
-                    &format!(
-                        r#"query {{ _commits(docID: "{}") {{ cid height }} }}"#,
-                        doc_id_for_charlie
-                    ),
-                    &charlie_key,
-                )
-                .ok()
-                .and_then(|value| value["_commits"].as_array().map(|rows| rows.len()))
-                .unwrap_or(usize::MAX);
+    // Anonymous also sees the doc on the peer — it is public there.
+    let anon_node1 = node1
+        .query("query { User { _docID name } }")
+        .expect("anon query on node1");
+    assert_eq!(
+        anon_node1["User"].as_array().map(|a| a.len()).unwrap_or(0),
+        1,
+        "anonymous must see the replicated doc on the peer (public there)"
+    );
 
-            visible_docs == 0 && visible_commits == 0
-        },
-        Duration::from_secs(15),
-        Duration::from_millis(200),
-        "replication must not grant access on node1 to identities without a relationship",
-    )
-    .await;
-
-    // Alice can still read the document on node1 (she's the owner, not relying on grant)
+    // Alice can also read the document on node1 (it is public there anyway).
     let alice_node1 = node1
-        .query_with_identity("query { User { _docID name } }", &alice.private_key_hex)
+        .query_with_identity("query { User { _docID name } }", &alice_key)
         .expect("Alice query on node1");
     assert_eq!(
         alice_node1["User"].as_array().map(|a| a.len()).unwrap_or(0),
         1,
-        "Alice must read her document on node1 as owner"
+        "Alice must read her document on node1"
     );
 }
 
@@ -393,6 +367,10 @@ async fn retryable_skip_is_replayed_by_replicator_test(cluster: TestCluster) {
         "node1 must store the protected document after explicit replicator replay"
     );
 
+    // Local ACP is node-local; once the doc is stored on the peer it is public there
+    // (the owner is registered only on the creating node0, matches Go). So Bob — who
+    // has no relationship anywhere — sees the replayed doc on node1. This replaces the
+    // old peer-side denial: cross-node access control is SourceHub ACP's job.
     let bob_after_replay = node1
         .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
         .expect("Bob query on node1 after replicator");
@@ -401,8 +379,8 @@ async fn retryable_skip_is_replayed_by_replicator_test(cluster: TestCluster) {
             .as_array()
             .map(|a| a.len())
             .unwrap_or(0),
-        0,
-        "an unauthorized reader must still see nothing after the explicit replicator replay"
+        1,
+        "ungranted reader sees the replayed doc on the peer (public there; Local ACP is node-local)"
     );
 
     let commits_after_replay = node1
@@ -422,6 +400,7 @@ async fn retryable_skip_is_replayed_by_replicator_test(cluster: TestCluster) {
         "node1 must expose commits after explicit replicator replay"
     );
 
+    // Anonymous also sees the doc on the peer — it is public there.
     let anonymous_after_replay = node1
         .query("query { User { _docID name } }")
         .expect("anonymous query on node1 after replay");
@@ -430,27 +409,12 @@ async fn retryable_skip_is_replayed_by_replicator_test(cluster: TestCluster) {
             .as_array()
             .map(|a| a.len())
             .unwrap_or(0),
-        0,
-        "anonymous access must still be denied after the document is stored on node1"
-    );
-
-    node1
-        .acp_relationship_add("User", &doc_id, "reader", &bob.did, &alice.private_key_hex)
-        .expect("grant Bob reader on node1 after replay");
-
-    let bob_after_local_grant = node1
-        .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
-        .expect("Bob query on node1 after local grant");
-    assert_eq!(
-        bob_after_local_grant["User"]
-            .as_array()
-            .map(|a| a.len())
-            .unwrap_or(0),
         1,
-        "a locally-authorized reader must see the replayed document"
+        "anonymous sees the replayed doc on the peer (public there; Local ACP is node-local)"
     );
 
-    let bob_commits_after_local_grant = node1
+    // Bob can also read the doc's commits on the peer (public there).
+    let bob_commits_after_replay = node1
         .query_with_identity(
             &format!(
                 r#"query {{ _commits(docID: "{}") {{ cid height }} }}"#,
@@ -458,13 +422,13 @@ async fn retryable_skip_is_replayed_by_replicator_test(cluster: TestCluster) {
             ),
             &bob.private_key_hex,
         )
-        .expect("Bob commits query on node1 after local grant");
+        .expect("Bob commits query on node1 after replay");
     assert!(
-        bob_commits_after_local_grant["_commits"]
+        bob_commits_after_replay["_commits"]
             .as_array()
             .map(|a| !a.is_empty())
             .unwrap_or(false),
-        "a locally-authorized reader must see commits after the replayed document is stored"
+        "ungranted reader sees the doc's commits on the peer (public there)"
     );
 }
 
@@ -594,6 +558,12 @@ async fn wrong_identity_explicit_replay_capability_is_ignored_test(cluster: Test
     )
     .await;
 
+    // Local ACP is node-local; once the doc is stored on the peer it is public there
+    // (the owner is registered only on the creating node0, matches Go). Bob — with no
+    // relationship anywhere — sees the replayed doc on node1. This replaces the old
+    // peer-side denial: cross-node access control is SourceHub ACP's job. The point of
+    // this test (a wrong-identity replicator capability is ignored, so the doc only
+    // replays under the owner-signed replicator) is preserved by the assertions above.
     let bob_after_replay = node1
         .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
         .expect("Bob query on node1 after replay");
@@ -602,8 +572,8 @@ async fn wrong_identity_explicit_replay_capability_is_ignored_test(cluster: Test
             .as_array()
             .map(|a| a.len())
             .unwrap_or(0),
-        0,
-        "unauthorized readers must still see nothing after the owner-signed replay"
+        1,
+        "ungranted reader sees the replayed doc on the peer (public there; Local ACP is node-local)"
     );
 }
 

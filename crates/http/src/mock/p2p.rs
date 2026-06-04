@@ -168,10 +168,6 @@ impl P2POperations for MockP2POperations {
         Ok(())
     }
 
-    async fn republish_document(&self, _collection_name: &str, _doc_id: &str) -> P2PResult<()> {
-        Ok(())
-    }
-
     async fn sync_documents(&self, _collection_name: &str, _doc_ids: Vec<String>) -> P2PResult<()> {
         Ok(())
     }
@@ -269,10 +265,6 @@ impl P2POperations for FailingMockP2POperations {
     }
 
     async fn remove_documents(&self, _docs: Vec<P2pDocumentRequest>) -> P2PResult<()> {
-        Err(P2PError::Internal(self.error.clone()))
-    }
-
-    async fn republish_document(&self, _collection_name: &str, _doc_id: &str) -> P2PResult<()> {
         Err(P2PError::Internal(self.error.clone()))
     }
 

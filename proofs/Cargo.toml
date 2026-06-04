@@ -1,0 +1,32 @@
+[package]
+name = "conformance"
+version = "0.1.0"
+edition = "2021"
+description = "Binds the proofs/tla and proofs/lean models to the real defradb.rs binary"
+license = "Apache-2.0 OR MIT"
+publish = false
+autotests = false
+
+[lib]
+path = "src/lib.rs"
+
+[[test]]
+name = "lean_conformance"
+path = "tests/lean_conformance.rs"
+
+[[test]]
+name = "tla_conformance"
+path = "tests/tla_conformance.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+
+[dev-dependencies]
+defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", branch = "feat/shared-se-key-harness" }
+tokio = { version = "1.35", features = ["full"] }
+serial_test = "3"
+
+[lints]
+workspace = true

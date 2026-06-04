@@ -6,11 +6,13 @@ use integration_test::{
 
 /// Test ACP-protected documents replicate correctly across P2P nodes.
 ///
-/// Owner DID is carried in the PushLog Creator field, so the receiving node
-/// registers the document in local ACP under the original owner. This test verifies:
+/// Local (DAC) ACP is node-local: a document is gated only on the node where its
+/// owner was registered (the creating node). A replicated copy is NOT gated on the
+/// peer — the unregistered doc is treated as public there (matches Go). This test
+/// verifies:
 /// 1. Both public and protected docs replicate to the receiving node
 /// 2. On the originating node, ACP enforces access (Alice sees both, anonymous sees only public)
-/// 3. On the receiving node, ACP also enforces access (owner DID was replicated)
+/// 3. On the receiving node, the protected doc is public — anonymous sees both docs
 async fn acp_p2p_test(cluster: TestCluster) {
     let node0 = cluster.client(0);
     let node1 = cluster.client(1);
@@ -107,8 +109,8 @@ async fn acp_p2p_test(cluster: TestCluster) {
     );
 
     // Wait for both documents to replicate to node 1.
-    // Use Alice's identity: the protected doc is ACP-registered on node1 after merge,
-    // so anonymous queries only see the public doc.
+    // Local ACP is node-local: the protected doc is NOT registered on node1, so it
+    // is public there. Poll as Alice for determinism (she sees both regardless).
     let node1_ref = &node1;
     let alice_key = alice.private_key_hex.clone();
     poll_until(
@@ -145,18 +147,25 @@ async fn acp_p2p_test(cluster: TestCluster) {
     assert!(names.contains(&"Public"));
     assert!(names.contains(&"Protected"));
 
-    // Anonymous sees only the public doc on node1 (protected is ACP-gated)
+    // Local ACP is node-local; the replicated protected doc is public on the peer
+    // (matches Go). The owner is only registered on the creating node (node0), so
+    // on node1 the unregistered doc is treated as public and anonymous sees BOTH.
     let anon_node1 = node1
         .query("query { User { name } }")
         .expect("anon query on node1 failed");
     let anon_node1_users = anon_node1["User"].as_array().expect("anon_node1 not array");
     assert_eq!(
         anon_node1_users.len(),
-        1,
-        "anonymous should see only public doc on node1, got {:?}",
+        2,
+        "anonymous should see both public and protected docs on the peer (Local ACP is node-local), got {:?}",
         anon_node1_users
     );
-    assert_eq!(anon_node1_users[0]["name"], "Public");
+    let anon_names: Vec<&str> = anon_node1_users
+        .iter()
+        .filter_map(|u| u["name"].as_str())
+        .collect();
+    assert!(anon_names.contains(&"Public"));
+    assert!(anon_names.contains(&"Protected"));
 }
 
 #[tokio::test]

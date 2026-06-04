@@ -34,7 +34,7 @@ dependencies = [
 [[package]]
 name = "acp-light-client"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
 dependencies = [
  "alloy-primitives",
  "borsh",
@@ -2536,6 +2536,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "conformance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "defra-harness",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tokio",
+]
+
+[[package]]
 name = "console_error_panic_hook"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3618,7 +3630,7 @@ dependencies = [
 [[package]]
 name = "defra-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
 dependencies = [
  "eyre",
  "futures",
@@ -5488,7 +5500,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 [[package]]
 name = "hub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -11810,7 +11822,7 @@ dependencies = [
 [[package]]
 name = "sourcehub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
 dependencies = [
  "cosmrs",
  "eyre",
@@ -12366,7 +12378,7 @@ dependencies = [
 [[package]]
 name = "test-infra"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#d4b0f9a7692f892647aad8787ca50c8109d92401"
+source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
 dependencies = [
  "eyre",
  "futures",

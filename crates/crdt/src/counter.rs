@@ -16,12 +16,25 @@ use serde::{Deserialize, Serialize};
 use std::any::Any;
 use storage::{corekv::Key, keys::CRDTValueKey, Reader, ReaderWriter};
 
-/// Numeric kind for counter values
+/// Numeric kind for counter values.
+///
+/// # Convergence warning (Float32/Float64)
+///
+/// Counter merge is unconditional addition. For `Int64` this is order-independent
+/// (wrapping addition is associative — proven in `proofs/lean` as `word64Add_assoc`).
+/// For `Float32`/`Float64` it is **NOT**: IEEE-754 addition is not associative
+/// (`(0.1 + 0.2) + 0.3 != 0.1 + (0.2 + 0.3)`; proven as `float_add_not_assoc`), so two
+/// replicas applying the same float deltas in different merge orders can converge to
+/// **different values**. This matches Go DefraDB exactly (both use raw IEEE-754 `+`), so
+/// the behavior is retained for parity — but float counter fields are not convergence-safe.
+/// Prefer `Int64` (or a fixed-point/scaled integer) when cross-replica convergence matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum NumericKind {
     Int64,
+    /// Non-convergent across replicas — see the type-level convergence warning above.
     Float32,
+    /// Non-convergent across replicas — see the type-level convergence warning above.
     Float64,
 }
 
@@ -483,67 +496,37 @@ impl Counter {
         Ok(MergeResult::Applied)
     }
 
-    /// Seed the counter CRDT storage from the document's current field value
-    /// if it hasn't been initialized yet.
+    /// Reconcile the CRDT accumulation store (`value_key`) up to the document's
+    /// current materialized value, unconditionally, before merging a remote delta.
     ///
-    /// Local document creation stores counter values in the document layer but not
-    /// in CRDT accumulation storage. Before merging a remote delta, the CRDT storage
-    /// must be seeded from the document value to ensure correct accumulation.
+    /// Local increments (create AND update) store the counter value in the
+    /// document blob but never in the accumulation store. On the node that
+    /// *created* the document the accumulation store is uninitialized when the
+    /// first remote delta arrives, so it can simply adopt the blob value. But a
+    /// node that received the document by *replication* first already has an
+    /// initialized accumulation store, so a conditional "seed only if empty"
+    /// leaves its later local increment stranded in the blob — and the next
+    /// remote merge re-materializes the blob from the stale store, silently
+    /// dropping that increment.
     ///
-    /// Returns true if seeding was performed, false if already initialized.
+    /// Unconditional reconcile closes the gap. The blob is always written *after*
+    /// the accumulation store within each merge transaction, and only local
+    /// increments push the blob ahead of the store, so
+    /// `blob - store == pending local increments`. Overwriting the store with the
+    /// blob therefore captures exactly those increments and never double-counts
+    /// (the arriving delta is still deduped by the merged-set).
     ///
     /// NOTE: per #847, counter merge is unconditional and there is no nonce
-    /// tracking. Any future seed variant (e.g. Float32 once added by #848)
-    /// MUST NOT call a `mark_nonce(..)` helper — that would leak dead markers
-    /// into the datastore and reintroduce the dedup contract this PR removes.
-    pub async fn seed_if_uninitialized_int64(
-        &self,
-        rw: &mut dyn ReaderWriter,
-        value: i64,
-    ) -> Result<bool> {
-        let has_value = rw
-            .has(&self.value_key)
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-        if has_value {
-            return Ok(false);
-        }
-        self.set_int64(rw, value).await?;
-        Ok(true)
+    /// tracking. A reconcile must never call a `mark_nonce(..)` helper — that
+    /// would leak dead markers into the datastore and reintroduce the dedup
+    /// contract #847 removed.
+    pub async fn reconcile_int64(&self, rw: &mut dyn ReaderWriter, value: i64) -> Result<()> {
+        self.set_int64(rw, value).await
     }
 
-    /// Float32 variant of `seed_if_uninitialized_int64`.
-    pub async fn seed_if_uninitialized_float32(
-        &self,
-        rw: &mut dyn ReaderWriter,
-        value: f32,
-    ) -> Result<bool> {
-        let has_value = rw
-            .has(&self.value_key)
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-        if has_value {
-            return Ok(false);
-        }
-        self.set_float32(rw, value).await?;
-        Ok(true)
-    }
-
-    /// Float64 variant of `seed_if_uninitialized_int64`.
-    pub async fn seed_if_uninitialized_float64(
-        &self,
-        rw: &mut dyn ReaderWriter,
-        value: f64,
-    ) -> Result<bool> {
-        let has_value = rw
-            .has(&self.value_key)
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-        if has_value {
-            return Ok(false);
-        }
-        self.set_float64(rw, value).await?;
-        Ok(true)
+    /// Float64 variant of `reconcile_int64`.
+    pub async fn reconcile_float64(&self, rw: &mut dyn ReaderWriter, value: f64) -> Result<()> {
+        self.set_float64(rw, value).await
     }
 
     /// Get current value bytes (for internal use)

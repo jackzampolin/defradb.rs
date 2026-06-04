@@ -4,14 +4,16 @@ use integration_test::{
     generate_identity, poll_until, users_schema_with_policy, TestCluster, USER_ACP_POLICY,
 };
 
-/// Trust ring boundaries: Core (node0) ↔ Near (node1) with asymmetric trust.
+/// Trust ring boundaries: Core (node0) ↔ Near (node1).
 ///
-/// Owner DID propagates via PushLog Creator field, so the receiving node
-/// registers the document in local ACP under the original owner. Tests:
-/// - ACP-protected docs replicate from Core to Near with owner DID
-/// - Owner (Jack) can read protected docs on both nodes
-/// - Non-owner identities cannot read protected docs on either node
-/// - Anonymous users see only public (unregistered) docs on both nodes
+/// Local (DAC) ACP is node-local: a document is gated only on the node where its
+/// owner was registered (the creating node, Core). A replicated copy is NOT gated
+/// on the peer (Near) — the unregistered doc is treated as public there, so any
+/// caller (owner, granted, ungranted, anonymous) can read it on Near (matches Go).
+/// Grants/revokes do NOT propagate to peers. Tests:
+/// - ACP-protected docs replicate from Core to Near
+/// - On Core (the creating node): owner sees protected doc, non-owners do not
+/// - On Near (the peer): the replicated doc is public, everyone sees it
 async fn p2p_trust_boundary_test(cluster: TestCluster) {
     let core = cluster.client(0);
     let near = cluster.client(1);
@@ -136,27 +138,28 @@ async fn p2p_trust_boundary_test(cluster: TestCluster) {
         "jack should see both docs on near"
     );
 
-    // vps_service has no grant and is not the owner — sees 0 protected docs.
-    // The anonymous (public) doc may or may not be visible depending on how
-    // the ACP query engine handles unregistered replicated docs.
+    // Local ACP is node-local; the replicated doc is public on the peer (matches Go).
+    // The owner is registered only on Core, so on Near the unregistered protected doc
+    // is public: vps_service (ungranted) sees BOTH docs even without any grant.
     let vps_near = near
         .query_with_identity("query { User { name } }", &vps_service.private_key_hex)
         .expect("vps query near");
     let vps_near_count = vps_near["User"].as_array().map(|a| a.len()).unwrap_or(0);
-    assert!(
-        vps_near_count <= 1,
-        "vps_service should not see protected doc on near, got {}",
+    assert_eq!(
+        vps_near_count, 2,
+        "vps_service sees both docs on the peer (Local ACP is node-local; protected doc is public there), got {}",
         vps_near_count
     );
 
-    // Anonymous query on Near
+    // Anonymous query on Near: the protected doc is public on the peer, so anonymous
+    // sees BOTH docs too (Local ACP is node-local; matches Go).
     let anon_near = near
         .query("query { User { name } }")
         .expect("anon query near");
     let anon_near_count = anon_near["User"].as_array().map(|a| a.len()).unwrap_or(0);
-    assert!(
-        anon_near_count <= 1,
-        "anonymous should not see protected doc on near, got {}",
+    assert_eq!(
+        anon_near_count, 2,
+        "anonymous sees both docs on the peer (Local ACP is node-local; protected doc is public there), got {}",
         anon_near_count
     );
 }

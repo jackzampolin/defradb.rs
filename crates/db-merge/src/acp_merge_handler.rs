@@ -172,6 +172,15 @@ impl CompositeMergeHook for AcpCompositeMergeHook {
         collection: &CollectionVersion,
         metadata: &BlockMetadata<'_>,
     ) -> Option<Box<dyn CompositePostCommitAction>> {
+        // Only register a replicated document's owner on the receiving node under
+        // strict (SourceHub) ACP, where cross-node access control is authoritative
+        // via shared on-chain state. Under Local ACP we match Go: a replicated
+        // document is NOT registered on the peer (unregistered == public), so the
+        // peer does not gate it. Cross-node Local ACP gating was a Rust-only
+        // feature; see also the removed relationship-propagation path.
+        if !self.strict_replicated_doc_access.load(Ordering::Relaxed) {
+            return None;
+        }
         let acp = self.document_acp()?.clone();
         let policy = collection.policy.as_ref()?;
         let creator = metadata

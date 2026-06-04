@@ -522,7 +522,6 @@ mod tests {
             collection_id: "collection".to_string(),
             creator: "creator".to_string(),
             block: Bytes::from_static(b"block"),
-            acp_actor_relationships: None,
         };
 
         assert!(!TransportEvent::<()>::GossipMessage {

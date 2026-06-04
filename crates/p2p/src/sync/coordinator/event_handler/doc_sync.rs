@@ -317,7 +317,6 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                                     sender_peer: Some(context.source_peer.to_string()),
                                     is_explicit_replicator: context.is_explicit_replicator,
                                     explicit_replay_authorization: None,
-                                    acp_actor_relationships: None,
                                 })
                                 .await
                                 .is_err()

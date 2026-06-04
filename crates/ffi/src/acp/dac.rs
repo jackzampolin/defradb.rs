@@ -1,8 +1,6 @@
 use std::ffi::c_char;
-use std::time::{Duration, Instant};
 
 use acp::nac::NodePermission;
-use acp::DocumentPermission;
 use acp::StorePolicyOptions;
 
 use crate::helpers::{get_rt, require_c_str};
@@ -307,13 +305,12 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
             );
         }
 
-        // Validate node handle and get database, document_acp, policy_store, and optional p2p
-        let (database, document_acp, policy_store, p2p_system) = match NODES.get(node_ptr, |state| {
+        // Validate node handle and get database, document_acp, and policy_store
+        let (database, document_acp, policy_store) = match NODES.get(node_ptr, |state| {
             (
                 state.database.clone(),
                 state.document_acp.clone(),
                 state.policy_store.clone(),
-                state.p2p.as_ref().map(|p2p| p2p.system.clone()),
             )
         }) {
             Some(tuple) => tuple,
@@ -377,51 +374,8 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
                 .await
                 .map_err(|e| e.to_string())?;
 
-            if added {
-                if let Some(system) = p2p_system {
-                    let target_identity = acp::Identity::from(target.clone());
-                    let wait_deadline = Instant::now() + Duration::from_secs(5);
-                    loop {
-                        let readable = document_acp
-                            .check_doc_access(
-                                &target_identity,
-                                DocumentPermission::Read,
-                                &policy_id,
-                                &resource_name,
-                                &doc_id_str,
-                            )
-                            .await
-                            .map_err(|e| format!("failed to verify DAC relationship propagation: {e}"))?;
-
-                        if readable {
-                            break;
-                        }
-
-                        if Instant::now() >= wait_deadline {
-                            return Err(
-                                "timed out waiting for DAC relationship to become readable".to_string(),
-                            );
-                        }
-
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-
-                    if let Err(error) = system
-                        .ops()
-                        .republish_document(&collection_id_str, &doc_id_str)
-                        .await
-                        .map_err(crate::p2p::FfiP2PError::from)
-                    {
-                        tracing::debug!(
-                            error = %error,
-                            collection_id = %collection_id_str,
-                            doc_id = %doc_id_str,
-                            "best-effort DAC republish failed"
-                        );
-                    }
-                }
-            }
-
+            // Local ACP relationships are node-local (matches Go): a grant is not
+            // propagated to peers. Cross-node access control is SourceHub's role.
             let json = serde_json::json!({ "added": added }).to_string();
             Ok::<String, String>(json)
         });
@@ -491,13 +445,12 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
             );
         }
 
-        // Validate node handle and get database, document_acp, policy_store, and optional p2p
-        let (database, document_acp, policy_store, p2p_system) = match NODES.get(node_ptr, |state| {
+        // Validate node handle and get database, document_acp, and policy_store
+        let (database, document_acp, policy_store) = match NODES.get(node_ptr, |state| {
             (
                 state.database.clone(),
                 state.document_acp.clone(),
                 state.policy_store.clone(),
-                state.p2p.clone(),
             )
         }) {
             Some(tuple) => tuple,
@@ -561,25 +514,8 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
                 .await
                 .map_err(|e| e.to_string())?;
 
-            if deleted {
-                if let Some(system) = p2p_system {
-                    if let Err(error) = system
-                        .system
-                        .ops()
-                        .republish_document(&collection_id_str, &doc_id_str)
-                        .await
-                        .map_err(crate::p2p::FfiP2PError::from)
-                    {
-                        tracing::debug!(
-                            error = %error,
-                            collection_id = %collection_id_str,
-                            doc_id = %doc_id_str,
-                            "best-effort DAC republish after revoke failed"
-                        );
-                    }
-                }
-            }
-
+            // Local ACP relationships are node-local (matches Go): a revoke is not
+            // propagated to peers. Cross-node access control is SourceHub's role.
             let json = serde_json::json!({ "deleted": deleted }).to_string();
             Ok::<String, String>(json)
         });

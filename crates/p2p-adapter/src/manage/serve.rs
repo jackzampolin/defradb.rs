@@ -323,9 +323,6 @@ mod tests {
         async fn remove_documents(&self, _docs: Vec<P2pDocumentRequest>) -> P2PResult<()> {
             unimplemented!()
         }
-        async fn republish_document(&self, _collection_name: &str, _doc_id: &str) -> P2PResult<()> {
-            unimplemented!()
-        }
         async fn sync_documents(
             &self,
             _collection_name: &str,
