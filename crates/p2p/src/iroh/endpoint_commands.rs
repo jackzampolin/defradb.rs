@@ -683,6 +683,7 @@ struct DialContext<'a> {
 /// Dial a peer by EndpointId.
 ///
 /// Keeps the connection alive by spawning a stream handler task.
+#[allow(clippy::too_many_arguments)]
 async fn handle_dial(
     ctx: DialContext<'_>,
     peer_id: &PeerId,

@@ -10,6 +10,8 @@ use crate::config::{Config, DatastoreType};
 use crate::error::Result;
 #[cfg(feature = "fjall")]
 use storage::backends::FjallStoreOptions;
+#[cfg(feature = "lark")]
+use storage::backends::LarkStoreOptions;
 #[cfg(feature = "redb")]
 use storage::backends::RedbStoreOptions;
 #[cfg(feature = "rocksdb")]
@@ -361,6 +363,44 @@ impl Node {
                 DatastoreType::RocksDb => {
                     return Err(crate::error::Error::InvalidDatastore(
                         "rocksdb backend not enabled. Rebuild with --features rocksdb".into(),
+                    ));
+                }
+                #[cfg(feature = "lark")]
+                DatastoreType::Lark => {
+                    info!("Using Lark datastore at {}", config.data_path().display());
+                    let opts =
+                        LarkStoreOptions::from_env().with_durability(config.datastore.durability);
+                    let backend = storage::LarkStore::open_with_options(config.data_path(), opts)?;
+                    if config.datastore.at_rest_encryption {
+                        info!("At-rest encryption enabled (value-only, AES-256-GCM)");
+                        let key = Self::load_or_create_encryption_key(&config)?;
+                        let store =
+                            Arc::new(storage::encrypted_store::EncryptedStore::new(backend, key));
+                        Self::init_persistent_store_and_server(
+                            store,
+                            &config,
+                            peer_keypair,
+                            user_identity.clone(),
+                            node_identity_did.clone(),
+                            se_key,
+                        )
+                        .await?
+                    } else {
+                        Self::init_persistent_store_and_server(
+                            Arc::new(backend),
+                            &config,
+                            peer_keypair,
+                            user_identity.clone(),
+                            node_identity_did.clone(),
+                            se_key,
+                        )
+                        .await?
+                    }
+                }
+                #[cfg(not(feature = "lark"))]
+                DatastoreType::Lark => {
+                    return Err(crate::error::Error::InvalidDatastore(
+                        "lark backend not enabled. Rebuild with --features lark".into(),
                     ));
                 }
             };

@@ -8,11 +8,11 @@ description = "Reusable embedded DefraDB node builder"
 [[bin]]
 name = "coding-session-bench"
 path = "src/bin/coding-session-bench.rs"
-required-features = ["rocksdb"]
 test = false
 
 [features]
-default = ["redb"]
+default = ["lark", "redb"]
+lark = ["storage/lark"]
 http = ["dep:defra-http", "dep:axum"]
 p2p = ["dep:p2p", "dep:blockstore", "dep:defra-http", "dep:defra-p2p-adapter"]
 redb = ["storage/redb"]

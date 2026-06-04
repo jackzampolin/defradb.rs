@@ -74,6 +74,25 @@ impl ServerDumpArgs {
                     "rocksdb backend not enabled. Rebuild with --features rocksdb".into(),
                 ));
             }
+            #[cfg(feature = "lark")]
+            DatastoreType::Lark => {
+                let opts = storage::backends::LarkStoreOptions::new()
+                    .with_durability(config.datastore.durability);
+                let store = Arc::new(storage::LarkStore::open_with_options(
+                    config.data_path(),
+                    opts,
+                )?);
+                let database = db::DB::open_from_arc(store)
+                    .await
+                    .map_err(|e| Error::Server(e.to_string()))?;
+                database.print_dump().await.map_err(Error::Server)?
+            }
+            #[cfg(not(feature = "lark"))]
+            DatastoreType::Lark => {
+                return Err(Error::InvalidDatastore(
+                    "lark backend not enabled. Rebuild with --features lark".into(),
+                ));
+            }
         };
 
         for line in &lines {

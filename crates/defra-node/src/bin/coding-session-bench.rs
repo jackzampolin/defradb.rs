@@ -1,31 +1,27 @@
-#[cfg(not(feature = "rocksdb"))]
-fn main() {
-    eprintln!(
-        "coding-session-bench requires the `rocksdb` feature.\n\
-         Run: cargo run -p defra-node --features rocksdb --bin coding-session-bench -- --help"
-    );
-    std::process::exit(1);
-}
-
-#[cfg(feature = "rocksdb")]
-mod rocksdb_runner {
+mod runner {
     use std::collections::HashSet;
     use std::path::PathBuf;
     use std::process::ExitCode;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use anyhow::{bail, Context, Result};
     use defra_node::benchmark_support::{
         benchmark_case, seed_coding_session_fixture, CodingSessionFixtureConfig,
     };
     use defra_node::{EmbeddedNode, StorageBackend};
+    use storage::backends::DurabilityMode;
+
+    const BENCH_AT_REST_ENCRYPTION_KEY: [u8; 32] = [0x42; 32];
 
     #[derive(Debug)]
     struct BenchOptions {
+        backend: StorageBackend,
+        durability: DurabilityMode,
         data_dir: Option<PathBuf>,
         keep_data: bool,
         reuse: bool,
         explain: bool,
+        at_rest_encryption: bool,
         warmup: usize,
         iterations: usize,
         limit: usize,
@@ -36,10 +32,13 @@ mod rocksdb_runner {
     impl Default for BenchOptions {
         fn default() -> Self {
             Self {
+                backend: StorageBackend::Lark,
+                durability: DurabilityMode::Immediate,
                 data_dir: None,
                 keep_data: false,
                 reuse: false,
                 explain: false,
+                at_rest_encryption: false,
                 warmup: 2,
                 iterations: 5,
                 limit: 10,
@@ -82,20 +81,39 @@ mod rocksdb_runner {
             .or_else(|| options.data_dir.clone())
             .context("failed to resolve data dir")?;
 
-        let node = EmbeddedNode::builder()
+        let mut builder = EmbeddedNode::builder()
             .data_path(&data_dir)
-            .with_storage_backend(StorageBackend::RocksDb)
-            .build()
-            .await?;
+            .with_storage_backend(options.backend)
+            .with_storage_durability(options.durability);
+        if options.at_rest_encryption {
+            builder = builder.with_at_rest_encryption_key(BENCH_AT_REST_ENCRYPTION_KEY);
+        }
+        let open_started = Instant::now();
+        let node = builder.build().await?;
+        let open_elapsed = open_started.elapsed();
 
+        let seed_started = Instant::now();
         let fixture = if options.reuse {
             options.fixture.layout()
         } else {
             seed_coding_session_fixture(&node, &options.fixture).await?
         };
+        let seed_elapsed = seed_started.elapsed();
         let stats = options.fixture.estimated_stats();
 
-        println!("backend=rocksdb data_dir={}", data_dir.display());
+        println!(
+            "backend={} durability={} at_rest_encryption={} data_dir={}",
+            backend_name(options.backend),
+            durability_name(options.durability),
+            options.at_rest_encryption,
+            data_dir.display()
+        );
+        println!(
+            "open_ms={} seed_ms={} reused={}",
+            open_elapsed.as_millis(),
+            seed_elapsed.as_millis(),
+            options.reuse
+        );
         println!(
             "fixture: sessions={} messages={} actions={} estimated_payload={}B ({:.1}MiB)",
             stats.sessions,
@@ -158,6 +176,13 @@ mod rocksdb_runner {
             let summary = benchmark_case(&node, case, options.warmup, options.iterations).await?;
             println!("{}", summary.render());
         }
+
+        let disk_bytes = dir_size_bytes(&data_dir)?;
+        println!(
+            "disk: bytes={} mib={:.1}",
+            disk_bytes,
+            disk_bytes as f64 / (1024.0 * 1024.0)
+        );
 
         if let Some(path) = owned_temp_dir {
             if options.keep_data {
@@ -229,12 +254,19 @@ mod rocksdb_runner {
                 "--profile" => {
                     options.fixture = parse_profile(next_value(&mut args, "--profile")?)?;
                 }
+                "--backend" | "--store" => {
+                    options.backend = parse_backend(next_value(&mut args, &arg)?)?;
+                }
+                "--durability" => {
+                    options.durability = parse_durability(next_value(&mut args, "--durability")?)?;
+                }
                 "--data-dir" => {
                     options.data_dir = Some(PathBuf::from(next_value(&mut args, "--data-dir")?));
                 }
                 "--keep-data" => options.keep_data = true,
                 "--reuse" => options.reuse = true,
                 "--explain" => options.explain = true,
+                "--at-rest-encryption" => options.at_rest_encryption = true,
                 "--warmup" => {
                     options.warmup = parse_usize(next_value(&mut args, "--warmup")?, "--warmup")?;
                 }
@@ -316,6 +348,40 @@ mod rocksdb_runner {
         Ok(options)
     }
 
+    fn parse_backend(value: String) -> Result<StorageBackend> {
+        match value.as_str() {
+            "lark" => Ok(StorageBackend::Lark),
+            "redb" => Ok(StorageBackend::Redb),
+            "rocksdb" | "rocks" => Ok(StorageBackend::RocksDb),
+            other => bail!("unknown backend: {other} (expected lark, redb, or rocksdb)"),
+        }
+    }
+
+    fn backend_name(backend: StorageBackend) -> &'static str {
+        match backend {
+            StorageBackend::Lark => "lark",
+            StorageBackend::Redb => "redb",
+            StorageBackend::RocksDb => "rocksdb",
+            _ => "unknown",
+        }
+    }
+
+    fn parse_durability(value: String) -> Result<DurabilityMode> {
+        match value.as_str() {
+            "immediate" => Ok(DurabilityMode::Immediate),
+            "eventual" => Ok(DurabilityMode::Eventual),
+            other => bail!("unknown durability: {other} (expected immediate or eventual)"),
+        }
+    }
+
+    fn durability_name(durability: DurabilityMode) -> &'static str {
+        match durability {
+            DurabilityMode::Immediate => "immediate",
+            DurabilityMode::Eventual => "eventual",
+            _ => "unknown",
+        }
+    }
+
     fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
         args.next()
             .with_context(|| format!("missing value for {flag}"))
@@ -348,20 +414,41 @@ mod rocksdb_runner {
         ))
     }
 
+    fn dir_size_bytes(path: &std::path::Path) -> Result<u64> {
+        let metadata = std::fs::metadata(path)
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        if metadata.is_file() {
+            return Ok(metadata.len());
+        }
+
+        let mut total = 0;
+        for entry in
+            std::fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))?
+        {
+            let entry = entry?;
+            total += dir_size_bytes(&entry.path())?;
+        }
+        Ok(total)
+    }
+
     fn print_usage() {
         println!(
             "coding-session-bench\n\
              \n\
-             Runs a reduced coding-session-style nested BM25 benchmark against a local RocksDB store.\n\
+             Runs a coding-session-style nested BM25 benchmark against a local persistent store.\n\
              \n\
              Usage:\n\
-               cargo run -p defra-node --features rocksdb --bin coding-session-bench -- [options]\n\
+               cargo run -p defra-node --bin coding-session-bench -- [options]\n\
              \n\
              Options:\n\
                --profile NAME            Fixture profile: smoke, default, or large\n\
-               --data-dir PATH            Persist the RocksDB store at PATH\n\
+               --backend NAME            Backend: lark, redb, or rocksdb (default: lark)\n\
+               --store NAME              Alias for --backend\n\
+               --durability NAME         Durability: immediate or eventual (default: immediate)\n\
+               --data-dir PATH            Persist the store at PATH\n\
                --reuse                    Reuse an existing fixture at --data-dir\n\
-               --keep-data                Keep the auto-created temp RocksDB dir after the run\n\
+               --keep-data                Keep the auto-created temp data dir after the run\n\
+               --at-rest-encryption       Wrap the backend in value-only AES-256-GCM encryption\n\
                --warmup N                 Warmup iterations per case (default: 2)\n\
                --iterations N             Timed iterations per case (default: 5)\n\
                --limit N                  GraphQL limit per query (default: 10)\n\
@@ -389,8 +476,7 @@ mod rocksdb_runner {
     }
 }
 
-#[cfg(feature = "rocksdb")]
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    rocksdb_runner::run().await
+    runner::run().await
 }

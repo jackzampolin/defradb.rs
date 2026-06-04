@@ -210,8 +210,8 @@ pub struct DatastoreConfig {
     pub default_key_type: String,
     /// Durability mode for the storage backend.
     ///
-    /// - `eventual` (default): defer fsync to OS
-    /// - `immediate`: fsync on every commit — safe against OS crashes
+    /// - `immediate` (default): fsync on every commit, safe against OS crashes
+    /// - `eventual`: defer fsync to OS for higher write throughput
     #[serde(default)]
     pub durability: DurabilityMode,
     /// Max DAG recursion depth for merge operations. Default: 1024.
@@ -235,7 +235,7 @@ fn default_max_merge_depth() -> usize {
 impl Default for DatastoreConfig {
     fn default() -> Self {
         Self {
-            store: DatastoreType::RocksDb,
+            store: DatastoreType::Lark,
             path: "data".to_string(),
             max_txn_retries: 5,
             valuelogfilesize: 1 << 30, // 1GB

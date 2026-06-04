@@ -105,6 +105,7 @@ postcard = { version = "1.0", features = ["alloc"] }
 redb = "2.4"
 fjall = "3.1.4"
 rocksdb = "0.24.0"
+lark-kv = { git = "https://github.com/sourcenetwork/lark.git", rev = "ab924471c2e376591c1e3b3cd419655f9c7c6dc4" }
 
 # Cryptography
 ed25519-dalek = { version = "2.1", features = ["serde", "zeroize"] }

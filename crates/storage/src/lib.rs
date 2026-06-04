@@ -114,13 +114,16 @@ pub mod stores;
 pub use backends::MemoryStore;
 
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-pub use backends::RedbStore;
+pub use backends::{RedbStore, RedbStoreOptions};
 
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 pub use backends::{FjallStore, FjallStoreOptions};
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 pub use backends::{RocksDbStore, RocksDbStoreOptions};
+
+#[cfg(all(feature = "lark", not(target_arch = "wasm32")))]
+pub use backends::{LarkStore, LarkStoreOptions};
 
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
 pub use backends::LevelDbStore;

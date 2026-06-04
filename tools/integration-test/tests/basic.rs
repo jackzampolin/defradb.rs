@@ -6,6 +6,8 @@ mod collection_delete_4657;
 mod collection_management;
 #[path = "basic/document_lifecycle.rs"]
 mod document_lifecycle;
+#[path = "basic/lark_crash_reopen.rs"]
+mod lark_crash_reopen;
 #[path = "basic/multi_collection.rs"]
 mod multi_collection;
 #[path = "basic/patch_secondary_relation_4709.rs"]

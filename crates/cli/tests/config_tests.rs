@@ -149,7 +149,7 @@ fn test_config_defaults() {
     assert_eq!(config.embedding.url, "");
     assert_eq!(config.embedding.model, "");
     assert_eq!(config.embedding.api_key_env, "OPENAI_API_KEY");
-    assert_eq!(config.datastore.store, DatastoreType::RocksDb);
+    assert_eq!(config.datastore.store, DatastoreType::Lark);
     assert!(!config.development);
     assert_eq!(config.secret_file, ".env");
 }

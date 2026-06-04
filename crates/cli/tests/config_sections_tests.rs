@@ -5,6 +5,7 @@ use cli::config::{
     LogLevel, LogOutput, NetConfig,
 };
 use cli::error::Error;
+use storage::backends::DurabilityMode;
 
 #[test]
 fn test_log_config_defaults() {
@@ -36,13 +37,14 @@ fn test_api_config_defaults() {
 #[test]
 fn test_datastore_config_defaults() {
     let config = DatastoreConfig::default();
-    assert_eq!(config.store, DatastoreType::RocksDb);
+    assert_eq!(config.store, DatastoreType::Lark);
     assert_eq!(config.path, "data");
     assert_eq!(config.max_txn_retries, 5);
     assert_eq!(config.valuelogfilesize, 1 << 30);
     assert!(!config.no_encryption);
     assert!(!config.no_signing);
     assert_eq!(config.default_key_type, "secp256k1");
+    assert_eq!(config.durability, DurabilityMode::Immediate);
 }
 
 #[test]
