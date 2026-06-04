@@ -138,7 +138,7 @@ impl Default for LarkStoreOptions {
             universal_max_size_amplification_percent:
                 DEFAULT_UNIVERSAL_MAX_SIZE_AMPLIFICATION_PERCENT,
             close_timeout: Duration::from_secs(DEFAULT_CLOSE_TIMEOUT_SECS),
-            durability: DurabilityMode::Eventual,
+            durability: DurabilityMode::Immediate,
         }
     }
 }
@@ -548,6 +548,16 @@ mod tests {
             .with_compression(true)
             .to_lark_options();
         assert_eq!(enabled.compression, lark_kv::CompressionType::Lz4);
+    }
+
+    #[test]
+    fn default_durability_is_immediate() {
+        let opts = LarkStoreOptions::new();
+        assert_eq!(opts.durability(), DurabilityMode::Immediate);
+        assert_eq!(
+            opts.to_lark_options().durability,
+            lark_kv::DurabilityMode::Immediate
+        );
     }
 
     #[test]

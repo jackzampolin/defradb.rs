@@ -5,6 +5,7 @@ use cli::config::{
     LogLevel, LogOutput, NetConfig,
 };
 use cli::error::Error;
+use storage::backends::DurabilityMode;
 
 #[test]
 fn test_log_config_defaults() {
@@ -43,6 +44,7 @@ fn test_datastore_config_defaults() {
     assert!(!config.no_encryption);
     assert!(!config.no_signing);
     assert_eq!(config.default_key_type, "secp256k1");
+    assert_eq!(config.durability, DurabilityMode::Immediate);
 }
 
 #[test]

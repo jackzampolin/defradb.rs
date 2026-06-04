@@ -370,26 +370,32 @@ impl Node {
                     info!("Using Lark datastore at {}", config.data_path().display());
                     let opts =
                         LarkStoreOptions::from_env().with_durability(config.datastore.durability);
-                    let store = Arc::new(storage::LarkStore::open_with_options(
-                        config.data_path(),
-                        opts,
-                    )?);
-                    info!("Using unified ACP store (namespace isolated in main database)");
-                    let acp_store: Arc<dyn acp::AcpStore> =
-                        Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
-                    let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
-                        Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
-                    Self::init_store_and_server(
-                        store,
-                        &config,
-                        peer_keypair,
-                        user_identity.clone(),
-                        acp_store,
-                        zanzibar_store,
-                        node_identity_did.clone(),
-                        se_key,
-                    )
-                    .await?
+                    let backend = storage::LarkStore::open_with_options(config.data_path(), opts)?;
+                    if config.datastore.at_rest_encryption {
+                        info!("At-rest encryption enabled (value-only, AES-256-GCM)");
+                        let key = Self::load_or_create_encryption_key(&config)?;
+                        let store =
+                            Arc::new(storage::encrypted_store::EncryptedStore::new(backend, key));
+                        Self::init_persistent_store_and_server(
+                            store,
+                            &config,
+                            peer_keypair,
+                            user_identity.clone(),
+                            node_identity_did.clone(),
+                            se_key,
+                        )
+                        .await?
+                    } else {
+                        Self::init_persistent_store_and_server(
+                            Arc::new(backend),
+                            &config,
+                            peer_keypair,
+                            user_identity.clone(),
+                            node_identity_did.clone(),
+                            se_key,
+                        )
+                        .await?
+                    }
                 }
                 #[cfg(not(feature = "lark"))]
                 DatastoreType::Lark => {

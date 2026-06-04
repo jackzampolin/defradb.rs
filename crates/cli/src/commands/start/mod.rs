@@ -43,7 +43,7 @@ pub struct StartArgs {
     #[arg(long)]
     pub max_txn_retries: Option<u32>,
 
-    /// Specify the datastore to use (supported: redb, memory, fjall, rocksdb)
+    /// Specify the datastore to use (supported: lark, redb, memory, fjall, rocksdb)
     #[arg(long)]
     pub store: Option<String>,
 
@@ -104,8 +104,8 @@ pub struct StartArgs {
     #[arg(long, value_delimiter = ',')]
     pub replicator_retry_intervals: Option<Vec<u32>>,
 
-    /// Storage durability mode: "eventual" (default, matches Go) or
-    /// "immediate" (fsync every commit, safer against OS crashes)
+    /// Storage durability mode: "immediate" (default, fsync every commit) or
+    /// "eventual" (defer fsync to OS for higher write throughput)
     #[arg(long)]
     pub durability: Option<String>,
 

@@ -310,19 +310,44 @@ impl NodeBuilder {
                 }
             }
 
-            tracing::info!(
-                storage_backend = "redb",
-                data_path = %path.display(),
-                "embedded node starting"
-            );
+            #[cfg(feature = "redb")]
+            {
+                tracing::info!(
+                    storage_backend = "redb",
+                    data_path = %path.display(),
+                    "embedded node starting"
+                );
 
-            let redb = storage::RedbStore::open(
-                path.to_str()
-                    .ok_or_else(|| anyhow!("data path contains non-UTF-8 characters"))?,
-            )
-            .with_context(|| format!("failed to open redb store at '{}'", path.display()))?;
+                let redb = storage::RedbStore::open(
+                    path.to_str()
+                        .ok_or_else(|| anyhow!("data path contains non-UTF-8 characters"))?,
+                )
+                .with_context(|| format!("failed to open redb store at '{}'", path.display()))?;
 
-            (EmbeddedStore::Redb(redb), Persistence::Persistent)
+                (EmbeddedStore::Redb(redb), Persistence::Persistent)
+            }
+
+            #[cfg(all(not(feature = "redb"), feature = "lark"))]
+            {
+                tracing::info!(
+                    storage_backend = "lark",
+                    data_path = %path.display(),
+                    "embedded node starting"
+                );
+
+                let lark = storage::LarkStore::open(&path).with_context(|| {
+                    format!("failed to open lark store at '{}'", path.display())
+                })?;
+
+                (EmbeddedStore::Lark(lark), Persistence::Persistent)
+            }
+
+            #[cfg(all(not(feature = "redb"), not(feature = "lark")))]
+            {
+                return Err(anyhow!(
+                    "persistent embedded storage requires the redb or lark feature"
+                ));
+            }
         } else {
             tracing::info!(
                 storage_backend = "memory",

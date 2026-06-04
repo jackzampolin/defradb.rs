@@ -210,8 +210,8 @@ pub struct DatastoreConfig {
     pub default_key_type: String,
     /// Durability mode for the storage backend.
     ///
-    /// - `eventual` (default): defer fsync to OS
-    /// - `immediate`: fsync on every commit — safe against OS crashes
+    /// - `immediate` (default): fsync on every commit, safe against OS crashes
+    /// - `eventual`: defer fsync to OS for higher write throughput
     #[serde(default)]
     pub durability: DurabilityMode,
     /// Max DAG recursion depth for merge operations. Default: 1024.

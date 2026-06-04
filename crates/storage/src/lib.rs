@@ -114,7 +114,7 @@ pub mod stores;
 pub use backends::MemoryStore;
 
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-pub use backends::RedbStore;
+pub use backends::{RedbStore, RedbStoreOptions};
 
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 pub use backends::{FjallStore, FjallStoreOptions};

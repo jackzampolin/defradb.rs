@@ -243,6 +243,9 @@ impl ManagedP2PSystem {
 #[non_exhaustive]
 pub enum EmbeddedStore {
     Memory(storage::MemoryStore),
+    #[cfg(feature = "lark")]
+    Lark(storage::LarkStore),
+    #[cfg(feature = "redb")]
     Redb(storage::RedbStore),
     /// A backend wrapped in transparent at-rest value encryption.
     Encrypted(Box<storage::encrypted_store::EncryptedStore<EmbeddedStore>>),
@@ -264,6 +267,9 @@ impl storage::Store for EmbeddedStore {
     async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
         match self {
             Self::Memory(store) => store.new_txn(readonly).await,
+            #[cfg(feature = "lark")]
+            Self::Lark(store) => store.new_txn(readonly).await,
+            #[cfg(feature = "redb")]
             Self::Redb(store) => store.new_txn(readonly).await,
             Self::Encrypted(store) => store.new_txn(readonly).await,
         }
@@ -272,6 +278,9 @@ impl storage::Store for EmbeddedStore {
     async fn close(&self) -> storage::Result<()> {
         match self {
             Self::Memory(store) => store.close().await,
+            #[cfg(feature = "lark")]
+            Self::Lark(store) => store.close().await,
+            #[cfg(feature = "redb")]
             Self::Redb(store) => store.close().await,
             Self::Encrypted(store) => store.close().await,
         }

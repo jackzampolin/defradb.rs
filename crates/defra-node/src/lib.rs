@@ -536,8 +536,9 @@ fn timeout_secs(timeout: Duration) -> u64 {
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
 pub enum StorageBackend {
-    /// Pure-Rust embedded database. Loads the full dataset into memory on open,
-    /// which can be slow for very large stores (10 GB+).
+    /// Pure-Rust LSM-tree backend.
+    Lark,
+    /// Pure-Rust embedded database using redb.
     #[default]
     Redb,
     /// RocksDB LSM-tree backend. Constant-time open regardless of dataset size,
@@ -550,12 +551,14 @@ pub enum StorageBackend {
 pub struct NodeBuilder {
     data_path: Option<PathBuf>,
     storage_backend: StorageBackend,
+    storage_durability: storage::backends::DurabilityMode,
     embedding_url: Option<String>,
     embedding_model: Option<String>,
     embedding_api_key: Option<String>,
     document_acp: DocumentAcpConfig,
     node_identity_did: Option<String>,
     node_acp_enabled: bool,
+    at_rest_encryption_key: Option<[u8; 32]>,
     query_timeout: Option<Duration>,
     query_limits: QueryLimits,
     #[cfg(feature = "http")]
@@ -583,6 +586,22 @@ struct StoreBuildArgs {
     telemetry_handle: Option<TelemetryHandle>,
 }
 
+struct PersistentStoreBuildArgs {
+    document_acp_config: DocumentAcpConfig,
+    db_options: db::DbOptions,
+    event_bus: Arc<dyn events::Bus>,
+    node_identity_did: Option<String>,
+    node_acp_enabled: bool,
+    query_timeout: Option<Duration>,
+    query_limits: QueryLimits,
+    #[cfg(feature = "http")]
+    transaction_cleanup_config: Option<TransactionCleanupConfig>,
+    #[cfg(feature = "p2p")]
+    p2p_config: Option<P2PConfig>,
+    #[cfg(feature = "otel")]
+    telemetry_handle: Option<TelemetryHandle>,
+}
+
 impl NodeBuilder {
     /// Set the data directory for persistent storage.
     /// If not set, uses in-memory storage.
@@ -594,9 +613,27 @@ impl NodeBuilder {
     /// Select the persistent storage backend (default: `Redb`).
     ///
     /// Has no effect when `data_path` is not set (in-memory mode).
-    /// Using `StorageBackend::RocksDb` requires the `rocksdb` feature.
+    /// Using a backend requires that backend feature to be enabled.
     pub fn with_storage_backend(mut self, backend: StorageBackend) -> Self {
         self.storage_backend = backend;
+        self
+    }
+
+    /// Set the persistent storage durability mode (default: `Immediate`).
+    ///
+    /// `Immediate` fsyncs acknowledged commits. `Eventual` can improve write
+    /// throughput, but OS crashes may lose acknowledged writes.
+    pub fn with_storage_durability(
+        mut self,
+        durability: storage::backends::DurabilityMode,
+    ) -> Self {
+        self.storage_durability = durability;
+        self
+    }
+
+    /// Enable transparent at-rest value encryption for the persistent storage backend.
+    pub fn with_at_rest_encryption_key(mut self, key: [u8; 32]) -> Self {
+        self.at_rest_encryption_key = Some(key);
         self
     }
 
@@ -760,43 +797,79 @@ impl NodeBuilder {
         let node = if let Some(path) = self.data_path {
             tokio::fs::create_dir_all(&path).await?;
 
+            let persistent_args = PersistentStoreBuildArgs {
+                document_acp_config: self.document_acp.clone(),
+                db_options: db_options.clone(),
+                event_bus,
+                node_identity_did: node_identity_did.clone(),
+                node_acp_enabled,
+                query_timeout,
+                query_limits,
+                #[cfg(feature = "http")]
+                transaction_cleanup_config,
+                #[cfg(feature = "p2p")]
+                p2p_config,
+                #[cfg(feature = "otel")]
+                telemetry_handle,
+            };
+
             match self.storage_backend {
+                #[cfg(feature = "lark")]
+                StorageBackend::Lark => {
+                    tracing::info!(
+                        storage_backend = "lark",
+                        data_path = %path.display(),
+                        "embedded node starting"
+                    );
+                    let opts =
+                        storage::LarkStoreOptions::new().with_durability(self.storage_durability);
+                    let store = storage::LarkStore::open_with_options(&path, opts)
+                        .map_err(|e| anyhow::anyhow!("failed to open lark store: {}", e))?;
+
+                    Self::build_with_persistent_store(
+                        store,
+                        self.at_rest_encryption_key,
+                        persistent_args,
+                    )
+                    .await?
+                }
+                #[cfg(not(feature = "lark"))]
+                StorageBackend::Lark => {
+                    return Err(anyhow::anyhow!(
+                        "Lark backend requested but the `lark` feature is not enabled. \
+                         Rebuild with `--features lark`."
+                    ));
+                }
+                #[cfg(feature = "redb")]
                 StorageBackend::Redb => {
                     tracing::info!(
                         storage_backend = "redb",
                         data_path = %path.display(),
                         "embedded node starting"
                     );
-                    let store = Arc::new(
-                        storage::RedbStore::open(path.to_str().ok_or_else(|| {
+                    let opts =
+                        storage::RedbStoreOptions::new().with_durability(self.storage_durability);
+                    let store = storage::RedbStore::open_with_options(
+                        path.to_str().ok_or_else(|| {
                             anyhow::anyhow!("data_path contains non-UTF8 characters")
-                        })?)
-                        .map_err(|e| anyhow::anyhow!("failed to open redb store: {}", e))?,
-                    );
+                        })?,
+                        opts,
+                    )
+                    .map_err(|e| anyhow::anyhow!("failed to open redb store: {}", e))?;
 
-                    let acp_store: Arc<dyn acp::AcpStore> =
-                        Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
-
-                    Self::build_with_store(
+                    Self::build_with_persistent_store(
                         store,
-                        StoreBuildArgs {
-                            acp_store,
-                            document_acp_config: self.document_acp.clone(),
-                            db_options: db_options.clone(),
-                            event_bus,
-                            node_identity_did: node_identity_did.clone(),
-                            node_acp_enabled,
-                            query_timeout,
-                            query_limits,
-                            #[cfg(feature = "http")]
-                            transaction_cleanup_config,
-                            #[cfg(feature = "p2p")]
-                            p2p_config,
-                            #[cfg(feature = "otel")]
-                            telemetry_handle,
-                        },
+                        self.at_rest_encryption_key,
+                        persistent_args,
                     )
                     .await?
+                }
+                #[cfg(not(feature = "redb"))]
+                StorageBackend::Redb => {
+                    return Err(anyhow::anyhow!(
+                        "Redb backend requested but the `redb` feature is not enabled. \
+                         Rebuild with `--features redb`."
+                    ));
                 }
                 #[cfg(feature = "rocksdb")]
                 StorageBackend::RocksDb => {
@@ -805,32 +878,15 @@ impl NodeBuilder {
                         data_path = %path.display(),
                         "embedded node starting"
                     );
-                    let store = Arc::new(
-                        storage::RocksDbStore::open(&path)
-                            .map_err(|e| anyhow::anyhow!("failed to open rocksdb store: {}", e))?,
-                    );
+                    let opts = storage::RocksDbStoreOptions::new()
+                        .with_durability(self.storage_durability);
+                    let store = storage::RocksDbStore::open_with_options(&path, opts)
+                        .map_err(|e| anyhow::anyhow!("failed to open rocksdb store: {}", e))?;
 
-                    let acp_store: Arc<dyn acp::AcpStore> =
-                        Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
-
-                    Self::build_with_store(
+                    Self::build_with_persistent_store(
                         store,
-                        StoreBuildArgs {
-                            acp_store,
-                            document_acp_config: self.document_acp.clone(),
-                            db_options: db_options.clone(),
-                            event_bus,
-                            node_identity_did: node_identity_did.clone(),
-                            node_acp_enabled,
-                            query_timeout,
-                            query_limits,
-                            #[cfg(feature = "http")]
-                            transaction_cleanup_config,
-                            #[cfg(feature = "p2p")]
-                            p2p_config,
-                            #[cfg(feature = "otel")]
-                            telemetry_handle,
-                        },
+                        self.at_rest_encryption_key,
+                        persistent_args,
                     )
                     .await?
                 }
@@ -937,6 +993,65 @@ impl NodeBuilder {
         }
 
         Ok(node)
+    }
+
+    async fn build_with_persistent_store<S: storage::corekv::Store + 'static>(
+        store: S,
+        at_rest_encryption_key: Option<[u8; 32]>,
+        args: PersistentStoreBuildArgs,
+    ) -> anyhow::Result<EmbeddedNode> {
+        if let Some(key) = at_rest_encryption_key {
+            tracing::info!("at-rest encryption enabled (value-only, AES-256-GCM)");
+            let store = Arc::new(storage::encrypted_store::EncryptedStore::new(store, key));
+            Self::build_with_persistent_store_arc(store, args).await
+        } else {
+            Self::build_with_persistent_store_arc(Arc::new(store), args).await
+        }
+    }
+
+    async fn build_with_persistent_store_arc<S: storage::corekv::Store + 'static>(
+        store: Arc<S>,
+        args: PersistentStoreBuildArgs,
+    ) -> anyhow::Result<EmbeddedNode> {
+        let PersistentStoreBuildArgs {
+            document_acp_config,
+            db_options,
+            event_bus,
+            node_identity_did,
+            node_acp_enabled,
+            query_timeout,
+            query_limits,
+            #[cfg(feature = "http")]
+            transaction_cleanup_config,
+            #[cfg(feature = "p2p")]
+            p2p_config,
+            #[cfg(feature = "otel")]
+            telemetry_handle,
+        } = args;
+
+        let acp_store: Arc<dyn acp::AcpStore> =
+            Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
+
+        Self::build_with_store(
+            store,
+            StoreBuildArgs {
+                acp_store,
+                document_acp_config,
+                db_options,
+                event_bus,
+                node_identity_did,
+                node_acp_enabled,
+                query_timeout,
+                query_limits,
+                #[cfg(feature = "http")]
+                transaction_cleanup_config,
+                #[cfg(feature = "p2p")]
+                p2p_config,
+                #[cfg(feature = "otel")]
+                telemetry_handle,
+            },
+        )
+        .await
     }
 
     async fn build_with_store<S: storage::corekv::Store + 'static>(

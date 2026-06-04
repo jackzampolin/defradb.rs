@@ -6,17 +6,17 @@ use crate::corekv::{AsyncTxnCallback, IterOptions, TxnCallback};
 
 /// Controls when data is flushed to disk after a commit.
 ///
-/// Default is `Eventual` (`SyncWrites = false`). Process crashes are safe
-/// due to WAL; only OS crashes risk data loss.
+/// Default is `Immediate`, which fsyncs every commit so acknowledged writes
+/// survive process and OS crashes.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum DurabilityMode {
     /// Flush to disk on every commit. Safe against process and OS crashes.
-    Immediate,
-    /// Rely on the OS to flush eventually (default). Process crash is still
-    /// safe due to WAL.
     #[default]
+    Immediate,
+    /// Rely on the OS to flush eventually. Faster, but OS crashes may lose
+    /// acknowledged writes.
     Eventual,
 }
 

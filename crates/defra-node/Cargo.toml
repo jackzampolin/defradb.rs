@@ -8,7 +8,6 @@ description = "Reusable embedded DefraDB node builder"
 [[bin]]
 name = "coding-session-bench"
 path = "src/bin/coding-session-bench.rs"
-required-features = ["rocksdb"]
 test = false
 
 [features]
