@@ -202,8 +202,14 @@ async fn acp_p2p_subscribe_add_get_single_with_permissioned_collection_test(clus
     )
     .await;
 
+    // node0 is the creating node: the doc's owner is registered there, so Local ACP
+    // gates it and anonymous sees nothing.
     assert!(query_user_names(&node0, None).is_empty());
-    assert!(query_user_names(&node1, None).is_empty());
+    // Local ACP is node-local; the replicated doc is public on the peer (matches Go).
+    // node1 never registered the owner, so anonymous sees the replicated "John".
+    assert!(query_user_names(&node1, None)
+        .iter()
+        .any(|name| name == "John"));
 }
 
 async fn acp_p2p_one_to_one_replicator_with_permissioned_collection_test(cluster: TestCluster) {
@@ -227,8 +233,12 @@ async fn acp_p2p_one_to_one_replicator_with_permissioned_collection_test(cluster
     )
     .await;
 
+    // node0 is the creating node: Local ACP gates the doc, anonymous sees nothing.
     assert!(query_user_names(&node0, None).is_empty());
-    assert!(query_user_names(&node1, None).is_empty());
+    // Local ACP is node-local; the replicated doc is public on the peer (matches Go).
+    assert!(query_user_names(&node1, None)
+        .iter()
+        .any(|name| name == "John"));
 }
 
 async fn acp_p2p_update_private_documents_on_different_nodes_test(cluster: TestCluster) {
@@ -274,8 +284,28 @@ async fn acp_p2p_update_private_documents_on_different_nodes_test(cluster: TestC
             .any(|name| name == "ShahzadLoneUpdated"),
         "node1 should expose its updated local document"
     );
+    // node0 created "Shahzad" (gated locally) and node1's doc never replicates back
+    // (replicator is node0 -> node1 only), so anonymous on node0 sees nothing.
     assert!(query_user_names(&node0, None).is_empty());
-    assert!(query_user_names(&node1, None).is_empty());
+    // Local ACP is node-local; node0's doc replicated to the peer is public there
+    // (matches Go), so anonymous on node1 sees it. Poll for the updated value to
+    // land (the update replicates after the create).
+    poll_until(
+        || {
+            query_user_names(&node1, None)
+                .iter()
+                .any(|name| name == "ShahzadUpdated")
+        },
+        Duration::from_secs(15),
+        Duration::from_millis(200),
+        "node0's updated doc did not replicate to the peer for anonymous to see",
+    )
+    .await;
+    // node1's own doc ("ShahzadLoneUpdated") was created here and remains gated, so
+    // anonymous does not see it.
+    assert!(!query_user_names(&node1, None)
+        .iter()
+        .any(|name| name == "ShahzadLoneUpdated"));
 }
 
 async fn acp_p2p_delete_private_documents_on_different_nodes_test(cluster: TestCluster) {

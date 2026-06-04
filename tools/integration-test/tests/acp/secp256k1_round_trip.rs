@@ -5,17 +5,17 @@
 //! produces for the same private bytes. Those tests cover the conversion
 //! pipeline in isolation; this test exercises the full flow:
 //!
-//!   secp256k1 owner -> create ACP-protected doc on node0
+//!   secp256k1 owner -> create ACP-protected doc on node0 (owner registered there)
 //!     -> P2P replicate to node1
-//!       -> node1 registers doc under owner's secp256k1 DID
-//!         -> owner-only ACP operations succeed against node1
-//!         -> anonymous queries on node1 are blocked
+//!       -> doc is public on the peer (Local ACP is node-local, matches Go)
+//!         -> owner-only ACP operations succeed against node0 (the creating node)
 //!
-//! The "owner-only on node1" assertion is the key parity check: granting a
-//! reader relationship via `acp_relationship_add` requires the caller to be
-//! the registered owner of the document. If the secp256k1 DID survived the
-//! round trip — protobuf encoding, gossipsub publish, merge, and ACP
-//! registration — only the original owner can grant a relation on node1.
+//! The "owner-only grant on node0" assertion is the key parity check: granting
+//! a reader relationship via `acp_relationship_add` requires the caller to be
+//! the registered owner of the document. The owner is registered only on the
+//! creating node (node0); relationships do not propagate to peers, so the grant
+//! is issued and verified on node0. The secp256k1 DID surviving creation/ACP
+//! registration on node0 is what lets the original owner grant a relation there.
 //!
 //! Tracks #890.
 
@@ -51,7 +51,7 @@ async fn rust_rust_secp256k1_acp_round_trip() {
     );
 
     // A second secp256k1 identity used as the relationship target: granting
-    // Bob a reader relation on node1 only succeeds if node1 has Alice
+    // Bob a reader relation on node0 only succeeds if node0 has Alice
     // registered as the owner of the document.
     let bob = generate_identity(&binary_path).expect("generate bob secp256k1 identity");
     assert!(bob.did.starts_with("did:key:z7r8"));
@@ -120,63 +120,76 @@ async fn rust_rust_secp256k1_acp_round_trip() {
         .expect("_docID from create response")
         .to_string();
 
-    // Wait until Alice can read the replicated doc on node1. This proves
-    // both that the document arrived AND that node1 registered her secp256k1
-    // DID as owner (otherwise her authenticated query would return zero rows).
+    // Wait until the doc replicates to node1. Local ACP is node-local; the
+    // replicated copy is public on the peer (node1 never registered the owner,
+    // matches Go), so any caller — including anonymous — can read it on node1.
     let node1_ref = &node1;
-    let alice_key = alice.private_key_hex.clone();
     poll_until(
         || {
             node1_ref
-                .query_with_identity("query { User { _docID name } }", &alice_key)
+                .query("query { User { _docID name } }")
                 .ok()
                 .and_then(|v| v["User"].as_array().map(|arr| !arr.is_empty()))
                 .unwrap_or(false)
         },
         Duration::from_secs(15),
         Duration::from_millis(200),
-        "protected doc did not replicate to node1 under alice's secp256k1 identity",
+        "protected doc did not replicate to node1",
     )
     .await;
 
-    // Strongest behavioral assertion: the relationship grant call requires
-    // the caller to be the document's owner. If the secp256k1 DID survived
-    // the round trip and node1 registered Alice correctly, this succeeds.
-    // If node1 registered "anonymous peer" or some other DID, this errors.
-    node1
+    // Strongest behavioral assertion: the relationship grant call requires the
+    // caller to be the document's owner, and the owner is registered only on the
+    // creating node (node0). If the secp256k1 DID survived creation/ACP
+    // registration on node0, alice can grant a reader there. (Grants do not
+    // propagate to peers; cross-node access control is SourceHub ACP's job.)
+    node0
         .acp_relationship_add("User", &doc_id, "reader", &bob.did, &alice.private_key_hex)
         .expect(
-            "alice (secp256k1 owner) must be able to grant reader on node1 — \
-             requires node1 to have registered her DID as the document owner",
+            "alice (secp256k1 owner) must be able to grant reader on node0 — \
+             requires node0 to have registered her DID as the document owner",
         );
 
-    // Cross-check from Bob's side: the grant is meaningless unless it
-    // actually unlocked read access on node1.
-    let bob_view_after_grant = node1
+    // Cross-check from Bob's side on node0 (the owner's node): the grant unlocked
+    // read access for the granted reader. Before the grant, node0 gates the doc.
+    let bob_view_after_grant = node0
         .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
-        .expect("bob query after grant");
+        .expect("bob query after grant on node0");
     let bob_users_after = bob_view_after_grant["User"]
         .as_array()
         .expect("bob User result not array");
     assert_eq!(
         bob_users_after.len(),
         1,
-        "bob (granted reader on node1) must see the protected doc"
+        "bob (granted reader on node0) must see the protected doc on the owner's node"
     );
     assert_eq!(bob_users_after[0]["name"], "Protected");
 
-    // And the negative half: anonymous queries on node1 are still blocked,
-    // confirming the document remains ACP-gated rather than slipping through
-    // as a public record.
+    // node0 is the creating node and still gates: anonymous sees nothing there.
+    let anon_view_node0 = node0
+        .query("query { User { _docID name } }")
+        .expect("anonymous query on node0");
+    assert!(
+        anon_view_node0["User"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false),
+        "anonymous must not see the protected doc on the creating node0",
+    );
+
+    // On the peer (node1) Local ACP is node-local; the replicated doc is public
+    // there, so anonymous sees it (matches Go). The owner is registered only on
+    // node0, so node1 does not gate.
     let anon_view = node1
         .query("query { User { _docID name } }")
         .expect("anonymous query on node1");
     let anon_users = anon_view["User"]
         .as_array()
         .expect("anon User result not array");
-    assert!(
-        anon_users.is_empty(),
-        "anonymous reader must not see the secp256k1-owned protected doc; got {:?}",
+    assert_eq!(
+        anon_users.len(),
+        1,
+        "anonymous must see the replicated doc on the peer (public there; Local ACP is node-local); got {:?}",
         anon_users
     );
 }
