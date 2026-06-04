@@ -171,6 +171,10 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             _ => RoutePermission::Required(NodePermission::P2pDocumentList),
         },
         "/api/v0/p2p/documents/sync" => RoutePermission::Required(NodePermission::P2pSyncDocuments),
+        // Management relay: this node connects to and commands the target peer,
+        // so it reuses the peer-connect permission to prevent an open relay.
+        "/api/v0/p2p/manage" => RoutePermission::Required(NodePermission::P2pPeerConnect),
+        "/api/v0/p2p/manage/query" => RoutePermission::Required(NodePermission::P2pPeerConnect),
 
         // =====================================================================
         // ACP (Document Access Control)
@@ -476,6 +480,16 @@ mod tests {
                 "/api/v0/p2p/documents/sync",
                 Method::POST,
                 RoutePermission::Required(NodePermission::P2pSyncDocuments),
+            ),
+            (
+                "/api/v0/p2p/manage",
+                Method::POST,
+                RoutePermission::Required(NodePermission::P2pPeerConnect),
+            ),
+            (
+                "/api/v0/p2p/manage/query",
+                Method::POST,
+                RoutePermission::Required(NodePermission::P2pPeerConnect),
             ),
             // ACP
             (

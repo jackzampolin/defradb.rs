@@ -508,6 +508,94 @@ pub(super) async fn handle_command(
             });
             track_task(spawned_tasks, task);
         }
+        IrohCommand::SendManageRequest {
+            peer_id,
+            request,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
+            let task = tokio::spawn(async move {
+                let result = handle_fire_and_forget(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_MANAGE_REQ,
+                    &request,
+                    direct_addr,
+                    &connection_cache,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
+            track_task(spawned_tasks, task);
+        }
+        IrohCommand::SendManageResponse {
+            peer_id,
+            reply_msg,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
+            let task = tokio::spawn(async move {
+                let result = handle_fire_and_forget(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_MANAGE_RESP,
+                    &reply_msg,
+                    direct_addr,
+                    &connection_cache,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
+            track_task(spawned_tasks, task);
+        }
+        IrohCommand::SendManageQueryRequest {
+            peer_id,
+            request,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
+            let task = tokio::spawn(async move {
+                let result = handle_fire_and_forget(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_MANAGE_QUERY_REQ,
+                    &request,
+                    direct_addr,
+                    &connection_cache,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
+            track_task(spawned_tasks, task);
+        }
+        IrohCommand::SendManageQueryResponse {
+            peer_id,
+            reply_msg,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let endpoint = endpoint.clone();
+            let connection_cache = Arc::clone(connection_cache);
+            let task = tokio::spawn(async move {
+                let result = handle_fire_and_forget(
+                    &endpoint,
+                    &peer_id,
+                    protocols::ALPN_MANAGE_QUERY_RESP,
+                    &reply_msg,
+                    direct_addr,
+                    &connection_cache,
+                )
+                .await;
+                let _ = reply.send(result);
+            });
+            track_task(spawned_tasks, task);
+        }
         IrohCommand::SyncBlocks {
             root,
             providers,

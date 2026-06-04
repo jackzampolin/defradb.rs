@@ -36,6 +36,12 @@ pub unsafe extern "C" fn get_nac_status(node_ptr: usize, identity_did: *const c_
             NodePermission::NacStatus
         ));
 
+        // Bind the caller's identity so any NAC-gated method reached by the body
+        // resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
             Some(m) => m,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),

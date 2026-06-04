@@ -49,6 +49,16 @@ pub unsafe extern "C" fn lens_add(
             identity_did,
             NodePermission::LensCreate
         ));
+
+        // Bind the caller's identity so the NAC-gated DB ops (set_migration /
+        // add_lens) resolve the actual caller instead of the wildcard. The body
+        // runs on this thread via `block_on`, so the thread-local is visible
+        // throughout; the guard restores on drop. set_migration(.., None) falls
+        // back to this ambient identity.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         let lens_str = try_ffi!(require_c_str(lens_json, "lens_json"));
 
         // If the JSON contains version IDs, this is a full migration config — delegate to
@@ -64,7 +74,7 @@ pub unsafe extern "C" fn lens_add(
 
                 let result = rt.block_on(async {
                     let transform_id = database
-                        .set_migration(full_config)
+                        .set_migration(full_config, None)
                         .await
                         .map_err(|e| format!("failed to set migration: {}", e))?;
                     Ok::<String, String>(transform_id.to_string())
@@ -157,6 +167,14 @@ pub unsafe extern "C" fn lens_add_in_txn(
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
+        // Bind the caller's identity so the registry-layer NAC gate on
+        // add_lens_in_txn resolves the actual caller instead of the wildcard. The
+        // body runs on this thread via `block_on`, so the thread-local is visible
+        // throughout; the guard restores on drop.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         let result = rt.block_on(async {
             let modules: Vec<LensModule> =
                 if let Ok(lens_obj) = serde_json::from_str::<serde_json::Value>(&lens_str) {
@@ -220,6 +238,12 @@ pub unsafe extern "C" fn lens_list(node_ptr: usize, identity_did: *const c_char)
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
+        // Bind the caller's identity so any DB-layer NAC gate reached by the body
+        // resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         ffi_async!(rt, {
             let lenses = lens_store
                 .list()
@@ -259,6 +283,12 @@ pub unsafe extern "C" fn lens_list_in_txn(
             Some(r) => r,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
+
+        // Bind the caller's identity so any registry-layer NAC gate reached by the
+        // body resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
 
         ffi_async!(rt, {
             let lenses = registry

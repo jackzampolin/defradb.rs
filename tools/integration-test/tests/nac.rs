@@ -6,6 +6,8 @@ mod cross_compartment_isolation;
 mod dac_access_matrix;
 #[path = "nac/document_acp.rs"]
 mod document_acp;
+#[path = "nac/multi_doc_create.rs"]
+mod multi_doc_create;
 #[path = "nac/operations.rs"]
 mod operations;
 #[path = "nac/p2p_management.rs"]

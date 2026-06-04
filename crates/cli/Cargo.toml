@@ -26,6 +26,7 @@ crypto = { path = "../crypto" }
 identity = { path = "../identity" }
 kms = { path = "../kms" }
 p2p = { path = "../p2p", features = ["libp2p-transport"] }
+defra-p2p-adapter = { path = "../p2p-adapter", default-features = false, features = ["libp2p"] }
 defra-http = { path = "../http" }
 query = { path = "../query" }
 db = { path = "../db" }
@@ -117,7 +118,7 @@ redb = ["storage/redb"]
 fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
 vendored-openssl = ["dep:openssl-sys"]
-iroh = ["p2p/iroh-transport", "dep:iroh-net", "dep:rand"]
+iroh = ["p2p/iroh-transport", "defra-p2p-adapter/iroh", "dep:iroh-net", "dep:rand"]
 profiling = ["dep:tracing-chrome"]
 # OpenTelemetry OTLP exporter. Mirrors Go's `//go:build telemetry`: compile-time
 # opt-in. When built with this feature, runtime default is on (Go parity); use

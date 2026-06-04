@@ -12,12 +12,16 @@ mod car;
 mod doc_sync;
 mod identity;
 mod inbound;
+mod manage;
 mod pushlog;
 mod se_query;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use futures::AsyncReadExt;
+use libp2p::Stream;
 
 use libp2p::StreamProtocol;
 use libp2p_stream as stream;
@@ -29,7 +33,8 @@ use libp2p::PeerId;
 use crate::message::{DocSyncReply, IdentityResponse, PushLogReply, PushLogRequest};
 use crate::protocol::{
     CAR_REQUEST_PROTOCOL, CAR_RESPONSE_PROTOCOL, IDENTITY_REQUEST_PROTOCOL,
-    IDENTITY_RESPONSE_PROTOCOL, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
+    IDENTITY_RESPONSE_PROTOCOL, MANAGE_QUERY_REQUEST_PROTOCOL, MANAGE_QUERY_RESPONSE_PROTOCOL,
+    MANAGE_REQUEST_PROTOCOL, MANAGE_RESPONSE_PROTOCOL, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
     SE_QUERY_REQUEST_PROTOCOL, SE_QUERY_RESPONSE_PROTOCOL, SE_REQUEST_PROTOCOL,
     SE_RESPONSE_PROTOCOL,
 };
@@ -168,6 +173,26 @@ impl TwoStreamHandler {
         StreamProtocol::new(SE_QUERY_RESPONSE_PROTOCOL)
     }
 
+    /// Get the management mutate request protocol.
+    pub fn manage_request_protocol() -> StreamProtocol {
+        StreamProtocol::new(MANAGE_REQUEST_PROTOCOL)
+    }
+
+    /// Get the management mutate response protocol.
+    pub fn manage_response_protocol() -> StreamProtocol {
+        StreamProtocol::new(MANAGE_RESPONSE_PROTOCOL)
+    }
+
+    /// Get the management query request protocol.
+    pub fn manage_query_request_protocol() -> StreamProtocol {
+        StreamProtocol::new(MANAGE_QUERY_REQUEST_PROTOCOL)
+    }
+
+    /// Get the management query response protocol.
+    pub fn manage_query_response_protocol() -> StreamProtocol {
+        StreamProtocol::new(MANAGE_QUERY_RESPONSE_PROTOCOL)
+    }
+
     /// Get the CAR request protocol.
     pub fn car_request_protocol() -> StreamProtocol {
         StreamProtocol::new(CAR_REQUEST_PROTOCOL)
@@ -229,6 +254,36 @@ impl TwoStreamHandler {
     pub fn error_reply(request: &PushLogRequest, error: &str) -> PushLogReply {
         PushLogReply::error(&request.message_id, error)
     }
+}
+
+/// Read a bounded, timed CBOR message from a stream.
+///
+/// Reads at most `max_msg_size` bytes within `stream_read_timeout`, then
+/// deserializes the buffer as CBOR into `T`.
+pub(super) async fn read_cbor_message<T>(
+    peer_id: PeerId,
+    mut stream: Stream,
+    max_msg_size: u64,
+    stream_read_timeout: std::time::Duration,
+    label: &'static str,
+) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let mut buf = Vec::new();
+    tokio::time::timeout(
+        stream_read_timeout,
+        (&mut stream).take(max_msg_size).read_to_end(&mut buf),
+    )
+    .await
+    .map_err(|_| {
+        tracing::warn!(peer_id = %peer_id, "{label} stream read timed out");
+        Error::CborDeserialization(format!("{label} stream read timed out"))
+    })?
+    .map_err(|e| Error::CborDeserialization(format!("failed to read {label}: {e}")))?;
+
+    serde_cbor::from_slice(&buf)
+        .map_err(|e| Error::CborDeserialization(format!("failed to decode {label}: {e}")))
 }
 
 #[cfg(test)]

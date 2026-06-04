@@ -340,6 +340,7 @@ async fn graphql_sse(
     let operation_name = request.operation_name;
     let variables = request.variables;
     let did = identity.did().cloned();
+    let acting_did = did.as_ref().map(|d| d.as_str().to_string());
 
     // Resolve signing config and DAC bypass once at subscription setup time
     let signing_config = crate::query_context::resolve_signing_config(&state, &identity);
@@ -395,6 +396,7 @@ async fn graphql_sse(
                     req,
                     signing_config.clone(),
                     dac_bypass,
+                    acting_did.clone(),
                 ).await;
 
                 // Skip empty results (filter excluded the document)

@@ -21,7 +21,7 @@ impl<S: Store> crate::database::DB<S> {
     /// - `InvalidCollectionName` if the collection name is invalid
     /// - `CollectionAlreadyExists` if a collection with this name already exists
     #[instrument(skip(self, txn, schema), fields(collection = %schema.name), name = "db.create_collection")]
-    pub async fn create_collection_with_txn(
+    pub(crate) async fn create_collection_with_txn(
         &self,
         txn: &mut DbTxn<S>,
         mut schema: CollectionVersion,
@@ -264,6 +264,8 @@ impl<S: Store> crate::database::DB<S> {
     /// and updates the process-wide cache.
     #[instrument(skip(self, schema), fields(collection = %schema.name), name = "db.create_collection_auto")]
     pub async fn create_collection(&self, schema: CollectionVersion) -> Result<()> {
+        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .await?;
         let name = schema.name.clone();
         let mut txn = self.new_txn(false).await?;
 
@@ -290,6 +292,8 @@ impl<S: Store> crate::database::DB<S> {
         &self,
         schemas: Vec<CollectionVersion>,
     ) -> Result<Vec<CollectionVersion>> {
+        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .await?;
         // Track old collection_id -> new collection_id mappings.
         // When views are created, create_collection_with_txn regenerates CIDs to include
         // query source data. Sibling schemas' relation fields may reference the old CIDs

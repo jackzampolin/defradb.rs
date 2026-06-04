@@ -748,6 +748,82 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Send a management mutate request to a peer via the manage two-stream protocol.
+    ///
+    /// The response arrives asynchronously as [`HostEvent::ManageReply`].
+    pub async fn send_manage_request(
+        &self,
+        peer_id: PeerId,
+        request: crate::message::ManageRequest,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendManageRequest {
+                peer_id,
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Send a management mutate response to a peer via the manage two-stream protocol.
+    pub async fn send_manage_response(
+        &self,
+        peer_id: PeerId,
+        reply: crate::message::ManageReply,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendManageResponse {
+                peer_id,
+                reply,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Send a management query request to a peer via the manage query two-stream protocol.
+    ///
+    /// The response arrives asynchronously as [`HostEvent::ManageQueryReply`].
+    pub async fn send_manage_query_request(
+        &self,
+        peer_id: PeerId,
+        request: crate::message::ManageQueryRequest,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendManageQueryRequest {
+                peer_id,
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Send a management query response to a peer via the manage query two-stream protocol.
+    pub async fn send_manage_query_response(
+        &self,
+        peer_id: PeerId,
+        reply: crate::message::ManageQueryReply,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendManageQueryResponse {
+                peer_id,
+                reply,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Send a CAR request to a peer (request DAG as CARv1).
     pub async fn send_car_request(&self, peer_id: PeerId, root_cid: Cid) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();

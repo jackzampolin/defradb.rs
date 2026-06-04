@@ -18,6 +18,7 @@ pub(super) struct HttpServerArgs<'a, S: storage::corekv::Store + 'static> {
     pub(super) event_bus: Arc<dyn events::Bus>,
     pub(super) query_setup: &'a QueryRunnerSetup<S>,
     pub(super) p2p_adapter: Option<Arc<dyn defra_http::router::P2POperations>>,
+    pub(super) manage_requester: Option<Arc<dyn defra_http::router::ManageRequester>>,
     pub(super) nac_adapter: Option<Arc<crate::nac_adapter::NacAdapter>>,
     pub(super) acp_setup: &'a DocumentAcpSetup,
     pub(super) zanzibar_store: Arc<dyn acp::ZanzibarStore>,
@@ -36,6 +37,7 @@ impl Node {
             event_bus,
             query_setup,
             p2p_adapter,
+            manage_requester,
             nac_adapter,
             acp_setup,
             zanzibar_store,
@@ -97,6 +99,11 @@ impl Node {
             }
         }
 
+        if let Some(requester) = &manage_requester {
+            server = server.with_manage_arc(requester.clone());
+            info!("P2P remote management requester enabled");
+        }
+
         let lens_adapter = crate::lens_adapter::LensAdapter::new_arc(database.clone());
         server = server.with_lens_arc(lens_adapter);
         info!("Lens HTTP endpoint enabled");
@@ -114,7 +121,10 @@ impl Node {
         let acp_adapter_for_schema: Option<Arc<dyn defra_http::router::AcpOperations>> =
             if config.acp.document_type != AcpDocumentType::None {
                 let acp_adapter = acp_setup.http_adapter.clone().unwrap_or_else(|| {
-                    crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store.clone())
+                    crate::acp_adapter::AcpAdapter::new_arc(
+                        zanzibar_store.clone(),
+                        db::node_access_checker(database.clone()),
+                    )
                 });
                 server = server.with_acp_arc(acp_adapter.clone());
                 info!(
@@ -228,10 +238,12 @@ impl Node {
         // Mirrors the HTTP server's behavior — without this, PG users would
         // be able to register schemas referencing nonexistent policies.
         let pg_schema_manager = if config.acp.document_type != AcpDocumentType::None {
-            let acp_adapter = acp_setup
-                .http_adapter
-                .clone()
-                .unwrap_or_else(|| crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store));
+            let acp_adapter = acp_setup.http_adapter.clone().unwrap_or_else(|| {
+                crate::acp_adapter::AcpAdapter::new_arc(
+                    zanzibar_store,
+                    db::node_access_checker(database.clone()),
+                )
+            });
             crate::schema_adapter::SchemaAdapter::new_pg_arc_with_acp(database, acp_adapter)
         } else {
             crate::schema_adapter::SchemaAdapter::new_pg_arc(database)

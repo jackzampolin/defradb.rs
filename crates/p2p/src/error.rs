@@ -203,6 +203,10 @@ pub enum Error {
         collection_id: String,
     },
 
+    /// Request rejected because the caller is not authorized.
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     /// Connection timed out waiting for peer.
     #[error("connection timed out waiting for peer {0}")]
     ConnectionTimeout(String),
@@ -451,6 +455,14 @@ mod tests {
 
         assert!(rate_limited.is_rate_limited());
         assert!(!ordinary_denial.is_rate_limited());
+    }
+
+    #[test]
+    fn unauthorized_displays() {
+        assert_eq!(
+            Error::Unauthorized("nope".into()).to_string(),
+            "unauthorized: nope"
+        );
     }
 
     #[test]

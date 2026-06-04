@@ -34,7 +34,13 @@ impl<S: Store> DB<S> {
         source = %config.source_schema_version_id,
         dest = %config.destination_schema_version_id
     ))]
-    pub async fn set_migration(&self, config: LensConfig) -> Result<TransformId> {
+    pub async fn set_migration(
+        &self,
+        config: LensConfig,
+        identity: Option<&identity::Did>,
+    ) -> Result<TransformId> {
+        self.check_node_access(identity, acp::nac::NodePermission::MigrationSet)
+            .await?;
         let dest_version_id = config.destination_schema_version_id.clone();
         let source_version_id = config.source_schema_version_id.clone();
         let config_for_persistence = config.clone();
@@ -263,7 +269,10 @@ impl<S: Store> DB<S> {
         &self,
         txn: &DbTxn<S>,
         config: LensConfig,
+        identity: Option<&identity::Did>,
     ) -> Result<TransformId> {
+        self.check_node_access(identity, acp::nac::NodePermission::MigrationSet)
+            .await?;
         self.set_migration_in_txn_with_store(txn, self.lens_store.clone(), config)
             .await
             .map(|outcome| outcome.transform_id)

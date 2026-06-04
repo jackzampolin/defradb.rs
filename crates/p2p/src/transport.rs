@@ -13,7 +13,8 @@ use cid::Cid;
 use crate::error::Result;
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, CarFetchRequest, DocSyncReply, DocSyncRequest,
-    PushLogBroadcast, PushLogReply, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
+    ManageQueryReply, ManageQueryRequest, ManageReply, ManageRequest, PushLogBroadcast,
+    PushLogReply, PushLogRequest, PushSEArtifactsRequest, QuerySEArtifactsReply,
     QuerySEArtifactsRequest,
 };
 use crate::replicator::ReplicatorInfo;
@@ -216,6 +217,22 @@ pub enum TransportEvent<ResponseToken> {
         peer_id: PeerId,
         reply: QuerySEArtifactsReply,
     },
+    ManageRequest {
+        peer_id: PeerId,
+        request: ManageRequest,
+    },
+    ManageReply {
+        peer_id: PeerId,
+        reply: ManageReply,
+    },
+    ManageQueryRequest {
+        peer_id: PeerId,
+        request: ManageQueryRequest,
+    },
+    ManageQueryReply {
+        peer_id: PeerId,
+        reply: ManageQueryReply,
+    },
     Listening(PeerAddr),
 }
 
@@ -252,6 +269,21 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
     // ---- Connection ----
 
     async fn dial(&self, peer_id: &PeerId, addrs: Vec<PeerAddr>) -> Result<()>;
+
+    /// Parse a peer address string into a transport-agnostic peer id and dial
+    /// hints. The accepted string format is transport-specific (libp2p
+    /// multiaddrs vs iroh tickets/endpoint ids), which is why this lives on the
+    /// transport rather than as a free function. Used by callers that need to
+    /// dial a peer given only its shareable address string (e.g. the outbound
+    /// management requester).
+    ///
+    /// The default implementation returns an error; concrete transports
+    /// override it.
+    fn parse_dial_addr(&self, _addr: &str) -> Result<(PeerId, Vec<PeerAddr>)> {
+        Err(crate::error::Error::Transport(
+            "parse_dial_addr is not supported on this transport".to_string(),
+        ))
+    }
 
     async fn listen(&self, addr: PeerAddr) -> Result<()>;
 
@@ -384,6 +416,38 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
     ) -> Result<()> {
         Err(crate::error::Error::Transport(
             "send_se_query_response is not supported on this transport".to_string(),
+        ))
+    }
+
+    async fn send_manage_request(&self, _peer_id: &PeerId, _req: ManageRequest) -> Result<()> {
+        Err(crate::error::Error::Transport(
+            "send_manage_request is not supported on this transport".to_string(),
+        ))
+    }
+
+    async fn send_manage_response(&self, _peer_id: &PeerId, _reply: ManageReply) -> Result<()> {
+        Err(crate::error::Error::Transport(
+            "send_manage_response is not supported on this transport".to_string(),
+        ))
+    }
+
+    async fn send_manage_query_request(
+        &self,
+        _peer_id: &PeerId,
+        _req: ManageQueryRequest,
+    ) -> Result<()> {
+        Err(crate::error::Error::Transport(
+            "send_manage_query_request is not supported on this transport".to_string(),
+        ))
+    }
+
+    async fn send_manage_query_response(
+        &self,
+        _peer_id: &PeerId,
+        _reply: ManageQueryReply,
+    ) -> Result<()> {
+        Err(crate::error::Error::Transport(
+            "send_manage_query_response is not supported on this transport".to_string(),
         ))
     }
 

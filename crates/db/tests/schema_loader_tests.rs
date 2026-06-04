@@ -273,7 +273,7 @@ async fn test_set_migration_placeholder_persists_short_id_mapping() {
         "missing-dst",
         LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
     );
-    db.set_migration(config).await.unwrap();
+    db.set_migration(config, None).await.unwrap();
 
     let versions = db.get_all_collection_versions().await.unwrap();
     assert_eq!(versions.len(), 2);
