@@ -81,10 +81,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             let mut datastore = txn.datastore()?;
             let mut doc_exists = false;
 
-            // Seed counter CRDT from the existing document if CRDT storage is still empty.
-            // Replicated creates can materialize the document value before any later standalone
-            // counter update arrives, so the standalone path needs the same initialization logic
-            // as the batched merge path.
+            // Reconcile the CRDT accumulation store up to the document's current
+            // materialized value before merging. Local increments update only the
+            // document blob, not the accumulation store, so a node that received
+            // the document by replication first (accumulation store already
+            // initialized) would otherwise drop its own local increments when this
+            // remote delta re-materializes the blob. See `Counter::reconcile_int64`.
             if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
                 if let Ok(Some(existing_doc)) =
                     collection.get_with_datastore(&datastore, &doc_id).await
@@ -93,14 +95,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if let Some(field_value) = existing_doc.get(&payload.field_name) {
                         match (numeric_kind, field_value) {
                             (NumericKind::Int64, NormalValue::Int(v)) => {
-                                let _ = counter
-                                    .seed_if_uninitialized_int64(&mut datastore, *v)
-                                    .await;
+                                let _ = counter.reconcile_int64(&mut datastore, *v).await;
                             }
                             (NumericKind::Float64, NormalValue::Float64(v)) => {
-                                let _ = counter
-                                    .seed_if_uninitialized_float64(&mut datastore, *v)
-                                    .await;
+                                let _ = counter.reconcile_float64(&mut datastore, *v).await;
                             }
                             _ => {}
                         }
@@ -200,9 +198,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         )
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
-        // Seed counter CRDT from existing document if CRDT storage isn't initialized.
-        // Local document creation stores counter values in the document layer but not
-        // in CRDT accumulation storage, so we must seed before merging remote deltas.
+        // Reconcile the CRDT accumulation store up to the document's current
+        // materialized value before merging. Local increments (create AND update)
+        // store the counter value in the document blob but not in the accumulation
+        // store, so a node that received the document by replication first would
+        // otherwise drop its own local increments when this remote delta
+        // re-materializes the blob. See `Counter::reconcile_int64`.
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
         let mut doc_exists = false;
         if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
@@ -212,10 +213,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 if let Some(field_value) = existing_doc.get(&payload.field_name) {
                     match (numeric_kind, field_value) {
                         (NumericKind::Int64, NormalValue::Int(v)) => {
-                            let _ = counter.seed_if_uninitialized_int64(datastore, *v).await;
+                            let _ = counter.reconcile_int64(datastore, *v).await;
                         }
                         (NumericKind::Float64, NormalValue::Float64(v)) => {
-                            let _ = counter.seed_if_uninitialized_float64(datastore, *v).await;
+                            let _ = counter.reconcile_float64(datastore, *v).await;
                         }
                         _ => {}
                     }

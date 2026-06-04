@@ -28,6 +28,9 @@ mod partition;
 #[path = "behavioral/parity.rs"]
 mod parity;
 
+#[path = "behavioral/bughunt.rs"]
+mod bughunt;
+
 #[path = "behavioral/index.rs"]
 mod index;
 

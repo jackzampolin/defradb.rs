@@ -218,8 +218,10 @@ async fn update_with_pcounter_simultaneous() {
     // Wait for sync
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // Both nodes should converge to 90 (0 + 45 + 45)
-    // Known gap: bidirectional replication may not be fully functional yet
+    // Both nodes must converge to the SUM, 90 (0 + 45 + 45). The previous
+    // `>= 45` leniency masked a real two-store counter bug: local increments
+    // updated only the document blob, not the CRDT accumulation store, so the
+    // node that received the doc by replication first dropped its own increment.
     let r0 = node0.query("query { Users { age } }").unwrap_or_default();
     let r1 = node1_ref
         .query("query { Users { age } }")
@@ -235,16 +237,8 @@ async fn update_with_pcounter_simultaneous() {
         .and_then(|u| u["age"].as_i64())
         .unwrap_or(0);
 
-    // At minimum, node0 should have its own update (45)
-    assert!(age0 >= 45, "node0 should have at least 45, got {}", age0);
-    assert!(age1 >= 45, "node1 should have at least 45, got {}", age1);
-
-    if age0 != 90 || age1 != 90 {
-        eprintln!(
-            "KNOWN GAP: PCounter bidirectional convergence not yet functional (node0={}, node1={})",
-            age0, age1
-        );
-    }
+    assert_eq!(age0, 90, "PCounter node0 must converge to sum 90");
+    assert_eq!(age1, 90, "PCounter node1 must converge to sum 90");
 }
 
 /// Port: TestP2PUpdate_WithPNCounter_NoError
@@ -432,13 +426,6 @@ async fn update_with_pncounter_simultaneous() {
         .and_then(|u| u["age"].as_i64())
         .unwrap_or(0);
 
-    assert!(age0 >= 45, "node0 should have at least 45, got {}", age0);
-    assert!(age1 >= 45, "node1 should have at least 45, got {}", age1);
-
-    if age0 != 90 || age1 != 90 {
-        eprintln!(
-            "KNOWN GAP: PNCounter bidirectional convergence not yet functional (node0={}, node1={})",
-            age0, age1
-        );
-    }
+    assert_eq!(age0, 90, "PNCounter node0 must converge to sum 90");
+    assert_eq!(age1, 90, "PNCounter node1 must converge to sum 90");
 }

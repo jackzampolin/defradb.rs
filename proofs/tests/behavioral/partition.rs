@@ -330,3 +330,117 @@ async fn convergence_concurrent_same_doc_writes_merge() {
         "replicas must materialize identical document state after merging concurrent edits"
     );
 }
+
+fn tally_hits(node: &DefraClient) -> i64 {
+    node.query("query { Tally { hits } }").expect("query Tally")["Tally"][0]["hits"]
+        .as_i64()
+        .unwrap_or(-1)
+}
+
+async fn poll_hits(node: &DefraClient, want: i64, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if tally_hits(node) == want {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Concurrent PCounter increments must converge to the SUM. Two nodes share a
+/// `hits=0` document over a live bidirectional connection; each increments by 45,
+/// concurrently; both must converge to 90.
+///
+/// REGRESSION: the twin of the LWW priority bug above. A counter's value lives in
+/// two places — the materialized document blob (advanced by BOTH local increments
+/// and merges) and the CRDT accumulation store (`value_key`, advanced ONLY by
+/// merges). A *local* increment updates only the blob; the node that received the
+/// document by replication first already has an initialized accumulation store, so
+/// a remote delta re-materializes the blob from that stale store and silently
+/// drops the node's own increment — converging to 45 instead of 90. Fixed in
+/// `crates/db-merge/src/merge_handler/counter.rs` by reconciling the store up to
+/// the committed blob before every merge (`Counter::reconcile_int64`). Verified:
+/// rust<->rust, go<->go, and rust<->go all converge to 90.
+#[tokio::test]
+async fn convergence_concurrent_counter_increments_sum() {
+    let mut cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_store("redb")
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("build 2-node p2p cluster");
+
+    let schema = "type Tally { name: String  hits: Int @crdt(type: pcounter) }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+
+    let (a0, a1) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+    cluster
+        .client(0)
+        .p2p_connect(&[a1.as_str()])
+        .expect("connect 0->1");
+    cluster
+        .client(1)
+        .p2p_connect(&[a0.as_str()])
+        .expect("connect 1->0");
+    cluster
+        .client(0)
+        .p2p_collection_add(&["Tally"])
+        .expect("subscribe node0");
+    cluster
+        .client(1)
+        .p2p_collection_add(&["Tally"])
+        .expect("subscribe node1");
+    cluster
+        .client(0)
+        .p2p_replicator_set(&["Tally"], &a1)
+        .expect("replicator 0->1");
+    cluster
+        .client(1)
+        .p2p_replicator_set(&["Tally"], &a0)
+        .expect("replicator 1->0");
+
+    // Seed `hits=0` from node0; node1 receives the document by replication first
+    // (the precondition that exposed the bug).
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_Tally(input: {name: "t", hits: 0}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_Tally"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    assert!(
+        poll_hits(&cluster.client(1), 0, Duration::from_secs(20)).await,
+        "seed document must replicate to node1 before the concurrent increments"
+    );
+
+    // Concurrent increments: each node adds 45.
+    for n in [0usize, 1] {
+        cluster
+            .client(n)
+            .query(&format!(
+                r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: 45}}) {{ _docID }} }}"#
+            ))
+            .expect("increment");
+    }
+
+    // CONVERGE: both replicas accumulate BOTH increments → 90.
+    if !poll_hits(&cluster.client(0), 90, Duration::from_secs(30)).await {
+        panic!(
+            "node0 did not converge to 90; hits = {}",
+            tally_hits(&cluster.client(0))
+        );
+    }
+    if !poll_hits(&cluster.client(1), 90, Duration::from_secs(30)).await {
+        panic!(
+            "node1 did not converge to 90; hits = {}",
+            tally_hits(&cluster.client(1))
+        );
+    }
+}

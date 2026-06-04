@@ -211,6 +211,93 @@ async fn parity_samedoc_rust_rust() {
     run_samedoc(cluster, "rust_rust", Some(1)).await;
 }
 
+/// Concurrent PCounter increments (node0 +45, node1 +45) over a cluster — must
+/// converge to the SUM (90) on both nodes. The Rust-only case exposed a
+/// two-store divergence (local increments updated only the document blob, not
+/// the CRDT accumulation store) where the node that received the doc by
+/// replication first silently dropped its own increment. This reports the
+/// Go-only and mixed cases to confirm Go converges (the parity target) and that
+/// Rust<->Go interop accumulates correctly.
+async fn run_counter_parity(mut cluster: TestCluster, label: &str) {
+    let schema = "type Tally { name: String  hits: Int @crdt(type: pcounter) }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+
+    let (a0, a1) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+    cluster.client(0).p2p_connect(&[a1.as_str()]).ok();
+    cluster.client(1).p2p_connect(&[a0.as_str()]).ok();
+    cluster.client(0).p2p_collection_add(&["Tally"]).ok();
+    cluster.client(1).p2p_collection_add(&["Tally"]).ok();
+    cluster.client(0).p2p_replicator_set(&["Tally"], &a1).ok();
+    cluster.client(1).p2p_replicator_set(&["Tally"], &a0).ok();
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_Tally(input: {name: "t", hits: 0}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_Tally"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    for n in [0usize, 1] {
+        cluster
+            .client(n)
+            .query(&format!(
+                r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: 45}}) {{ _docID }} }}"#
+            ))
+            .expect("increment");
+    }
+
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    let hits = |n: usize| -> i64 {
+        cluster
+            .client(n)
+            .query("query { Tally { hits } }")
+            .expect("q Tally")["Tally"][0]["hits"]
+            .as_i64()
+            .unwrap_or(-1)
+    };
+    let (h0, h1) = (hits(0), hits(1));
+    let converged = h0 == h1 && h0 == 90;
+    eprintln!(
+        "PARITY[{label}] node0.hits={h0} node1.hits={h1} | expected 90 | CONVERGED={converged}"
+    );
+}
+
+/// Go<->Go counter convergence (badger) — the parity target.
+#[ignore = "parity investigation; needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_counter_go_go() {
+    let cluster = TestCluster::builder()
+        .go_nodes(2)
+        .with_p2p()
+        .with_store("badger")
+        .with_development()
+        .build()
+        .await
+        .expect("go-go cluster");
+    run_counter_parity(cluster, "counter_go_go").await;
+}
+
+/// Mixed Rust(node0)<->Go(node1) counter convergence, live.
+#[ignore = "parity investigation; needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_counter_mixed_live() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .go_nodes(1)
+        .with_p2p()
+        .with_development()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("mixed cluster");
+    run_counter_parity(cluster, "counter_mixed_live(rust0,go1)").await;
+}
+
 /// The key question: Go<->Go (badger) — does Go diverge too?
 #[ignore = "parity investigation; needs Go binary on PATH; run with --ignored"]
 #[tokio::test]
