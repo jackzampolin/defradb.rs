@@ -8,7 +8,7 @@ use defra_core::{
     Block, CollectionDefinitionDeltaPayload, CollectionSetDeltaPayload, CrdtDelta, DAGLink,
     FieldDefinitionDeltaPayload, DAG_CBOR_CODEC, SHA2_256_CODE,
 };
-use multihash::MultihashGeneric;
+use multihash::Multihash;
 use sha2::{Digest, Sha256};
 
 use crate::{FieldDescription, FieldKind};
@@ -185,8 +185,8 @@ fn generate_cid_from_bytes(cbor_bytes: &[u8]) -> crate::Result<Cid> {
     hasher.update(cbor_bytes);
     let hash_bytes = hasher.finalize();
 
-    // Create multihash (CID crate uses MultihashGeneric<64>)
-    let mh: MultihashGeneric<64> = MultihashGeneric::wrap(*SHA2_256_CODE, &hash_bytes)
+    // Create multihash (CID crate uses Multihash<64>)
+    let mh: Multihash<64> = Multihash::wrap(*SHA2_256_CODE, &hash_bytes)
         .map_err(|e| crate::SchemaError::CidGeneration(e.to_string()))?;
 
     // Create CIDv1 with DAG-CBOR codec

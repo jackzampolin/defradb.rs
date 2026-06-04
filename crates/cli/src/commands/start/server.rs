@@ -156,6 +156,7 @@ impl Node {
             acp_store,
             zanzibar_store.clone(),
             event_bus.clone(),
+            db::node_access_checker(database.clone()),
         )
         .await?;
 
@@ -167,6 +168,13 @@ impl Node {
         }
 
         let nac_adapter = Self::setup_nac_manager(config, user_did.as_ref()).await?;
+
+        // Wire the NAC manager into the DB so DB-layer `check_node_access` calls
+        // go live (first-call-wins via the DB's OnceLock). Without this the CLI
+        // server's DB-layer NAC checks are inert.
+        if let Some(adapter) = nac_adapter.as_ref() {
+            database.set_nac_manager(adapter.nac_manager());
+        }
 
         // Populate the manage-channel serve deps now that the controller exists;
         // until this fires the event loop drops inbound manage requests rather

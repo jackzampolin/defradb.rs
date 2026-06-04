@@ -32,6 +32,14 @@ pub unsafe extern "C" fn p2p_add_collections(
             NodePermission::P2pCollectionAdd
         ));
 
+        // Bind the caller's identity so the adapter's inner NAC check resolves the
+        // actual caller instead of the wildcard. The body runs on this thread via
+        // `block_on`, so the thread-local is visible throughout; the guard restores
+        // on drop so it never leaks into the next request on this pooled thread.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));
         let collections = match parse_collections_json(&collections_str) {
             Ok(collections) => collections,
@@ -81,6 +89,14 @@ pub unsafe extern "C" fn p2p_delete_collections(
             NodePermission::P2pCollectionDelete
         ));
 
+        // Bind the caller's identity so the adapter's inner NAC check resolves the
+        // actual caller instead of the wildcard. The body runs on this thread via
+        // `block_on`, so the thread-local is visible throughout; the guard restores
+        // on drop so it never leaks into the next request on this pooled thread.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));
         let collections = match parse_collections_json(&collections_str) {
             Ok(collections) => collections,
@@ -128,6 +144,14 @@ pub unsafe extern "C" fn p2p_list_collections(
             identity_did,
             NodePermission::P2pCollectionList
         ));
+
+        // Bind the caller's identity so the adapter's inner NAC check resolves the
+        // actual caller instead of the wildcard. The body runs on this thread via
+        // `block_on`, so the thread-local is visible throughout; the guard restores
+        // on drop so it never leaks into the next request on this pooled thread.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
 
         let result = NODES
             .get(node_ptr, |state| {

@@ -94,9 +94,7 @@ fn is_value_compatible_with_scalar(value: &NormalValue, scalar: ScalarKind) -> b
             // as a String. Accept a String iff it parses as RFC3339 — a stored
             // `Time` always does, while genuinely-wrong strings still fail.
             NormalValue::String(s) => chrono::DateTime::parse_from_rfc3339(s).is_ok(),
-            NormalValue::NillableString(Some(s)) => {
-                chrono::DateTime::parse_from_rfc3339(s).is_ok()
-            }
+            NormalValue::NillableString(Some(s)) => chrono::DateTime::parse_from_rfc3339(s).is_ok(),
             _ => false,
         },
         ScalarKind::String => {

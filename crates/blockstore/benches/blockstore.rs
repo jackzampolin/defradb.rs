@@ -5,7 +5,7 @@ use blockstore::{Blockstore, DefraBlockstore};
 use cid::Cid;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use lru::LruCache;
-use multihash::MultihashGeneric;
+use multihash::Multihash;
 use sha2::{Digest, Sha256};
 use std::hint::black_box;
 use storage::backends::MemoryStore;
@@ -19,7 +19,7 @@ fn cid_from_data(data: &[u8]) -> Cid {
     let mut hasher = Sha256::new();
     hasher.update(data);
     let digest = hasher.finalize();
-    let hash = MultihashGeneric::<64>::wrap(0x12, &digest).unwrap();
+    let hash = Multihash::<64>::wrap(0x12, &digest).unwrap();
     Cid::new_v1(0x55, hash)
 }
 

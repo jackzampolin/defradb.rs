@@ -70,6 +70,13 @@ pub unsafe extern "C" fn exec_request_in_txn(
         defra_core::batch_signing::set_batch_session_key(session_key);
         defra_core::signing::set_signing_config(signing);
 
+        // Set the ambient acting identity so DB-layer NAC checks can resolve
+        // the caller. The guard clears it on scope exit so it never leaks into
+        // the next request on this pooled thread.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            identity_str.as_ref().filter(|s| !s.is_empty()).cloned(),
+        );
+
         // Check if identity has DAC bypass (NAC admin/owner can read all documents)
         crate::query::check_and_set_dac_bypass(rt, node_ptr, identity_did);
 

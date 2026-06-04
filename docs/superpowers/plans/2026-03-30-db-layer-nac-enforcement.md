@@ -6,7 +6,46 @@
 
 **Architecture:** Add a `check_node_access` method to `DB<S>` that delegates to the existing `NacManagerApi`. Every public DB method that mutates or reads user data calls this at the top. Identity is threaded via an `Option<&Did>` parameter added to methods that need it, or extracted from the existing options pattern where applicable.
 
-**Tech Stack:** Rust, async_trait, existing `NacManagerApi` trait in `crates/acp/src/nac/`
+**Tech Stack:** Rust, async_trait, existing `NacManagerApi` trait in `crates/db-nac/` (re-exported as `db::NacManagerApi`).
+
+---
+
+## Design refinements (from Go source recon, 2026-06-02)
+
+The original plan drifted and mis-stated two things. Verified against Go
+`internal/db/` (`db_nac.go`, `store.go`, `collection*.go`, `p2p.go`, `merge.go`):
+
+1. **Gate the public API boundary, NOT internal helpers.** Go gates the
+   *exported* `GetCollectionByName`/`GetCollections` (in `store.go`) but leaves
+   the *unexported* `getCollectionByName`/`getCollections` (in `collection.go`)
+   ungated, because internal code calls them constantly. Rust mirror: gate the
+   public method that HTTP/FFI/CLI/embedded call; keep an ungated internal path
+   for in-crate callers. Do NOT thread identity through pervasive internal
+   collection lookups.
+2. **The merge/replication path is UNGATED in Go.** `db.Merge()` has no
+   `checkNodeAccess`; the merge processor even clears identity from context.
+   Only document-level DAC applies during merge, not NAC. Likewise Go's
+   `SyncDocuments`/`SyncCollectionVersions`/`SyncBranchableCollection` are not
+   `checkNodeAccess`-gated at the DB layer. **Task 7 therefore gates only P2P
+   *management* ops** (connect, replicator add/delete/list, collection
+   add/delete/list, document add/delete/list) — each of which has an identity at
+   its API boundary. This removes the "identity in internal merge paths"
+   entanglement: there is nothing to co-design with #1012's actor-DID envelope
+   here, because Go does not gate merges at the DB layer.
+3. **The real parity gap is the embedded API surface.** Rust already enforces
+   NAC in HTTP middleware and FFI entry points. The uncovered path is embedded
+   consumers (e.g. defra-agent) calling `db`/`embedded` methods directly. Gating
+   at the DB layer closes that, matching Go's "gate at the `client.DB`
+   interface" design.
+4. **`check_node_access` needs a node-identity bypass** (mirroring Go
+   `db_nac.go`): if the supplied identity equals `self.node_did()`, return
+   `Ok(())` immediately. This lets the node's own internal operations and the
+   owner pass, and is required before any gating goes live.
+5. **Verified facts:** trait is `db::NacManagerApi` (re-exported from `db-nac`);
+   identity type is `identity::Did` (not `defra_core::identity::Did`), with
+   `Did::wildcard()`; `Store` bound is `storage::corekv::Store`; `db::Error`
+   gained `NotAuthorized { permission }` in Task 1. Create uses
+   `DocumentUpdate` perm (confirmed against Go `NodeDocumentUpdatePerm`).
 
 ---
 

@@ -121,6 +121,11 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
         doc_id: &str,
         relation: &str,
     ) -> Result<bool, String> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::DacRelationAdd)
+            .await
+            .map_err(|e| format!("{}", e))?;
+
         if relation == "owner" {
             return Err("OPERATION_FORBIDDEN: cannot add owner relation".into());
         }
@@ -173,6 +178,11 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
         doc_id: &str,
         relation: &str,
     ) -> Result<bool, String> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::DacRelationDelete)
+            .await
+            .map_err(|e| format!("{}", e))?;
+
         if relation == "owner" {
             return Err("OPERATION_FORBIDDEN: cannot delete owner relation".into());
         }

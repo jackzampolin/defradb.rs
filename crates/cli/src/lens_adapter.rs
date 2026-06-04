@@ -28,7 +28,7 @@ impl<S: Store + 'static> LensOperations for LensAdapter<S> {
 
         let transform_id = self
             .database
-            .set_migration(lens_config)
+            .set_migration(lens_config, None)
             .await
             .map_err(|e| format!("failed to set migration: {}", e))?;
 
@@ -52,11 +52,16 @@ impl<S: Store + 'static> LensOperations for LensAdapter<S> {
         {
             let transform_id = self
                 .database
-                .set_migration(lens_config)
+                .set_migration(lens_config, None)
                 .await
                 .map_err(|e| format!("failed to set migration: {}", e))?;
             return Ok(transform_id.to_string());
         }
+
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::LensCreate)
+            .await
+            .map_err(|e| format!("{}", e))?;
 
         // Build IPLD blocks, store in blockstore, register with real CID
         let transform_id = self
@@ -69,6 +74,11 @@ impl<S: Store + 'static> LensOperations for LensAdapter<S> {
     }
 
     async fn list(&self) -> Result<serde_json::Value, String> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::LensList)
+            .await
+            .map_err(|e| format!("{}", e))?;
+
         let modules = self
             .database
             .lens_store()

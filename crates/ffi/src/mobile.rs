@@ -371,12 +371,19 @@ pub extern "C" fn defra_mobile_ensure_schema(
             NodePermission::CollectionPatch
         ));
 
-        let (database, policy_store) = match NODES.get(node_ptr, |state| {
-            (state.database.clone(), state.policy_store.clone())
+        let (database, policy_store, node_identity_did) = match NODES.get(node_ptr, |state| {
+            (state.database.clone(), state.policy_store.clone(), state.node_identity_did.clone())
         }) {
             Some(value) => value,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
+
+        // Bind the node's own identity into the ambient context so the DB-layer
+        // NAC gate on create_collection resolves the node (the NAC owner) instead
+        // of the wildcard. The body runs on this thread via `block_on`, so the
+        // thread-local is visible throughout it; the guard restores on drop.
+        let _identity_guard =
+            defra_core::current_identity::scoped_current_identity(node_identity_did);
 
         ffi_async!(rt, {
             let existing_collections: HashSet<String> =

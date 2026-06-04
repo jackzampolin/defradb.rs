@@ -81,6 +81,13 @@ pub unsafe extern "C" fn exec_request(
         defra_core::batch_signing::set_batch_session_key(session_key);
         defra_core::signing::set_signing_config(signing);
 
+        // Set the ambient acting identity so DB-layer NAC checks can resolve
+        // the caller. The guard clears it on scope exit so it never leaks into
+        // the next request on this pooled thread.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            identity_str.as_ref().filter(|s| !s.is_empty()).cloned(),
+        );
+
         // Check if identity has DAC bypass (NAC admin/owner can read all documents)
         check_and_set_dac_bypass(rt, node_ptr, identity_did);
 
@@ -127,6 +134,7 @@ pub unsafe extern "C" fn exec_request(
             // spawned task runs on a different tokio thread.
             let sub_signing_config = defra_core::signing::get_signing_config();
             let sub_dac_bypass = defra_core::dac_bypass::get_dac_bypass();
+            let sub_acting_did = defra_core::current_identity::get_current_identity();
 
             // Spawn background task that processes events and executes queries at event time.
             // This ensures the DB state at query execution matches the event's state.
@@ -172,8 +180,11 @@ pub unsafe extern "C" fn exec_request(
                         let runner = query_runner.clone();
                         let config = sub_signing_config.clone();
                         let bypass = sub_dac_bypass;
+                        let acting_did = sub_acting_did.clone();
                         let handle = tokio::runtime::Handle::current();
                         let response = match tokio::task::spawn_blocking(move || {
+                            let _identity_guard =
+                                defra_core::current_identity::scoped_current_identity(acting_did);
                             defra_core::signing::set_signing_config(config);
                             defra_core::dac_bypass::set_dac_bypass(bypass);
                             handle.block_on(async { runner.execute(request).await })

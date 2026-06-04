@@ -237,6 +237,7 @@ where
         doc_pusher,
         event_bus,
         version_syncer,
+        db::node_access_checker(database.clone()),
     )
     .with_replicator_push_options_state(replicator_push_options.clone());
     adapter.set_initial_tracked_documents(restored_doc_ids);
@@ -480,6 +481,7 @@ where
         doc_pusher,
         event_bus,
         version_syncer,
+        db::node_access_checker(database.clone()),
     )
     .with_replicator_push_options_state(replicator_push_options.clone());
     adapter.set_initial_tracked_documents(restored_doc_ids);

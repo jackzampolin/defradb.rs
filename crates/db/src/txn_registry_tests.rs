@@ -211,7 +211,7 @@ async fn test_set_migration_in_txn_is_only_visible_inside_transaction() {
     let config = LensConfig::new("users-v1", "users-v2", empty_wasm_module());
 
     let transform_id = registry
-        .set_migration_in_txn(&txn_id, config)
+        .set_migration_in_txn(&txn_id, config, None)
         .await
         .unwrap();
 
@@ -245,7 +245,7 @@ async fn test_set_migration_in_txn_promotes_transform_on_commit() {
     let config = LensConfig::new("users-v1", "users-v2", empty_wasm_module());
 
     let transform_id = registry
-        .set_migration_in_txn(&txn_id, config)
+        .set_migration_in_txn(&txn_id, config, None)
         .await
         .unwrap();
 

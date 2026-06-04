@@ -71,6 +71,8 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
         schema::definition_validation::validate_new_collections(&collections)
             .map_err(|error| anyhow!("schema validation error: {error}"))?;
 
+        let _id_guard =
+            defra_core::current_identity::scoped_current_identity(self.node_identity_did.clone());
         for collection in collections {
             self.database
                 .create_collection(collection)
@@ -492,6 +494,11 @@ where
     let (document_acp, local_zanzibar_store, sourcehub_acp) =
         create_document_acp(store.clone(), config.persistence, &config.document_acp).await?;
     let nac_manager = create_nac_manager(store.clone(), config.persistence).await?;
+
+    // Wire the NAC manager into the DB so DB-layer `check_node_access` calls go
+    // live. First-call-wins via the DB's OnceLock setter. Covers both the
+    // embedded node and the FFI node (which also builds via `build_with_store`).
+    database.set_nac_manager(nac_manager.clone());
 
     if let Some(ref mut setup) = p2p_setup {
         setup.merge_handler.set_document_acp(document_acp.clone());

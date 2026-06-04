@@ -42,7 +42,7 @@ pub fn verify_block_cid(cid: &Cid, data: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use multihash::MultihashGeneric;
+    use multihash::Multihash;
     use multihash_codetable::{Code, MultihashDigest};
 
     fn sha256_cid(data: &[u8]) -> Cid {
@@ -70,7 +70,7 @@ mod tests {
     fn unsupported_algorithm_fails() {
         // Construct a CID with Blake2b-256 (multihash code 0xb220)
         let digest = [0u8; 32];
-        let mh: MultihashGeneric<64> = MultihashGeneric::wrap(0xb220, &digest).unwrap();
+        let mh: Multihash<64> = Multihash::wrap(0xb220, &digest).unwrap();
         let cid = Cid::new_v1(0x71, mh);
         let err = verify_block_cid(&cid, b"anything").unwrap_err();
         assert!(matches!(

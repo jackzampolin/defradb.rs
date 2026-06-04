@@ -64,7 +64,11 @@ async fn datetime_update_revalidation_noindex() -> Result<()> {
         r#"mutation {{ update_Probe(docID: "{id}", input: {{ last_probe: "2026-06-03T15:00:00Z" }}) {{ _docID }} }}"#
     );
     let r1 = node.execute(&set_dt).await;
-    assert!(!r1.has_errors(), "setting last_probe failed: {:?}", r1.errors);
+    assert!(
+        !r1.has_errors(),
+        "setting last_probe failed: {:?}",
+        r1.errors
+    );
 
     // Update an UNRELATED field — re-validates the stored DateTime.
     let upd_other = format!(
@@ -92,7 +96,11 @@ async fn datetime_update_revalidation_indexed() -> Result<()> {
         r#"mutation {{ update_ProbeIdx(docID: "{id}", input: {{ last_probe: "2026-06-03T15:00:00Z" }}) {{ _docID }} }}"#
     );
     let r1 = node.execute(&set_dt).await;
-    assert!(!r1.has_errors(), "setting last_probe failed: {:?}", r1.errors);
+    assert!(
+        !r1.has_errors(),
+        "setting last_probe failed: {:?}",
+        r1.errors
+    );
 
     let upd_other = format!(
         r#"mutation {{ update_ProbeIdx(docID: "{id}", input: {{ name: "changed" }}) {{ _docID }} }}"#

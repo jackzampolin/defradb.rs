@@ -56,7 +56,10 @@ impl<S: Store> crate::database::DB<S> {
         &self,
         collection_name: &str,
         patch: &str,
+        identity: Option<&identity::Did>,
     ) -> Result<CollectionVersion> {
+        self.check_node_access(identity, acp::nac::NodePermission::CollectionPatch)
+            .await?;
         // Parse the patch early - needed for both collection lookup fallbacks and processing
         let patch_ops: serde_json::Value =
             serde_json::from_str(patch).map_err(|e| Error::InvalidPatch(e.to_string()))?;

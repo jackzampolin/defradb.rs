@@ -37,7 +37,7 @@ impl<S: Store + 'static> TransactionOperations for TxnRegistryAdapter<S> {
         tokio::task::spawn_blocking(move || {
             handle.block_on(async {
                 registry
-                    .set_migration_in_txn(&txn_id, lens_config)
+                    .set_migration_in_txn(&txn_id, lens_config, None)
                     .await
                     .map(|id| id.to_string())
                     .map_err(|e| format!("{}", e))

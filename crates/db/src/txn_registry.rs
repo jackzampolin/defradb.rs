@@ -428,7 +428,11 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         &self,
         txn_id: &str,
         config: lens::LensConfig,
+        identity: Option<&identity::Did>,
     ) -> Result<lens::TransformId> {
+        self.db
+            .check_node_access(identity, acp::nac::NodePermission::MigrationSet)
+            .await?;
         let ctx = self
             .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
@@ -516,6 +520,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let ctx = self
             .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+        self.db
+            .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .await?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
 
@@ -567,6 +574,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let ctx = self
             .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+        self.db
+            .check_node_access(None, acp::nac::NodePermission::LensCreate)
+            .await?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
 

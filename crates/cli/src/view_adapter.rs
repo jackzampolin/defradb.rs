@@ -40,6 +40,11 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
         sdl: &str,
         transform: Option<&str>,
     ) -> Result<Vec<CollectionVersion>, String> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::ViewAdd)
+            .await
+            .map_err(|e| format!("{}", e))?;
+
         let known_types: std::collections::HashSet<String> = self
             .database
             .list_collections()
@@ -133,6 +138,11 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
     }
 
     async fn refresh_views(&self, names: Option<Vec<String>>) -> Result<(), String> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::ViewRefresh)
+            .await
+            .map_err(|e| format!("{}", e))?;
+
         let options = names.map(db::RefreshViewsOptions::with_names);
         self.database
             .refresh_views(options)
@@ -141,6 +151,11 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
     }
 
     async fn gc_downsample_histories(&self, names: Option<Vec<String>>) -> Result<(), String> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::ViewGc)
+            .await
+            .map_err(|e| format!("{}", e))?;
+
         let options = names.map(db::downsample::GcDownsampleHistoriesOptions::with_names);
         self.database
             .gc_downsample_histories(options)

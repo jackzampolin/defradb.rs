@@ -41,9 +41,20 @@ pub struct P2PAdapter<B: Blockstore + 'static> {
     replicator_push_options: ReplicatorPushOptionsState,
     peer_addresses: Arc<std::sync::RwLock<HashMap<String, String>>>,
     tracked_documents: Arc<std::sync::RwLock<HashSet<String>>>,
+    nac_checker: Option<Arc<dyn db::NodeAccessChecker>>,
 }
 
 impl<B: Blockstore + 'static> P2PAdapter<B> {
+    async fn check_nac(&self, permission: acp::nac::NodePermission) -> P2PResult<()> {
+        if let Some(ref checker) = self.nac_checker {
+            checker
+                .check_node_access(permission)
+                .await
+                .map_err(|error| P2PError::internal(error.to_string()))?;
+        }
+        Ok(())
+    }
+
     async fn resubscribe_tracked_document_topics(&self) {
         let doc_ids: Vec<String> = match self.tracked_documents.read() {
             Ok(docs) => docs.iter().cloned().collect(),
@@ -69,6 +80,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
         doc_pusher: Arc<dyn DocPusher>,
         event_bus: Arc<dyn events::Bus>,
         version_syncer: Option<Arc<dyn VersionSyncer>>,
+        nac_checker: Arc<dyn db::NodeAccessChecker>,
     ) -> Self {
         Self {
             handle,
@@ -79,6 +91,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             replicator_push_options: ReplicatorPushOptionsState::default(),
             peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
             tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            nac_checker: Some(nac_checker),
         }
     }
 
@@ -101,6 +114,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
         doc_pusher: Arc<dyn DocPusher>,
         event_bus: Arc<dyn events::Bus>,
         version_syncer: Option<Arc<dyn VersionSyncer>>,
+        nac_checker: Arc<dyn db::NodeAccessChecker>,
     ) -> Arc<dyn P2POperations> {
         Arc::new(Self::with_full_context(
             handle,
@@ -108,6 +122,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             doc_pusher,
             event_bus,
             version_syncer,
+            nac_checker,
         ))
     }
 
@@ -137,6 +152,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn connected_peers(&self) -> P2PResult<Vec<String>> {
+        self.check_nac(acp::nac::NodePermission::P2pPeerActive)
+            .await?;
+
         let connected = self
             .handle
             .connected_peers()
@@ -151,6 +169,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn connect_peer(&self, addr: &str) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pPeerConnect)
+            .await?;
+
         let parsed = p2p::parse_multiaddr_with_peer_id(addr)
             .map_err(|error| P2PError::invalid_input(error.to_string()))?;
         let already_connected = self
@@ -185,6 +206,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
+        self.check_nac(acp::nac::NodePermission::P2pReplicatorList)
+            .await?;
+
         let p2p_infos = if let Some(ref pusher) = self.doc_pusher {
             match pusher.load_persisted_replicators().await? {
                 Some(infos) => infos,
@@ -214,6 +238,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
         expected_authorizer_did: Option<&str>,
     ) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pReplicatorAdd)
+            .await?;
+
         let addr_str = addr.ok_or_else(|| P2PError::invalid_input("address is required"))?;
         let parsed = p2p::parse_multiaddr_with_peer_id(addr_str)
             .map_err(|error| P2PError::invalid_input(error.to_string()))?;
@@ -392,6 +419,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         collections: Vec<String>,
         addr: Option<&str>,
     ) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pReplicatorDelete)
+            .await?;
+
         let addr_str = addr.ok_or_else(|| P2PError::invalid_input("address is required"))?;
         let peer_id = match p2p::parse_multiaddr_with_peer_id(addr_str) {
             Ok(parsed) => parsed.peer_id,
@@ -454,6 +484,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn get_collections(&self) -> P2PResult<Vec<String>> {
+        self.check_nac(acp::nac::NodePermission::P2pCollectionList)
+            .await?;
+
         if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
                 .get_subscribed_collections()
@@ -465,6 +498,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn add_collections(&self, collections: Vec<String>) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pCollectionAdd)
+            .await?;
+
         if let Some(ref coordinator) = self.sync_coordinator {
             for collection_name in collections {
                 let topic_id = if let Some(ref pusher) = self.doc_pusher {
@@ -505,6 +541,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn remove_collections(&self, collections: Vec<String>) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pCollectionDelete)
+            .await?;
+
         if let Some(ref coordinator) = self.sync_coordinator {
             let topic_ids = collections
                 .into_iter()
@@ -548,6 +587,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn get_documents(&self) -> P2PResult<Vec<P2pDocumentInfo>> {
+        self.check_nac(acp::nac::NodePermission::P2pDocumentList)
+            .await?;
+
         let docs = self.tracked_documents.read().map_err(|error| {
             P2PError::internal(format!("failed to read tracked documents: {error}"))
         })?;
@@ -563,6 +605,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn add_documents(&self, docs: Vec<P2pDocumentRequest>) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pDocumentAdd)
+            .await?;
+
         let doc_ids: Vec<String> = docs.into_iter().map(|doc| doc.doc_id).collect();
         document::validate_doc_ids(&doc_ids).map_err(|_| {
             P2PError::invalid_input("malformed document ID, missing either version or cid")
@@ -593,6 +638,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn remove_documents(&self, docs: Vec<P2pDocumentRequest>) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pDocumentDelete)
+            .await?;
+
         let doc_ids: Vec<String> = docs.into_iter().map(|doc| doc.doc_id).collect();
         document::validate_doc_ids(&doc_ids).map_err(|_| {
             P2PError::invalid_input("malformed document ID, missing either version or cid")
@@ -623,6 +671,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn republish_document(&self, collection_name: &str, doc_id: &str) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pDocumentList)
+            .await?;
+
         let pusher = self
             .doc_pusher
             .as_ref()

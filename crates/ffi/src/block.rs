@@ -47,6 +47,12 @@ pub unsafe extern "C" fn block_verify_signature(
             NodePermission::SignatureVerify
         ));
 
+        // Bind the caller's identity so any DB-layer NAC gate reached by the body
+        // resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         let key_type_str = match c_str_to_string(key_type) {
             Some(s) if !s.is_empty() => s,
             _ => "secp256k1".to_string(),
@@ -119,6 +125,12 @@ pub unsafe extern "C" fn block_verify_signature_in_txn(
             identity_did,
             NodePermission::SignatureVerify
         ));
+
+        // Bind the caller's identity so any registry-layer NAC gate reached by the
+        // body resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
 
         let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
         let key_type_str = match c_str_to_string(key_type) {
