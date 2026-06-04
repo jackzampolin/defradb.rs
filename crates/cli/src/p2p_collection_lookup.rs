@@ -83,14 +83,6 @@ impl DocPusher for LookupOnlyDocPusher {
         Err("load_document_head_blocks not available (no database context)".to_string())
     }
 
-    async fn load_doc_actor_relationships(
-        &self,
-        _collection_name: &str,
-        _doc_id: &str,
-    ) -> Result<Option<acp::ReplicatedDocActorRelationships>, String> {
-        Err("load_doc_actor_relationships not available (no database context)".to_string())
-    }
-
     async fn load_doc_creator_did(
         &self,
         _collection_name: &str,

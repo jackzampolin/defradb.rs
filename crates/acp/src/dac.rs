@@ -4,29 +4,11 @@
 
 use async_trait::async_trait;
 use identity::Did;
-use serde::{Deserialize, Serialize};
 use storage::corekv::MaybeSendSync;
 
 use crate::error::Result;
 use crate::identity::Identity;
 use crate::permission::DocumentPermission;
-
-/// A document-scoped actor relationship snapshot suitable for P2P replication.
-///
-/// `actor` is either a DID string or `"*"` for wildcard grants.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplicatedActorRelationship {
-    pub relation: String,
-    pub actor: String,
-}
-
-/// Replicated actor relationships for a single document.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplicatedDocActorRelationships {
-    pub policy_id: String,
-    pub resource_name: String,
-    pub relationships: Vec<ReplicatedActorRelationship>,
-}
 
 /// Document ACP interface (matches Go acp/dac/dac.go)
 ///
@@ -178,36 +160,6 @@ pub trait DocumentACP: MaybeSendSync {
         relation: &str,
         managing_relations: &[String],
     ) -> Result<bool>;
-
-    /// Export the current non-owner actor relationships for a document.
-    ///
-    /// This is used by Rust-only local ACP P2P replication to propagate
-    /// relationship grants and revocations alongside document republishes.
-    async fn export_actor_relationships(
-        &self,
-        policy_id: &str,
-        resource_name: &str,
-        doc_id: &str,
-    ) -> Result<Vec<ReplicatedActorRelationship>> {
-        let _ = (policy_id, resource_name, doc_id);
-        Ok(Vec::new())
-    }
-
-    /// Replace the current non-owner actor relationships for a document.
-    ///
-    /// Implementations should reconcile the local document-scoped actor
-    /// relationships to match the provided snapshot while preserving the
-    /// existing owner registration.
-    async fn replace_actor_relationships(
-        &self,
-        policy_id: &str,
-        resource_name: &str,
-        doc_id: &str,
-        relationships: &[ReplicatedActorRelationship],
-    ) -> Result<()> {
-        let _ = (policy_id, resource_name, doc_id, relationships);
-        Ok(())
-    }
 
     /// Unregister a document, removing all ACP tuples.
     ///

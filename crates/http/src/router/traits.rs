@@ -119,9 +119,6 @@ pub trait P2POperations: Send + Sync {
     /// Remove documents from P2P replication.
     async fn remove_documents(&self, docs: Vec<P2pDocumentRequest>) -> P2PResult<()>;
 
-    /// Re-broadcast the current document heads.
-    async fn republish_document(&self, collection_name: &str, doc_id: &str) -> P2PResult<()>;
-
     /// Sync specific documents from connected peers.
     async fn sync_documents(&self, collection_name: &str, doc_ids: Vec<String>) -> P2PResult<()>;
 

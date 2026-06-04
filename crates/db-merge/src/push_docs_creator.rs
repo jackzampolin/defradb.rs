@@ -134,9 +134,7 @@ pub(crate) async fn resolve_push_creator(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acp::{
-        DocumentPermission, Identity, LocalDocumentACP, MemoryAcpStore, ReplicatedActorRelationship,
-    };
+    use acp::{DocumentPermission, Identity, LocalDocumentACP, MemoryAcpStore};
     use identity::Did;
     use schema::{CollectionVersion, PolicyDescription};
     use std::sync::Arc;
@@ -266,15 +264,6 @@ mod tests {
             _relation: &str,
             _managing_relations: &[String],
         ) -> acp::Result<bool> {
-            Err(acp::Error::Storage("boom".to_string()))
-        }
-
-        async fn export_actor_relationships(
-            &self,
-            _policy_id: &str,
-            _resource_name: &str,
-            _doc_id: &str,
-        ) -> acp::Result<Vec<ReplicatedActorRelationship>> {
             Err(acp::Error::Storage("boom".to_string()))
         }
 

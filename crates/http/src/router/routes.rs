@@ -364,10 +364,6 @@ mod tests {
             Ok(())
         }
 
-        async fn republish_document(&self, _collection_name: &str, _doc_id: &str) -> P2PResult<()> {
-            Ok(())
-        }
-
         async fn sync_documents(
             &self,
             _collection_name: &str,

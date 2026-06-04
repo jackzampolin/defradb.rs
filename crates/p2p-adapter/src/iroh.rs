@@ -648,44 +648,6 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         Ok(())
     }
 
-    async fn republish_document(&self, collection_name: &str, doc_id: &str) -> P2PResult<()> {
-        let pusher = self
-            .doc_pusher
-            .as_ref()
-            .ok_or_else(|| P2PError::unsupported("no database context for republish"))?;
-        let coordinator = self
-            .sync_coordinator
-            .as_ref()
-            .ok_or_else(|| P2PError::unsupported("no sync coordinator for republish"))?;
-        pusher.validate_collection_exists(collection_name)?;
-        let collection_id = pusher.get_collection_id(collection_name).ok_or_else(|| {
-            P2PError::not_found(format!("collection '{collection_name}' not found"))
-        })?;
-        let head_blocks = pusher.load_document_head_blocks(doc_id).await?;
-        let creator_did = pusher.load_doc_creator_did(collection_name, doc_id).await?;
-        let acp_actor_relationships = pusher
-            .load_doc_actor_relationships(collection_name, doc_id)
-            .await?;
-
-        for (cid, block) in head_blocks {
-            coordinator
-                .broadcast_local_update_with_creator_and_relationships(
-                    &cid,
-                    &block,
-                    doc_id,
-                    &collection_id,
-                    creator_did.as_deref(),
-                    acp_actor_relationships.clone(),
-                )
-                .await
-                .map_err(|error| {
-                    P2PError::transport(format!("failed to republish document head {cid}: {error}"))
-                })?;
-        }
-
-        Ok(())
-    }
-
     async fn sync_documents(&self, collection_name: &str, doc_ids: Vec<String>) -> P2PResult<()> {
         let pusher = self
             .doc_pusher

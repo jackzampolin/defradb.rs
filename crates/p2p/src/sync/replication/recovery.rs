@@ -77,7 +77,6 @@ where
             &config,
             cid,
             BlockMetadata::recovery(),
-            None,
         )
         .await;
 

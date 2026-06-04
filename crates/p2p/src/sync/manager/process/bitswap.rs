@@ -66,7 +66,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                             sender_peer: dag.source_peer,
                             is_explicit_replicator: dag.is_explicit_replicator,
                             explicit_replay_authorization: dag.explicit_replay_authorization,
-                            acp_actor_relationships: dag.acp_actor_relationships,
                         })
                         .await
                         .is_err()

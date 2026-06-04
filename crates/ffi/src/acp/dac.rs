@@ -1,8 +1,6 @@
 use std::ffi::c_char;
-use std::time::{Duration, Instant};
 
 use acp::nac::NodePermission;
-use acp::DocumentPermission;
 use acp::StorePolicyOptions;
 
 use crate::helpers::{get_rt, require_c_str};
@@ -293,13 +291,12 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
             );
         }
 
-        // Validate node handle and get database, document_acp, policy_store, and optional p2p
-        let (database, document_acp, policy_store, p2p_system) = match NODES.get(node_ptr, |state| {
+        // Validate node handle and get database, document_acp, and policy_store
+        let (database, document_acp, policy_store) = match NODES.get(node_ptr, |state| {
             (
                 state.database.clone(),
                 state.document_acp.clone(),
                 state.policy_store.clone(),
-                state.p2p.as_ref().map(|p2p| p2p.system.clone()),
             )
         }) {
             Some(tuple) => tuple,
@@ -427,13 +424,12 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
             );
         }
 
-        // Validate node handle and get database, document_acp, policy_store, and optional p2p
-        let (database, document_acp, policy_store, p2p_system) = match NODES.get(node_ptr, |state| {
+        // Validate node handle and get database, document_acp, and policy_store
+        let (database, document_acp, policy_store) = match NODES.get(node_ptr, |state| {
             (
                 state.database.clone(),
                 state.document_acp.clone(),
                 state.policy_store.clone(),
-                state.p2p.clone(),
             )
         }) {
             Some(tuple) => tuple,

@@ -849,7 +849,6 @@ async fn regression_834_gossipsub_message_id_distinguishes_senders() {
         "col-834".to_string(),
         "creator-834".to_string(),
         Bytes::from(vec![0x01, 0x02, 0x03]),
-        None,
     );
 
     let id_from_peer0 = publish_when_ready(&handle0, topic.clone(), payload.clone()).await;

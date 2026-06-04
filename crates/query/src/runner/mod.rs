@@ -42,7 +42,7 @@ mod version;
 pub use se_transport::SeQueryTransport;
 
 use acp::nac::NodePermission;
-use acp::{DocumentACP, Identity as AcpIdentity, ReplicatedActorRelationship};
+use acp::{DocumentACP, Identity as AcpIdentity};
 use async_trait::async_trait;
 use identity::Did;
 use schema::CollectionVersion;
@@ -146,15 +146,6 @@ impl DocumentACP for NoOpDocumentAcp {
         _managing_relations: &[String],
     ) -> acp::Result<bool> {
         Ok(false)
-    }
-
-    async fn export_actor_relationships(
-        &self,
-        _policy_id: &str,
-        _resource_name: &str,
-        _doc_id: &str,
-    ) -> acp::Result<Vec<ReplicatedActorRelationship>> {
-        Ok(Vec::new())
     }
 
     async fn unregister_doc_object(

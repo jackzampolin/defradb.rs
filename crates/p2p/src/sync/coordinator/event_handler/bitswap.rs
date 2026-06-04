@@ -502,7 +502,6 @@ mod tests {
             collection_id.to_string(),
             "creator1".to_string(),
             Bytes::from(block),
-            None,
         )
     }
 

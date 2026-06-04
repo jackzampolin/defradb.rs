@@ -1,6 +1,5 @@
 //! Tests for the wire message types module.
 
-use acp::{ReplicatedActorRelationship, ReplicatedDocActorRelationships};
 use bytes::Bytes;
 use p2p::message::{
     Message, MetaData, PushLogBroadcast, PushLogGossipPayloadEncoding, PushLogReply, PushLogRequest,
@@ -24,17 +23,6 @@ fn decode_with_ciborium<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> T {
 fn has_text_key(map: &[(ciborium::Value, ciborium::Value)], key: &str) -> bool {
     map.iter()
         .any(|(candidate, _)| candidate == &ciborium::Value::Text(key.to_string()))
-}
-
-fn sample_actor_relationships() -> ReplicatedDocActorRelationships {
-    ReplicatedDocActorRelationships {
-        policy_id: "policy-1".to_string(),
-        resource_name: "documents".to_string(),
-        relationships: vec![ReplicatedActorRelationship {
-            relation: "reader".to_string(),
-            actor: "did:key:z6Mkexample".to_string(),
-        }],
-    }
 }
 
 #[test]
@@ -285,7 +273,6 @@ fn test_pushlog_broadcast_serialization() {
         "collection1".to_string(),
         "creator1".to_string(),
         Bytes::from(vec![5, 6, 7, 8]),
-        None,
     );
 
     let encoded = encode_with_ciborium(&broadcast);
@@ -307,7 +294,6 @@ fn test_pushlog_broadcast_cbor_field_names() {
         "collection3".to_string(),
         "creator3".to_string(),
         Bytes::from(vec![4, 5, 6]),
-        None,
     );
 
     let encoded = encode_with_ciborium(&broadcast);
@@ -387,7 +373,6 @@ fn test_pushlog_broadcast_to_request() {
         "col3".to_string(),
         "creator3".to_string(),
         Bytes::from(vec![100, 110, 120]),
-        None,
     );
 
     let request = broadcast.to_request();
@@ -489,7 +474,6 @@ fn test_decode_gossip_payload_from_postcard_broadcast() {
         "collection-postcard-broadcast".to_string(),
         "creator-postcard-broadcast".to_string(),
         Bytes::from(vec![5, 6, 7, 8]),
-        Some(sample_actor_relationships()),
     );
 
     let encoded = encode_with_postcard(&broadcast);
@@ -508,7 +492,6 @@ fn test_encode_gossip_payload_uses_cbor_broadcast() {
         "collection-canonical".to_string(),
         "creator-canonical".to_string(),
         Bytes::from(vec![2, 4, 6]),
-        None,
     );
 
     let encoded = broadcast
@@ -529,7 +512,6 @@ fn test_decode_gossip_payload_from_cbor_broadcast() {
         "collection-cbor-broadcast".to_string(),
         "creator-cbor-broadcast".to_string(),
         Bytes::from(vec![40, 50, 60]),
-        None,
     );
 
     let encoded = encode_with_ciborium(&broadcast);
@@ -542,14 +524,13 @@ fn test_decode_gossip_payload_from_cbor_broadcast() {
 
 #[test]
 fn test_decode_gossip_payload_from_cbor_request() {
-    let mut request = PushLogRequest::new(
+    let request = PushLogRequest::new(
         "doc-cbor-request".to_string(),
         Bytes::from(vec![11, 22, 33]),
         "collection-cbor-request".to_string(),
         "creator-cbor-request".to_string(),
         Bytes::from(vec![44, 55, 66]),
     );
-    request.acp_actor_relationships = Some(sample_actor_relationships());
 
     let encoded = encode_with_ciborium(&request);
     let (decoded, encoding) =

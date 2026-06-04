@@ -126,7 +126,6 @@ impl Node {
                     database.clone(),
                     acp_setup.document_acp.clone(),
                     zanzibar_store,
-                    p2p_adapter.clone(),
                 );
                 server = server.with_doc_acp_arc(doc_acp_adapter);
                 info!("Document ACP HTTP endpoints enabled");

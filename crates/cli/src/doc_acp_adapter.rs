@@ -12,7 +12,6 @@ pub struct DocumentAcpAdapter<S: Store> {
     database: Arc<db::DB<S>>,
     acp: Arc<dyn acp::DocumentACP>,
     store: Arc<dyn acp::ZanzibarStore>,
-    p2p: Option<Arc<dyn defra_http::router::P2POperations>>,
 }
 
 impl<S: Store + 'static> DocumentAcpAdapter<S> {
@@ -21,13 +20,11 @@ impl<S: Store + 'static> DocumentAcpAdapter<S> {
         database: Arc<db::DB<S>>,
         acp: Arc<dyn acp::DocumentACP>,
         store: Arc<dyn acp::ZanzibarStore>,
-        p2p: Option<Arc<dyn defra_http::router::P2POperations>>,
     ) -> Self {
         Self {
             database,
             acp,
             store,
-            p2p,
         }
     }
 
@@ -36,9 +33,8 @@ impl<S: Store + 'static> DocumentAcpAdapter<S> {
         database: Arc<db::DB<S>>,
         acp: Arc<dyn acp::DocumentACP>,
         store: Arc<dyn acp::ZanzibarStore>,
-        p2p: Option<Arc<dyn defra_http::router::P2POperations>>,
     ) -> Arc<dyn DocumentAcpOperations> {
-        Arc::new(Self::new(database, acp, store, p2p))
+        Arc::new(Self::new(database, acp, store))
     }
 
     /// Look up policy info for a collection by name.

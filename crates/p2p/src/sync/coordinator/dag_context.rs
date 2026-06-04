@@ -1,6 +1,5 @@
 //! Context carried while fetching a DAG before merge.
 
-use acp::ReplicatedDocActorRelationships;
 use cid::Cid;
 use defra_core::Block as DefraBlock;
 
@@ -37,7 +36,6 @@ pub(crate) struct DagFetchContext {
     pub(crate) is_explicit_replicator: bool,
     explicit_replicator_collections: Option<Vec<String>>,
     pub(crate) explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
-    pub(crate) acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
 }
 
 impl DagFetchContext {
@@ -55,7 +53,6 @@ impl DagFetchContext {
             is_explicit_replicator: false,
             explicit_replicator_collections: None,
             explicit_replay_authorization: None,
-            acp_actor_relationships: None,
         }
     }
 
@@ -75,14 +72,6 @@ impl DagFetchContext {
         authorization: Option<ExplicitReplayAuthorization>,
     ) -> Self {
         self.explicit_replay_authorization = authorization;
-        self
-    }
-
-    pub(crate) fn with_acp_actor_relationships(
-        mut self,
-        relationships: Option<ReplicatedDocActorRelationships>,
-    ) -> Self {
-        self.acp_actor_relationships = relationships;
         self
     }
 
@@ -120,7 +109,6 @@ impl DagFetchContext {
             sender_peer: Some(self.source_peer.to_string()),
             is_explicit_replicator: self.is_explicit_replicator,
             explicit_replay_authorization: self.explicit_replay_authorization,
-            acp_actor_relationships: self.acp_actor_relationships,
         }
     }
 }

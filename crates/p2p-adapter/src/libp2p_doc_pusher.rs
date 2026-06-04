@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use crate::libp2p::CollectionLookup;
 use crate::{P2PError, P2PErrorExt as _, P2PResult};
-use acp::ReplicatedDocActorRelationships;
 use async_trait::async_trait;
 use cid::Cid;
 use p2p::P2PHostHandle;
@@ -50,12 +49,6 @@ pub trait DocPusher: Send + Sync {
     ) -> P2PResult<()>;
 
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>>;
-
-    async fn load_doc_actor_relationships(
-        &self,
-        collection_name: &str,
-        doc_id: &str,
-    ) -> P2PResult<Option<ReplicatedDocActorRelationships>>;
 
     async fn load_doc_creator_did(
         &self,
@@ -261,41 +254,6 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         db_merge::load_document_head_blocks(&self.db, doc_id)
             .await
             .map_err(P2PError::internal)
-    }
-
-    async fn load_doc_actor_relationships(
-        &self,
-        collection_name: &str,
-        doc_id: &str,
-    ) -> P2PResult<Option<ReplicatedDocActorRelationships>> {
-        let Some(acp) = self.document_acp.get() else {
-            return Ok(None);
-        };
-        let collection = match self.db.get_collection(collection_name) {
-            Ok(Some(collection)) => collection,
-            Ok(None) => return Ok(None),
-            Err(error) => {
-                return Err(P2PError::internal(format!(
-                    "failed to load collection for ACP relationships: {error}"
-                )));
-            }
-        };
-        let Some(policy) = collection.schema().policy.as_ref() else {
-            return Ok(None);
-        };
-
-        let relationships = acp
-            .export_actor_relationships(&policy.id, &policy.resource_name, doc_id)
-            .await
-            .map_err(|error| {
-                P2PError::internal(format!("failed to export ACP relationships: {error}"))
-            })?;
-
-        Ok(Some(ReplicatedDocActorRelationships {
-            policy_id: policy.id.clone(),
-            resource_name: policy.resource_name.clone(),
-            relationships,
-        }))
     }
 
     async fn load_doc_creator_did(
