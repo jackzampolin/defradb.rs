@@ -97,7 +97,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - run: cargo test --workspace --exclude integration-test --exclude ffi-test
+      - run: cargo test --workspace --exclude integration-test --exclude ffi-test --exclude conformance
+
+      # The conformance crate (proofs/) drives real `defra` subprocesses. Run it
+      # SERIALLY (not in the parallel --workspace job above) so concurrent node
+      # startup doesn't contend on ports/CPU and flake ("failed to start
+      # rust-0"). It uses the default-feature `target/debug/defra` built above
+      # (proofs/tests/support.rs::release_binary); the Lean drift-check skips when
+      # `lake` is absent.
+      - run: cargo test -p conformance -- --test-threads=1
 
       # Cache binaries BEFORE any feature-on rebuild. `cargo test --workspace`
       # above left a default-feature `defra` at target/debug/defra; the otel
