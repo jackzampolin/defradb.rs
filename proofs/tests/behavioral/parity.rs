@@ -267,6 +267,98 @@ async fn run_counter_parity(mut cluster: TestCluster, label: &str) {
     );
 }
 
+/// Concurrent DELETE vs UPDATE on the same document. node0 deletes, node1
+/// updates a field, concurrently, over a live link. Reports each node's final
+/// view so the delete-vs-update resolution can be compared across impls — a
+/// classic semantic divergence point (does delete win, or does the concurrent
+/// update revive the doc?). The property that matters is that BOTH agree AND that
+/// Go and Rust agree with EACH OTHER.
+async fn run_delete_update_parity(mut cluster: TestCluster, label: &str) {
+    let schema = "type User { name: String  age: Int }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+
+    let (a0, a1) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+    cluster.client(0).p2p_connect(&[a1.as_str()]).ok();
+    cluster.client(1).p2p_connect(&[a0.as_str()]).ok();
+    cluster.client(0).p2p_collection_add(&["User"]).ok();
+    cluster.client(1).p2p_collection_add(&["User"]).ok();
+    cluster.client(0).p2p_replicator_set(&["User"], &a1).ok();
+    cluster.client(1).p2p_replicator_set(&["User"], &a0).ok();
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_User"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    cluster
+        .client(0)
+        .query(&format!(
+            r#"mutation {{ delete_User(docID: "{id}") {{ _docID }} }}"#
+        ))
+        .ok();
+    cluster
+        .client(1)
+        .query(&format!(
+            r#"mutation {{ update_User(docID: "{id}", input: {{age: 99}}) {{ _docID }} }}"#
+        ))
+        .ok();
+
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    let view = |n: usize| -> String {
+        let r = cluster
+            .client(n)
+            .query("query { User { _docID age } }")
+            .unwrap_or_default();
+        match r["User"].as_array().and_then(|a| a.first()) {
+            Some(d) => format!("present(age={})", d["age"]),
+            None => "deleted".to_string(),
+        }
+    };
+    let (v0, v1) = (view(0), view(1));
+    eprintln!(
+        "PARITY[{label}] node0={v0} node1={v1} | CONVERGED={}",
+        v0 == v1
+    );
+}
+
+/// Go<->Go delete-vs-update resolution (badger).
+#[ignore = "parity investigation; needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_delete_update_go_go() {
+    let cluster = TestCluster::builder()
+        .go_nodes(2)
+        .with_p2p()
+        .with_store("badger")
+        .with_development()
+        .build()
+        .await
+        .expect("go-go cluster");
+    run_delete_update_parity(cluster, "delete_update_go_go").await;
+}
+
+/// Mixed Rust(node0, deletes)<->Go(node1, updates) delete-vs-update resolution.
+#[ignore = "parity investigation; needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_delete_update_mixed() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .go_nodes(1)
+        .with_p2p()
+        .with_development()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("mixed cluster");
+    run_delete_update_parity(cluster, "delete_update_mixed(rust0_del,go1_upd)").await;
+}
+
 /// Go<->Go counter convergence (badger) — the parity target.
 #[ignore = "parity investigation; needs Go binary on PATH; run with --ignored"]
 #[tokio::test]

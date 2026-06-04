@@ -126,3 +126,205 @@ async fn bughunt_counter_live() {
 async fn bughunt_counter_restart() {
     run_counter("counter_restart(node1)", Some(1)).await;
 }
+
+/// MULTI-ROUND counter robustness for the reconcile fix: each node runs `rounds`
+/// sequential `+10` local increments, interleaved with live replication, so the
+/// store<->blob reconcile is exercised repeatedly. Expected total = seed(0) +
+/// 2*rounds*10. A reconcile that double-counts under repeated local+remote
+/// interleaving would overshoot; one that drops would undershoot.
+async fn run_counter_multiround(rounds: usize) {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_store("redb")
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("2-node cluster");
+
+    let schema = "type Tally { name: String  hits: Int @crdt(type: pcounter) }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+    wire(&cluster).await;
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_Tally(input: {name: "t", hits: 0}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_Tally"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    for _ in 0..rounds {
+        for n in [0usize, 1] {
+            cluster
+                .client(n)
+                .query(&format!(
+                    r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: 10}}) {{ _docID }} }}"#
+                ))
+                .expect("increment");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    let want = (2 * rounds * 10) as i64;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (h0, h1) = (hits(&cluster.client(0)), hits(&cluster.client(1)));
+        if (h0 == h1 && h0 == want) || Instant::now() >= deadline {
+            let converged = h0 == h1 && h0 == want;
+            eprintln!(
+                "BUGHUNT[counter_multiround({rounds})] node0.hits={h0} node1.hits={h1} | expected {want} | CONVERGED={converged}"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+#[ignore = "bug-hunt probe; run with --ignored --nocapture"]
+#[tokio::test]
+async fn bughunt_counter_multiround() {
+    run_counter_multiround(5).await;
+}
+
+/// DELETE vs concurrent UPDATE race. node0 deletes the document while node1
+/// updates a field, concurrently, then both heal. Go gates counter/LWW merges on
+/// a `DeletedObjectMarker`; this reports each node's view (doc present? field
+/// value?) so a divergent delete/update resolution is visible.
+#[ignore = "bug-hunt probe; run with --ignored --nocapture"]
+#[tokio::test]
+async fn bughunt_delete_update_race() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_store("redb")
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("2-node cluster");
+
+    let schema = "type User { name: String  age: Int }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+    let (a0, a1) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+    cluster.client(0).p2p_connect(&[a1.as_str()]).ok();
+    cluster.client(1).p2p_connect(&[a0.as_str()]).ok();
+    cluster.client(0).p2p_collection_add(&["User"]).ok();
+    cluster.client(1).p2p_collection_add(&["User"]).ok();
+    cluster.client(0).p2p_replicator_set(&["User"], &a1).ok();
+    cluster.client(1).p2p_replicator_set(&["User"], &a0).ok();
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_User"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Concurrent: node0 deletes, node1 updates age.
+    cluster
+        .client(0)
+        .query(&format!(
+            r#"mutation {{ delete_User(docID: "{id}") {{ _docID }} }}"#
+        ))
+        .ok();
+    cluster
+        .client(1)
+        .query(&format!(
+            r#"mutation {{ update_User(docID: "{id}", input: {{age: 99}}) {{ _docID }} }}"#
+        ))
+        .ok();
+
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    let view = |n: usize| -> String {
+        let r = cluster
+            .client(n)
+            .query("query { User { _docID age } }")
+            .unwrap_or_default();
+        match r["User"].as_array().and_then(|a| a.first()) {
+            Some(d) => format!("present(age={})", d["age"]),
+            None => "deleted".to_string(),
+        }
+    };
+    let (v0, v1) = (view(0), view(1));
+    eprintln!(
+        "BUGHUNT[delete_update_race] node0={v0} node1={v1} | CONVERGED={}",
+        v0 == v1
+    );
+}
+
+/// 3-NODE TRANSITIVE propagation: a linear chain node0 -> node1 -> node2 (no
+/// direct node0 -> node2 replicator). A write on node0 must reach node2 via
+/// node1's onward replication. Reports whether node2 receives it.
+#[ignore = "bug-hunt probe; run with --ignored --nocapture"]
+#[tokio::test]
+async fn bughunt_3node_transitive() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(3)
+        .with_p2p()
+        .with_store("redb")
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("3-node cluster");
+
+    let schema = "type User { name: String }";
+    for n in 0..3 {
+        cluster.client(n).schema_add(schema).expect("schema");
+        cluster.client(n).p2p_collection_add(&["User"]).ok();
+    }
+    let addr: Vec<String> = (0..3).map(|n| node_addr(&cluster, n)).collect();
+    // Chain: 0 -> 1 -> 2.
+    cluster.client(0).p2p_connect(&[addr[1].as_str()]).ok();
+    cluster.client(1).p2p_connect(&[addr[2].as_str()]).ok();
+    cluster
+        .client(0)
+        .p2p_replicator_set(&["User"], &addr[1])
+        .ok();
+    cluster
+        .client(1)
+        .p2p_replicator_set(&["User"], &addr[2])
+        .ok();
+
+    cluster
+        .client(0)
+        .query(r#"mutation { add_User(input: {name: "Relayed"}) { _docID } }"#)
+        .expect("create");
+
+    let names = |n: usize| -> Vec<String> {
+        cluster
+            .client(n)
+            .query("query { User { name } }")
+            .unwrap_or_default()["User"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|u| u["name"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let deadline = Instant::now() + Duration::from_secs(25);
+    loop {
+        let got = names(2).iter().any(|s| s == "Relayed");
+        if got || Instant::now() >= deadline {
+            eprintln!(
+                "BUGHUNT[3node_transitive] node1={:?} node2={:?} | node2_received={got}",
+                names(1),
+                names(2)
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
