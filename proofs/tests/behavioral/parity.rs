@@ -150,7 +150,11 @@ async fn mixed_disk_cluster() -> TestCluster {
         .rust_nodes(1)
         .go_nodes(1)
         .with_p2p()
-        .with_development()
+        // A persistent keyring so each node keeps a STABLE libp2p peer-id across a
+        // restart (production behavior). Under `--no-keyring` BOTH impls generate
+        // an ephemeral peer-id, so a restart changes it and a peer's replicator
+        // can't re-target the new id — not a product bug, a test-mode artifact.
+        .with_keyring()
         .with_node_store(0, "redb") // node0 = Rust
         .with_node_store(1, "badger") // node1 = Go
         .with_rust_binary(support::release_binary())
@@ -173,15 +177,15 @@ async fn parity_samedoc_mixed_restart_go() {
 
 /// Mixed + restart with the RUST node (node0) restarted, peer Go.
 ///
-/// FINDING (separate from the merge-convergence fix): this does NOT converge —
-/// node0 ends with its own `age=31` but never receives node1(go)'s `city=LA` at
-/// all (node1 does get node0's `age=31`). So it is a go->rust re-DELIVERY gap to
-/// a *restarted* rust node, not a merge clobber: `mixed_live` converges (go->rust
-/// works without a restart), `mixed_restart_go` converges, rust<->rust converges
-/// — only a restarted *rust* node fails to re-receive a go peer's concurrent
-/// write after heal. Left as a follow-up (P2P heal robustness, distinct from the
-/// LWW priority-reconcile fix). Reported, not asserted.
-#[ignore = "parity investigation; reveals a go->rust re-delivery gap after a rust restart; run with --ignored"]
+/// Converges (via `mixed_disk_cluster`'s persistent keyring). NOTE on the
+/// investigation: under `--no-keyring` this DIVERGED — but it was NOT a product
+/// bug. Both Go and Rust generate an EPHEMERAL libp2p peer-id under
+/// `--no-keyring`, so a restart changes it; a peer's replicator then can't
+/// re-target the new id (Go's delete-by-address 404s, leaving a stale replicator
+/// pushing to the dead peer-id) and the restarted node never re-receives the
+/// concurrent write. A real node uses a persistent keyring -> stable peer-id ->
+/// the connection simply reconnects, which is what this test now exercises.
+#[ignore = "parity investigation; needs Go binary on PATH; run with --ignored"]
 #[tokio::test]
 async fn parity_samedoc_mixed_restart_rust() {
     run_samedoc(
