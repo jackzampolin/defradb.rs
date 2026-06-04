@@ -20,7 +20,9 @@ echo; echo "== Conformance: Lean axis + registry (cargo test, no binary) =="
 
 echo; echo "== Conformance: TLA axis behavioral (release binary) =="
 if [ -x "$ROOT/target/release/defra" ] || [ -n "${DEFRA_CONFORMANCE_BINARY:-}" ]; then
-  ( cd "$ROOT" && cargo test -p conformance --test tla_conformance ); behav=$?
+  # Serial: each test spins up real nodes (some restart/2-node) — parallel
+  # execution contends on CPU/timing and flakes poll deadlines.
+  ( cd "$ROOT" && cargo test -p conformance --test tla_conformance -- --test-threads=1 ); behav=$?
 else
   echo "SKIP — no release binary. Build it: cargo build --release -p cli"
   echo "       (or set DEFRA_CONFORMANCE_BINARY to a shipped artifact)"

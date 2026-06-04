@@ -195,30 +195,23 @@ async fn convergence_partition_both_directions_merge() {
 /// merged state (both edits present) — order-independent merge (commutativity),
 /// the exact property the Lean LWW proofs assert.
 ///
-/// IGNORED — this exposes a real convergence bug (found via this harness). The
-/// DAGs converge byte-identically on both nodes, but the restarted node
-/// materializes the wrong value: node0 -> {age:31, city:LA}, node1 ->
-/// {age:31, city:NYC} (node1 loses its own concurrent city=LA, reverting to the
-/// create's NYC).
+/// Regression guard for a real convergence bug this harness FOUND AND FIXED. The
+/// DAGs converged byte-identically, but the restarted node materialized the
+/// wrong value (node0 -> city=LA, node1 -> city=NYC) — a permanent divergence
+/// that all unit tests missed, and that go<->go does NOT exhibit (it was a Rust
+/// regression from Go; see parity.rs).
 ///
-/// Traced root cause (via merge-handler instrumentation): a FIELD-PRIORITY
-/// inconsistency on the restarted node. node1 emits its `city=LA` update at
-/// priority 2 (node0 receives it as priority 2 and LA correctly wins
-/// `RejectedLowerPriority{current:2}`), but in node1's OWN local LWW store the
-/// field sits at priority 1. So when the create's `city=NYC` (priority 1) is
-/// re-merged on node1, it TIES (`RejectedTieBreak`, equal priority) and wins the
-/// lexicographic tie-break ("NYC" > "LA"). The restart (which clears the
-/// in-memory `merged_composites` dedup in db-merge/.../composite.rs and forces a
-/// re-walk of the already-applied create composite) is what surfaces the stale
-/// priority. The fix is in the local-update / headstore<->datastore priority
-/// handling, not a single merge-handler line — needs deliberate engine work.
-/// Un-ignore once that lands.
-///
-/// PARITY (see parity.rs): this is RUST-SPECIFIC. Under the identical scenario
-/// go<->go CONVERGES (both nodes -> city=LA) and go<->rust live-converges, while
-/// rust<->rust diverges — a Rust regression from Go's behavior, not a shared
-/// CRDT-design issue.
-#[ignore = "exposes a real restart-induced CRDT field-priority convergence bug (Rust-specific); see doc comment"]
+/// Root cause: a field's priority lives in two stores — the headstore (advanced
+/// by BOTH local writes and merges) and the datastore LWW priority (advanced
+/// ONLY by merges). A local write (node1's `city=LA`) pushes the headstore to
+/// priority 2 but leaves the datastore LWW stale at the replicated seed's
+/// priority 1; a restart then clears the in-memory `merged_composites` dedup and
+/// re-walks the create composite, whose `city=NYC` (priority 1) ties the stale
+/// datastore entry and wins the lexicographic tie-break. Fixed in
+/// `crates/db-merge/src/merge_handler/lww.rs` `seed_lww_from_existing_doc`: it
+/// now re-seeds the datastore LWW from the authoritative materialized doc + head
+/// priority whenever the headstore is ahead, so the merge resolves against the
+/// true current state. Verified: rust<->rust, go<->go, and go<->rust all converge.
 #[tokio::test]
 async fn convergence_concurrent_same_doc_writes_merge() {
     let mut cluster = TestCluster::builder()

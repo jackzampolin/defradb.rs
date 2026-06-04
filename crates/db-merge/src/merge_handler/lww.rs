@@ -50,12 +50,27 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             return Ok(false);
         };
 
-        if crdt::traits::PriorityReader::priority(lww, datastore)
+        // Two priority stores can disagree for a field: the headstore tracks the
+        // authoritative current priority (advanced by BOTH local writes and
+        // merges), while the datastore LWW priority is advanced ONLY by merges.
+        // A local write therefore pushes the headstore (and materialized doc)
+        // ahead of a stale datastore LWW. Reconcile here: when the headstore is
+        // ahead, re-seed the datastore LWW from the materialized doc value at the
+        // headstore priority, so the merge resolves against the true current
+        // state instead of the stale CRDT entry (otherwise a re-walked ancestor
+        // delta clobbers a concurrent local write — replicas diverge).
+        let hs_priority = self
+            .current_field_priority(headstore, doc_id_str, &payload.field_name)
+            .await?;
+        let ds_priority = crdt::traits::PriorityReader::priority(lww, datastore)
             .await
-            .map_err(|e| MergeError::MergeFailed(e.to_string()))?
-            != 0
-        {
-            return Ok(false);
+            .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
+
+        // Fast path: the datastore LWW already reflects (or exceeds) the
+        // headstore priority — nothing to seed. A non-zero datastore priority
+        // also implies the document exists.
+        if ds_priority != 0 && ds_priority >= hs_priority {
+            return Ok(true);
         }
 
         let doc_id = match DocID::from_string(doc_id_str) {
@@ -71,9 +86,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             return Ok(true);
         };
 
-        let priority = self
-            .current_field_priority(headstore, doc_id_str, &payload.field_name)
-            .await?;
+        let priority = hs_priority;
         if priority == 0 {
             return Ok(true);
         }
