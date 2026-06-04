@@ -124,11 +124,7 @@ async fn run_samedoc(mut cluster: TestCluster, label: &str, restart: Option<usiz
 
 /// Mixed Go<->Rust, LIVE (no restart): node0=Rust, node1=Go, concurrent edits to
 /// the same document over a live connection. Isolates pure cross-implementation
-/// merge interop. (A mixed + restart variant — which would surface the
-/// Rust-side bug — is blocked: the restarted node needs a disk store its impl
-/// supports, but the harness sets one store for the whole cluster and Go/Rust
-/// share no disk store. The Rust-vs-Go split is already localized by the
-/// rust_rust vs go_go results.)
+/// merge interop.
 #[ignore = "parity investigation; needs Go binary on PATH; run with --ignored"]
 #[tokio::test]
 async fn parity_samedoc_mixed_live() {
@@ -143,6 +139,57 @@ async fn parity_samedoc_mixed_live() {
         .expect("mixed cluster");
     // node0 = Rust, node1 = Go (harness assigns Rust indices first).
     run_samedoc(cluster, "mixed_live(rust0,go1)", None).await;
+}
+
+/// Build a mixed Rust(node0)/Go(node1) cluster with per-node native disk stores
+/// (`with_node_store`: Rust=redb, Go=badger) so EACH node persists across a
+/// restart. This is what makes the strongest cross-impl test — mixed + restart —
+/// possible (a cluster-wide store can't satisfy both impls).
+async fn mixed_disk_cluster() -> TestCluster {
+    TestCluster::builder()
+        .rust_nodes(1)
+        .go_nodes(1)
+        .with_p2p()
+        .with_development()
+        .with_node_store(0, "redb") // node0 = Rust
+        .with_node_store(1, "badger") // node1 = Go
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("mixed disk cluster")
+}
+
+/// Mixed + restart with the GO node (node1) restarted — Go restarted, peer Rust.
+#[ignore = "parity investigation; needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_samedoc_mixed_restart_go() {
+    run_samedoc(
+        mixed_disk_cluster().await,
+        "mixed_restart_go(rust0,go1)",
+        Some(1),
+    )
+    .await;
+}
+
+/// Mixed + restart with the RUST node (node0) restarted, peer Go.
+///
+/// FINDING (separate from the merge-convergence fix): this does NOT converge —
+/// node0 ends with its own `age=31` but never receives node1(go)'s `city=LA` at
+/// all (node1 does get node0's `age=31`). So it is a go->rust re-DELIVERY gap to
+/// a *restarted* rust node, not a merge clobber: `mixed_live` converges (go->rust
+/// works without a restart), `mixed_restart_go` converges, rust<->rust converges
+/// — only a restarted *rust* node fails to re-receive a go peer's concurrent
+/// write after heal. Left as a follow-up (P2P heal robustness, distinct from the
+/// LWW priority-reconcile fix). Reported, not asserted.
+#[ignore = "parity investigation; reveals a go->rust re-delivery gap after a rust restart; run with --ignored"]
+#[tokio::test]
+async fn parity_samedoc_mixed_restart_rust() {
+    run_samedoc(
+        mixed_disk_cluster().await,
+        "mixed_restart_rust(rust0,go1)",
+        Some(0),
+    )
+    .await;
 }
 
 /// Control: Rust<->Rust (redb) — should reproduce the divergence.
