@@ -130,6 +130,10 @@ pub struct ManagedP2PSystem {
     replicator_push_options: ReplicatorPushOptionsState,
     on_replicator_push_options: Option<ReplicatorPushOptionsCallback>,
     retry_replicators: std::sync::OnceLock<RetryReplicatorsCallback>,
+    /// Outbound management requester (Task 7a): relays management requests to
+    /// P2P-only peers on behalf of an HTTP caller. Set once during P2P setup
+    /// (after the system is built), consumed when wiring `AppState`.
+    manage_requester: std::sync::OnceLock<Arc<dyn defra_http::ManageRequester>>,
     shutdown: node::ShutdownHandle,
 }
 
@@ -175,8 +179,19 @@ impl ManagedP2PSystem {
             replicator_push_options,
             on_replicator_push_options,
             retry_replicators: std::sync::OnceLock::new(),
+            manage_requester: std::sync::OnceLock::new(),
             shutdown,
         }
+    }
+
+    /// Install the outbound management requester. Set once during P2P setup.
+    pub fn set_manage_requester(&self, requester: Arc<dyn defra_http::ManageRequester>) {
+        let _ = self.manage_requester.set(requester);
+    }
+
+    /// Get the outbound management requester, if installed.
+    pub fn manage_requester(&self) -> Option<&Arc<dyn defra_http::ManageRequester>> {
+        self.manage_requester.get()
     }
 
     /// Install the on-demand replicator retry trigger. Set once during P2P setup.

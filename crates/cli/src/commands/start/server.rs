@@ -156,6 +156,7 @@ impl Node {
             acp_store,
             zanzibar_store.clone(),
             event_bus.clone(),
+            db::node_access_checker(database.clone()),
         )
         .await?;
 
@@ -167,6 +168,37 @@ impl Node {
         }
 
         let nac_adapter = Self::setup_nac_manager(config, user_did.as_ref()).await?;
+
+        // Wire the NAC manager into the DB so DB-layer `check_node_access` calls
+        // go live (first-call-wins via the DB's OnceLock). Without this the CLI
+        // server's DB-layer NAC checks are inert.
+        if let Some(adapter) = nac_adapter.as_ref() {
+            database.set_nac_manager(adapter.nac_manager());
+        }
+
+        // Populate the manage-channel serve deps now that the controller exists;
+        // until this fires the event loop drops inbound manage requests rather
+        // than serving them. The NAC handle gates authorization: when NAC is
+        // enabled we use the real adapter's manager, otherwise we supply a
+        // disabled NacManager whose check_permission returns Ok(true) (parity
+        // with the embedded node, which always populates these hooks).
+        if let (Some(hooks), Some(controller), Some(correlator), Some(query_correlator)) = (
+            p2p_setup.manage_hooks.as_ref(),
+            p2p_setup.manage_controller.as_ref(),
+            p2p_setup.manage_correlator.as_ref(),
+            p2p_setup.manage_query_correlator.as_ref(),
+        ) {
+            let nac: Arc<dyn db::NacManagerApi> = match nac_adapter.as_ref() {
+                Some(adapter) => adapter.nac_manager(),
+                None => Arc::new(db::create_memory_nac_manager(db::NacConfig::new())),
+            };
+            let _ = hooks.set(defra_p2p_adapter::manage::hooks::ManageHooks {
+                ops: controller.clone(),
+                nac,
+                correlator: correlator.clone(),
+                query_correlator: query_correlator.clone(),
+            });
+        }
 
         // Build + wire the KMS (mirrors crates/embedded/src/node.rs). The P2P
         // transport was created earlier; the NacDacPolicy needs document_acp +
@@ -285,6 +317,7 @@ impl Node {
             event_bus,
             query_setup: &query_setup,
             p2p_adapter: p2p_setup.http_adapter.clone(),
+            manage_requester: p2p_setup.manage_requester.clone(),
             nac_adapter,
             acp_setup: &acp_setup,
             zanzibar_store,

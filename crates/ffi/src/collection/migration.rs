@@ -46,6 +46,14 @@ pub unsafe extern "C" fn set_migration(
         let config_str = try_ffi!(require_c_str(config, "config"));
         let database = try_ffi!(get_node_database(node_ptr));
 
+        // Bind the caller's identity into the ambient context so the DB-layer NAC
+        // gate on set_migration resolves the actual caller instead of the
+        // wildcard. The body runs on this thread via `block_on`, so the
+        // thread-local is visible throughout it; the guard restores on drop.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         ffi_async!(rt, {
             // Parse the LensConfig from JSON
             let lens_config: lens::LensConfig = serde_json::from_str(&config_str)
@@ -53,7 +61,7 @@ pub unsafe extern "C" fn set_migration(
 
             // Register the migration with the lens store
             let transform_id = database
-                .set_migration(lens_config)
+                .set_migration(lens_config, None)
                 .await
                 .map_err(|e| format!("failed to set migration: {}", e))?;
 
@@ -106,6 +114,14 @@ pub unsafe extern "C" fn set_migration_in_txn(
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
+        // Bind the caller's identity into the ambient context so the DB-layer NAC
+        // gate on set_migration_in_txn resolves the actual caller instead of the
+        // wildcard. The body runs on this thread via `block_on`, so the
+        // thread-local is visible throughout it; the guard restores on drop.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         ffi_async!(rt, {
             // Parse the LensConfig from JSON
             let lens_config: lens::LensConfig = serde_json::from_str(&config_str)
@@ -113,7 +129,7 @@ pub unsafe extern "C" fn set_migration_in_txn(
 
             // Register the migration within the transaction
             let transform_id = registry
-                .set_migration_in_txn(&txn_str, lens_config)
+                .set_migration_in_txn(&txn_str, lens_config, None)
                 .await
                 .map_err(|e| format!("failed to set migration in txn: {}", e))?;
 
@@ -156,6 +172,12 @@ pub unsafe extern "C" fn delete_collection_versions(
         ));
         let ids_str = try_ffi!(require_c_str(version_ids_json, "version_ids_json"));
         let database = try_ffi!(get_node_database(node_ptr));
+
+        // Bind the caller's identity so any DB-layer NAC gate reached by the body
+        // resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
 
         ffi_async!(rt, {
             let version_ids: Vec<String> = serde_json::from_str(&ids_str)

@@ -71,6 +71,8 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
         schema::definition_validation::validate_new_collections(&collections)
             .map_err(|error| anyhow!("schema validation error: {error}"))?;
 
+        let _id_guard =
+            defra_core::current_identity::scoped_current_identity(self.node_identity_did.clone());
         for collection in collections {
             self.database
                 .create_collection(collection)
@@ -493,6 +495,11 @@ where
         create_document_acp(store.clone(), config.persistence, &config.document_acp).await?;
     let nac_manager = create_nac_manager(store.clone(), config.persistence).await?;
 
+    // Wire the NAC manager into the DB so DB-layer `check_node_access` calls go
+    // live. First-call-wins via the DB's OnceLock setter. Covers both the
+    // embedded node and the FFI node (which also builds via `build_with_store`).
+    database.set_nac_manager(nac_manager.clone());
+
     if let Some(ref mut setup) = p2p_setup {
         setup.merge_handler.set_document_acp(document_acp.clone());
         setup
@@ -501,6 +508,17 @@ where
         if let Some(wire_document_acp) = setup.wire_document_acp.take() {
             wire_document_acp(document_acp.clone());
         }
+        // Populate the manage-channel serve deps now that the controller and
+        // NAC manager exist; until this fires the event loop drops inbound
+        // manage requests rather than serving them unauthenticated.
+        let _ = setup
+            .manage_hooks
+            .set(defra_p2p_adapter::manage::hooks::ManageHooks {
+                ops: setup.manage_controller.clone(),
+                nac: nac_manager.clone(),
+                correlator: setup.manage_correlator.clone(),
+                query_correlator: setup.manage_query_correlator.clone(),
+            });
     }
 
     // Build the KMS once document ACP + NAC manager exist (PR #4778 ordering:

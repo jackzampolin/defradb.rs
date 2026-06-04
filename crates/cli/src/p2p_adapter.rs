@@ -16,7 +16,6 @@ use p2p::P2PHostHandle;
 
 // Re-export extracted types so existing `crate::p2p_adapter::Foo` paths still resolve.
 pub(crate) use crate::p2p_adapter_helpers::collections_requiring_replay;
-pub(crate) use crate::p2p_collection_lookup::LookupOnlyDocPusher;
 pub use crate::p2p_doc_pusher::DbDocPusher;
 
 /// Trait for looking up collection IDs by name.
@@ -110,9 +109,17 @@ pub struct P2PAdapter<
     version_syncer: Option<Arc<dyn VersionSyncer>>,
     peer_addresses: Arc<std::sync::RwLock<HashMap<String, String>>>,
     tracked_documents: Arc<std::sync::RwLock<HashSet<String>>>,
+    nac_checker: Arc<dyn db::NodeAccessChecker>,
 }
 
 impl<B: Blockstore + 'static> P2PAdapter<B> {
+    async fn check_nac(&self, permission: acp::nac::NodePermission) -> P2PResult<()> {
+        self.nac_checker
+            .check_node_access(permission)
+            .await
+            .map_err(|e| P2PError::Internal(e.to_string()))
+    }
+
     fn to_http_replicator_info(info: p2p::ReplicatorInfo) -> ReplicatorInfo {
         let address = info.addresses_str().first().map(|s| s.to_string());
         let status = Some(info.status.into());
@@ -123,53 +130,6 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             address,
             status,
             last_status_change,
-        }
-    }
-
-    /// Create a new adapter wrapping the given P2P handle.
-    pub fn new(handle: P2PHostHandle) -> Self {
-        Self {
-            handle,
-            sync_coordinator: None,
-            doc_pusher: None,
-            event_bus: None,
-            version_syncer: None,
-            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
-        }
-    }
-
-    /// Create a new adapter with a sync coordinator for enhanced replicator support.
-    pub fn with_sync_coordinator(
-        handle: P2PHostHandle,
-        coordinator: Arc<Libp2pSyncCoordinator<B>>,
-    ) -> Self {
-        Self {
-            handle,
-            sync_coordinator: Some(coordinator),
-            doc_pusher: None,
-            event_bus: None,
-            version_syncer: None,
-            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
-        }
-    }
-
-    /// Create a new adapter with sync coordinator and collection lookup.
-    pub fn with_sync_coordinator_and_lookup(
-        handle: P2PHostHandle,
-        coordinator: Arc<Libp2pSyncCoordinator<B>>,
-        lookup: Arc<dyn CollectionLookup>,
-    ) -> Self {
-        let doc_pusher: Arc<dyn DocPusher> = Arc::new(LookupOnlyDocPusher(lookup));
-        Self {
-            handle,
-            sync_coordinator: Some(coordinator),
-            doc_pusher: Some(doc_pusher),
-            event_bus: None,
-            version_syncer: None,
-            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
     }
 
@@ -187,6 +147,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
         doc_pusher: Arc<dyn DocPusher>,
         event_bus: Arc<dyn events::Bus>,
         version_syncer: Option<Arc<dyn VersionSyncer>>,
+        nac_checker: Arc<dyn db::NodeAccessChecker>,
     ) -> Self {
         Self {
             handle,
@@ -196,54 +157,8 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             version_syncer,
             peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
             tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            nac_checker,
         }
-    }
-}
-
-impl P2PAdapter<blockstore::DefraBlockstore<storage::backends::MemoryStore>> {
-    /// Create an Arc-wrapped adapter.
-    pub fn new_arc(handle: P2PHostHandle) -> Arc<dyn P2POperations> {
-        Arc::new(Self::new(handle))
-    }
-}
-
-impl<B: Blockstore + 'static> P2PAdapter<B> {
-    /// Create an Arc-wrapped adapter with sync coordinator.
-    pub fn with_sync_coordinator_arc(
-        handle: P2PHostHandle,
-        coordinator: Arc<Libp2pSyncCoordinator<B>>,
-    ) -> Arc<dyn P2POperations> {
-        Arc::new(Self::with_sync_coordinator(handle, coordinator))
-    }
-
-    /// Create an Arc-wrapped adapter with sync coordinator and collection lookup.
-    pub fn with_sync_coordinator_and_lookup_arc(
-        handle: P2PHostHandle,
-        coordinator: Arc<Libp2pSyncCoordinator<B>>,
-        lookup: Arc<dyn CollectionLookup>,
-    ) -> Arc<dyn P2POperations> {
-        Arc::new(Self::with_sync_coordinator_and_lookup(
-            handle,
-            coordinator,
-            lookup,
-        ))
-    }
-
-    /// Create an Arc-wrapped adapter with full context.
-    pub fn with_full_context_arc(
-        handle: P2PHostHandle,
-        coordinator: Arc<Libp2pSyncCoordinator<B>>,
-        doc_pusher: Arc<dyn DocPusher>,
-        event_bus: Arc<dyn events::Bus>,
-        version_syncer: Option<Arc<dyn VersionSyncer>>,
-    ) -> Arc<dyn P2POperations> {
-        Arc::new(Self::with_full_context(
-            handle,
-            coordinator,
-            doc_pusher,
-            event_bus,
-            version_syncer,
-        ))
     }
 }
 
@@ -266,6 +181,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn connected_peers(&self) -> P2PResult<Vec<String>> {
+        self.check_nac(acp::nac::NodePermission::P2pPeerActive)
+            .await?;
+
         let connected = self
             .handle
             .connected_peers()
@@ -284,6 +202,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn connect_peer(&self, addr: &str) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pPeerConnect)
+            .await?;
+
         let parsed = p2p::parse_multiaddr_with_peer_id(addr)
             .map_err(|e| P2PError::InvalidInput(e.to_string()))?;
 
@@ -310,6 +231,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
+        self.check_nac(acp::nac::NodePermission::P2pReplicatorList)
+            .await?;
+
         let p2p_infos = if let Some(ref pusher) = self.doc_pusher {
             match pusher.load_persisted_replicators().await {
                 Ok(Some(infos)) => infos,
@@ -342,6 +266,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
         expected_authorizer_did: Option<&str>,
     ) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pReplicatorAdd)
+            .await?;
+
         let addr_str = addr.ok_or_else(|| P2PError::InvalidInput("address is required".into()))?;
         let parsed = p2p::parse_multiaddr_with_peer_id(addr_str)
             .map_err(|e| P2PError::InvalidInput(e.to_string()))?;
@@ -577,6 +504,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         collections: Vec<String>,
         addr: Option<&str>,
     ) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pReplicatorDelete)
+            .await?;
+
         let addr_str = addr.ok_or_else(|| P2PError::InvalidInput("address is required".into()))?;
         let parsed = p2p::parse_multiaddr_with_peer_id(addr_str)
             .map_err(|e| P2PError::InvalidInput(e.to_string()))?;
@@ -625,6 +555,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn get_collections(&self) -> P2PResult<Vec<String>> {
+        self.check_nac(acp::nac::NodePermission::P2pCollectionList)
+            .await?;
+
         if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
                 .get_subscribed_collections()
@@ -636,6 +569,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn add_collections(&self, collections: Vec<String>) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pCollectionAdd)
+            .await?;
+
         if let Some(ref coordinator) = self.sync_coordinator {
             for collection_name in collections {
                 let topic_id = if let Some(ref pusher) = self.doc_pusher {
@@ -686,6 +622,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn remove_collections(&self, collections: Vec<String>) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pCollectionDelete)
+            .await?;
+
         if let Some(ref coordinator) = self.sync_coordinator {
             let topic_ids = collections
                 .into_iter()
@@ -726,6 +665,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn get_documents(&self) -> P2PResult<Vec<defra_http::router::P2pDocumentInfo>> {
+        self.check_nac(acp::nac::NodePermission::P2pDocumentList)
+            .await?;
+
         let docs = self
             .tracked_documents
             .read()
@@ -745,6 +687,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         &self,
         docs: Vec<defra_http::router::P2pDocumentRequest>,
     ) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pDocumentAdd)
+            .await?;
+
         let doc_ids: Vec<String> = docs.into_iter().map(|d| d.doc_id).collect();
 
         // Validate all document IDs have valid format (atomic: all or nothing)
@@ -781,6 +726,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         &self,
         docs: Vec<defra_http::router::P2pDocumentRequest>,
     ) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pDocumentDelete)
+            .await?;
+
         let doc_ids: Vec<String> = docs.into_iter().map(|d| d.doc_id).collect();
 
         // Validate all document IDs have valid format (atomic: all or nothing)

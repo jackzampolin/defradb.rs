@@ -23,6 +23,11 @@ impl<S: Store + 'static> EncryptedIndexOperations for EncryptedIndexAdapter<S> {
         collection: &str,
         field_name: &str,
     ) -> Result<EncryptedIndexInfo, String> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::EncryptedIndexAdd)
+            .await
+            .map_err(|e| format!("{}", e))?;
+
         let col = self
             .database
             .get_collection(collection)
@@ -105,6 +110,11 @@ impl<S: Store + 'static> EncryptedIndexOperations for EncryptedIndexAdapter<S> {
     ) -> Result<Vec<EncryptedIndexInfo>, String> {
         match collection {
             Some(name) => {
+                self.database
+                    .check_node_access(None, acp::nac::NodePermission::EncryptedIndexList)
+                    .await
+                    .map_err(|e| format!("{}", e))?;
+
                 let col = self
                     .database
                     .get_collection(name)
@@ -123,6 +133,11 @@ impl<S: Store + 'static> EncryptedIndexOperations for EncryptedIndexAdapter<S> {
                     .collect())
             }
             None => {
+                self.database
+                    .check_node_access(None, acp::nac::NodePermission::EncryptedIndexListAll)
+                    .await
+                    .map_err(|e| format!("{}", e))?;
+
                 let names = self
                     .database
                     .list_collections()
@@ -150,6 +165,11 @@ impl<S: Store + 'static> EncryptedIndexOperations for EncryptedIndexAdapter<S> {
         collection: &str,
         field_name: &str,
     ) -> Result<(), String> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::EncryptedIndexDelete)
+            .await
+            .map_err(|e| format!("{}", e))?;
+
         let col = self
             .database
             .get_collection(collection)

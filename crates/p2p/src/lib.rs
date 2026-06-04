@@ -66,6 +66,7 @@ mod explicit_replay;
 pub mod host;
 #[cfg(feature = "libp2p-transport")]
 pub mod kms;
+pub mod manage_correlator;
 pub mod message;
 pub mod protocol;
 #[cfg(feature = "libp2p-transport")]
@@ -152,6 +153,11 @@ pub struct QueryId(pub u64);
 
 // Re-export replicator types
 pub use replicator::{ReplicatorInfo, ReplicatorStatus};
+
+// Re-export management correlators
+pub use manage_correlator::{
+    ManageCorrelator, ManageQueryCorrelator, PendingManage, PendingManageQuery,
+};
 
 // Re-export SE query correlator
 pub use se_correlator::{PendingSeQuery, SeQueryCorrelator};

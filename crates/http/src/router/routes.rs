@@ -144,7 +144,10 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/documents", get(handlers::p2p::list_documents)) // Go-compatible
         .route("/documents", post(handlers::p2p::add_documents))
         .route("/documents", delete(handlers::p2p::remove_documents))
-        .route("/documents/sync", post(handlers::p2p::sync_documents)); // Go-compatible
+        .route("/documents/sync", post(handlers::p2p::sync_documents)) // Go-compatible
+        // Management relay: this node forwards a signed request to a P2P-only peer
+        .route("/manage", post(handlers::p2p::manage))
+        .route("/manage/query", post(handlers::p2p::manage_query));
 
     // ACP routes
     let acp_routes = Router::new()
@@ -282,7 +285,8 @@ mod tests {
         FailingMockP2POperations, MockDocumentAcpOperations, MockQueryExecutor, MockRestOperations,
     };
     use crate::router::{
-        DocumentAcpOperations, P2POperations, P2PResult, P2pDocumentInfo, P2pDocumentRequest,
+        DocumentAcpOperations, ManageRequester, P2POperations, P2PResult, P2pDocumentInfo,
+        P2pDocumentRequest, RemoteManageOp, RemoteManageQueryOp, RemoteManageQueryResult,
         ReplicatorInfo,
     };
     use axum::{
@@ -548,6 +552,68 @@ mod tests {
             .expect("router task should join")
             .expect("router should respond");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    struct DenyingManageRequester;
+
+    #[async_trait::async_trait]
+    impl ManageRequester for DenyingManageRequester {
+        async fn manage(
+            &self,
+            _target_addr: &str,
+            _auth_token: Vec<u8>,
+            _op: RemoteManageOp,
+        ) -> Result<(), String> {
+            Err("unauthorized".to_string())
+        }
+
+        async fn manage_query(
+            &self,
+            _target_addr: &str,
+            _auth_token: Vec<u8>,
+            _op: RemoteManageQueryOp,
+        ) -> Result<RemoteManageQueryResult, String> {
+            Err("unauthorized".to_string())
+        }
+    }
+
+    async fn manage_status_with_state(state: AppState, body: &'static str) -> StatusCode {
+        let router = create_router_with_state(state);
+        router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v0/p2p/manage")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn p2p_manage_returns_service_unavailable_when_unset() {
+        let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
+        let state = AppStateBuilder::new(executor).build();
+        let body = r#"{"Target":"addr","AuthToken":"tok","Op":{"Kind":"CollectionAdd","collection_ids":["Users"]}}"#;
+        assert_eq!(
+            manage_status_with_state(state, body).await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn p2p_manage_maps_unauthorized_to_forbidden() {
+        let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
+        let manage = Arc::new(DenyingManageRequester) as Arc<dyn ManageRequester>;
+        let state = AppStateBuilder::new(executor).with_manage(manage).build();
+        let body = r#"{"Target":"addr","AuthToken":"tok","Op":{"Kind":"CollectionAdd","collection_ids":["Users"]}}"#;
+        assert_eq!(
+            manage_status_with_state(state, body).await,
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]

@@ -12,7 +12,11 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// Note: This does NOT delete documents. Use `truncate_collection` first if needed.
     #[instrument(skip(self, txn), fields(collection = %name), name = "db.delete_collection")]
-    pub async fn delete_collection_with_txn(&self, txn: &mut DbTxn<S>, name: &str) -> Result<()> {
+    pub(crate) async fn delete_collection_with_txn(
+        &self,
+        txn: &mut DbTxn<S>,
+        name: &str,
+    ) -> Result<()> {
         // Get the collection to find its version_id and collection_id
         let collection = txn
             .get_collection(name)
@@ -66,6 +70,8 @@ impl<S: Store> crate::database::DB<S> {
     /// Note: This does NOT delete documents. Use `truncate_collection` first if needed.
     #[instrument(skip(self), fields(collection = %name), name = "db.delete_collection_auto")]
     pub async fn delete_collection(&self, name: &str) -> Result<()> {
+        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .await?;
         let mut txn = self.new_txn(false).await?;
 
         match self.delete_collection_with_txn(&mut txn, name).await {
@@ -106,6 +112,8 @@ impl<S: Store> crate::database::DB<S> {
     /// orphan child versions outside the batch) is delegated to
     /// `delete_collection_versions_batch`.
     pub async fn delete_collections(&self, names: Vec<String>, active_only: bool) -> Result<()> {
+        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .await?;
         if names.is_empty() {
             return Err(Error::InvalidPatch(
                 "collection name required: pass at least one name to delete".into(),
@@ -162,7 +170,13 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// Processes deletes in chunks to avoid building a massive uncommitted write set.
     #[instrument(skip(self), fields(collection = %name), name = "db.truncate_collection")]
-    pub async fn truncate_collection(&self, name: &str) -> Result<()> {
+    pub async fn truncate_collection(
+        &self,
+        name: &str,
+        identity: Option<&identity::Did>,
+    ) -> Result<()> {
+        self.check_node_access(identity, acp::nac::NodePermission::CollectionTruncate)
+            .await?;
         let collection = self
             .get_collection(name)?
             .ok_or_else(|| Error::CollectionNotFound(name.to_string()))?;

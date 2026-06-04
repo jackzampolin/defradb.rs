@@ -99,6 +99,9 @@ pub enum Error {
     #[error("acp error: {0}")]
     Acp(String),
 
+    #[error("not authorized to perform operation. Permission: {permission}")]
+    NotAuthorized { permission: String },
+
     #[error("lens error: {0}")]
     Lens(String),
 

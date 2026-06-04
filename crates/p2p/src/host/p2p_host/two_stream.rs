@@ -316,6 +316,66 @@ impl<S: Store> P2PHost<S> {
                     "Failed to decode two-stream message"
                 );
             }
+            TwoStreamEvent::ManageRequest { peer_id, request } => {
+                info!(
+                    peer_id = %peer_id,
+                    message_id = %request.message_id,
+                    "Host received manage request via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::ManageRequest { peer_id, request })
+                    .await
+                    .is_err()
+                {
+                    error!(peer_id = %peer_id, "Failed to send ManageRequest event");
+                }
+            }
+            TwoStreamEvent::ManageReply { peer_id, reply } => {
+                debug!(
+                    peer_id = %peer_id,
+                    message_id = %reply.message_id,
+                    "Host received manage reply via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::ManageReply { peer_id, reply })
+                    .await
+                    .is_err()
+                {
+                    error!(peer_id = %peer_id, "Failed to send ManageReply event");
+                }
+            }
+            TwoStreamEvent::ManageQueryRequest { peer_id, request } => {
+                info!(
+                    peer_id = %peer_id,
+                    message_id = %request.message_id,
+                    "Host received manage query request via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::ManageQueryRequest { peer_id, request })
+                    .await
+                    .is_err()
+                {
+                    error!(peer_id = %peer_id, "Failed to send ManageQueryRequest event");
+                }
+            }
+            TwoStreamEvent::ManageQueryReply { peer_id, reply } => {
+                debug!(
+                    peer_id = %peer_id,
+                    message_id = %reply.message_id,
+                    "Host received manage query reply via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::ManageQueryReply { peer_id, reply })
+                    .await
+                    .is_err()
+                {
+                    error!(peer_id = %peer_id, "Failed to send ManageQueryReply event");
+                }
+            }
         }
     }
 }

@@ -184,6 +184,100 @@ pub struct SyncVersionsRequest {
     pub version_ids: Vec<String>,
 }
 
+/// A management operation to relay to a remote P2P peer (http-native mirror of
+/// the p2p manage ops; http does not depend on p2p).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "Kind")]
+pub enum RemoteManageOp {
+    ReplicatorAdd {
+        addresses: Vec<String>,
+        collection_ids: Vec<String>,
+    },
+    ReplicatorDelete {
+        addresses: Vec<String>,
+        collection_ids: Vec<String>,
+    },
+    CollectionAdd {
+        collection_ids: Vec<String>,
+    },
+    CollectionRemove {
+        collection_ids: Vec<String>,
+    },
+    DocumentAdd {
+        docs: Vec<RemoteManageDocRef>,
+    },
+    DocumentRemove {
+        docs: Vec<RemoteManageDocRef>,
+    },
+    PeerConnect {
+        address: String,
+    },
+}
+
+/// A document reference for [`RemoteManageOp`] document operations.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemoteManageDocRef {
+    pub collection: String,
+    pub doc_id: String,
+}
+
+/// A read-only management operation to relay to a remote P2P peer.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "Kind")]
+pub enum RemoteManageQueryOp {
+    ReplicatorList,
+    CollectionList,
+}
+
+/// Typed result of a [`RemoteManageQueryOp`].
+///
+/// Serialize-only because it embeds [`ReplicatorInfo`] (a response type), and is
+/// only ever produced by the requester and rendered into an HTTP response.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "Kind")]
+pub enum RemoteManageQueryResult {
+    Replicators { replicators: Vec<ReplicatorInfo> },
+    Strings { values: Vec<String> },
+}
+
+/// Wire sentinel for a remote NAC denial on the management channel.
+///
+/// This is the contract between the manage serve side (which produces it when
+/// authorization fails), the [`ManageRequester`] implementation (which
+/// normalizes denials to it), and the HTTP handler (which maps it to 403). It is
+/// the single source of truth for the `"unauthorized"` string.
+pub const MANAGE_UNAUTHORIZED: &str = "unauthorized";
+
+/// Relays management requests to P2P-only peers on behalf of an HTTP caller.
+///
+/// In the management deployment model, the target node (B) exposes only its P2P
+/// port. To manage B, a caller hits this node's (A's) HTTP API; this node then
+/// sends a signed P2P management request to B, relaying the caller-minted actor
+/// token (a JWT with `aud` = B's peer-id).
+#[async_trait::async_trait]
+pub trait ManageRequester: Send + Sync {
+    /// Relay a mutating management request to the peer at `target_addr`.
+    ///
+    /// `target_addr` is the peer's shareable address (this node dials it).
+    /// `auth_token` is the caller-minted JWT (`aud` = the target peer-id).
+    /// Returns `Ok(())` on success, or an error string (`"unauthorized"` when
+    /// the remote NAC denies the operation).
+    async fn manage(
+        &self,
+        target_addr: &str,
+        auth_token: Vec<u8>,
+        op: RemoteManageOp,
+    ) -> Result<(), String>;
+
+    /// Relay a read-only management query to the peer at `target_addr`.
+    async fn manage_query(
+        &self,
+        target_addr: &str,
+        auth_token: Vec<u8>,
+        op: RemoteManageQueryOp,
+    ) -> Result<RemoteManageQueryResult, String>;
+}
+
 /// Trait for ACP (Access Control Policy) operations.
 ///
 /// ACP policies define access permissions for collections and documents,

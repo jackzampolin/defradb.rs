@@ -34,6 +34,11 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
         name: Option<&str>,
         unique: bool,
     ) -> Result<IndexInfo, String> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::IndexCreate)
+            .await
+            .map_err(|e| format!("{}", e))?;
+
         let col = self
             .database
             .require_collection(collection)
@@ -115,6 +120,11 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
     }
 
     async fn list_indexes(&self, collection: Option<&str>) -> Result<Vec<IndexInfo>, String> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::IndexList)
+            .await
+            .map_err(|e| format!("{}", e))?;
+
         let collections = if let Some(name) = collection {
             let col = self
                 .database
@@ -166,6 +176,11 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
     }
 
     async fn delete_index(&self, collection: &str, name: &str) -> Result<(), String> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::IndexDelete)
+            .await
+            .map_err(|e| format!("{}", e))?;
+
         let col = self
             .database
             .require_collection(collection)

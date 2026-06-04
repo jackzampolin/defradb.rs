@@ -83,6 +83,12 @@ pub unsafe extern "C" fn delete_index(
         let index_name_str = try_ffi!(require_c_str(index_name, "index_name"));
         let database = try_ffi!(get_node_database(node_ptr));
 
+        // Bind the caller's identity so any DB-layer NAC gate reached by the body
+        // resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         ffi_async!(rt, {
             // Get the collection
             let collection = database
@@ -198,6 +204,12 @@ pub unsafe extern "C" fn get_indexes(
         let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
         let database = try_ffi!(get_node_database(node_ptr));
 
+        // Bind the caller's identity so any DB-layer NAC gate reached by the body
+        // resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
+
         ffi_async!(rt, {
             // Get the collection
             let collection = database
@@ -244,6 +256,12 @@ pub unsafe extern "C" fn list_all_indexes(
             NodePermission::IndexList
         ));
         let database = try_ffi!(get_node_database(node_ptr));
+
+        // Bind the caller's identity so any DB-layer NAC gate reached by the body
+        // resolves the actual caller instead of the wildcard.
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
+        );
 
         ffi_async!(rt, {
             // Get all collection names

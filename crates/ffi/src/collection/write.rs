@@ -117,7 +117,7 @@ pub unsafe extern "C" fn patch_collection(
         patch => patch_str: "patch";
         {
         let updated_schema = database
-            .patch_collection(&name_str, &patch_str)
+            .patch_collection(&name_str, &patch_str, None)
             .await
             .map_err(|e| format!("failed to patch collection: {}", e))?;
 
@@ -161,7 +161,7 @@ pub unsafe extern "C" fn truncate_collection(
         name => name_str: "name";
         {
         database
-            .truncate_collection(&name_str)
+            .truncate_collection(&name_str, None)
             .await
             .map_err(|e| format!("failed to truncate collection: {}", e))?;
 

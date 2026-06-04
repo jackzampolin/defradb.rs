@@ -261,7 +261,25 @@ impl EmbeddedNode {
             return self.runner.execute(request).await;
         };
 
-        execute_with_signing_context(self.runner.clone(), request, signing_config).await
+        execute_with_signing_context(
+            self.runner.clone(),
+            request,
+            signing_config,
+            node_identity_did.to_string(),
+        )
+        .await
+    }
+
+    /// Run `op` with the node's own identity installed as the ambient acting
+    /// identity for the duration of the future, so DB-layer NAC checks resolve
+    /// to the node itself (which holds full access). No-op when no node identity
+    /// is configured. Uses the task_local so it survives `.await` on the
+    /// direct-async schema paths.
+    async fn as_node_identity<F, T>(&self, op: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        defra_core::current_identity::with_scoped_identity(self.node_identity_did.clone(), op).await
     }
 
     /// DID used as the embedded node identity for signing, when configured.
@@ -271,7 +289,7 @@ impl EmbeddedNode {
 
     /// Add a schema from a GraphQL SDL type definition.
     pub async fn add_schema(&self, sdl: &str) -> anyhow::Result<()> {
-        self.schema_ops.add_schema(sdl).await
+        self.as_node_identity(self.schema_ops.add_schema(sdl)).await
     }
 
     /// Create a materialized view from a source query and target SDL.
@@ -280,7 +298,8 @@ impl EmbeddedNode {
     /// `target_sdl` is the SDL for the view collection (may include directives
     /// like `@downsample` that are forward-declared for future defradb.rs support).
     pub async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()> {
-        self.schema_ops.add_view(source_query, target_sdl).await
+        self.as_node_identity(self.schema_ops.add_view(source_query, target_sdl))
+            .await
     }
 
     /// Apply a JSON Patch (RFC 6902) to an existing collection's schema.
@@ -296,8 +315,7 @@ impl EmbeddedNode {
         collection_name: &str,
         patch: &str,
     ) -> anyhow::Result<CollectionVersion> {
-        self.schema_ops
-            .patch_collection(collection_name, patch)
+        self.as_node_identity(self.schema_ops.patch_collection(collection_name, patch))
             .await
     }
 
@@ -307,8 +325,7 @@ impl EmbeddedNode {
     /// collection-name pointer to resolve to this version. If migrations are
     /// registered, documents are reindexed through them.
     pub async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()> {
-        self.schema_ops
-            .set_active_collection_version(version_id)
+        self.as_node_identity(self.schema_ops.set_active_collection_version(version_id))
             .await
     }
 
@@ -318,7 +335,8 @@ impl EmbeddedNode {
     /// Placeholder versions are created if the source or destination are not
     /// yet materialized, allowing migrations to be registered ahead of patches.
     pub async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
-        self.schema_ops.set_migration(config).await
+        self.as_node_identity(self.schema_ops.set_migration(config))
+            .await
     }
 
     /// List the names of every active collection known to the node.
@@ -431,6 +449,7 @@ async fn execute_with_signing_context(
     executor: Arc<dyn QueryExecutor>,
     request: QueryRequest,
     signing_config: SigningConfig,
+    node_did: String,
 ) -> QueryResponse {
     let handle = tokio::runtime::Handle::current();
     let batch_session_key = Some(signing_config.public_key_hex.clone());
@@ -438,6 +457,10 @@ async fn execute_with_signing_context(
     match tokio::task::spawn_blocking(move || {
         defra_core::signing::set_signing_config(Some(signing_config));
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
+        // Install the node identity as the ambient acting identity so DB-layer
+        // NAC checks resolve to the node itself. The pool thread is reused, so
+        // the guard clears it when the closure ends to prevent cross-request leak.
+        let _id_guard = defra_core::current_identity::scoped_current_identity(Some(node_did));
         handle.block_on(async { executor.execute(request).await })
     })
     .await
@@ -532,6 +555,7 @@ pub struct NodeBuilder {
     embedding_api_key: Option<String>,
     document_acp: DocumentAcpConfig,
     node_identity_did: Option<String>,
+    node_acp_enabled: bool,
     query_timeout: Option<Duration>,
     query_limits: QueryLimits,
     #[cfg(feature = "http")]
@@ -548,6 +572,7 @@ struct StoreBuildArgs {
     db_options: db::DbOptions,
     event_bus: Arc<dyn events::Bus>,
     node_identity_did: Option<String>,
+    node_acp_enabled: bool,
     query_timeout: Option<Duration>,
     query_limits: QueryLimits,
     #[cfg(feature = "http")]
@@ -606,6 +631,18 @@ impl NodeBuilder {
     /// remote signer such as a host Secure Enclave adapter.
     pub fn with_node_identity_did(mut self, did: impl Into<String>) -> Self {
         self.node_identity_did = Some(did.into());
+        self
+    }
+
+    /// Enable Node Access Control (NAC) with the configured node identity as owner.
+    ///
+    /// NAC is disabled by default. When enabled, DB-layer node operations are
+    /// gated by the NAC policy; the node's own identity always retains full
+    /// access (it is the owner). Requires [`NodeBuilder::with_node_identity_did`]
+    /// to be set with an identity backed by local key bytes, so the node DID can
+    /// own the policy — [`NodeBuilder::build`] fails otherwise.
+    pub fn with_node_acp_enabled(mut self) -> Self {
+        self.node_acp_enabled = true;
         self
     }
 
@@ -710,6 +747,7 @@ impl NodeBuilder {
         let p2p_config = self.p2p_config;
         let query_timeout = self.query_timeout;
         let query_limits = self.query_limits;
+        let node_acp_enabled = self.node_acp_enabled;
 
         // Telemetry handle (if any) was moved into the builder via
         // `with_telemetry`. Threaded through `StoreBuildArgs` to the
@@ -747,6 +785,7 @@ impl NodeBuilder {
                             db_options: db_options.clone(),
                             event_bus,
                             node_identity_did: node_identity_did.clone(),
+                            node_acp_enabled,
                             query_timeout,
                             query_limits,
                             #[cfg(feature = "http")]
@@ -782,6 +821,7 @@ impl NodeBuilder {
                             db_options: db_options.clone(),
                             event_bus,
                             node_identity_did: node_identity_did.clone(),
+                            node_acp_enabled,
                             query_timeout,
                             query_limits,
                             #[cfg(feature = "http")]
@@ -818,6 +858,7 @@ impl NodeBuilder {
                     db_options,
                     event_bus,
                     node_identity_did: node_identity_did.clone(),
+                    node_acp_enabled,
                     query_timeout,
                     query_limits,
                     #[cfg(feature = "http")]
@@ -908,6 +949,7 @@ impl NodeBuilder {
             db_options,
             event_bus,
             node_identity_did,
+            node_acp_enabled,
             query_timeout,
             query_limits,
             #[cfg(feature = "http")]
@@ -928,6 +970,37 @@ impl NodeBuilder {
         // Wire event bus so mutations publish events
         database.set_event_bus(event_bus.clone());
         let database = Arc::new(database);
+
+        // Node Access Control: only installed when explicitly enabled. The node
+        // identity owns the policy, so DB-layer node operations run by the node
+        // itself are always allowed (the node-DID bypass in check_node_access).
+        if node_acp_enabled {
+            let owner = node_identity_did
+                .as_deref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "node ACP requires a node identity; set one with with_node_identity_did()"
+                    )
+                })
+                .and_then(|did| {
+                    identity::Did::new(did)
+                        .map_err(|e| anyhow::anyhow!("invalid node identity DID for node ACP: {e}"))
+                })?;
+            if database.node_did().as_ref() != Some(&owner) {
+                anyhow::bail!(
+                    "node ACP requires the node identity to be backed by local key bytes so the \
+                     node DID can own the policy"
+                );
+            }
+            let nac_store = Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
+            let nac_config = db::NacConfig::new().with_enabled().with_dev_mode();
+            let nac_manager = Arc::new(db::NacManager::new(nac_store, nac_config));
+            nac_manager
+                .initialize(Some(&owner))
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to enable node ACP: {e}"))?;
+            database.set_nac_manager(nac_manager);
+        }
 
         // P2P setup (affects mutator choice)
         #[cfg(feature = "p2p")]
@@ -1153,6 +1226,7 @@ impl NodeBuilder {
             doc_pusher,
             event_bus,
             version_syncer,
+            db::node_access_checker(database.clone()),
         );
         adapter.set_initial_tracked_documents(restored_doc_ids);
         let ops: Arc<dyn defra_http::P2POperations> = Arc::new(adapter);

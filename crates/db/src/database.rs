@@ -6,6 +6,7 @@
 use crate::collection::Collection;
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;
+use crate::NacManagerApi;
 use cid::Cid;
 use datastore::BasicTxn;
 // EmbeddingClientConfig extracted to standalone db-search crate (Phase 6 of #796).
@@ -166,6 +167,11 @@ pub struct DB<S: Store> {
     /// it shares the DB's lifetime — and its in-process block cache — and drops
     /// with the DB, releasing the lock. Set once at startup.
     kms_blockstore: std::sync::OnceLock<Arc<blockstore::DefraBlockstore<S>>>,
+    /// Optional NAC manager. When set and enabled, node-level operations are
+    /// gated through [`DB::check_node_access`]. Set once at node startup via
+    /// [`DB::set_nac_manager`]. When unset, all `check_node_access` calls are
+    /// no-ops (NAC not configured).
+    nac_manager: std::sync::OnceLock<std::sync::Arc<dyn NacManagerApi>>,
 }
 
 impl<S: Store> DB<S> {
@@ -196,6 +202,7 @@ impl<S: Store> DB<S> {
             forbidden_collection_ids: RwLock::new(HashSet::new()),
             kms: std::sync::OnceLock::new(),
             kms_blockstore: std::sync::OnceLock::new(),
+            nac_manager: std::sync::OnceLock::new(),
         })
     }
 
@@ -248,6 +255,7 @@ impl<S: Store> DB<S> {
             forbidden_collection_ids: RwLock::new(HashSet::new()),
             kms: std::sync::OnceLock::new(),
             kms_blockstore: std::sync::OnceLock::new(),
+            nac_manager: std::sync::OnceLock::new(),
         })
     }
 
@@ -291,6 +299,18 @@ impl<S: Store> DB<S> {
     /// Get the KMS service, if one has been installed.
     pub fn kms(&self) -> Option<std::sync::Arc<dyn kms::KmsService>> {
         self.kms.get().cloned()
+    }
+
+    /// Install the NAC manager. First call wins (OnceLock); subsequent calls
+    /// are silently discarded. Called once at node startup. When unset, all
+    /// `check_node_access` calls are no-ops (NAC not configured).
+    pub fn set_nac_manager(&self, nac: std::sync::Arc<dyn NacManagerApi>) {
+        let _ = self.nac_manager.set(nac);
+    }
+
+    /// Get the NAC manager, if one has been installed.
+    pub fn nac_manager(&self) -> Option<std::sync::Arc<dyn NacManagerApi>> {
+        self.nac_manager.get().cloned()
     }
 
     /// Park the KMS durable blockstore on the DB so its owning `Arc` shares the

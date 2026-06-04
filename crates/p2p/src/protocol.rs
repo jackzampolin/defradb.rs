@@ -58,6 +58,18 @@ pub const SE_QUERY_REQUEST_PROTOCOL: &str = "/defradb/se_query_req/0.0.1";
 /// Go uses "se_query" as the channel name: `/defradb/se_query_resp/0.0.1`
 pub const SE_QUERY_RESPONSE_PROTOCOL: &str = "/defradb/se_query_resp/0.0.1";
 
+/// Management mutate request protocol ID.
+pub const MANAGE_REQUEST_PROTOCOL: &str = "/defradb/manage_req/0.0.1";
+
+/// Management mutate response protocol ID.
+pub const MANAGE_RESPONSE_PROTOCOL: &str = "/defradb/manage_resp/0.0.1";
+
+/// Management query request protocol ID.
+pub const MANAGE_QUERY_REQUEST_PROTOCOL: &str = "/defradb/manage_query_req/0.0.1";
+
+/// Management query response protocol ID.
+pub const MANAGE_QUERY_RESPONSE_PROTOCOL: &str = "/defradb/manage_query_resp/0.0.1";
+
 /// CAR (Content ARchive) request protocol ID.
 pub const CAR_REQUEST_PROTOCOL: &str = "/defradb/car_req/0.0.1";
 

@@ -34,6 +34,14 @@ pub struct TwoStreamRunner {
     se_query_request_streams: stream::IncomingStreams,
     /// Incoming SE query response streams.
     se_query_response_streams: stream::IncomingStreams,
+    /// Incoming manage request streams.
+    manage_request_streams: stream::IncomingStreams,
+    /// Incoming manage response streams.
+    manage_response_streams: stream::IncomingStreams,
+    /// Incoming manage query request streams.
+    manage_query_request_streams: stream::IncomingStreams,
+    /// Incoming manage query response streams.
+    manage_query_response_streams: stream::IncomingStreams,
     /// Incoming CAR request streams.
     car_request_streams: stream::IncomingStreams,
     /// Incoming CAR response streams.
@@ -65,6 +73,10 @@ impl TwoStreamRunner {
         se_response_streams: stream::IncomingStreams,
         se_query_request_streams: stream::IncomingStreams,
         se_query_response_streams: stream::IncomingStreams,
+        manage_request_streams: stream::IncomingStreams,
+        manage_response_streams: stream::IncomingStreams,
+        manage_query_request_streams: stream::IncomingStreams,
+        manage_query_response_streams: stream::IncomingStreams,
         car_request_streams: stream::IncomingStreams,
         car_response_streams: stream::IncomingStreams,
         identity_request_streams: stream::IncomingStreams,
@@ -83,6 +95,10 @@ impl TwoStreamRunner {
             se_response_streams,
             se_query_request_streams,
             se_query_response_streams,
+            manage_request_streams,
+            manage_response_streams,
+            manage_query_request_streams,
+            manage_query_response_streams,
             car_request_streams,
             car_response_streams,
             identity_request_streams,
@@ -305,6 +321,118 @@ impl TwoStreamRunner {
                                     peer_id = %peer_id,
                                     error = %e,
                                     "Failed to handle SE query response stream"
+                                );
+                                let _ = event_tx.send(TwoStreamEvent::DecodeError {
+                                    peer_id,
+                                    error: e.to_string(),
+                                }).await;
+                            }
+                        }
+                    });
+                }
+                // Handle incoming manage request streams
+                Some((peer_id, stream)) = self.manage_request_streams.next() => {
+                    let event_tx = self.event_tx.clone();
+                    let sem = self.semaphore.clone();
+                    let max_msg_size = self.max_msg_size;
+                    let stream_read_timeout = self.stream_read_timeout;
+                    tokio::spawn(async move {
+                        let Ok(_permit) = sem.acquire().await else { return };
+                        match TwoStreamHandler::handle_manage_request_stream(peer_id, stream, max_msg_size, stream_read_timeout).await {
+                            Ok(event) => {
+                                if event_tx.send(event).await.is_err() {
+                                    tracing::warn!(peer_id = %peer_id, "Failed to send manage request event");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    peer_id = %peer_id,
+                                    error = %e,
+                                    "Failed to handle manage request stream"
+                                );
+                                let _ = event_tx.send(TwoStreamEvent::DecodeError {
+                                    peer_id,
+                                    error: e.to_string(),
+                                }).await;
+                            }
+                        }
+                    });
+                }
+                // Handle incoming manage response streams
+                Some((peer_id, stream)) = self.manage_response_streams.next() => {
+                    let event_tx = self.event_tx.clone();
+                    let sem = self.semaphore.clone();
+                    let max_msg_size = self.max_msg_size;
+                    let stream_read_timeout = self.stream_read_timeout;
+                    tokio::spawn(async move {
+                        let Ok(_permit) = sem.acquire().await else { return };
+                        match TwoStreamHandler::handle_manage_response_stream(peer_id, stream, max_msg_size, stream_read_timeout).await {
+                            Ok(event) => {
+                                if event_tx.send(event).await.is_err() {
+                                    tracing::warn!(peer_id = %peer_id, "Failed to send manage response event");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    peer_id = %peer_id,
+                                    error = %e,
+                                    "Failed to handle manage response stream"
+                                );
+                                let _ = event_tx.send(TwoStreamEvent::DecodeError {
+                                    peer_id,
+                                    error: e.to_string(),
+                                }).await;
+                            }
+                        }
+                    });
+                }
+                // Handle incoming manage query request streams
+                Some((peer_id, stream)) = self.manage_query_request_streams.next() => {
+                    let event_tx = self.event_tx.clone();
+                    let sem = self.semaphore.clone();
+                    let max_msg_size = self.max_msg_size;
+                    let stream_read_timeout = self.stream_read_timeout;
+                    tokio::spawn(async move {
+                        let Ok(_permit) = sem.acquire().await else { return };
+                        match TwoStreamHandler::handle_manage_query_request_stream(peer_id, stream, max_msg_size, stream_read_timeout).await {
+                            Ok(event) => {
+                                if event_tx.send(event).await.is_err() {
+                                    tracing::warn!(peer_id = %peer_id, "Failed to send manage query request event");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    peer_id = %peer_id,
+                                    error = %e,
+                                    "Failed to handle manage query request stream"
+                                );
+                                let _ = event_tx.send(TwoStreamEvent::DecodeError {
+                                    peer_id,
+                                    error: e.to_string(),
+                                }).await;
+                            }
+                        }
+                    });
+                }
+                // Handle incoming manage query response streams
+                Some((peer_id, stream)) = self.manage_query_response_streams.next() => {
+                    let event_tx = self.event_tx.clone();
+                    let sem = self.semaphore.clone();
+                    let max_msg_size = self.max_msg_size;
+                    let stream_read_timeout = self.stream_read_timeout;
+                    tokio::spawn(async move {
+                        let Ok(_permit) = sem.acquire().await else { return };
+                        match TwoStreamHandler::handle_manage_query_response_stream(peer_id, stream, max_msg_size, stream_read_timeout).await {
+                            Ok(event) => {
+                                if event_tx.send(event).await.is_err() {
+                                    tracing::warn!(peer_id = %peer_id, "Failed to send manage query response event");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    peer_id = %peer_id,
+                                    error = %e,
+                                    "Failed to handle manage query response stream"
                                 );
                                 let _ = event_tx.send(TwoStreamEvent::DecodeError {
                                     peer_id,

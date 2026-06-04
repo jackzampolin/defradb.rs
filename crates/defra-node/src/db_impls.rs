@@ -24,6 +24,11 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
 #[async_trait::async_trait]
 impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
     async fn add_schema(&self, sdl: &str) -> anyhow::Result<()> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .await
+            .map_err(anyhow::Error::new)?;
+
         let collections =
             query::parse_sdl(sdl).map_err(|e| anyhow::anyhow!("SDL parse error: {}", e))?;
 
@@ -39,6 +44,11 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
     }
 
     async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::ViewAdd)
+            .await
+            .map_err(anyhow::Error::new)?;
+
         let known_types: std::collections::HashSet<String> =
             db::DB::list_collections(&self.database)
                 .unwrap_or_default()
@@ -111,19 +121,24 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
         collection_name: &str,
         patch: &str,
     ) -> anyhow::Result<CollectionVersion> {
-        db::DB::patch_collection(&self.database, collection_name, patch)
+        db::DB::patch_collection(&self.database, collection_name, patch, None)
             .await
             .map_err(anyhow::Error::new)
     }
 
     async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()> {
+        self.database
+            .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .await
+            .map_err(anyhow::Error::new)?;
+
         db::DB::set_active_collection_version(&self.database, version_id)
             .await
             .map_err(anyhow::Error::new)
     }
 
     async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
-        db::DB::set_migration(&self.database, config)
+        db::DB::set_migration(&self.database, config, None)
             .await
             .map_err(anyhow::Error::new)
     }

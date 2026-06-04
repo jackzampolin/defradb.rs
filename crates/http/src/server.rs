@@ -23,8 +23,8 @@ use crate::error::Result;
 use crate::router::{
     create_router_with_state, AcpOperations, AppStateBuilder, BackupOperations, BlockOperations,
     CollectionManagementOperations, DocumentAcpOperations, DumpOperations,
-    EncryptedIndexOperations, IndexOperations, LensOperations, NodeAcpOperations, P2POperations,
-    SchemaOperations, TransactionOperations, ViewOperations,
+    EncryptedIndexOperations, IndexOperations, LensOperations, ManageRequester, NodeAcpOperations,
+    P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
 };
 
 /// Server configuration options.
@@ -70,6 +70,7 @@ pub struct Server {
     executor: Arc<dyn QueryExecutor>,
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
+    manage: Option<Arc<dyn ManageRequester>>,
     acp: Option<Arc<dyn AcpOperations>>,
     index: Option<Arc<dyn IndexOperations>>,
     encrypted_index: Option<Arc<dyn EncryptedIndexOperations>>,
@@ -96,6 +97,7 @@ impl Server {
             executor: Arc::new(executor),
             rest: None,
             p2p: None,
+            manage: None,
             acp: None,
             index: None,
             encrypted_index: None,
@@ -122,6 +124,7 @@ impl Server {
             executor: Arc::new(executor),
             rest: None,
             p2p: None,
+            manage: None,
             acp: None,
             index: None,
             encrypted_index: None,
@@ -148,6 +151,7 @@ impl Server {
             executor,
             rest: None,
             p2p: None,
+            manage: None,
             acp: None,
             index: None,
             encrypted_index: None,
@@ -174,6 +178,7 @@ impl Server {
             executor,
             rest: None,
             p2p: None,
+            manage: None,
             acp: None,
             index: None,
             encrypted_index: None,
@@ -229,6 +234,15 @@ impl Server {
     /// Set P2P operations from an Arc.
     pub fn with_p2p_arc(mut self, p2p: Arc<dyn P2POperations>) -> Self {
         self.p2p = Some(p2p);
+        self
+    }
+
+    /// Set the outbound management requester from an Arc.
+    ///
+    /// When configured, the server can relay management requests to P2P-only
+    /// peers on behalf of HTTP callers.
+    pub fn with_manage_arc(mut self, manage: Arc<dyn ManageRequester>) -> Self {
+        self.manage = Some(manage);
         self
     }
 
@@ -382,6 +396,9 @@ impl Server {
         if let Some(ref p2p) = self.p2p {
             builder = builder.with_p2p(Arc::clone(p2p));
         }
+        if let Some(ref manage) = self.manage {
+            builder = builder.with_manage(Arc::clone(manage));
+        }
         if let Some(ref acp) = self.acp {
             builder = builder.with_acp(Arc::clone(acp));
         }
@@ -434,8 +451,9 @@ impl Server {
         let state_for_middleware = state.clone();
         let mut router = create_router_with_state(state);
 
-        // Global auth middleware: enforces route-level permissions before handlers run.
-        // Applied via route_layer so MatchedPath is available (routing has completed).
+        // Global auth middleware: enforces route-level permissions before handlers
+        // run, and binds the caller's identity to the request task for DB-layer
+        // NAC checks. Applied via route_layer so MatchedPath is available.
         router = router.route_layer(axum::middleware::from_fn_with_state(
             state_for_middleware,
             crate::auth_middleware::auth_middleware,

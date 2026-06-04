@@ -17,12 +17,14 @@ defra-core = { path = "../defra-core" }
 defra-http = { path = "../http" }
 document = { path = "../document" }
 events = { path = "../events" }
+identity = { path = "../identity" }
 lens = { path = "../lens" }
 p2p = { path = "../p2p", default-features = false }
 storage = { path = "../storage" }
 
 async-trait.workspace = true
 bytes.workspace = true
+chrono = { version = "0.4", features = ["serde"] }
 cid.workspace = true
 hex.workspace = true
 libp2p = { workspace = true, optional = true }
@@ -33,6 +35,10 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing.workspace = true
 zeroize = "1"
+
+[dev-dependencies]
+crypto = { path = "../crypto" }
+db-nac = { path = "../db-nac" }
 
 [features]
 default = ["iroh", "libp2p"]
