@@ -33,14 +33,14 @@ fn test_cid3() -> Cid {
 
 /// Create a CID from data using SHA2-256 (for hash verification tests)
 fn cid_from_data(data: &[u8]) -> Cid {
-    use multihash::MultihashGeneric;
+    use multihash::Multihash;
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
     hasher.update(data);
     let digest = hasher.finalize();
 
-    let hash = MultihashGeneric::<64>::wrap(0x12, &digest).unwrap();
+    let hash = Multihash::<64>::wrap(0x12, &digest).unwrap();
     Cid::new_v1(0x55, hash) // raw codec
 }
 
@@ -272,9 +272,9 @@ mod hash_verification {
         let store = Arc::new(MemoryStore::new());
         let blockstore = DefraBlockstore::new(store, false);
 
-        use multihash::MultihashGeneric;
+        use multihash::Multihash;
         let data = b"identity hash data";
-        let hash = MultihashGeneric::<64>::wrap(0x00, data).unwrap();
+        let hash = Multihash::<64>::wrap(0x00, data).unwrap();
         let cid = Cid::new_v1(0x55, hash);
 
         blockstore.put(&cid, data).await.unwrap();
@@ -289,10 +289,10 @@ mod hash_verification {
         let store = Arc::new(MemoryStore::new());
         let blockstore = DefraBlockstore::new(store, false);
 
-        use multihash::MultihashGeneric;
+        use multihash::Multihash;
         let data = b"blake2b test data";
         let fake_digest = [0u8; 32];
-        let hash = MultihashGeneric::<64>::wrap(0xb220, &fake_digest).unwrap();
+        let hash = Multihash::<64>::wrap(0xb220, &fake_digest).unwrap();
         let cid = Cid::new_v1(0x55, hash);
 
         blockstore.put(&cid, data).await.unwrap();
