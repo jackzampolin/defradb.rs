@@ -13,7 +13,7 @@ use schema::{CollectionVersion, IndexDescription};
 use storage::field_value::encode_field_value;
 use storage::keys::IndexDataStoreKey;
 
-use crate::planner::index_selection::{json_to_normal_value, normalize_for_index_field};
+use crate::planner::index_selection::json_to_normal_value_for_index_field;
 
 /// Wrap a plan tree with `CursorNode`, configure any scan in the tree
 /// with `cursor_seek`, and validate that ordering is supported by an
@@ -304,10 +304,8 @@ fn build_cursor_seek_key(
         let Some(json_val) = cursor.keys.get(field_name) else {
             return Err(QueryError::cursor_invalid());
         };
-        let raw = json_to_normal_value(json_val).ok_or_else(QueryError::cursor_invalid)?;
-        // Normalize to the schema field's encoding type so the seek key bytes
-        // match what the index actually stores (e.g., Float64 JSON → Float32).
-        let normal = normalize_for_index_field(raw, field_name, &collection.fields);
+        let normal = json_to_normal_value_for_index_field(json_val, field_name, &collection.fields)
+            .ok_or_else(QueryError::cursor_invalid)?;
 
         // Use the index's descending flag for this field position, if available.
         let descending = idx.fields.get(i).map(|f| f.descending).unwrap_or(false);
@@ -495,6 +493,87 @@ mod tests {
         assert_eq!(
             key, expected,
             "seek key must use Float32 encoding to match index bytes"
+        );
+    }
+
+    #[test]
+    fn seek_key_keeps_date_like_json_string_as_string_for_string_field() {
+        use document::NormalValue;
+        use schema::{FieldDescription, FieldKind};
+        use storage::field_value::encode_field_value;
+        use storage::keys::IndexDataStoreKey;
+
+        let idx = make_index("idx_stamp", vec![("stamp", false)], true);
+
+        let stamp_field = FieldDescription::new("1", "stamp", FieldKind::string());
+        let mut coll = CollectionVersion::new("test", "v1", "coll_test_001", vec![stamp_field]);
+        coll.indexes = vec![idx.clone()];
+
+        let stamp = "2026-05-29T13:06:28Z";
+        let mut keys = std::collections::BTreeMap::new();
+        keys.insert("stamp".to_string(), serde_json::json!(stamp));
+        let cursor = Cursor {
+            keys,
+            doc_id: "bae-test".to_string(),
+            direction: String::new(),
+        };
+        let order = order_asc("stamp");
+
+        let key = build_cursor_seek_key(&cursor, &order, &coll, &idx).unwrap();
+
+        let prefix = IndexDataStoreKey::index_prefix(coll.resolved_root_id(), idx.id);
+        let expected = encode_field_value(
+            prefix.clone(),
+            &NormalValue::String(stamp.to_string()),
+            false,
+        )
+        .unwrap();
+        let parsed_time = chrono::DateTime::parse_from_rfc3339(stamp).unwrap();
+        let time_encoded = encode_field_value(prefix, &NormalValue::Time(parsed_time), false)
+            .expect("time value should encode");
+
+        assert_eq!(
+            key, expected,
+            "seek key must preserve date-like text as String for String fields"
+        );
+        assert_ne!(
+            key, time_encoded,
+            "seek key must not use DateTime bytes for a String field"
+        );
+    }
+
+    #[test]
+    fn seek_key_preserves_null_for_schema_typed_field() {
+        use document::NormalValue;
+        use schema::{FieldDescription, FieldKind};
+        use storage::field_value::encode_field_value;
+        use storage::keys::IndexDataStoreKey;
+
+        let idx = make_index("idx_stamp", vec![("stamp", false)], true);
+
+        let stamp_field = FieldDescription::new("1", "stamp", FieldKind::string());
+        let mut coll = CollectionVersion::new("test", "v1", "coll_test_001", vec![stamp_field]);
+        coll.indexes = vec![idx.clone()];
+
+        let doc_id = "bae-test";
+        let mut keys = std::collections::BTreeMap::new();
+        keys.insert("stamp".to_string(), serde_json::Value::Null);
+        let cursor = Cursor {
+            keys,
+            doc_id: doc_id.to_string(),
+            direction: String::new(),
+        };
+        let order = order_asc("stamp");
+
+        let key = build_cursor_seek_key(&cursor, &order, &coll, &idx).unwrap();
+
+        let prefix = IndexDataStoreKey::index_prefix(coll.resolved_root_id(), idx.id);
+        let mut expected = encode_field_value(prefix, &NormalValue::Null, false).unwrap();
+        expected.extend_from_slice(doc_id.as_bytes());
+
+        assert_eq!(
+            key, expected,
+            "null cursor keys remain valid and include doc_id for unique null entries"
         );
     }
 }
