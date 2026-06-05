@@ -78,16 +78,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
         let _guard = self.merge_queue.acquire(&doc_id_str).await;
 
-        self.process_composite_delta_locked(
-            cid,
-            block,
-            payload,
-            metadata,
-            from_collection,
-            depth,
-            &doc_id_str,
-        )
-        .await
+        self.process_composite_delta_locked(cid, block, payload, metadata, from_collection, depth)
+            .await
     }
 
     async fn process_composite_delta_locked(
@@ -98,7 +90,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         metadata: &BlockMetadata<'_>,
         from_collection: bool,
         depth: usize,
-        doc_id_str: &str,
     ) -> std::result::Result<MergeOutcome, MergeError> {
         if depth >= super::MAX_MERGE_DEPTH {
             return Err(MergeError::depth_exceeded(cid, depth));
@@ -114,6 +105,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 return Ok(MergeOutcome::terminal_skip("already merged"));
             }
         }
+
+        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
 
         tracing::info!(
             cid = %cid,
@@ -218,7 +211,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         child_cid = %cid,
                         "Recursively merging parent composite before current"
                     );
-                    let head_doc_id_str = String::from_utf8_lossy(&head_payload.doc_id).to_string();
                     match Box::pin(self.process_composite_delta_locked(
                         head_cid,
                         &head_block,
@@ -226,7 +218,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         metadata,
                         from_collection,
                         depth + 1,
-                        &head_doc_id_str,
                     ))
                     .await
                     {
