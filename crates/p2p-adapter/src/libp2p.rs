@@ -44,6 +44,40 @@ pub struct P2PAdapter<B: Blockstore + 'static> {
     nac_checker: Option<Arc<dyn db::NodeAccessChecker>>,
 }
 
+async fn wait_for_branchable_merges(
+    sub: &mut events::Subscription,
+    collection_id: &str,
+    start: std::time::Instant,
+    overall_timeout: std::time::Duration,
+    idle_timeout: std::time::Duration,
+) {
+    let mut saw_merge = false;
+    let mut last_activity = std::time::Instant::now();
+
+    while start.elapsed() < overall_timeout {
+        if last_activity.elapsed() > idle_timeout {
+            break;
+        }
+
+        match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv()).await {
+            Ok(Some(msg)) => {
+                if let Some(data) = msg.as_merge_complete() {
+                    if data.collection_id == collection_id {
+                        saw_merge = true;
+                        last_activity = std::time::Instant::now();
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                if !saw_merge && start.elapsed() > idle_timeout {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 impl<B: Blockstore + 'static> P2PAdapter<B> {
     async fn check_nac(&self, permission: acp::nac::NodePermission) -> P2PResult<()> {
         if let Some(ref checker) = self.nac_checker {
@@ -787,6 +821,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .as_ref()
             .ok_or_else(|| P2PError::unsupported("no database context for sync"))?;
         pusher.validate_branchable_collection(collection_id)?;
+        let event_bus = self
+            .event_bus
+            .as_ref()
+            .ok_or_else(|| P2PError::unsupported("no event bus for sync"))?;
 
         let connected_peers = self.handle.connected_peers().await.map_err(|error| {
             P2PError::transport(format!("failed to get connected peers: {error}"))
@@ -795,24 +833,53 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             return Ok(());
         }
 
+        let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);
+        let overall_timeout = std::time::Duration::from_secs(30);
+        let idle_timeout = std::time::Duration::from_secs(3);
+        let start = std::time::Instant::now();
+        let collection_id_string = collection_id.to_string();
+
         // Go-compatible pubsub_rpc path when coordinator is wired (#828).
         // Falls back to two-stream per-peer requests otherwise.
         if let Some(coord) = self.sync_coordinator.as_ref() {
+            let expected_responses = match self.handle.topic_peers(DefraTopic::SyncBranchable).await
+            {
+                Ok(peers) if !peers.is_empty() => peers.len(),
+                Ok(_) => connected_peers.len(),
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        "failed to get sync-branchable topic peers; using connected peer count"
+                    );
+                    connected_peers.len()
+                }
+            };
             coord
                 .pubsub_sync_branchable_collection(
                     collection_id.to_string(),
                     Some(std::time::Duration::from_secs(8)),
-                    Some(connected_peers.len()),
+                    Some(expected_responses),
                 )
                 .await
                 .map_err(|error| {
+                    event_bus.unsubscribe(sub.id());
                     P2PError::transport(format!("pubsub_rpc branchable-sync failed: {error}"))
                 })?;
+            wait_for_branchable_merges(
+                &mut sub,
+                &collection_id_string,
+                start,
+                overall_timeout,
+                idle_timeout,
+            )
+            .await;
+            event_bus.unsubscribe(sub.id());
             return Ok(());
         }
 
         let mut request = p2p::message::BranchableSyncRequest::new(collection_id.to_string());
         p2p::signing::sign_message(self.handle.keypair(), &mut request).map_err(|error| {
+            event_bus.unsubscribe(sub.id());
             P2PError::internal(format!("failed to sign BranchableSync request: {error}"))
         })?;
 
@@ -830,6 +897,15 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             });
         }
 
+        wait_for_branchable_merges(
+            &mut sub,
+            &collection_id_string,
+            start,
+            overall_timeout,
+            idle_timeout,
+        )
+        .await;
+        event_bus.unsubscribe(sub.id());
         Ok(())
     }
 
