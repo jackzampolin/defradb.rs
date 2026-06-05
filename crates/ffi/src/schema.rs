@@ -345,4 +345,45 @@ mod tests {
         }
         node_close(node);
     }
+
+    #[test]
+    fn test_add_schema_duplicate_implicit_relation_name_errors() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        let sdl = CString::new(
+            r#"
+            type Book {
+                title: String
+                author: Person
+                reviewer: Person
+            }
+
+            type Person {
+                name: String
+                authoredBooks: [Book]
+                reviewedBooks: [Book]
+            }
+            "#,
+        )
+        .unwrap();
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
+        assert_eq!(result.status, 1);
+        let error = unsafe { std::ffi::CStr::from_ptr(result.error).to_string_lossy() };
+        assert!(
+            error.contains(
+                "relation name is not unique within collection. Field: author, RelationName: book_person"
+            ),
+            "unexpected error: {error}"
+        );
+        unsafe {
+            crate::types::defra_free_string(result.error);
+        }
+
+        node_close(node);
+    }
 }

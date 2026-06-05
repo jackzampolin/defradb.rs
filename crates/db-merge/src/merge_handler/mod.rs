@@ -1348,6 +1348,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_block_serializes_standalone_counter_by_doc_id() {
+        let (handler, blockstore) = make_handler_with_counter_schema().await;
+        let mut doc = Document::new();
+        doc.generate_and_set_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().clone();
+        let doc_id_str = doc_id.to_string();
+
+        let mut delta_data = Vec::new();
+        ciborium::into_writer(&5_i64, &mut delta_data).unwrap();
+
+        let payload = CounterDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            field_name: "score".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            data: delta_data,
+            nonce: 4243,
+        };
+        let block = Block {
+            delta: CrdtDelta::Counter(payload),
+            heads: None,
+            links: None,
+            encryption: None,
+            signature: None,
+        };
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+        blockstore.put(&cid, &block_data).await.unwrap();
+
+        let metadata = BlockMetadata::normal(
+            &doc_id_str,
+            "col-counters",
+            "did:key:z6MkrCounterMergeQueueTest",
+            None,
+            false,
+        );
+
+        let guard = handler.merge_queue.acquire(&doc_id_str).await;
+        let merge = handler.handle_block(&cid, &block_data, metadata);
+        tokio::pin!(merge);
+
+        assert!(
+            timeout(Duration::from_millis(50), merge.as_mut())
+                .await
+                .is_err(),
+            "standalone counter merge should wait on the per-document queue"
+        );
+
+        drop(guard);
+        let outcome = timeout(Duration::from_secs(1), merge)
+            .await
+            .expect("counter merge should complete after releasing the queue")
+            .unwrap();
+        assert_eq!(outcome, MergeOutcome::Merged);
+        assert!(blockstore.is_merged(&cid).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn counter_standalone_skips_already_merged_block() {
         let (handler, blockstore) = make_handler_with_counter_schema().await;
         let collection = handler
@@ -1533,6 +1591,181 @@ mod tests {
             stored
         };
         assert_eq!(stored.get("score"), Some(&NormalValue::Int(20)));
+    }
+
+    #[tokio::test]
+    async fn composite_lww_reseeds_from_local_doc_when_crdt_store_is_stale() {
+        let (handler, blockstore, _bus) = make_handler_with_schema_and_bus().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-users")
+            .unwrap()
+            .expect("users collection should exist");
+
+        let mut doc = Document::new();
+        doc.set("age", NormalValue::Int(21));
+        doc.generate_and_set_doc_id().unwrap();
+        doc.set_schema_version_id("v1");
+        let doc_id = doc.id().unwrap().clone();
+        let doc_id_str = doc_id.to_string();
+
+        let create_blocks = {
+            let txn = handler.db.new_txn(false).await.unwrap();
+            let blocks = {
+                let datastore = txn.datastore().unwrap();
+                let headstore = txn.headstore().unwrap();
+                let raw_blockstore = txn.blockstore().unwrap();
+                collection
+                    .save_with_datastore(&datastore, &doc)
+                    .await
+                    .unwrap();
+                db_blocks::write_document_blocks(
+                    &raw_blockstore,
+                    &headstore,
+                    &doc,
+                    "v1",
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            };
+            txn.force_commit().await.unwrap();
+            blocks
+        };
+
+        doc.set("age", NormalValue::Int(60));
+        let mut modified_fields = HashSet::new();
+        modified_fields.insert("age".to_string());
+        {
+            let txn = handler.db.new_txn(false).await.unwrap();
+            {
+                let datastore = txn.datastore().unwrap();
+                let headstore = txn.headstore().unwrap();
+                let raw_blockstore = txn.blockstore().unwrap();
+                collection
+                    .save_with_datastore(&datastore, &doc)
+                    .await
+                    .unwrap();
+                db_blocks::write_document_blocks(
+                    &raw_blockstore,
+                    &headstore,
+                    &doc,
+                    "v1",
+                    Some(&modified_fields),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            txn.force_commit().await.unwrap();
+        }
+
+        let lww = Lww::new("v1", doc_id_str.as_bytes(), "age").unwrap();
+        let mut stale_value = Vec::new();
+        ciborium::into_writer(&NormalValue::Int(30), &mut stale_value).unwrap();
+        let stale_delta = LwwDelta::new(
+            doc_id_str.as_bytes().to_vec(),
+            "age".to_string(),
+            2,
+            "v1".to_string(),
+            stale_value.clone(),
+        )
+        .unwrap();
+        {
+            let txn = handler.db.new_txn(false).await.unwrap();
+            {
+                let mut datastore = txn.datastore().unwrap();
+                lww.merge(
+                    &mut datastore,
+                    &Context {
+                        doc_id: DocId::new(&doc_id_str).unwrap(),
+                        schema_version: "v1".to_string(),
+                        is_create: false,
+                    },
+                    &stale_delta,
+                )
+                .await
+                .unwrap();
+            }
+            txn.force_commit().await.unwrap();
+        }
+
+        let incoming_field_payload = LwwDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            field_name: "age".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 2,
+            data: stale_value,
+        };
+        let incoming_field_block = Block::new(
+            CrdtDelta::Lww(incoming_field_payload),
+            create_blocks.field_cids.clone(),
+            vec![],
+        );
+        let incoming_field_cid = incoming_field_block.generate_cid().unwrap();
+        let incoming_field_data = incoming_field_block.to_dag_cbor().unwrap();
+        blockstore
+            .put(&incoming_field_cid, &incoming_field_data)
+            .await
+            .unwrap();
+
+        let incoming_composite_payload = CompositeDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 2,
+            status: 1,
+        };
+        let incoming_composite_block = Block::new(
+            CrdtDelta::Composite(incoming_composite_payload.clone()),
+            vec![create_blocks.cid],
+            vec![DAGLink::new("age", incoming_field_cid)],
+        );
+        let incoming_composite_cid = incoming_composite_block.generate_cid().unwrap();
+        let incoming_composite_data = incoming_composite_block.to_dag_cbor().unwrap();
+        blockstore
+            .put(&incoming_composite_cid, &incoming_composite_data)
+            .await
+            .unwrap();
+
+        let metadata = BlockMetadata::normal(
+            &doc_id_str,
+            "col-users",
+            "did:key:z6MkrCompositeStaleLww",
+            None,
+            false,
+        );
+        let outcome = handler
+            .process_composite_delta(
+                &incoming_composite_cid,
+                &incoming_composite_block,
+                &incoming_composite_payload,
+                &metadata,
+                false,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, MergeOutcome::Merged);
+
+        let stored = {
+            let txn = handler.db.new_txn(true).await.unwrap();
+            let stored = {
+                let datastore = txn.datastore().unwrap();
+                collection
+                    .get_with_datastore(&datastore, &doc_id)
+                    .await
+                    .unwrap()
+                    .expect("document should exist")
+            };
+            txn.force_discard().unwrap();
+            stored
+        };
+        assert_eq!(stored.get("age"), Some(&NormalValue::Int(60)));
     }
 
     #[tokio::test]

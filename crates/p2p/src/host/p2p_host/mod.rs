@@ -407,11 +407,24 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
         )
         .await?;
 
-        // Enable TCP port reuse to match Go-libp2p behavior.
-        // Go-libp2p reuses the listen port for outgoing connections, so the
-        // remote side sees the listen address (not an ephemeral port).
-        // This is critical for ActivePeers to return correct addresses.
-        let tcp_config = tcp::Config::default().port_reuse(true);
+        // Outgoing dials use an ephemeral source port (no TCP port reuse).
+        //
+        // `port_reuse(true)` makes libp2p bind each outgoing dial to the listen
+        // port. rust-libp2p 0.53 has no fallback when that bind fails (unlike
+        // go-libp2p's reuseport dialer), so on any host where a connecting
+        // socket cannot share the listener's local port (macOS, or a node
+        // dialing several peers on one IP) the dial fails permanently with
+        // `EADDRINUSE`, the peer never connects, and replicated DAGs never sync.
+        //
+        // Disabling it does NOT affect Rust<->Go interop. Port reuse exists only
+        // to make a node's *observed* source port dialable for DCUtR hole
+        // punching, and DefraDB performs no hole punching: there is no dcutr or
+        // autonat behaviour (see `DefraBehaviour`), and NAT traversal goes
+        // through the circuit relay, which is independent of the dial source
+        // port. The TCP/Noise/Yamux wire protocol is identical either way, and
+        // peers learn each other's dialable listen address from Identify (see
+        // `handle_identify_event`), not from the observed source port.
+        let tcp_config = tcp::Config::default().port_reuse(false);
 
         // Two builder paths required: libp2p's SwarmBuilder uses a typestate
         // pattern where `.with_relay_client()` transitions to a different builder

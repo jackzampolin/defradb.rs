@@ -75,6 +75,22 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         from_collection: bool,
         depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
+        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
+        let _guard = self.merge_queue.acquire(&doc_id_str).await;
+
+        self.process_composite_delta_locked(cid, block, payload, metadata, from_collection, depth)
+            .await
+    }
+
+    async fn process_composite_delta_locked(
+        &self,
+        cid: &Cid,
+        block: &Block,
+        payload: &defra_core::block::CompositeDeltaPayload,
+        metadata: &BlockMetadata<'_>,
+        from_collection: bool,
+        depth: usize,
+    ) -> std::result::Result<MergeOutcome, MergeError> {
         if depth >= super::MAX_MERGE_DEPTH {
             return Err(MergeError::depth_exceeded(cid, depth));
         }
@@ -195,7 +211,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         child_cid = %cid,
                         "Recursively merging parent composite before current"
                     );
-                    match Box::pin(self.process_composite_delta(
+                    match Box::pin(self.process_composite_delta_locked(
                         head_cid,
                         &head_block,
                         head_payload,
@@ -261,7 +277,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 if outcome.is_terminal_skip() && !from_collection {
                     if let Some(bus) = self.db.event_bus() {
                         let merge_complete = MergeCompleteData {
-                            doc_id: doc_id_str.clone(),
+                            doc_id: doc_id_str.to_string(),
                             subject_doc_id: None,
                             cid: *cid,
                             collection_id: metadata
@@ -319,7 +335,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
                 if let Some(bus) = self.db.event_bus() {
                     let update = Update::new(
-                        doc_id_str.clone(),
+                        doc_id_str.to_string(),
                         *cid,
                         payload.schema_version_id.clone(),
                         vec![],
@@ -330,7 +346,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
                     if !from_collection {
                         let merge_complete = MergeCompleteData {
-                            doc_id: doc_id_str.clone(),
+                            doc_id: doc_id_str.to_string(),
                             subject_doc_id: None,
                             cid: *cid,
                             collection_id: metadata
@@ -345,7 +361,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if state.is_branchable {
                         let merge_complete = MergeCompleteData {
                             doc_id: String::new(),
-                            subject_doc_id: Some(doc_id_str.clone()),
+                            subject_doc_id: Some(doc_id_str.to_string()),
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id

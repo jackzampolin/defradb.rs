@@ -62,14 +62,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let hs_priority = self
             .current_field_priority(headstore, doc_id_str, &payload.field_name)
             .await?;
-        let ds_priority = crdt::traits::PriorityReader::priority(lww, datastore)
+        let stored_priority = crdt::traits::PriorityReader::priority(lww, datastore)
             .await
             .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
-        // Fast path: the datastore LWW already reflects (or exceeds) the
-        // headstore priority — nothing to seed. A non-zero datastore priority
-        // also implies the document exists.
-        if ds_priority != 0 && ds_priority >= hs_priority {
+        // Fast path: the datastore LWW is strictly ahead of the headstore, so
+        // nothing in the materialized doc can improve it. Equal priority still
+        // needs the value tie-break below to preserve Go LWW behavior.
+        if stored_priority != 0 && stored_priority > hs_priority {
             return Ok(true);
         }
 
@@ -95,6 +95,21 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         ciborium::into_writer(field_value, &mut value_bytes)
             .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
+        let should_seed = match priority.cmp(&stored_priority) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => {
+                match crdt::traits::ValueReader::value(lww, datastore).await {
+                    Ok(stored_value) => value_bytes > stored_value,
+                    Err(_) => true,
+                }
+            }
+        };
+
+        if !should_seed {
+            return Ok(true);
+        }
+
         let seed_delta = LwwDelta::new(
             payload.doc_id.clone(),
             payload.field_name.clone(),
@@ -107,7 +122,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let seed_ctx = Context {
             doc_id: DocId::new(doc_id_str).map_err(|e| MergeError::MergeFailed(e.to_string()))?,
             schema_version: payload.schema_version_id.clone(),
-            is_create: true,
+            is_create: false,
         };
 
         lww.merge(datastore, &seed_ctx, &seed_delta)
@@ -124,6 +139,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         payload: &defra_core::block::LwwDeltaPayload,
         metadata: &BlockMetadata<'_>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
+        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
+        let _guard = self.merge_queue.acquire(&doc_id_str).await;
+
         tracing::debug!(
             cid = %cid,
             field_name = %payload.field_name,
@@ -151,8 +169,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             payload.data.clone(),
         )
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
-
-        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
 
         // Perform the merge in a scoped block to ensure datastore reference is dropped
         // before we try to commit/discard the transaction.

@@ -16,8 +16,8 @@ use tokio::time::timeout;
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Error;
 use crate::message::{
-    BranchableSyncRequest, CarFetchRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
-    PushLogRequest,
+    BranchableSyncReply, BranchableSyncRequest, CarFetchRequest, DocSyncReply, DocSyncRequest,
+    PushLogBroadcast, PushLogRequest,
 };
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::NoOpCollectionStorage;
@@ -541,6 +541,21 @@ fn branchable_sync_event(peer_id: PeerId, collection_id: &str) -> TransportEvent
     }
 }
 
+fn branchable_sync_reply_event(
+    peer_id: PeerId,
+    collection_id: &str,
+    heads: Vec<Cid>,
+) -> TransportEvent<()> {
+    TransportEvent::BranchableSyncReply {
+        peer_id,
+        reply: BranchableSyncReply::success(
+            "branchable-sync-request",
+            collection_id,
+            heads.iter().map(|cid| cid.to_bytes()).collect(),
+        ),
+    }
+}
+
 fn random_peer_id() -> PeerId {
     let libp2p_peer = libp2p::PeerId::random();
     PeerId::from(libp2p_peer)
@@ -978,6 +993,76 @@ async fn branchable_sync_controlled_mode_allows_connected_peer() {
         "Connected peer should be allowed for Go-compatible BranchableSync, got {:?}",
         result
     );
+}
+
+#[tokio::test]
+async fn branchable_sync_reply_remerges_locally_complete_unmerged_head() {
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta};
+
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "collection1".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![],
+    );
+    let block_data = block.to_dag_cbor().unwrap();
+    let cid = block.generate_cid().unwrap();
+    blockstore.put(&cid, &block_data).await.unwrap();
+    assert!(
+        !blockstore.is_merged(&cid).await.unwrap(),
+        "test setup requires an unmerged local root"
+    );
+
+    let (coordinator, mut events) =
+        create_test_coordinator_with_blockstore(TestCoordinatorParams {
+            access_mode: AccessMode::Open,
+            replicators,
+            peer_state,
+            transport,
+            local_peer_id,
+            broadcaster,
+            blockstore,
+            rate_limiter: Arc::new(PeerRateLimiter::default()),
+        });
+
+    coordinator
+        .handle_transport_event(branchable_sync_reply_event(
+            peer.clone(),
+            "collection1",
+            vec![cid],
+        ))
+        .await
+        .unwrap();
+
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            cid: event_cid,
+            doc_id,
+            collection_id,
+            sender_peer,
+            ..
+        } => {
+            assert_eq!(event_cid, cid);
+            assert_eq!(doc_id, "doc1");
+            assert_eq!(collection_id, "collection1");
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+        }
+        other => panic!("expected BlockReceived for unmerged BranchableSync head, got {other:?}"),
+    }
 }
 
 #[tokio::test]

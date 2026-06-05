@@ -31,6 +31,10 @@ pub unsafe extern "C" fn delete_collection(
         permission = NodePermission::CollectionPatch,
         name => name_str: "name";
         {
+        if name_str.is_empty() {
+            return Err("collection name can't be empty".to_string());
+        }
+
         database
             .delete_collection(&name_str)
             .await
@@ -215,6 +219,25 @@ mod tests {
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
         assert_eq!(value, "false");
         unsafe { crate::types::defra_free_string(result.value) };
+
+        node_close(node);
+    }
+
+    #[test]
+    fn test_delete_collection_empty_name_returns_validation_error() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        let name = CString::new("").unwrap();
+        let result = unsafe { delete_collection(node, std::ptr::null(), name.as_ptr()) };
+        assert_eq!(result.status, 1);
+        let error = unsafe { std::ffi::CStr::from_ptr(result.error).to_string_lossy() };
+        assert_eq!(error, "collection name can't be empty");
+        unsafe { crate::types::defra_free_string(result.error) };
 
         node_close(node);
     }

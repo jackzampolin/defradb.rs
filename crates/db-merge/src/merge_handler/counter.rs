@@ -9,6 +9,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         metadata: &BlockMetadata<'_>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
+        let _guard = self.merge_queue.acquire(&doc_id_str).await;
 
         tracing::debug!(
             cid = %cid,

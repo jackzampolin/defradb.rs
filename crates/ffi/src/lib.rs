@@ -69,6 +69,7 @@ use std::ffi::{c_char, CString};
 pub const ERR_INVALID_NODE_HANDLE: &str = "invalid node handle";
 
 const DETERMINISTIC_TEST_CRYPTO_ENV: &str = "DEFRA_ALLOW_DETERMINISTIC_TEST_CRYPTO";
+const RUST_FFI_CLIENT_ENV: &str = "DEFRA_CLIENT_RUST_FFI";
 
 fn deterministic_test_crypto_env_enabled() -> bool {
     matches!(
@@ -77,8 +78,27 @@ fn deterministic_test_crypto_env_enabled() -> bool {
     )
 }
 
-fn should_use_deterministic_test_crypto_for_arg(arg0: &str) -> bool {
-    should_use_deterministic_test_crypto(deterministic_test_crypto_env_enabled(), arg0)
+fn rust_ffi_client_env_enabled() -> bool {
+    matches!(std::env::var(RUST_FFI_CLIENT_ENV).as_deref(), Ok("true"))
+}
+
+fn should_use_deterministic_test_crypto_for_process() -> bool {
+    let arg0 = std::env::args().next();
+    should_use_deterministic_test_crypto_for_process_state(
+        deterministic_test_crypto_env_enabled(),
+        rust_ffi_client_env_enabled(),
+        arg0.as_deref(),
+    )
+}
+
+fn should_use_deterministic_test_crypto_for_process_state(
+    env_enabled: bool,
+    rust_ffi_client_enabled: bool,
+    arg0: Option<&str>,
+) -> bool {
+    env_enabled
+        && (rust_ffi_client_enabled
+            || arg0.is_some_and(|arg0| should_use_deterministic_test_crypto(env_enabled, arg0)))
 }
 
 fn should_use_deterministic_test_crypto(env_enabled: bool, arg0: &str) -> bool {
@@ -263,11 +283,7 @@ pub use types::defra_free_string;
 #[no_mangle]
 pub extern "C" fn defra_init() {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if std::env::args()
-            .next()
-            .as_deref()
-            .is_some_and(should_use_deterministic_test_crypto_for_arg)
-        {
+        if should_use_deterministic_test_crypto_for_process() {
             crypto::encryption::nonce::set_deterministic_nonce(true);
             defra_core::encryption::set_deterministic_encryption_key(true);
         }
@@ -345,6 +361,30 @@ mod tests {
         assert!(!should_use_deterministic_test_crypto(
             true,
             "/usr/local/bin/defradb"
+        ));
+    }
+
+    #[test]
+    fn test_ffi_test_env_detection_for_deterministic_test_crypto() {
+        assert!(!should_use_deterministic_test_crypto_for_process_state(
+            false,
+            true,
+            Some("/usr/local/bin/defradb")
+        ));
+        assert!(should_use_deterministic_test_crypto_for_process_state(
+            true,
+            true,
+            Some("/usr/local/bin/defradb")
+        ));
+        assert!(!should_use_deterministic_test_crypto_for_process_state(
+            true,
+            false,
+            Some("/usr/local/bin/defradb")
+        ));
+        assert!(should_use_deterministic_test_crypto_for_process_state(
+            true,
+            false,
+            Some("/tmp/go-build123/tests.test")
         ));
     }
 

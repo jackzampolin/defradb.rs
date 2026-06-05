@@ -123,6 +123,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         let mut cids_to_fetch: Vec<Cid> = Vec::new();
+        let mut cids_to_remerge: Vec<Cid> = Vec::new();
         for head_bytes in &reply.heads {
             match Cid::try_from(head_bytes.as_slice()) {
                 Ok(cid) => {
@@ -141,7 +142,32 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                                 )
                                 .await
                                 {
-                                    Ok(missing) => !missing.is_empty(),
+                                    Ok(missing) => {
+                                        if missing.is_empty() {
+                                            match self.manager.blockstore().is_merged(&cid).await {
+                                                Ok(true) => false,
+                                                Ok(false) => {
+                                                    tracing::info!(
+                                                        cid = %cid,
+                                                        collection_id = %reply.collection_id,
+                                                        "Collection head exists with complete DAG but is unmerged, scheduling re-merge"
+                                                    );
+                                                    cids_to_remerge.push(cid);
+                                                    false
+                                                }
+                                                Err(e) => {
+                                                    tracing::debug!(
+                                                        cid = %cid,
+                                                        error = %e,
+                                                        "Failed to check merge status; falling back to fetch"
+                                                    );
+                                                    true
+                                                }
+                                            }
+                                        } else {
+                                            true
+                                        }
+                                    }
                                     Err(e) => {
                                         tracing::debug!(
                                             cid = %cid,
@@ -169,6 +195,52 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to parse CID from BranchableSync reply");
+                }
+            }
+        }
+
+        if !cids_to_remerge.is_empty() {
+            let event_tx = self.manager.event_sender();
+            for cid in cids_to_remerge {
+                match self.manager.blockstore().get(&cid).await {
+                    Ok(Some(data)) => {
+                        let mut context = DagFetchContext::new(
+                            String::new(),
+                            reply.collection_id.clone(),
+                            String::new(),
+                            peer_id.clone(),
+                        )
+                        .with_explicit_replicator(
+                            self.is_registered_replicator(peer_id.as_str(), &reply.collection_id),
+                        );
+                        context.fill_missing_from_block(&data);
+                        tracing::info!(
+                            cid = %cid,
+                            collection_id = %context.collection_id,
+                            "DAG complete locally, emitting BlockReceived for BranchableSync re-merge"
+                        );
+                        if event_tx
+                            .send(crate::sync::manager::SyncEvent::BlockReceived {
+                                cid,
+                                doc_id: context.doc_id,
+                                collection_id: context.collection_id,
+                                creator: context.creator,
+                                sender_peer: Some(context.source_peer.to_string()),
+                                is_explicit_replicator: context.is_explicit_replicator,
+                                explicit_replay_authorization: None,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            tracing::error!(
+                                cid = %cid,
+                                collection_id = %reply.collection_id,
+                                "Failed to emit BlockReceived for locally complete BranchableSync DAG"
+                            );
+                            return Err(crate::error::Error::ChannelSend);
+                        }
+                    }
+                    _ => cids_to_fetch.push(cid),
                 }
             }
         }
