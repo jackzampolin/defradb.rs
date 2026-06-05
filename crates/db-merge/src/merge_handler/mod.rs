@@ -1348,6 +1348,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_block_serializes_standalone_counter_by_doc_id() {
+        let (handler, blockstore) = make_handler_with_counter_schema().await;
+        let mut doc = Document::new();
+        doc.generate_and_set_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().clone();
+        let doc_id_str = doc_id.to_string();
+
+        let mut delta_data = Vec::new();
+        ciborium::into_writer(&5_i64, &mut delta_data).unwrap();
+
+        let payload = CounterDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            field_name: "score".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            data: delta_data,
+            nonce: 4243,
+        };
+        let block = Block {
+            delta: CrdtDelta::Counter(payload),
+            heads: None,
+            links: None,
+            encryption: None,
+            signature: None,
+        };
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+        blockstore.put(&cid, &block_data).await.unwrap();
+
+        let metadata = BlockMetadata::normal(
+            &doc_id_str,
+            "col-counters",
+            "did:key:z6MkrCounterMergeQueueTest",
+            None,
+            false,
+        );
+
+        let guard = handler.merge_queue.acquire(&doc_id_str).await;
+        let merge = handler.handle_block(&cid, &block_data, metadata);
+        tokio::pin!(merge);
+
+        assert!(
+            timeout(Duration::from_millis(50), merge.as_mut())
+                .await
+                .is_err(),
+            "standalone counter merge should wait on the per-document queue"
+        );
+
+        drop(guard);
+        let outcome = timeout(Duration::from_secs(1), merge)
+            .await
+            .expect("counter merge should complete after releasing the queue")
+            .unwrap();
+        assert_eq!(outcome, MergeOutcome::Merged);
+        assert!(blockstore.is_merged(&cid).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn counter_standalone_skips_already_merged_block() {
         let (handler, blockstore) = make_handler_with_counter_schema().await;
         let collection = handler

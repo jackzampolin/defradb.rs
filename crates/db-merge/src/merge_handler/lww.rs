@@ -139,6 +139,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         payload: &defra_core::block::LwwDeltaPayload,
         metadata: &BlockMetadata<'_>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
+        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
+        let _guard = self.merge_queue.acquire(&doc_id_str).await;
+
         tracing::debug!(
             cid = %cid,
             field_name = %payload.field_name,
@@ -166,8 +169,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             payload.data.clone(),
         )
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
-
-        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
 
         // Perform the merge in a scoped block to ensure datastore reference is dropped
         // before we try to commit/discard the transaction.
