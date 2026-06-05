@@ -472,10 +472,8 @@ async fn bughunt_indexed_lww_restart() {
 /// both nodes (its key delivered) and both must materialize the same plaintext.
 /// A key that doesn't reach the peer, or a two-store reconcile that mishandles
 /// the ciphertext, shows up as divergence here.
-#[ignore = "bug-hunt probe; run with --ignored --nocapture"]
-#[tokio::test]
-async fn bughunt_encrypted_lww_convergence() {
-    let cluster = TestCluster::builder()
+async fn run_encrypted_lww(label: &str, restart: Option<usize>) {
+    let mut cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
         .with_encryption()
@@ -509,6 +507,13 @@ async fn bughunt_encrypted_lww_convergence() {
         .to_string();
     tokio::time::sleep(Duration::from_secs(4)).await;
 
+    if let Some(idx) = restart {
+        cluster
+            .restart_node(idx, Duration::from_secs(30))
+            .await
+            .expect("restart node");
+    }
+
     // Concurrent updates to the encrypted field. LWW tie-break (equal priority) ->
     // lexicographically greater value wins; "zzz" > "aaa".
     cluster
@@ -523,6 +528,24 @@ async fn bughunt_encrypted_lww_convergence() {
             r#"mutation {{ update_Vault(docID: "{id}", input: {{secret: "zzz"}}) {{ _docID }} }}"#
         ))
         .ok();
+
+    if restart.is_some() {
+        let (a0b, a1b) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+        cluster.client(0).p2p_connect(&[a1b.as_str()]).ok();
+        cluster.client(1).p2p_connect(&[a0b.as_str()]).ok();
+        cluster.client(0).p2p_collection_add(&["Vault"]).ok();
+        cluster.client(1).p2p_collection_add(&["Vault"]).ok();
+        cluster
+            .client(0)
+            .p2p_replicator_delete(&["Vault"], Some(&a1b))
+            .ok();
+        cluster
+            .client(1)
+            .p2p_replicator_delete(&["Vault"], Some(&a0b))
+            .ok();
+        cluster.client(0).p2p_replicator_set(&["Vault"], &a1b).ok();
+        cluster.client(1).p2p_replicator_set(&["Vault"], &a0b).ok();
+    }
     tokio::time::sleep(Duration::from_secs(12)).await;
 
     let secret = |n: usize| -> String {
@@ -537,6 +560,317 @@ async fn bughunt_encrypted_lww_convergence() {
     let (s0, s1) = (secret(0), secret(1));
     let converged = s0 == s1 && s0 == "zzz";
     eprintln!(
-        "BUGHUNT[encrypted_lww] node0.secret={s0:?} node1.secret={s1:?} | expected \"zzz\" | CONVERGED={converged}"
+        "BUGHUNT[{label}] node0.secret={s0:?} node1.secret={s1:?} | expected \"zzz\" | CONVERGED={converged}"
     );
+}
+
+#[ignore = "bug-hunt probe; run with --ignored --nocapture"]
+#[tokio::test]
+async fn bughunt_encrypted_lww_convergence() {
+    run_encrypted_lww("encrypted_lww", None).await;
+}
+
+#[ignore = "bug-hunt probe; run with --ignored --nocapture"]
+#[tokio::test]
+async fn bughunt_encrypted_lww_restart() {
+    run_encrypted_lww("encrypted_lww_restart(node1)", Some(1)).await;
+}
+
+/// 3-NODE counter accumulation: each of three fully-meshed nodes increments the
+/// same counter by 10, concurrently. Every node's delta must reach the other two
+/// and accumulate — all three converge to 30. With only two nodes the counter
+/// reconcile is symmetric; a third node exposes whether a delta that arrives via
+/// a different peer still accumulates (no dedup collision, no lost cross-peer
+/// delta).
+#[ignore = "bug-hunt probe; run with --ignored --nocapture"]
+#[tokio::test]
+async fn bughunt_counter_3node() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(3)
+        .with_p2p()
+        .with_store("redb")
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("3-node cluster");
+
+    let schema = "type Tally { name: String  hits: Int @crdt(type: pcounter) }";
+    let addr: Vec<String> = (0..3).map(|n| node_addr(&cluster, n)).collect();
+    for n in 0..3 {
+        cluster.client(n).schema_add(schema).expect("schema");
+        cluster.client(n).p2p_collection_add(&["Tally"]).ok();
+    }
+    // Full mesh: every node replicates to the other two.
+    for i in 0..3 {
+        for j in 0..3 {
+            if i != j {
+                cluster.client(i).p2p_connect(&[addr[j].as_str()]).ok();
+                cluster
+                    .client(i)
+                    .p2p_replicator_set(&["Tally"], &addr[j])
+                    .ok();
+            }
+        }
+    }
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_Tally(input: {name: "t", hits: 0}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_Tally"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+
+    // BARRIER: wait until ALL THREE nodes have the seed doc (hits==0) before any
+    // node increments — so a node can't build its increment on a pre-seed base.
+    // This isolates a genuine merge/dedup race from seed-propagation timing.
+    let seed_deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if (0..3).all(|n| hits(&cluster.client(n)) == 0) {
+            break;
+        }
+        assert!(
+            Instant::now() < seed_deadline,
+            "seed did not reach all 3 nodes"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    for n in 0..3 {
+        cluster
+            .client(n)
+            .query(&format!(
+                r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: 10}}) {{ _docID }} }}"#
+            ))
+            .expect("increment");
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let h: Vec<i64> = (0..3).map(|n| hits(&cluster.client(n))).collect();
+        let ok = h.iter().all(|&x| x == 30);
+        if ok || Instant::now() >= deadline {
+            eprintln!(
+                "BUGHUNT[counter_3node] node0={} node1={} node2={} | expected 30 each | CONVERGED={ok}",
+                h[0], h[1], h[2]
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// PNCounter with DECREMENT — the counter reconcile fix (#1014) was validated for
+/// PCounter (increment-only). PNCounter allows negative deltas, so a node's local
+/// state can be BELOW the seed. node0 +50, node1 -30, concurrently (optionally
+/// across a restart-partition); both must converge to seed(0) + 50 - 30 = 20. A
+/// reconcile that mishandles a decrement (e.g. clamps at 0, drops the negative
+/// local delta, or materializes the signed value wrong) shows up here.
+async fn run_pncounter(label: &str, restart: Option<usize>) {
+    let mut cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_store("redb")
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("2-node cluster");
+
+    let schema = "type Tally { name: String  hits: Int @crdt(type: pncounter) }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+    wire(&cluster).await;
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_Tally(input: {name: "t", hits: 0}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_Tally"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    if let Some(idx) = restart {
+        cluster
+            .restart_node(idx, Duration::from_secs(30))
+            .await
+            .expect("restart node");
+    }
+
+    // node0 increments +50; node1 decrements -30 (PNCounter allows negatives).
+    cluster
+        .client(0)
+        .query(&format!(
+            r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: 50}}) {{ _docID }} }}"#
+        ))
+        .expect("inc node0");
+    cluster
+        .client(1)
+        .query(&format!(
+            r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: -30}}) {{ _docID }} }}"#
+        ))
+        .expect("dec node1");
+
+    if restart.is_some() {
+        let (a0b, a1b) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+        cluster.client(0).p2p_connect(&[a1b.as_str()]).ok();
+        cluster.client(1).p2p_connect(&[a0b.as_str()]).ok();
+        cluster.client(0).p2p_collection_add(&["Tally"]).ok();
+        cluster.client(1).p2p_collection_add(&["Tally"]).ok();
+        cluster
+            .client(0)
+            .p2p_replicator_delete(&["Tally"], Some(&a1b))
+            .ok();
+        cluster
+            .client(1)
+            .p2p_replicator_delete(&["Tally"], Some(&a0b))
+            .ok();
+        cluster.client(0).p2p_replicator_set(&["Tally"], &a1b).ok();
+        cluster.client(1).p2p_replicator_set(&["Tally"], &a0b).ok();
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (h0, h1) = (hits(&cluster.client(0)), hits(&cluster.client(1)));
+        if (h0 == h1 && h0 == 20) || Instant::now() >= deadline {
+            let converged = h0 == h1 && h0 == 20;
+            eprintln!(
+                "BUGHUNT[{label}] node0.hits={h0} node1.hits={h1} | expected 20 | CONVERGED={converged}"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+#[ignore = "bug-hunt probe; run with --ignored --nocapture"]
+#[tokio::test]
+async fn bughunt_pncounter_live() {
+    run_pncounter("pncounter_live", None).await;
+}
+
+#[ignore = "bug-hunt probe; run with --ignored --nocapture"]
+#[tokio::test]
+async fn bughunt_pncounter_restart() {
+    run_pncounter("pncounter_restart(node1)", Some(1)).await;
+}
+
+/// MIXED-FIELD doc: an LWW field (`name`) AND a counter field (`views`) in the
+/// same document. node0 updates the LWW field; node1 increments the counter,
+/// concurrently (optionally across a restart). Both stores must reconcile
+/// INDEPENDENTLY: converge to name="alice" (only node0 set it) AND views=10 (only
+/// node1 incremented). The hazard: merging one field type re-materializes the
+/// document blob and could clobber the other field's pending local write if the
+/// composite re-materialization doesn't reconcile both stores.
+async fn run_mixed_fields(label: &str, restart: Option<usize>) {
+    let mut cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_store("redb")
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("2-node cluster");
+
+    let schema = "type Mixed { name: String  views: Int @crdt(type: pcounter) }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+    let (a0, a1) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+    cluster.client(0).p2p_connect(&[a1.as_str()]).ok();
+    cluster.client(1).p2p_connect(&[a0.as_str()]).ok();
+    cluster.client(0).p2p_collection_add(&["Mixed"]).ok();
+    cluster.client(1).p2p_collection_add(&["Mixed"]).ok();
+    cluster.client(0).p2p_replicator_set(&["Mixed"], &a1).ok();
+    cluster.client(1).p2p_replicator_set(&["Mixed"], &a0).ok();
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_Mixed(input: {name: "seed", views: 0}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_Mixed"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    if let Some(idx) = restart {
+        cluster
+            .restart_node(idx, Duration::from_secs(30))
+            .await
+            .expect("restart node");
+    }
+
+    // node0 sets the LWW field; node1 increments the counter — different fields.
+    cluster
+        .client(0)
+        .query(&format!(
+            r#"mutation {{ update_Mixed(docID: "{id}", input: {{name: "alice"}}) {{ _docID }} }}"#
+        ))
+        .expect("node0 name");
+    cluster
+        .client(1)
+        .query(&format!(
+            r#"mutation {{ update_Mixed(docID: "{id}", input: {{views: 10}}) {{ _docID }} }}"#
+        ))
+        .expect("node1 views");
+
+    if restart.is_some() {
+        let (a0b, a1b) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+        cluster.client(0).p2p_connect(&[a1b.as_str()]).ok();
+        cluster.client(1).p2p_connect(&[a0b.as_str()]).ok();
+        cluster.client(0).p2p_collection_add(&["Mixed"]).ok();
+        cluster.client(1).p2p_collection_add(&["Mixed"]).ok();
+        cluster
+            .client(0)
+            .p2p_replicator_delete(&["Mixed"], Some(&a1b))
+            .ok();
+        cluster
+            .client(1)
+            .p2p_replicator_delete(&["Mixed"], Some(&a0b))
+            .ok();
+        cluster.client(0).p2p_replicator_set(&["Mixed"], &a1b).ok();
+        cluster.client(1).p2p_replicator_set(&["Mixed"], &a0b).ok();
+    }
+
+    let read = |n: usize| -> (String, i64) {
+        let r = cluster
+            .client(n)
+            .query("query { Mixed { name views } }")
+            .unwrap_or_default();
+        let d = &r["Mixed"][0];
+        (
+            d["name"].as_str().unwrap_or("<none>").to_string(),
+            d["views"].as_i64().unwrap_or(-1),
+        )
+    };
+    let deadline = Instant::now() + Duration::from_secs(25);
+    loop {
+        let (n0, v0) = read(0);
+        let (n1, v1) = read(1);
+        let ok = n0 == "alice" && n1 == "alice" && v0 == 10 && v1 == 10;
+        if ok || Instant::now() >= deadline {
+            eprintln!(
+                "BUGHUNT[{label}] node0=(name={n0},views={v0}) node1=(name={n1},views={v1}) | expected name=alice views=10 | CONVERGED={ok}"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+#[ignore = "bug-hunt probe; run with --ignored --nocapture"]
+#[tokio::test]
+async fn bughunt_mixed_fields_live() {
+    run_mixed_fields("mixed_fields_live", None).await;
+}
+
+#[ignore = "bug-hunt probe; run with --ignored --nocapture"]
+#[tokio::test]
+async fn bughunt_mixed_fields_restart() {
+    run_mixed_fields("mixed_fields_restart(node1)", Some(1)).await;
 }
