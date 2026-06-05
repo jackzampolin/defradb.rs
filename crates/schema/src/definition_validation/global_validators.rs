@@ -2,7 +2,7 @@
 
 use super::helpers::*;
 use super::DefinitionState;
-use crate::ORPHAN_COLLECTION_ID;
+use crate::{FieldKind, ScalarKind, ORPHAN_COLLECTION_ID};
 
 /// Matches Go's validateCollectionNameUnique.
 pub(super) fn validate_collection_name_unique(
@@ -93,6 +93,50 @@ pub(super) fn validate_field_not_duplicated(
             if !seen.insert(&field.name) {
                 errs.push(format!("duplicate field. Name: {}", field.name));
             }
+        }
+    }
+    errs
+}
+
+/// Matches Go's validateRelationNameUnique.
+pub(super) fn validate_relation_name_unique(
+    new_state: &DefinitionState,
+    _old_state: &DefinitionState,
+) -> Vec<String> {
+    let mut errs = Vec::new();
+    for col in &new_state.collections {
+        let mut relation_fields: std::collections::HashMap<&str, Vec<(&str, bool)>> =
+            std::collections::HashMap::new();
+
+        for field in &col.fields {
+            let Some(relation_name) = field.relation_name.as_deref() else {
+                continue;
+            };
+
+            if matches!(field.kind, FieldKind::Scalar(ScalarKind::DocID)) {
+                continue;
+            }
+
+            relation_fields
+                .entry(relation_name)
+                .or_default()
+                .push((field.name.as_str(), field.is_primary));
+        }
+
+        for (relation_name, fields) in relation_fields {
+            if fields.len() <= 1 {
+                continue;
+            }
+
+            let primary_count = fields.iter().filter(|(_, is_primary)| *is_primary).count();
+            if primary_count == 1 && fields.len() == 2 {
+                continue;
+            }
+
+            errs.push(format!(
+                "relation name is not unique within collection. Field: {}, RelationName: {}",
+                fields[0].0, relation_name
+            ));
         }
     }
     errs

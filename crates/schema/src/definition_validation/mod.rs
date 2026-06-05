@@ -71,6 +71,7 @@ const GLOBAL_VALIDATORS: &[Validator] = &[
     validate_type_supported,
     validate_type_and_kind_compatible,
     validate_field_not_duplicated,
+    validate_relation_name_unique,
     validate_collection_materialized,
     validate_materialized_has_no_policy,
     validate_embedding_and_kind_compatible,
@@ -80,8 +81,8 @@ const GLOBAL_VALIDATORS: &[Validator] = &[
 
 /// Validates embedding definitions on newly created collections.
 ///
-/// Only runs embedding-specific validators (type and fields).
-/// Other global validators are not appropriate at create time.
+/// Only runs validators that are safe before collection IDs and persisted metadata
+/// are assigned.
 pub fn validate_new_collections(new_collections: &[CollectionVersion]) -> Result<(), String> {
     let new_state = DefinitionState::new(new_collections);
     let old_state = DefinitionState::new(&[]);
@@ -91,6 +92,7 @@ pub fn validate_new_collections(new_collections: &[CollectionVersion]) -> Result
         validate_embedding_fields_for_generation,
         validate_embedding_provider_and_model,
         validate_index_fields_not_counter,
+        validate_relation_name_unique,
     ];
 
     let mut errors = Vec::new();
