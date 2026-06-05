@@ -1,6 +1,6 @@
 use super::*;
 use crate::planner::index_selection::IndexScanType;
-use query_types::mapper::{Field, Filter};
+use query_types::mapper::{CursorParams, Field, Filter, OrderBy, OrderCondition, OrderDirection};
 use schema::{FieldDescription, FieldKind, IndexDescription, IndexedFieldDescription};
 
 fn map<const N: usize>(
@@ -329,6 +329,67 @@ async fn test_plan_result_uses_index_method() {
     let select_no_filter = Select::new("Users").with_field(Field::new("name"));
     let result_no_filter = planner.plan_with_index_info(&select_no_filter).unwrap();
     assert!(!result_no_filter.uses_index());
+}
+
+#[test]
+fn test_active_cursor_filter_and_order_prefers_order_index() {
+    let planner = Planner::new(vec![make_test_collection_with_index()]);
+    let collection = planner.collection("Users").unwrap();
+
+    let filter = Filter::from_conditions(map([(
+        "name".to_string(),
+        serde_json::json!({"_eq": "Alice"}),
+    )]));
+    let order = OrderBy::new().with_condition(OrderCondition::new("age", OrderDirection::Asc));
+
+    let mut select = Select::new("Users")
+        .with_field(Field::new("name"))
+        .with_filter(filter)
+        .with_order(order);
+    select.is_cursor = true;
+    select.cursor_params = Some(CursorParams {
+        first: Some(2),
+        after: Some("encoded-cursor".to_string()),
+        ..Default::default()
+    });
+
+    let (params, provides_ordering) = planner.try_select_index(&select, collection).unwrap();
+
+    assert_eq!(params.index_name, "age_idx");
+    assert!(provides_ordering);
+    match params.scan_type {
+        IndexScanType::PrefixScan { reverse, .. } => {
+            assert!(!reverse, "age ASC should scan the ASC index forward");
+        }
+        _ => panic!("expected PrefixScan over ordering index"),
+    }
+}
+
+#[test]
+fn test_first_cursor_page_still_prefers_filter_index() {
+    let planner = Planner::new(vec![make_test_collection_with_index()]);
+    let collection = planner.collection("Users").unwrap();
+
+    let filter = Filter::from_conditions(map([(
+        "name".to_string(),
+        serde_json::json!({"_eq": "Alice"}),
+    )]));
+    let order = OrderBy::new().with_condition(OrderCondition::new("age", OrderDirection::Asc));
+
+    let mut select = Select::new("Users")
+        .with_field(Field::new("name"))
+        .with_filter(filter)
+        .with_order(order);
+    select.is_cursor = true;
+    select.cursor_params = Some(CursorParams {
+        first: Some(2),
+        ..Default::default()
+    });
+
+    let (params, provides_ordering) = planner.try_select_index(&select, collection).unwrap();
+
+    assert_eq!(params.index_name, "name_idx");
+    assert!(!provides_ordering);
 }
 
 // ========================================================================

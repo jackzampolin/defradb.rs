@@ -377,11 +377,9 @@ async fn rust_unique_composite_prefix_after_paginates_via_slow_path() {
 /// the seek bytes encoded for `idx_age`'s field positions were applied to the
 /// `idx_score` scan, producing garbage page 2 results.
 ///
-/// After the fix, `IndexScanNode::set_cursor_seek` rejects the seek when
-/// `expected_index_name` doesn't match its own index name, causing `CursorNode` to
-/// fall back to the slow path. The slow path errors with an actionable message when
-/// non-docID ordering is present and an `after` cursor token exists — this is
-/// CORRECT behavior that surfaces the limitation clearly.
+/// After the fix, active cursor pages prefer the order-supporting index, so the
+/// cursor seek applies to `idx_age` and the residual score filter is still applied
+/// after fetching rows in order.
 #[tokio::test]
 async fn rust_cursor_with_filter_and_order_uses_correct_index() {
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
@@ -437,53 +435,25 @@ async fn rust_cursor_with_filter_and_order_uses_correct_index() {
         .expect("endCursor present")
         .to_string();
 
-    // Page 2: continue from cursor.
-    // After the fix, two outcomes are acceptable:
-    //   (a) Correct rows: ["c", "e"] (ages 40, 60; d filtered out by score=80).
-    //   (b) Actionable slow-path error: the seek was rejected (wrong-index mismatch)
-    //       and the slow path refuses non-docID ordering — this is correct and expected.
-    let p2_result = node.query(&format!(
+    // Page 2: continue from cursor using the age order index. The scan starts
+    // after `b`, skips `d` via the residual score filter, and returns `c`, `e`.
+    let p2: Value = node
+        .query(&format!(
         r#"{{ _cursor {{
             User(first: 2, after: "{end_cursor}", filter: {{ score: {{ _eq: 90 }} }}, order: [{{age: ASC}}]) {{ name age score }}
         }} }}"#
-    ));
+    ))
+        .expect("page 2 filter/order cursor should seek on order index");
 
-    match p2_result {
-        Ok(p2) => {
-            // Fast path succeeded with the correct index — verify no garbage rows.
-            let names2: Vec<String> = p2["_cursor"]["User"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|u| u["name"].as_str().unwrap().to_string())
-                .collect();
-            // Should be c and e (ages 40 and 60); d is filtered out (score=80).
-            assert!(
-                names2.iter().all(|n| n != "b"),
-                "page 2 must not repeat page 1's boundary row 'b'; got {names2:?}"
-            );
-            for n in &names2 {
-                let score = p2["_cursor"]["User"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|u| u["name"].as_str() == Some(n))
-                    .map(|u| u["score"].as_i64().unwrap_or(0))
-                    .unwrap_or(0);
-                assert_eq!(
-                    score, 90,
-                    "all page 2 rows must pass the score=90 filter; '{n}' has score {score}"
-                );
-            }
-        }
-        Err(err) => {
-            // Slow path error — this is also correct: the seek was rejected (wrong index),
-            // the slow path refuses non-docID ordering, and the error is actionable.
-            let err_str = err.to_string();
-            assert!(
-                err_str.contains("cursor slow path") || err_str.contains("does not support non-docID ordering"),
-                "expected actionable slow-path error when seek rejected for wrong index, got: {err_str}"
-            );
-        }
+    let names2: Vec<String> = p2["_cursor"]["User"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names2, vec!["c", "e"]);
+
+    for row in p2["_cursor"]["User"].as_array().unwrap() {
+        assert_eq!(row["score"], Value::Number(90.into()));
     }
 }
