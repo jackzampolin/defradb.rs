@@ -603,12 +603,12 @@ async fn bughunt_counter_3node() {
     }
     // Full mesh: every node replicates to the other two.
     for i in 0..3 {
-        for j in 0..3 {
+        for (j, peer_addr) in addr.iter().enumerate() {
             if i != j {
-                cluster.client(i).p2p_connect(&[addr[j].as_str()]).ok();
+                cluster.client(i).p2p_connect(&[peer_addr.as_str()]).ok();
                 cluster
                     .client(i)
-                    .p2p_replicator_set(&["Tally"], &addr[j])
+                    .p2p_replicator_set(&["Tally"], peer_addr)
                     .ok();
             }
         }

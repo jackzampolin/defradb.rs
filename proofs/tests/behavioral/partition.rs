@@ -350,6 +350,63 @@ async fn poll_hits(node: &DefraClient, want: i64, timeout: Duration) -> bool {
     }
 }
 
+fn wire_bidirectional(cluster: &TestCluster, collection: &str) {
+    let (a0, a1) = (node_addr(cluster, 0), node_addr(cluster, 1));
+    cluster
+        .client(0)
+        .p2p_connect(&[a1.as_str()])
+        .expect("connect 0->1");
+    cluster
+        .client(1)
+        .p2p_connect(&[a0.as_str()])
+        .expect("connect 1->0");
+    cluster
+        .client(0)
+        .p2p_collection_add(&[collection])
+        .expect("subscribe node0");
+    cluster
+        .client(1)
+        .p2p_collection_add(&[collection])
+        .expect("subscribe node1");
+    cluster
+        .client(0)
+        .p2p_replicator_set(&[collection], &a1)
+        .expect("replicator 0->1");
+    cluster
+        .client(1)
+        .p2p_replicator_set(&[collection], &a0)
+        .expect("replicator 1->0");
+}
+
+fn mixed_state(node: &DefraClient) -> (String, i64) {
+    let r = node
+        .query("query { Mixed { name views } }")
+        .expect("query Mixed");
+    r["Mixed"]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .map(|doc| {
+            (
+                doc["name"].as_str().unwrap_or("<none>").to_string(),
+                doc["views"].as_i64().unwrap_or(-1),
+            )
+        })
+        .unwrap_or_else(|| ("<missing>".to_string(), -1))
+}
+
+async fn poll_mixed_state(node: &DefraClient, name: &str, views: i64, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if mixed_state(node) == (name.to_string(), views) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// Concurrent PCounter increments must converge to the SUM. Two nodes share a
 /// `hits=0` document over a live bidirectional connection; each increments by 45,
 /// concurrently; both must converge to 90.
@@ -366,7 +423,7 @@ async fn poll_hits(node: &DefraClient, want: i64, timeout: Duration) -> bool {
 /// rust<->rust, go<->go, and rust<->go all converge to 90.
 #[tokio::test]
 async fn convergence_concurrent_counter_increments_sum() {
-    let mut cluster = TestCluster::builder()
+    let cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
         .with_store("redb")
@@ -443,4 +500,133 @@ async fn convergence_concurrent_counter_increments_sum() {
             tally_hits(&cluster.client(1))
         );
     }
+}
+
+/// Concurrent PNCounter updates must accumulate signed deltas, not just positive
+/// increments. node0 contributes `+50` while node1 contributes `-30`; after
+/// merging, both materialized documents must show `20`.
+///
+/// This extends the PCounter two-store regression guard above to the
+/// decrement-capable counter variant. A merge path that clamps, drops, or
+/// re-materializes from a stale accumulation store would converge to the wrong
+/// value even if both replicas agree.
+#[tokio::test]
+async fn convergence_concurrent_pncounter_signed_deltas_sum() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_store("redb")
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("build 2-node p2p cluster");
+
+    let schema = "type Tally { name: String  hits: Int @crdt(type: pncounter) }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+    wire_bidirectional(&cluster, "Tally");
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_Tally(input: {name: "t", hits: 0}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_Tally"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    assert!(
+        poll_hits(&cluster.client(1), 0, Duration::from_secs(20)).await,
+        "seed document must replicate to node1 before the signed counter updates"
+    );
+
+    cluster
+        .client(0)
+        .query(&format!(
+            r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: 50}}) {{ _docID }} }}"#
+        ))
+        .expect("node0 increment");
+    cluster
+        .client(1)
+        .query(&format!(
+            r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: -30}}) {{ _docID }} }}"#
+        ))
+        .expect("node1 decrement");
+
+    if !poll_hits(&cluster.client(0), 20, Duration::from_secs(30)).await {
+        panic!(
+            "node0 did not converge to 20; hits = {}",
+            tally_hits(&cluster.client(0))
+        );
+    }
+    if !poll_hits(&cluster.client(1), 20, Duration::from_secs(30)).await {
+        panic!(
+            "node1 did not converge to 20; hits = {}",
+            tally_hits(&cluster.client(1))
+        );
+    }
+}
+
+/// Mixed-field convergence: the same document carries an LWW field and a
+/// counter field, and different nodes update different CRDT families
+/// concurrently. Persisting one linked field must not re-materialize the
+/// document from stale state and clobber the other field's local write.
+#[tokio::test]
+async fn convergence_concurrent_mixed_lww_and_counter_fields_merge() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_store("redb")
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("build 2-node p2p cluster");
+
+    let schema = "type Mixed { name: String  views: Int @crdt(type: pcounter) }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+    wire_bidirectional(&cluster, "Mixed");
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_Mixed(input: {name: "seed", views: 0}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_Mixed"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    assert!(
+        poll_mixed_state(&cluster.client(1), "seed", 0, Duration::from_secs(20)).await,
+        "seed document must replicate to node1 before mixed-field updates"
+    );
+
+    cluster
+        .client(0)
+        .query(&format!(
+            r#"mutation {{ update_Mixed(docID: "{id}", input: {{name: "alice"}}) {{ _docID }} }}"#
+        ))
+        .expect("node0 name update");
+    cluster
+        .client(1)
+        .query(&format!(
+            r#"mutation {{ update_Mixed(docID: "{id}", input: {{views: 10}}) {{ _docID }} }}"#
+        ))
+        .expect("node1 views increment");
+
+    if !poll_mixed_state(&cluster.client(0), "alice", 10, Duration::from_secs(30)).await {
+        panic!(
+            "node0 did not converge to name=alice views=10; state = {:?}",
+            mixed_state(&cluster.client(0))
+        );
+    }
+    if !poll_mixed_state(&cluster.client(1), "alice", 10, Duration::from_secs(30)).await {
+        panic!(
+            "node1 did not converge to name=alice views=10; state = {:?}",
+            mixed_state(&cluster.client(1))
+        );
+    }
+    assert_eq!(
+        mixed_state(&cluster.client(0)),
+        mixed_state(&cluster.client(1)),
+        "replicas must materialize identical mixed-field state"
+    );
 }
