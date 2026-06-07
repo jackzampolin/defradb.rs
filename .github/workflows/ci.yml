@@ -99,14 +99,6 @@ jobs:
 
       - run: cargo test --workspace --exclude integration-test --exclude ffi-test --exclude conformance
 
-      # The conformance crate (proofs/) drives real `defra` subprocesses. Run it
-      # SERIALLY (not in the parallel --workspace job above) so concurrent node
-      # startup doesn't contend on ports/CPU and flake ("failed to start
-      # rust-0"). It uses the default-feature `target/debug/defra` built above
-      # (proofs/tests/support.rs::release_binary); the Lean drift-check skips when
-      # `lake` is absent.
-      - run: cargo test -p conformance -- --test-threads=1
-
       # Cache binaries BEFORE any feature-on rebuild. `cargo test --workspace`
       # above left a default-feature `defra` at target/debug/defra; the otel
       # steps below recompile it with `--features otel`, so caching must happen
@@ -144,6 +136,48 @@ jobs:
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- .
           git clean -fd
+          pkill -f "target/debug/defra" || true
+
+  conformance:
+    name: Conformance
+    needs: build
+    runs-on: [self-hosted, macOS, ARM64, studio]
+    env:
+      DEFRA_CONFORMANCE_BINARY: ${{ github.workspace }}/target/release/defra
+      DEFRA_WORKSPACE_ROOT: ${{ github.workspace }}
+      # The conformance harness waits on INFO-level node readiness/P2P log lines.
+      # Pin the child-node filter so an inherited runner-level RUST_LOG=warn
+      # cannot make healthy nodes look unready.
+      RUST_LOG: info
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary under test
+        run: |
+          cargo build --release -p cli
+          "$DEFRA_CONFORMANCE_BINARY" version --format json
+
+      # The conformance crate (proofs/) drives real `defra` subprocesses. Run it
+      # serially so concurrent node startup doesn't contend on ports/CPU and
+      # flake ("failed to start rust-0"). The Lean drift-check still skips when
+      # `lake` is absent; a Lean-equipped job can make that mandatory later.
+      - name: Run conformance tests
+        run: cargo test -p conformance -- --test-threads=1
+
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git checkout -- .
+          git clean -fd
+          pkill -f "target/release/defra" || true
           pkill -f "target/debug/defra" || true
 
   integration:
