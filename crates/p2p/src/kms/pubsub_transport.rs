@@ -381,6 +381,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    type PublishedRawMessages = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
     fn a_libp2p_peer() -> libp2p::PeerId {
         libp2p::PeerId::from_public_key(&libp2p::identity::Keypair::generate_ed25519().public())
     }
@@ -394,7 +396,7 @@ mod tests {
         topic_peers_calls: Arc<AtomicUsize>,
         subscriber_visible_after: usize,
         publish_attempts: Arc<AtomicUsize>,
-        published: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        published: PublishedRawMessages,
     }
 
     impl RacyTransport {

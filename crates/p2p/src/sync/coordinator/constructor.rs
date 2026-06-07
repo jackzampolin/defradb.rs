@@ -106,6 +106,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let rate_limit_burst = config.rate_limit_burst;
         let rate_limit_rate = config.rate_limit_rate;
         let rate_limit_backoff = config.rate_limit_backoff.clone();
+        let max_doc_sync_request_doc_ids = config.max_doc_sync_request_doc_ids.max(1);
         let push_send_timeout = if config.push_send_timeout.is_zero() {
             DEFAULT_PUSH_SEND_TIMEOUT
         } else {
@@ -142,6 +143,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         rate_limit_backoff,
                     )),
                     push_send_timeout,
+                    max_doc_sync_request_doc_ids,
                     shutdown: super::SyncShutdownHandle::new(),
                 },
                 manager,

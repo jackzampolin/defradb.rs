@@ -40,6 +40,7 @@ fn test_p2p_config() -> P2PConfig {
         load_persisted_collections: false,
         max_concurrent_dag_fetches: p2p::sync::DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
         max_concurrent_push_tasks: p2p::sync::DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+        max_doc_sync_request_doc_ids: p2p::sync::DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
         rate_limit_burst: p2p::sync::DEFAULT_RATE_LIMIT_BURST,
         rate_limit_rate: p2p::sync::DEFAULT_RATE_LIMIT_RATE,
     }
@@ -701,16 +702,27 @@ async fn fetch_turn_diagnostics(
     })
 }
 
-async fn create_turn(
-    node: &EmbeddedNode,
-    session_id: &str,
-    request_id: &str,
-    prompt: &str,
+struct TurnSpec<'a> {
+    session_id: &'a str,
+    request_id: &'a str,
+    prompt: &'a str,
     user_sequence: usize,
     assistant_sequence: usize,
     chunk_count: usize,
     tool_call_every: usize,
-) {
+}
+
+async fn create_turn(node: &EmbeddedNode, spec: TurnSpec<'_>) {
+    let TurnSpec {
+        session_id,
+        request_id,
+        prompt,
+        user_sequence,
+        assistant_sequence,
+        chunk_count,
+        tool_call_every,
+    } = spec;
+
     let now = synthetic_timestamp();
     let upsert_conversation = node
         .execute(&format!(
@@ -1374,13 +1386,15 @@ async fn live_replicator_same_session_followup_turn_converges() {
     let session_id = "sess-followup";
     create_turn(
         &node0,
-        session_id,
-        "req-1",
-        "Hey amy can you tell me about the p2p communcation between the agent and the desktop in this app and the docuemnt based request model?",
-        1,
-        2,
-        64,
-        3,
+        TurnSpec {
+            session_id,
+            request_id: "req-1",
+            prompt: "Hey amy can you tell me about the p2p communcation between the agent and the desktop in this app and the docuemnt based request model?",
+            user_sequence: 1,
+            assistant_sequence: 2,
+            chunk_count: 64,
+            tool_call_every: 3,
+        },
     )
     .await;
 
@@ -1407,13 +1421,15 @@ async fn live_replicator_same_session_followup_turn_converges() {
 
     create_turn(
         &node0,
-        session_id,
-        "req-2",
-        "Awesome breakdown, can you please tell me what you like about the architecture and point to files?",
-        3,
-        4,
-        128,
-        2,
+        TurnSpec {
+            session_id,
+            request_id: "req-2",
+            prompt: "Awesome breakdown, can you please tell me what you like about the architecture and point to files?",
+            user_sequence: 3,
+            assistant_sequence: 4,
+            chunk_count: 128,
+            tool_call_every: 2,
+        },
     )
     .await;
 

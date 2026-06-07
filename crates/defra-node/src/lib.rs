@@ -1254,6 +1254,7 @@ impl NodeBuilder {
         let sync_config = p2p::sync::SyncConfig {
             max_concurrent_dag_fetches: config.max_concurrent_dag_fetches,
             max_concurrent_push_tasks: config.max_concurrent_push_tasks,
+            max_doc_sync_request_doc_ids: config.max_doc_sync_request_doc_ids,
             rate_limit_burst: config.rate_limit_burst,
             rate_limit_rate: config.rate_limit_rate,
             ..Default::default()

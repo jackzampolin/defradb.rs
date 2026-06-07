@@ -110,6 +110,7 @@ pub struct EmbeddedNodeConfig {
     pub query_limits: query::QueryLimits,
     pub max_concurrent_dag_fetches: Option<usize>,
     pub max_concurrent_push_tasks: Option<usize>,
+    pub max_doc_sync_request_doc_ids: Option<usize>,
     pub rate_limit_burst: Option<u32>,
     pub rate_limit_rate: Option<f64>,
 }

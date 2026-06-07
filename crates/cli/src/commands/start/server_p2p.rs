@@ -1240,6 +1240,7 @@ impl Node {
         p2p::sync::SyncConfig {
             rate_limit_burst: config.net.p2p_rate_limit_burst,
             rate_limit_rate: config.net.p2p_rate_limit_rate,
+            max_doc_sync_request_doc_ids: config.net.p2p_max_doc_sync_request_doc_ids,
             ..Default::default()
         }
     }
