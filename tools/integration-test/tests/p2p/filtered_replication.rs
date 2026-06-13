@@ -40,17 +40,17 @@ fn socket_addr(cluster: &TestCluster, node: usize) -> String {
 /// Add a filtered replicator from `node` to `addr` over the CLI, exercising the
 /// `--filter-field` / `--filter-value` flags the PR introduced. The CLI wraps
 /// `--filter-value` as a JSON string, matching string scalar fields.
-fn add_filtered_replicator(
+fn run_replicator_add(
     cluster: &TestCluster,
     node: usize,
     collections: &[&str],
     addr: &str,
     field: &str,
     value: &str,
-) {
+) -> std::process::Output {
     let client = cluster.client(node);
     let cols = collections.join(",");
-    let output = Command::new(client.binary_path())
+    Command::new(client.binary_path())
         .arg("--url")
         .arg(socket_addr(cluster, node))
         .args([
@@ -67,7 +67,18 @@ fn add_filtered_replicator(
             addr,
         ])
         .output()
-        .expect("exec filtered replicator add");
+        .expect("exec filtered replicator add")
+}
+
+fn add_filtered_replicator(
+    cluster: &TestCluster,
+    node: usize,
+    collections: &[&str],
+    addr: &str,
+    field: &str,
+    value: &str,
+) {
+    let output = run_replicator_add(cluster, node, collections, addr, field, value);
     assert!(
         output.status.success(),
         "filtered replicator add failed: status={} stderr={}",
@@ -424,6 +435,68 @@ async fn rust_filtered_replication_encrypted_respects_filter() {
     assert_eq!(
         count, 1,
         "filtered peer must hold only the matching encrypted document"
+    );
+}
+
+const DUMMY_PEER_ADDR: &str =
+    "/ip4/127.0.0.1/tcp/1/p2p/12D3KooWGjMkcMy5PM9iSbgWWgUnH5dQhvzhNu7w3Gk4kHZBsxnJ";
+
+/// G8: a filter on a field absent from the collection schema is rejected at
+/// add time (prevents a typo silently producing zero replication). Validation
+/// runs before any dial, so an unreachable dummy peer address is fine.
+#[tokio::test]
+async fn rust_filtered_replicator_rejects_unknown_field() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 1).await;
+    cluster.client(0).schema_add(AGENT_SCHEMA).expect("schema");
+
+    let output = run_replicator_add(
+        &cluster,
+        0,
+        &["AgentDoc"],
+        DUMMY_PEER_ADDR,
+        "nonexistent_field",
+        ALICE,
+    );
+    assert!(
+        !output.status.success(),
+        "filtering on a non-existent field must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found"),
+        "error should explain the field is not in the schema, got: {stderr}"
+    );
+}
+
+/// G8: a filter on an existing-but-mutable field is rejected — the filter key
+/// must be `@immutable` (the B3 split-ownership guard).
+#[tokio::test]
+async fn rust_filtered_replicator_rejects_non_immutable_field() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 1).await;
+    cluster.client(0).schema_add(AGENT_SCHEMA).expect("schema");
+
+    // `body` exists but is not @immutable.
+    let output = run_replicator_add(&cluster, 0, &["AgentDoc"], DUMMY_PEER_ADDR, "body", "x");
+    assert!(
+        !output.status.success(),
+        "filtering on a mutable field must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("immutable"),
+        "error should require the filter field be @immutable, got: {stderr}"
     );
 }
 
