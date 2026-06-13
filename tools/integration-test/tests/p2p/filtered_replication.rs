@@ -14,7 +14,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use integration_test::{
-    extract_doc_id, extract_p2p_addr, poll_until, TestCluster, P2P_POLL_INTERVAL, P2P_TIMEOUT,
+    extract_doc_id, extract_p2p_addr, generate_identity, poll_until, TestCluster,
+    P2P_POLL_INTERVAL, P2P_TIMEOUT, USER_ACP_POLICY,
 };
 
 const AGENT_SCHEMA: &str = "type AgentDoc { agent_did: String @immutable  body: String }";
@@ -82,6 +83,46 @@ fn add_filtered_replicator(
     assert!(
         output.status.success(),
         "filtered replicator add failed: status={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Add a filtered replicator authenticated as `identity_hex` (for Controlled/ACP mode).
+fn add_filtered_replicator_with_identity(
+    cluster: &TestCluster,
+    node: usize,
+    collections: &[&str],
+    addr: &str,
+    field: &str,
+    value: &str,
+    identity_hex: &str,
+) {
+    let client = cluster.client(node);
+    let cols = collections.join(",");
+    let output = Command::new(client.binary_path())
+        .arg("--url")
+        .arg(socket_addr(cluster, node))
+        .args([
+            "client",
+            "-i",
+            identity_hex,
+            "p2p",
+            "replicator",
+            "add",
+            "-c",
+            &cols,
+            "--filter-field",
+            field,
+            "--filter-value",
+            value,
+            addr,
+        ])
+        .output()
+        .expect("exec filtered replicator add (with identity)");
+    assert!(
+        output.status.success(),
+        "filtered replicator add (identity) failed: status={} stderr={}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
@@ -601,6 +642,118 @@ async fn rust_schema_rejects_immutable_non_lww_field() {
     assert!(
         msg.contains("only LWW register fields can be immutable"),
         "schema rejection should explain @immutable requires an LWW field, got: {msg}"
+    );
+}
+
+/// #1-test / F7: filtered replication under ACP (Controlled access mode). Every
+/// other filtered test runs in Open mode, where `bitswap/filter.rs` short-circuits
+/// (`mode.is_open() -> true`) before the filtered-replicator gating. Running under
+/// `with_acp_local()` keeps `check_access` in Controlled mode so its
+/// filtered-replicator logic is active. (The deny branch itself fires only on a
+/// Bitswap WANT for a known non-matching CID, which the harness cannot issue; that
+/// branch stays covered by the in-process unit test
+/// `controlled_mode_denies_filtered_replicator_data_block_requests`.)
+#[tokio::test]
+async fn rust_filtered_replication_excludes_nonmatching_controlled_mode() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    let alice = generate_identity(node0.binary_path()).expect("generate identity");
+
+    let policy = node0
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("policy node0");
+    let policy_id = policy["PolicyID"]
+        .as_str()
+        .or_else(|| policy["policyID"].as_str())
+        .expect("policy id")
+        .to_string();
+    node1
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("policy node1");
+
+    let schema = format!(
+        r#"type User @policy(id: "{policy_id}", resource: "users") {{ agent_did: String @immutable  name: String }}"#
+    );
+    node0
+        .schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("schema node0");
+    node1
+        .schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0.p2p_collection_add(&["User"]).expect("subscribe 0");
+    add_filtered_replicator_with_identity(
+        &cluster,
+        0,
+        &["User"],
+        &addr1,
+        "agent_did",
+        ALICE,
+        &alice.private_key_hex,
+    );
+
+    let mk = |did: &str, name: &str| {
+        format!(
+            r#"mutation {{ add_User(input: {{agent_did: "{did}", name: "{name}"}}) {{ _docID }} }}"#
+        )
+    };
+    let matching = node0
+        .query_with_identity(&mk(ALICE, "a"), &alice.private_key_hex)
+        .expect("create matching");
+    let matching_id = extract_doc_id(&matching, "add_User");
+    node0
+        .query_with_identity(&mk(BOB, "b"), &alice.private_key_hex)
+        .expect("create non-matching");
+    // Second matching doc after the non-matching one anchors exclusion to ordered delivery.
+    let matching2 = node0
+        .query_with_identity(&mk(ALICE, "a2"), &alice.private_key_hex)
+        .expect("create second matching");
+    let matching2_id = extract_doc_id(&matching2, "add_User");
+
+    // Replicated docs are unregistered on node1, so they are public there.
+    let node1_for_poll = cluster.client(1);
+    let m1 = matching_id.clone();
+    let m2 = matching2_id.clone();
+    poll_until(
+        || {
+            let result = node1_for_poll
+                .query("query { User { _docID agent_did } }")
+                .unwrap_or_default();
+            let Some(rows) = result["User"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&m1.as_str()) && ids.contains(&m2.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "matching docs did not replicate to filtered peer under ACP",
+    )
+    .await;
+
+    let result = node1
+        .query("query { User { agent_did } }")
+        .expect("query node1");
+    let rows = result["User"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        rows.len(),
+        2,
+        "filtered peer must hold only the two matching docs under ACP, found: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|r| r["agent_did"].as_str() == Some(ALICE)),
+        "filtered peer must hold only matching documents under ACP, found: {rows:?}"
     );
 }
 
