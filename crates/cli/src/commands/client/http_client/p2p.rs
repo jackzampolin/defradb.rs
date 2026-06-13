@@ -1,6 +1,8 @@
 //! P2P HTTP client methods
 
-use defra_http::router::{ExplicitReplayCapabilityInput, RemoteManageOp, RemoteManageQueryOp};
+use defra_http::router::{
+    ExplicitReplayCapabilityInput, RemoteManageOp, RemoteManageQueryOp, ReplicationFilters,
+};
 use serde::{Deserialize, Serialize};
 
 use super::HttpClient;
@@ -98,6 +100,11 @@ pub struct P2pReplicatorRequest {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
+    #[serde(
+        rename = "Filters",
+        skip_serializing_if = "ReplicationFilters::is_empty"
+    )]
+    pub filters: ReplicationFilters,
 }
 
 /// P2P collection request
@@ -140,6 +147,7 @@ impl HttpClient {
         &self,
         collections: &[String],
         address: Option<&str>,
+        filters: ReplicationFilters,
         explicit_replay_capabilities: &[ExplicitReplayCapabilityInput],
     ) -> Result<()> {
         let url = format!("{}/api/v0/p2p/replicator", self.base_url);
@@ -148,6 +156,7 @@ impl HttpClient {
             collections: collections.to_vec(),
             addresses,
             explicit_replay_capabilities: explicit_replay_capabilities.to_vec(),
+            filters,
         })?;
         self.request_void("POST", &url, Some(&body)).await
     }

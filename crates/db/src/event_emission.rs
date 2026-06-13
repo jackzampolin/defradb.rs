@@ -21,6 +21,7 @@ pub struct TxnBroadcastEvent {
     pub doc_id: String,
     pub doc_cid: Cid,
     pub doc_block: Vec<u8>,
+    pub document_json: Option<serde_json::Value>,
     pub collection_block: Option<(Cid, Vec<u8>)>,
     pub creator_did: Option<String>,
 }
@@ -59,6 +60,7 @@ pub(crate) fn register_update_event_callback<S: Store + 'static>(
     doc_id: String,
     doc_cid: Cid,
     doc_block: Vec<u8>,
+    document_json: Option<serde_json::Value>,
     collection_block: Option<(Cid, Vec<u8>)>,
     creator_did: Option<String>,
 ) -> Result<()> {
@@ -102,6 +104,7 @@ pub(crate) fn register_update_event_callback<S: Store + 'static>(
                     doc_id,
                     doc_cid,
                     doc_block,
+                    document_json,
                     collection_block,
                     creator_did,
                 };

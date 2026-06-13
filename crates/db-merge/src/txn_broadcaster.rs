@@ -43,6 +43,7 @@ where
             doc_id,
             doc_cid,
             doc_block,
+            document_json,
             collection_block,
             creator_did,
         } = event;
@@ -55,14 +56,26 @@ where
         tokio::spawn(async move {
             let creator_ref = creator_did.as_deref();
 
-            sync.push_to_replicators_with_creator(
-                &doc_cid,
-                &doc_block,
-                &doc_id,
-                &collection_id,
-                creator_ref,
-            )
-            .await;
+            if let Some(document_json) = document_json.as_ref() {
+                sync.push_document_to_replicators_with_creator(
+                    &doc_cid,
+                    &doc_block,
+                    &doc_id,
+                    &collection_id,
+                    document_json,
+                    creator_ref,
+                )
+                .await;
+            } else {
+                sync.push_to_replicators_with_creator(
+                    &doc_cid,
+                    &doc_block,
+                    &doc_id,
+                    &collection_id,
+                    creator_ref,
+                )
+                .await;
+            }
 
             let doc_block_result = BlockResult {
                 cid: doc_cid,

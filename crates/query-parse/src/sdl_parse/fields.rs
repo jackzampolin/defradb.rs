@@ -92,6 +92,7 @@ impl<'a> SdlParser<'a> {
                         self.get_float_with_warning(directive, "b", &type_name, Some(field_name));
                     result.fulltext = Some(super::directives::FullTextConfig { language, k1, b });
                 }
+                "immutable" => result.immutable = true,
                 "embedding" => {
                     let provider = get_directive_string(directive, "provider").unwrap_or_default();
                     let model = get_directive_string(directive, "model").unwrap_or_default();

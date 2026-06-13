@@ -82,6 +82,8 @@ impl Collection {
             None => return Err(Error::DocumentNotFound(doc_id.to_string())),
         };
 
+        self.validate_immutable_fields_unchanged(&old_doc, doc)?;
+
         // Serialize and store
         let data = doc.to_cbor()?;
 

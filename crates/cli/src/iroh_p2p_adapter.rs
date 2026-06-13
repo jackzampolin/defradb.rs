@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use blockstore::Blockstore;
 
-use defra_http::router::{P2PError, P2POperations, P2PResult, ReplicatorInfo};
+use defra_http::router::{P2PError, P2POperations, P2PResult, ReplicationFilters, ReplicatorInfo};
 use p2p::iroh::{
     best_shareable_public_addr, format_public_listen_addrs, parse_public_peer_addr, IrohTransport,
 };
@@ -52,7 +52,62 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
             address,
             status,
             last_status_change,
+            filters: info
+                .filters
+                .into_iter()
+                .map(|(collection, filter)| {
+                    (
+                        collection,
+                        defra_http::router::ReplicationFilter {
+                            field: filter.field,
+                            value: filter.value,
+                        },
+                    )
+                })
+                .collect(),
         }
+    }
+
+    fn resolve_replication_filters(
+        filters: ReplicationFilters,
+        effective_collections: &[String],
+        collection_cids: &[String],
+    ) -> P2PResult<p2p::ReplicationFilters> {
+        let mut resolved = p2p::ReplicationFilters::new();
+        for (key, filter) in filters {
+            if filter.field.trim().is_empty() {
+                return Err(P2PError::InvalidInput(
+                    "replication filter field cannot be empty".into(),
+                ));
+            }
+            if filter.value.is_null() || filter.value.is_array() || filter.value.is_object() {
+                return Err(P2PError::InvalidInput(format!(
+                    "replication filter for collection '{key}' must use a scalar value"
+                )));
+            }
+
+            let collection_id = collection_cids
+                .iter()
+                .position(|collection_id| collection_id == &key)
+                .or_else(|| {
+                    effective_collections
+                        .iter()
+                        .position(|collection_name| collection_name == &key)
+                })
+                .and_then(|index| collection_cids.get(index))
+                .cloned()
+                .ok_or_else(|| {
+                    P2PError::InvalidInput(format!(
+                        "replication filter collection '{key}' was not requested"
+                    ))
+                })?;
+
+            resolved.insert(
+                collection_id,
+                p2p::ReplicationFilter::new(filter.field, filter.value),
+            );
+        }
+        Ok(resolved)
     }
 
     pub fn with_full_context(
@@ -236,6 +291,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
+        filters: ReplicationFilters,
         _explicit_replay_capabilities: Vec<defra_http::router::ExplicitReplayCapabilityInput>,
         _expected_authorizer_did: Option<&str>,
     ) -> P2PResult<()> {
@@ -273,11 +329,25 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         } else {
             collection_cids.clone_from(&effective_collections);
         }
+        let replication_filters =
+            Self::resolve_replication_filters(filters, &effective_collections, &collection_cids)?;
+        if !replication_filters.is_empty() {
+            self.doc_pusher
+                .as_ref()
+                .ok_or_else(|| {
+                    P2PError::Unsupported("no database context to validate filters".into())
+                })?
+                .validate_replication_filters(&replication_filters)
+                .map_err(P2PError::InvalidInput)?;
+        }
 
         // Check existing replicator state before creating/updating so we can
         // skip the expensive initial replay when the replicator already exists
         // with the same collections (idempotent reconnect path).
-        let existing_collection_ids: HashSet<String> = {
+        let (existing_collection_ids, existing_filters): (
+            HashSet<String>,
+            p2p::ReplicationFilters,
+        ) = {
             let result = if let Some(ref coordinator) = self.sync_coordinator {
                 coordinator
                     .get_replicator(&peer_id)
@@ -290,17 +360,22 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                     .map_err(|e| P2PError::Transport(e.to_string()))
             };
             match result {
-                Ok(Some(info)) => info.collections.into_iter().collect(),
-                Ok(None) => HashSet::new(),
+                Ok(Some(info)) => (info.collections.into_iter().collect(), info.filters),
+                Ok(None) => (HashSet::new(), p2p::ReplicationFilters::new()),
                 Err(e) => {
                     tracing::warn!(
                         peer_id = %peer_id,
                         error = %e,
                         "Failed to check existing replicator state; falling back to full replay"
                     );
-                    HashSet::new()
+                    (HashSet::new(), p2p::ReplicationFilters::new())
                 }
             }
+        };
+        let existing_collection_ids = if existing_filters == replication_filters {
+            existing_collection_ids
+        } else {
+            HashSet::new()
         };
 
         self.transport
@@ -315,22 +390,37 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         }
 
         if let Some(ref coordinator) = self.sync_coordinator {
+            let info = p2p::ReplicatorInfo::from_raw_with_filters(
+                peer_id.to_string(),
+                collection_cids.clone(),
+                vec![addr_str.to_string()],
+                replication_filters.clone(),
+            );
             coordinator
-                .create_replicator(&peer_id, collection_cids.clone(), true)
+                .create_replicator_info(&peer_id, info, true)
                 .await
                 .map_err(|e| P2PError::Transport(e.to_string()))?;
         } else {
+            let info = p2p::ReplicatorInfo::from_raw_with_filters(
+                peer_id.to_string(),
+                collection_cids.clone(),
+                vec![addr_str.to_string()],
+                replication_filters.clone(),
+            );
             self.transport
-                .create_replicator(&peer_id, collection_cids.clone())
+                .create_replicator_info(&peer_id, info)
                 .await
                 .map_err(|e| P2PError::Transport(e.to_string()))?;
         }
 
         if let Some(ref pusher) = self.doc_pusher {
-            if let Err(e) = pusher
-                .persist_replicator(&peer_id.to_string(), &collection_cids)
-                .await
-            {
+            let info = p2p::ReplicatorInfo::from_raw_with_filters(
+                peer_id.to_string(),
+                collection_cids.clone(),
+                vec![addr_str.to_string()],
+                replication_filters.clone(),
+            );
+            if let Err(e) = pusher.persist_replicator_info(&info).await {
                 tracing::warn!(peer_id = %peer_id, error = %e, "failed to persist replicator");
             }
         }
@@ -350,6 +440,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                 let push_pusher = Arc::clone(pusher);
                 let push_event_bus = self.event_bus.clone();
                 let push_peer = peer_id;
+                let push_filters = replication_filters.clone();
 
                 tracing::info!(
                     peer_id = %push_peer,
@@ -359,7 +450,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
 
                 tokio::spawn(async move {
                     if let Err(e) = push_pusher
-                        .push_existing_docs(&push_peer, &new_collection_names, None)
+                        .push_existing_docs(&push_peer, &new_collection_names, &push_filters, None)
                         .await
                     {
                         tracing::error!(error = %e, "Failed to push existing docs to replicator");

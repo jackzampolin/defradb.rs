@@ -18,6 +18,12 @@ use crate::txn::DbTxn;
 use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
 use defra_core::signing::get_signing_config;
 
+fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
+    Some(serde_json::Value::Object(
+        doc.to_map().ok()?.into_iter().collect(),
+    ))
+}
+
 /// Document mutator that uses a database transaction.
 ///
 /// This mutator holds a reference to an active transaction and uses the
@@ -137,6 +143,7 @@ impl<S: Store + 'static> DbDocMutator<S> {
         doc_id: String,
         doc_cid: Cid,
         doc_block: Vec<u8>,
+        document_json: Option<serde_json::Value>,
         collection_block: Option<(Cid, Vec<u8>)>,
     ) -> query::error::Result<()> {
         let mut txn_guard = self.txn.lock().await;
@@ -153,6 +160,7 @@ impl<S: Store + 'static> DbDocMutator<S> {
             doc_id,
             doc_cid,
             doc_block,
+            document_json,
             collection_block,
             creator_did,
         )
@@ -283,6 +291,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             doc_id.to_string(),
             doc_cid,
             doc_block,
+            document_json_value(&doc),
             col_block_data,
         )
         .await?;
@@ -399,6 +408,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 doc_id.to_string(),
                 doc_cid,
                 doc_block,
+                document_json_value(&doc),
                 col_block_data,
             )
             .await?;
@@ -422,6 +432,12 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
+        let pre_delete_document_json = collection
+            .get_with_datastore(&datastore, doc_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|doc| document_json_value(&doc));
 
         let existed = collection
             .delete_with_indexes(&datastore, doc_id, &index_manager)
@@ -498,6 +514,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             doc_id.to_string(),
             doc_cid,
             doc_block,
+            pre_delete_document_json,
             col_block_data,
         )
         .await?;
@@ -717,6 +734,11 @@ mod tests {
         assert_eq!(event.collection_name, "TestDoc");
         assert_ne!(event.doc_cid, cid::Cid::default(), "doc_cid populated");
         assert!(!event.doc_block.is_empty(), "doc_block populated");
+        assert_eq!(
+            event.document_json.as_ref().and_then(|json| json.get("x")),
+            Some(&serde_json::json!(1)),
+            "document_json populated for filtered transaction replication"
+        );
     }
 
     #[tokio::test]

@@ -8,7 +8,8 @@ use blockstore::Blockstore;
 use cid::Cid;
 
 use defra_http::router::{
-    ExplicitReplayCapabilityInput, P2PError, P2POperations, P2PResult, ReplicatorInfo,
+    ExplicitReplayCapabilityInput, P2PError, P2POperations, P2PResult, ReplicationFilters,
+    ReplicatorInfo,
 };
 use p2p::sync::Libp2pSyncCoordinator;
 use p2p::topics::DefraTopic;
@@ -37,6 +38,7 @@ pub trait DocPusher: Send + Sync {
         handle: &P2PHostHandle,
         peer_id: libp2p::PeerId,
         collections: &[String],
+        filters: &p2p::ReplicationFilters,
         se_key: Option<&[u8]>,
         se_identity_pubkey: Option<&[u8]>,
     ) -> Result<(), String>;
@@ -45,8 +47,20 @@ pub trait DocPusher: Send + Sync {
 
     fn list_collections(&self) -> Result<Vec<String>, String>;
 
+    fn validate_replication_filters(
+        &self,
+        _filters: &p2p::ReplicationFilters,
+    ) -> Result<(), String> {
+        Err("no database context to validate replication filters".to_string())
+    }
+
     async fn persist_replicator(&self, peer_id: &str, collections: &[String])
         -> Result<(), String>;
+
+    async fn persist_replicator_info(&self, info: &p2p::ReplicatorInfo) -> Result<(), String> {
+        self.persist_replicator(info.peer_id_str(), &info.collections)
+            .await
+    }
 
     async fn delete_persisted_replicator(&self, peer_id: &str) -> Result<(), String>;
 
@@ -130,7 +144,62 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             address,
             status,
             last_status_change,
+            filters: info
+                .filters
+                .into_iter()
+                .map(|(collection, filter)| {
+                    (
+                        collection,
+                        defra_http::router::ReplicationFilter {
+                            field: filter.field,
+                            value: filter.value,
+                        },
+                    )
+                })
+                .collect(),
         }
+    }
+
+    fn resolve_replication_filters(
+        filters: ReplicationFilters,
+        effective_collections: &[String],
+        collection_cids: &[String],
+    ) -> P2PResult<p2p::ReplicationFilters> {
+        let mut resolved = p2p::ReplicationFilters::new();
+        for (key, filter) in filters {
+            if filter.field.trim().is_empty() {
+                return Err(P2PError::InvalidInput(
+                    "replication filter field cannot be empty".into(),
+                ));
+            }
+            if filter.value.is_null() || filter.value.is_array() || filter.value.is_object() {
+                return Err(P2PError::InvalidInput(format!(
+                    "replication filter for collection '{key}' must use a scalar value"
+                )));
+            }
+
+            let collection_id = collection_cids
+                .iter()
+                .position(|collection_id| collection_id == &key)
+                .or_else(|| {
+                    effective_collections
+                        .iter()
+                        .position(|collection_name| collection_name == &key)
+                })
+                .and_then(|index| collection_cids.get(index))
+                .cloned()
+                .ok_or_else(|| {
+                    P2PError::InvalidInput(format!(
+                        "replication filter collection '{key}' was not requested"
+                    ))
+                })?;
+
+            resolved.insert(
+                collection_id,
+                p2p::ReplicationFilter::new(filter.field, filter.value),
+            );
+        }
+        Ok(resolved)
     }
 
     /// Pre-populate tracked documents from persisted state without re-subscribing.
@@ -263,6 +332,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
+        filters: ReplicationFilters,
         explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
         expected_authorizer_did: Option<&str>,
     ) -> P2PResult<()> {
@@ -301,6 +371,17 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             }
         } else {
             collection_cids.clone_from(&effective_collections);
+        }
+        let replication_filters =
+            Self::resolve_replication_filters(filters, &effective_collections, &collection_cids)?;
+        if !replication_filters.is_empty() {
+            self.doc_pusher
+                .as_ref()
+                .ok_or_else(|| {
+                    P2PError::Unsupported("no database context to validate filters".into())
+                })?
+                .validate_replication_filters(&replication_filters)
+                .map_err(P2PError::InvalidInput)?;
         }
 
         let peer_id = parsed.peer_id;
@@ -377,7 +458,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         // Check existing replicator state before creating/updating so we can
         // skip the expensive initial replay when the replicator already exists
         // with the same collections and replay capability.
-        let existing_collection_ids: HashSet<String> = {
+        let (existing_collection_ids, existing_filters): (
+            HashSet<String>,
+            p2p::ReplicationFilters,
+        ) = {
             let result = if let Some(ref coordinator) = self.sync_coordinator {
                 let transport_pid = p2p::transport::PeerId::from(peer_id);
                 coordinator
@@ -391,17 +475,22 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                     .map_err(|e| P2PError::Transport(e.to_string()))
             };
             match result {
-                Ok(Some(info)) => info.collections.into_iter().collect(),
-                Ok(None) => HashSet::new(),
+                Ok(Some(info)) => (info.collections.into_iter().collect(), info.filters),
+                Ok(None) => (HashSet::new(), p2p::ReplicationFilters::new()),
                 Err(e) => {
                     tracing::warn!(
                         peer_id = %peer_id,
                         error = %e,
                         "Failed to check existing replicator state; falling back to full replay"
                     );
-                    HashSet::new()
+                    (HashSet::new(), p2p::ReplicationFilters::new())
                 }
             }
+        };
+        let existing_collection_ids = if existing_filters == replication_filters {
+            existing_collection_ids
+        } else {
+            HashSet::new()
         };
 
         // Dial peer
@@ -420,23 +509,38 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         // Register replicator (coordinator handles topic auto-subscribe)
         if let Some(ref coordinator) = self.sync_coordinator {
             let transport_pid = p2p::transport::PeerId::from(peer_id);
+            let info = p2p::ReplicatorInfo::from_raw_with_filters(
+                peer_id.to_string(),
+                collection_cids.clone(),
+                vec![addr_str.to_string()],
+                replication_filters.clone(),
+            );
             coordinator
-                .create_replicator(&transport_pid, collection_cids.clone(), true)
+                .create_replicator_info(&transport_pid, info.clone(), true)
                 .await
                 .map_err(|e| P2PError::Transport(e.to_string()))?;
         } else {
+            let info = p2p::ReplicatorInfo::from_raw_with_filters(
+                peer_id.to_string(),
+                collection_cids.clone(),
+                vec![addr_str.to_string()],
+                replication_filters.clone(),
+            );
             self.handle
-                .create_replicator(peer_id, collection_cids.clone())
+                .create_replicator_info(peer_id, info.clone())
                 .await
                 .map_err(|e| P2PError::Transport(e.to_string()))?;
         }
 
         // Persist to peerstore (best-effort, log warning on failure)
         if let Some(ref pusher) = self.doc_pusher {
-            if let Err(e) = pusher
-                .persist_replicator(&peer_id.to_string(), &collection_cids)
-                .await
-            {
+            let info = p2p::ReplicatorInfo::from_raw_with_filters(
+                peer_id.to_string(),
+                collection_cids.clone(),
+                vec![addr_str.to_string()],
+                replication_filters.clone(),
+            );
+            if let Err(e) = pusher.persist_replicator_info(&info).await {
                 tracing::warn!(peer_id = %peer_id, error = %e, "failed to persist replicator");
             }
         }
@@ -457,6 +561,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 let push_handle = self.handle.clone();
                 let push_pusher = Arc::clone(pusher);
                 let push_event_bus = self.event_bus.clone();
+                let push_filters = replication_filters.clone();
 
                 tracing::info!(
                     peer_id = %peer_id,
@@ -470,6 +575,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                             &push_handle,
                             peer_id,
                             &collection_names_requiring_replay,
+                            &push_filters,
                             None,
                             None,
                         )

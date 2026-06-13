@@ -424,11 +424,21 @@ impl P2PHostHandle {
     /// Adds the peer as a replicator for the specified collections.
     /// If the peer is already a replicator, updates their collections.
     pub async fn create_replicator(&self, peer_id: PeerId, collections: Vec<String>) -> Result<()> {
+        let info = ReplicatorInfo::from_raw(peer_id.to_string(), collections, Vec::new());
+        self.create_replicator_info(peer_id, info).await
+    }
+
+    /// Set (add/update) a replicator using the full persisted metadata record.
+    pub async fn create_replicator_info(
+        &self,
+        peer_id: PeerId,
+        info: ReplicatorInfo,
+    ) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .send(HostCommand::CreateReplicator {
                 peer_id,
-                collections,
+                info,
                 response: response_tx,
             })
             .await

@@ -107,6 +107,15 @@ async fn check_access<S: Store>(
                 return false;
             };
             let peer_str = peer_id.to_string();
+            if registry.is_filtered_replicator(collection_id, &peer_str) {
+                debug!(
+                    cid = %cid,
+                    peer = %peer_id,
+                    collection = %collection_id,
+                    "bitswap request denied: filtered replicator data-block access uses direct push"
+                );
+                return false;
+            }
             if registry.is_replicator(collection_id, &peer_str) {
                 return true;
             }
@@ -138,6 +147,7 @@ async fn check_access<S: Store>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::replicator::{ReplicationFilter, ReplicationFilters, ReplicatorInfo};
     use async_trait::async_trait;
     use iroh_bitswap::{Block, Store};
     use std::collections::HashMap;
@@ -237,6 +247,33 @@ mod tests {
 
         let allowed = check_access(AccessMode::Controlled, &registry, &store, &peer, &cid).await;
         assert!(allowed, "registered replicator must be served");
+    }
+
+    #[tokio::test]
+    async fn controlled_mode_denies_filtered_replicator_data_block_requests() {
+        let registry = Arc::new(ReplicatorRegistry::new());
+        let store = InMemoryStore::default();
+        let (cid, bytes) = make_data_block("users");
+        store.put(cid, bytes);
+
+        let peer = PeerId::random();
+        let mut filters = ReplicationFilters::new();
+        filters.insert(
+            "users".to_string(),
+            ReplicationFilter::new("agent_did", serde_json::json!("did:key:z6M")),
+        );
+        registry.set_replicator_info(ReplicatorInfo::from_raw_with_filters(
+            peer.to_string(),
+            vec!["users".to_string()],
+            vec![],
+            filters,
+        ));
+
+        let allowed = check_access(AccessMode::Controlled, &registry, &store, &peer, &cid).await;
+        assert!(
+            !allowed,
+            "filtered replicators receive matching full DAGs by direct push, not collection-wide Bitswap"
+        );
     }
 
     #[tokio::test]

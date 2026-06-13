@@ -78,6 +78,7 @@ impl<S: Store + 'static> BatchMutator<S> {
             doc_id,
             doc_cid,
             doc_block,
+            None,
             collection_block,
             None,
         )

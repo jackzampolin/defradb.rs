@@ -73,6 +73,22 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
+        if let Some(old_doc) = old_doc.as_ref() {
+            for field in collection
+                .schema()
+                .fields
+                .iter()
+                .filter(|field| field.immutable)
+            {
+                if old_doc.get(&field.name) != doc.get(&field.name) {
+                    return Err(MergeError::MergeFailed(format!(
+                        "immutable field '{}' cannot be changed",
+                        field.name
+                    )));
+                }
+            }
+        }
+
         collection
             .save_with_datastore(datastore, &doc)
             .await

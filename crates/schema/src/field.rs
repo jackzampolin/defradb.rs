@@ -8,6 +8,10 @@ fn default_ctype_none() -> CType {
     CType::None
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Describes a field within a collection schema.
 ///
 /// This matches Go's CollectionFieldDescription struct.
@@ -52,6 +56,10 @@ pub struct FieldDescription {
     /// Go uses int with 0 meaning no constraint.
     #[serde(rename = "Size", default)]
     pub size: usize,
+
+    /// Whether the field is write-once after document creation.
+    #[serde(rename = "Immutable", default, skip_serializing_if = "is_false")]
+    pub immutable: bool,
 }
 
 impl FieldDescription {
@@ -66,6 +74,7 @@ impl FieldDescription {
             is_primary: false,
             default_value: None,
             size: 0, // 0 means no constraint (matches Go)
+            immutable: false,
         }
     }
 
@@ -99,6 +108,12 @@ impl FieldDescription {
         self
     }
 
+    /// Mark the field as immutable after document creation.
+    pub fn as_immutable(mut self) -> Self {
+        self.immutable = true;
+        self
+    }
+
     /// Returns true if this is a secondary (non-primary) relation field.
     ///
     /// Secondary relation fields are local-only and do not get saved in the blockstore.
@@ -120,6 +135,21 @@ impl FieldDescription {
                 crdt_type: self.crdt_type.to_string().to_lowercase(),
                 field_kind: self.kind.graphql_type_name().to_string(),
             });
+        }
+
+        if self.immutable {
+            if self.crdt_type != CType::LwwRegister {
+                return Err(SchemaError::InvalidImmutableField {
+                    field_name: self.name.clone(),
+                    reason: "only LWW register fields can be immutable".to_string(),
+                });
+            }
+            if !self.kind.is_scalar() {
+                return Err(SchemaError::InvalidImmutableField {
+                    field_name: self.name.clone(),
+                    reason: "only scalar fields can be immutable".to_string(),
+                });
+            }
         }
 
         // Float counter merge is not order-independent: IEEE-754 addition is not
@@ -230,6 +260,55 @@ mod tests {
         let json = serde_json::to_string(&field).unwrap();
         let parsed: FieldDescription = serde_json::from_str(&json).unwrap();
         assert_eq!(field, parsed);
+    }
+
+    #[test]
+    fn test_immutable_scalar_lww_field_validates_and_serializes() {
+        let field = FieldDescription::new("1", "agent_did", FieldKind::string()).as_immutable();
+
+        field.validate().unwrap();
+        let json = serde_json::to_string(&field).unwrap();
+        assert!(
+            json.contains(r#""Immutable":true"#),
+            "immutable fields must persist the Rust extension metadata"
+        );
+        let parsed: FieldDescription = serde_json::from_str(&json).unwrap();
+        assert!(parsed.immutable);
+    }
+
+    #[test]
+    fn test_non_immutable_field_omits_rust_extension() {
+        let field = FieldDescription::new("1", "agent_did", FieldKind::string());
+
+        let json = serde_json::to_string(&field).unwrap();
+        assert!(
+            !json.contains("Immutable"),
+            "false immutable metadata must be omitted for Go-compatible schema JSON"
+        );
+    }
+
+    #[test]
+    fn test_immutable_counter_field_fails_validation() {
+        let field = FieldDescription::new("1", "score", FieldKind::int())
+            .with_crdt_type(CType::PnCounter)
+            .as_immutable();
+
+        let result = field.validate();
+        assert!(matches!(
+            result,
+            Err(SchemaError::InvalidImmutableField { .. })
+        ));
+    }
+
+    #[test]
+    fn test_immutable_array_field_fails_validation() {
+        let field = FieldDescription::new("1", "tags", FieldKind::string_array()).as_immutable();
+
+        let result = field.validate();
+        assert!(matches!(
+            result,
+            Err(SchemaError::InvalidImmutableField { .. })
+        ));
     }
 
     #[test]

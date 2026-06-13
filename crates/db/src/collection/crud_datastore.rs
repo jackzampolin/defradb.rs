@@ -185,10 +185,16 @@ impl Collection {
 
         let key = self.doc_key(doc_id);
 
-        // Check document exists
-        if !datastore.has(&key).await.map_err(Error::Storage)? {
-            return Err(Error::DocumentNotFound(doc_id.to_string()));
-        }
+        let old_doc = match datastore.get(&key).await.map_err(Error::Storage)? {
+            Some(bytes) => {
+                let mut d = Document::from_cbor(&bytes)?;
+                d.set_id(doc_id.clone());
+                d
+            }
+            None => return Err(Error::DocumentNotFound(doc_id.to_string())),
+        };
+
+        self.validate_immutable_fields_unchanged(&old_doc, doc)?;
 
         // Serialize and store
         let data = doc.to_cbor()?;

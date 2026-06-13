@@ -99,6 +99,7 @@ async fn authorize_and_apply(
                 ops.add_replicator(
                     collection_ids.clone(),
                     addresses.first().map(|s| s.as_str()),
+                    Default::default(),
                     vec![],
                     Some(did_str.as_str()),
                 )
@@ -216,6 +217,16 @@ fn to_p2p_replicator_info(info: defra_http::router::ReplicatorInfo) -> p2p::Repl
         info.collections,
         info.address.into_iter().collect(),
     );
+    out.filters = info
+        .filters
+        .into_iter()
+        .map(|(collection, filter)| {
+            (
+                collection,
+                p2p::ReplicationFilter::new(filter.field, filter.value),
+            )
+        })
+        .collect();
     out.status = info
         .status
         .map(|s| p2p::ReplicatorStatus::try_from(s).unwrap_or_default())
@@ -288,6 +299,7 @@ mod tests {
             &self,
             collections: Vec<String>,
             addr: Option<&str>,
+            _filters: defra_http::router::ReplicationFilters,
             _explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
             _expected_authorizer_did: Option<&str>,
         ) -> P2PResult<()> {
@@ -420,6 +432,7 @@ mod tests {
             address: Some("/ip4/1.2.3.4/tcp/9000".into()),
             status: Some(1),
             last_status_change: Some("2024-03-14T15:09:26.535Z".into()),
+            filters: Default::default(),
         };
         let out = to_p2p_replicator_info(http);
         assert_eq!(

@@ -3,6 +3,7 @@
 use chrono::{TimeZone, Utc};
 use p2p::replicator::{ReplicatorError, ReplicatorInfo, ReplicatorStatus};
 use p2p::{Multiaddr, PeerId};
+use p2p::{ReplicationFilter, ReplicationFilters};
 
 // ---------------------------------------------------------------------------
 // Go-produced fixtures (generated via `encoding/json` on the real
@@ -91,6 +92,53 @@ fn encodes_byte_exact_to_go_zero_time() {
 
     let bytes = info.to_bytes().unwrap();
     assert_eq!(std::str::from_utf8(&bytes).unwrap(), GO_ZERO_STATUS_CHANGE);
+}
+
+#[test]
+fn unfiltered_rust_extension_does_not_change_go_bytes() {
+    let info = ReplicatorInfo::from_raw(
+        GO_FIXTURE_PEER_ID.to_string(),
+        vec!["users".to_string()],
+        vec![],
+    );
+
+    let json = std::str::from_utf8(&info.to_bytes().unwrap())
+        .unwrap()
+        .to_string();
+    assert_eq!(json, GO_ZERO_STATUS_CHANGE);
+    assert!(
+        !json.contains("Filters"),
+        "empty Rust-only filter metadata must not drift from Go peerstore JSON"
+    );
+}
+
+#[test]
+fn filtered_replicator_round_trips_rust_extension() {
+    let mut filters = ReplicationFilters::new();
+    filters.insert(
+        "users".to_string(),
+        ReplicationFilter::new("agent_did", serde_json::json!("did:key:z6M")),
+    );
+    let info = ReplicatorInfo::from_raw_with_filters(
+        GO_FIXTURE_PEER_ID.to_string(),
+        vec!["users".to_string()],
+        vec![],
+        filters,
+    );
+
+    let bytes = info.to_bytes().unwrap();
+    assert_eq!(
+        std::str::from_utf8(&bytes).unwrap(),
+        r#"{"ID":"12D3KooWGjMkcMy5PM9iSbgWWgUnH5dQhvzhNu7w3Gk4kHZBsxnJ","Addresses":[],"CollectionIDs":["users"],"Status":0,"LastStatusChange":"0001-01-01T00:00:00Z","Filters":{"users":{"Field":"agent_did","Value":"did:key:z6M"}}}"#
+    );
+
+    let restored = ReplicatorInfo::from_bytes(&bytes).unwrap();
+    assert_eq!(restored, info);
+    assert!(restored.matches_filter(
+        "users",
+        &serde_json::json!({"agent_did": "did:key:z6M", "body": "selected"})
+    ));
+    assert!(!restored.matches_filter("users", &serde_json::json!({"agent_did": "did:key:other"})));
 }
 
 // ---------------------------------------------------------------------------

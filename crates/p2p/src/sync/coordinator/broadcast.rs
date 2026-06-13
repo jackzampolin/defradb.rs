@@ -6,6 +6,7 @@ use std::time::Duration;
 use blockstore::Blockstore;
 use bytes::Bytes;
 use cid::Cid;
+use serde_json::Value as JsonValue;
 
 use super::SyncCoordinator;
 use crate::error::{is_rate_limited_message, Result};
@@ -77,6 +78,22 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 doc_id,
                 collection_id,
             });
+        }
+    }
+
+    fn replicator_in_collection(
+        rep: &crate::replicator::ReplicatorInfo,
+        collection_id: &str,
+    ) -> bool {
+        rep.collections.is_empty() || rep.collections.iter().any(|id| id == collection_id)
+    }
+
+    fn peer_id_for_replicator(rep: &crate::replicator::ReplicatorInfo) -> Option<PeerId> {
+        let peer_id_str = rep.peer_id_str();
+        if peer_id_str.is_empty() {
+            None
+        } else {
+            Some(PeerId::new(peer_id_str.to_string()))
         }
     }
 
@@ -155,16 +172,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         );
 
         for rep in &replicators {
-            if !rep.collections.is_empty() && !rep.collections.contains(&collection_id.to_string())
-            {
+            if !Self::replicator_in_collection(rep, collection_id) {
+                continue;
+            }
+            if rep.is_filtered_for_collection(collection_id) {
                 continue;
             }
 
-            let peer_id_str = rep.peer_id_str().to_string();
-            if peer_id_str.is_empty() {
+            let Some(peer_id) = Self::peer_id_for_replicator(rep) else {
                 continue;
-            }
-            let peer_id = PeerId::new(peer_id_str);
+            };
 
             let mut requests: Vec<(Cid, PushLogRequest)> = Vec::new();
 
@@ -239,16 +256,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         };
 
         for rep in &replicators {
-            if !rep.collections.is_empty() && !rep.collections.contains(&collection_id.to_string())
-            {
+            if !Self::replicator_in_collection(rep, collection_id) {
+                continue;
+            }
+            if rep.is_filtered_for_collection(collection_id) {
                 continue;
             }
 
-            let peer_id_str = rep.peer_id_str().to_string();
-            if peer_id_str.is_empty() {
+            let Some(peer_id) = Self::peer_id_for_replicator(rep) else {
                 continue;
-            }
-            let peer_id = PeerId::new(peer_id_str);
+            };
 
             let mut request = PushLogRequest::new(
                 doc_id.to_string(),
@@ -294,6 +311,117 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
     }
 
+    /// Push a committed document update to replicators using document JSON to
+    /// evaluate filtered peers. Filtered peers receive the full document DAG so
+    /// merge completeness does not depend on generic Bitswap access.
+    pub async fn push_document_to_replicators_with_creator(
+        &self,
+        cid: &Cid,
+        block: &[u8],
+        doc_id: &str,
+        collection_id: &str,
+        document: &JsonValue,
+        creator_override: Option<&str>,
+    ) {
+        let creator = creator_override.unwrap_or(&self.access.local_peer_id);
+        let Some(replicators) = self.list_replicators_for_push().await else {
+            return;
+        };
+
+        if replicators.is_empty() {
+            return;
+        }
+
+        let mut dag_blocks: Option<Vec<(Cid, Bytes)>> = None;
+        for rep in &replicators {
+            if !Self::replicator_in_collection(rep, collection_id) {
+                continue;
+            }
+
+            let Some(peer_id) = Self::peer_id_for_replicator(rep) else {
+                continue;
+            };
+
+            let use_full_dag = if rep.is_filtered_for_collection(collection_id) {
+                if !rep.matches_filter(collection_id, document) {
+                    continue;
+                }
+                true
+            } else {
+                false
+            };
+
+            let requests: Vec<(Cid, PushLogRequest)> = if use_full_dag {
+                if dag_blocks.is_none() {
+                    dag_blocks = Some(
+                        self.load_dag_blocks(*cid, Bytes::copy_from_slice(block))
+                            .await,
+                    );
+                }
+                let dag_blocks = dag_blocks.as_ref().expect("dag blocks loaded");
+                let mut requests = Vec::new();
+                for (block_cid, block_data) in dag_blocks.iter() {
+                    let mut req = PushLogRequest::new(
+                        doc_id.to_string(),
+                        Bytes::from(block_cid.to_bytes()),
+                        collection_id.to_string(),
+                        creator.to_string(),
+                        block_data.clone(),
+                    );
+                    if sign_with_transport(&self.runtime.transport, &mut req).is_ok() {
+                        requests.push((*block_cid, req));
+                    }
+                }
+                requests
+            } else {
+                let mut request = PushLogRequest::new(
+                    doc_id.to_string(),
+                    Bytes::from(cid.to_bytes()),
+                    collection_id.to_string(),
+                    creator.to_string(),
+                    Bytes::copy_from_slice(block),
+                );
+                if let Err(e) = sign_with_transport(&self.runtime.transport, &mut request) {
+                    tracing::debug!(error = %e, "Failed to sign PushLog request");
+                    continue;
+                }
+                vec![(*cid, request)]
+            };
+
+            if requests.is_empty() {
+                continue;
+            }
+
+            let transport = self.runtime.transport.clone();
+            let failure_tx = self.runtime.failure_tx.clone();
+            let doc_id_owned = doc_id.to_string();
+            let collection_id_owned = collection_id.to_string();
+            let semaphore = self.runtime.push_semaphore.clone();
+            let peer_id_clone = peer_id.clone();
+            let send_timeout = self.runtime.push_send_timeout;
+            self.spawn_background_task("push_document_to_replicators", async move {
+                let Ok(_permit) = semaphore.acquire().await else {
+                    return;
+                };
+                let any_failed = Self::send_ordered_pushlogs_via_transport(
+                    &transport,
+                    &peer_id_clone,
+                    requests,
+                    send_timeout,
+                )
+                .await;
+                if any_failed {
+                    Self::report_push_failure(
+                        &failure_tx,
+                        &peer_id_clone,
+                        doc_id_owned,
+                        collection_id_owned,
+                    );
+                }
+            });
+        }
+    }
+
     /// Push searchable-encryption artifacts for a committed document to
     /// replicators of the collection. This mirrors Go's SE coordinator, which
     /// listens to committed update events independently of document access.
@@ -312,6 +440,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
         for rep in replicators {
             if !rep.collections.iter().any(|id| id == collection_id) {
+                continue;
+            }
+            if rep.is_filtered_for_collection(collection_id) {
                 continue;
             }
 
@@ -334,6 +465,61 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 // reconnects. Mirrors Go's independent `seRetryInfo`; the doc
                 // block push failure is racy and may not fire when the SE push
                 // does, so SE pushes must record their own retries.
+                for doc_id in artifacts
+                    .iter()
+                    .map(|artifact| artifact.doc_id.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                {
+                    Self::report_push_failure(
+                        &self.runtime.failure_tx,
+                        &peer_id,
+                        doc_id,
+                        collection_id.to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Push SE artifacts with document-filter evaluation for filtered peers.
+    pub async fn push_se_artifacts_to_replicators_for_document(
+        &self,
+        collection_id: &str,
+        artifacts: Vec<SEArtifact>,
+        document: &JsonValue,
+    ) {
+        if artifacts.is_empty() {
+            return;
+        }
+
+        let Some(replicators) = self.list_replicators_for_push().await else {
+            return;
+        };
+
+        for rep in replicators {
+            if !rep.collections.iter().any(|id| id == collection_id) {
+                continue;
+            }
+            if !rep.matches_filter(collection_id, document) {
+                continue;
+            }
+
+            let Some(peer_id) = Self::peer_id_for_replicator(&rep) else {
+                continue;
+            };
+            let request = PushSEArtifactsRequest::new(collection_id.to_string(), artifacts.clone());
+            if let Err(error) = self
+                .runtime
+                .transport
+                .send_se_artifacts(&peer_id, request)
+                .await
+            {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    collection_id,
+                    error = %error,
+                    "Failed to push SE artifacts to replicator"
+                );
                 for doc_id in artifacts
                     .iter()
                     .map(|artifact| artifact.doc_id.clone())

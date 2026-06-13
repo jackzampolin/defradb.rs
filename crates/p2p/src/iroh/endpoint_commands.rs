@@ -632,10 +632,11 @@ pub(super) async fn handle_command(
         }
         IrohCommand::CreateReplicator {
             peer_id,
-            collections,
+            mut info,
             reply,
         } => {
-            replicators.set_peer_collections(peer_id.as_str(), &collections);
+            info.id = peer_id.to_string();
+            replicators.set_replicator_info(info);
             let _ = reply.send(Ok(()));
         }
         IrohCommand::DeleteReplicator { peer_id, reply } => {

@@ -61,6 +61,7 @@ impl MockP2POperations {
             address,
             status: Some(0),
             last_status_change: Some("0001-01-01T00:00:00Z".to_string()),
+            filters: Default::default(),
         });
         self
     }
@@ -113,6 +114,7 @@ impl P2POperations for MockP2POperations {
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
+        filters: crate::router::ReplicationFilters,
         _explicit_replay_capabilities: Vec<crate::router::ExplicitReplayCapabilityInput>,
         _expected_authorizer_did: Option<&str>,
     ) -> P2PResult<()> {
@@ -122,6 +124,7 @@ impl P2POperations for MockP2POperations {
             address: addr.map(|s| s.to_string()),
             status: Some(0),
             last_status_change: Some("0001-01-01T00:00:00Z".to_string()),
+            filters,
         });
         Ok(())
     }
@@ -230,6 +233,7 @@ impl P2POperations for FailingMockP2POperations {
         &self,
         _collections: Vec<String>,
         _addr: Option<&str>,
+        _filters: crate::router::ReplicationFilters,
         _explicit_replay_capabilities: Vec<crate::router::ExplicitReplayCapabilityInput>,
         _expected_authorizer_did: Option<&str>,
     ) -> P2PResult<()> {

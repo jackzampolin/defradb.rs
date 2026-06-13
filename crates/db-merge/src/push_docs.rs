@@ -16,6 +16,32 @@ pub struct PushExistingDocsSeOptions<'a> {
     pub identity_pubkey: Option<&'a [u8]>,
 }
 
+async fn document_matches_filter<R: Reader + ?Sized>(
+    datastore: &R,
+    collection_id: &str,
+    doc_id: &str,
+    filter: &p2p::ReplicationFilter,
+) -> Result<bool, String> {
+    let doc_key = format!("/d/{}/{}", collection_id, doc_id).into_bytes();
+    let Some(doc_data) = datastore
+        .get(&doc_key)
+        .await
+        .map_err(|e| format!("failed to read document for replication filter: {}", e))?
+    else {
+        return Ok(false);
+    };
+
+    let doc = document::Document::from_cbor(&doc_data)
+        .map_err(|e| format!("failed to decode document for replication filter: {}", e))?;
+    let document_json = serde_json::Value::Object(
+        doc.to_map()
+            .map_err(|e| format!("failed to encode document for replication filter: {}", e))?
+            .into_iter()
+            .collect(),
+    );
+    Ok(filter.matches_json_object(&document_json))
+}
+
 /// Push existing documents to a replicator peer.
 ///
 /// Matches Go's `pushHeadsForAllDocs`: for each collection, iterate all docs,
@@ -29,6 +55,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
     document_acp: Option<&dyn DocumentACP>,
     peer_id: libp2p::PeerId,
     collections: &[String],
+    filters: &p2p::ReplicationFilters,
     se_encryption_key: Option<&[u8]>,
     se_identity_pubkey: Option<&[u8]>,
 ) -> Result<(), String> {
@@ -38,6 +65,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
         document_acp,
         peer_id,
         collections,
+        filters,
         PushExistingDocsSeOptions {
             encryption_key: se_encryption_key,
             identity_pubkey: se_identity_pubkey,
@@ -54,6 +82,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
     document_acp: Option<&dyn DocumentACP>,
     peer_id: libp2p::PeerId,
     collections: &[String],
+    filters: &p2p::ReplicationFilters,
     se_options: PushExistingDocsSeOptions<'_>,
     replay_config: ReplayPushConfig,
 ) -> Result<(), String> {
@@ -147,6 +176,14 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
         // processes the composite block, otherwise it tries Bitswap which
         // doesn't work reliably cross-platform.
         for doc_id in &doc_ids {
+            if let Some(filter) = filters.get(collection.collection_id()) {
+                if !document_matches_filter(&datastore, collection.collection_id(), doc_id, filter)
+                    .await?
+                {
+                    continue;
+                }
+            }
+
             let creator = match resolve_push_creator(
                 document_acp,
                 &collection,
@@ -331,6 +368,19 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
             // For each document, load field values and generate artifacts.
             let mut all_artifacts = Vec::new();
             for doc_id in &se_doc_ids {
+                if let Some(filter) = filters.get(collection.collection_id()) {
+                    if !document_matches_filter(
+                        &datastore,
+                        collection.collection_id(),
+                        doc_id,
+                        filter,
+                    )
+                    .await?
+                    {
+                        continue;
+                    }
+                }
+
                 // Read document CBOR from datastore: /d/{collection_id}/{doc_id}
                 let doc_key = format!("/d/{}/{}", collection.collection_id(), doc_id).into_bytes();
                 let doc_data = match datastore.get(&doc_key).await {
@@ -410,6 +460,7 @@ pub async fn retry_doc<S: Store + 'static>(
     peer_id: libp2p::PeerId,
     doc_id: &str,
     collection_id: &str,
+    filters: &p2p::ReplicationFilters,
 ) -> Result<(), String> {
     let local_peer_id = handle
         .local_peer_id()
@@ -420,6 +471,18 @@ pub async fn retry_doc<S: Store + 'static>(
         .find_collection_by_id(collection_id)
         .map_err(|e| format!("failed to get collection: {}", e))?
         .ok_or_else(|| format!("collection '{}' not found", collection_id))?;
+    if let Some(filter) = filters.get(collection_id) {
+        let txn = db
+            .new_txn(true)
+            .await
+            .map_err(|e| format!("failed to create filter transaction: {}", e))?;
+        let datastore = txn
+            .datastore()
+            .map_err(|e| format!("failed to get datastore: {}", e))?;
+        if !document_matches_filter(&datastore, collection_id, doc_id, filter).await? {
+            return Ok(());
+        }
+    }
     let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id_str)
         .await
         .map_err(|e| e.to_string())?;

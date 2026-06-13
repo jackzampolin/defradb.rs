@@ -246,8 +246,10 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> SeArtifactRep
         if artifacts.is_empty() {
             return;
         }
+        let document_json =
+            serde_json::Value::Object(document.to_map().unwrap_or_default().into_iter().collect());
         self.sync
-            .push_se_artifacts_to_replicators(collection_id, artifacts)
+            .push_se_artifacts_to_replicators_for_document(collection_id, artifacts, &document_json)
             .await;
     }
 }
@@ -353,6 +355,14 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             &result.document,
             &[],
         );
+        let document_json = serde_json::Value::Object(
+            result
+                .document
+                .to_map()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+        );
 
         // Capture everything for the spawned task by value.
         let sync = self.sync.clone();
@@ -367,16 +377,21 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
             // Match Go DefraDB's live replicator model: push the new head block
             // and let the receiver resolve any missing links via DAG sync.
-            sync.push_to_replicators_with_creator(
+            sync.push_document_to_replicators_with_creator(
                 &block_result.cid,
                 &block_result.block,
                 &block_result.doc_id,
                 &collection_id,
+                &document_json,
                 creator_ref,
             )
             .await;
-            sync.push_se_artifacts_to_replicators(&collection_id, se_artifacts)
-                .await;
+            sync.push_se_artifacts_to_replicators_for_document(
+                &collection_id,
+                se_artifacts,
+                &document_json,
+            )
+            .await;
 
             // Broadcast composite via GossipSub with retry for InsufficientPeers
             log_broadcast_failure(
@@ -444,8 +459,12 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         // Build block results and collect broadcast work items.
         // Block building failures return Failed status immediately (not spawned).
         let mut broadcast_results = Vec::with_capacity(results.len());
-        let mut broadcast_work: Vec<(BlockResult, Option<BlockResult>, Vec<SEArtifact>)> =
-            Vec::with_capacity(results.len());
+        let mut broadcast_work: Vec<(
+            BlockResult,
+            Option<BlockResult>,
+            Vec<SEArtifact>,
+            serde_json::Value,
+        )> = Vec::with_capacity(results.len());
 
         for result in results {
             let (cid, block, doc_id_str) = if let (Some(cid), Some(block)) =
@@ -511,6 +530,14 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 &result.document,
                 &[],
             );
+            let document_json = serde_json::Value::Object(
+                result
+                    .document
+                    .to_map()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+            );
 
             broadcast_results.push(CreateResult::with_commit_and_broadcast(
                 result.doc_id,
@@ -520,7 +547,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 BroadcastStatus::Pending,
             ));
 
-            broadcast_work.push((block_result, branchable_data, se_artifacts));
+            broadcast_work.push((block_result, branchable_data, se_artifacts, document_json));
         }
 
         // Spawn a single detached task that processes all broadcast work items.
@@ -531,17 +558,23 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             tokio::spawn(async move {
                 let creator_ref = creator_did.as_deref();
 
-                for (block_result, branchable_data, se_artifacts) in &broadcast_work {
-                    sync.push_to_replicators_with_creator(
+                for (block_result, branchable_data, se_artifacts, document_json) in &broadcast_work
+                {
+                    sync.push_document_to_replicators_with_creator(
                         &block_result.cid,
                         &block_result.block,
                         &block_result.doc_id,
                         &collection_id,
+                        document_json,
                         creator_ref,
                     )
                     .await;
-                    sync.push_se_artifacts_to_replicators(&collection_id, se_artifacts.clone())
-                        .await;
+                    sync.push_se_artifacts_to_replicators_for_document(
+                        &collection_id,
+                        se_artifacts.clone(),
+                        document_json,
+                    )
+                    .await;
 
                     log_broadcast_failure(
                         &broadcast_with_retry_with_creator(
@@ -661,6 +694,14 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             &result.document,
             &se_fields,
         );
+        let document_json = serde_json::Value::Object(
+            result
+                .document
+                .to_map()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+        );
 
         // Capture everything for the spawned task by value.
         let sync = self.sync.clone();
@@ -673,16 +714,21 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
             // Match Go DefraDB's live replicator model: push the new head block
             // and let the receiver resolve any missing links via DAG sync.
-            sync.push_to_replicators_with_creator(
+            sync.push_document_to_replicators_with_creator(
                 &block_result.cid,
                 &block_result.block,
                 &block_result.doc_id,
                 &collection_id,
+                &document_json,
                 creator_ref,
             )
             .await;
-            sync.push_se_artifacts_to_replicators(&collection_id, se_artifacts)
-                .await;
+            sync.push_se_artifacts_to_replicators_for_document(
+                &collection_id,
+                se_artifacts,
+                &document_json,
+            )
+            .await;
 
             // Broadcast composite via GossipSub with retry for InsufficientPeers
             log_broadcast_failure(
@@ -738,6 +784,18 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
         let collection_id = collection.collection_id().to_string();
+        let pre_delete_document_json = match db::block_reader::read_document_for_se(
+            &self.db,
+            &collection_id,
+            &doc_id.to_string(),
+        )
+        .await
+        {
+            Ok(Some(document)) => Some(serde_json::Value::Object(
+                document.to_map().unwrap_or_default().into_iter().collect(),
+            )),
+            _ => None,
+        };
 
         // Execute the delete mutation
         let result = self.inner.delete(collection_name, doc_id).await?;
@@ -810,14 +868,26 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             let creator_ref = creator_did.as_deref();
 
             // Push to replicators (single block for delete, not full DAG).
-            sync.push_to_replicators_with_creator(
-                &block_result.cid,
-                &block_result.block,
-                &block_result.doc_id,
-                &collection_id,
-                creator_ref,
-            )
-            .await;
+            if let Some(document_json) = pre_delete_document_json.as_ref() {
+                sync.push_document_to_replicators_with_creator(
+                    &block_result.cid,
+                    &block_result.block,
+                    &block_result.doc_id,
+                    &collection_id,
+                    document_json,
+                    creator_ref,
+                )
+                .await;
+            } else {
+                sync.push_to_replicators_with_creator(
+                    &block_result.cid,
+                    &block_result.block,
+                    &block_result.doc_id,
+                    &collection_id,
+                    creator_ref,
+                )
+                .await;
+            }
 
             // Broadcast via GossipSub with retry for InsufficientPeers
             log_broadcast_failure(

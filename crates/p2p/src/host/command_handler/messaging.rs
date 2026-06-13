@@ -12,6 +12,7 @@ use crate::message::{
     ManageQueryReply, ManageQueryRequest, ManageReply, ManageRequest, PushLogReply, PushLogRequest,
     PushSEArtifactsReply, PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest,
 };
+use crate::replicator::ReplicatorInfo;
 
 use super::super::p2p_host::P2PHost;
 
@@ -399,13 +400,13 @@ impl<S: Store> P2PHost<S> {
     pub(super) fn handle_create_replicator(
         &mut self,
         peer_id: PeerId,
-        collections: Vec<String>,
+        mut info: ReplicatorInfo,
         response: tokio::sync::oneshot::Sender<Result<()>>,
     ) {
-        debug!(peer_id = %peer_id, collections = ?collections, "Creating replicator");
+        debug!(peer_id = %peer_id, collections = ?info.collections, filters = ?info.filters, "Creating replicator");
         let peer_str = peer_id.to_string();
-        self.replicators
-            .set_peer_collections(&peer_str, &collections);
+        info.id = peer_str;
+        self.replicators.set_replicator_info(info);
         if response.send(Ok(())).is_err() {
             debug!(peer_id = %peer_id, "CreateReplicator command response dropped - caller cancelled");
         }

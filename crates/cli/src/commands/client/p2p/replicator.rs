@@ -1,7 +1,7 @@
 //! P2P replicator command implementations
 
 use clap::{Args, Subcommand};
-use defra_http::router::ExplicitReplayCapabilityInput;
+use defra_http::router::{ExplicitReplayCapabilityInput, ReplicationFilter, ReplicationFilters};
 
 use crate::commands::client::http_client::HttpClient;
 use crate::commands::client::{raw_identity_from_key_bytes, validate_identifier, ClientContext};
@@ -40,6 +40,14 @@ pub struct P2pReplicatorAddArgs {
     /// Peer address(es) to replicate with
     #[arg(value_name = "addresses")]
     pub addresses: Vec<String>,
+
+    /// Field used for filtered replication, applied to every selected collection.
+    #[arg(long = "filter-field")]
+    pub filter_field: Option<String>,
+
+    /// Scalar value matched by --filter-field.
+    #[arg(long = "filter-value", requires = "filter_field")]
+    pub filter_value: Option<String>,
 }
 
 /// Arguments for replicator delete command
@@ -90,17 +98,58 @@ impl P2pReplicatorAddArgs {
             .with_verbose(ctx.verbose);
 
         let address = self.addresses.first().map(|s| s.as_str());
+        let filters = self.build_filters()?;
         let explicit_replay_capabilities =
             build_explicit_replay_capabilities(&client, ctx, &self.collection, address).await?;
 
         client
-            .p2p_replicator_add(&self.collection, address, &explicit_replay_capabilities)
+            .p2p_replicator_add(
+                &self.collection,
+                address,
+                filters,
+                &explicit_replay_capabilities,
+            )
             .await?;
         println!(
             "Set replicator for collections: {}",
             self.collection.join(", ")
         );
         Ok(())
+    }
+
+    fn build_filters(&self) -> Result<ReplicationFilters> {
+        let Some(field) = self.filter_field.as_deref() else {
+            if self.filter_value.is_some() {
+                return Err(Error::MissingInput(
+                    "--filter-value requires --filter-field".to_string(),
+                ));
+            }
+            return Ok(ReplicationFilters::new());
+        };
+        let Some(value) = self.filter_value.as_deref() else {
+            return Err(Error::MissingInput(
+                "--filter-field requires --filter-value".to_string(),
+            ));
+        };
+        if field.trim().is_empty() {
+            return Err(Error::InvalidConfig(
+                "--filter-field cannot be empty".to_string(),
+            ));
+        }
+
+        Ok(self
+            .collection
+            .iter()
+            .map(|collection| {
+                (
+                    collection.clone(),
+                    ReplicationFilter {
+                        field: field.to_string(),
+                        value: serde_json::Value::String(value.to_string()),
+                    },
+                )
+            })
+            .collect())
     }
 }
 

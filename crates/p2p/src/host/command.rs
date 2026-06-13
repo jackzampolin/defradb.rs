@@ -138,7 +138,7 @@ pub enum HostCommand {
     /// If the peer is already a replicator, updates their collections.
     CreateReplicator {
         peer_id: PeerId,
-        collections: Vec<String>,
+        info: ReplicatorInfo,
         response: oneshot::Sender<Result<()>>,
     },
 

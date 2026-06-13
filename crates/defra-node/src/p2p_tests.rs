@@ -346,13 +346,20 @@ async fn install_one_way_replicator(
         .add_replicator(
             collection_names.clone(),
             Some(&sender_addr),
+            Default::default(),
             Vec::new(),
             None,
         )
         .await
         .expect("authorize sender as receiver-side replicator");
     sender_p2p
-        .add_replicator(collection_names, Some(&receiver_addr), Vec::new(), None)
+        .add_replicator(
+            collection_names,
+            Some(&receiver_addr),
+            Default::default(),
+            Vec::new(),
+            None,
+        )
         .await
         .expect("set sender -> receiver replicator");
 }
@@ -1135,12 +1142,24 @@ async fn live_replicator_pushes_post_config_writes() {
         .await
         .expect("subscribe node1 User");
 
-    p2p1.add_replicator(vec!["User".to_string()], Some(&addr0), Vec::new(), None)
-        .await
-        .expect("authorize node0 on node1");
-    p2p0.add_replicator(vec!["User".to_string()], Some(&addr1), Vec::new(), None)
-        .await
-        .expect("set replicator node0 -> node1");
+    p2p1.add_replicator(
+        vec!["User".to_string()],
+        Some(&addr0),
+        Default::default(),
+        Vec::new(),
+        None,
+    )
+    .await
+    .expect("authorize node0 on node1");
+    p2p0.add_replicator(
+        vec!["User".to_string()],
+        Some(&addr1),
+        Default::default(),
+        Vec::new(),
+        None,
+    )
+    .await
+    .expect("set replicator node0 -> node1");
 
     let response = node0
         .execute(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID name age } }"#)

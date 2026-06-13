@@ -2,6 +2,18 @@
 
 use thiserror::Error;
 
+pub type ReplicationFilters = std::collections::BTreeMap<String, ReplicationFilter>;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ReplicationFilter {
+    #[serde(rename = "Field")]
+    pub field: String,
+    #[serde(rename = "Value")]
+    pub value: serde_json::Value,
+}
+
+impl Eq for ReplicationFilter {}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExplicitReplayCapabilityInput {
     #[serde(rename = "CollectionID")]
@@ -90,6 +102,7 @@ pub trait P2POperations: Send + Sync {
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
+        filters: ReplicationFilters,
         explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
         expected_authorizer_did: Option<&str>,
     ) -> P2PResult<()>;
@@ -137,6 +150,7 @@ pub struct ReplicatorInfo {
     pub address: Option<String>,
     pub status: Option<u8>,
     pub last_status_change: Option<String>,
+    pub filters: ReplicationFilters,
 }
 
 /// P2P document information for HTTP responses.

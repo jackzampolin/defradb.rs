@@ -7,7 +7,7 @@ use super::{map_p2p_bad_request, map_p2p_internal};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
-use crate::router::{AppState, ExplicitReplayCapabilityInput, NodePermission};
+use crate::router::{AppState, ExplicitReplayCapabilityInput, NodePermission, ReplicationFilters};
 use crate::validation::{validate_collection_name, validate_multiaddr};
 
 /// Response for replicator info (Go-compatible format with PascalCase).
@@ -29,6 +29,12 @@ pub struct ReplicatorInfoResponse {
     /// Last time the status changed, formatted like Go's time.Time JSON.
     #[serde(rename = "LastStatusChange")]
     pub last_status_change: String,
+    /// Optional Rust extension for filtered replication.
+    #[serde(
+        rename = "Filters",
+        skip_serializing_if = "ReplicationFilters::is_empty"
+    )]
+    pub filters: ReplicationFilters,
 }
 
 /// Request to add a replicator (Go-compatible format).
@@ -42,6 +48,9 @@ pub struct ReplicatorRequest {
     pub addresses: Vec<String>,
     #[serde(rename = "ExplicitReplayCapabilities", default)]
     pub explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
+    /// Optional per-collection filtered replication predicates.
+    #[serde(rename = "Filters", default)]
+    pub filters: ReplicationFilters,
 }
 
 /// Request body for replicator removal (Go-compatible).
@@ -86,6 +95,7 @@ pub async fn list_replicators(
             last_status_change: r
                 .last_status_change
                 .unwrap_or_else(|| "0001-01-01T00:00:00Z".to_string()),
+            filters: r.filters,
         })
         .collect();
 
@@ -131,6 +141,7 @@ pub async fn add_replicator(
     p2p.add_replicator(
         request.collections,
         addr,
+        request.filters,
         request.explicit_replay_capabilities,
         expected_authorizer_did.as_deref(),
     )
