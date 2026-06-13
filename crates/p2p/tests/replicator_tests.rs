@@ -141,6 +141,24 @@ fn filtered_replicator_round_trips_rust_extension() {
     assert!(!restored.matches_filter("users", &serde_json::json!({"agent_did": "did:key:other"})));
 }
 
+#[test]
+fn filter_matches_numbers_numerically() {
+    // A whole-number Float field materializes as an integer in Go-compatible
+    // JSON, so a 2.0 filter value must still match a stored 2.
+    let float_filter = ReplicationFilter::new("score", serde_json::json!(2.0));
+    assert!(float_filter.matches_json_object(&serde_json::json!({"score": 2})));
+    assert!(float_filter.matches_json_object(&serde_json::json!({"score": 2.0})));
+    assert!(!float_filter.matches_json_object(&serde_json::json!({"score": 3})));
+
+    // Non-whole floats and integers still match their own form.
+    let frac_filter = ReplicationFilter::new("ratio", serde_json::json!(2.5));
+    assert!(frac_filter.matches_json_object(&serde_json::json!({"ratio": 2.5})));
+
+    // A string filter value never matches a numeric field (type mismatch).
+    let str_filter = ReplicationFilter::new("score", serde_json::json!("2"));
+    assert!(!str_filter.matches_json_object(&serde_json::json!({"score": 2})));
+}
+
 // ---------------------------------------------------------------------------
 // Round-trip
 // ---------------------------------------------------------------------------

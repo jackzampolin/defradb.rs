@@ -77,7 +77,21 @@ impl ReplicationFilter {
         document
             .as_object()
             .and_then(|object| object.get(&self.field))
-            .is_some_and(|value| value == &self.value)
+            .is_some_and(|value| json_scalar_eq(value, &self.value))
+    }
+}
+
+/// Equality for filter matching. Numbers are compared numerically so a filter
+/// value of `2.0` matches a field materialized as the integer `2` (Go-compatible
+/// JSON encodes whole-number floats as integers), which raw `serde_json::Value`
+/// equality treats as unequal.
+fn json_scalar_eq(a: &JsonValue, b: &JsonValue) -> bool {
+    match (a, b) {
+        (JsonValue::Number(x), JsonValue::Number(y)) => match (x.as_f64(), y.as_f64()) {
+            (Some(xf), Some(yf)) => xf == yf,
+            _ => x == y,
+        },
+        _ => a == b,
     }
 }
 
