@@ -27,7 +27,7 @@ impl Collection {
         Ok(())
     }
 
-    pub(crate) fn validate_immutable_fields_unchanged(
+    pub fn validate_immutable_fields_unchanged(
         &self,
         old_doc: &Document,
         new_doc: &Document,
