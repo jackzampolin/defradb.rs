@@ -263,6 +263,12 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
                     filter.field, collection_id
                 ));
             }
+            if !field.kind.accepts_filter_value(&filter.value) {
+                return Err(format!(
+                    "replication filter value for field '{}' in collection '{}' does not match the field type",
+                    filter.field, collection_id
+                ));
+            }
         }
         Ok(())
     }

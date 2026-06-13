@@ -500,6 +500,35 @@ async fn rust_filtered_replicator_rejects_non_immutable_field() {
     );
 }
 
+/// G8/F1: filtering on a non-String scalar field with a value whose type cannot
+/// match it is rejected at add time. The CLI wraps `--filter-value` as a JSON
+/// string, so a filter on an `@immutable` Int field would otherwise pass
+/// validation yet silently match zero documents.
+#[tokio::test]
+async fn rust_filtered_replicator_rejects_type_mismatch() {
+    const INT_SCHEMA: &str = "type IntDoc { count: Int @immutable  body: String }";
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 1).await;
+    cluster.client(0).schema_add(INT_SCHEMA).expect("schema");
+
+    // `count` is a scalar @immutable Int, but the CLI sends "30" as a string.
+    let output = run_replicator_add(&cluster, 0, &["IntDoc"], DUMMY_PEER_ADDR, "count", "30");
+    assert!(
+        !output.status.success(),
+        "string filter value against an Int field must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does not match the field type"),
+        "error should explain the value/field type mismatch, got: {stderr}"
+    );
+}
+
 // #3 (remote-merge enforcement of `@immutable`) is intentionally NOT an
 // integration-suite test. The guard in `composite_persist.rs` is defense-in-depth
 // against a malicious or divergent peer and is unreachable through two honest
