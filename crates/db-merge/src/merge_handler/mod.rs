@@ -1927,6 +1927,339 @@ mod tests {
         );
     }
 
+    /// A composite that does NOT touch an immutable field must not be rejected,
+    /// even against a deleted prior version. Only linked immutable fields are
+    /// validated, so a partial update is not falsely flagged.
+    #[tokio::test]
+    async fn remote_merge_allows_partial_update_to_deleted_doc() {
+        let (handler, blockstore) = make_handler_with_immutable_schema().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-agentdocs")
+            .unwrap()
+            .expect("agentdocs collection should exist");
+
+        let mut doc = Document::new();
+        doc.set(
+            "agent_did",
+            NormalValue::String("did:key:alice".to_string()),
+        );
+        doc.set("body", NormalValue::String("v1".to_string()));
+        doc.generate_and_set_doc_id().unwrap();
+        doc.set_schema_version_id("v1");
+        let doc_id = doc.id().unwrap().clone();
+        let doc_id_str = doc_id.to_string();
+
+        let create_blocks = {
+            let txn = handler.db.new_txn(false).await.unwrap();
+            let blocks = {
+                let datastore = txn.datastore().unwrap();
+                let headstore = txn.headstore().unwrap();
+                let raw_blockstore = txn.blockstore().unwrap();
+                collection
+                    .save_with_datastore(&datastore, &doc)
+                    .await
+                    .unwrap();
+                db_blocks::write_document_blocks(
+                    &raw_blockstore,
+                    &headstore,
+                    &doc,
+                    "v1",
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            };
+            txn.force_commit().await.unwrap();
+            blocks
+        };
+
+        // Delete (status 2).
+        let delete_payload = CompositeDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 2,
+            status: 2,
+        };
+        let delete_block = Block::new(
+            CrdtDelta::Composite(delete_payload.clone()),
+            vec![create_blocks.cid],
+            vec![],
+        );
+        let delete_cid = delete_block.generate_cid().unwrap();
+        blockstore
+            .put(&delete_cid, &delete_block.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        handler
+            .process_composite_delta(
+                &delete_cid,
+                &delete_block,
+                &delete_payload,
+                &BlockMetadata::normal(
+                    &doc_id_str,
+                    "col-agentdocs",
+                    "did:key:z6MkrDel",
+                    None,
+                    false,
+                ),
+                false,
+                0,
+            )
+            .await
+            .expect("delete merge");
+
+        // Re-materialize touching only the (mutable) body field — must be allowed.
+        let mut body_data = Vec::new();
+        ciborium::into_writer(&NormalValue::String("v2".to_string()), &mut body_data).unwrap();
+        let body_payload = LwwDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            field_name: "body".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 3,
+            data: body_data,
+        };
+        let body_block = Block::new(
+            CrdtDelta::Lww(body_payload),
+            create_blocks.field_cids.clone(),
+            vec![],
+        );
+        let body_cid = body_block.generate_cid().unwrap();
+        blockstore
+            .put(&body_cid, &body_block.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        let recreate_payload = CompositeDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 3,
+            status: 1,
+        };
+        let recreate_block = Block::new(
+            CrdtDelta::Composite(recreate_payload.clone()),
+            vec![delete_cid],
+            vec![DAGLink::new("body", body_cid)],
+        );
+        let recreate_cid = recreate_block.generate_cid().unwrap();
+        blockstore
+            .put(&recreate_cid, &recreate_block.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        let outcome = handler
+            .process_composite_delta(
+                &recreate_cid,
+                &recreate_block,
+                &recreate_payload,
+                &BlockMetadata::normal(
+                    &doc_id_str,
+                    "col-agentdocs",
+                    "did:key:z6MkrRe",
+                    None,
+                    false,
+                ),
+                false,
+                0,
+            )
+            .await
+            .expect("partial update merge");
+        assert!(
+            !outcome.is_terminal_skip(),
+            "a partial update that does not touch an immutable field must be allowed, got {outcome:?}"
+        );
+    }
+
+    /// Batch path: a composite that changes an @immutable field is terminally
+    /// skipped and leaves NO partial write (not even of its sibling mutable
+    /// field), while a valid block in the same batch still commits.
+    #[tokio::test]
+    async fn batch_merge_rejects_immutable_change_without_partial_write() {
+        let (handler, blockstore) = make_handler_with_immutable_schema().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-agentdocs")
+            .unwrap()
+            .expect("agentdocs collection should exist");
+
+        let mut doc = Document::new();
+        doc.set(
+            "agent_did",
+            NormalValue::String("did:key:alice".to_string()),
+        );
+        doc.set("body", NormalValue::String("v1".to_string()));
+        doc.generate_and_set_doc_id().unwrap();
+        doc.set_schema_version_id("v1");
+        let doc_id = doc.id().unwrap().clone();
+        let doc_id_str = doc_id.to_string();
+
+        let create_blocks = {
+            let txn = handler.db.new_txn(false).await.unwrap();
+            let blocks = {
+                let datastore = txn.datastore().unwrap();
+                let headstore = txn.headstore().unwrap();
+                let raw_blockstore = txn.blockstore().unwrap();
+                collection
+                    .save_with_datastore(&datastore, &doc)
+                    .await
+                    .unwrap();
+                db_blocks::write_document_blocks(
+                    &raw_blockstore,
+                    &headstore,
+                    &doc,
+                    "v1",
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            };
+            txn.force_commit().await.unwrap();
+            blocks
+        };
+
+        // Violating composite: changes the immutable agent_did AND a benign body.
+        let encode = |s: &str| {
+            let mut b = Vec::new();
+            ciborium::into_writer(&NormalValue::String(s.to_string()), &mut b).unwrap();
+            b
+        };
+        let did_block = Block::new(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                doc_id: doc_id_str.as_bytes().to_vec(),
+                field_name: "agent_did".to_string(),
+                schema_version_id: "v1".to_string(),
+                priority: 2,
+                data: encode("did:key:bob"),
+            }),
+            create_blocks.field_cids.clone(),
+            vec![],
+        );
+        let did_cid = did_block.generate_cid().unwrap();
+        blockstore
+            .put(&did_cid, &did_block.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        let body_block = Block::new(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                doc_id: doc_id_str.as_bytes().to_vec(),
+                field_name: "body".to_string(),
+                schema_version_id: "v1".to_string(),
+                priority: 2,
+                data: encode("hijacked"),
+            }),
+            create_blocks.field_cids.clone(),
+            vec![],
+        );
+        let body_cid = body_block.generate_cid().unwrap();
+        blockstore
+            .put(&body_cid, &body_block.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        let bad_payload = CompositeDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 2,
+            status: 1,
+        };
+        let bad_block = Block::new(
+            CrdtDelta::Composite(bad_payload),
+            vec![create_blocks.cid],
+            vec![
+                DAGLink::new("agent_did", did_cid),
+                DAGLink::new("body", body_cid),
+            ],
+        );
+        let bad_cid = bad_block.generate_cid().unwrap();
+        blockstore
+            .put(&bad_cid, &bad_block.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        let bad_merge = MergeBlock {
+            cid: bad_cid,
+            block_data: bytes::Bytes::from(bad_block.to_dag_cbor().unwrap()),
+            doc_id: doc_id_str.clone(),
+            collection_id: "col-agentdocs".to_string(),
+            creator: "did:key:z6MkrBad".to_string(),
+            sender_peer: Some("peer1".to_string()),
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+            verified_creator: None,
+        };
+
+        // Valid sibling: a fresh document in the same batch.
+        let mut sibling = Document::new();
+        sibling.set(
+            "agent_did",
+            NormalValue::String("did:key:carol".to_string()),
+        );
+        sibling.set("body", NormalValue::String("sibling".to_string()));
+        sibling.generate_and_set_doc_id().unwrap();
+        let sibling_id = sibling.id().unwrap().to_string();
+        let sibling_result = db_blocks::build_blocks_from_document(&sibling, "v1", &blockstore)
+            .await
+            .unwrap();
+        let sibling_merge = MergeBlock {
+            cid: sibling_result.cid,
+            block_data: bytes::Bytes::from(sibling_result.block),
+            doc_id: sibling_result.doc_id,
+            collection_id: "col-agentdocs".to_string(),
+            creator: "did:key:z6MkrSib".to_string(),
+            sender_peer: Some("peer1".to_string()),
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+            verified_creator: None,
+        };
+
+        let results = handler
+            .handle_block_batch(&[bad_merge, sibling_merge])
+            .await;
+        assert!(
+            matches!(results[0], Ok(ref o) if o.is_terminal_skip()),
+            "immutable-violating batch block must be terminally skipped, got {:?}",
+            results[0]
+        );
+        assert!(
+            matches!(results[1], Ok(MergeOutcome::Merged)),
+            "valid sibling block must commit, got {:?}",
+            results[1]
+        );
+
+        // No partial write: neither the immutable field NOR the benign body of the
+        // rejected composite persisted; the sibling did.
+        let txn = handler.db.new_txn(true).await.unwrap();
+        let (doc1, sibling_present) = {
+            let datastore = txn.datastore().unwrap();
+            let doc1 = collection
+                .get_with_datastore(&datastore, &doc_id)
+                .await
+                .unwrap()
+                .expect("doc1 exists");
+            let sibling_present = collection
+                .get_with_datastore(&datastore, &DocID::from_string(&sibling_id).unwrap())
+                .await
+                .unwrap()
+                .is_some();
+            (doc1, sibling_present)
+        };
+        txn.force_discard().unwrap();
+
+        assert_eq!(
+            doc1.get("agent_did"),
+            Some(&NormalValue::String("did:key:alice".to_string())),
+            "immutable field must be unchanged"
+        );
+        assert_eq!(
+            doc1.get("body"),
+            Some(&NormalValue::String("v1".to_string())),
+            "rejected composite must not have written its sibling field (no partial write)"
+        );
+        assert!(sibling_present, "valid sibling document must be committed");
+    }
+
     #[tokio::test]
     async fn composite_lww_reseeds_from_local_doc_when_crdt_store_is_stale() {
         let (handler, blockstore, _bus) = make_handler_with_schema_and_bus().await;

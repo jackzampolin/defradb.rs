@@ -37,6 +37,85 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         Ok(None)
     }
 
+    /// Reject a composite that changes an `@immutable` field BEFORE any field
+    /// block is persisted, so a rejected block never leaves a partial CRDT write
+    /// behind (which a shared batch transaction cannot roll back per-block).
+    ///
+    /// Only fields the composite actually links are checked, so a partial update
+    /// that does not touch an immutable field is not falsely rejected. The prior
+    /// value is read deleted-inclusively so a delete+recreate cannot change it.
+    pub(crate) async fn validate_immutable_links(
+        &self,
+        datastore: &NamespaceView,
+        context: &CompositeMergeContext<'_, '_>,
+    ) -> std::result::Result<(), MergeError> {
+        let Some(collection) = context.collection.as_ref() else {
+            return Ok(());
+        };
+        let Some(links) = &context.block.links else {
+            return Ok(());
+        };
+        let immutable: HashSet<&str> = collection
+            .schema()
+            .fields
+            .iter()
+            .filter(|field| field.immutable)
+            .map(|field| field.name.as_str())
+            .collect();
+        if immutable.is_empty() || !links.iter().any(|l| immutable.contains(l.name.as_str())) {
+            return Ok(());
+        }
+
+        let doc_id = DocID::from_string(context.doc_id_str)
+            .map_err(|e| MergeError::MergeFailed(format!("invalid doc_id: {e}")))?;
+        let Some((baseline, _)) = collection
+            .get_with_datastore_include_deleted(datastore, &doc_id, false)
+            .await
+            .map_err(MergeError::Database)?
+        else {
+            return Ok(());
+        };
+
+        for link in links {
+            if !immutable.contains(link.name.as_str()) {
+                continue;
+            }
+            let Some(prior) = baseline.get(&link.name) else {
+                continue;
+            };
+            let Ok(Some(block_data)) = self.blockstore.get(&link.link).await else {
+                continue;
+            };
+            let Ok(block) = Block::from_dag_cbor(&block_data) else {
+                continue;
+            };
+            // Decrypt with the policy hook already marked checked so this read-only
+            // validation does not trigger encryption side effects.
+            let mut hook_checked = true;
+            let effective = match self
+                .handle_encryption(context, &block, &mut hook_checked)
+                .await?
+            {
+                EffectiveLinkedDelta::Delta(delta) => delta,
+                _ => continue,
+            };
+            if let CrdtDelta::Lww(payload) = effective {
+                let Ok(incoming) = ciborium::from_reader::<NormalValue, _>(payload.data.as_slice())
+                else {
+                    continue;
+                };
+                if *prior != incoming {
+                    return Err(MergeError::ImmutableFieldChanged(format!(
+                        "immutable field '{}' cannot be changed",
+                        link.name
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn process_field_block(
         &self,
         datastore: &mut NamespaceView,
