@@ -263,11 +263,19 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 .await?
             {
                 Some(outcome) => Ok(Some(outcome)),
-                None => {
-                    self.persist_merged_document(&mut datastore, &context, &mut state)
-                        .await?;
-                    Ok(None)
-                }
+                None => match self
+                    .persist_merged_document(&mut datastore, &context, &mut state)
+                    .await
+                {
+                    Ok(()) => Ok(None),
+                    // A change to an @immutable field is a deterministic content
+                    // rejection: skip the block terminally so it is not retried
+                    // on every sync pass instead of failing transiently.
+                    Err(MergeError::ImmutableFieldChanged(reason)) => {
+                        Ok(Some(MergeOutcome::terminal_skip(reason)))
+                    }
+                    Err(e) => Err(e),
+                },
             }
         };
 
@@ -558,11 +566,19 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 .await?
             {
                 Some(outcome) => Ok(Some(outcome)),
-                None => {
-                    self.persist_merged_document(&mut datastore, &context, &mut state)
-                        .await?;
-                    Ok(None)
-                }
+                None => match self
+                    .persist_merged_document(&mut datastore, &context, &mut state)
+                    .await
+                {
+                    Ok(()) => Ok(None),
+                    // A change to an @immutable field is a deterministic content
+                    // rejection: skip the block terminally so it is not retried
+                    // on every sync pass instead of failing transiently.
+                    Err(MergeError::ImmutableFieldChanged(reason)) => {
+                        Ok(Some(MergeOutcome::terminal_skip(reason)))
+                    }
+                    Err(e) => Err(e),
+                },
             }
         };
 

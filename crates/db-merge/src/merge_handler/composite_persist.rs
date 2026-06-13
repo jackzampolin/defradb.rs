@@ -76,7 +76,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         if let Some(old_doc) = old_doc.as_ref() {
             collection
                 .validate_immutable_fields_unchanged(old_doc, &doc)
-                .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
+                .map_err(|e| MergeError::ImmutableFieldChanged(e.to_string()))?;
         }
 
         collection

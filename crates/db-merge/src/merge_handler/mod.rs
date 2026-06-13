@@ -1730,7 +1730,7 @@ mod tests {
             None,
             false,
         );
-        let result = handler
+        let outcome = handler
             .process_composite_delta(
                 &update_composite_cid,
                 &update_composite_block,
@@ -1739,15 +1739,14 @@ mod tests {
                 false,
                 0,
             )
-            .await;
+            .await
+            .expect("an immutable-field rejection is a terminal skip, not a hard error");
 
+        // The rejection must be TERMINAL (skipped), not a transient Err — a hard
+        // error would leave the CID unmarked and re-fetched on every sync pass.
         assert!(
-            result.is_err(),
-            "remote merge changing an immutable field must be rejected, got {result:?}"
-        );
-        assert!(
-            result.unwrap_err().to_string().contains("immutable"),
-            "rejection should cite the immutable field"
+            outcome.is_terminal_skip(),
+            "remote merge changing an immutable field must be terminally skipped, got {outcome:?}"
         );
 
         // The locally-stored immutable value must be unchanged.
