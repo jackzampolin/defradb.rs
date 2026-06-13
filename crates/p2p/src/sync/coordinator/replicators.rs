@@ -53,7 +53,26 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .create_replicator_info(peer_id, info.clone())
             .await?;
 
+        let filtered_collections: Vec<String> = info.filters.keys().cloned().collect();
         self.register_replicator_access(info);
+
+        if !filtered_collections.is_empty() {
+            if let Ok(subscribed) = self.get_subscribed_collections().await {
+                let bypassed: Vec<&String> = filtered_collections
+                    .iter()
+                    .filter(|collection_id| subscribed.contains(collection_id))
+                    .collect();
+                if !bypassed.is_empty() {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        collections = ?bypassed,
+                        "filtered replicator added for collection(s) this node also gossip-subscribes; \
+                         filtered replication is push-path selectivity, not an access boundary \
+                         (subscribed peers receive all documents) — use ACP/encryption for confidentiality"
+                    );
+                }
+            }
+        }
 
         let mut result = CreateReplicatorResult {
             subscribed: Vec::new(),
