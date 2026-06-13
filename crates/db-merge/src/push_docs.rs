@@ -49,6 +49,7 @@ async fn document_matches_filter<R: Reader + ?Sized>(
 /// If an SE encryption key is provided, also generates and pushes SE artifacts
 /// for collections with encrypted indexes. The identity pubkey is threaded
 /// through SE artifact generation to ensure per-identity tag isolation.
+#[allow(clippy::too_many_arguments)]
 pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
     handle: &p2p::P2PHostHandle,
     db: &DB<S>,
@@ -76,6 +77,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
 }
 
 /// Push existing documents to a replicator peer with explicit replay limits.
+#[allow(clippy::too_many_arguments)]
 pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>(
     handle: &p2p::P2PHostHandle,
     db: &DB<S>,

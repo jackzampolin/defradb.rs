@@ -65,6 +65,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
 }
 
 /// Push existing documents to a replicator peer via a generic transport with explicit replay limits.
+#[allow(clippy::too_many_arguments)]
 pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T: P2PTransport>(
     transport: &T,
     db: &DB<S>,

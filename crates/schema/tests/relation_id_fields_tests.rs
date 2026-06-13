@@ -172,9 +172,9 @@ fn test_finalize_relations_adds_id_fields() {
 
     assert!(
         posts.indexes.iter().all(|idx| {
-            !idx.fields
+            idx.fields
                 .first()
-                .is_some_and(|field| field.name == "_authorID")
+                .is_none_or(|field| field.name != "_authorID")
         }),
         "one-to-many relation FK indexes require an explicit @index"
     );
@@ -261,9 +261,9 @@ fn test_finalize_relations_hashmap() {
 
     assert!(
         posts.indexes.iter().all(|idx| {
-            !idx.fields
+            idx.fields
                 .first()
-                .is_some_and(|field| field.name == "_authorID")
+                .is_none_or(|field| field.name != "_authorID")
         }),
         "one-to-many relation FK indexes require an explicit @index"
     );

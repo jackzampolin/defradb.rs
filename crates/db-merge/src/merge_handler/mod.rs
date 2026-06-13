@@ -1593,6 +1593,184 @@ mod tests {
         assert_eq!(stored.get("score"), Some(&NormalValue::Int(20)));
     }
 
+    async fn make_handler_with_immutable_schema() -> (
+        DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+        Arc<DefraBlockstore<MemoryStore>>,
+    ) {
+        let store = Arc::new(MemoryStore::new());
+        let db = Arc::new(DB::from_arc(store.clone()).unwrap());
+
+        db.create_collection(CollectionVersion::new(
+            "AgentDocs",
+            "v1",
+            "col-agentdocs",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "agent_did", FieldKind::string()).as_immutable(),
+                FieldDescription::new("3", "body", FieldKind::string()),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        let blockstore = Arc::new(DefraBlockstore::new(store, false));
+        let handler = DbMergeHandler::new(db, blockstore.clone());
+        (handler, blockstore)
+    }
+
+    /// Remote-merge enforcement of `@immutable` (filtered-replication B3 hazard).
+    ///
+    /// A higher-priority remote composite delta that flips an immutable field
+    /// must be rejected by the merge handler, leaving the local value intact.
+    /// This guards the `composite_persist.rs` path, which re-implements the
+    /// check independently of the local-write validator — so it needs its own
+    /// coverage. Honest two-node e2e cannot reach this: local validation blocks
+    /// the originating update and content-addressed doc IDs prevent honest
+    /// divergence, so the conflicting delta is crafted directly here.
+    #[tokio::test]
+    async fn remote_composite_merge_rejects_immutable_field_change() {
+        let (handler, blockstore) = make_handler_with_immutable_schema().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-agentdocs")
+            .unwrap()
+            .expect("agentdocs collection should exist");
+
+        let mut doc = Document::new();
+        doc.set(
+            "agent_did",
+            NormalValue::String("did:key:alice".to_string()),
+        );
+        doc.set("body", NormalValue::String("v1".to_string()));
+        doc.generate_and_set_doc_id().unwrap();
+        doc.set_schema_version_id("v1");
+        let doc_id = doc.id().unwrap().clone();
+        let doc_id_str = doc_id.to_string();
+
+        // Persist the initial document locally (agent_did = alice).
+        let create_blocks = {
+            let txn = handler.db.new_txn(false).await.unwrap();
+            let blocks = {
+                let datastore = txn.datastore().unwrap();
+                let headstore = txn.headstore().unwrap();
+                let raw_blockstore = txn.blockstore().unwrap();
+                collection
+                    .save_with_datastore(&datastore, &doc)
+                    .await
+                    .unwrap();
+                db_blocks::write_document_blocks(
+                    &raw_blockstore,
+                    &headstore,
+                    &doc,
+                    "v1",
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            };
+            txn.force_commit().await.unwrap();
+            blocks
+        };
+
+        // Craft a higher-priority remote update that flips the immutable field.
+        let mut update_data = Vec::new();
+        ciborium::into_writer(
+            &NormalValue::String("did:key:bob".to_string()),
+            &mut update_data,
+        )
+        .unwrap();
+        let update_field_payload = LwwDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            field_name: "agent_did".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 2,
+            data: update_data,
+        };
+        let update_field_block = Block::new(
+            CrdtDelta::Lww(update_field_payload),
+            create_blocks.field_cids.clone(),
+            vec![],
+        );
+        let update_field_cid = update_field_block.generate_cid().unwrap();
+        blockstore
+            .put(
+                &update_field_cid,
+                &update_field_block.to_dag_cbor().unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let update_payload = CompositeDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 2,
+            status: 1,
+        };
+        let update_composite_block = Block::new(
+            CrdtDelta::Composite(update_payload.clone()),
+            vec![create_blocks.cid],
+            vec![DAGLink::new("agent_did", update_field_cid)],
+        );
+        let update_composite_cid = update_composite_block.generate_cid().unwrap();
+        blockstore
+            .put(
+                &update_composite_cid,
+                &update_composite_block.to_dag_cbor().unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let metadata = BlockMetadata::normal(
+            &doc_id_str,
+            "col-agentdocs",
+            "did:key:z6MkrRemoteImmutableMerge",
+            None,
+            false,
+        );
+        let result = handler
+            .process_composite_delta(
+                &update_composite_cid,
+                &update_composite_block,
+                &update_payload,
+                &metadata,
+                false,
+                0,
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "remote merge changing an immutable field must be rejected, got {result:?}"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("immutable"),
+            "rejection should cite the immutable field"
+        );
+
+        // The locally-stored immutable value must be unchanged.
+        let stored = {
+            let txn = handler.db.new_txn(true).await.unwrap();
+            let stored = {
+                let datastore = txn.datastore().unwrap();
+                collection
+                    .get_with_datastore(&datastore, &doc_id)
+                    .await
+                    .unwrap()
+                    .expect("document should still exist")
+            };
+            txn.force_discard().unwrap();
+            stored
+        };
+        assert_eq!(
+            stored.get("agent_did"),
+            Some(&NormalValue::String("did:key:alice".to_string())),
+            "immutable field must survive a rejected remote merge"
+        );
+    }
+
     #[tokio::test]
     async fn composite_lww_reseeds_from_local_doc_when_crdt_store_is_stale() {
         let (handler, blockstore, _bus) = make_handler_with_schema_and_bus().await;

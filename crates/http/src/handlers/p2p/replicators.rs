@@ -230,6 +230,7 @@ mod tests {
             collection_ids: vec!["Users".to_string(), "Posts".to_string()],
             status: 0,
             last_status_change: "0001-01-01T00:00:00Z".to_string(),
+            filters: Default::default(),
         };
         let json = serde_json::to_string(&response).unwrap();
         // Verify PascalCase field names

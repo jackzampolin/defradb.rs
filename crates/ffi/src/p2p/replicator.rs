@@ -62,7 +62,7 @@ pub unsafe extern "C" fn p2p_add_replicator(
                 rt.block_on(async move {
                     p2p.system
                         .ops()
-                        .add_replicator(collections, Some(&addr), Vec::new(), None)
+                        .add_replicator(collections, Some(&addr), Default::default(), Vec::new(), None)
                         .await
                         .map_err(FfiP2PError::from)
                 })

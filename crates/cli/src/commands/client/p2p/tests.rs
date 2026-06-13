@@ -8,6 +8,8 @@ fn test_p2p_replicator_add_args() {
     let args = P2pReplicatorAddArgs {
         collection: vec!["Users".to_string(), "Posts".to_string()],
         addresses: vec!["/ip4/127.0.0.1/tcp/9000".to_string()],
+        filter_field: None,
+        filter_value: None,
     };
     assert_eq!(args.collection.len(), 2);
     assert_eq!(args.addresses.len(), 1);
@@ -18,6 +20,8 @@ fn test_p2p_replicator_add_args_no_address() {
     let args = P2pReplicatorAddArgs {
         collection: vec!["Users".to_string()],
         addresses: vec![],
+        filter_field: None,
+        filter_value: None,
     };
     assert!(args.addresses.is_empty());
 }

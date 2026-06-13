@@ -366,7 +366,7 @@ async fn poll_hits(node: &DefraClient, want: i64, timeout: Duration) -> bool {
 /// rust<->rust, go<->go, and rust<->go all converge to 90.
 #[tokio::test]
 async fn convergence_concurrent_counter_increments_sum() {
-    let mut cluster = TestCluster::builder()
+    let cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
         .with_store("redb")

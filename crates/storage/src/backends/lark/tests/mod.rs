@@ -341,7 +341,7 @@ async fn low_level_crash_writer_helper() {
 
     for op_idx in 0..max_ops {
         let key = random_crash_key(&mut rng, 10_000);
-        let delete = rng.next_u64() % 10 == 0;
+        let delete = rng.next_u64().is_multiple_of(10);
         let line = if delete {
             let mut txn = store.new_txn(false).await.unwrap();
             txn.delete(&key).await.unwrap();
@@ -388,6 +388,7 @@ async fn verify_synced_shadow_log(db_path: &Path, shadow_path: &Path, synced_ops
     store.close().await.unwrap();
 }
 
+#[allow(clippy::type_complexity)]
 fn replay_synced_shadow_log(
     shadow_path: &Path,
     synced_ops: usize,
