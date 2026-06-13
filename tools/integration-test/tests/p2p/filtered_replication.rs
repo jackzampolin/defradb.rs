@@ -581,6 +581,29 @@ async fn rust_filtered_replicator_rejects_type_mismatch() {
     );
 }
 
+/// G8/F6: the "must be a scalar LWW field" branch of filter validation is
+/// belt-and-suspenders — the schema layer already forbids `@immutable` on any
+/// non-LWW field, so a filter field that passes the `@immutable` check is
+/// necessarily a scalar LWW field. There is therefore no way to construct an
+/// `@immutable` non-LWW field to reach that branch; verify the underlying schema
+/// invariant directly instead.
+#[tokio::test]
+async fn rust_schema_rejects_immutable_non_lww_field() {
+    const COUNTER_SCHEMA: &str =
+        r#"type CounterDoc { hits: Int @crdt(type: "pncounter") @immutable  body: String }"#;
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+
+    let err = cluster
+        .client(0)
+        .schema_add(COUNTER_SCHEMA)
+        .expect_err("@immutable on a non-LWW (counter) field must be rejected by the schema");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("only LWW register fields can be immutable"),
+        "schema rejection should explain @immutable requires an LWW field, got: {msg}"
+    );
+}
+
 // #3 (remote-merge enforcement of `@immutable`) is intentionally NOT an
 // integration-suite test. The guard in `composite_persist.rs` is defense-in-depth
 // against a malicious or divergent peer and is unreachable through two honest
