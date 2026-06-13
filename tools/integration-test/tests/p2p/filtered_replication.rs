@@ -215,9 +215,10 @@ async fn filtered_excludes_nonmatching(cluster: TestCluster) {
         ))
         .expect("create non-matching doc");
 
-    // A SECOND matching doc, created AFTER the non-matching one. Replicator pushes
-    // are ordered, so once this arrives we know the non-matching doc's push slot was
-    // already processed-and-skipped — making its absence conclusive without a sleep.
+    // The non-matching doc is filtered at the SENDER and never pushed, so its
+    // absence is guaranteed by the filter — not by timing. Create a second
+    // matching doc and wait for it so the assertion runs only after the push
+    // pipeline has demonstrably delivered, replacing the earlier wall-clock sleep.
     let matching2 = node0
         .query(&format!(
             r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "selected-2"}}) {{ _docID }} }}"#
@@ -349,6 +350,9 @@ async fn rust_filtered_replication_backfill_respects_filter() {
     )
     .await;
 
+    // The non-matching doc is excluded by the sender-side backfill filter, not by
+    // this window. Backfill is unordered (no "after" anchor like the live-push
+    // tests), so a short settle window remains before asserting absence.
     tokio::time::sleep(ABSENCE_GRACE).await;
     let dids = agent_did_values(&cluster, 1);
     assert_eq!(
@@ -492,8 +496,8 @@ async fn rust_filtered_replication_encrypted_respects_filter() {
         ))
         .expect("create non-matching encrypted doc");
 
-    // Second matching doc created AFTER the non-matching one anchors the
-    // exclusion to ordered delivery rather than a wall-clock window.
+    // The non-matching doc is filtered at the sender and never pushed; the
+    // second matching doc just ensures delivery happened before asserting absence.
     let matching2 = node0
         .query(&format!(
             r#"mutation {{ add_SecretDoc(input: {{agent_did: "{ALICE}", secret: "s2"}}, encryptFields: [secret]) {{ _docID }} }}"#
@@ -715,7 +719,8 @@ async fn rust_filtered_replication_excludes_nonmatching_controlled_mode() {
     node0
         .query_with_identity(&mk(BOB, "b"), &alice.private_key_hex)
         .expect("create non-matching");
-    // Second matching doc after the non-matching one anchors exclusion to ordered delivery.
+    // BOB is filtered at the sender and never pushed; the second matching doc
+    // just ensures the push pipeline has delivered before we assert absence.
     let matching2 = node0
         .query_with_identity(&mk(ALICE, "a2"), &alice.private_key_hex)
         .expect("create second matching");
