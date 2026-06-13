@@ -174,38 +174,55 @@ async fn filtered_excludes_nonmatching(cluster: TestCluster) {
         ))
         .expect("create non-matching doc");
 
-    // The matching document must arrive AND be fully materialized — body
-    // populated proves the full document DAG was delivered (filtered peers
-    // bypass generic Bitswap, so partial delivery would surface here).
+    // A SECOND matching doc, created AFTER the non-matching one. Replicator pushes
+    // are ordered, so once this arrives we know the non-matching doc's push slot was
+    // already processed-and-skipped — making its absence conclusive without a sleep.
+    let matching2 = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "selected-2"}}) {{ _docID }} }}"#
+        ))
+        .expect("create second matching doc");
+    let matching2_id = extract_doc_id(&matching2, "add_AgentDoc");
+
+    // Both matching docs must arrive; the first fully materialized (body present)
+    // proves the full document DAG was delivered (filtered peers bypass Bitswap).
     let node1_for_poll = cluster.client(1);
     let matching_id_poll = matching_id.clone();
+    let matching2_id_poll = matching2_id.clone();
     poll_until(
         || {
             let result = node1_for_poll
                 .query("query { AgentDoc { _docID agent_did body } }")
                 .unwrap_or_default();
-            result["AgentDoc"].as_array().is_some_and(|rows| {
-                rows.iter().any(|r| {
-                    r["_docID"].as_str() == Some(matching_id_poll.as_str())
-                        && r["agent_did"].as_str() == Some(ALICE)
-                        && r["body"].as_str() == Some("selected")
-                })
-            })
+            let Some(rows) = result["AgentDoc"].as_array() else {
+                return false;
+            };
+            let first_full = rows.iter().any(|r| {
+                r["_docID"].as_str() == Some(matching_id_poll.as_str())
+                    && r["agent_did"].as_str() == Some(ALICE)
+                    && r["body"].as_str() == Some("selected")
+            });
+            let second = rows
+                .iter()
+                .any(|r| r["_docID"].as_str() == Some(matching2_id_poll.as_str()));
+            first_full && second
         },
         P2P_TIMEOUT,
         P2P_POLL_INTERVAL,
-        "matching document did not replicate to filtered peer",
+        "both matching documents did not replicate to filtered peer",
     )
     .await;
 
-    // After the matching doc has replicated, the non-matching doc must remain
-    // absent through a grace window.
-    tokio::time::sleep(ABSENCE_GRACE).await;
+    // The non-matching doc must be absent: the peer holds only the two matching docs.
     let dids = agent_did_values(&cluster, 1);
     assert_eq!(
-        dids,
-        vec![ALICE.to_string()],
-        "filtered peer must hold only the matching document, found: {dids:?}"
+        dids.len(),
+        2,
+        "filtered peer must hold exactly the two matching docs, found: {dids:?}"
+    );
+    assert!(
+        dids.iter().all(|d| d == ALICE),
+        "filtered peer must hold only matching documents, found: {dids:?}"
     );
 }
 
@@ -434,32 +451,42 @@ async fn rust_filtered_replication_encrypted_respects_filter() {
         ))
         .expect("create non-matching encrypted doc");
 
+    // Second matching doc created AFTER the non-matching one anchors the
+    // exclusion to ordered delivery rather than a wall-clock window.
+    let matching2 = node0
+        .query(&format!(
+            r#"mutation {{ add_SecretDoc(input: {{agent_did: "{ALICE}", secret: "s2"}}, encryptFields: [secret]) {{ _docID }} }}"#
+        ))
+        .expect("create second matching encrypted doc");
+    let matching2_id = extract_doc_id(&matching2, "add_SecretDoc");
+
     let node1_for_poll = cluster.client(1);
     let matching_id_poll = matching_id.clone();
+    let matching2_id_poll = matching2_id.clone();
     poll_until(
         || {
             let result = node1_for_poll
                 .query("query { SecretDoc { _docID } }")
                 .unwrap_or_default();
-            result["SecretDoc"].as_array().is_some_and(|rows| {
-                rows.iter()
-                    .any(|r| r["_docID"].as_str() == Some(matching_id_poll.as_str()))
-            })
+            let Some(rows) = result["SecretDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&matching_id_poll.as_str()) && ids.contains(&matching2_id_poll.as_str())
         },
         P2P_TIMEOUT,
         P2P_POLL_INTERVAL,
-        "matching encrypted document did not replicate to filtered peer",
+        "matching encrypted documents did not replicate to filtered peer",
     )
     .await;
 
-    tokio::time::sleep(ABSENCE_GRACE).await;
     let result = node1
         .query("query { SecretDoc { _docID } }")
         .expect("query SecretDoc on node1");
     let count = result["SecretDoc"].as_array().map(Vec::len).unwrap_or(0);
     assert_eq!(
-        count, 1,
-        "filtered peer must hold only the matching encrypted document"
+        count, 2,
+        "filtered peer must hold only the two matching encrypted documents"
     );
 }
 
