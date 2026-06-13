@@ -1770,6 +1770,163 @@ mod tests {
         );
     }
 
+    /// A remotely-deleted document still retains its bytes (handle_deletion only
+    /// sets the marker), so a later merge that re-materializes it must NOT be able
+    /// to change an immutable field via delete+recreate. Without the
+    /// deleted-inclusive baseline read, get_with_datastore returns None and the
+    /// check is skipped.
+    #[tokio::test]
+    async fn remote_merge_rejects_immutable_change_after_delete() {
+        let (handler, blockstore) = make_handler_with_immutable_schema().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-agentdocs")
+            .unwrap()
+            .expect("agentdocs collection should exist");
+
+        let mut doc = Document::new();
+        doc.set(
+            "agent_did",
+            NormalValue::String("did:key:alice".to_string()),
+        );
+        doc.set("body", NormalValue::String("v1".to_string()));
+        doc.generate_and_set_doc_id().unwrap();
+        doc.set_schema_version_id("v1");
+        let doc_id = doc.id().unwrap().clone();
+        let doc_id_str = doc_id.to_string();
+
+        let create_blocks = {
+            let txn = handler.db.new_txn(false).await.unwrap();
+            let blocks = {
+                let datastore = txn.datastore().unwrap();
+                let headstore = txn.headstore().unwrap();
+                let raw_blockstore = txn.blockstore().unwrap();
+                collection
+                    .save_with_datastore(&datastore, &doc)
+                    .await
+                    .unwrap();
+                db_blocks::write_document_blocks(
+                    &raw_blockstore,
+                    &headstore,
+                    &doc,
+                    "v1",
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            };
+            txn.force_commit().await.unwrap();
+            blocks
+        };
+
+        // Remote deletion (status = 2): sets the deleted marker, retains bytes.
+        let delete_payload = CompositeDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 2,
+            status: 2,
+        };
+        let delete_block = Block::new(
+            CrdtDelta::Composite(delete_payload.clone()),
+            vec![create_blocks.cid],
+            vec![],
+        );
+        let delete_cid = delete_block.generate_cid().unwrap();
+        blockstore
+            .put(&delete_cid, &delete_block.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        let delete_meta = BlockMetadata::normal(
+            &doc_id_str,
+            "col-agentdocs",
+            "did:key:z6MkrDeleter",
+            None,
+            false,
+        );
+        let delete_outcome = handler
+            .process_composite_delta(
+                &delete_cid,
+                &delete_block,
+                &delete_payload,
+                &delete_meta,
+                false,
+                0,
+            )
+            .await
+            .expect("delete merge");
+        assert_eq!(delete_outcome, MergeOutcome::Merged);
+
+        // Remote re-materialize with a CHANGED immutable field (priority 3).
+        let mut update_data = Vec::new();
+        ciborium::into_writer(
+            &NormalValue::String("did:key:bob".to_string()),
+            &mut update_data,
+        )
+        .unwrap();
+        let recreate_field_payload = LwwDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            field_name: "agent_did".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 3,
+            data: update_data,
+        };
+        let recreate_field_block = Block::new(
+            CrdtDelta::Lww(recreate_field_payload),
+            create_blocks.field_cids.clone(),
+            vec![],
+        );
+        let recreate_field_cid = recreate_field_block.generate_cid().unwrap();
+        blockstore
+            .put(
+                &recreate_field_cid,
+                &recreate_field_block.to_dag_cbor().unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let recreate_payload = CompositeDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 3,
+            status: 1,
+        };
+        let recreate_block = Block::new(
+            CrdtDelta::Composite(recreate_payload.clone()),
+            vec![delete_cid],
+            vec![DAGLink::new("agent_did", recreate_field_cid)],
+        );
+        let recreate_cid = recreate_block.generate_cid().unwrap();
+        blockstore
+            .put(&recreate_cid, &recreate_block.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        let recreate_meta = BlockMetadata::normal(
+            &doc_id_str,
+            "col-agentdocs",
+            "did:key:z6MkrRecreator",
+            None,
+            false,
+        );
+        let outcome = handler
+            .process_composite_delta(
+                &recreate_cid,
+                &recreate_block,
+                &recreate_payload,
+                &recreate_meta,
+                false,
+                0,
+            )
+            .await
+            .expect("an immutable rejection is a terminal skip, not a hard error");
+        assert!(
+            outcome.is_terminal_skip(),
+            "re-materializing a deleted doc with a changed immutable field must be rejected, got {outcome:?}"
+        );
+    }
+
     #[tokio::test]
     async fn composite_lww_reseeds_from_local_doc_when_crdt_store_is_stale() {
         let (handler, blockstore, _bus) = make_handler_with_schema_and_bus().await;

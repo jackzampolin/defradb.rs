@@ -73,9 +73,22 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
-        if let Some(old_doc) = old_doc.as_ref() {
+        // Enforce @immutable even when the prior version is logically deleted:
+        // get_with_datastore returns None for a deleted doc, so a delete+recreate
+        // would otherwise bypass the check and re-materialize with a changed
+        // immutable field. Recover the prior value via the deleted-inclusive read.
+        let immutable_baseline = match old_doc.as_ref() {
+            Some(old_doc) => Some(old_doc.clone()),
+            None => collection
+                .get_with_datastore_include_deleted(datastore, &doc_id, false)
+                .await
+                .ok()
+                .flatten()
+                .map(|(prior, _)| prior),
+        };
+        if let Some(baseline) = immutable_baseline.as_ref() {
             collection
-                .validate_immutable_fields_unchanged(old_doc, &doc)
+                .validate_immutable_fields_unchanged(baseline, &doc)
                 .map_err(|e| MergeError::ImmutableFieldChanged(e.to_string()))?;
         }
 
