@@ -87,6 +87,18 @@ fn add_filtered_replicator(
     );
 }
 
+/// Run a GraphQL query/mutation over the CLI and return the raw process output,
+/// so a test can observe error payloads the typed `query()` helper discards.
+fn run_query(cluster: &TestCluster, node: usize, gql: &str) -> std::process::Output {
+    let client = cluster.client(node);
+    Command::new(client.binary_path())
+        .arg("--url")
+        .arg(socket_addr(cluster, node))
+        .args(["client", "query", gql])
+        .output()
+        .expect("exec query")
+}
+
 fn agent_did_values(cluster: &TestCluster, node: usize) -> Vec<String> {
     let result = cluster
         .client(node)
@@ -309,12 +321,25 @@ async fn rust_immutable_field_rejects_local_update() {
     ))
     .expect("update body should succeed");
 
-    // Rejected: mutate the immutable field. The CLI may surface this as a
-    // non-zero exit or a GraphQL error payload — either way the stored value
-    // must be unchanged, which is the invariant we assert.
-    let _ = node.query(&format!(
-        r#"mutation {{ update_AgentDoc(docID: "{doc_id}", input: {{agent_did: "{BOB}"}}) {{ _docID }} }}"#
-    ));
+    // Rejected: mutate the immutable field. Observe the rejection directly from
+    // the raw CLI output so a regression into silently DROPPING the field (a
+    // no-op that also leaves the value unchanged) cannot pass this test.
+    let rejected = run_query(
+        &cluster,
+        0,
+        &format!(
+            r#"mutation {{ update_AgentDoc(docID: "{doc_id}", input: {{agent_did: "{BOB}"}}) {{ _docID }} }}"#
+        ),
+    );
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(
+        output.contains("immutable"),
+        "immutable update must surface an error mentioning the immutable field, got: {output}"
+    );
 
     let after = node
         .query("query { AgentDoc { agent_did body } }")
