@@ -82,9 +82,11 @@ fn to_mutate_op(op: RemoteManageOp) -> ManageMutateOp {
         RemoteManageOp::ReplicatorAdd {
             addresses,
             collection_ids,
+            filters,
         } => ManageMutateOp::ReplicatorAdd {
             addresses,
             collection_ids,
+            filters: http_filters_to_p2p(filters),
         },
         RemoteManageOp::ReplicatorDelete {
             addresses,
@@ -107,6 +109,19 @@ fn to_mutate_op(op: RemoteManageOp) -> ManageMutateOp {
         },
         RemoteManageOp::PeerConnect { address } => ManageMutateOp::PeerConnect { address },
     }
+}
+
+fn http_filters_to_p2p(filters: defra_http::router::ReplicationFilters) -> p2p::ReplicationFilters {
+    filters
+        .into_iter()
+        .map(|(key, f)| {
+            let pf = match f.conditions {
+                Some(conds) => p2p::ReplicationFilter::predicate(conds),
+                None => p2p::ReplicationFilter::new(f.field, f.value),
+            };
+            (key, pf)
+        })
+        .collect()
 }
 
 fn to_doc_ref(doc: RemoteManageDocRef) -> ManageDocRef {

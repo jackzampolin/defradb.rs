@@ -209,7 +209,7 @@ fn json_scalar_eq(a: &JsonValue, b: &JsonValue) -> bool {
 
 pub type ReplicationFilters = BTreeMap<String, ReplicationFilter>;
 
-fn no_replication_filters(filters: &ReplicationFilters) -> bool {
+pub(crate) fn no_replication_filters(filters: &ReplicationFilters) -> bool {
     filters.is_empty()
 }
 

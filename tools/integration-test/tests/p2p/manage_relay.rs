@@ -18,7 +18,7 @@ use serial_test::serial;
 
 use crate::manage_relay_common::{peer_id_of, post_manage, post_manage_query};
 
-const SCHEMA: &str = "type User { name: String  age: Int }";
+const SCHEMA: &str = "type User { name: String @immutable  age: Int }";
 
 /// Bring up a NAC-enabled 2-node libp2p cluster, deploy the `User` schema on
 /// node B, and return the admin key plus node B's peer-id and dial address.
@@ -424,6 +424,79 @@ async fn manage_replicator_add_and_list_over_p2p() {
         assert!(
             Instant::now() < deadline,
             "node B did not report the added replicator over the relay"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// A relayed `ReplicatorAdd` that carries a rich filter must PRESERVE the filter
+/// end-to-end: the `ReplicatorList` reply over the same relay shows the replicator
+/// WITH a non-empty `filters`. Guards the manage-channel filter-drop regression.
+#[tokio::test]
+#[serial]
+async fn manage_replicator_add_preserves_filter() {
+    let (cluster, admin_key, addr_b, peer_id_b) = setup().await;
+    let api_a = cluster.api_url(0).to_string();
+
+    // Node A's listen address: B will replicate the User collection back to A.
+    let node_a = cluster.client(0);
+    let info_a = node_a
+        .p2p_info_with_identity(&admin_key)
+        .expect("p2p_info node A");
+    let addr_a = info_a
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .expect("node A has no P2P address")
+        .to_string();
+
+    let token = crate::manage_relay_common::mint_manage_token(&admin_key, &peer_id_b);
+
+    let status = post_manage(
+        &api_a,
+        &admin_key,
+        &addr_b,
+        &token,
+        json!({
+            "Kind": "ReplicatorAdd",
+            "addresses": [addr_a],
+            "collection_ids": ["User"],
+            "filters": { "User": { "Conditions": { "name": { "_eq": "keep" } } } },
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "authorized filtered ReplicatorAdd relay should return 200"
+    );
+
+    // ReplicatorList over the relay must reflect the replicator WITH its filter.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, body) = post_manage_query(
+            &api_a,
+            &admin_key,
+            &addr_b,
+            &token,
+            json!({ "Kind": "ReplicatorList" }),
+        )
+        .await;
+        if status == StatusCode::OK && replicator_list_nonempty(&body) {
+            assert_eq!(
+                body["Kind"], "Replicators",
+                "ReplicatorList must return a typed Replicators result, got {body}"
+            );
+            let filters = &body["replicators"][0]["filters"];
+            assert!(
+                filters.as_object().map(|m| !m.is_empty()).unwrap_or(false),
+                "relayed replicator must retain a non-empty filter, got {body}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node B did not report the filtered replicator over the relay"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }

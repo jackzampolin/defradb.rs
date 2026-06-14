@@ -245,6 +245,8 @@ pub enum RemoteManageOp {
     ReplicatorAdd {
         addresses: Vec<String>,
         collection_ids: Vec<String>,
+        #[serde(default)]
+        filters: ReplicationFilters,
     },
     ReplicatorDelete {
         addresses: Vec<String>,

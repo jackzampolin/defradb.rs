@@ -6,7 +6,9 @@
 //! operation via NAC.
 
 use clap::{Args, Subcommand};
-use defra_http::router::{RemoteManageDocRef, RemoteManageOp, RemoteManageQueryOp};
+use defra_http::router::{
+    RemoteManageDocRef, RemoteManageOp, RemoteManageQueryOp, ReplicationFilter, ReplicationFilters,
+};
 
 use crate::commands::client::http_client::HttpClient;
 use crate::commands::client::http_client::{mint_manage_token, ManageQueryResultResponse};
@@ -267,6 +269,10 @@ pub struct ManageReplicatorMutateArgs {
     /// Collection ID(s) to replicate
     #[arg(value_name = "COLLECTION_IDS", required = true)]
     pub collection_ids: Vec<String>,
+
+    /// Optional rich replication filter (JSON conditions object), applied to all listed collections.
+    #[arg(long, value_name = "json")]
+    pub filter: Option<String>,
 }
 
 impl P2pManageReplicatorArgs {
@@ -304,6 +310,7 @@ impl ManageReplicatorMutateArgs {
             RemoteManageOp::ReplicatorAdd {
                 addresses,
                 collection_ids: self.collection_ids.clone(),
+                filters: self.build_filters()?,
             }
         } else {
             RemoteManageOp::ReplicatorDelete {
@@ -321,6 +328,25 @@ impl ManageReplicatorMutateArgs {
             self.collection_ids.join(", ")
         );
         Ok(())
+    }
+
+    fn build_filters(&self) -> Result<ReplicationFilters> {
+        let Some(raw) = self.filter.as_deref() else {
+            return Ok(ReplicationFilters::new());
+        };
+        let value: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|e| Error::InvalidConfig(format!("--filter is not valid JSON: {e}")))?;
+        let conds = value
+            .as_object()
+            .ok_or_else(|| {
+                Error::InvalidConfig("--filter must be a JSON object of conditions".to_string())
+            })?
+            .clone();
+        Ok(self
+            .collection_ids
+            .iter()
+            .map(|c| (c.clone(), ReplicationFilter::predicate(conds.clone())))
+            .collect())
     }
 }
 

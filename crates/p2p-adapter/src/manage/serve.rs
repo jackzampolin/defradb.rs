@@ -92,14 +92,16 @@ async fn authorize_and_apply(
             ManageMutateOp::ReplicatorAdd {
                 addresses,
                 collection_ids,
+                filters,
             } => {
                 if addresses.len() > 1 {
                     return Err("replicator add supports at most one address".to_string());
                 }
+                let http_filters = p2p_filters_to_http(filters)?;
                 ops.add_replicator(
                     collection_ids.clone(),
                     addresses.first().map(|s| s.as_str()),
-                    Default::default(),
+                    http_filters,
                     vec![],
                     Some(did_str.as_str()),
                 )
@@ -142,6 +144,28 @@ async fn authorize_and_apply(
         }
     })
     .await
+}
+
+fn p2p_filters_to_http(
+    filters: &p2p::ReplicationFilters,
+) -> Result<defra_http::router::ReplicationFilters, String> {
+    let mut out = defra_http::router::ReplicationFilters::new();
+    for (key, f) in filters {
+        match f {
+            p2p::ReplicationFilter::Predicate(map) => {
+                out.insert(
+                    key.clone(),
+                    defra_http::router::ReplicationFilter::predicate(map.clone()),
+                );
+            }
+            _ => {
+                return Err(format!(
+                    "replication filter for collection '{key}' uses a form unsupported over the manage relay"
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn to_doc_reqs(docs: &[ManageDocRef]) -> Vec<P2pDocumentRequest> {
@@ -253,11 +277,17 @@ mod tests {
     use p2p::message::Message;
     use std::sync::Mutex;
 
+    type RecordedReplicator = (
+        Vec<String>,
+        Option<String>,
+        defra_http::router::ReplicationFilters,
+    );
+
     /// Records mutating calls so tests can prove no side effect occurred.
     struct MockOps {
         peer_id: String,
         added_collections: Mutex<Vec<String>>,
-        added_replicators: Mutex<Vec<(Vec<String>, Option<String>)>>,
+        added_replicators: Mutex<Vec<RecordedReplicator>>,
     }
 
     impl MockOps {
@@ -273,7 +303,7 @@ mod tests {
             self.added_collections.lock().unwrap().clone()
         }
 
-        fn added_replicators(&self) -> Vec<(Vec<String>, Option<String>)> {
+        fn added_replicators(&self) -> Vec<RecordedReplicator> {
             self.added_replicators.lock().unwrap().clone()
         }
     }
@@ -299,14 +329,15 @@ mod tests {
             &self,
             collections: Vec<String>,
             addr: Option<&str>,
-            _filters: defra_http::router::ReplicationFilters,
+            filters: defra_http::router::ReplicationFilters,
             _explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
             _expected_authorizer_did: Option<&str>,
         ) -> P2PResult<()> {
-            self.added_replicators
-                .lock()
-                .unwrap()
-                .push((collections, addr.map(|s| s.to_string())));
+            self.added_replicators.lock().unwrap().push((
+                collections,
+                addr.map(|s| s.to_string()),
+                filters,
+            ));
             Ok(())
         }
         async fn remove_replicator(
@@ -507,6 +538,7 @@ mod tests {
                     "/ip4/2.2.2.2/tcp/9000".into(),
                 ],
                 collection_ids: vec!["c1".into()],
+                filters: Default::default(),
             },
             token,
         );
@@ -531,6 +563,7 @@ mod tests {
             ManageMutateOp::ReplicatorAdd {
                 addresses: vec!["/ip4/1.1.1.1/tcp/9000".into()],
                 collection_ids: vec!["c1".into()],
+                filters: Default::default(),
             },
             token,
         );
@@ -540,8 +573,43 @@ mod tests {
             ops.added_replicators(),
             vec![(
                 vec!["c1".to_string()],
-                Some("/ip4/1.1.1.1/tcp/9000".to_string())
+                Some("/ip4/1.1.1.1/tcp/9000".to_string()),
+                defra_http::router::ReplicationFilters::new()
             )]
+        );
+    }
+
+    #[tokio::test]
+    async fn replicator_add_forwards_filters() {
+        let ops = MockOps::new("12D3KooW-THIS");
+        let token = crate::manage::auth::mint_token_for("12D3KooW-THIS").0;
+        let mut conds = serde_json::Map::new();
+        conds.insert(
+            "agent_did".to_string(),
+            serde_json::json!({ "_eq": "did:key:alice" }),
+        );
+        let mut filters = p2p::ReplicationFilters::new();
+        filters.insert("User".to_string(), p2p::ReplicationFilter::predicate(conds));
+        let req = ManageRequest::new(
+            ManageMutateOp::ReplicatorAdd {
+                addresses: vec!["/ip4/1.1.1.1/tcp/9000".into()],
+                collection_ids: vec!["User".into()],
+                filters,
+            },
+            token,
+        );
+        let reply = build_manage_reply(&ops, &BoolNac(true), req).await;
+        assert_eq!(reply.err_message(), None);
+        let recorded = ops.added_replicators();
+        assert_eq!(recorded.len(), 1);
+        let (_collections, _addr, http_filters) = &recorded[0];
+        assert!(
+            !http_filters.is_empty(),
+            "relayed filters must reach add_replicator non-empty"
+        );
+        assert!(
+            http_filters.contains_key("User"),
+            "the User collection filter must survive the relay"
         );
     }
 }
