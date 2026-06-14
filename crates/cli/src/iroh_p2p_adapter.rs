@@ -40,7 +40,12 @@ fn p2p_filter_to_http(
                 conds.clone(),
             ))
         }
-        p2p::ReplicationFilter::Acp { .. } | p2p::ReplicationFilter::All(_) => None,
+        p2p::ReplicationFilter::Acp { .. } | p2p::ReplicationFilter::All(_) => {
+            tracing::warn!(
+                "replication filter variant not representable over HTTP yet; omitted from replicator listing"
+            );
+            None
+        }
     }
 }
 

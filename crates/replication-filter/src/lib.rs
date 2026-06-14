@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Mutex;
 
 use p2p::{ReplicationFilter, ReplicationFilterMatcher};
@@ -125,10 +124,10 @@ fn validate_op(
 
 /// Evaluates replication filters using the DefraDB query filter engine.
 ///
-/// Parsed [`Filter`] objects are cached by a hash of the conditions JSON so
-/// re-parsing is avoided when the same predicate is applied to many documents.
+/// Parsed [`Filter`] objects are cached by the canonical JSON of the conditions
+/// so re-parsing is avoided when the same predicate is applied to many documents.
 pub struct QueryReplicationFilterMatcher {
-    cache: Mutex<HashMap<u64, Filter>>,
+    cache: Mutex<HashMap<String, Filter>>,
 }
 
 impl QueryReplicationFilterMatcher {
@@ -141,9 +140,12 @@ impl QueryReplicationFilterMatcher {
     fn eval(&self, filter: &ReplicationFilter, document: &serde_json::Value) -> bool {
         match filter {
             ReplicationFilter::Predicate(conds) => {
-                let key = hash_conditions(conds);
+                let key = serde_json::to_string(conds).unwrap_or_default();
                 let parsed = {
                     let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                    if cache.len() >= 256 {
+                        cache.clear();
+                    }
                     cache
                         .entry(key)
                         .or_insert_with(|| Filter::from_conditions(conds.clone()))
@@ -172,14 +174,6 @@ impl ReplicationFilterMatcher for QueryReplicationFilterMatcher {
     ) -> bool {
         self.eval(filter, document)
     }
-}
-
-fn hash_conditions(conds: &serde_json::Map<String, serde_json::Value>) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    serde_json::to_string(conds)
-        .unwrap_or_default()
-        .hash(&mut hasher);
-    hasher.finish()
 }
 
 #[cfg(test)]
@@ -281,6 +275,19 @@ mod tests {
             relation: "owner".to_string(),
         };
         let err = validate_replication_filter(&fields, "col", &filter).unwrap_err();
+        assert!(
+            err.contains("not yet implemented"),
+            "expected not yet implemented error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn acp_filter_rejected_for_agent_doc_collection() {
+        let fields = test_fields();
+        let filter = ReplicationFilter::Acp {
+            relation: "reader".to_string(),
+        };
+        let err = validate_replication_filter(&fields, "AgentDoc", &filter).unwrap_err();
         assert!(
             err.contains("not yet implemented"),
             "expected not yet implemented error, got: {err}"

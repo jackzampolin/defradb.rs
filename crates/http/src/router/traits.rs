@@ -13,9 +13,13 @@ pub type ReplicationFilters = std::collections::BTreeMap<String, ReplicationFilt
 /// When `conditions` is present it takes precedence over `field`/`value`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReplicationFilter {
-    #[serde(rename = "Field", default)]
+    #[serde(rename = "Field", default, skip_serializing_if = "String::is_empty")]
     pub field: String,
-    #[serde(rename = "Value", default)]
+    #[serde(
+        rename = "Value",
+        default,
+        skip_serializing_if = "serde_json::Value::is_null"
+    )]
     pub value: serde_json::Value,
     /// Full query-filter conditions object for rich predicates (IN, composite, etc.).
     /// When present, `field`/`value` are ignored during conversion.

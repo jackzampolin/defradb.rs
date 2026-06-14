@@ -1094,12 +1094,13 @@ async fn rust_filtered_replicator_rejects_predicate_non_immutable_field() {
     );
 }
 
-/// The HTTP wire format cannot express the internal `Acp` variant of
-/// `p2p::ReplicationFilter` — `ReplicationFilter` carries only `Field`, `Value`,
-/// and `Conditions`. Sending an unknown key produces a filter where `Field` is
-/// empty and `Conditions` is None, which the adapter rejects with 4xx.
+/// A filter with an empty `Field` and no `Conditions` is structurally invalid
+/// over HTTP. The adapter rejects it with a 4xx before any P2P dial is attempted.
+/// (The internal `Acp` variant of `p2p::ReplicationFilter` cannot be expressed
+/// over the HTTP wire format at all; see the `replication-filter` unit tests for
+/// that coverage.)
 #[tokio::test]
-async fn rust_filtered_replicator_rejects_acp_variant() {
+async fn rust_filtered_replicator_rejects_empty_field_over_http() {
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .with_p2p()
