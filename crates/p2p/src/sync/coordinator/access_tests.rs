@@ -146,6 +146,7 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
             rate_limiter,
             push_send_timeout: DEFAULT_PUSH_SEND_TIMEOUT,
             shutdown: SyncShutdownHandle::new(),
+            filter_matcher: Arc::new(crate::replicator::EqOnlyFilterMatcher),
         },
         manager,
         access: SyncAccessState {

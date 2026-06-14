@@ -30,6 +30,12 @@ pub enum ManageMutateOp {
         addresses: Vec<String>,
         #[serde(rename = "CollectionIDs", default)]
         collection_ids: Vec<String>,
+        #[serde(
+            rename = "Filters",
+            default,
+            skip_serializing_if = "crate::replicator::no_replication_filters"
+        )]
+        filters: crate::replicator::ReplicationFilters,
     },
     ReplicatorDelete {
         #[serde(rename = "Addresses", default)]
@@ -612,6 +618,7 @@ mod tests {
             ManageMutateOp::ReplicatorAdd {
                 addresses: vec![],
                 collection_ids: vec![],
+                filters: Default::default(),
             }
             .permission(),
             P::P2pReplicatorAdd

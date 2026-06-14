@@ -112,6 +112,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             filters,
             se_key,
             se_identity_pubkey,
+            &replication_filter::QueryReplicationFilterMatcher::new(),
         )
         .await
         .map_err(P2PError::from)
@@ -154,35 +155,12 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
                 .ok_or_else(|| {
                     P2PError::not_found(format!("collection '{collection_id}' not found"))
                 })?;
-            let field = collection
-                .schema()
-                .fields
-                .iter()
-                .find(|field| field.name == filter.field)
-                .ok_or_else(|| {
-                    P2PError::invalid_input(format!(
-                        "replication filter field '{}' not found in collection '{}'",
-                        filter.field, collection_id
-                    ))
-                })?;
-            if !field.immutable {
-                return Err(P2PError::invalid_input(format!(
-                    "replication filter field '{}' in collection '{}' must be marked @immutable",
-                    filter.field, collection_id
-                )));
-            }
-            if field.crdt_type != schema::CType::LwwRegister || !field.kind.is_scalar() {
-                return Err(P2PError::invalid_input(format!(
-                    "replication filter field '{}' in collection '{}' must be a scalar LWW field",
-                    filter.field, collection_id
-                )));
-            }
-            if !field.kind.accepts_filter_value(&filter.value) {
-                return Err(P2PError::invalid_input(format!(
-                    "replication filter value for field '{}' in collection '{}' does not match the field type",
-                    filter.field, collection_id
-                )));
-            }
+            replication_filter::validate_replication_filter(
+                &collection.schema().fields,
+                collection_id,
+                filter,
+            )
+            .map_err(P2PError::invalid_input)?;
         }
         Ok(())
     }
@@ -330,6 +308,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             doc_id,
             collection_id,
             &filters,
+            &replication_filter::QueryReplicationFilterMatcher::new(),
         )
         .await
         .map_err(P2PError::from)

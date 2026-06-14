@@ -136,16 +136,21 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
     ) -> P2PResult<p2p::ReplicationFilters> {
         let mut resolved = p2p::ReplicationFilters::new();
         for (key, filter) in filters {
-            if filter.field.trim().is_empty() {
-                return Err(P2PError::invalid_input(
-                    "replication filter field cannot be empty",
-                ));
-            }
-            if filter.value.is_null() || filter.value.is_array() || filter.value.is_object() {
-                return Err(P2PError::invalid_input(format!(
-                    "replication filter for collection '{key}' must use a scalar value"
-                )));
-            }
+            let p2p_filter = if let Some(conds) = filter.conditions {
+                p2p::ReplicationFilter::predicate(conds)
+            } else {
+                if filter.field.trim().is_empty() {
+                    return Err(P2PError::invalid_input(
+                        "replication filter field cannot be empty",
+                    ));
+                }
+                if filter.value.is_null() || filter.value.is_array() || filter.value.is_object() {
+                    return Err(P2PError::invalid_input(format!(
+                        "replication filter for collection '{key}' must use a scalar value"
+                    )));
+                }
+                p2p::ReplicationFilter::new(filter.field, filter.value)
+            };
 
             let collection_id = collection_cids
                 .iter()
@@ -163,10 +168,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
                     ))
                 })?;
 
-            resolved.insert(
-                collection_id,
-                p2p::ReplicationFilter::new(filter.field, filter.value),
-            );
+            resolved.insert(collection_id, p2p_filter);
         }
         Ok(resolved)
     }

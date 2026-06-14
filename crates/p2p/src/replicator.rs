@@ -48,43 +48,149 @@ pub enum ReplicatorStatus {
     Inactive = 1,
 }
 
-/// Per-collection equality predicate for filtered replication.
-///
-/// This is intentionally narrow for the first filtered-replication release:
-/// a document is selected when its materialized JSON contains `Field` with
-/// exactly `Value`. The full within-document DAG is still replicated for
-/// selected documents.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ReplicationFilter {
-    #[serde(rename = "Field")]
-    pub field: String,
-
-    #[serde(rename = "Value")]
-    pub value: JsonValue,
+/// Per-collection filter for filtered replication.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReplicationFilter {
+    /// A DefraDB query-filter conditions map, e.g. `{"agent_did": {"_eq": "did:a"}}`.
+    Predicate(serde_json::Map<String, JsonValue>),
+    /// Deferred ACP-based filter (not evaluated in p2p; reserved for future use).
+    Acp { relation: String },
+    /// AND-composition of sub-filters.
+    All(Vec<ReplicationFilter>),
 }
 
 impl Eq for ReplicationFilter {}
 
-impl ReplicationFilter {
-    pub fn new(field: impl Into<String>, value: JsonValue) -> Self {
-        Self {
-            field: field.into(),
-            value,
-        }
-    }
+/// Tagged serde representation for new-format filters.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReplicationFilterTagged {
+    Predicate(serde_json::Map<String, JsonValue>),
+    Acp { relation: String },
+    All(Vec<ReplicationFilter>),
+}
 
-    pub fn matches_json_object(&self, document: &JsonValue) -> bool {
-        document
-            .as_object()
-            .and_then(|object| object.get(&self.field))
-            .is_some_and(|value| json_scalar_eq(value, &self.value))
+/// Legacy wire shape: `{"Field": "...", "Value": ...}`.
+#[derive(Deserialize)]
+struct LegacyFilter {
+    #[serde(rename = "Field")]
+    field: String,
+    #[serde(rename = "Value")]
+    value: JsonValue,
+}
+
+impl From<&ReplicationFilter> for ReplicationFilterTagged {
+    fn from(f: &ReplicationFilter) -> Self {
+        match f {
+            ReplicationFilter::Predicate(m) => ReplicationFilterTagged::Predicate(m.clone()),
+            ReplicationFilter::Acp { relation } => ReplicationFilterTagged::Acp {
+                relation: relation.clone(),
+            },
+            ReplicationFilter::All(v) => ReplicationFilterTagged::All(v.clone()),
+        }
     }
 }
 
-/// Equality for filter matching. Numbers are compared numerically so a filter
-/// value of `2.0` matches a field materialized as the integer `2` (Go-compatible
-/// JSON encodes whole-number floats as integers), which raw `serde_json::Value`
-/// equality treats as unequal.
+impl Serialize for ReplicationFilter {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        ReplicationFilterTagged::from(self).serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReplicationFilter {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = JsonValue::deserialize(d)?;
+        if v.as_object()
+            .map(|o| o.contains_key("Field"))
+            .unwrap_or(false)
+        {
+            let legacy: LegacyFilter =
+                serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+            Ok(ReplicationFilter::eq(legacy.field, legacy.value))
+        } else {
+            let tagged: ReplicationFilterTagged =
+                serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+            Ok(match tagged {
+                ReplicationFilterTagged::Predicate(m) => ReplicationFilter::Predicate(m),
+                ReplicationFilterTagged::Acp { relation } => ReplicationFilter::Acp { relation },
+                ReplicationFilterTagged::All(v) => ReplicationFilter::All(v),
+            })
+        }
+    }
+}
+
+impl ReplicationFilter {
+    /// Create a legacy-compatible equality filter. Normalizes to `Predicate({field: {_eq: value}})`.
+    pub fn new(field: impl Into<String>, value: JsonValue) -> Self {
+        Self::eq(field, value)
+    }
+
+    /// Create a simple equality predicate filter.
+    pub fn eq(field: impl Into<String>, value: JsonValue) -> Self {
+        let mut conds = serde_json::Map::new();
+        let mut op = serde_json::Map::new();
+        op.insert("_eq".to_string(), value);
+        conds.insert(field.into(), JsonValue::Object(op));
+        Self::Predicate(conds)
+    }
+
+    /// Create a predicate filter directly from a conditions map.
+    pub fn predicate(conditions: serde_json::Map<String, JsonValue>) -> Self {
+        Self::Predicate(conditions)
+    }
+}
+
+/// Evaluates a [`ReplicationFilter`] against a materialized document JSON object.
+pub trait ReplicationFilterMatcher: Send + Sync {
+    fn matches(
+        &self,
+        collection_id: &str,
+        filter: &ReplicationFilter,
+        document: &JsonValue,
+    ) -> bool;
+}
+
+/// Default matcher that handles only the simple `{field: {"_eq": value}}` predicate shape.
+///
+/// Handles `Predicate` (single `_eq` per field), `All` (all sub-filters must match),
+/// `Acp` → always false (not evaluated in p2p).
+pub struct EqOnlyFilterMatcher;
+
+impl ReplicationFilterMatcher for EqOnlyFilterMatcher {
+    fn matches(
+        &self,
+        _collection_id: &str,
+        filter: &ReplicationFilter,
+        document: &JsonValue,
+    ) -> bool {
+        match filter {
+            ReplicationFilter::Predicate(conds) => {
+                let Some(obj) = document.as_object() else {
+                    return false;
+                };
+                conds.iter().all(|(field, condition)| {
+                    let Some(op_map) = condition.as_object() else {
+                        return false;
+                    };
+                    let Some(field_val) = obj.get(field) else {
+                        return false;
+                    };
+                    op_map
+                        .get("_eq")
+                        .is_some_and(|expected| json_scalar_eq(field_val, expected))
+                })
+            }
+            ReplicationFilter::All(filters) => filters
+                .iter()
+                .all(|f| self.matches(_collection_id, f, document)),
+            ReplicationFilter::Acp { .. } => false,
+        }
+    }
+}
+
+/// Numbers are compared numerically so a filter value of `2.0` matches a field
+/// materialized as the integer `2` (Go-compatible JSON encodes whole-number
+/// floats as integers), which raw `serde_json::Value` equality treats as unequal.
 fn json_scalar_eq(a: &JsonValue, b: &JsonValue) -> bool {
     match (a, b) {
         (JsonValue::Number(x), JsonValue::Number(y)) => {
@@ -103,7 +209,7 @@ fn json_scalar_eq(a: &JsonValue, b: &JsonValue) -> bool {
 
 pub type ReplicationFilters = BTreeMap<String, ReplicationFilter>;
 
-fn no_replication_filters(filters: &ReplicationFilters) -> bool {
+pub(crate) fn no_replication_filters(filters: &ReplicationFilters) -> bool {
     filters.is_empty()
 }
 
@@ -306,10 +412,16 @@ impl ReplicatorInfo {
         self.filters.get(collection_id)
     }
 
-    pub fn matches_filter(&self, collection_id: &str, document: &JsonValue) -> bool {
-        self.filter_for_collection(collection_id)
-            .map(|filter| filter.matches_json_object(document))
-            .unwrap_or(true)
+    pub fn matches_filter(
+        &self,
+        matcher: &dyn ReplicationFilterMatcher,
+        collection_id: &str,
+        document: &JsonValue,
+    ) -> bool {
+        match self.filters.get(collection_id) {
+            Some(filter) => matcher.matches(collection_id, filter, document),
+            None => true,
+        }
     }
 
     /// Get the peer ID. Returns `None` if the stored ID is not a valid libp2p PeerId.

@@ -40,6 +40,7 @@ members = [
     "crates/wasm",
     "crates/pg-compat",
     "crates/defra-node",
+    "crates/replication-filter",
     "crates/telemetry",
     "tools/lens-host",
     "tools/ffi-test",

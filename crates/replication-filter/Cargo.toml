@@ -1,0 +1,19 @@
+[package]
+name = "replication-filter"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Query-filter-backed replication filter matcher shared between cli and embedded"
+
+[dependencies]
+p2p = { path = "../p2p" }
+query = { path = "../query" }
+schema = { path = "../schema" }
+
+serde_json.workspace = true
+
+[lints]
+workspace = true

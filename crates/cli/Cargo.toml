@@ -29,6 +29,7 @@ p2p = { path = "../p2p", features = ["libp2p-transport"] }
 defra-p2p-adapter = { path = "../p2p-adapter", default-features = false, features = ["libp2p"] }
 defra-http = { path = "../http" }
 query = { path = "../query" }
+replication-filter = { path = "../replication-filter" }
 db = { path = "../db" }
 db-backup = { path = "../db-backup" }
 db-merge = { path = "../db-merge" }

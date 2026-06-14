@@ -14,6 +14,7 @@ use super::{
 };
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Result;
+use crate::replicator::{EqOnlyFilterMatcher, ReplicationFilterMatcher};
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::{NoOpCollectionStorage, P2PCollectionStorage};
 use crate::sync::head_provider::{DocumentHeadProvider, NoOpHeadProvider};
@@ -38,6 +39,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             AccessMode::Open,
             Arc::new(ReplicatorRegistry::new()),
             Arc::new(NoOpCollectionStorage),
+            Arc::new(EqOnlyFilterMatcher),
         )
         .await
     }
@@ -59,6 +61,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             access_mode,
             Arc::new(ReplicatorRegistry::new()),
             collection_store,
+            Arc::new(EqOnlyFilterMatcher),
         )
         .await
     }
@@ -66,6 +69,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Create a new sync coordinator with access control.
     ///
     /// Returns the coordinator and a receiver for sync events.
+    #[allow(clippy::too_many_arguments)]
     pub async fn with_access_control(
         transport: T,
         blockstore: Arc<B>,
@@ -73,6 +77,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         access_mode: AccessMode,
         replicators: Arc<ReplicatorRegistry>,
         collection_store: Arc<dyn P2PCollectionStorage>,
+        filter_matcher: Arc<dyn ReplicationFilterMatcher>,
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
         Self::with_head_provider(
             transport,
@@ -82,6 +87,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             replicators,
             collection_store,
             Arc::new(NoOpHeadProvider),
+            filter_matcher,
         )
         .await
     }
@@ -89,6 +95,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Create a new sync coordinator with a document head provider for DocSync.
     ///
     /// Returns the coordinator and a receiver for sync events.
+    #[allow(clippy::too_many_arguments)]
     pub async fn with_head_provider(
         transport: T,
         blockstore: Arc<B>,
@@ -97,6 +104,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         replicators: Arc<ReplicatorRegistry>,
         collection_store: Arc<dyn P2PCollectionStorage>,
         head_provider: Arc<dyn DocumentHeadProvider>,
+        filter_matcher: Arc<dyn ReplicationFilterMatcher>,
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
         let local_peer_id = transport.local_peer_id().to_string();
         let broadcaster = Broadcaster::new(transport.clone());
@@ -143,6 +151,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     )),
                     push_send_timeout,
                     shutdown: super::SyncShutdownHandle::new(),
+                    filter_matcher,
                 },
                 manager,
                 access: SyncAccessState {

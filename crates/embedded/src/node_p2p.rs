@@ -142,6 +142,7 @@ where
         replicator_registry,
         collection_store,
         head_provider,
+        std::sync::Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
     )
     .await
     .map_err(|error| anyhow!("failed to create sync coordinator: {error}"))?;
@@ -400,6 +401,7 @@ where
         replicator_registry,
         collection_store,
         head_provider,
+        std::sync::Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
     )
     .await
     .map_err(|error| anyhow!("failed to create iroh sync coordinator: {error}"))?;

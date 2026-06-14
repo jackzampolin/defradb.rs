@@ -1265,6 +1265,7 @@ impl NodeBuilder {
             p2p::AccessMode::Controlled,
             replicator_registry,
             collection_store,
+            Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
         )
         .await
         .map_err(|e| anyhow::anyhow!("SyncCoordinator creation failed: {}", e))?;
@@ -1593,6 +1594,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                         doc_id,
                         collection_id,
                         &retry_filters,
+                        &replication_filter::QueryReplicationFilterMatcher::new(),
                     )
                     .await
                     {

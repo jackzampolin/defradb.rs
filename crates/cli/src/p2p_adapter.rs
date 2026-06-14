@@ -19,6 +19,38 @@ use p2p::P2PHostHandle;
 pub(crate) use crate::p2p_adapter_helpers::collections_requiring_replay;
 pub use crate::p2p_doc_pusher::DbDocPusher;
 
+/// Convert a `p2p::ReplicationFilter` to its HTTP wire representation.
+///
+/// Simple single-field `_eq` predicates use the legacy `Field`/`Value` shape so
+/// older clients can still read them. All other predicates (multi-field, `_in`,
+/// `_gt`, etc.) are encoded via the `Conditions` field.
+fn p2p_filter_to_http(
+    filter: &p2p::ReplicationFilter,
+) -> Option<defra_http::router::ReplicationFilter> {
+    match filter {
+        p2p::ReplicationFilter::Predicate(conds) => {
+            if conds.len() == 1 {
+                let (field, condition) = conds.iter().next()?;
+                if let Some(value) = condition.as_object().and_then(|op| op.get("_eq")).cloned() {
+                    return Some(defra_http::router::ReplicationFilter::eq(
+                        field.clone(),
+                        value,
+                    ));
+                }
+            }
+            Some(defra_http::router::ReplicationFilter::predicate(
+                conds.clone(),
+            ))
+        }
+        p2p::ReplicationFilter::Acp { .. } | p2p::ReplicationFilter::All(_) => {
+            tracing::warn!(
+                "replication filter variant not representable over HTTP yet; omitted from replicator listing"
+            );
+            None
+        }
+    }
+}
+
 /// Trait for looking up collection IDs by name.
 ///
 /// This is used by the P2P adapter to resolve collection names to their
@@ -147,15 +179,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             filters: info
                 .filters
                 .into_iter()
-                .map(|(collection, filter)| {
-                    (
-                        collection,
-                        defra_http::router::ReplicationFilter {
-                            field: filter.field,
-                            value: filter.value,
-                        },
-                    )
-                })
+                .filter_map(|(collection, filter)| Some((collection, p2p_filter_to_http(&filter)?)))
                 .collect(),
         }
     }
@@ -167,16 +191,21 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
     ) -> P2PResult<p2p::ReplicationFilters> {
         let mut resolved = p2p::ReplicationFilters::new();
         for (key, filter) in filters {
-            if filter.field.trim().is_empty() {
-                return Err(P2PError::InvalidInput(
-                    "replication filter field cannot be empty".into(),
-                ));
-            }
-            if filter.value.is_null() || filter.value.is_array() || filter.value.is_object() {
-                return Err(P2PError::InvalidInput(format!(
-                    "replication filter for collection '{key}' must use a scalar value"
-                )));
-            }
+            let p2p_filter = if let Some(conds) = filter.conditions {
+                p2p::ReplicationFilter::predicate(conds)
+            } else {
+                if filter.field.trim().is_empty() {
+                    return Err(P2PError::InvalidInput(
+                        "replication filter field cannot be empty".into(),
+                    ));
+                }
+                if filter.value.is_null() || filter.value.is_array() || filter.value.is_object() {
+                    return Err(P2PError::InvalidInput(format!(
+                        "replication filter for collection '{key}' must use a scalar value"
+                    )));
+                }
+                p2p::ReplicationFilter::new(filter.field, filter.value)
+            };
 
             let collection_id = collection_cids
                 .iter()
@@ -194,10 +223,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
                     ))
                 })?;
 
-            resolved.insert(
-                collection_id,
-                p2p::ReplicationFilter::new(filter.field, filter.value),
-            );
+            resolved.insert(collection_id, p2p_filter);
         }
         Ok(resolved)
     }

@@ -152,7 +152,10 @@ pub use iroh_bitswap::Store as BitswapStore;
 pub struct QueryId(pub u64);
 
 // Re-export replicator types
-pub use replicator::{ReplicationFilter, ReplicationFilters, ReplicatorInfo, ReplicatorStatus};
+pub use replicator::{
+    EqOnlyFilterMatcher, ReplicationFilter, ReplicationFilterMatcher, ReplicationFilters,
+    ReplicatorInfo, ReplicatorStatus,
+};
 
 // Re-export management correlators
 pub use manage_correlator::{

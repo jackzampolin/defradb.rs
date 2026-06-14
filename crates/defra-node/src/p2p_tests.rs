@@ -364,6 +364,118 @@ async fn install_one_way_replicator(
         .expect("set sender -> receiver replicator");
 }
 
+const AGENT_SCHEMA: &str = "type AgentDoc { agent_did: String @immutable  body: String }";
+
+async fn install_filtered_one_way_replicator(
+    sender: &EmbeddedNode,
+    receiver: &EmbeddedNode,
+    collections: &[&str],
+    filters: defra_http::router::ReplicationFilters,
+) {
+    let sender_addr = wait_for_listen_addr(sender).await;
+    let receiver_addr = wait_for_listen_addr(receiver).await;
+    let sender_p2p = sender.p2p().expect("sender p2p");
+    let receiver_p2p = receiver.p2p().expect("receiver p2p");
+
+    sender_p2p
+        .connect_peer(&receiver_addr)
+        .await
+        .expect("connect sender -> receiver");
+    wait_for_connected_peer(sender).await;
+    wait_for_connected_peer(receiver).await;
+
+    let collection_names = collections
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    sender_p2p
+        .add_collections(collection_names.clone())
+        .await
+        .expect("add collections to sender p2p");
+    receiver_p2p
+        .add_collections(collection_names.clone())
+        .await
+        .expect("add collections to receiver p2p");
+    receiver_p2p
+        .add_replicator(
+            collection_names.clone(),
+            Some(&sender_addr),
+            Default::default(),
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("authorize sender as receiver-side replicator");
+    sender_p2p
+        .add_replicator(
+            collection_names,
+            Some(&receiver_addr),
+            filters,
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("set sender -> receiver filtered replicator");
+}
+
+async fn query_agent_doc_dids(node: &EmbeddedNode) -> Vec<String> {
+    let response = node.execute("query { AgentDoc { agent_did } }").await;
+    assert!(
+        response.errors.is_empty(),
+        "AgentDoc query returned errors: {:?}",
+        response.errors
+    );
+    response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("AgentDoc"))
+        .and_then(|v| v.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    row.get("agent_did")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn wait_for_agent_doc_dids(node: &EmbeddedNode, expected_dids: &[&str]) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let present = query_agent_doc_dids(node).await;
+        if expected_dids
+            .iter()
+            .all(|did| present.contains(&did.to_string()))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "receiver never got expected dids {:?}; last seen: {:?}",
+            expected_dids,
+            present
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn agent_did_in_filter(dids: &[&str]) -> defra_http::router::ReplicationFilters {
+    let conds = serde_json::json!({"agent_did": {"_in": dids}});
+    let conditions = conds
+        .as_object()
+        .expect("conditions must be an object")
+        .clone();
+    let mut filters = defra_http::router::ReplicationFilters::new();
+    filters.insert(
+        "AgentDoc".to_string(),
+        defra_http::router::ReplicationFilter::predicate(conditions),
+    );
+    filters
+}
+
 async fn fetch_turn_snapshot(
     node: &EmbeddedNode,
     session_id: &str,
@@ -1468,4 +1580,140 @@ async fn live_replicator_same_session_followup_turn_converges() {
         expected_receiver,
         "same-session followup turn failed to converge without explicit sync nudge; receiver={receiver:?} expected={second_expected:?} sender_diag={sender_diag:?} receiver_diag={receiver_diag:?}",
     );
+}
+
+#[tokio::test]
+async fn live_replicator_filtered_push_respects_predicate() {
+    init_tracing();
+
+    let sender = EmbeddedNode::builder()
+        .with_p2p(test_p2p_config())
+        .build()
+        .await
+        .expect("build sender");
+    let receiver = EmbeddedNode::builder()
+        .with_p2p(test_p2p_config())
+        .build()
+        .await
+        .expect("build receiver");
+
+    sender
+        .add_schema(AGENT_SCHEMA)
+        .await
+        .expect("schema on sender");
+    receiver
+        .add_schema(AGENT_SCHEMA)
+        .await
+        .expect("schema on receiver");
+
+    install_filtered_one_way_replicator(
+        &sender,
+        &receiver,
+        &["AgentDoc"],
+        agent_did_in_filter(&["did:key:alice", "did:key:carol"]),
+    )
+    .await;
+
+    for (agent_did, body) in [
+        ("did:key:alice", "alice body"),
+        ("did:key:bob", "bob body"),
+        ("did:key:carol", "carol body"),
+    ] {
+        let response = sender
+            .execute(&format!(
+                r#"mutation {{ add_AgentDoc(input: {{agent_did: "{agent_did}", body: "{body}"}}) {{ _docID }} }}"#
+            ))
+            .await;
+        assert!(
+            response.errors.is_empty(),
+            "add_AgentDoc({agent_did}) returned errors: {:?}",
+            response.errors
+        );
+    }
+
+    wait_for_agent_doc_dids(&receiver, &["did:key:alice", "did:key:carol"]).await;
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let present = query_agent_doc_dids(&receiver).await;
+    assert!(
+        !present.contains(&"did:key:bob".to_string()),
+        "bob's doc must NOT have replicated; receiver has: {present:?}"
+    );
+    assert_eq!(
+        present.len(),
+        2,
+        "receiver must have exactly 2 docs; got: {present:?}"
+    );
+
+    sender.shutdown().await;
+    receiver.shutdown().await;
+}
+
+#[tokio::test]
+async fn filtered_backfill_via_transport_pusher_respects_predicate() {
+    init_tracing();
+
+    let sender = EmbeddedNode::builder()
+        .with_p2p(test_p2p_config())
+        .build()
+        .await
+        .expect("build sender");
+    let receiver = EmbeddedNode::builder()
+        .with_p2p(test_p2p_config())
+        .build()
+        .await
+        .expect("build receiver");
+
+    sender
+        .add_schema(AGENT_SCHEMA)
+        .await
+        .expect("schema on sender");
+    receiver
+        .add_schema(AGENT_SCHEMA)
+        .await
+        .expect("schema on receiver");
+
+    for (agent_did, body) in [
+        ("did:key:alice", "alice body"),
+        ("did:key:bob", "bob body"),
+        ("did:key:carol", "carol body"),
+    ] {
+        let response = sender
+            .execute(&format!(
+                r#"mutation {{ add_AgentDoc(input: {{agent_did: "{agent_did}", body: "{body}"}}) {{ _docID }} }}"#
+            ))
+            .await;
+        assert!(
+            response.errors.is_empty(),
+            "pre-replicator add_AgentDoc({agent_did}) returned errors: {:?}",
+            response.errors
+        );
+    }
+
+    install_filtered_one_way_replicator(
+        &sender,
+        &receiver,
+        &["AgentDoc"],
+        agent_did_in_filter(&["did:key:alice", "did:key:carol"]),
+    )
+    .await;
+
+    wait_for_agent_doc_dids(&receiver, &["did:key:alice", "did:key:carol"]).await;
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let present = query_agent_doc_dids(&receiver).await;
+    assert!(
+        !present.contains(&"did:key:bob".to_string()),
+        "bob's doc must NOT have backfilled; receiver has: {present:?}"
+    );
+    assert_eq!(
+        present.len(),
+        2,
+        "receiver must have exactly 2 docs after backfill; got: {present:?}"
+    );
+
+    sender.shutdown().await;
+    receiver.shutdown().await;
 }

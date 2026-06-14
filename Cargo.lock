@@ -2121,6 +2121,7 @@ dependencies = [
  "portpicker",
  "query",
  "rand 0.9.2",
+ "replication-filter",
  "reqwest 0.12.28",
  "schema",
  "serde",
@@ -3702,6 +3703,7 @@ dependencies = [
  "lens",
  "p2p",
  "query",
+ "replication-filter",
  "reqwest 0.12.28",
  "schema",
  "serde",
@@ -3738,6 +3740,7 @@ dependencies = [
  "lens",
  "libp2p",
  "p2p",
+ "replication-filter",
  "schema",
  "serde",
  "serde_bytes",
@@ -4236,6 +4239,7 @@ dependencies = [
  "libp2p",
  "p2p",
  "query",
+ "replication-filter",
  "schema",
  "serde",
  "serde_bytes",
@@ -10468,6 +10472,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71fe3824f5629716b1589be05dacd749f6aa084c87e00e016714a8cdfccc997c"
 dependencies = [
  "bytecheck",
+]
+
+[[package]]
+name = "replication-filter"
+version = "0.5.0"
+dependencies = [
+ "p2p",
+ "query",
+ "schema",
+ "serde_json",
 ]
 
 [[package]]

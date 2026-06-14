@@ -117,6 +117,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             collections,
             filters,
             se_key,
+            &replication_filter::QueryReplicationFilterMatcher::new(),
         )
         .await
     }
@@ -143,6 +144,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             doc_id,
             collection_id,
             &filters,
+            &replication_filter::QueryReplicationFilterMatcher::new(),
         )
         .await
     }
@@ -240,35 +242,11 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
                 .find_collection_by_id(collection_id)
                 .map_err(|e| format!("failed to load collection '{}': {}", collection_id, e))?
                 .ok_or_else(|| format!("collection '{}' not found", collection_id))?;
-            let field = collection
-                .schema()
-                .fields
-                .iter()
-                .find(|field| field.name == filter.field)
-                .ok_or_else(|| {
-                    format!(
-                        "replication filter field '{}' not found in collection '{}'",
-                        filter.field, collection_id
-                    )
-                })?;
-            if !field.immutable {
-                return Err(format!(
-                    "replication filter field '{}' in collection '{}' must be marked @immutable",
-                    filter.field, collection_id
-                ));
-            }
-            if field.crdt_type != schema::CType::LwwRegister || !field.kind.is_scalar() {
-                return Err(format!(
-                    "replication filter field '{}' in collection '{}' must be a scalar LWW field",
-                    filter.field, collection_id
-                ));
-            }
-            if !field.kind.accepts_filter_value(&filter.value) {
-                return Err(format!(
-                    "replication filter value for field '{}' in collection '{}' does not match the field type",
-                    filter.field, collection_id
-                ));
-            }
+            replication_filter::validate_replication_filter(
+                &collection.schema().fields,
+                collection_id,
+                filter,
+            )?;
         }
         Ok(())
     }

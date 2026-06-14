@@ -20,6 +20,7 @@ events = { path = "../events" }
 identity = { path = "../identity" }
 lens = { path = "../lens" }
 p2p = { path = "../p2p", default-features = false }
+replication-filter = { path = "../replication-filter" }
 schema = { path = "../schema" }
 storage = { path = "../storage" }
 

@@ -4,15 +4,54 @@ use thiserror::Error;
 
 pub type ReplicationFilters = std::collections::BTreeMap<String, ReplicationFilter>;
 
+/// HTTP wire shape for a per-collection replication filter.
+///
+/// Supports two forms:
+/// - Legacy scalar equality: `{"Field": "f", "Value": <scalar>}`
+/// - Rich predicate (any DefraDB query-filter conditions object): `{"Conditions": {"f": {"_in": [...]}}}`
+///
+/// When `conditions` is present it takes precedence over `field`/`value`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReplicationFilter {
-    #[serde(rename = "Field")]
+    #[serde(rename = "Field", default, skip_serializing_if = "String::is_empty")]
     pub field: String,
-    #[serde(rename = "Value")]
+    #[serde(
+        rename = "Value",
+        default,
+        skip_serializing_if = "serde_json::Value::is_null"
+    )]
     pub value: serde_json::Value,
+    /// Full query-filter conditions object for rich predicates (IN, composite, etc.).
+    /// When present, `field`/`value` are ignored during conversion.
+    #[serde(
+        rename = "Conditions",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub conditions: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl Eq for ReplicationFilter {}
+
+impl ReplicationFilter {
+    /// Construct a simple scalar equality filter.
+    pub fn eq(field: impl Into<String>, value: serde_json::Value) -> Self {
+        Self {
+            field: field.into(),
+            value,
+            conditions: None,
+        }
+    }
+
+    /// Construct a rich predicate filter from a conditions map.
+    pub fn predicate(conditions: serde_json::Map<String, serde_json::Value>) -> Self {
+        Self {
+            field: String::new(),
+            value: serde_json::Value::Null,
+            conditions: Some(conditions),
+        }
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExplicitReplayCapabilityInput {
@@ -206,6 +245,8 @@ pub enum RemoteManageOp {
     ReplicatorAdd {
         addresses: Vec<String>,
         collection_ids: Vec<String>,
+        #[serde(default)]
+        filters: ReplicationFilters,
     },
     ReplicatorDelete {
         addresses: Vec<String>,

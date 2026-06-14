@@ -22,6 +22,33 @@ use crate::transport_version_syncer::TransportVersionSyncer;
 
 const DOC_SYNC_DISPATCH_PARALLELISM: usize = 16;
 
+fn p2p_filter_to_http(
+    filter: &p2p::ReplicationFilter,
+) -> Option<defra_http::router::ReplicationFilter> {
+    match filter {
+        p2p::ReplicationFilter::Predicate(conds) => {
+            if conds.len() == 1 {
+                let (field, condition) = conds.iter().next()?;
+                if let Some(value) = condition.as_object().and_then(|op| op.get("_eq")).cloned() {
+                    return Some(defra_http::router::ReplicationFilter::eq(
+                        field.clone(),
+                        value,
+                    ));
+                }
+            }
+            Some(defra_http::router::ReplicationFilter::predicate(
+                conds.clone(),
+            ))
+        }
+        p2p::ReplicationFilter::Acp { .. } | p2p::ReplicationFilter::All(_) => {
+            tracing::warn!(
+                "replication filter variant not representable over HTTP yet; omitted from replicator listing"
+            );
+            None
+        }
+    }
+}
+
 /// P2POperations implementation for iroh transport.
 pub struct IrohP2PAdapter<B: Blockstore + 'static> {
     transport: IrohTransport,
@@ -55,15 +82,7 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
             filters: info
                 .filters
                 .into_iter()
-                .map(|(collection, filter)| {
-                    (
-                        collection,
-                        defra_http::router::ReplicationFilter {
-                            field: filter.field,
-                            value: filter.value,
-                        },
-                    )
-                })
+                .filter_map(|(collection, filter)| Some((collection, p2p_filter_to_http(&filter)?)))
                 .collect(),
         }
     }
@@ -75,16 +94,21 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
     ) -> P2PResult<p2p::ReplicationFilters> {
         let mut resolved = p2p::ReplicationFilters::new();
         for (key, filter) in filters {
-            if filter.field.trim().is_empty() {
-                return Err(P2PError::InvalidInput(
-                    "replication filter field cannot be empty".into(),
-                ));
-            }
-            if filter.value.is_null() || filter.value.is_array() || filter.value.is_object() {
-                return Err(P2PError::InvalidInput(format!(
-                    "replication filter for collection '{key}' must use a scalar value"
-                )));
-            }
+            let p2p_filter = if let Some(conds) = filter.conditions {
+                p2p::ReplicationFilter::predicate(conds)
+            } else {
+                if filter.field.trim().is_empty() {
+                    return Err(P2PError::InvalidInput(
+                        "replication filter field cannot be empty".into(),
+                    ));
+                }
+                if filter.value.is_null() || filter.value.is_array() || filter.value.is_object() {
+                    return Err(P2PError::InvalidInput(format!(
+                        "replication filter for collection '{key}' must use a scalar value"
+                    )));
+                }
+                p2p::ReplicationFilter::new(filter.field, filter.value)
+            };
 
             let collection_id = collection_cids
                 .iter()
@@ -102,10 +126,7 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
                     ))
                 })?;
 
-            resolved.insert(
-                collection_id,
-                p2p::ReplicationFilter::new(filter.field, filter.value),
-            );
+            resolved.insert(collection_id, p2p_filter);
         }
         Ok(resolved)
     }

@@ -52,16 +52,40 @@ pub(crate) fn to_http_replicator_info(info: p2p::ReplicatorInfo) -> ReplicatorIn
         filters: info
             .filters
             .into_iter()
-            .map(|(collection, filter)| {
-                (
-                    collection,
-                    defra_http::router::ReplicationFilter {
-                        field: filter.field,
-                        value: filter.value,
-                    },
-                )
-            })
+            .filter_map(|(collection, filter)| Some((collection, p2p_filter_to_http(&filter)?)))
             .collect(),
+    }
+}
+
+/// Convert a `p2p::ReplicationFilter` to the HTTP wire representation.
+///
+/// Simple single-field `_eq` predicates use the legacy `Field`/`Value` shape so
+/// older clients can still read them. All other predicates (multi-field, `_in`,
+/// `_gt`, etc.) are encoded via the `Conditions` field.
+pub(crate) fn p2p_filter_to_http(
+    filter: &p2p::ReplicationFilter,
+) -> Option<defra_http::router::ReplicationFilter> {
+    match filter {
+        p2p::ReplicationFilter::Predicate(conds) => {
+            if conds.len() == 1 {
+                let (field, condition) = conds.iter().next()?;
+                if let Some(value) = condition.as_object().and_then(|op| op.get("_eq")).cloned() {
+                    return Some(defra_http::router::ReplicationFilter::eq(
+                        field.clone(),
+                        value,
+                    ));
+                }
+            }
+            Some(defra_http::router::ReplicationFilter::predicate(
+                conds.clone(),
+            ))
+        }
+        p2p::ReplicationFilter::Acp { .. } | p2p::ReplicationFilter::All(_) => {
+            tracing::warn!(
+                "replication filter variant not representable over HTTP yet; omitted from replicator listing"
+            );
+            None
+        }
     }
 }
 
