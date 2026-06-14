@@ -87,10 +87,16 @@ impl ReplicationFilter {
 /// equality treats as unequal.
 fn json_scalar_eq(a: &JsonValue, b: &JsonValue) -> bool {
     match (a, b) {
-        (JsonValue::Number(x), JsonValue::Number(y)) => match (x.as_f64(), y.as_f64()) {
-            (Some(xf), Some(yf)) => xf == yf,
-            _ => x == y,
-        },
+        (JsonValue::Number(x), JsonValue::Number(y)) => {
+            // A whole-number float (2.0) materializes as an integer, so a float
+            // filter value must match an integer field value. But compare two
+            // integers exactly to avoid f64 precision loss above 2^53.
+            if x.is_f64() || y.is_f64() {
+                x.as_f64() == y.as_f64()
+            } else {
+                x == y
+            }
+        }
         _ => a == b,
     }
 }

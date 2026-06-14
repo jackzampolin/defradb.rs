@@ -157,6 +157,13 @@ fn filter_matches_numbers_numerically() {
     // A string filter value never matches a numeric field (type mismatch).
     let str_filter = ReplicationFilter::new("score", serde_json::json!("2"));
     assert!(!str_filter.matches_json_object(&serde_json::json!({"score": 2})));
+
+    // Two distinct large integers must NOT match: comparing them as f64 would
+    // lose precision above 2^53 and falsely match.
+    let big = 9_007_199_254_740_993_i64; // 2^53 + 1
+    let big_filter = ReplicationFilter::new("id", serde_json::json!(big));
+    assert!(big_filter.matches_json_object(&serde_json::json!({ "id": big })));
+    assert!(!big_filter.matches_json_object(&serde_json::json!({ "id": big + 1 })));
 }
 
 // ---------------------------------------------------------------------------
