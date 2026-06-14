@@ -664,6 +664,37 @@ async fn manage_document_list_over_p2p() {
     }
 }
 
+/// Admin token (`aud` = B peer-id) relays a `PeerDisconnect`. The disconnect
+/// primitive is idempotent-Ok, so a 200 proves the dispatch path is wired
+/// (mirrors `manage_document_add_over_p2p`). The target address is a third,
+/// unconnected peer so the relay's own A<->B connection is never torn down.
+#[tokio::test]
+#[serial]
+async fn manage_peer_disconnect_over_p2p() {
+    let (cluster, admin_key, addr_b, peer_id_b) = setup().await;
+    let api_a = cluster.api_url(0).to_string();
+
+    let token = crate::manage_relay_common::mint_manage_token(&admin_key, &peer_id_b);
+
+    // A syntactically-valid multiaddr for a peer node B is not connected to.
+    // Disconnect is idempotent, so hanging up an absent peer succeeds.
+    let absent_peer =
+        "/ip4/127.0.0.1/tcp/65535/p2p/12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X";
+    let status = post_manage(
+        &api_a,
+        &admin_key,
+        &addr_b,
+        &token,
+        json!({ "Kind": "PeerDisconnect", "address": absent_peer }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "authorized PeerDisconnect relay should return 200"
+    );
+}
+
 /// True when a `RemoteManageQueryResult::Strings` body carries at least one value.
 fn collection_list_nonempty(body: &Value) -> bool {
     body["Kind"] == "Strings"

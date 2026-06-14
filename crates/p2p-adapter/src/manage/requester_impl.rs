@@ -108,6 +108,7 @@ fn to_mutate_op(op: RemoteManageOp) -> ManageMutateOp {
             docs: docs.into_iter().map(to_doc_ref).collect(),
         },
         RemoteManageOp::PeerConnect { address } => ManageMutateOp::PeerConnect { address },
+        RemoteManageOp::PeerDisconnect { address } => ManageMutateOp::PeerDisconnect { address },
     }
 }
 

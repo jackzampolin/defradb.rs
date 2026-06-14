@@ -102,6 +102,16 @@ impl P2POperations for MockP2POperations {
         Ok(())
     }
 
+    async fn disconnect_peer(&self, addr: &str) -> P2PResult<()> {
+        let peer_id = if addr.contains("/p2p/") {
+            addr.split("/p2p/").last().unwrap_or("unknown").to_string()
+        } else {
+            format!("peer-{}", addr.len())
+        };
+        self.peers.write().unwrap().retain(|p| p != &peer_id);
+        Ok(())
+    }
+
     async fn notify_network_change(&self) -> P2PResult<()> {
         Ok(())
     }
@@ -218,6 +228,10 @@ impl P2POperations for FailingMockP2POperations {
     }
 
     async fn connect_peer(&self, _addr: &str) -> P2PResult<()> {
+        Err(P2PError::Internal(self.error.clone()))
+    }
+
+    async fn disconnect_peer(&self, _addr: &str) -> P2PResult<()> {
         Err(P2PError::Internal(self.error.clone()))
     }
 

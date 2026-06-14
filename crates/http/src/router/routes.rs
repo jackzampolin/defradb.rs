@@ -320,6 +320,10 @@ mod tests {
             Ok(())
         }
 
+        async fn disconnect_peer(&self, _addr: &str) -> P2PResult<()> {
+            Ok(())
+        }
+
         async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
             Ok(vec![])
         }

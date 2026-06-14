@@ -63,6 +63,10 @@ pub enum ManageMutateOp {
         #[serde(rename = "Address")]
         address: String,
     },
+    PeerDisconnect {
+        #[serde(rename = "Address")]
+        address: String,
+    },
 }
 
 /// Read-only management operations (typed reply).
@@ -104,6 +108,7 @@ impl ManageMutateOp {
             ManageMutateOp::DocumentAdd { .. } => P::P2pDocumentAdd,
             ManageMutateOp::DocumentRemove { .. } => P::P2pDocumentDelete,
             ManageMutateOp::PeerConnect { .. } => P::P2pPeerConnect,
+            ManageMutateOp::PeerDisconnect { .. } => P::P2pPeerConnect,
         }
     }
 }

@@ -124,6 +124,9 @@ pub trait P2POperations: Send + Sync {
     /// Connect to a peer at the given address.
     async fn connect_peer(&self, addr: &str) -> P2PResult<()>;
 
+    /// Disconnect the live connection to the peer at the given address.
+    async fn disconnect_peer(&self, addr: &str) -> P2PResult<()>;
+
     /// Notify the transport that local network conditions may have changed.
     ///
     /// Some transports, such as iroh, use this to refresh relay/direct
@@ -265,6 +268,9 @@ pub enum RemoteManageOp {
         docs: Vec<RemoteManageDocRef>,
     },
     PeerConnect {
+        address: String,
+    },
+    PeerDisconnect {
         address: String,
     },
 }
