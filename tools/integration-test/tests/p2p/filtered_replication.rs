@@ -1445,3 +1445,606 @@ async fn rust_filtered_replication_in_set_backfill() {
         "bob must be excluded by IN-set backfill filter, found: {dids:?}"
     );
 }
+
+/// OR predicate: docs where `agent_did = alice` OR `kind = keep` replicate;
+/// (bob, drop) satisfies neither arm and must be excluded.
+#[tokio::test]
+async fn rust_filtered_replication_or() {
+    const OR_SCHEMA: &str = "type OrDoc { agent_did: String @immutable  kind: String @immutable }";
+
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(OR_SCHEMA).expect("schema node0");
+    node1.schema_add(OR_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0.p2p_collection_add(&["OrDoc"]).expect("subscribe 0");
+
+    let filter_json =
+        format!(r#"{{"_or":[{{"agent_did":{{"_eq":"{ALICE}"}}}},{{"kind":{{"_eq":"keep"}}}}]}}"#);
+    let out = run_replicator_add_filter(&cluster, 0, &["OrDoc"], &addr1, &filter_json);
+    assert!(
+        out.status.success(),
+        "OR replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mk = |did: &str, kind: &str| {
+        format!(
+            r#"mutation {{ add_OrDoc(input: {{agent_did: "{did}", kind: "{kind}"}}) {{ _docID }} }}"#
+        )
+    };
+
+    let match_alice = node0
+        .query(&mk(ALICE, "x"))
+        .expect("create (alice, x) — matches via agent_did arm");
+    let match_alice_id = extract_doc_id(&match_alice, "add_OrDoc");
+
+    node0
+        .query(&mk(BOB, "drop"))
+        .expect("create (bob, drop) — matches neither arm");
+
+    let match_keep = node0
+        .query(&mk(BOB, "keep"))
+        .expect("create (bob, keep) — matches via kind arm (ordering anchor)");
+    let match_keep_id = extract_doc_id(&match_keep, "add_OrDoc");
+
+    let node1_poll = cluster.client(1);
+    let m_alice = match_alice_id.clone();
+    let m_keep = match_keep_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { OrDoc { _docID } }")
+                .unwrap_or_default();
+            let Some(rows) = result["OrDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&m_alice.as_str()) && ids.contains(&m_keep.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "OR-matching docs did not replicate to filtered peer",
+    )
+    .await;
+
+    let result = node1
+        .query("query { OrDoc { agent_did kind } }")
+        .expect("query OrDoc on node1");
+    let rows = result["OrDoc"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        rows.len(),
+        2,
+        "OR filtered peer must hold exactly 2 matching docs, found: {rows:?}"
+    );
+    let has_drop = rows.iter().any(|r| r["kind"].as_str() == Some("drop"));
+    assert!(
+        !has_drop,
+        "(bob, drop) must be excluded by OR filter, found: {rows:?}"
+    );
+}
+
+/// NE predicate: docs where `agent_did != bob` replicate; bob is excluded.
+#[tokio::test]
+async fn rust_filtered_replication_ne_excludes() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+
+    let filter_json = format!(r#"{{"agent_did":{{"_ne":"{BOB}"}}}}"#);
+    let out = run_replicator_add_filter(&cluster, 0, &["AgentDoc"], &addr1, &filter_json);
+    assert!(
+        out.status.success(),
+        "NE replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let alice_doc = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "alice-ne"}}) {{ _docID }} }}"#
+        ))
+        .expect("alice doc");
+    let alice_id = extract_doc_id(&alice_doc, "add_AgentDoc");
+
+    node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{BOB}", body: "bob-ne"}}) {{ _docID }} }}"#
+        ))
+        .expect("bob doc");
+
+    let carol_doc = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{CAROL}", body: "carol-ne"}}) {{ _docID }} }}"#
+        ))
+        .expect("carol doc (ordering anchor)");
+    let carol_id = extract_doc_id(&carol_doc, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let a_id = alice_id.clone();
+    let c_id = carol_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            let Some(rows) = result["AgentDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&a_id.as_str()) && ids.contains(&c_id.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "alice and carol did not replicate under NE filter",
+    )
+    .await;
+
+    let dids = agent_did_values(&cluster, 1);
+    assert_eq!(
+        dids.len(),
+        2,
+        "NE filter must admit exactly alice + carol (not bob), found: {dids:?}"
+    );
+    assert!(
+        !dids.iter().any(|d| d == BOB),
+        "bob must be excluded by NE filter, found: {dids:?}"
+    );
+    assert!(
+        dids.iter().any(|d| d == ALICE) && dids.iter().any(|d| d == CAROL),
+        "alice and carol must be present, found: {dids:?}"
+    );
+}
+
+/// Range predicate (GTE): docs with `tier >= 2` replicate; tier=1 is excluded.
+#[tokio::test]
+async fn rust_filtered_replication_range() {
+    const TIER_SCHEMA: &str = "type TierDoc { tier: Int @immutable  body: String }";
+
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(TIER_SCHEMA).expect("schema node0");
+    node1.schema_add(TIER_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0.p2p_collection_add(&["TierDoc"]).expect("subscribe 0");
+
+    let filter_json = r#"{"tier":{"_gte":2}}"#;
+    let out = run_replicator_add_filter(&cluster, 0, &["TierDoc"], &addr1, filter_json);
+    assert!(
+        out.status.success(),
+        "range (GTE) replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mk = |tier: i32, body: &str| {
+        format!(
+            r#"mutation {{ add_TierDoc(input: {{tier: {tier}, body: "{body}"}}) {{ _docID }} }}"#
+        )
+    };
+
+    node0.query(&mk(1, "tier1")).expect("tier=1 doc");
+
+    let tier2 = node0.query(&mk(2, "tier2")).expect("tier=2 doc");
+    let tier2_id = extract_doc_id(&tier2, "add_TierDoc");
+
+    let tier3 = node0
+        .query(&mk(3, "tier3"))
+        .expect("tier=3 doc (ordering anchor)");
+    let tier3_id = extract_doc_id(&tier3, "add_TierDoc");
+
+    let node1_poll = cluster.client(1);
+    let t2 = tier2_id.clone();
+    let t3 = tier3_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { TierDoc { _docID } }")
+                .unwrap_or_default();
+            let Some(rows) = result["TierDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&t2.as_str()) && ids.contains(&t3.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "tier>=2 docs did not replicate to range-filtered peer",
+    )
+    .await;
+
+    let result = node1
+        .query("query { TierDoc { tier } }")
+        .expect("query TierDoc on node1");
+    let rows = result["TierDoc"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        rows.len(),
+        2,
+        "range filter must admit exactly tier=2 and tier=3, found: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|r| r["tier"].as_i64().unwrap_or(0) >= 2),
+        "all replicated docs must have tier >= 2, found: {rows:?}"
+    );
+    let has_tier1 = rows.iter().any(|r| r["tier"].as_i64() == Some(1));
+    assert!(
+        !has_tier1,
+        "tier=1 doc must be excluded by range filter, found: {rows:?}"
+    );
+}
+
+/// Typed Int equality filter: only docs with `code = 7` replicate.
+/// Proves Int materialization + matching e2e (the silent-zero-match guard for Int).
+#[tokio::test]
+async fn rust_filtered_replication_int_match() {
+    const INT_SCHEMA: &str = "type IntDoc { code: Int @immutable  body: String }";
+
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(INT_SCHEMA).expect("schema node0");
+    node1.schema_add(INT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0.p2p_collection_add(&["IntDoc"]).expect("subscribe 0");
+
+    let filter_json = r#"{"code":{"_eq":7}}"#;
+    let out = run_replicator_add_filter(&cluster, 0, &["IntDoc"], &addr1, filter_json);
+    assert!(
+        out.status.success(),
+        "Int _eq replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let match1 = node0
+        .query(r#"mutation { add_IntDoc(input: {code: 7, body: "seven-1"}) { _docID } }"#)
+        .expect("code=7 doc");
+    let match1_id = extract_doc_id(&match1, "add_IntDoc");
+
+    node0
+        .query(r#"mutation { add_IntDoc(input: {code: 9, body: "nine"}) { _docID } }"#)
+        .expect("code=9 doc");
+
+    let match2 = node0
+        .query(r#"mutation { add_IntDoc(input: {code: 7, body: "seven-2"}) { _docID } }"#)
+        .expect("code=7 anchor");
+    let match2_id = extract_doc_id(&match2, "add_IntDoc");
+
+    let node1_poll = cluster.client(1);
+    let m1 = match1_id.clone();
+    let m2 = match2_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { IntDoc { _docID } }")
+                .unwrap_or_default();
+            let Some(rows) = result["IntDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&m1.as_str()) && ids.contains(&m2.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "Int code=7 docs did not replicate to Int-filtered peer",
+    )
+    .await;
+
+    let result = node1
+        .query("query { IntDoc { code } }")
+        .expect("query IntDoc on node1");
+    let rows = result["IntDoc"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        rows.len(),
+        2,
+        "Int filter must admit exactly the two code=7 docs, found: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|r| r["code"].as_i64() == Some(7)),
+        "all replicated IntDoc must have code=7, found: {rows:?}"
+    );
+}
+
+/// Bool equality filter: only docs with `active = true` replicate.
+/// Proves Bool materialization + matching e2e.
+#[tokio::test]
+async fn rust_filtered_replication_bool_match() {
+    const FLAG_SCHEMA: &str = "type FlagDoc { active: Boolean @immutable  body: String }";
+
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(FLAG_SCHEMA).expect("schema node0");
+    node1.schema_add(FLAG_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0.p2p_collection_add(&["FlagDoc"]).expect("subscribe 0");
+
+    let filter_json = r#"{"active":{"_eq":true}}"#;
+    let out = run_replicator_add_filter(&cluster, 0, &["FlagDoc"], &addr1, filter_json);
+    assert!(
+        out.status.success(),
+        "Bool _eq replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let match1 = node0
+        .query(r#"mutation { add_FlagDoc(input: {active: true, body: "on-1"}) { _docID } }"#)
+        .expect("active=true doc");
+    let match1_id = extract_doc_id(&match1, "add_FlagDoc");
+
+    node0
+        .query(r#"mutation { add_FlagDoc(input: {active: false, body: "off"}) { _docID } }"#)
+        .expect("active=false doc");
+
+    let match2 = node0
+        .query(r#"mutation { add_FlagDoc(input: {active: true, body: "on-2"}) { _docID } }"#)
+        .expect("active=true anchor");
+    let match2_id = extract_doc_id(&match2, "add_FlagDoc");
+
+    let node1_poll = cluster.client(1);
+    let m1 = match1_id.clone();
+    let m2 = match2_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { FlagDoc { _docID } }")
+                .unwrap_or_default();
+            let Some(rows) = result["FlagDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&m1.as_str()) && ids.contains(&m2.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "Bool active=true docs did not replicate to Bool-filtered peer",
+    )
+    .await;
+
+    let result = node1
+        .query("query { FlagDoc { active } }")
+        .expect("query FlagDoc on node1");
+    let rows = result["FlagDoc"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        rows.len(),
+        2,
+        "Bool filter must admit exactly the two active=true docs, found: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|r| r["active"].as_bool() == Some(true)),
+        "all replicated FlagDoc must have active=true, found: {rows:?}"
+    );
+}
+
+/// DateTime range filter: docs with `at >= 2026-01-01T00:00:00Z` replicate;
+/// earlier dates are excluded. Proves DateTime materialization + comparison e2e.
+#[tokio::test]
+async fn rust_filtered_replication_datetime() {
+    const EVENT_SCHEMA: &str = "type EventDoc { at: DateTime @immutable  body: String }";
+
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(EVENT_SCHEMA).expect("schema node0");
+    node1.schema_add(EVENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["EventDoc"])
+        .expect("subscribe 0");
+
+    let filter_json = r#"{"at":{"_gte":"2026-01-01T00:00:00Z"}}"#;
+    let out = run_replicator_add_filter(&cluster, 0, &["EventDoc"], &addr1, filter_json);
+    assert!(
+        out.status.success(),
+        "DateTime GTE replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    node0
+        .query(
+            r#"mutation { add_EventDoc(input: {at: "2025-06-01T00:00:00Z", body: "old"}) { _docID } }"#,
+        )
+        .expect("old datetime doc");
+
+    let match1 = node0
+        .query(
+            r#"mutation { add_EventDoc(input: {at: "2026-01-01T00:00:00Z", body: "new-1"}) { _docID } }"#,
+        )
+        .expect("matching datetime doc");
+    let match1_id = extract_doc_id(&match1, "add_EventDoc");
+
+    let match2 = node0
+        .query(
+            r#"mutation { add_EventDoc(input: {at: "2026-06-01T00:00:00Z", body: "new-2"}) { _docID } }"#,
+        )
+        .expect("matching datetime anchor");
+    let match2_id = extract_doc_id(&match2, "add_EventDoc");
+
+    let node1_poll = cluster.client(1);
+    let m1 = match1_id.clone();
+    let m2 = match2_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { EventDoc { _docID } }")
+                .unwrap_or_default();
+            let Some(rows) = result["EventDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&m1.as_str()) && ids.contains(&m2.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "DateTime >= 2026 docs did not replicate to DateTime-filtered peer",
+    )
+    .await;
+
+    let result = node1
+        .query("query { EventDoc { body } }")
+        .expect("query EventDoc on node1");
+    let rows = result["EventDoc"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        rows.len(),
+        2,
+        "DateTime filter must admit exactly the two >= 2026 docs, found: {rows:?}"
+    );
+    let has_old = rows.iter().any(|r| r["body"].as_str() == Some("old"));
+    assert!(
+        !has_old,
+        "old (2025) EventDoc must be excluded by DateTime filter, found: {rows:?}"
+    );
+}
+
+/// Iroh transport variant of `rust_filtered_replication_in_set`: verifies the
+/// rich `_in` filter works over Iroh (previously broken in the iroh adapter).
+#[tokio::test]
+async fn rust_filtered_replication_in_set_iroh() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_iroh_transport()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+
+    let filter_json = format!(r#"{{"agent_did":{{"_in":["{ALICE}","{CAROL}"]}}}}"#);
+    let out = run_replicator_add_filter(&cluster, 0, &["AgentDoc"], &addr1, &filter_json);
+    assert!(
+        out.status.success(),
+        "IN-set iroh replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let alice_doc = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "alice-iroh"}}) {{ _docID }} }}"#
+        ))
+        .expect("alice doc");
+    let alice_id = extract_doc_id(&alice_doc, "add_AgentDoc");
+
+    node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{BOB}", body: "bob-iroh"}}) {{ _docID }} }}"#
+        ))
+        .expect("bob doc");
+
+    let carol_doc = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{CAROL}", body: "carol-iroh"}}) {{ _docID }} }}"#
+        ))
+        .expect("carol doc (ordering anchor)");
+    let carol_id = extract_doc_id(&carol_doc, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let a_id = alice_id.clone();
+    let c_id = carol_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID agent_did } }")
+                .unwrap_or_default();
+            let Some(rows) = result["AgentDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&a_id.as_str()) && ids.contains(&c_id.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "alice and carol did not replicate over iroh IN-set filter",
+    )
+    .await;
+
+    let dids = agent_did_values(&cluster, 1);
+    assert_eq!(
+        dids.len(),
+        2,
+        "iroh IN-set filtered peer must hold exactly 2 docs (alice + carol), found: {dids:?}"
+    );
+    assert!(
+        dids.iter().all(|d| d == ALICE || d == CAROL),
+        "iroh IN-set filtered peer must hold only alice and carol, found: {dids:?}"
+    );
+    assert!(
+        !dids.iter().any(|d| d == BOB),
+        "bob must be excluded by iroh IN-set filter, found: {dids:?}"
+    );
+}
