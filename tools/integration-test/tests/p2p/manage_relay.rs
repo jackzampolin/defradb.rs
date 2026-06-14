@@ -610,6 +610,60 @@ async fn manage_document_add_over_p2p() {
     );
 }
 
+/// Admin token (`aud` = B peer-id) relays a `DocumentAdd` for a doc id, then a
+/// `DocumentList` query over the same relay reflects it. Proves the DocumentList
+/// dispatch path AND the structured `Documents` reply round-trip.
+#[tokio::test]
+#[serial]
+async fn manage_document_list_over_p2p() {
+    let (cluster, admin_key, addr_b, peer_id_b) = setup().await;
+    let api_a = cluster.api_url(0).to_string();
+
+    let token = crate::manage_relay_common::mint_manage_token(&admin_key, &peer_id_b);
+
+    let doc_id = "bae-0e7c3bb5-4917-46e2-b36e-3f8d0c4b3f5d";
+    let status = post_manage(
+        &api_a,
+        &admin_key,
+        &addr_b,
+        &token,
+        json!({
+            "Kind": "DocumentAdd",
+            "docs": [{ "collection": "User", "doc_id": doc_id }],
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "authorized DocumentAdd relay should return 200"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, body) = post_manage_query(
+            &api_a,
+            &admin_key,
+            &addr_b,
+            &token,
+            json!({ "Kind": "DocumentList" }),
+        )
+        .await;
+        if status == StatusCode::OK && documents_list_contains(&body, doc_id) {
+            assert_eq!(
+                body["Kind"], "Documents",
+                "DocumentList must return a typed Documents result, got {body}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node B did not report the subscribed document over the relay"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// True when a `RemoteManageQueryResult::Strings` body carries at least one value.
 fn collection_list_nonempty(body: &Value) -> bool {
     body["Kind"] == "Strings"
@@ -626,5 +680,14 @@ fn replicator_list_nonempty(body: &Value) -> bool {
         && body["replicators"]
             .as_array()
             .map(|a| !a.is_empty())
+            .unwrap_or(false)
+}
+
+/// True when a `RemoteManageQueryResult::Documents` body contains the given doc id.
+fn documents_list_contains(body: &Value, doc_id: &str) -> bool {
+    body["Kind"] == "Documents"
+        && body["documents"]
+            .as_array()
+            .map(|docs| docs.iter().any(|d| d["doc_id"] == doc_id))
             .unwrap_or(false)
 }

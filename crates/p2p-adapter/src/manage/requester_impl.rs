@@ -131,10 +131,18 @@ fn to_doc_ref(doc: RemoteManageDocRef) -> ManageDocRef {
     }
 }
 
+fn to_remote_doc_ref(doc: ManageDocRef) -> RemoteManageDocRef {
+    RemoteManageDocRef {
+        collection: doc.collection,
+        doc_id: doc.doc_id,
+    }
+}
+
 fn to_query_op(op: RemoteManageQueryOp) -> ManageQueryOp {
     match op {
         RemoteManageQueryOp::ReplicatorList => ManageQueryOp::ReplicatorList,
         RemoteManageQueryOp::CollectionList => ManageQueryOp::CollectionList,
+        RemoteManageQueryOp::DocumentList => ManageQueryOp::DocumentList,
     }
 }
 
@@ -147,5 +155,8 @@ fn to_http_query_result(result: ManageQueryResult) -> RemoteManageQueryResult {
                 .collect(),
         },
         ManageQueryResult::Strings { values } => RemoteManageQueryResult::Strings { values },
+        ManageQueryResult::Documents { documents } => RemoteManageQueryResult::Documents {
+            documents: documents.into_iter().map(to_remote_doc_ref).collect(),
+        },
     }
 }

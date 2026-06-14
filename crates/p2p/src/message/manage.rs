@@ -72,6 +72,7 @@ pub enum ManageMutateOp {
 pub enum ManageQueryOp {
     ReplicatorList,
     CollectionList,
+    DocumentList,
 }
 
 /// Typed payload for a `manage_query` reply.
@@ -85,6 +86,10 @@ pub enum ManageQueryResult {
     Strings {
         #[serde(rename = "Values")]
         values: Vec<String>,
+    },
+    Documents {
+        #[serde(rename = "Documents")]
+        documents: Vec<ManageDocRef>,
     },
 }
 
@@ -109,6 +114,7 @@ impl ManageQueryOp {
         match self {
             ManageQueryOp::ReplicatorList => P::P2pReplicatorList,
             ManageQueryOp::CollectionList => P::P2pCollectionList,
+            ManageQueryOp::DocumentList => P::P2pDocumentList,
         }
     }
 }

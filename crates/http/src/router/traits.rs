@@ -282,6 +282,7 @@ pub struct RemoteManageDocRef {
 pub enum RemoteManageQueryOp {
     ReplicatorList,
     CollectionList,
+    DocumentList,
 }
 
 /// Typed result of a [`RemoteManageQueryOp`].
@@ -293,6 +294,7 @@ pub enum RemoteManageQueryOp {
 pub enum RemoteManageQueryResult {
     Replicators { replicators: Vec<ReplicatorInfo> },
     Strings { values: Vec<String> },
+    Documents { documents: Vec<RemoteManageDocRef> },
 }
 
 /// Wire sentinel for a remote NAC denial on the management channel.

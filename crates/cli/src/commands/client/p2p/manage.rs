@@ -368,6 +368,8 @@ pub enum P2pManageDocumentCommand {
     Add(ManageDocumentMutateArgs),
     /// Remove document(s) from the target peer's P2P sync
     Remove(ManageDocumentMutateArgs),
+    /// List the target peer's P2P documents
+    List(ManageTarget),
 }
 
 #[derive(Args, Debug)]
@@ -389,6 +391,18 @@ impl P2pManageDocumentArgs {
         match &self.command {
             P2pManageDocumentCommand::Add(args) => args.execute(ctx, /* add = */ true).await,
             P2pManageDocumentCommand::Remove(args) => args.execute(ctx, /* add = */ false).await,
+            P2pManageDocumentCommand::List(target) => {
+                let auth = target.resolve(ctx)?;
+                let client = client(ctx, auth.bearer)?;
+                let result = client
+                    .p2p_manage_query(
+                        &target.target,
+                        &auth.actor_token,
+                        RemoteManageQueryOp::DocumentList,
+                    )
+                    .await?;
+                print_query_result(&result)
+            }
         }
     }
 }

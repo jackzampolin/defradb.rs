@@ -212,6 +212,18 @@ pub async fn build_manage_query_reply(
                 ManageQueryOp::CollectionList => ManageQueryResult::Strings {
                     values: ops.get_collections().await.map_err(|e| e.to_string())?,
                 },
+                ManageQueryOp::DocumentList => ManageQueryResult::Documents {
+                    documents: ops
+                        .get_documents()
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .map(|d| ManageDocRef {
+                            collection: d.collection,
+                            doc_id: d.doc_id,
+                        })
+                        .collect(),
+                },
             })
         })
         .await
@@ -289,6 +301,7 @@ mod tests {
         peer_id: String,
         added_collections: Mutex<Vec<String>>,
         added_replicators: Mutex<Vec<RecordedReplicator>>,
+        documents: Vec<P2pDocumentInfo>,
     }
 
     impl MockOps {
@@ -297,6 +310,16 @@ mod tests {
                 peer_id: peer_id.to_string(),
                 added_collections: Mutex::new(Vec::new()),
                 added_replicators: Mutex::new(Vec::new()),
+                documents: Vec::new(),
+            }
+        }
+
+        fn with_documents(peer_id: &str, documents: Vec<P2pDocumentInfo>) -> Self {
+            Self {
+                peer_id: peer_id.to_string(),
+                added_collections: Mutex::new(Vec::new()),
+                added_replicators: Mutex::new(Vec::new()),
+                documents,
             }
         }
 
@@ -359,7 +382,7 @@ mod tests {
             unimplemented!()
         }
         async fn get_documents(&self) -> P2PResult<Vec<P2pDocumentInfo>> {
-            unimplemented!()
+            Ok(self.documents.clone())
         }
         async fn add_documents(&self, _docs: Vec<P2pDocumentRequest>) -> P2PResult<()> {
             unimplemented!()
@@ -640,5 +663,44 @@ mod tests {
             http_filters.contains_key("User"),
             "the User collection filter must survive the relay"
         );
+    }
+
+    #[tokio::test]
+    async fn document_list_returns_documents() {
+        let ops = MockOps::with_documents(
+            "12D3KooW-THIS",
+            vec![
+                P2pDocumentInfo {
+                    collection: "User".into(),
+                    doc_id: "bae-doc-1".into(),
+                },
+                P2pDocumentInfo {
+                    collection: "User".into(),
+                    doc_id: "bae-doc-2".into(),
+                },
+            ],
+        );
+        let token = crate::manage::auth::mint_token_for("12D3KooW-THIS").0;
+        let req = ManageQueryRequest::new(ManageQueryOp::DocumentList, token);
+        let reply = build_manage_query_reply(&ops, &BoolNac(true), req).await;
+        assert_eq!(reply.err_message(), None);
+        match reply.result {
+            Some(ManageQueryResult::Documents { documents }) => {
+                assert_eq!(
+                    documents,
+                    vec![
+                        ManageDocRef {
+                            collection: "User".into(),
+                            doc_id: "bae-doc-1".into(),
+                        },
+                        ManageDocRef {
+                            collection: "User".into(),
+                            doc_id: "bae-doc-2".into(),
+                        },
+                    ]
+                );
+            }
+            other => panic!("expected a Documents result, got {other:?}"),
+        }
     }
 }
