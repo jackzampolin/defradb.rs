@@ -11,6 +11,7 @@ description = "Query-filter-backed replication filter matcher shared between cli
 [dependencies]
 p2p = { path = "../p2p" }
 query = { path = "../query" }
+schema = { path = "../schema" }
 
 serde_json.workspace = true
 
