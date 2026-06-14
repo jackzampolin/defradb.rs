@@ -21,6 +21,7 @@ use integration_test::{
 const AGENT_SCHEMA: &str = "type AgentDoc { agent_did: String @immutable  body: String }";
 const ALICE: &str = "did:key:alice";
 const BOB: &str = "did:key:bob";
+const CAROL: &str = "did:key:carol";
 
 /// Grace window used to confirm a non-matching document stays absent *after*
 /// a matching document has already replicated. Once the matching doc arrives we
@@ -852,3 +853,498 @@ async fn rust_filtered_replication_float_filter_matches_numerically() {
 // doc IDs prevent two honest nodes from forging the same docID with differing
 // immutable values. It is covered directly at the merge layer by
 // `db-merge`'s `remote_composite_merge_rejects_immutable_field_change`.
+
+/// Add a replicator with a raw query-filter conditions JSON via the CLI --filter flag.
+fn run_replicator_add_filter(
+    cluster: &TestCluster,
+    node: usize,
+    collections: &[&str],
+    addr: &str,
+    filter_json: &str,
+) -> std::process::Output {
+    let client = cluster.client(node);
+    let cols = collections.join(",");
+    Command::new(client.binary_path())
+        .arg("--url")
+        .arg(socket_addr(cluster, node))
+        .args([
+            "client",
+            "p2p",
+            "replicator",
+            "add",
+            "-c",
+            &cols,
+            "--filter",
+            filter_json,
+            addr,
+        ])
+        .output()
+        .expect("exec replicator add --filter")
+}
+
+/// IN-set predicate: only docs whose `agent_did` is in `[alice, carol]` replicate.
+///
+/// The ordering-anchor is the carol doc created after the non-matching bob doc.
+/// Once carol arrives on node1 the push pipeline has provably run; bob's absence
+/// is then attributable to the filter, not to a not-yet-delivered race.
+#[tokio::test]
+async fn rust_filtered_replication_in_set() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+
+    let filter_json = format!(r#"{{"agent_did":{{"_in":["{ALICE}","{CAROL}"]}}}}"#);
+    let out = run_replicator_add_filter(&cluster, 0, &["AgentDoc"], &addr1, &filter_json);
+    assert!(
+        out.status.success(),
+        "IN-set replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let alice_doc = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "alice-1"}}) {{ _docID }} }}"#
+        ))
+        .expect("create alice doc");
+    let alice_id = extract_doc_id(&alice_doc, "add_AgentDoc");
+
+    node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{BOB}", body: "bob-1"}}) {{ _docID }} }}"#
+        ))
+        .expect("create bob doc");
+
+    let carol_doc = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{CAROL}", body: "carol-1"}}) {{ _docID }} }}"#
+        ))
+        .expect("create carol doc (ordering anchor)");
+    let carol_id = extract_doc_id(&carol_doc, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let alice_id_poll = alice_id.clone();
+    let carol_id_poll = carol_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID agent_did } }")
+                .unwrap_or_default();
+            let Some(rows) = result["AgentDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&alice_id_poll.as_str()) && ids.contains(&carol_id_poll.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "alice and carol docs did not replicate to IN-set filtered peer",
+    )
+    .await;
+
+    let dids = agent_did_values(&cluster, 1);
+    assert_eq!(
+        dids.len(),
+        2,
+        "IN-set filtered peer must hold exactly 2 docs (alice + carol), found: {dids:?}"
+    );
+    assert!(
+        dids.iter().all(|d| d == ALICE || d == CAROL),
+        "IN-set filtered peer must hold only alice and carol, found: {dids:?}"
+    );
+    assert!(
+        !dids.iter().any(|d| d == BOB),
+        "bob must be excluded by IN-set filter, found: {dids:?}"
+    );
+}
+
+/// Composite AND predicate: only docs where `agent_did = alice` AND `kind = keep` replicate.
+#[tokio::test]
+async fn rust_filtered_replication_composite_and() {
+    const AND_SCHEMA: &str =
+        "type AndDoc { agent_did: String @immutable  kind: String @immutable  seq: Int }";
+
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AND_SCHEMA).expect("schema node0");
+    node1.schema_add(AND_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0.p2p_collection_add(&["AndDoc"]).expect("subscribe 0");
+
+    let filter_json = format!(r#"{{"agent_did":{{"_eq":"{ALICE}"}},"kind":{{"_eq":"keep"}}}}"#);
+    let out = run_replicator_add_filter(&cluster, 0, &["AndDoc"], &addr1, &filter_json);
+    assert!(
+        out.status.success(),
+        "composite AND replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mk = |did: &str, kind: &str, seq: i32| {
+        format!(
+            r#"mutation {{ add_AndDoc(input: {{agent_did: "{did}", kind: "{kind}", seq: {seq}}}) {{ _docID }} }}"#
+        )
+    };
+
+    let match1 = node0
+        .query(&mk(ALICE, "keep", 1))
+        .expect("create (alice, keep, 1) doc");
+    let match1_id = extract_doc_id(&match1, "add_AndDoc");
+
+    node0
+        .query(&mk(ALICE, "drop", 2))
+        .expect("create (alice, drop) doc");
+    node0
+        .query(&mk(BOB, "keep", 3))
+        .expect("create (bob, keep) doc");
+
+    let match2 = node0
+        .query(&mk(ALICE, "keep", 4))
+        .expect("create second (alice, keep, 4) anchor");
+    let match2_id = extract_doc_id(&match2, "add_AndDoc");
+
+    let node1_poll = cluster.client(1);
+    let m1 = match1_id.clone();
+    let m2 = match2_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AndDoc { _docID agent_did kind } }")
+                .unwrap_or_default();
+            let Some(rows) = result["AndDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&m1.as_str()) && ids.contains(&m2.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "composite AND matching docs did not replicate",
+    )
+    .await;
+
+    let result = node1
+        .query("query { AndDoc { agent_did kind } }")
+        .expect("query AndDoc on node1");
+    let rows = result["AndDoc"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        rows.len(),
+        2,
+        "composite AND filtered peer must hold exactly 2 (alice,keep) docs, found: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r["agent_did"].as_str() == Some(ALICE) && r["kind"].as_str() == Some("keep")),
+        "composite AND filtered peer must hold only (alice,keep) docs, found: {rows:?}"
+    );
+}
+
+/// A predicate on a mutable field (`body`) must be rejected at add time.
+#[tokio::test]
+async fn rust_filtered_replicator_rejects_predicate_non_immutable_field() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 1).await;
+    cluster.client(0).schema_add(AGENT_SCHEMA).expect("schema");
+
+    let out = run_replicator_add_filter(
+        &cluster,
+        0,
+        &["AgentDoc"],
+        DUMMY_PEER_ADDR,
+        r#"{"body":{"_eq":"x"}}"#,
+    );
+    assert!(
+        !out.status.success(),
+        "filtering on a mutable field via --filter must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("immutable"),
+        "error should require the filter field be @immutable, got: {stderr}"
+    );
+}
+
+/// The HTTP wire format cannot express the internal `Acp` variant of
+/// `p2p::ReplicationFilter` — `ReplicationFilter` carries only `Field`, `Value`,
+/// and `Conditions`. Sending an unknown key produces a filter where `Field` is
+/// empty and `Conditions` is None, which the adapter rejects with 4xx.
+#[tokio::test]
+async fn rust_filtered_replicator_rejects_acp_variant() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 1).await;
+    cluster.client(0).schema_add(AGENT_SCHEMA).expect("schema");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/v0/p2p/replicators", cluster.api_url(0)))
+        .json(&serde_json::json!({
+            "Collections": ["AgentDoc"],
+            "Addresses": [DUMMY_PEER_ADDR],
+            "Filters": {"AgentDoc": {"Field": "", "Value": null}}
+        }))
+        .send()
+        .await
+        .expect("POST replicators");
+
+    assert!(
+        resp.status().is_client_error(),
+        "empty-field filter must be rejected with a 4xx, got: {}",
+        resp.status()
+    );
+}
+
+/// The legacy `{Field, Value}` HTTP shape still routes correctly through the new
+/// filter resolution path — back-compat for clients that have not migrated to
+/// the `Conditions` shape.
+#[tokio::test]
+async fn rust_filtered_replication_legacy_format_back_compat() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/v0/p2p/replicators", cluster.api_url(0)))
+        .json(&serde_json::json!({
+            "Collections": ["AgentDoc"],
+            "Addresses": [addr1],
+            "Filters": {"AgentDoc": {"Field": "agent_did", "Value": ALICE}}
+        }))
+        .send()
+        .await
+        .expect("POST replicators legacy");
+    assert!(
+        resp.status().is_success(),
+        "legacy {{Field, Value}} replicator add failed: {}",
+        resp.status()
+    );
+
+    let alice1 = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "a1"}}) {{ _docID }} }}"#
+        ))
+        .expect("alice1");
+    let alice1_id = extract_doc_id(&alice1, "add_AgentDoc");
+
+    node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{BOB}", body: "b1"}}) {{ _docID }} }}"#
+        ))
+        .expect("bob1");
+
+    let alice2 = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "a2"}}) {{ _docID }} }}"#
+        ))
+        .expect("alice2 anchor");
+    let alice2_id = extract_doc_id(&alice2, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let a1 = alice1_id.clone();
+    let a2 = alice2_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            let Some(rows) = result["AgentDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&a1.as_str()) && ids.contains(&a2.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "legacy-format alice docs did not replicate",
+    )
+    .await;
+
+    let dids = agent_did_values(&cluster, 1);
+    assert_eq!(
+        dids.len(),
+        2,
+        "legacy back-compat: only alice docs must replicate, found: {dids:?}"
+    );
+    assert!(
+        dids.iter().all(|d| d == ALICE),
+        "legacy back-compat: bob must be excluded, found: {dids:?}"
+    );
+}
+
+/// A replicator's filter can be updated in-place (upsert) by re-adding with the
+/// same peer+collection but a new predicate. Documents that match the updated
+/// filter but not the original must begin replicating after the upsert without
+/// requiring a remove/re-add cycle.
+#[tokio::test]
+async fn rust_filtered_replication_mutable_filter_upsert() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+
+    let narrow_filter = format!(r#"{{"agent_did":{{"_in":["{ALICE}"]}}}}"#);
+    let out = run_replicator_add_filter(&cluster, 0, &["AgentDoc"], &addr1, &narrow_filter);
+    assert!(
+        out.status.success(),
+        "initial narrow filter add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let alice1 = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "alice-before-upsert"}}) {{ _docID }} }}"#
+        ))
+        .expect("alice1");
+    let alice1_id = extract_doc_id(&alice1, "add_AgentDoc");
+
+    node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{CAROL}", body: "carol-before-upsert"}}) {{ _docID }} }}"#
+        ))
+        .expect("carol before upsert");
+
+    let node1_poll = cluster.client(1);
+    let a1 = alice1_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(a1.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "alice1 did not replicate before upsert",
+    )
+    .await;
+
+    // Carol arrived on node0 first but must still be absent on node1 at this
+    // point (the narrow filter excludes her). A brief settle window confirms
+    // absence before the upsert changes the filter.
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let before_upsert = agent_did_values(&cluster, 1);
+    assert!(
+        !before_upsert.iter().any(|d| d == CAROL),
+        "carol must not be present before filter upsert, found: {before_upsert:?}"
+    );
+
+    // Upsert the replicator with a wider filter that now includes carol.
+    let wide_filter = format!(r#"{{"agent_did":{{"_in":["{ALICE}","{CAROL}"]}}}}"#);
+    let out = run_replicator_add_filter(&cluster, 0, &["AgentDoc"], &addr1, &wide_filter);
+    assert!(
+        out.status.success(),
+        "filter upsert failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Create new docs after the upsert so delivery comes from live push under
+    // the updated filter (not backfill, which is separate behavior).
+    let carol2 = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{CAROL}", body: "carol-after-upsert"}}) {{ _docID }} }}"#
+        ))
+        .expect("carol2 after upsert");
+    let carol2_id = extract_doc_id(&carol2, "add_AgentDoc");
+
+    let alice2 = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "alice-anchor"}}) {{ _docID }} }}"#
+        ))
+        .expect("alice2 ordering anchor");
+    let alice2_id = extract_doc_id(&alice2, "add_AgentDoc");
+
+    let node1_poll2 = cluster.client(1);
+    let c2 = carol2_id.clone();
+    let a2 = alice2_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll2
+                .query("query { AgentDoc { _docID agent_did } }")
+                .unwrap_or_default();
+            let Some(rows) = result["AgentDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&c2.as_str()) && ids.contains(&a2.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "carol2 or alice2 did not replicate after filter upsert",
+    )
+    .await;
+
+    let dids_after = agent_did_values(&cluster, 1);
+    assert!(
+        dids_after.iter().any(|d| d == CAROL),
+        "carol must replicate after filter upsert, found: {dids_after:?}"
+    );
+    assert!(
+        !dids_after.iter().any(|d| d == BOB),
+        "bob must remain excluded after filter upsert, found: {dids_after:?}"
+    );
+}
