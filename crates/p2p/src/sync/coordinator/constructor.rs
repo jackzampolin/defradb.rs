@@ -39,6 +39,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             AccessMode::Open,
             Arc::new(ReplicatorRegistry::new()),
             Arc::new(NoOpCollectionStorage),
+            Arc::new(EqOnlyFilterMatcher),
         )
         .await
     }
@@ -60,6 +61,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             access_mode,
             Arc::new(ReplicatorRegistry::new()),
             collection_store,
+            Arc::new(EqOnlyFilterMatcher),
         )
         .await
     }
@@ -67,6 +69,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Create a new sync coordinator with access control.
     ///
     /// Returns the coordinator and a receiver for sync events.
+    #[allow(clippy::too_many_arguments)]
     pub async fn with_access_control(
         transport: T,
         blockstore: Arc<B>,
@@ -74,6 +77,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         access_mode: AccessMode,
         replicators: Arc<ReplicatorRegistry>,
         collection_store: Arc<dyn P2PCollectionStorage>,
+        filter_matcher: Arc<dyn ReplicationFilterMatcher>,
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
         Self::with_head_provider(
             transport,
@@ -83,7 +87,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             replicators,
             collection_store,
             Arc::new(NoOpHeadProvider),
-            Arc::new(EqOnlyFilterMatcher),
+            filter_matcher,
         )
         .await
     }

@@ -39,6 +39,7 @@ mod tests {
         BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
         PushLogReply, PushLogRequest, PushSEArtifactsRequest,
     };
+    use crate::replicator::EqOnlyFilterMatcher;
     use crate::sync::manager::SyncEvent;
     use crate::sync::merge::{
         BlockMetadata, MergeBlock, MergeHandler, MergeOutcome, RecoveredBlockMetadata,
@@ -989,6 +990,7 @@ mod tests {
                 AccessMode::Open,
                 Arc::new(crate::ReplicatorRegistry::new()),
                 Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+                Arc::new(EqOnlyFilterMatcher),
             )
             .await
             .unwrap();
@@ -1057,6 +1059,7 @@ mod tests {
                 AccessMode::Open,
                 Arc::new(crate::ReplicatorRegistry::new()),
                 Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+                Arc::new(EqOnlyFilterMatcher),
             )
             .await
             .unwrap();
@@ -1102,6 +1105,7 @@ mod tests {
                 AccessMode::Controlled,
                 Arc::new(crate::ReplicatorRegistry::new()),
                 Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+                Arc::new(EqOnlyFilterMatcher),
             )
             .await
             .unwrap();
@@ -1149,6 +1153,7 @@ mod tests {
                 AccessMode::Open,
                 Arc::new(crate::ReplicatorRegistry::new()),
                 Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+                Arc::new(EqOnlyFilterMatcher),
             )
             .await
             .unwrap();
@@ -1214,6 +1219,7 @@ mod tests {
                 AccessMode::Open,
                 Arc::new(crate::ReplicatorRegistry::new()),
                 Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+                Arc::new(EqOnlyFilterMatcher),
             )
             .await
             .unwrap();
@@ -1359,6 +1365,7 @@ mod tests {
                 AccessMode::Open,
                 Arc::new(crate::ReplicatorRegistry::new()),
                 Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+                Arc::new(EqOnlyFilterMatcher),
             )
             .await
             .unwrap();
@@ -1422,6 +1429,7 @@ mod tests {
                 AccessMode::Open,
                 Arc::new(crate::ReplicatorRegistry::new()),
                 Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+                Arc::new(EqOnlyFilterMatcher),
             )
             .await
             .unwrap();
@@ -1508,6 +1516,7 @@ mod tests {
                 AccessMode::Open,
                 Arc::new(crate::ReplicatorRegistry::new()),
                 Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+                Arc::new(EqOnlyFilterMatcher),
             )
             .await
             .unwrap();
@@ -1564,6 +1573,7 @@ mod tests {
                 AccessMode::Open,
                 Arc::new(crate::ReplicatorRegistry::new()),
                 Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+                Arc::new(EqOnlyFilterMatcher),
             )
             .await
             .unwrap();
@@ -1612,6 +1622,7 @@ mod tests {
                 AccessMode::Open,
                 Arc::new(crate::ReplicatorRegistry::new()),
                 Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+                Arc::new(EqOnlyFilterMatcher),
             )
             .await
             .unwrap();

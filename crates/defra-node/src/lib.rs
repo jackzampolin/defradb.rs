@@ -1265,6 +1265,7 @@ impl NodeBuilder {
             p2p::AccessMode::Controlled,
             replicator_registry,
             collection_store,
+            Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
         )
         .await
         .map_err(|e| anyhow::anyhow!("SyncCoordinator creation failed: {}", e))?;
