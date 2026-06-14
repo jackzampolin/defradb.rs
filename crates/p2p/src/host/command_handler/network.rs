@@ -38,6 +38,19 @@ impl<S: Store> P2PHost<S> {
         }
     }
 
+    pub(super) fn handle_disconnect(
+        &mut self,
+        peer_id: PeerId,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        // `disconnect_peer_id` returns `Err(())` when the peer is not connected.
+        // Disconnect is idempotent: hanging up on an absent peer is success.
+        let _ = self.swarm.disconnect_peer_id(peer_id);
+        if response.send(Ok(())).is_err() {
+            debug!(peer_id = %peer_id, "Disconnect command response dropped - caller cancelled");
+        }
+    }
+
     pub(super) fn handle_peer_addresses(
         &self,
         response: tokio::sync::oneshot::Sender<Vec<String>>,

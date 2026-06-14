@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
+use iroh::endpoint::Connection;
 use iroh::EndpointId;
 
 use crate::transport::PeerId;
@@ -25,6 +26,10 @@ pub fn endpoint_id_to_peer_id(id: &EndpointId) -> PeerId {
 pub struct ConnectionInfo {
     pub remote_addr: Option<SocketAddr>,
     pub active_connections: u32,
+    /// A handle to the underlying QUIC connection, used to hang up on
+    /// `disconnect`. iroh `Connection` clones share the same QUIC connection,
+    /// so closing this handle closes the connection for the peer.
+    connection: Option<Connection>,
 }
 
 /// Tracks connected peers and their connection info.
@@ -40,16 +45,21 @@ impl PeerMap {
 
     /// Increment connection count for a peer. Returns `true` if this is the
     /// first connection (0 -> 1), meaning PeerConnected should be emitted.
+    ///
+    /// `connection` is a handle to the underlying QUIC connection, retained so
+    /// `disconnect` can hang up on the peer.
     pub fn increment_connections(
         &mut self,
         id: EndpointId,
         remote_addr: Option<SocketAddr>,
+        connection: Connection,
     ) -> bool {
         if let Some(info) = self.connections.get_mut(&id) {
             info.active_connections += 1;
             if let Some(addr) = remote_addr {
                 info.remote_addr = Some(addr);
             }
+            info.connection = Some(connection);
             false
         } else {
             self.connections.insert(
@@ -57,10 +67,21 @@ impl PeerMap {
                 ConnectionInfo {
                     remote_addr,
                     active_connections: 1,
+                    connection: Some(connection),
                 },
             );
             true
         }
+    }
+
+    /// Take the retained connection handle for a peer without removing the
+    /// connection-count entry. Returns `None` if the peer is unknown or no
+    /// handle was retained. Used by `disconnect` to close the live connection;
+    /// the count entry is then cleared by the stream task on `accept_bi` error.
+    pub fn take_connection(&mut self, id: &EndpointId) -> Option<Connection> {
+        self.connections
+            .get_mut(id)
+            .and_then(|info| info.connection.take())
     }
 
     /// Decrement connection count for a peer. Returns `true` if the count

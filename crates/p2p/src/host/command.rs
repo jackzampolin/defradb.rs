@@ -29,6 +29,12 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<()>>,
     },
 
+    /// Disconnect from a peer, hanging up any live connection.
+    Disconnect {
+        peer_id: PeerId,
+        response: oneshot::Sender<Result<()>>,
+    },
+
     /// Send a PushLog request to a peer.
     SendPushLog {
         peer_id: PeerId,

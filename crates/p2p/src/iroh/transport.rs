@@ -98,6 +98,14 @@ impl P2PTransport for IrohTransport {
         .await
     }
 
+    async fn disconnect(&self, peer_id: &PeerId) -> Result<()> {
+        self.send_command(|reply| IrohCommand::Disconnect {
+            peer_id: peer_id.clone(),
+            reply,
+        })
+        .await
+    }
+
     fn parse_dial_addr(&self, addr: &str) -> Result<(PeerId, Vec<PeerAddr>)> {
         super::addr::parse_public_peer_addr(addr)
     }
@@ -598,6 +606,80 @@ mod tests {
         transport1.shutdown().await.unwrap();
         task0.await.unwrap();
         task1.await.unwrap();
+    }
+
+    async fn poll_until_disconnected(transport: &IrohTransport, peer_id: &PeerId) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let peers = transport.connected_peers().await.unwrap_or_default();
+            if !peers.iter().any(|p| p.as_str() == peer_id.as_str()) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for disconnection from {}",
+                peer_id
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_drops_connected_peer() {
+        let key0 = SecretKey::generate();
+        let key1 = SecretKey::generate();
+        let (command_tx0, _events0, _replicators0, task0) =
+            spawn_endpoint(test_config(key0.clone())).await.unwrap();
+        let (command_tx1, _events1, _replicators1, task1) =
+            spawn_endpoint(test_config(key1.clone())).await.unwrap();
+        let transport0 = IrohTransport::new(command_tx0, key0);
+        let transport1 = IrohTransport::new(command_tx1, key1);
+
+        transport0
+            .dial(
+                transport1.local_peer_id(),
+                transport1.listen_addresses().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        transport0
+            .poll_until_connected(transport1.local_peer_id(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let connected = transport0.connected_peers().await.unwrap();
+        assert!(connected
+            .iter()
+            .any(|p| p.as_str() == transport1.local_peer_id().as_str()));
+
+        transport0
+            .disconnect(transport1.local_peer_id())
+            .await
+            .unwrap();
+        poll_until_disconnected(&transport0, transport1.local_peer_id()).await;
+
+        transport0.shutdown().await.unwrap();
+        transport1.shutdown().await.unwrap();
+        task0.await.unwrap();
+        task1.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_absent_peer_is_ok() {
+        let key0 = SecretKey::generate();
+        let key1 = SecretKey::generate();
+        let (command_tx0, _events0, _replicators0, task0) =
+            spawn_endpoint(test_config(key0.clone())).await.unwrap();
+        let transport0 = IrohTransport::new(command_tx0, key0);
+        let never_connected = PeerId::new(key1.public().to_string());
+
+        transport0
+            .disconnect(&never_connected)
+            .await
+            .expect("disconnecting a never-connected peer must be Ok");
+
+        transport0.shutdown().await.unwrap();
+        task0.await.unwrap();
     }
 
     #[tokio::test]

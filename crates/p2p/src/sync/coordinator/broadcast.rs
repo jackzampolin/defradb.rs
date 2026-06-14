@@ -756,6 +756,10 @@ mod tests {
             Ok(())
         }
 
+        async fn disconnect(&self, _peer_id: &PeerId) -> P2PResult<()> {
+            Ok(())
+        }
+
         async fn listen(&self, _addr: PeerAddr) -> P2PResult<()> {
             Ok(())
         }

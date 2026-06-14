@@ -27,6 +27,9 @@ impl<S: Store> P2PHost<S> {
             } => {
                 self.handle_dial(peer_id, addrs, response);
             }
+            HostCommand::Disconnect { peer_id, response } => {
+                self.handle_disconnect(peer_id, response);
+            }
             HostCommand::Shutdown => {
                 return self.handle_shutdown().await;
             }

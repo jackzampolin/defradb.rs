@@ -270,6 +270,13 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
 
     async fn dial(&self, peer_id: &PeerId, addrs: Vec<PeerAddr>) -> Result<()>;
 
+    /// Disconnect from a peer, hanging up any live connection.
+    ///
+    /// Disconnect-only: this hangs up the current connection but does not
+    /// prevent the peer from reconnecting (no persistent allow/deny list).
+    /// Idempotent: disconnecting an already-absent peer returns `Ok(())`.
+    async fn disconnect(&self, peer_id: &PeerId) -> Result<()>;
+
     /// Parse a peer address string into a transport-agnostic peer id and dial
     /// hints. The accepted string format is transport-specific (libp2p
     /// multiaddrs vs iroh tickets/endpoint ids), which is why this lives on the
