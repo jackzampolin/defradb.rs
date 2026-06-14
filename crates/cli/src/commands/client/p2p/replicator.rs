@@ -48,6 +48,11 @@ pub struct P2pReplicatorAddArgs {
     /// Scalar value matched by --filter-field.
     #[arg(long = "filter-value", requires = "filter_field")]
     pub filter_value: Option<String>,
+
+    /// Full query-filter conditions JSON applied to every selected collection,
+    /// e.g. --filter '{"agent_did": {"_in": ["did:a","did:b"]}}'. Mutually exclusive with --filter-field.
+    #[arg(long = "filter", conflicts_with = "filter_field")]
+    pub filter: Option<String>,
 }
 
 /// Arguments for replicator delete command
@@ -118,6 +123,22 @@ impl P2pReplicatorAddArgs {
     }
 
     fn build_filters(&self) -> Result<ReplicationFilters> {
+        if let Some(raw) = self.filter.as_deref() {
+            let value: serde_json::Value = serde_json::from_str(raw)
+                .map_err(|e| Error::InvalidConfig(format!("--filter is not valid JSON: {e}")))?;
+            let conds = value
+                .as_object()
+                .ok_or_else(|| {
+                    Error::InvalidConfig("--filter must be a JSON object of conditions".to_string())
+                })?
+                .clone();
+            return Ok(self
+                .collection
+                .iter()
+                .map(|c| (c.clone(), ReplicationFilter::predicate(conds.clone())))
+                .collect());
+        }
+
         let Some(field) = self.filter_field.as_deref() else {
             if self.filter_value.is_some() {
                 return Err(Error::MissingInput(
@@ -143,10 +164,10 @@ impl P2pReplicatorAddArgs {
             .map(|collection| {
                 (
                     collection.clone(),
-                    ReplicationFilter {
-                        field: field.to_string(),
-                        value: serde_json::Value::String(value.to_string()),
-                    },
+                    ReplicationFilter::eq(
+                        field.to_string(),
+                        serde_json::Value::String(value.to_string()),
+                    ),
                 )
             })
             .collect())
@@ -251,7 +272,7 @@ impl P2pReplicatorDeleteArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_public_peer_id;
+    use super::{extract_public_peer_id, P2pReplicatorAddArgs};
 
     #[test]
     fn extract_public_peer_id_accepts_libp2p_multiaddr() {
@@ -271,5 +292,39 @@ mod tests {
         let addr = format!("127.0.0.1:9000/p2p/{peer_id}");
 
         assert_eq!(extract_public_peer_id(&addr).unwrap(), peer_id);
+    }
+
+    #[test]
+    fn build_filters_with_filter_flag_produces_predicate() {
+        let args = P2pReplicatorAddArgs {
+            collection: vec!["users".to_string()],
+            addresses: vec![],
+            filter_field: None,
+            filter_value: None,
+            filter: Some(r#"{"agent_did":{"_in":["did:a","did:b"]}}"#.to_string()),
+        };
+
+        let filters = args.build_filters().expect("build_filters should succeed");
+        let filter = filters.get("users").expect("users filter present");
+
+        let conds = filter.conditions.as_ref().expect("conditions set");
+        let in_vals = conds["agent_did"]["_in"].as_array().expect("_in is array");
+        assert_eq!(in_vals.len(), 2);
+        assert_eq!(in_vals[0], "did:a");
+        assert_eq!(in_vals[1], "did:b");
+        assert!(filter.field.is_empty());
+    }
+
+    #[test]
+    fn build_filters_with_filter_flag_rejects_non_object() {
+        let args = P2pReplicatorAddArgs {
+            collection: vec!["users".to_string()],
+            addresses: vec![],
+            filter_field: None,
+            filter_value: None,
+            filter: Some(r#"["not","an","object"]"#.to_string()),
+        };
+
+        assert!(args.build_filters().is_err());
     }
 }
