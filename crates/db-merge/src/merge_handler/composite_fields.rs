@@ -158,9 +158,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         Ok(None)
     }
 
-    /// Reject an incoming immutable-field delta that does not exactly preserve the
+    /// Reject an incoming immutable-field delta that does not exactly preserve a
     /// prior value — a different value, or a tombstone/clear (empty payload) — so a
     /// crafted block cannot diverge the field store from the document store.
+    ///
+    /// A field with no prior value is allowed to be set: out-of-order sync can
+    /// materialize a partial document before the create-composite carrying the
+    /// immutable field merges, so rejecting first-set would false-reject the
+    /// legitimate block.
     fn check_immutable_delta(
         baseline: &Document,
         field_name: &str,

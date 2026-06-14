@@ -762,6 +762,89 @@ async fn rust_filtered_replication_excludes_nonmatching_controlled_mode() {
     );
 }
 
+/// A typed Float filter value (2.0) — set via HTTP, since the CLI only sends
+/// string values — matches a whole-number Float field that materializes as an
+/// integer JSON number, exercising numeric-aware filter matching end to end.
+#[tokio::test]
+async fn rust_filtered_replication_float_filter_matches_numerically() {
+    const SCORE_SCHEMA: &str = "type ScoreDoc { score: Float @immutable  body: String }";
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+    node0.schema_add(SCORE_SCHEMA).expect("schema node0");
+    node1.schema_add(SCORE_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["ScoreDoc"])
+        .expect("subscribe 0");
+
+    // Typed Float filter value (2.0) — must go via HTTP; the CLI wraps as a string.
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/v0/p2p/replicators", cluster.api_url(0)))
+        .json(&serde_json::json!({
+            "Collections": ["ScoreDoc"],
+            "Addresses": [addr1],
+            "Filters": {"ScoreDoc": {"Field": "score", "Value": 2.0}}
+        }))
+        .send()
+        .await
+        .expect("add filtered replicator");
+    assert!(
+        resp.status().is_success(),
+        "HTTP filtered replicator add failed: {}",
+        resp.status()
+    );
+
+    let matching = node0
+        .query(r#"mutation { add_ScoreDoc(input: {score: 2.0, body: "a"}) { _docID } }"#)
+        .expect("matching");
+    let matching_id = extract_doc_id(&matching, "add_ScoreDoc");
+    node0
+        .query(r#"mutation { add_ScoreDoc(input: {score: 3.0, body: "b"}) { _docID } }"#)
+        .expect("non-matching");
+    let matching2 = node0
+        .query(r#"mutation { add_ScoreDoc(input: {score: 2.0, body: "a2"}) { _docID } }"#)
+        .expect("matching2");
+    let matching2_id = extract_doc_id(&matching2, "add_ScoreDoc");
+
+    let node1_poll = cluster.client(1);
+    let m1 = matching_id.clone();
+    let m2 = matching2_id.clone();
+    poll_until(
+        || {
+            let r = node1_poll
+                .query("query { ScoreDoc { _docID } }")
+                .unwrap_or_default();
+            let Some(rows) = r["ScoreDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|x| x["_docID"].as_str()).collect();
+            ids.contains(&m1.as_str()) && ids.contains(&m2.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "Float-matching docs did not replicate to filtered peer",
+    )
+    .await;
+
+    let result = node1
+        .query("query { ScoreDoc { _docID } }")
+        .expect("query node1");
+    let count = result["ScoreDoc"].as_array().map(Vec::len).unwrap_or(0);
+    assert_eq!(
+        count, 2,
+        "filtered peer must hold only the two score=2.0 docs, not score=3.0"
+    );
+}
+
 // #3 (remote-merge enforcement of `@immutable`) is intentionally NOT an
 // integration-suite test. The guard in `composite_persist.rs` is defense-in-depth
 // against a malicious or divergent peer and is unreachable through two honest
