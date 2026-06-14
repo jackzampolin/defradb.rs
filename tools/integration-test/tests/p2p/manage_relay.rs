@@ -664,6 +664,142 @@ async fn manage_document_list_over_p2p() {
     }
 }
 
+/// Bring up a NAC-enabled 3-node libp2p cluster (A=relay controller, B=manage
+/// target, C=the peer B will be told to disconnect from), deploy the `User`
+/// schema on node B, and return the admin key plus B's and C's dial addresses.
+async fn setup_3() -> (TestCluster, String, String, String) {
+    let cluster = TestCluster::builder()
+        .rust_nodes(3)
+        .with_acp_local()
+        .with_nac()
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+
+    let timeout = Duration::from_secs(15);
+    for node in 0..3 {
+        cluster
+            .wait_for_log(node, "p2p_listening", timeout)
+            .await
+            .unwrap_or_else(|_| panic!("node{node} P2P listener did not start"));
+    }
+
+    let admin_key = cluster
+        .startup_identity()
+        .expect("NAC cluster must have startup identity")
+        .to_string();
+
+    let node_b = cluster.client(1);
+    node_b
+        .schema_add_with_identity(SCHEMA, &admin_key)
+        .expect("deploy schema on node B");
+
+    let addr_b = first_addr(&cluster.client(1), &admin_key);
+    let addr_c = first_addr(&cluster.client(2), &admin_key);
+
+    (cluster, admin_key, addr_b, addr_c)
+}
+
+/// First P2P dial address of `client`, fetched with the admin identity.
+fn first_addr(client: &integration_test::DefraClient, admin_key: &str) -> String {
+    client
+        .p2p_info_with_identity(admin_key)
+        .expect("p2p_info")
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .expect("node has no P2P address")
+        .to_string()
+}
+
+/// True when `peer_id` appears (as the `/p2p/<id>` suffix) in node `idx`'s
+/// active-peers list, fetched with the admin identity.
+fn active_peers_contains(
+    cluster: &TestCluster,
+    idx: usize,
+    admin_key: &str,
+    peer_id: &str,
+) -> bool {
+    cluster
+        .client(idx)
+        .p2p_active_peers_with_identity(admin_key)
+        .expect("p2p_active_peers")
+        .as_array()
+        .map(|peers| {
+            peers
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|addr| peer_id_of(addr) == peer_id)
+        })
+        .unwrap_or(false)
+}
+
+/// 3-node e2e: a relayed `PeerDisconnect` must SEVER a live connection, not just
+/// return 200. Node A (HTTP relay) tells node B to disconnect from node C, while
+/// a live B<->C connection (established directly, not over the relay) exists.
+/// The disconnect is proven by C disappearing from B's active peers. The third
+/// node is essential: the A<->B relay link is a different connection, so the
+/// relay reply still returns even after C is dropped.
+#[tokio::test]
+#[serial]
+async fn manage_peer_disconnect_severs_live_connection() {
+    let (cluster, admin_key, addr_b, addr_c) = setup_3().await;
+    let api_a = cluster.api_url(0).to_string();
+    let peer_id_b = peer_id_of(&addr_b).to_string();
+    let peer_id_c = peer_id_of(&addr_c).to_string();
+
+    // Establish a LIVE B<->C connection directly (not over the relay).
+    cluster
+        .client(1)
+        .p2p_connect_with_identity(&[addr_c.as_str()], &admin_key)
+        .expect("node B connect to node C");
+
+    // Poll until C is present in B's active peers (connect is eventually-consistent).
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if active_peers_contains(&cluster, 1, &admin_key, &peer_id_c) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node C never appeared in node B's active peers; cannot test disconnect"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Relay a PeerDisconnect to B targeting C's address.
+    let token = crate::manage_relay_common::mint_manage_token(&admin_key, &peer_id_b);
+    let status = post_manage(
+        &api_a,
+        &admin_key,
+        &addr_b,
+        &token,
+        json!({ "Kind": "PeerDisconnect", "address": addr_c }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "authorized PeerDisconnect relay should return 200"
+    );
+
+    // The real assertion: C must vanish from B's active peers — the relayed verb
+    // severed a live connection.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if !active_peers_contains(&cluster, 1, &admin_key, &peer_id_c) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "relayed PeerDisconnect did not sever the live B<->C connection: \
+             node C is still in node B's active peers"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// Admin token (`aud` = B peer-id) relays a `PeerDisconnect`. The disconnect
 /// primitive is idempotent-Ok, so a 200 proves the dispatch path is wired
 /// (mirrors `manage_document_add_over_p2p`). The target address is a third,
