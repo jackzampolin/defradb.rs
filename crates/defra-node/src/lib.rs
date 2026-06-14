@@ -1593,6 +1593,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                         doc_id,
                         collection_id,
                         &retry_filters,
+                        &replication_filter::QueryReplicationFilterMatcher::new(),
                     )
                     .await
                     {

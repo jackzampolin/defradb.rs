@@ -112,6 +112,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             filters,
             se_key,
             se_identity_pubkey,
+            &replication_filter::QueryReplicationFilterMatcher::new(),
         )
         .await
         .map_err(P2PError::from)
@@ -307,6 +308,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             doc_id,
             collection_id,
             &filters,
+            &replication_filter::QueryReplicationFilterMatcher::new(),
         )
         .await
         .map_err(P2PError::from)

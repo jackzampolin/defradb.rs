@@ -1348,3 +1348,99 @@ async fn rust_filtered_replication_mutable_filter_upsert() {
         "bob must remain excluded after filter upsert, found: {dids_after:?}"
     );
 }
+
+/// Backfill with `_in` set filter: docs created BEFORE replicator is added must
+/// be backfilled only if they appear in the IN set.
+///
+/// This test would fail if the backfill path used `EqOnlyFilterMatcher` because
+/// `_in` has no `_eq` key — EqOnly would match nothing and silently drop ALL docs.
+#[tokio::test]
+async fn rust_filtered_replication_in_set_backfill() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    // Create all docs BEFORE wiring replication so delivery comes from backfill.
+    let alice_doc = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "alice-backfill"}}) {{ _docID }} }}"#
+        ))
+        .expect("create alice doc");
+    let alice_id = extract_doc_id(&alice_doc, "add_AgentDoc");
+
+    node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{BOB}", body: "bob-backfill"}}) {{ _docID }} }}"#
+        ))
+        .expect("create bob doc");
+
+    let carol_doc = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{CAROL}", body: "carol-backfill"}}) {{ _docID }} }}"#
+        ))
+        .expect("create carol doc");
+    let carol_id = extract_doc_id(&carol_doc, "add_AgentDoc");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+
+    let filter_json = format!(r#"{{"agent_did":{{"_in":["{ALICE}","{CAROL}"]}}}}"#);
+    let out = run_replicator_add_filter(&cluster, 0, &["AgentDoc"], &addr1, &filter_json);
+    assert!(
+        out.status.success(),
+        "IN-set backfill replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Both alice and carol must arrive via backfill.
+    let node1_poll = cluster.client(1);
+    let alice_id_poll = alice_id.clone();
+    let carol_id_poll = carol_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID agent_did } }")
+                .unwrap_or_default();
+            let Some(rows) = result["AgentDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&alice_id_poll.as_str()) && ids.contains(&carol_id_poll.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "alice and carol did not backfill to IN-set filtered peer",
+    )
+    .await;
+
+    // Bob must be absent. After both matching docs arrived the push pipeline has
+    // provably run, so bob's absence is attributable to the filter.
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let dids = agent_did_values(&cluster, 1);
+    assert_eq!(
+        dids.len(),
+        2,
+        "IN-set backfill filtered peer must hold exactly 2 docs (alice + carol), found: {dids:?}"
+    );
+    assert!(
+        dids.iter().all(|d| d == ALICE || d == CAROL),
+        "IN-set backfill filtered peer must hold only alice and carol, found: {dids:?}"
+    );
+    assert!(
+        !dids.iter().any(|d| d == BOB),
+        "bob must be excluded by IN-set backfill filter, found: {dids:?}"
+    );
+}

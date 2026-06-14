@@ -3,7 +3,6 @@ use std::sync::Arc;
 use acp::DocumentACP;
 use bytes::Bytes;
 use p2p::message::PushLogRequest;
-use p2p::replicator::ReplicationFilterMatcher as _;
 use storage::corekv::{IterOptions, Reader, Store};
 
 use crate::push_docs_common::{load_latest_composite_head_cids, load_push_dag_blocks};
@@ -22,6 +21,7 @@ async fn document_matches_filter<R: Reader + ?Sized>(
     collection_id: &str,
     doc_id: &str,
     filter: &p2p::ReplicationFilter,
+    matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
 ) -> Result<bool, String> {
     let doc_key = format!("/d/{}/{}", collection_id, doc_id).into_bytes();
     let Some(doc_data) = datastore
@@ -40,7 +40,7 @@ async fn document_matches_filter<R: Reader + ?Sized>(
             .into_iter()
             .collect(),
     );
-    Ok(p2p::replicator::EqOnlyFilterMatcher.matches("", filter, &document_json))
+    Ok(matcher.matches("", filter, &document_json))
 }
 
 /// Push existing documents to a replicator peer.
@@ -60,6 +60,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
     filters: &p2p::ReplicationFilters,
     se_encryption_key: Option<&[u8]>,
     se_identity_pubkey: Option<&[u8]>,
+    matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
 ) -> Result<(), String> {
     push_existing_docs_with_config(
         handle,
@@ -73,6 +74,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
             identity_pubkey: se_identity_pubkey,
         },
         ReplayPushConfig::default(),
+        matcher,
     )
     .await
 }
@@ -88,6 +90,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
     filters: &p2p::ReplicationFilters,
     se_options: PushExistingDocsSeOptions<'_>,
     replay_config: ReplayPushConfig,
+    matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
 ) -> Result<(), String> {
     // Wait for the connection to be fully established (dial is non-blocking).
     // After a node restart, re-establishing connectivity can take longer than
@@ -180,8 +183,14 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
         // doesn't work reliably cross-platform.
         for doc_id in &doc_ids {
             if let Some(filter) = filters.get(collection.collection_id()) {
-                if !document_matches_filter(&datastore, collection.collection_id(), doc_id, filter)
-                    .await?
+                if !document_matches_filter(
+                    &datastore,
+                    collection.collection_id(),
+                    doc_id,
+                    filter,
+                    matcher,
+                )
+                .await?
                 {
                     continue;
                 }
@@ -377,6 +386,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                         collection.collection_id(),
                         doc_id,
                         filter,
+                        matcher,
                     )
                     .await?
                     {
@@ -456,6 +466,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
 /// Reads composite head CIDs from the headstore, loads block data
 /// (field blocks + composite block) from the blockstore, and sends
 /// signed PushLogRequests to the target peer.
+#[allow(clippy::too_many_arguments)]
 pub async fn retry_doc<S: Store + 'static>(
     handle: &p2p::P2PHostHandle,
     db: &DB<S>,
@@ -464,6 +475,7 @@ pub async fn retry_doc<S: Store + 'static>(
     doc_id: &str,
     collection_id: &str,
     filters: &p2p::ReplicationFilters,
+    matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
 ) -> Result<(), String> {
     let local_peer_id = handle
         .local_peer_id()
@@ -482,7 +494,7 @@ pub async fn retry_doc<S: Store + 'static>(
         let datastore = txn
             .datastore()
             .map_err(|e| format!("failed to get datastore: {}", e))?;
-        if !document_matches_filter(&datastore, collection_id, doc_id, filter).await? {
+        if !document_matches_filter(&datastore, collection_id, doc_id, filter, matcher).await? {
             return Ok(());
         }
     }

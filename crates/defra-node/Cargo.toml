@@ -25,6 +25,7 @@ otel = ["dep:telemetry", "telemetry/otlp"]
 [dependencies]
 db = { path = "../db" }
 db-merge = { path = "../db-merge" }
+replication-filter = { path = "../replication-filter" }
 storage = { path = "../storage" }
 query = { path = "../query" }
 events = { path = "../events" }

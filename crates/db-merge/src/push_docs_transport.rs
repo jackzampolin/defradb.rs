@@ -3,7 +3,6 @@ use std::sync::Arc;
 use acp::DocumentACP;
 use bytes::Bytes;
 use p2p::message::PushLogRequest;
-use p2p::replicator::ReplicationFilterMatcher as _;
 use p2p::transport::PeerId;
 use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
@@ -18,6 +17,7 @@ async fn document_matches_filter<R: Reader + ?Sized>(
     collection_id: &str,
     doc_id: &str,
     filter: &p2p::ReplicationFilter,
+    matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
 ) -> Result<bool, String> {
     let doc_key = format!("/d/{}/{}", collection_id, doc_id).into_bytes();
     let Some(doc_data) = datastore
@@ -36,13 +36,14 @@ async fn document_matches_filter<R: Reader + ?Sized>(
             .into_iter()
             .collect(),
     );
-    Ok(p2p::replicator::EqOnlyFilterMatcher.matches("", filter, &document_json))
+    Ok(matcher.matches("", filter, &document_json))
 }
 
 /// Push existing documents to a replicator peer via a generic transport.
 ///
 /// Transport-agnostic equivalent of `push_existing_docs`. Uses `P2PTransport`
 /// methods instead of `P2PHostHandle`.
+#[allow(clippy::too_many_arguments)]
 pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTransport>(
     transport: &T,
     db: &DB<S>,
@@ -51,6 +52,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
     collections: &[String],
     filters: &p2p::ReplicationFilters,
     se_encryption_key: Option<&[u8]>,
+    matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
 ) -> Result<(), String> {
     push_existing_docs_via_transport_with_config(
         transport,
@@ -61,6 +63,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
         filters,
         se_encryption_key,
         ReplayPushConfig::default(),
+        matcher,
     )
     .await
 }
@@ -76,6 +79,7 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
     filters: &p2p::ReplicationFilters,
     se_encryption_key: Option<&[u8]>,
     replay_config: ReplayPushConfig,
+    matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
 ) -> Result<(), String> {
     let conn_timeout = std::time::Duration::from_secs(15);
     let conn_start = std::time::Instant::now();
@@ -165,8 +169,14 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
 
         for doc_id in &doc_ids {
             if let Some(filter) = filters.get(collection.collection_id()) {
-                if !document_matches_filter(&datastore, collection.collection_id(), doc_id, filter)
-                    .await?
+                if !document_matches_filter(
+                    &datastore,
+                    collection.collection_id(),
+                    doc_id,
+                    filter,
+                    matcher,
+                )
+                .await?
                 {
                     continue;
                 }
@@ -351,6 +361,7 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
                         collection.collection_id(),
                         doc_id,
                         filter,
+                        matcher,
                     )
                     .await?
                     {
@@ -427,6 +438,7 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
 /// via a generic transport.
 ///
 /// Transport-agnostic equivalent of `retry_doc`.
+#[allow(clippy::too_many_arguments)]
 pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
     transport: &T,
     db: &DB<S>,
@@ -435,6 +447,7 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
     doc_id: &str,
     collection_id: &str,
     filters: &p2p::ReplicationFilters,
+    matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
 ) -> Result<(), String> {
     let local_peer_id = transport.local_peer_id().to_string();
     let collection = db
@@ -449,7 +462,7 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
         let datastore = txn
             .datastore()
             .map_err(|e| format!("failed to get datastore: {}", e))?;
-        if !document_matches_filter(&datastore, collection_id, doc_id, filter).await? {
+        if !document_matches_filter(&datastore, collection_id, doc_id, filter, matcher).await? {
             return Ok(());
         }
     }

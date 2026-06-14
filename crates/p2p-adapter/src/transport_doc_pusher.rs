@@ -106,6 +106,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             collections,
             filters,
             se_key,
+            &replication_filter::QueryReplicationFilterMatcher::new(),
         )
         .await
         .map_err(P2PError::from)
@@ -133,6 +134,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             doc_id,
             collection_id,
             &filters,
+            &replication_filter::QueryReplicationFilterMatcher::new(),
         )
         .await
         .map_err(P2PError::from)
