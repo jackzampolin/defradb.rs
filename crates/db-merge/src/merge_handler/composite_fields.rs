@@ -37,7 +37,15 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     .schema()
                     .fields
                     .iter()
-                    .filter(|field| field.immutable)
+                    // JSON fields encode numbers differently in the document store
+                    // (json_to_cbor_value) than in the field block (ciborium), so a
+                    // cross-encoding merge comparison would false-reject. The local
+                    // write path compares same-representation values and still
+                    // enforces immutability for JSON fields.
+                    .filter(|field| {
+                        field.immutable
+                            && !matches!(field.kind, FieldKind::Scalar(ScalarKind::Json))
+                    })
                     .map(|field| field.name.as_str())
                     .collect()
             })
