@@ -15,230 +15,173 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         context: &CompositeMergeContext<'_, '_>,
         state: &mut CompositeMergeState,
     ) -> std::result::Result<Option<MergeOutcome>, MergeError> {
-        if let Some(links) = &context.block.links {
-            if context.mode.is_standalone() {
-                tracing::info!(
-                    cid = %context.cid,
-                    links_count = links.len(),
-                    "Processing linked blocks from Composite delta"
-                );
-            }
-
-            for dag_link in links {
-                if let Some(outcome) = self
-                    .process_field_block(datastore, headstore, context, dag_link, state)
-                    .await?
-                {
-                    return Ok(Some(outcome));
-                }
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Reject a composite that changes an `@immutable` field BEFORE any field
-    /// block is persisted, so a rejected block never leaves a partial CRDT write
-    /// behind (which a shared batch transaction cannot roll back per-block).
-    ///
-    /// Only fields the composite actually links are checked, so a partial update
-    /// that does not touch an immutable field is not falsely rejected. The prior
-    /// value is read deleted-inclusively so a delete+recreate cannot change it.
-    pub(crate) async fn validate_immutable_links(
-        &self,
-        datastore: &NamespaceView,
-        context: &CompositeMergeContext<'_, '_>,
-    ) -> std::result::Result<(), MergeError> {
-        let Some(collection) = context.collection.as_ref() else {
-            return Ok(());
-        };
         let Some(links) = &context.block.links else {
-            return Ok(());
+            return Ok(None);
         };
-        let immutable: HashSet<&str> = collection
-            .schema()
-            .fields
-            .iter()
-            .filter(|field| field.immutable)
-            .map(|field| field.name.as_str())
-            .collect();
-        if immutable.is_empty() || !links.iter().any(|l| immutable.contains(l.name.as_str())) {
-            return Ok(());
-        }
-
-        let doc_id = DocID::from_string(context.doc_id_str)
-            .map_err(|e| MergeError::MergeFailed(format!("invalid doc_id: {e}")))?;
-        let Some((baseline, _)) = collection
-            .get_with_datastore_include_deleted(datastore, &doc_id, false)
-            .await
-            .map_err(MergeError::Database)?
-        else {
-            return Ok(());
-        };
-
-        for link in links {
-            if !immutable.contains(link.name.as_str()) {
-                continue;
-            }
-            let Some(prior) = baseline.get(&link.name) else {
-                continue;
-            };
-            let Ok(Some(block_data)) = self.blockstore.get(&link.link).await else {
-                continue;
-            };
-            let Ok(block) = Block::from_dag_cbor(&block_data) else {
-                continue;
-            };
-            // Decrypt with the policy hook already marked checked so this read-only
-            // validation does not trigger encryption side effects.
-            let mut hook_checked = true;
-            let effective = match self
-                .handle_encryption(context, &block, &mut hook_checked)
-                .await?
-            {
-                EffectiveLinkedDelta::Delta(delta) => delta,
-                _ => continue,
-            };
-            if let CrdtDelta::Lww(payload) = effective {
-                let Ok(incoming) = ciborium::from_reader::<NormalValue, _>(payload.data.as_slice())
-                else {
-                    continue;
-                };
-                if *prior != incoming {
-                    return Err(MergeError::ImmutableFieldChanged(format!(
-                        "immutable field '{}' cannot be changed",
-                        link.name
-                    )));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn process_field_block(
-        &self,
-        datastore: &mut NamespaceView,
-        headstore: &NamespaceView,
-        context: &CompositeMergeContext<'_, '_>,
-        dag_link: &defra_core::block::DAGLink,
-        state: &mut CompositeMergeState,
-    ) -> std::result::Result<Option<MergeOutcome>, MergeError> {
-        let link_name = &dag_link.name;
-        let link_cid = &dag_link.link;
 
         if context.mode.is_standalone() {
-            tracing::debug!(
-                parent_cid = %context.cid,
-                link_cid = %link_cid,
-                link_name = %link_name,
-                "Processing linked block"
+            tracing::info!(
+                cid = %context.cid,
+                links_count = links.len(),
+                "Processing linked blocks from Composite delta"
             );
         }
 
-        let linked_block_data = match self.blockstore.get(link_cid).await {
-            Ok(Some(data)) => data,
-            Ok(None) => {
-                if context.mode.is_standalone() {
-                    tracing::error!(
-                        parent_cid = %context.cid,
-                        link_cid = %link_cid,
-                        "Linked block not found in blockstore"
-                    );
-                }
-                return Err(MergeError::Storage(format!(
-                    "Linked block {} not found in blockstore",
-                    link_cid
-                )));
-            }
-            Err(e) => {
-                if context.mode.is_standalone() {
-                    tracing::error!(
-                        parent_cid = %context.cid,
-                        link_cid = %link_cid,
-                        error = %e,
-                        "Failed to load linked block from blockstore"
-                    );
-                }
-                return Err(MergeError::Storage(e.to_string()));
-            }
+        // Load the prior value once (deleted-inclusive, so a delete+recreate cannot
+        // change an immutable field) when the composite links any @immutable field.
+        let immutable_fields: HashSet<&str> = context
+            .collection
+            .as_ref()
+            .map(|collection| {
+                collection
+                    .schema()
+                    .fields
+                    .iter()
+                    .filter(|field| field.immutable)
+                    .map(|field| field.name.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let immutable_baseline = if context.collection.as_ref().is_some_and(|_| {
+            links
+                .iter()
+                .any(|l| immutable_fields.contains(l.name.as_str()))
+        }) {
+            let doc_id = DocID::from_string(context.doc_id_str)
+                .map_err(|e| MergeError::MergeFailed(format!("invalid doc_id: {e}")))?;
+            context
+                .collection
+                .as_ref()
+                .unwrap()
+                .get_with_datastore_include_deleted(datastore, &doc_id, false)
+                .await
+                .map_err(MergeError::Database)?
+                .map(|(doc, _)| doc)
+        } else {
+            None
         };
 
-        let linked_block = Block::from_dag_cbor(&linked_block_data)
-            .map_err(|e| MergeError::BlockDecode(e.to_string()))?;
+        // Phase 1: decode/decrypt every linked field ONCE and validate @immutable
+        // BEFORE persisting anything, so a rejected composite leaves no partial write.
+        let mut pending: Vec<(Cid, CrdtDelta)> = Vec::with_capacity(links.len());
+        for dag_link in links {
+            let link_name = &dag_link.name;
+            let link_cid = &dag_link.link;
 
-        if let Some(heads) = &linked_block.heads {
-            state
-                .field_block_heads
-                .insert(link_name.clone(), heads.clone());
+            let linked_block_data = match self.blockstore.get(link_cid).await {
+                Ok(Some(data)) => data,
+                Ok(None) => {
+                    return Err(MergeError::Storage(format!(
+                        "Linked block {} not found in blockstore",
+                        link_cid
+                    )));
+                }
+                Err(e) => return Err(MergeError::Storage(e.to_string())),
+            };
+            let linked_block = Block::from_dag_cbor(&linked_block_data)
+                .map_err(|e| MergeError::BlockDecode(e.to_string()))?;
+
+            if let Some(heads) = &linked_block.heads {
+                state
+                    .field_block_heads
+                    .insert(link_name.clone(), heads.clone());
+            }
+
+            let effective = match self
+                .handle_encryption(context, &linked_block, &mut state.encrypted_policy_checked)
+                .await?
+            {
+                EffectiveLinkedDelta::Delta(delta) => delta,
+                EffectiveLinkedDelta::Skip(outcome) => return Ok(Some(outcome)),
+                EffectiveLinkedDelta::SkipField => continue,
+            };
+
+            if immutable_fields.contains(link_name.as_str()) {
+                if let Some(baseline) = immutable_baseline.as_ref() {
+                    Self::check_immutable_delta(baseline, link_name, &effective)?;
+                }
+            }
+
+            pending.push((*link_cid, effective));
         }
 
-        let effective_linked_delta = match self
-            .handle_encryption(context, &linked_block, &mut state.encrypted_policy_checked)
-            .await?
-        {
-            EffectiveLinkedDelta::Delta(delta) => delta,
-            EffectiveLinkedDelta::Skip(outcome) => return Ok(Some(outcome)),
-            EffectiveLinkedDelta::SkipField => return Ok(None),
-        };
-
-        match &effective_linked_delta {
-            CrdtDelta::Lww(lww_payload) => {
-                let result = self
-                    .process_lww_delta_in_txn(
-                        datastore,
-                        headstore,
-                        link_cid,
-                        lww_payload,
-                        context.metadata.collection_id,
-                    )
-                    .await?;
-                if result.applied {
-                    state.any_field_applied = true;
+        // Phase 2: persist the decoded deltas.
+        for (link_cid, effective) in pending {
+            match effective {
+                CrdtDelta::Lww(lww_payload) => {
+                    let result = self
+                        .process_lww_delta_in_txn(
+                            datastore,
+                            headstore,
+                            &link_cid,
+                            &lww_payload,
+                            context.metadata.collection_id,
+                        )
+                        .await?;
+                    if result.applied {
+                        state.any_field_applied = true;
+                    }
+                    if let Some(value) = result.value {
+                        state
+                            .field_values
+                            .insert(lww_payload.field_name.clone(), value);
+                    }
                 }
-                if let Some(value) = result.value {
-                    state
-                        .field_values
-                        .insert(lww_payload.field_name.clone(), value);
+                CrdtDelta::Counter(counter_payload) => {
+                    let result = self
+                        .process_counter_delta_in_txn(
+                            datastore,
+                            &link_cid,
+                            &counter_payload,
+                            context.metadata.collection_id,
+                        )
+                        .await?;
+                    if result.applied {
+                        state.any_field_applied = true;
+                    }
+                    if let Some(value) = result.value {
+                        state
+                            .field_values
+                            .insert(counter_payload.field_name.clone(), value);
+                    }
+                }
+                other => {
+                    return Err(MergeError::UnsupportedDelta(format!(
+                        "Unexpected delta type in linked block: {:?}",
+                        std::mem::discriminant(&other)
+                    )));
                 }
             }
-            CrdtDelta::Counter(counter_payload) => {
-                let result = self
-                    .process_counter_delta_in_txn(
-                        datastore,
-                        link_cid,
-                        counter_payload,
-                        context.metadata.collection_id,
-                    )
-                    .await?;
-                if result.applied {
-                    state.any_field_applied = true;
-                }
-                if let Some(value) = result.value {
-                    state
-                        .field_values
-                        .insert(counter_payload.field_name.clone(), value);
-                }
-            }
-            other => {
-                if context.mode.is_standalone() {
-                    tracing::error!(
-                        parent_cid = %context.cid,
-                        link_cid = %link_cid,
-                        delta_type = ?std::mem::discriminant(other),
-                        "Unexpected delta type in linked block - expected LWW or Counter"
-                    );
-                }
-                return Err(MergeError::UnsupportedDelta(format!(
-                    "Unexpected delta type in linked block: {:?}",
-                    std::mem::discriminant(other)
-                )));
-            }
+            state.linked_field_cids.push(link_cid);
         }
-
-        state.linked_field_cids.push(*link_cid);
 
         Ok(None)
+    }
+
+    /// Reject an incoming immutable-field delta that does not exactly preserve the
+    /// prior value — a different value, or a tombstone/clear (empty payload) — so a
+    /// crafted block cannot diverge the field store from the document store.
+    fn check_immutable_delta(
+        baseline: &Document,
+        field_name: &str,
+        effective: &CrdtDelta,
+    ) -> std::result::Result<(), MergeError> {
+        let Some(prior) = baseline.get(field_name) else {
+            return Ok(());
+        };
+        let CrdtDelta::Lww(payload) = effective else {
+            return Ok(());
+        };
+        let preserves_prior = !payload.data.is_empty()
+            && ciborium::from_reader::<NormalValue, _>(payload.data.as_slice())
+                .map(|incoming| incoming == *prior)
+                .unwrap_or(false);
+        if !preserves_prior {
+            return Err(MergeError::ImmutableFieldChanged(format!(
+                "immutable field '{field_name}' cannot be changed"
+            )));
+        }
+        Ok(())
     }
 
     async fn handle_encryption(

@@ -1770,6 +1770,111 @@ mod tests {
         );
     }
 
+    /// Clearing an @immutable field (an empty/tombstone LWW delta) is also a
+    /// change and must be rejected — not silently applied to the field store.
+    #[tokio::test]
+    async fn remote_composite_merge_rejects_immutable_field_clear() {
+        let (handler, blockstore) = make_handler_with_immutable_schema().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-agentdocs")
+            .unwrap()
+            .expect("agentdocs collection should exist");
+
+        let mut doc = Document::new();
+        doc.set(
+            "agent_did",
+            NormalValue::String("did:key:alice".to_string()),
+        );
+        doc.set("body", NormalValue::String("v1".to_string()));
+        doc.generate_and_set_doc_id().unwrap();
+        doc.set_schema_version_id("v1");
+        let doc_id = doc.id().unwrap().clone();
+        let doc_id_str = doc_id.to_string();
+
+        let create_blocks = {
+            let txn = handler.db.new_txn(false).await.unwrap();
+            let blocks = {
+                let datastore = txn.datastore().unwrap();
+                let headstore = txn.headstore().unwrap();
+                let raw_blockstore = txn.blockstore().unwrap();
+                collection
+                    .save_with_datastore(&datastore, &doc)
+                    .await
+                    .unwrap();
+                db_blocks::write_document_blocks(
+                    &raw_blockstore,
+                    &headstore,
+                    &doc,
+                    "v1",
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            };
+            txn.force_commit().await.unwrap();
+            blocks
+        };
+
+        // Tombstone: an LWW delta with empty data clears the field.
+        let clear_field = Block::new(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                doc_id: doc_id_str.as_bytes().to_vec(),
+                field_name: "agent_did".to_string(),
+                schema_version_id: "v1".to_string(),
+                priority: 2,
+                data: Vec::new(),
+            }),
+            create_blocks.field_cids.clone(),
+            vec![],
+        );
+        let clear_field_cid = clear_field.generate_cid().unwrap();
+        blockstore
+            .put(&clear_field_cid, &clear_field.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        let clear_payload = CompositeDeltaPayload {
+            doc_id: doc_id_str.as_bytes().to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 2,
+            status: 1,
+        };
+        let clear_composite = Block::new(
+            CrdtDelta::Composite(clear_payload.clone()),
+            vec![create_blocks.cid],
+            vec![DAGLink::new("agent_did", clear_field_cid)],
+        );
+        let clear_cid = clear_composite.generate_cid().unwrap();
+        blockstore
+            .put(&clear_cid, &clear_composite.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        let outcome = handler
+            .process_composite_delta(
+                &clear_cid,
+                &clear_composite,
+                &clear_payload,
+                &BlockMetadata::normal(
+                    &doc_id_str,
+                    "col-agentdocs",
+                    "did:key:z6MkrClr",
+                    None,
+                    false,
+                ),
+                false,
+                0,
+            )
+            .await
+            .expect("immutable clear rejection is a terminal skip, not a hard error");
+        assert!(
+            outcome.is_terminal_skip(),
+            "clearing an immutable field must be terminally skipped, got {outcome:?}"
+        );
+    }
+
     /// A remotely-deleted document still retains its bytes (handle_deletion only
     /// sets the marker), so a later merge that re-materializes it must NOT be able
     /// to change an immutable field via delete+recreate. Without the

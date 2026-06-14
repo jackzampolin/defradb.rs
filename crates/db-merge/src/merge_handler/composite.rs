@@ -258,21 +258,20 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 }
             };
 
-            // Validate @immutable fields BEFORE any field write so a rejected
-            // block leaves no partial CRDT write. A change is a deterministic
-            // content rejection: skip terminally (and roll back) rather than retry.
-            match self.validate_immutable_links(&datastore, &context).await {
-                Ok(()) => match self
-                    .process_linked_field_blocks(&mut datastore, &headstore, &context, &mut state)
-                    .await?
-                {
-                    Some(outcome) => Ok(Some(outcome)),
-                    None => {
-                        self.persist_merged_document(&mut datastore, &context, &mut state)
-                            .await?;
-                        Ok(None)
-                    }
-                },
+            // process_linked_field_blocks validates @immutable fields BEFORE
+            // persisting any field, so a rejected composite leaves no partial
+            // write. A change is a deterministic content rejection: skip terminally
+            // (and roll back) rather than retry.
+            match self
+                .process_linked_field_blocks(&mut datastore, &headstore, &context, &mut state)
+                .await
+            {
+                Ok(Some(outcome)) => Ok(Some(outcome)),
+                Ok(None) => {
+                    self.persist_merged_document(&mut datastore, &context, &mut state)
+                        .await?;
+                    Ok(None)
+                }
                 Err(MergeError::ImmutableFieldChanged(reason)) => {
                     Ok(Some(MergeOutcome::terminal_skip(reason)))
                 }
@@ -562,21 +561,20 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let process_result: std::result::Result<Option<MergeOutcome>, MergeError> = {
             let mut datastore = datastore.clone();
 
-            // Validate @immutable fields BEFORE any field write so a rejected
-            // block leaves no partial CRDT write in the shared batch txn. A change
-            // is a deterministic content rejection: skip terminally, not retry.
-            match self.validate_immutable_links(&datastore, &context).await {
-                Ok(()) => match self
-                    .process_linked_field_blocks(&mut datastore, headstore, &context, &mut state)
-                    .await?
-                {
-                    Some(outcome) => Ok(Some(outcome)),
-                    None => {
-                        self.persist_merged_document(&mut datastore, &context, &mut state)
-                            .await?;
-                        Ok(None)
-                    }
-                },
+            // process_linked_field_blocks validates @immutable fields BEFORE
+            // persisting any field, so a rejected composite leaves no partial write
+            // in the shared batch txn. A change is a deterministic content
+            // rejection: skip terminally, not retry.
+            match self
+                .process_linked_field_blocks(&mut datastore, headstore, &context, &mut state)
+                .await
+            {
+                Ok(Some(outcome)) => Ok(Some(outcome)),
+                Ok(None) => {
+                    self.persist_merged_document(&mut datastore, &context, &mut state)
+                        .await?;
+                    Ok(None)
+                }
                 Err(MergeError::ImmutableFieldChanged(reason)) => {
                     Ok(Some(MergeOutcome::terminal_skip(reason)))
                 }
