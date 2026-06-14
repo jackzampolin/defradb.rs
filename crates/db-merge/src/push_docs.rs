@@ -3,6 +3,7 @@ use std::sync::Arc;
 use acp::DocumentACP;
 use bytes::Bytes;
 use p2p::message::PushLogRequest;
+use p2p::replicator::ReplicationFilterMatcher as _;
 use storage::corekv::{IterOptions, Reader, Store};
 
 use crate::push_docs_common::{load_latest_composite_head_cids, load_push_dag_blocks};
@@ -39,7 +40,7 @@ async fn document_matches_filter<R: Reader + ?Sized>(
             .into_iter()
             .collect(),
     );
-    Ok(filter.matches_json_object(&document_json))
+    Ok(p2p::replicator::EqOnlyFilterMatcher.matches("", filter, &document_json))
 }
 
 /// Push existing documents to a replicator peer.

@@ -71,6 +71,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
+use crate::replicator::ReplicationFilterMatcher;
 use crate::transport::{P2PTransport, PeerId};
 
 use super::broadcaster::Broadcaster;
@@ -261,6 +262,9 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
 
     /// Shutdown state for coordinator-owned background tasks.
     pub(super) shutdown: SyncShutdownHandle,
+
+    /// Filter matcher used to evaluate replication filters during push.
+    pub(super) filter_matcher: Arc<dyn ReplicationFilterMatcher>,
 }
 
 /// Access control and peer identity state for the coordinator.

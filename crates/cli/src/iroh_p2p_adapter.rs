@@ -55,14 +55,25 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
             filters: info
                 .filters
                 .into_iter()
-                .map(|(collection, filter)| {
-                    (
-                        collection,
-                        defra_http::router::ReplicationFilter {
-                            field: filter.field,
-                            value: filter.value,
-                        },
-                    )
+                .filter_map(|(collection, filter)| {
+                    if let p2p::ReplicationFilter::Predicate(ref conds) = filter {
+                        if conds.len() == 1 {
+                            if let Some((field, condition)) = conds.iter().next() {
+                                if let Some(value) =
+                                    condition.as_object().and_then(|op| op.get("_eq")).cloned()
+                                {
+                                    return Some((
+                                        collection,
+                                        defra_http::router::ReplicationFilter {
+                                            field: field.clone(),
+                                            value,
+                                        },
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    None
                 })
                 .collect(),
         }

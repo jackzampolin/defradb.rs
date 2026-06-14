@@ -93,34 +93,44 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
                 .find_collection_by_id(collection_id)
                 .map_err(|e| format!("failed to load collection '{}': {}", collection_id, e))?
                 .ok_or_else(|| format!("collection '{}' not found", collection_id))?;
-            let field = collection
-                .schema()
-                .fields
-                .iter()
-                .find(|field| field.name == filter.field)
-                .ok_or_else(|| {
-                    format!(
-                        "replication filter field '{}' not found in collection '{}'",
-                        filter.field, collection_id
-                    )
-                })?;
-            if !field.immutable {
-                return Err(format!(
-                    "replication filter field '{}' in collection '{}' must be marked @immutable",
-                    filter.field, collection_id
-                ));
-            }
-            if field.crdt_type != schema::CType::LwwRegister || !field.kind.is_scalar() {
-                return Err(format!(
-                    "replication filter field '{}' in collection '{}' must be a scalar LWW field",
-                    filter.field, collection_id
-                ));
-            }
-            if !field.kind.accepts_filter_value(&filter.value) {
-                return Err(format!(
-                    "replication filter value for field '{}' in collection '{}' does not match the field type",
-                    filter.field, collection_id
-                ));
+            let p2p::ReplicationFilter::Predicate(conds) = filter else {
+                continue;
+            };
+            for (field_name, condition) in conds {
+                let value = condition
+                    .as_object()
+                    .and_then(|op| op.get("_eq"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let field = collection
+                    .schema()
+                    .fields
+                    .iter()
+                    .find(|field| field.name == *field_name)
+                    .ok_or_else(|| {
+                        format!(
+                            "replication filter field '{}' not found in collection '{}'",
+                            field_name, collection_id
+                        )
+                    })?;
+                if !field.immutable {
+                    return Err(format!(
+                        "replication filter field '{}' in collection '{}' must be marked @immutable",
+                        field_name, collection_id
+                    ));
+                }
+                if field.crdt_type != schema::CType::LwwRegister || !field.kind.is_scalar() {
+                    return Err(format!(
+                        "replication filter field '{}' in collection '{}' must be a scalar LWW field",
+                        field_name, collection_id
+                    ));
+                }
+                if !field.kind.accepts_filter_value(&value) {
+                    return Err(format!(
+                        "replication filter value for field '{}' in collection '{}' does not match the field type",
+                        field_name, collection_id
+                    ));
+                }
             }
         }
         Ok(())

@@ -208,6 +208,7 @@ impl Node {
             replicator_registry,
             collection_store,
             head_provider,
+            std::sync::Arc::new(p2p::EqOnlyFilterMatcher),
         )
         .await
         .map_err(Error::P2P)?;
@@ -778,6 +779,7 @@ impl Node {
             replicator_registry,
             collection_store,
             head_provider,
+            std::sync::Arc::new(p2p::EqOnlyFilterMatcher),
         )
         .await
         .map_err(Error::P2P)?;

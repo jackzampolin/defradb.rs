@@ -343,7 +343,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             };
 
             let use_full_dag = if rep.is_filtered_for_collection(collection_id) {
-                if !rep.matches_filter(collection_id, document) {
+                if !rep.matches_filter(
+                    self.runtime.filter_matcher.as_ref(),
+                    collection_id,
+                    document,
+                ) {
                     continue;
                 }
                 true
@@ -500,7 +504,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             if !rep.collections.iter().any(|id| id == collection_id) {
                 continue;
             }
-            if !rep.matches_filter(collection_id, document) {
+            if !rep.matches_filter(
+                self.runtime.filter_matcher.as_ref(),
+                collection_id,
+                document,
+            ) {
                 continue;
             }
 

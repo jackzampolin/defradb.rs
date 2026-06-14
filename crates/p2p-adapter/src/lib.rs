@@ -52,17 +52,30 @@ pub(crate) fn to_http_replicator_info(info: p2p::ReplicatorInfo) -> ReplicatorIn
         filters: info
             .filters
             .into_iter()
-            .map(|(collection, filter)| {
-                (
+            .filter_map(|(collection, filter)| {
+                let (field, value) = filter_to_field_value(&filter)?;
+                Some((
                     collection,
-                    defra_http::router::ReplicationFilter {
-                        field: filter.field,
-                        value: filter.value,
-                    },
-                )
+                    defra_http::router::ReplicationFilter { field, value },
+                ))
             })
             .collect(),
     }
+}
+
+/// Extract a (field, value) pair from a `Predicate` filter with a single `_eq` condition.
+///
+/// Returns `None` for non-Predicate variants or multi-field predicates (those
+/// are newer filter shapes that the legacy HTTP response format cannot represent).
+fn filter_to_field_value(filter: &p2p::ReplicationFilter) -> Option<(String, serde_json::Value)> {
+    if let p2p::ReplicationFilter::Predicate(conds) = filter {
+        if conds.len() == 1 {
+            let (field, condition) = conds.iter().next()?;
+            let value = condition.as_object()?.get("_eq")?.clone();
+            return Some((field.clone(), value));
+        }
+    }
+    None
 }
 
 /// Optional inputs used when pushing existing documents to replicators.

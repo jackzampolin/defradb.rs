@@ -1,7 +1,10 @@
 //! Tests for replicator types, including Go wire-format parity.
 
 use chrono::{TimeZone, Utc};
-use p2p::replicator::{ReplicatorError, ReplicatorInfo, ReplicatorStatus};
+use p2p::replicator::{
+    EqOnlyFilterMatcher, ReplicationFilterMatcher as _, ReplicatorError, ReplicatorInfo,
+    ReplicatorStatus,
+};
 use p2p::{Multiaddr, PeerId};
 use p2p::{ReplicationFilter, ReplicationFilters};
 
@@ -114,6 +117,7 @@ fn unfiltered_rust_extension_does_not_change_go_bytes() {
 
 #[test]
 fn filtered_replicator_round_trips_rust_extension() {
+    let matcher = EqOnlyFilterMatcher;
     let mut filters = ReplicationFilters::new();
     filters.insert(
         "users".to_string(),
@@ -129,41 +133,56 @@ fn filtered_replicator_round_trips_rust_extension() {
     let bytes = info.to_bytes().unwrap();
     assert_eq!(
         std::str::from_utf8(&bytes).unwrap(),
-        r#"{"ID":"12D3KooWGjMkcMy5PM9iSbgWWgUnH5dQhvzhNu7w3Gk4kHZBsxnJ","Addresses":[],"CollectionIDs":["users"],"Status":0,"LastStatusChange":"0001-01-01T00:00:00Z","Filters":{"users":{"Field":"agent_did","Value":"did:key:z6M"}}}"#
+        r#"{"ID":"12D3KooWGjMkcMy5PM9iSbgWWgUnH5dQhvzhNu7w3Gk4kHZBsxnJ","Addresses":[],"CollectionIDs":["users"],"Status":0,"LastStatusChange":"0001-01-01T00:00:00Z","Filters":{"users":{"predicate":{"agent_did":{"_eq":"did:key:z6M"}}}}}"#
     );
 
     let restored = ReplicatorInfo::from_bytes(&bytes).unwrap();
     assert_eq!(restored, info);
     assert!(restored.matches_filter(
+        &matcher,
         "users",
         &serde_json::json!({"agent_did": "did:key:z6M", "body": "selected"})
     ));
-    assert!(!restored.matches_filter("users", &serde_json::json!({"agent_did": "did:key:other"})));
+    assert!(!restored.matches_filter(
+        &matcher,
+        "users",
+        &serde_json::json!({"agent_did": "did:key:other"})
+    ));
+
+    // Legacy wire format deserializes into the same Predicate variant.
+    let legacy_json = r#"{"Field":"agent_did","Value":"did:key:z6M"}"#;
+    let from_legacy: ReplicationFilter = serde_json::from_str(legacy_json).unwrap();
+    assert_eq!(
+        from_legacy,
+        ReplicationFilter::new("agent_did", serde_json::json!("did:key:z6M"))
+    );
 }
 
 #[test]
 fn filter_matches_numbers_numerically() {
+    let matcher = EqOnlyFilterMatcher;
+
     // A whole-number Float field materializes as an integer in Go-compatible
     // JSON, so a 2.0 filter value must still match a stored 2.
     let float_filter = ReplicationFilter::new("score", serde_json::json!(2.0));
-    assert!(float_filter.matches_json_object(&serde_json::json!({"score": 2})));
-    assert!(float_filter.matches_json_object(&serde_json::json!({"score": 2.0})));
-    assert!(!float_filter.matches_json_object(&serde_json::json!({"score": 3})));
+    assert!(matcher.matches("", &float_filter, &serde_json::json!({"score": 2})));
+    assert!(matcher.matches("", &float_filter, &serde_json::json!({"score": 2.0})));
+    assert!(!matcher.matches("", &float_filter, &serde_json::json!({"score": 3})));
 
     // Non-whole floats and integers still match their own form.
     let frac_filter = ReplicationFilter::new("ratio", serde_json::json!(2.5));
-    assert!(frac_filter.matches_json_object(&serde_json::json!({"ratio": 2.5})));
+    assert!(matcher.matches("", &frac_filter, &serde_json::json!({"ratio": 2.5})));
 
     // A string filter value never matches a numeric field (type mismatch).
     let str_filter = ReplicationFilter::new("score", serde_json::json!("2"));
-    assert!(!str_filter.matches_json_object(&serde_json::json!({"score": 2})));
+    assert!(!matcher.matches("", &str_filter, &serde_json::json!({"score": 2})));
 
     // Two distinct large integers must NOT match: comparing them as f64 would
     // lose precision above 2^53 and falsely match.
     let big = 9_007_199_254_740_993_i64; // 2^53 + 1
     let big_filter = ReplicationFilter::new("id", serde_json::json!(big));
-    assert!(big_filter.matches_json_object(&serde_json::json!({ "id": big })));
-    assert!(!big_filter.matches_json_object(&serde_json::json!({ "id": big + 1 })));
+    assert!(matcher.matches("", &big_filter, &serde_json::json!({ "id": big })));
+    assert!(!matcher.matches("", &big_filter, &serde_json::json!({ "id": big + 1 })));
 }
 
 // ---------------------------------------------------------------------------
@@ -347,4 +366,69 @@ fn from_bytes_rejects_truncated_json() {
 fn from_bytes_rejects_unknown_status() {
     let bad = r#"{"ID":"peer","Addresses":[],"CollectionIDs":["users"],"Status":42,"LastStatusChange":"0001-01-01T00:00:00Z"}"#;
     assert!(ReplicatorInfo::from_bytes(bad.as_bytes()).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// ReplicationFilter enum and EqOnlyFilterMatcher
+// ---------------------------------------------------------------------------
+
+#[test]
+fn legacy_wire_deserializes_to_predicate() {
+    let json = r#"{"Field":"agent_did","Value":"x"}"#;
+    let filter: ReplicationFilter = serde_json::from_str(json).unwrap();
+    let mut expected_conds = serde_json::Map::new();
+    let mut op = serde_json::Map::new();
+    op.insert("_eq".to_string(), serde_json::json!("x"));
+    expected_conds.insert("agent_did".to_string(), serde_json::Value::Object(op));
+    assert_eq!(filter, ReplicationFilter::Predicate(expected_conds));
+}
+
+#[test]
+fn predicate_with_in_round_trips() {
+    let mut conds = serde_json::Map::new();
+    conds.insert(
+        "agent_did".to_string(),
+        serde_json::json!({"_in": ["did:a", "did:b"]}),
+    );
+    let filter = ReplicationFilter::Predicate(conds);
+    let json = serde_json::to_string(&filter).unwrap();
+    assert!(
+        json.contains("predicate"),
+        "predicate variant serializes as tagged"
+    );
+    let restored: ReplicationFilter = serde_json::from_str(&json).unwrap();
+    assert_eq!(filter, restored);
+}
+
+#[test]
+fn eq_only_matcher_evaluates_filters() {
+    use p2p::replicator::EqOnlyFilterMatcher;
+    let matcher = EqOnlyFilterMatcher;
+
+    // No filter for collection → true
+    let info = ReplicatorInfo::from_raw("peer".to_string(), vec!["users".to_string()], vec![]);
+    assert!(info.matches_filter(&matcher, "users", &serde_json::json!({"x": 1})));
+
+    // Matching _eq → true
+    let mut filters = ReplicationFilters::new();
+    filters.insert(
+        "users".to_string(),
+        ReplicationFilter::eq("agent_did", serde_json::json!("did:x")),
+    );
+    let info_filtered = ReplicatorInfo::from_raw_with_filters(
+        "peer".to_string(),
+        vec!["users".to_string()],
+        vec![],
+        filters,
+    );
+    assert!(info_filtered.matches_filter(
+        &matcher,
+        "users",
+        &serde_json::json!({"agent_did": "did:x"})
+    ));
+    assert!(!info_filtered.matches_filter(
+        &matcher,
+        "users",
+        &serde_json::json!({"agent_did": "did:y"})
+    ));
 }
