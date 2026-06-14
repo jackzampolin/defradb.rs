@@ -309,6 +309,10 @@ impl P2PTransport for NoopTransport {
         Ok(())
     }
 
+    async fn disconnect(&self, _peer_id: &PeerId) -> crate::Result<()> {
+        Ok(())
+    }
+
     async fn listen(&self, _addr: PeerAddr) -> crate::Result<()> {
         Ok(())
     }

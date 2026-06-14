@@ -63,6 +63,10 @@ pub enum ManageMutateOp {
         #[serde(rename = "Address")]
         address: String,
     },
+    PeerDisconnect {
+        #[serde(rename = "Address")]
+        address: String,
+    },
 }
 
 /// Read-only management operations (typed reply).
@@ -72,6 +76,7 @@ pub enum ManageMutateOp {
 pub enum ManageQueryOp {
     ReplicatorList,
     CollectionList,
+    DocumentList,
 }
 
 /// Typed payload for a `manage_query` reply.
@@ -86,6 +91,10 @@ pub enum ManageQueryResult {
         #[serde(rename = "Values")]
         values: Vec<String>,
     },
+    Documents {
+        #[serde(rename = "Documents")]
+        documents: Vec<ManageDocRef>,
+    },
 }
 
 impl ManageMutateOp {
@@ -99,6 +108,7 @@ impl ManageMutateOp {
             ManageMutateOp::DocumentAdd { .. } => P::P2pDocumentAdd,
             ManageMutateOp::DocumentRemove { .. } => P::P2pDocumentDelete,
             ManageMutateOp::PeerConnect { .. } => P::P2pPeerConnect,
+            ManageMutateOp::PeerDisconnect { .. } => P::P2pPeerConnect,
         }
     }
 }
@@ -109,6 +119,7 @@ impl ManageQueryOp {
         match self {
             ManageQueryOp::ReplicatorList => P::P2pReplicatorList,
             ManageQueryOp::CollectionList => P::P2pCollectionList,
+            ManageQueryOp::DocumentList => P::P2pDocumentList,
         }
     }
 }

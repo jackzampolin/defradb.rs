@@ -346,6 +346,10 @@ mod tests {
             Ok(())
         }
 
+        async fn disconnect(&self, _peer_id: &PeerId) -> Result<()> {
+            Ok(())
+        }
+
         async fn listen(&self, _addr: PeerAddr) -> Result<()> {
             Ok(())
         }

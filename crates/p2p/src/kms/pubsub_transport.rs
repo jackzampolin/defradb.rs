@@ -432,6 +432,9 @@ mod tests {
         async fn dial(&self, _p: &PeerId, _a: Vec<PeerAddr>) -> Result<()> {
             Ok(())
         }
+        async fn disconnect(&self, _p: &PeerId) -> Result<()> {
+            Ok(())
+        }
         async fn listen(&self, _a: PeerAddr) -> Result<()> {
             Ok(())
         }

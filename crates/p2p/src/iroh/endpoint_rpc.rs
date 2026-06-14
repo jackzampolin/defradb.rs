@@ -202,6 +202,28 @@ fn evict_connection(cache: &ConnectionCache, peer_id: &PeerId, alpn: &[u8]) {
     }
 }
 
+/// QUIC application error code used when locally closing a connection in
+/// response to a `disconnect` request.
+const DISCONNECT_ERROR_CODE: u32 = 0;
+
+/// Close and remove every cached connection to `endpoint_id`.
+///
+/// Used by `disconnect` to tear down the outbound-send connection cache for a
+/// peer. Closing is idempotent — a peer with no cached connections is a no-op.
+pub(super) fn close_cached_connections(cache: &ConnectionCache, endpoint_id: &iroh::EndpointId) {
+    let mut guard = cache.lock();
+    let keys: Vec<ConnectionCacheKey> = guard
+        .keys()
+        .filter(|key| &key.endpoint_id == endpoint_id)
+        .cloned()
+        .collect();
+    for key in keys {
+        if let Some(connection) = guard.remove(&key) {
+            connection.close(DISCONNECT_ERROR_CODE.into(), b"disconnect");
+        }
+    }
+}
+
 async fn connect_with_cache(
     endpoint: &Endpoint,
     peer_id: &PeerId,

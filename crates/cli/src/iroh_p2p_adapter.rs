@@ -272,6 +272,25 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         Ok(())
     }
 
+    async fn disconnect_peer(&self, addr: &str) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pPeerConnect)
+            .await?;
+
+        let (peer_id, _direct_addrs) =
+            parse_public_peer_addr(addr).map_err(|e| P2PError::InvalidInput(e.to_string()))?;
+
+        self.transport
+            .disconnect(&peer_id)
+            .await
+            .map_err(|e| P2PError::Transport(e.to_string()))?;
+
+        if let Ok(mut addrs) = self.peer_addresses.write() {
+            addrs.remove(&peer_id.to_string());
+        }
+
+        Ok(())
+    }
+
     async fn notify_network_change(&self) -> P2PResult<()> {
         self.transport
             .network_change()

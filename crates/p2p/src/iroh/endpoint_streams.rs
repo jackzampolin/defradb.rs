@@ -79,7 +79,7 @@ pub(super) async fn handle_incoming(
 
     let is_new = peer_map
         .lock()
-        .increment_connections(remote_id, remote_addr);
+        .increment_connections(remote_id, remote_addr, connection.clone());
 
     if is_new
         && event_tx

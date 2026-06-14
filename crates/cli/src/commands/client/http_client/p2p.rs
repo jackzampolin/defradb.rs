@@ -285,8 +285,22 @@ impl HttpClient {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "Kind")]
 pub enum ManageQueryResultResponse {
-    Replicators { replicators: Vec<P2pReplicatorInfo> },
-    Strings { values: Vec<String> },
+    Replicators {
+        replicators: Vec<P2pReplicatorInfo>,
+    },
+    Strings {
+        values: Vec<String>,
+    },
+    Documents {
+        documents: Vec<ManageDocRefResponse>,
+    },
+}
+
+/// Deserializable mirror of `RemoteManageDocRef` for `Documents` query responses.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ManageDocRefResponse {
+    pub collection: String,
+    pub doc_id: String,
 }
 
 /// Mint an actor JWT for a P2P management request.

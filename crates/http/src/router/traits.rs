@@ -124,6 +124,9 @@ pub trait P2POperations: Send + Sync {
     /// Connect to a peer at the given address.
     async fn connect_peer(&self, addr: &str) -> P2PResult<()>;
 
+    /// Disconnect the live connection to the peer at the given address.
+    async fn disconnect_peer(&self, addr: &str) -> P2PResult<()>;
+
     /// Notify the transport that local network conditions may have changed.
     ///
     /// Some transports, such as iroh, use this to refresh relay/direct
@@ -267,6 +270,9 @@ pub enum RemoteManageOp {
     PeerConnect {
         address: String,
     },
+    PeerDisconnect {
+        address: String,
+    },
 }
 
 /// A document reference for [`RemoteManageOp`] document operations.
@@ -282,6 +288,7 @@ pub struct RemoteManageDocRef {
 pub enum RemoteManageQueryOp {
     ReplicatorList,
     CollectionList,
+    DocumentList,
 }
 
 /// Typed result of a [`RemoteManageQueryOp`].
@@ -293,6 +300,7 @@ pub enum RemoteManageQueryOp {
 pub enum RemoteManageQueryResult {
     Replicators { replicators: Vec<ReplicatorInfo> },
     Strings { values: Vec<String> },
+    Documents { documents: Vec<RemoteManageDocRef> },
 }
 
 /// Wire sentinel for a remote NAC denial on the management channel.

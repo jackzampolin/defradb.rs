@@ -368,6 +368,8 @@ pub enum P2pManageDocumentCommand {
     Add(ManageDocumentMutateArgs),
     /// Remove document(s) from the target peer's P2P sync
     Remove(ManageDocumentMutateArgs),
+    /// List the target peer's P2P documents
+    List(ManageTarget),
 }
 
 #[derive(Args, Debug)]
@@ -389,6 +391,18 @@ impl P2pManageDocumentArgs {
         match &self.command {
             P2pManageDocumentCommand::Add(args) => args.execute(ctx, /* add = */ true).await,
             P2pManageDocumentCommand::Remove(args) => args.execute(ctx, /* add = */ false).await,
+            P2pManageDocumentCommand::List(target) => {
+                let auth = target.resolve(ctx)?;
+                let client = client(ctx, auth.bearer)?;
+                let result = client
+                    .p2p_manage_query(
+                        &target.target,
+                        &auth.actor_token,
+                        RemoteManageQueryOp::DocumentList,
+                    )
+                    .await?;
+                print_query_result(&result)
+            }
         }
     }
 }
@@ -440,6 +454,8 @@ pub struct P2pManagePeerArgs {
 pub enum P2pManagePeerCommand {
     /// Instruct the target peer to connect to another peer
     Connect(ManagePeerConnectArgs),
+    /// Instruct the target peer to disconnect from another peer
+    Disconnect(ManagePeerDisconnectArgs),
 }
 
 #[derive(Args, Debug)]
@@ -452,10 +468,21 @@ pub struct ManagePeerConnectArgs {
     pub address: String,
 }
 
+#[derive(Args, Debug)]
+pub struct ManagePeerDisconnectArgs {
+    #[command(flatten)]
+    pub target: ManageTarget,
+
+    /// Address of the peer the target should disconnect from
+    #[arg(long, value_name = "multiaddr")]
+    pub address: String,
+}
+
 impl P2pManagePeerArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
             P2pManagePeerCommand::Connect(args) => args.execute(ctx).await,
+            P2pManagePeerCommand::Disconnect(args) => args.execute(ctx).await,
         }
     }
 }
@@ -471,6 +498,21 @@ impl ManagePeerConnectArgs {
             .p2p_manage(&self.target.target, &auth.actor_token, op)
             .await?;
         println!("Instructed target peer to connect to {}", self.address);
+        Ok(())
+    }
+}
+
+impl ManagePeerDisconnectArgs {
+    async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let auth = self.target.resolve(ctx)?;
+        let op = RemoteManageOp::PeerDisconnect {
+            address: self.address.clone(),
+        };
+        let client = client(ctx, auth.bearer)?;
+        client
+            .p2p_manage(&self.target.target, &auth.actor_token, op)
+            .await?;
+        println!("Disconnected target peer from {}", self.address);
         Ok(())
     }
 }

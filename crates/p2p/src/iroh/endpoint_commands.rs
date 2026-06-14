@@ -23,8 +23,9 @@ use super::endpoint::{
     TopicSubscription,
 };
 use super::endpoint_rpc::{
-    handle_block_sync, handle_car_request_response, handle_fire_and_forget,
-    handle_request_response, handle_send_only, BlockSyncResources, ConnectionCache,
+    close_cached_connections, handle_block_sync, handle_car_request_response,
+    handle_fire_and_forget, handle_request_response, handle_send_only, BlockSyncResources,
+    ConnectionCache,
 };
 use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
 use super::protocols;
@@ -67,6 +68,10 @@ pub(super) async fn handle_command(
                 event_tx,
             };
             let result = handle_dial(ctx, &peer_id, addrs).await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::Disconnect { peer_id, reply } => {
+            let result = handle_disconnect(peer_id, peer_map, connection_cache);
             let _ = reply.send(result);
         }
         IrohCommand::Listen { addr: _, reply } => {
@@ -706,10 +711,11 @@ async fn handle_dial(
 
     let conn_alpn = connection.alpn().to_vec();
 
-    let is_new = ctx
-        .peer_map
-        .lock()
-        .increment_connections(endpoint_id, direct_addresses.first().copied());
+    let is_new = ctx.peer_map.lock().increment_connections(
+        endpoint_id,
+        direct_addresses.first().copied(),
+        connection.clone(),
+    );
 
     if is_new
         && ctx
@@ -744,6 +750,28 @@ async fn handle_dial(
     });
     track_task(ctx.spawned_tasks, task);
 
+    Ok(())
+}
+
+/// Hang up the live connection to a peer.
+///
+/// Closes both the connection handle retained in `peer_map` (covering dial- and
+/// accept-initiated connections) and any cached outbound-send connections.
+/// iroh `Connection` clones share the underlying QUIC connection, so closing
+/// any handle tears down the connection; the stream task then observes the
+/// `accept_bi` error, decrements the count, and emits `PeerDisconnected`.
+///
+/// Idempotent: disconnecting an already-absent peer returns `Ok(())`.
+fn handle_disconnect(
+    peer_id: PeerId,
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    connection_cache: &ConnectionCache,
+) -> crate::error::Result<()> {
+    let endpoint_id = parse_endpoint_id(&peer_id)?;
+    if let Some(connection) = peer_map.lock().take_connection(&endpoint_id) {
+        connection.close(0u32.into(), b"disconnect");
+    }
+    close_cached_connections(connection_cache, &endpoint_id);
     Ok(())
 }
 

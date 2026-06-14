@@ -141,6 +141,10 @@ async fn authorize_and_apply(
             ManageMutateOp::PeerConnect { address } => {
                 ops.connect_peer(address).await.map_err(|e| e.to_string())
             }
+            ManageMutateOp::PeerDisconnect { address } => ops
+                .disconnect_peer(address)
+                .await
+                .map_err(|e| e.to_string()),
         }
     })
     .await
@@ -211,6 +215,18 @@ pub async fn build_manage_query_reply(
                 },
                 ManageQueryOp::CollectionList => ManageQueryResult::Strings {
                     values: ops.get_collections().await.map_err(|e| e.to_string())?,
+                },
+                ManageQueryOp::DocumentList => ManageQueryResult::Documents {
+                    documents: ops
+                        .get_documents()
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .map(|d| ManageDocRef {
+                            collection: d.collection,
+                            doc_id: d.doc_id,
+                        })
+                        .collect(),
                 },
             })
         })
@@ -289,6 +305,8 @@ mod tests {
         peer_id: String,
         added_collections: Mutex<Vec<String>>,
         added_replicators: Mutex<Vec<RecordedReplicator>>,
+        disconnected_peers: Mutex<Vec<String>>,
+        documents: Vec<P2pDocumentInfo>,
     }
 
     impl MockOps {
@@ -297,6 +315,18 @@ mod tests {
                 peer_id: peer_id.to_string(),
                 added_collections: Mutex::new(Vec::new()),
                 added_replicators: Mutex::new(Vec::new()),
+                disconnected_peers: Mutex::new(Vec::new()),
+                documents: Vec::new(),
+            }
+        }
+
+        fn with_documents(peer_id: &str, documents: Vec<P2pDocumentInfo>) -> Self {
+            Self {
+                peer_id: peer_id.to_string(),
+                added_collections: Mutex::new(Vec::new()),
+                added_replicators: Mutex::new(Vec::new()),
+                disconnected_peers: Mutex::new(Vec::new()),
+                documents,
             }
         }
 
@@ -306,6 +336,10 @@ mod tests {
 
         fn added_replicators(&self) -> Vec<RecordedReplicator> {
             self.added_replicators.lock().unwrap().clone()
+        }
+
+        fn disconnected_peers(&self) -> Vec<String> {
+            self.disconnected_peers.lock().unwrap().clone()
         }
     }
 
@@ -322,6 +356,13 @@ mod tests {
         }
         async fn connect_peer(&self, _addr: &str) -> P2PResult<()> {
             unimplemented!()
+        }
+        async fn disconnect_peer(&self, addr: &str) -> P2PResult<()> {
+            self.disconnected_peers
+                .lock()
+                .unwrap()
+                .push(addr.to_string());
+            Ok(())
         }
         async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
             unimplemented!()
@@ -359,7 +400,7 @@ mod tests {
             unimplemented!()
         }
         async fn get_documents(&self) -> P2PResult<Vec<P2pDocumentInfo>> {
-            unimplemented!()
+            Ok(self.documents.clone())
         }
         async fn add_documents(&self, _docs: Vec<P2pDocumentRequest>) -> P2PResult<()> {
             unimplemented!()
@@ -639,6 +680,81 @@ mod tests {
         assert!(
             http_filters.contains_key("User"),
             "the User collection filter must survive the relay"
+        );
+    }
+
+    #[tokio::test]
+    async fn document_list_returns_documents() {
+        let ops = MockOps::with_documents(
+            "12D3KooW-THIS",
+            vec![
+                P2pDocumentInfo {
+                    collection: "User".into(),
+                    doc_id: "bae-doc-1".into(),
+                },
+                P2pDocumentInfo {
+                    collection: "User".into(),
+                    doc_id: "bae-doc-2".into(),
+                },
+            ],
+        );
+        let token = crate::manage::auth::mint_token_for("12D3KooW-THIS").0;
+        let req = ManageQueryRequest::new(ManageQueryOp::DocumentList, token);
+        let reply = build_manage_query_reply(&ops, &BoolNac(true), req).await;
+        assert_eq!(reply.err_message(), None);
+        match reply.result {
+            Some(ManageQueryResult::Documents { documents }) => {
+                assert_eq!(
+                    documents,
+                    vec![
+                        ManageDocRef {
+                            collection: "User".into(),
+                            doc_id: "bae-doc-1".into(),
+                        },
+                        ManageDocRef {
+                            collection: "User".into(),
+                            doc_id: "bae-doc-2".into(),
+                        },
+                    ]
+                );
+            }
+            other => panic!("expected a Documents result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_disconnect_dispatches() {
+        let ops = MockOps::new("12D3KooW-THIS");
+        let token = crate::manage::auth::mint_token_for("12D3KooW-THIS").0;
+        let req = ManageRequest::new(
+            ManageMutateOp::PeerDisconnect {
+                address: "/ip4/1.2.3.4/tcp/9000".into(),
+            },
+            token,
+        );
+        let reply = build_manage_reply(&ops, &BoolNac(true), req).await;
+        assert_eq!(reply.err_message(), None);
+        assert_eq!(
+            ops.disconnected_peers(),
+            vec!["/ip4/1.2.3.4/tcp/9000".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_disconnect_unauthorized_rejected_before_side_effects() {
+        let ops = MockOps::new("12D3KooW-THIS");
+        let token = crate::manage::auth::mint_token_for("12D3KooW-THIS").0;
+        let req = ManageRequest::new(
+            ManageMutateOp::PeerDisconnect {
+                address: "/ip4/1.2.3.4/tcp/9000".into(),
+            },
+            token,
+        );
+        let reply = build_manage_reply(&ops, &BoolNac(false), req).await;
+        assert_eq!(reply.err_message(), Some("unauthorized"));
+        assert!(
+            ops.disconnected_peers().is_empty(),
+            "no side effect on denial"
         );
     }
 }

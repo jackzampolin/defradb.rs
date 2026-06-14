@@ -279,6 +279,22 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         Ok(())
     }
 
+    async fn disconnect_peer(&self, addr: &str) -> P2PResult<()> {
+        self.check_nac(acp::nac::NodePermission::P2pPeerConnect)
+            .await?;
+
+        let parsed = p2p::parse_multiaddr_with_peer_id(addr)
+            .map_err(|error| P2PError::invalid_input(error.to_string()))?;
+        self.handle
+            .disconnect(parsed.peer_id)
+            .await
+            .map_err(|error| P2PError::transport(error.to_string()))?;
+        if let Ok(mut addrs) = self.peer_addresses.write() {
+            addrs.remove(&parsed.peer_id.to_string());
+        }
+        Ok(())
+    }
+
     async fn notify_network_change(&self) -> P2PResult<()> {
         Ok(())
     }

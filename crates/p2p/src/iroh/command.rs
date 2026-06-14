@@ -21,6 +21,10 @@ pub enum IrohCommand {
         addrs: Vec<PeerAddr>,
         reply: oneshot::Sender<crate::error::Result<()>>,
     },
+    Disconnect {
+        peer_id: PeerId,
+        reply: oneshot::Sender<crate::error::Result<()>>,
+    },
     Listen {
         addr: PeerAddr,
         reply: oneshot::Sender<crate::error::Result<()>>,

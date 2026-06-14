@@ -138,6 +138,21 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Disconnect from a peer, hanging up any live connection.
+    ///
+    /// Idempotent: disconnecting an already-absent peer returns `Ok(())`.
+    pub async fn disconnect(&self, peer_id: PeerId) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::Disconnect {
+                peer_id,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Send a PushLog request to a peer and wait for the response.
     pub async fn send_pushlog(
         &self,

@@ -865,3 +865,68 @@ async fn regression_834_gossipsub_message_id_distinguishes_senders() {
     handle0.shutdown().await.unwrap();
     handle1.shutdown().await.unwrap();
 }
+
+async fn wait_until_disconnected(handle: &p2p::P2PHostHandle, peer_id: PeerId) {
+    let start = std::time::Instant::now();
+    loop {
+        if !handle
+            .connected_peers()
+            .await
+            .unwrap_or_default()
+            .contains(&peer_id)
+        {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "timed out waiting for disconnection from {peer_id}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn test_disconnect_drops_connected_peer() {
+    let (host0, handle0, _events0, _replicators0) =
+        P2PHost::new(MockBitswapStore::new()).await.unwrap();
+    let (host1, handle1, _events1, _replicators1) =
+        P2PHost::new(MockBitswapStore::new()).await.unwrap();
+
+    tokio::spawn(host0.run());
+    tokio::spawn(host1.run());
+
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr1 = handle1.listen_addresses().await.unwrap().remove(0);
+    let peer1 = handle1.local_peer_id_cached();
+
+    handle0.dial(peer1, vec![addr1]).await.unwrap();
+    wait_until_connected(&handle0, peer1).await;
+    assert!(handle0.connected_peers().await.unwrap().contains(&peer1));
+
+    handle0.disconnect(peer1).await.unwrap();
+    wait_until_disconnected(&handle0, peer1).await;
+
+    handle0.shutdown().await.unwrap();
+    handle1.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_disconnect_absent_peer_is_ok() {
+    let (host0, handle0, _events0, _replicators0) =
+        P2PHost::new(MockBitswapStore::new()).await.unwrap();
+    tokio::spawn(host0.run());
+
+    let (_host1, handle1, _events1, _replicators1) =
+        P2PHost::new(MockBitswapStore::new()).await.unwrap();
+    let never_connected = handle1.local_peer_id_cached();
+
+    handle0
+        .disconnect(never_connected)
+        .await
+        .expect("disconnecting a never-connected peer must be Ok");
+
+    handle0.shutdown().await.unwrap();
+}
