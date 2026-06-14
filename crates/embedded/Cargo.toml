@@ -24,6 +24,7 @@ kms = { path = "../kms" }
 lens = { path = "../lens" }
 p2p = { path = "../p2p", features = ["libp2p-transport"] }
 query = { path = "../query" }
+replication-filter = { path = "../replication-filter" }
 schema = { path = "../schema" }
 sourcehub = { path = "../sourcehub" }
 storage = { path = "../storage" }

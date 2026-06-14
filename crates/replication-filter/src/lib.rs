@@ -1,9 +1,3 @@
-//! Query-filter-backed replication filter matcher.
-//!
-//! Evaluates [`p2p::ReplicationFilter`] predicates by delegating to the
-//! DefraDB query filter engine (`query::Filter`), enabling the full
-//! operator set (`_in`, `_eq`, `_gt`, `_and`, `_or`, `_not`, …).
-
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Mutex;
