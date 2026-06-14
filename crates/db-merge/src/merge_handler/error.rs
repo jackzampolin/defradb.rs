@@ -22,6 +22,12 @@ pub enum MergeError {
     #[error("merge failed: {0}")]
     MergeFailed(String),
 
+    /// A merge would change an `@immutable` field. This is a deterministic
+    /// rejection of the block's content, not a transient failure: the offending
+    /// block must be marked terminal (skipped) so it is not retried forever.
+    #[error("immutable field rejected: {0}")]
+    ImmutableFieldChanged(String),
+
     /// Database error.
     #[error("database error: {0}")]
     Database(#[from] db::error::Error),

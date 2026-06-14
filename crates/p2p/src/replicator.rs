@@ -15,6 +15,8 @@ use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 #[cfg(feature = "libp2p-transport")]
 use libp2p::{Multiaddr, PeerId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value as JsonValue;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 /// Error type for replicator operations.
@@ -44,6 +46,65 @@ pub enum ReplicatorStatus {
     #[default]
     Active = 0,
     Inactive = 1,
+}
+
+/// Per-collection equality predicate for filtered replication.
+///
+/// This is intentionally narrow for the first filtered-replication release:
+/// a document is selected when its materialized JSON contains `Field` with
+/// exactly `Value`. The full within-document DAG is still replicated for
+/// selected documents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReplicationFilter {
+    #[serde(rename = "Field")]
+    pub field: String,
+
+    #[serde(rename = "Value")]
+    pub value: JsonValue,
+}
+
+impl Eq for ReplicationFilter {}
+
+impl ReplicationFilter {
+    pub fn new(field: impl Into<String>, value: JsonValue) -> Self {
+        Self {
+            field: field.into(),
+            value,
+        }
+    }
+
+    pub fn matches_json_object(&self, document: &JsonValue) -> bool {
+        document
+            .as_object()
+            .and_then(|object| object.get(&self.field))
+            .is_some_and(|value| json_scalar_eq(value, &self.value))
+    }
+}
+
+/// Equality for filter matching. Numbers are compared numerically so a filter
+/// value of `2.0` matches a field materialized as the integer `2` (Go-compatible
+/// JSON encodes whole-number floats as integers), which raw `serde_json::Value`
+/// equality treats as unequal.
+fn json_scalar_eq(a: &JsonValue, b: &JsonValue) -> bool {
+    match (a, b) {
+        (JsonValue::Number(x), JsonValue::Number(y)) => {
+            // A whole-number float (2.0) materializes as an integer, so a float
+            // filter value must match an integer field value. But compare two
+            // integers exactly to avoid f64 precision loss above 2^53.
+            if x.is_f64() || y.is_f64() {
+                x.as_f64() == y.as_f64()
+            } else {
+                x == y
+            }
+        }
+        _ => a == b,
+    }
+}
+
+pub type ReplicationFilters = BTreeMap<String, ReplicationFilter>;
+
+fn no_replication_filters(filters: &ReplicationFilters) -> bool {
+    filters.is_empty()
 }
 
 impl From<ReplicatorStatus> for u8 {
@@ -131,7 +192,7 @@ fn format_go_time(t: &DateTime<Utc>) -> String {
 /// Persisted to the peerstore as JSON, matching Go's `client.Replicator`
 /// wire format exactly so a shared datastore can be read by either
 /// implementation. See `defradb/client/replicator.go:18-24`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReplicatorInfo {
     #[serde(rename = "ID")]
     pub id: String,
@@ -155,7 +216,20 @@ pub struct ReplicatorInfo {
         with = "go_time_serde"
     )]
     pub last_status_change: DateTime<Utc>,
+
+    /// Optional Rust extension for filtered replication.
+    ///
+    /// Omitted when empty so unfiltered records remain byte-identical to Go's
+    /// `client.Replicator` JSON. Go decoders ignore this field when present.
+    #[serde(
+        rename = "Filters",
+        default,
+        skip_serializing_if = "no_replication_filters"
+    )]
+    pub filters: ReplicationFilters,
 }
+
+impl Eq for ReplicatorInfo {}
 
 impl ReplicatorInfo {
     /// Create a new replicator info.
@@ -174,7 +248,19 @@ impl ReplicatorInfo {
             collections,
             status: ReplicatorStatus::Active,
             last_status_change: go_time_zero(),
+            filters: ReplicationFilters::new(),
         })
+    }
+
+    /// Create a new replicator info with per-collection filters.
+    pub fn new_with_filters(
+        peer_id: impl ToString,
+        collections: Vec<String>,
+        filters: ReplicationFilters,
+    ) -> Result<Self, ReplicatorError> {
+        let mut info = Self::new(peer_id, collections)?;
+        info.filters = filters;
+        Ok(info)
     }
 
     /// Unchecked constructor for test fixtures and raw peerstore reads.
@@ -191,7 +277,39 @@ impl ReplicatorInfo {
             collections,
             status: ReplicatorStatus::Active,
             last_status_change: go_time_zero(),
+            filters: ReplicationFilters::new(),
         }
+    }
+
+    /// Unchecked constructor that preserves filter metadata.
+    pub fn from_raw_with_filters(
+        peer_id: String,
+        collections: Vec<String>,
+        addresses: Vec<String>,
+        filters: ReplicationFilters,
+    ) -> Self {
+        Self {
+            id: peer_id,
+            addresses,
+            collections,
+            status: ReplicatorStatus::Active,
+            last_status_change: go_time_zero(),
+            filters,
+        }
+    }
+
+    pub fn is_filtered_for_collection(&self, collection_id: &str) -> bool {
+        self.filters.contains_key(collection_id)
+    }
+
+    pub fn filter_for_collection(&self, collection_id: &str) -> Option<&ReplicationFilter> {
+        self.filters.get(collection_id)
+    }
+
+    pub fn matches_filter(&self, collection_id: &str, document: &JsonValue) -> bool {
+        self.filter_for_collection(collection_id)
+            .map(|filter| filter.matches_json_object(document))
+            .unwrap_or(true)
     }
 
     /// Get the peer ID. Returns `None` if the stored ID is not a valid libp2p PeerId.

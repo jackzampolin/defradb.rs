@@ -85,6 +85,7 @@ async fn embedded_libp2p_se_owner_queries_replicator() -> Result<()> {
         .add_replicator(
             vec!["User".to_string()],
             Some(&replicator_addr),
+            Default::default(),
             Vec::new(),
             None,
         )
@@ -188,6 +189,7 @@ async fn embedded_iroh_se_owner_queries_replicator() -> Result<()> {
         .add_replicator(
             vec!["User".to_string()],
             Some(&replicator_addr),
+            Default::default(),
             Vec::new(),
             None,
         )

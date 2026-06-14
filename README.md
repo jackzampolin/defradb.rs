@@ -144,6 +144,21 @@ ffi-test status                        # Show pass rates
 
 See `tools/ffi-test/README.md` for full usage.
 
+## P2P Replication
+
+### Filtered replication
+
+A replicator can carry an optional per-collection predicate so a source node only **pushes** documents whose field matches:
+
+```bash
+defradb client p2p replicator add -c MyCollection \
+  --filter-field agent_did --filter-value did:key:alice <peer-multiaddr>
+```
+
+The filter field must be a scalar, `@immutable` LWW field on the collection.
+
+**Filtered replication is a push-path selectivity optimization, not an access-control boundary.** A peer that also subscribes to the collection (`p2p collection add`) joins the collection's gossip topic and receives every document, bypassing the filter. Use ACP and encryption for confidentiality. The `--filter-value` is matched as a JSON string, so only string-valued fields can be filtered today.
+
 ## Documentation
 
 - [DefraDB (Go)](https://github.com/sourcenetwork/defradb) — concepts, architecture, specifications

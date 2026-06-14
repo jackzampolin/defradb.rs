@@ -10,15 +10,17 @@ pub(crate) async fn restore_libp2p_replicators<S: storage::corekv::Store + 'stat
                 match p2p::ReplicatorInfo::from_bytes(&data) {
                     Ok(info) => {
                         if let Some(peer_id) = info.peer_id() {
-                            if let Err(error) = handle
-                                .create_replicator(peer_id, info.collections.clone())
-                                .await
+                            if let Err(error) =
+                                handle.create_replicator_info(peer_id, info.clone()).await
                             {
                                 tracing::warn!(peer_id = %peer_id, error = %error, "failed to restore replicator");
                                 continue;
                             }
 
                             for collection_id in &info.collections {
+                                if info.is_filtered_for_collection(collection_id) {
+                                    continue;
+                                }
                                 let topic = DefraTopic::collection(collection_id);
                                 if let Err(error) = handle.subscribe(topic).await {
                                     tracing::warn!(collection_id = %collection_id, error = %error, "failed to restore collection topic");
@@ -64,7 +66,7 @@ pub(crate) async fn restore_iroh_replicators<S, B>(
                 if let Ok(rep_info) = p2p::ReplicatorInfo::from_bytes(&data) {
                     let peer_id = p2p::transport::PeerId::new(rep_info.peer_id_str().to_string());
                     let _ = coordinator
-                        .create_replicator(&peer_id, rep_info.collections.clone(), false)
+                        .create_replicator_info(&peer_id, rep_info, false)
                         .await;
                 }
             }

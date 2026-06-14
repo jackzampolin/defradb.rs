@@ -12,6 +12,32 @@ use crate::push_docs_creator::resolve_push_creator;
 use crate::push_docs_replay::{ReplayPushConfig, ReplayPushGate};
 use db::database::DB;
 
+async fn document_matches_filter<R: Reader + ?Sized>(
+    datastore: &R,
+    collection_id: &str,
+    doc_id: &str,
+    filter: &p2p::ReplicationFilter,
+) -> Result<bool, String> {
+    let doc_key = format!("/d/{}/{}", collection_id, doc_id).into_bytes();
+    let Some(doc_data) = datastore
+        .get(&doc_key)
+        .await
+        .map_err(|e| format!("failed to read document for replication filter: {}", e))?
+    else {
+        return Ok(false);
+    };
+
+    let doc = document::Document::from_cbor(&doc_data)
+        .map_err(|e| format!("failed to decode document for replication filter: {}", e))?;
+    let document_json = serde_json::Value::Object(
+        doc.to_map()
+            .map_err(|e| format!("failed to encode document for replication filter: {}", e))?
+            .into_iter()
+            .collect(),
+    );
+    Ok(filter.matches_json_object(&document_json))
+}
+
 /// Push existing documents to a replicator peer via a generic transport.
 ///
 /// Transport-agnostic equivalent of `push_existing_docs`. Uses `P2PTransport`
@@ -22,6 +48,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
     document_acp: Option<&dyn DocumentACP>,
     peer_id: &PeerId,
     collections: &[String],
+    filters: &p2p::ReplicationFilters,
     se_encryption_key: Option<&[u8]>,
 ) -> Result<(), String> {
     push_existing_docs_via_transport_with_config(
@@ -30,6 +57,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
         document_acp,
         peer_id,
         collections,
+        filters,
         se_encryption_key,
         ReplayPushConfig::default(),
     )
@@ -37,12 +65,14 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
 }
 
 /// Push existing documents to a replicator peer via a generic transport with explicit replay limits.
+#[allow(clippy::too_many_arguments)]
 pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T: P2PTransport>(
     transport: &T,
     db: &DB<S>,
     document_acp: Option<&dyn DocumentACP>,
     peer_id: &PeerId,
     collections: &[String],
+    filters: &p2p::ReplicationFilters,
     se_encryption_key: Option<&[u8]>,
     replay_config: ReplayPushConfig,
 ) -> Result<(), String> {
@@ -133,6 +163,14 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
             .map_err(|e| format!("datastore close error: {}", e))?;
 
         for doc_id in &doc_ids {
+            if let Some(filter) = filters.get(collection.collection_id()) {
+                if !document_matches_filter(&datastore, collection.collection_id(), doc_id, filter)
+                    .await?
+                {
+                    continue;
+                }
+            }
+
             let creator = match resolve_push_creator(
                 document_acp,
                 &collection,
@@ -306,6 +344,19 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
 
             let mut all_artifacts = Vec::new();
             for doc_id in &se_doc_ids {
+                if let Some(filter) = filters.get(collection.collection_id()) {
+                    if !document_matches_filter(
+                        &datastore,
+                        collection.collection_id(),
+                        doc_id,
+                        filter,
+                    )
+                    .await?
+                    {
+                        continue;
+                    }
+                }
+
                 let doc_key = format!("/d/{}/{}", collection.collection_id(), doc_id).into_bytes();
                 let doc_data = match datastore.get(&doc_key).await {
                     Ok(Some(data)) => data,
@@ -382,12 +433,25 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
     peer_id: &PeerId,
     doc_id: &str,
     collection_id: &str,
+    filters: &p2p::ReplicationFilters,
 ) -> Result<(), String> {
     let local_peer_id = transport.local_peer_id().to_string();
     let collection = db
         .find_collection_by_id(collection_id)
         .map_err(|e| format!("failed to get collection: {}", e))?
         .ok_or_else(|| format!("collection '{}' not found", collection_id))?;
+    if let Some(filter) = filters.get(collection_id) {
+        let txn = db
+            .new_txn(true)
+            .await
+            .map_err(|e| format!("failed to create filter transaction: {}", e))?;
+        let datastore = txn
+            .datastore()
+            .map_err(|e| format!("failed to get datastore: {}", e))?;
+        if !document_matches_filter(&datastore, collection_id, doc_id, filter).await? {
+            return Ok(());
+        }
+    }
     let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id)
         .await
         .map_err(|e| e.to_string())?;

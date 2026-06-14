@@ -388,6 +388,7 @@ mod tests {
     /// Mock transport that records raw publishes and mimics the gossipsub
     /// subscription-propagation race for `topic_peers`/`publish_raw`.
     #[derive(Clone)]
+    #[allow(clippy::type_complexity)]
     struct RacyTransport {
         local_peer_id: PeerId,
         peer: PeerId,

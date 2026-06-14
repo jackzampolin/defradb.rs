@@ -3,6 +3,7 @@
 use chrono::{TimeZone, Utc};
 use p2p::replicator::{ReplicatorError, ReplicatorInfo, ReplicatorStatus};
 use p2p::{Multiaddr, PeerId};
+use p2p::{ReplicationFilter, ReplicationFilters};
 
 // ---------------------------------------------------------------------------
 // Go-produced fixtures (generated via `encoding/json` on the real
@@ -91,6 +92,78 @@ fn encodes_byte_exact_to_go_zero_time() {
 
     let bytes = info.to_bytes().unwrap();
     assert_eq!(std::str::from_utf8(&bytes).unwrap(), GO_ZERO_STATUS_CHANGE);
+}
+
+#[test]
+fn unfiltered_rust_extension_does_not_change_go_bytes() {
+    let info = ReplicatorInfo::from_raw(
+        GO_FIXTURE_PEER_ID.to_string(),
+        vec!["users".to_string()],
+        vec![],
+    );
+
+    let json = std::str::from_utf8(&info.to_bytes().unwrap())
+        .unwrap()
+        .to_string();
+    assert_eq!(json, GO_ZERO_STATUS_CHANGE);
+    assert!(
+        !json.contains("Filters"),
+        "empty Rust-only filter metadata must not drift from Go peerstore JSON"
+    );
+}
+
+#[test]
+fn filtered_replicator_round_trips_rust_extension() {
+    let mut filters = ReplicationFilters::new();
+    filters.insert(
+        "users".to_string(),
+        ReplicationFilter::new("agent_did", serde_json::json!("did:key:z6M")),
+    );
+    let info = ReplicatorInfo::from_raw_with_filters(
+        GO_FIXTURE_PEER_ID.to_string(),
+        vec!["users".to_string()],
+        vec![],
+        filters,
+    );
+
+    let bytes = info.to_bytes().unwrap();
+    assert_eq!(
+        std::str::from_utf8(&bytes).unwrap(),
+        r#"{"ID":"12D3KooWGjMkcMy5PM9iSbgWWgUnH5dQhvzhNu7w3Gk4kHZBsxnJ","Addresses":[],"CollectionIDs":["users"],"Status":0,"LastStatusChange":"0001-01-01T00:00:00Z","Filters":{"users":{"Field":"agent_did","Value":"did:key:z6M"}}}"#
+    );
+
+    let restored = ReplicatorInfo::from_bytes(&bytes).unwrap();
+    assert_eq!(restored, info);
+    assert!(restored.matches_filter(
+        "users",
+        &serde_json::json!({"agent_did": "did:key:z6M", "body": "selected"})
+    ));
+    assert!(!restored.matches_filter("users", &serde_json::json!({"agent_did": "did:key:other"})));
+}
+
+#[test]
+fn filter_matches_numbers_numerically() {
+    // A whole-number Float field materializes as an integer in Go-compatible
+    // JSON, so a 2.0 filter value must still match a stored 2.
+    let float_filter = ReplicationFilter::new("score", serde_json::json!(2.0));
+    assert!(float_filter.matches_json_object(&serde_json::json!({"score": 2})));
+    assert!(float_filter.matches_json_object(&serde_json::json!({"score": 2.0})));
+    assert!(!float_filter.matches_json_object(&serde_json::json!({"score": 3})));
+
+    // Non-whole floats and integers still match their own form.
+    let frac_filter = ReplicationFilter::new("ratio", serde_json::json!(2.5));
+    assert!(frac_filter.matches_json_object(&serde_json::json!({"ratio": 2.5})));
+
+    // A string filter value never matches a numeric field (type mismatch).
+    let str_filter = ReplicationFilter::new("score", serde_json::json!("2"));
+    assert!(!str_filter.matches_json_object(&serde_json::json!({"score": 2})));
+
+    // Two distinct large integers must NOT match: comparing them as f64 would
+    // lose precision above 2^53 and falsely match.
+    let big = 9_007_199_254_740_993_i64; // 2^53 + 1
+    let big_filter = ReplicationFilter::new("id", serde_json::json!(big));
+    assert!(big_filter.matches_json_object(&serde_json::json!({ "id": big })));
+    assert!(!big_filter.matches_json_object(&serde_json::json!({ "id": big + 1 })));
 }
 
 // ---------------------------------------------------------------------------

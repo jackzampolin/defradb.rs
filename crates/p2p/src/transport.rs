@@ -466,6 +466,10 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
 
     async fn create_replicator(&self, peer_id: &PeerId, collections: Vec<String>) -> Result<()>;
 
+    async fn create_replicator_info(&self, peer_id: &PeerId, info: ReplicatorInfo) -> Result<()> {
+        self.create_replicator(peer_id, info.collections).await
+    }
+
     async fn delete_replicator(&self, peer_id: &PeerId) -> Result<()>;
 
     async fn list_replicators(&self) -> Result<Vec<ReplicatorInfo>>;

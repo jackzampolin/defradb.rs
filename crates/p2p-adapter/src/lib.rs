@@ -35,7 +35,7 @@ pub use version_syncer::DbVersionSyncer;
 
 pub use defra_http::router::{
     ExplicitReplayCapabilityInput, P2PError, P2POperations, P2PResult, P2pDocumentInfo,
-    P2pDocumentRequest, ReplicatorInfo,
+    P2pDocumentRequest, ReplicationFilter, ReplicationFilters, ReplicatorInfo,
 };
 
 /// Convert a p2p `ReplicatorInfo` into the HTTP-facing `ReplicatorInfo`.
@@ -49,6 +49,19 @@ pub(crate) fn to_http_replicator_info(info: p2p::ReplicatorInfo) -> ReplicatorIn
         address,
         status,
         last_status_change,
+        filters: info
+            .filters
+            .into_iter()
+            .map(|(collection, filter)| {
+                (
+                    collection,
+                    defra_http::router::ReplicationFilter {
+                        field: filter.field,
+                        value: filter.value,
+                    },
+                )
+            })
+            .collect(),
     }
 }
 

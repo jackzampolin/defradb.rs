@@ -64,9 +64,9 @@ impl<T: P2PTransport> RuntimeAuthorizer<T> {
         let peer_id = PeerId::new(peer_id_str.to_string());
         match self.transport.get_replicator(&peer_id).await {
             Ok(Some(info)) if !info.collections.is_empty() => {
-                self.replicators
-                    .set_peer_collections(peer_id_str, &info.collections);
-                Some(info.collections)
+                let collections = info.collections.clone();
+                self.replicators.set_replicator_info(info);
+                Some(collections)
             }
             Ok(_) => None,
             Err(error) => {

@@ -328,6 +328,7 @@ mod tests {
             &self,
             _collections: Vec<String>,
             _addr: Option<&str>,
+            _filters: crate::router::ReplicationFilters,
             _explicit_replay_capabilities: Vec<crate::router::ExplicitReplayCapabilityInput>,
             _expected_authorizer_did: Option<&str>,
         ) -> P2PResult<()> {

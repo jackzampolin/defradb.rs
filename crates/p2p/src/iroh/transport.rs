@@ -420,9 +420,14 @@ impl P2PTransport for IrohTransport {
     }
 
     async fn create_replicator(&self, peer_id: &PeerId, collections: Vec<String>) -> Result<()> {
+        let info = ReplicatorInfo::from_raw(peer_id.to_string(), collections, Vec::new());
+        self.create_replicator_info(peer_id, info).await
+    }
+
+    async fn create_replicator_info(&self, peer_id: &PeerId, info: ReplicatorInfo) -> Result<()> {
         self.send_command(|reply| IrohCommand::CreateReplicator {
             peer_id: peer_id.clone(),
-            collections,
+            info,
             reply,
         })
         .await

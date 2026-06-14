@@ -467,6 +467,9 @@ impl<'a> SdlParser<'a> {
             if let Some(size) = parsed_field.directives.size_constraint {
                 field = field.with_size(size);
             }
+            if parsed_field.directives.immutable {
+                field = field.as_immutable();
+            }
 
             // Set relation name - use explicit @relation(name:) if provided, otherwise auto-generate
             if kind.is_relation() {

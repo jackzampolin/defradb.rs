@@ -3738,6 +3738,7 @@ dependencies = [
  "lens",
  "libp2p",
  "p2p",
+ "schema",
  "serde",
  "serde_bytes",
  "serde_ipld_dagcbor",

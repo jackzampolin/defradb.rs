@@ -187,7 +187,7 @@ pub enum IrohCommand {
     // Replicators
     CreateReplicator {
         peer_id: PeerId,
-        collections: Vec<String>,
+        info: ReplicatorInfo,
         reply: oneshot::Sender<crate::error::Result<()>>,
     },
     DeleteReplicator {

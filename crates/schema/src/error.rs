@@ -62,6 +62,9 @@ pub enum SchemaError {
 
     #[error("invalid downsample configuration: {0}")]
     InvalidDownsample(String),
+
+    #[error("invalid immutable field {field_name}: {reason}")]
+    InvalidImmutableField { field_name: String, reason: String },
 }
 
 impl From<serde_json::Error> for SchemaError {

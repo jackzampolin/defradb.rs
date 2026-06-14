@@ -13,7 +13,7 @@ pub use traits::{
     IndexInfo, IndexOperations, LensOperations, ManageRequester, NacStatus, NacStatusInfo,
     NodeAcpOperations, NodePermission, P2PError, P2POperations, P2PResult, P2pDocumentInfo,
     P2pDocumentRequest, PolicyInfo, RemoteManageDocRef, RemoteManageOp, RemoteManageQueryOp,
-    RemoteManageQueryResult, ReplicatorInfo, SchemaOperations, SyncBranchableRequest,
-    SyncDocumentsRequest, SyncVersionsRequest, TransactionOperations, ViewOperations,
-    MANAGE_UNAUTHORIZED,
+    RemoteManageQueryResult, ReplicationFilter, ReplicationFilters, ReplicatorInfo,
+    SchemaOperations, SyncBranchableRequest, SyncDocumentsRequest, SyncVersionsRequest,
+    TransactionOperations, ViewOperations, MANAGE_UNAUTHORIZED,
 };

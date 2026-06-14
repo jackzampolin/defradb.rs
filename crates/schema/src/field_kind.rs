@@ -296,6 +296,27 @@ impl FieldKind {
         matches!(self, FieldKind::Scalar(_))
     }
 
+    /// Returns true if `value` has a JSON shape that could equal a materialized
+    /// document field of this kind. Used by filtered replication to reject a
+    /// filter predicate whose value type can never match the field (e.g. a
+    /// string `"30"` against an `Int` field), which would otherwise silently
+    /// select zero documents.
+    pub fn accepts_filter_value(&self, value: &serde_json::Value) -> bool {
+        match self {
+            FieldKind::Scalar(ScalarKind::String)
+            | FieldKind::Scalar(ScalarKind::DateTime)
+            | FieldKind::Scalar(ScalarKind::Blob)
+            | FieldKind::Scalar(ScalarKind::DocID) => value.is_string(),
+            FieldKind::Scalar(ScalarKind::Bool) => value.is_boolean(),
+            FieldKind::Scalar(ScalarKind::Int) => value.is_i64() || value.is_u64(),
+            FieldKind::Scalar(ScalarKind::Float64) | FieldKind::Scalar(ScalarKind::Float32) => {
+                value.is_number()
+            }
+            FieldKind::Scalar(ScalarKind::Json) => true,
+            _ => false,
+        }
+    }
+
     /// Returns true if values of this kind can be nil/null.
     /// In Go DefraDB, ALL types return true for IsNillable().
     pub fn is_nillable(&self) -> bool {
@@ -601,5 +622,44 @@ fn parse_string_kind(s: &str) -> Result<FieldKind, String> {
             };
             Ok(FieldKind::Named { name, is_array })
         }
+    }
+}
+
+#[cfg(test)]
+mod accepts_filter_value_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn string_field_accepts_only_strings() {
+        let k = FieldKind::string();
+        assert!(k.accepts_filter_value(&json!("did:key:alice")));
+        assert!(!k.accepts_filter_value(&json!(30)));
+        assert!(!k.accepts_filter_value(&json!(true)));
+    }
+
+    #[test]
+    fn int_field_rejects_stringified_numbers() {
+        let k = FieldKind::int();
+        assert!(k.accepts_filter_value(&json!(30)));
+        assert!(!k.accepts_filter_value(&json!("30")));
+        assert!(!k.accepts_filter_value(&json!(1.5)));
+    }
+
+    #[test]
+    fn bool_and_float_fields() {
+        assert!(FieldKind::bool().accepts_filter_value(&json!(true)));
+        assert!(!FieldKind::bool().accepts_filter_value(&json!("true")));
+        assert!(FieldKind::float64().accepts_filter_value(&json!(1.5)));
+        assert!(FieldKind::float64().accepts_filter_value(&json!(2)));
+    }
+
+    #[test]
+    fn relations_never_accept() {
+        let k = FieldKind::Relation {
+            collection_id: "Other".to_string(),
+            is_array: false,
+        };
+        assert!(!k.accepts_filter_value(&json!("x")));
     }
 }

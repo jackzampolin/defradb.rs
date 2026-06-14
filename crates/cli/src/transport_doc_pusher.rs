@@ -18,6 +18,7 @@ pub trait TransportDocPusher: Send + Sync {
         &self,
         peer_id: &PeerId,
         collections: &[String],
+        filters: &p2p::ReplicationFilters,
         se_key: Option<&[u8]>,
     ) -> Result<(), String>;
 
@@ -40,8 +41,20 @@ pub trait TransportDocPusher: Send + Sync {
 
     fn list_collections(&self) -> Result<Vec<String>, String>;
 
+    fn validate_replication_filters(
+        &self,
+        _filters: &p2p::ReplicationFilters,
+    ) -> Result<(), String> {
+        Err("no database context to validate replication filters".to_string())
+    }
+
     async fn persist_replicator(&self, peer_id: &str, collections: &[String])
         -> Result<(), String>;
+
+    async fn persist_replicator_info(&self, info: &p2p::ReplicatorInfo) -> Result<(), String> {
+        self.persist_replicator(info.peer_id_str(), &info.collections)
+            .await
+    }
 
     async fn delete_persisted_replicator(&self, peer_id: &str) -> Result<(), String>;
 
@@ -93,6 +106,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         &self,
         peer_id: &PeerId,
         collections: &[String],
+        filters: &p2p::ReplicationFilters,
         se_key: Option<&[u8]>,
     ) -> Result<(), String> {
         db_merge::push_existing_docs_via_transport(
@@ -101,6 +115,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             self.document_acp.get().map(|acp| acp.as_ref()),
             peer_id,
             collections,
+            filters,
             se_key,
         )
         .await
@@ -112,6 +127,14 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         doc_id: &str,
         collection_id: &str,
     ) -> Result<(), String> {
+        let peer_id_str = peer_id.to_string();
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let filters = match peerstore.get_replicator(&peer_id_str).await {
+            Ok(Some(bytes)) => p2p::ReplicatorInfo::from_bytes(&bytes)
+                .map(|info| info.filters)
+                .unwrap_or_default(),
+            _ => p2p::ReplicationFilters::new(),
+        };
         db_merge::retry_doc_via_transport(
             &self.transport,
             &self.db,
@@ -119,6 +142,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             peer_id,
             doc_id,
             collection_id,
+            &filters,
         )
         .await
     }
@@ -206,6 +230,49 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             .map_err(|e| format!("failed to list collections: {}", e))
     }
 
+    fn validate_replication_filters(
+        &self,
+        filters: &p2p::ReplicationFilters,
+    ) -> Result<(), String> {
+        for (collection_id, filter) in filters {
+            let collection = self
+                .db
+                .find_collection_by_id(collection_id)
+                .map_err(|e| format!("failed to load collection '{}': {}", collection_id, e))?
+                .ok_or_else(|| format!("collection '{}' not found", collection_id))?;
+            let field = collection
+                .schema()
+                .fields
+                .iter()
+                .find(|field| field.name == filter.field)
+                .ok_or_else(|| {
+                    format!(
+                        "replication filter field '{}' not found in collection '{}'",
+                        filter.field, collection_id
+                    )
+                })?;
+            if !field.immutable {
+                return Err(format!(
+                    "replication filter field '{}' in collection '{}' must be marked @immutable",
+                    filter.field, collection_id
+                ));
+            }
+            if field.crdt_type != schema::CType::LwwRegister || !field.kind.is_scalar() {
+                return Err(format!(
+                    "replication filter field '{}' in collection '{}' must be a scalar LWW field",
+                    filter.field, collection_id
+                ));
+            }
+            if !field.kind.accepts_filter_value(&filter.value) {
+                return Err(format!(
+                    "replication filter value for field '{}' in collection '{}' does not match the field type",
+                    filter.field, collection_id
+                ));
+            }
+        }
+        Ok(())
+    }
+
     async fn persist_replicator(
         &self,
         peer_id: &str,
@@ -226,6 +293,20 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         };
         info.id = peer_id.to_string();
         info.collections = collections.to_vec();
+        let bytes = info
+            .to_bytes()
+            .map_err(|e| format!("failed to serialize replicator info: {}", e))?;
+        peerstore
+            .create_replicator(peer_id, &bytes)
+            .await
+            .map_err(|e| format!("failed to persist replicator: {}", e))
+    }
+
+    async fn persist_replicator_info(&self, info: &p2p::ReplicatorInfo) -> Result<(), String> {
+        let peer_id = info.peer_id_str();
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let mut info = info.clone();
+        info.id = peer_id.to_string();
         let bytes = info
             .to_bytes()
             .map_err(|e| format!("failed to serialize replicator info: {}", e))?;

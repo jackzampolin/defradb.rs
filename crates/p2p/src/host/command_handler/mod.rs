@@ -193,10 +193,10 @@ impl<S: Store> P2PHost<S> {
             }
             HostCommand::CreateReplicator {
                 peer_id,
-                collections,
+                info,
                 response,
             } => {
-                self.handle_create_replicator(peer_id, collections, response);
+                self.handle_create_replicator(peer_id, info, response);
             }
             HostCommand::DeleteReplicator { peer_id, response } => {
                 self.handle_delete_replicator(peer_id, response);

@@ -14,6 +14,7 @@ pub trait DocPusher: Send + Sync {
         handle: &P2PHostHandle,
         peer_id: libp2p::PeerId,
         collections: &[String],
+        filters: &p2p::ReplicationFilters,
         se_key: Option<&[u8]>,
         se_identity_pubkey: Option<&[u8]>,
     ) -> P2PResult<()>;
@@ -22,7 +23,18 @@ pub trait DocPusher: Send + Sync {
 
     fn list_collections(&self) -> P2PResult<Vec<String>>;
 
+    fn validate_replication_filters(&self, _filters: &p2p::ReplicationFilters) -> P2PResult<()> {
+        Err(P2PError::invalid_input(
+            "no database context to validate replication filters",
+        ))
+    }
+
     async fn persist_replicator(&self, peer_id: &str, collections: &[String]) -> P2PResult<()>;
+
+    async fn persist_replicator_info(&self, info: &p2p::ReplicatorInfo) -> P2PResult<()> {
+        self.persist_replicator(info.peer_id_str(), &info.collections)
+            .await
+    }
 
     async fn delete_persisted_replicator(&self, peer_id: &str) -> P2PResult<()>;
 
@@ -87,6 +99,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         handle: &P2PHostHandle,
         peer_id: libp2p::PeerId,
         collections: &[String],
+        filters: &p2p::ReplicationFilters,
         se_key: Option<&[u8]>,
         se_identity_pubkey: Option<&[u8]>,
     ) -> P2PResult<()> {
@@ -96,6 +109,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             self.document_acp.get().map(|acp| acp.as_ref()),
             peer_id,
             collections,
+            filters,
             se_key,
             se_identity_pubkey,
         )
@@ -125,6 +139,52 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         self.db
             .list_collections()
             .map_err(|error| P2PError::internal(format!("failed to list collections: {error}")))
+    }
+
+    fn validate_replication_filters(&self, filters: &p2p::ReplicationFilters) -> P2PResult<()> {
+        for (collection_id, filter) in filters {
+            let collection = self
+                .db
+                .find_collection_by_id(collection_id)
+                .map_err(|error| {
+                    P2PError::internal(format!(
+                        "failed to load collection '{collection_id}': {error}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    P2PError::not_found(format!("collection '{collection_id}' not found"))
+                })?;
+            let field = collection
+                .schema()
+                .fields
+                .iter()
+                .find(|field| field.name == filter.field)
+                .ok_or_else(|| {
+                    P2PError::invalid_input(format!(
+                        "replication filter field '{}' not found in collection '{}'",
+                        filter.field, collection_id
+                    ))
+                })?;
+            if !field.immutable {
+                return Err(P2PError::invalid_input(format!(
+                    "replication filter field '{}' in collection '{}' must be marked @immutable",
+                    filter.field, collection_id
+                )));
+            }
+            if field.crdt_type != schema::CType::LwwRegister || !field.kind.is_scalar() {
+                return Err(P2PError::invalid_input(format!(
+                    "replication filter field '{}' in collection '{}' must be a scalar LWW field",
+                    filter.field, collection_id
+                )));
+            }
+            if !field.kind.accepts_filter_value(&filter.value) {
+                return Err(P2PError::invalid_input(format!(
+                    "replication filter value for field '{}' in collection '{}' does not match the field type",
+                    filter.field, collection_id
+                )));
+            }
+        }
+        Ok(())
     }
 
     async fn persist_replicator(&self, peer_id: &str, collections: &[String]) -> P2PResult<()> {
@@ -157,6 +217,22 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             };
         info.id = peer_id.to_string();
         info.collections = collections.to_vec();
+        let bytes = info.to_bytes().map_err(|error| {
+            P2PError::internal(format!("failed to serialize replicator info: {error}"))
+        })?;
+        peerstore
+            .create_replicator(peer_id, &bytes)
+            .await
+            .map_err(|error| {
+                P2PError::persistence(format!("failed to persist replicator: {error}"))
+            })
+    }
+
+    async fn persist_replicator_info(&self, info: &p2p::ReplicatorInfo) -> P2PResult<()> {
+        let peer_id = info.peer_id_str();
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let mut info = info.clone();
+        info.id = peer_id.to_string();
         let bytes = info.to_bytes().map_err(|error| {
             P2PError::internal(format!("failed to serialize replicator info: {error}"))
         })?;
@@ -238,6 +314,14 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         doc_id: &str,
         collection_id: &str,
     ) -> P2PResult<()> {
+        let peer_id_str = peer_id.to_string();
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let filters = match peerstore.get_replicator(&peer_id_str).await {
+            Ok(Some(bytes)) => p2p::ReplicatorInfo::from_bytes(&bytes)
+                .map(|info| info.filters)
+                .unwrap_or_default(),
+            _ => p2p::ReplicationFilters::new(),
+        };
         db_merge::retry_doc(
             handle,
             &self.db,
@@ -245,6 +329,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             peer_id,
             doc_id,
             collection_id,
+            &filters,
         )
         .await
         .map_err(P2PError::from)

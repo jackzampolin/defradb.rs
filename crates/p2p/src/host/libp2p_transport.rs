@@ -322,6 +322,11 @@ impl P2PTransport for Libp2pTransport {
         self.handle.create_replicator(pid, collections).await
     }
 
+    async fn create_replicator_info(&self, peer_id: &PeerId, info: ReplicatorInfo) -> Result<()> {
+        let pid = parse_libp2p_peer_id(peer_id)?;
+        self.handle.create_replicator_info(pid, info).await
+    }
+
     async fn delete_replicator(&self, peer_id: &PeerId) -> Result<()> {
         let pid = parse_libp2p_peer_id(peer_id)?;
         self.handle.delete_replicator(pid).await

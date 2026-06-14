@@ -73,6 +73,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
+        // @immutable enforcement happens in process_linked_field_blocks (phase 1),
+        // BEFORE any field block is persisted, so a rejected block leaves no
+        // partial write.
+
         collection
             .save_with_datastore(datastore, &doc)
             .await

@@ -1,6 +1,8 @@
 //! P2P HTTP client methods
 
-use defra_http::router::{ExplicitReplayCapabilityInput, RemoteManageOp, RemoteManageQueryOp};
+use defra_http::router::{
+    ExplicitReplayCapabilityInput, RemoteManageOp, RemoteManageQueryOp, ReplicationFilters,
+};
 use serde::{Deserialize, Serialize};
 
 use super::HttpClient;
@@ -84,6 +86,15 @@ pub struct P2pReplicatorInfo {
         default
     )]
     pub last_status_change: Option<String>,
+
+    /// Optional per-collection filtered-replication predicates (Rust extension).
+    #[serde(
+        rename = "Filters",
+        alias = "filters",
+        default,
+        skip_serializing_if = "ReplicationFilters::is_empty"
+    )]
+    pub filters: ReplicationFilters,
 }
 
 /// P2P replicator request (Go-compatible format).
@@ -98,6 +109,11 @@ pub struct P2pReplicatorRequest {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
+    #[serde(
+        rename = "Filters",
+        skip_serializing_if = "ReplicationFilters::is_empty"
+    )]
+    pub filters: ReplicationFilters,
 }
 
 /// P2P collection request
@@ -140,6 +156,7 @@ impl HttpClient {
         &self,
         collections: &[String],
         address: Option<&str>,
+        filters: ReplicationFilters,
         explicit_replay_capabilities: &[ExplicitReplayCapabilityInput],
     ) -> Result<()> {
         let url = format!("{}/api/v0/p2p/replicator", self.base_url);
@@ -148,6 +165,7 @@ impl HttpClient {
             collections: collections.to_vec(),
             addresses,
             explicit_replay_capabilities: explicit_replay_capabilities.to_vec(),
+            filters,
         })?;
         self.request_void("POST", &url, Some(&body)).await
     }
@@ -324,5 +342,19 @@ mod tests {
             info.last_status_change.as_deref(),
             Some("2026-04-26T10:00:00Z")
         );
+    }
+
+    #[test]
+    fn replicator_info_deserializes_filters() {
+        let json = r#"{"ID":"12D3KooWtest","CollectionIDs":["users"],"Addresses":[],"Status":0,"LastStatusChange":"0001-01-01T00:00:00Z","Filters":{"users":{"Field":"agent_did","Value":"did:key:alice"}}}"#;
+        let info: P2pReplicatorInfo = serde_json::from_str(json).unwrap();
+
+        let filter = info.filters.get("users").expect("users filter present");
+        assert_eq!(filter.field, "agent_did");
+        assert_eq!(filter.value, serde_json::json!("did:key:alice"));
+
+        let json_no_filters = r#"{"ID":"12D3KooWtest","CollectionIDs":["users"],"Addresses":[],"Status":0,"LastStatusChange":"0001-01-01T00:00:00Z"}"#;
+        let info_no_filters: P2pReplicatorInfo = serde_json::from_str(json_no_filters).unwrap();
+        assert!(info_no_filters.filters.is_empty());
     }
 }

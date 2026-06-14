@@ -23,6 +23,12 @@ enum BroadcastKind {
     SingleBlockPush,
 }
 
+fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
+    Some(serde_json::Value::Object(
+        doc.to_map().ok()?.into_iter().collect(),
+    ))
+}
+
 struct PendingBroadcast {
     kind: BroadcastKind,
     cid: Cid,
@@ -30,6 +36,7 @@ struct PendingBroadcast {
     doc_id: String,
     collection_id: String,
     collection_name: String,
+    document_json: Option<serde_json::Value>,
     creator_did: Option<String>,
     broadcast_cid: Option<Cid>,
     broadcast_block: Option<Vec<u8>>,
@@ -41,6 +48,7 @@ struct BroadcastCapture<'a> {
     doc_id: &'a str,
     commit_cid: Option<Cid>,
     commit_block: Option<&'a Vec<u8>>,
+    document_json: Option<serde_json::Value>,
     broadcast_cid: Option<Cid>,
     broadcast_block: Option<&'a Vec<u8>>,
 }
@@ -89,6 +97,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             doc_id,
             commit_cid,
             commit_block,
+            document_json,
             broadcast_cid,
             broadcast_block,
         } = capture;
@@ -113,6 +122,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             doc_id: doc_id.to_string(),
             collection_id,
             collection_name: collection_name.to_string(),
+            document_json,
             creator_did: defra_core::signing::get_broadcast_creator_did(),
             broadcast_cid,
             broadcast_block: broadcast_block.cloned(),
@@ -129,6 +139,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             doc_id,
             collection_id,
             collection_name,
+            document_json,
             creator_did,
             broadcast_cid,
             broadcast_block,
@@ -136,18 +147,19 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
 
         let creator_ref = creator_did.as_deref();
 
-        match kind {
-            BroadcastKind::DagPush => {
-                sync.push_to_replicators_with_creator(
+        match (kind, document_json.as_ref()) {
+            (_, Some(document_json)) => {
+                sync.push_document_to_replicators_with_creator(
                     &cid,
                     &block,
                     &doc_id,
                     &collection_id,
+                    document_json,
                     creator_ref,
                 )
                 .await;
             }
-            BroadcastKind::SingleBlockPush => {
+            (BroadcastKind::DagPush | BroadcastKind::SingleBlockPush, None) => {
                 sync.push_to_replicators_with_creator(
                     &cid,
                     &block,
@@ -232,12 +244,14 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
     ) -> query::error::Result<CreateResult> {
         let result = self.inner.create(collection_name, doc).await?;
         let doc_id = result.doc_id.to_string();
+        let document_json = document_json_value(&result.document);
         self.capture_broadcast(BroadcastCapture {
             kind: BroadcastKind::DagPush,
             collection_name,
             doc_id: &doc_id,
             commit_cid: result.commit_cid,
             commit_block: result.commit_block.as_ref(),
+            document_json,
             broadcast_cid: result.broadcast_cid,
             broadcast_block: result.broadcast_block.as_ref(),
         })
@@ -258,12 +272,14 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
         if let Some(doc_id) = result.document.id() {
             let doc_id = doc_id.to_string();
+            let document_json = document_json_value(&result.document);
             self.capture_broadcast(BroadcastCapture {
                 kind: BroadcastKind::DagPush,
                 collection_name,
                 doc_id: &doc_id,
                 commit_cid: result.commit_cid,
                 commit_block: result.commit_block.as_ref(),
+                document_json,
                 broadcast_cid: result.broadcast_cid,
                 broadcast_block: result.broadcast_block.as_ref(),
             })
@@ -283,6 +299,11 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
+        let document_json = self
+            .inner
+            .get_for_update(collection_name, doc_id)
+            .await?
+            .and_then(|doc| document_json_value(&doc));
         let result = self.inner.delete(collection_name, doc_id).await?;
         let doc_id = result.doc_id.to_string();
         // Pass through the branchable collection block so it gets broadcast
@@ -294,6 +315,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             doc_id: &doc_id,
             commit_cid: result.commit_cid,
             commit_block: result.commit_block.as_ref(),
+            document_json,
             broadcast_cid: result.broadcast_cid,
             broadcast_block: result.broadcast_block.as_ref(),
         })

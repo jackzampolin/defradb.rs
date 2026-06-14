@@ -82,6 +82,25 @@ fn test_parse_crdt_directive() {
 }
 
 #[test]
+fn test_parse_immutable_directive() {
+    let sdl = r#"
+        type AgentDoc {
+            agent_did: String @immutable
+            body: String
+        }
+    "#;
+
+    let collections = parse_sdl(sdl).unwrap();
+    let agent_doc = &collections[0];
+
+    let agent_did = agent_doc.field_by_name("agent_did").unwrap();
+    assert!(agent_did.immutable);
+
+    let body = agent_doc.field_by_name("body").unwrap();
+    assert!(!body.immutable);
+}
+
+#[test]
 fn test_parse_primary_directive() {
     let sdl = r#"
         type Post {
@@ -127,9 +146,9 @@ fn test_parse_relation() {
 
     assert!(
         post.indexes.iter().all(|idx| {
-            !idx.fields
+            idx.fields
                 .first()
-                .is_some_and(|field| field.name == "_authorID")
+                .is_none_or(|field| field.name != "_authorID")
         }),
         "one-to-many relation FK indexes require an explicit @index"
     );
@@ -1122,6 +1141,7 @@ fn test_known_directives_no_warnings() {
             name: String @index(unique: true)
             age: Int @crdt(type: "pncounter")
             role: String @default(string: "user")
+            agent_did: String @immutable
         }
     "#;
 

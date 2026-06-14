@@ -218,7 +218,7 @@ async fn parity_samedoc_rust_rust() {
 /// replication first silently dropped its own increment. This reports the
 /// Go-only and mixed cases to confirm Go converges (the parity target) and that
 /// Rust<->Go interop accumulates correctly.
-async fn run_counter_parity(mut cluster: TestCluster, label: &str) {
+async fn run_counter_parity(cluster: TestCluster, label: &str) {
     let schema = "type Tally { name: String  hits: Int @crdt(type: pcounter) }";
     cluster.client(0).schema_add(schema).expect("schema node0");
     cluster.client(1).schema_add(schema).expect("schema node1");
@@ -273,7 +273,7 @@ async fn run_counter_parity(mut cluster: TestCluster, label: &str) {
 /// classic semantic divergence point (does delete win, or does the concurrent
 /// update revive the doc?). The property that matters is that BOTH agree AND that
 /// Go and Rust agree with EACH OTHER.
-async fn run_delete_update_parity(mut cluster: TestCluster, label: &str) {
+async fn run_delete_update_parity(cluster: TestCluster, label: &str) {
     let schema = "type User { name: String  age: Int }";
     cluster.client(0).schema_add(schema).expect("schema node0");
     cluster.client(1).schema_add(schema).expect("schema node1");

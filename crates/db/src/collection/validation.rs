@@ -26,6 +26,24 @@ impl Collection {
         }
         Ok(())
     }
+
+    pub fn validate_immutable_fields_unchanged(
+        &self,
+        old_doc: &Document,
+        new_doc: &Document,
+    ) -> Result<()> {
+        for field_def in self.def.fields.iter().filter(|field| field.immutable) {
+            let old_value = old_doc.get(&field_def.name);
+            let new_value = new_doc.get(&field_def.name);
+            if old_value != new_value {
+                return Err(Error::InvalidDocument(format!(
+                    "immutable field '{}' cannot be changed",
+                    field_def.name
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Check if a NormalValue is compatible with a FieldKind.
@@ -216,5 +234,51 @@ fn is_empty_array(value: &NormalValue) -> bool {
         NormalValue::NillableFloat64ElementArray(arr) => arr.is_empty(),
         NormalValue::NillableStringElementArray(arr) => arr.is_empty(),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use schema::{CollectionVersion, FieldDescription, FieldKind};
+
+    fn filtered_collection() -> Collection {
+        Collection::new(CollectionVersion::new(
+            "AgentDoc",
+            "agent_doc_version",
+            "agent_doc_collection",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "agent_did", FieldKind::string()).as_immutable(),
+                FieldDescription::new("3", "body", FieldKind::string()),
+            ],
+        ))
+    }
+
+    #[test]
+    fn immutable_field_validation_allows_other_field_changes() {
+        let collection = filtered_collection();
+        let old_doc =
+            Document::from_json_str(r#"{"agent_did":"did:key:z6M","body":"before"}"#).unwrap();
+        let new_doc =
+            Document::from_json_str(r#"{"agent_did":"did:key:z6M","body":"after"}"#).unwrap();
+
+        collection
+            .validate_immutable_fields_unchanged(&old_doc, &new_doc)
+            .unwrap();
+    }
+
+    #[test]
+    fn immutable_field_validation_rejects_key_changes() {
+        let collection = filtered_collection();
+        let old_doc =
+            Document::from_json_str(r#"{"agent_did":"did:key:z6M","body":"before"}"#).unwrap();
+        let new_doc =
+            Document::from_json_str(r#"{"agent_did":"did:key:other","body":"before"}"#).unwrap();
+
+        let result = collection.validate_immutable_fields_unchanged(&old_doc, &new_doc);
+        assert!(
+            matches!(result, Err(Error::InvalidDocument(message)) if message.contains("agent_did"))
+        );
     }
 }

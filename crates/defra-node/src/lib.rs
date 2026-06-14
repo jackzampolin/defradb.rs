@@ -1577,6 +1577,12 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                     continue;
                 }
 
+                let retry_filters = match peerstore.get_replicator(&peer_id_str).await {
+                    Ok(Some(bytes)) => p2p::ReplicatorInfo::from_bytes(&bytes)
+                        .map(|info| info.filters)
+                        .unwrap_or_default(),
+                    _ => p2p::ReplicationFilters::new(),
+                };
                 let mut all_succeeded = true;
                 for (doc_id, collection_id) in &docs {
                     match db_merge::retry_doc_via_transport(
@@ -1586,6 +1592,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                         &peer_id,
                         doc_id,
                         collection_id,
+                        &retry_filters,
                     )
                     .await
                     {

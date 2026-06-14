@@ -5,7 +5,7 @@ use blockstore::Blockstore;
 use super::result_types::{CreateReplicatorResult, LoadReplicatorsResult};
 use super::SyncCoordinator;
 use crate::error::Result;
-use crate::replicator::ReplicatorInfo;
+use crate::replicator::{ReplicationFilters, ReplicatorInfo};
 use crate::transport::{P2PTransport, PeerId};
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
@@ -16,12 +16,63 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         collections: Vec<String>,
         auto_subscribe: bool,
     ) -> Result<CreateReplicatorResult> {
+        let info = ReplicatorInfo::from_raw(peer_id.to_string(), collections, Vec::new());
+        self.create_replicator_info(peer_id, info, auto_subscribe)
+            .await
+    }
+
+    /// Set (add/update) a replicator with per-collection filters.
+    pub async fn create_replicator_with_filters(
+        &self,
+        peer_id: &PeerId,
+        collections: Vec<String>,
+        filters: ReplicationFilters,
+        auto_subscribe: bool,
+    ) -> Result<CreateReplicatorResult> {
+        let info = ReplicatorInfo::from_raw_with_filters(
+            peer_id.to_string(),
+            collections,
+            Vec::new(),
+            filters,
+        );
+        self.create_replicator_info(peer_id, info, auto_subscribe)
+            .await
+    }
+
+    /// Set (add/update) a replicator from a full metadata record.
+    pub async fn create_replicator_info(
+        &self,
+        peer_id: &PeerId,
+        mut info: ReplicatorInfo,
+        auto_subscribe: bool,
+    ) -> Result<CreateReplicatorResult> {
+        info.id = peer_id.to_string();
+        let collections = info.collections.clone();
         self.runtime
             .transport
-            .create_replicator(peer_id, collections.clone())
+            .create_replicator_info(peer_id, info.clone())
             .await?;
 
-        self.register_replicator_access(peer_id, &collections);
+        let filtered_collections: Vec<String> = info.filters.keys().cloned().collect();
+        self.register_replicator_access(info);
+
+        if !filtered_collections.is_empty() {
+            if let Ok(subscribed) = self.get_subscribed_collections().await {
+                let bypassed: Vec<&String> = filtered_collections
+                    .iter()
+                    .filter(|collection_id| subscribed.contains(collection_id))
+                    .collect();
+                if !bypassed.is_empty() {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        collections = ?bypassed,
+                        "filtered replicator added for collection(s) this node also gossip-subscribes; \
+                         filtered replication is push-path selectivity, not an access boundary \
+                         (subscribed peers receive all documents) — use ACP/encryption for confidentiality"
+                    );
+                }
+            }
+        }
 
         let mut result = CreateReplicatorResult {
             subscribed: Vec::new(),
@@ -30,6 +81,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
         if auto_subscribe {
             for collection_id in &collections {
+                if self
+                    .access
+                    .replicators
+                    .is_filtered_replicator(collection_id, peer_id.as_str())
+                {
+                    continue;
+                }
                 match self.subscribe_collection(collection_id).await {
                     Ok(_) => {
                         result.subscribed.push(collection_id.clone());
@@ -191,7 +249,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
             let peer_id = PeerId::new(peer_id_str.to_string());
             match self
-                .create_replicator(&peer_id, info.collections.clone(), auto_subscribe)
+                .create_replicator_info(&peer_id, info.clone(), auto_subscribe)
                 .await
             {
                 Ok(set_result) => {
@@ -231,9 +289,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         result
     }
 
-    fn register_replicator_access(&self, peer_id: &PeerId, collections: &[String]) {
-        self.access
-            .replicators
-            .set_peer_collections(peer_id.as_str(), collections);
+    fn register_replicator_access(&self, info: ReplicatorInfo) {
+        self.access.replicators.set_replicator_info(info);
     }
 }
