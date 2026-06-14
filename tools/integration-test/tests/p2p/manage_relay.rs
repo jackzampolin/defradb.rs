@@ -502,6 +502,82 @@ async fn manage_replicator_add_preserves_filter() {
     }
 }
 
+/// A RICH predicate (`_in`, not a single `_eq`) must round-trip through the
+/// relay's ReplicatorList reply with its `Conditions` intact. The reply path
+/// reconstructs the filter on the target (`to_p2p_replicator_info`); a
+/// field/value-only reconstruction silently corrupts any non-`_eq` predicate
+/// into `{"": {"_eq": null}}`, which a presence-only assertion would miss.
+#[tokio::test]
+#[serial]
+async fn manage_replicator_add_preserves_rich_filter() {
+    let (cluster, admin_key, addr_b, peer_id_b) = setup().await;
+    let api_a = cluster.api_url(0).to_string();
+
+    let node_a = cluster.client(0);
+    let info_a = node_a
+        .p2p_info_with_identity(&admin_key)
+        .expect("p2p_info node A");
+    let addr_a = info_a
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .expect("node A has no P2P address")
+        .to_string();
+
+    let token = crate::manage_relay_common::mint_manage_token(&admin_key, &peer_id_b);
+    let expected = json!({ "name": { "_in": ["keep", "also"] } });
+
+    let status = post_manage(
+        &api_a,
+        &admin_key,
+        &addr_b,
+        &token,
+        json!({
+            "Kind": "ReplicatorAdd",
+            "addresses": [addr_a],
+            "collection_ids": ["User"],
+            "filters": { "User": { "Conditions": expected } },
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "authorized rich-filtered ReplicatorAdd relay should return 200"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, body) = post_manage_query(
+            &api_a,
+            &admin_key,
+            &addr_b,
+            &token,
+            json!({ "Kind": "ReplicatorList" }),
+        )
+        .await;
+        if status == StatusCode::OK && replicator_list_nonempty(&body) {
+            let filters = body["replicators"][0]["filters"]
+                .as_object()
+                .expect("replicator must carry a filters object");
+            let (_collection, filter) = filters
+                .iter()
+                .next()
+                .expect("filters object must have one entry");
+            assert_eq!(
+                filter["Conditions"], expected,
+                "rich predicate must round-trip through the relay reply intact, got {body}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node B did not report the rich-filtered replicator over the relay"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// Admin token (`aud` = B peer-id) relays a `DocumentAdd`. Document subscribe is a
 /// broadcaster delegation that succeeds even for a not-yet-existing doc id (the
 /// p2p document tests treat doc ids the same way), so a 200 proves the dispatch

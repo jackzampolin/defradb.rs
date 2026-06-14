@@ -245,10 +245,11 @@ fn to_p2p_replicator_info(info: defra_http::router::ReplicatorInfo) -> p2p::Repl
         .filters
         .into_iter()
         .map(|(collection, filter)| {
-            (
-                collection,
-                p2p::ReplicationFilter::new(filter.field, filter.value),
-            )
+            let p2p_filter = match filter.conditions {
+                Some(conds) => p2p::ReplicationFilter::predicate(conds),
+                None => p2p::ReplicationFilter::new(filter.field, filter.value),
+            };
+            (collection, p2p_filter)
         })
         .collect();
     out.status = info
@@ -472,6 +473,34 @@ mod tests {
         );
         assert_eq!(out.status, p2p::ReplicatorStatus::Inactive);
         assert_eq!(out.addresses_str(), &["/ip4/1.2.3.4/tcp/9000".to_string()]);
+    }
+
+    /// A rich (non-`_eq`) predicate must survive the reply-path http->p2p
+    /// conversion intact. Reconstructing via `new(field, value)` would ignore
+    /// `conditions` and corrupt it into `Predicate({"": {"_eq": null}})`.
+    #[test]
+    fn replicator_rich_filter_survives_round_trip() {
+        let conds: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({ "name": { "_in": ["keep", "also"] } }))
+                .unwrap();
+        let mut filters = defra_http::router::ReplicationFilters::new();
+        filters.insert(
+            "User".into(),
+            defra_http::router::ReplicationFilter::predicate(conds.clone()),
+        );
+        let http = ReplicatorInfo {
+            id: Some("12D3KooW-PEER".into()),
+            collections: vec!["User".into()],
+            address: Some("/ip4/1.2.3.4/tcp/9000".into()),
+            status: Some(0),
+            last_status_change: None,
+            filters,
+        };
+        let out = to_p2p_replicator_info(http);
+        match out.filters.get("User").expect("filter present for User") {
+            p2p::ReplicationFilter::Predicate(m) => assert_eq!(m, &conds),
+            other => panic!("expected predicate filter to round-trip, got {other:?}"),
+        }
     }
 
     #[tokio::test]
