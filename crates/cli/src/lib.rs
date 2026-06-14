@@ -29,6 +29,7 @@ pub(crate) mod p2p_adapter_helpers;
 pub(crate) mod p2p_collection_lookup;
 #[allow(dead_code)]
 pub(crate) mod p2p_doc_pusher;
+pub mod replication_filter_matcher;
 pub(crate) mod schema_adapter;
 pub(crate) mod sourcehub_acp_adapter;
 #[allow(dead_code)]
