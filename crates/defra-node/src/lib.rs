@@ -51,6 +51,40 @@ pub use schema::CollectionVersion;
 #[cfg(feature = "otel")]
 pub use telemetry::{TelemetryConfig, TelemetryHandle};
 
+const TRANSACTION_CONFLICT_RETRY_MESSAGE: &str = "transaction conflict. Please retry";
+
+/// Retry policy for [`EmbeddedNode::execute_with_retry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecuteRetryPolicy {
+    /// Number of retries after the initial attempt.
+    pub max_retries: u32,
+    /// Backoff before the first retry.
+    pub initial_backoff: Duration,
+    /// Maximum backoff between retries.
+    pub max_backoff: Duration,
+}
+
+impl ExecuteRetryPolicy {
+    /// Create a retry policy with bounded exponential backoff.
+    pub const fn new(max_retries: u32, initial_backoff: Duration, max_backoff: Duration) -> Self {
+        Self {
+            max_retries,
+            initial_backoff,
+            max_backoff,
+        }
+    }
+}
+
+impl Default for ExecuteRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            initial_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_millis(250),
+        }
+    }
+}
+
 /// Type-erased schema operations so we can store DB<S> without leaking the Store generic.
 #[async_trait::async_trait]
 trait SchemaOps: Send + Sync {
@@ -247,7 +281,33 @@ impl EmbeddedNode {
 
     /// Execute a GraphQL query or mutation.
     pub async fn execute(&self, query_str: &str) -> QueryResponse {
-        let request = QueryRequest::new(query_str);
+        self.execute_request_once(QueryRequest::new(query_str))
+            .await
+    }
+
+    /// Execute a GraphQL query or mutation, retrying transient transaction conflicts.
+    pub async fn execute_with_retry(
+        &self,
+        query_str: &str,
+        policy: ExecuteRetryPolicy,
+    ) -> QueryResponse {
+        self.execute_request_with_retry(QueryRequest::new(query_str), policy)
+            .await
+    }
+
+    /// Execute a prepared query request, retrying transient transaction conflicts.
+    pub async fn execute_request_with_retry(
+        &self,
+        request: QueryRequest,
+        policy: ExecuteRetryPolicy,
+    ) -> QueryResponse {
+        execute_request_with_retry_loop(request, policy, |request| {
+            self.execute_request_once(request)
+        })
+        .await
+    }
+
+    async fn execute_request_once(&self, request: QueryRequest) -> QueryResponse {
         let Some(node_identity_did) = self.node_identity_did.as_deref() else {
             return self.runner.execute(request).await;
         };
@@ -445,6 +505,39 @@ impl EmbeddedNode {
     }
 }
 
+async fn execute_request_with_retry_loop<F, Fut>(
+    request: QueryRequest,
+    policy: ExecuteRetryPolicy,
+    mut execute_once: F,
+) -> QueryResponse
+where
+    F: FnMut(QueryRequest) -> Fut,
+    Fut: std::future::Future<Output = QueryResponse>,
+{
+    let mut retry_count = 0;
+    let mut backoff = policy.initial_backoff.min(policy.max_backoff);
+
+    loop {
+        let response = execute_once(request.clone()).await;
+        if !is_transaction_conflict_response(&response) || retry_count >= policy.max_retries {
+            return response;
+        }
+
+        retry_count += 1;
+        tracing::debug!(
+            retry = retry_count,
+            max_retries = policy.max_retries,
+            backoff_ms = backoff.as_millis(),
+            "retrying embedded execute after transaction conflict"
+        );
+
+        if !backoff.is_zero() {
+            tokio::time::sleep(backoff).await;
+        }
+        backoff = next_retry_backoff(backoff, policy.max_backoff);
+    }
+}
+
 async fn execute_with_signing_context(
     executor: Arc<dyn QueryExecutor>,
     request: QueryRequest,
@@ -470,6 +563,21 @@ async fn execute_with_signing_context(
             QueryResponse::error(format!("query execution task failed: {join_error}"))
         }
     }
+}
+
+fn is_transaction_conflict_response(response: &QueryResponse) -> bool {
+    response.data.is_none()
+        && response.errors.len() == 1
+        && response.errors[0]
+            .message
+            .contains(TRANSACTION_CONFLICT_RETRY_MESSAGE)
+}
+
+fn next_retry_backoff(current: Duration, max_backoff: Duration) -> Duration {
+    if current.is_zero() {
+        return Duration::ZERO;
+    }
+    current.saturating_mul(2).min(max_backoff)
 }
 
 fn resolve_registered_node_identity(did: &str) -> anyhow::Result<SigningConfig> {
@@ -1651,11 +1759,13 @@ struct P2PSetupResult {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use defra_core::signing::{RemoteSigner, SigningConfig, SigningKeyType};
+    use query::{QueryRequest, QueryResponseError};
 
-    use super::EmbeddedNode;
+    use super::{EmbeddedNode, ExecuteRetryPolicy};
 
     #[cfg(feature = "http")]
     use axum::{routing::get, Router};
@@ -1695,6 +1805,81 @@ mod tests {
         assert_eq!(super::timeout_secs(std::time::Duration::from_millis(1)), 1);
         assert_eq!(super::timeout_secs(std::time::Duration::new(2, 1)), 3);
         assert_eq!(super::timeout_secs(std::time::Duration::from_secs(5)), 5);
+    }
+
+    #[test]
+    fn execute_retry_policy_defaults_are_bounded() {
+        let policy = ExecuteRetryPolicy::default();
+
+        assert_eq!(policy.max_retries, 3);
+        assert_eq!(policy.initial_backoff, std::time::Duration::from_millis(10));
+        assert_eq!(policy.max_backoff, std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn execute_retry_backoff_doubles_until_cap() {
+        let max = std::time::Duration::from_millis(25);
+
+        assert_eq!(
+            super::next_retry_backoff(std::time::Duration::from_millis(10), max),
+            std::time::Duration::from_millis(20)
+        );
+        assert_eq!(
+            super::next_retry_backoff(std::time::Duration::from_millis(20), max),
+            max
+        );
+    }
+
+    #[test]
+    fn execute_retry_classifier_matches_transaction_conflicts_only() {
+        let conflict = query::QueryResponse::error(
+            "commit error: datastore error: storage error: transaction conflict. Please retry",
+        );
+        assert!(super::is_transaction_conflict_response(&conflict));
+
+        let validation = query::QueryResponse::error("schema error: invalid field");
+        assert!(!super::is_transaction_conflict_response(&validation));
+
+        let partial = query::QueryResponse::partial(
+            serde_json::json!({"ok": true}),
+            vec![QueryResponseError::new(
+                "commit error: transaction conflict. Please retry",
+            )],
+        );
+        assert!(!super::is_transaction_conflict_response(&partial));
+    }
+
+    #[tokio::test]
+    async fn execute_retry_loop_retries_conflicts_until_success() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let policy =
+            ExecuteRetryPolicy::new(3, std::time::Duration::ZERO, std::time::Duration::ZERO);
+
+        let response = super::execute_request_with_retry_loop(
+            QueryRequest::new("mutation { noop }"),
+            policy,
+            {
+                let attempts = attempts.clone();
+                move |_request| {
+                    let attempts = attempts.clone();
+                    async move {
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        if attempt < 2 {
+                            query::QueryResponse::error(
+                                "commit error: storage error: transaction conflict. Please retry",
+                            )
+                        } else {
+                            query::QueryResponse::success(serde_json::json!({"ok": true}))
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert!(!response.has_errors());
+        assert_eq!(response.data, Some(serde_json::json!({"ok": true})));
     }
 
     #[tokio::test]
