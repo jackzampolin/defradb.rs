@@ -140,8 +140,16 @@ jobs:
 
   conformance:
     name: Conformance
-    needs: build
+    # Serialized after `integration` (not just `build`) so it never co-runs
+    # with the integration matrix on the single studio host. Both jobs spawn
+    # real `defra` nodes and the studio harness port allocator has a TOCTOU
+    # bind race ("failed to start rust-0") when node-spawning jobs run
+    # concurrently — the same reason the integration matrix pins
+    # `max-parallel: 1`. The dependency edge is the strict-ordering fix; it
+    # does not affect correctness, only scheduling.
+    needs: [build, integration]
     runs-on: [self-hosted, macOS, ARM64, studio]
+    timeout-minutes: 45
     env:
       DEFRA_CONFORMANCE_BINARY: ${{ github.workspace }}/target/release/defra
       DEFRA_WORKSPACE_ROOT: ${{ github.workspace }}
