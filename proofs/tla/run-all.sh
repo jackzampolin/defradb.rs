@@ -68,6 +68,8 @@ RUNS=(
   "MC_MergeQueue_CrossDocParallel.cfg MC_MergeQueue_CrossDocParallel.tla RED" # anti-vacuity probe: cross-doc merges DO parallelize
   "MC_MergeQueue_Red_FailOpen.cfg  MC_MergeQueue_Red_FailOpen.tla  RED"   # retry exhaustion silently drops a block
   "MC_MergeQueue_Red_NoMutex.cfg   MC_MergeQueue_Red_NoMutex.tla   RED"   # no per-doc mutex -> same-doc double-apply
+  "MC_TwoStoreCounter_Red_Split.cfg MC_TwoStoreCounter.tla         RED"   # counter reconcile-from-blob clobbers a concurrent local increment (INV_NoLoss)
+  "MC_TwoStoreCounter_Green.cfg     MC_TwoStoreCounter.tla         GREEN" # unified/conflict-checked RMW (Go single value key) -> no lost increment
   "MC_Jwt_Green.cfg                MC_Jwt_Green.tla                GREEN" # token->DID binds genuine signer DID
   "MC_Jwt_Red_NoAlgBinding.cfg     MC_Jwt_Red_NoAlgBinding.tla     RED"   # alg-confusion: header alg not bound to key type
   "MC_Jwt_Red_NoIssBinding.cfg     MC_Jwt_Red_NoIssBinding.tla     RED"   # iss not bound to did(pubkey)

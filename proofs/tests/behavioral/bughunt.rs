@@ -662,6 +662,133 @@ async fn bughunt_counter_3node() {
     }
 }
 
+/// SAME-DOC MERGE STORM — high concurrent-write contention on ONE counter doc in
+/// a 3-node full mesh. Each node fires a burst of `+1` increments at the same
+/// document over several rounds; the exact running sum is the no-loss /
+/// no-double-apply oracle (below => a delta dropped, above => one double-applied).
+///
+/// FINDING (2026-06-15): reliably UNDER-counts (e.g. 12/11/11 for an expected 12)
+/// and does NOT recover within 40s. Distinct from the documented #1021 Bitswap
+/// fetch-failure: node logs show ZERO bitswap timeouts; the lagging nodes simply
+/// process one FEWER composite delta. The signature is a gossip-DELIVERY drop
+/// under concurrent full-mesh load — "Dropping GossipSub message outside accepted
+/// replication direction", "not authorized for collection", and a "document topic
+/// failed - InsufficientPeers" partial broadcast — so a delta's composite never
+/// arrives via any accepted path (no fetch is ever attempted). An 8s topic-mesh
+/// warmup does NOT fix it, so it is not a gossipsub graft-warmup artifact. The
+/// committed single-increment `counter_3node` converges, so this is load-
+/// dependent within a valid topology. Reporting probe until root-caused/fixed.
+#[ignore = "bug-hunt probe (reproduces a same-doc-contention under-count); run with --ignored --nocapture"]
+#[tokio::test]
+async fn bughunt_same_doc_merge_storm() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(3)
+        .with_p2p()
+        .with_store("redb")
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("3-node rust cluster");
+    run_merge_storm(cluster, 3, "rust").await;
+}
+
+/// Go<->Go<->Go control: does the upstream Go binary exhibit the same under-count
+/// under the identical storm? If YES, the loss is a shared gossipsub small-network
+/// limitation (live updates are best-effort gossip in both impls); if NO, it is a
+/// Rust delivery regression. Needs the Go `defradb` on PATH.
+#[ignore = "bug-hunt probe (go control); needs Go binary on PATH; run with --ignored --nocapture"]
+#[tokio::test]
+async fn bughunt_same_doc_merge_storm_go() {
+    let cluster = TestCluster::builder()
+        .go_nodes(3)
+        .with_p2p()
+        .with_store("badger")
+        .with_development()
+        .build()
+        .await
+        .expect("3-node go cluster");
+    run_merge_storm(cluster, 3, "go").await;
+}
+
+async fn run_merge_storm(cluster: TestCluster, nodes: usize, label: &str) {
+    let rounds: i64 = 4;
+    let burst_per_node: i64 = 4;
+    let schema = "type Tally { name: String  hits: Int @crdt(type: pcounter) }";
+    let addr: Vec<String> = (0..nodes).map(|n| node_addr(&cluster, n)).collect();
+    for n in 0..nodes {
+        cluster.client(n).schema_add(schema).expect("schema");
+        cluster.client(n).p2p_collection_add(&["Tally"]).ok();
+    }
+    for i in 0..nodes {
+        for (j, peer) in addr.iter().enumerate() {
+            if i != j {
+                cluster.client(i).p2p_connect(&[peer.as_str()]).ok();
+                cluster.client(i).p2p_replicator_set(&["Tally"], peer).ok();
+            }
+        }
+    }
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_Tally(input: {name: "t", hits: 0}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_Tally"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+
+    let seed_deadline = Instant::now() + Duration::from_secs(20);
+    while !(0..nodes).all(|n| hits(&cluster.client(n)) == 0) {
+        if Instant::now() >= seed_deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let mut expected = 0i64;
+    for round in 0..rounds {
+        for _ in 0..burst_per_node {
+            for n in 0..nodes {
+                cluster
+                    .client(n)
+                    .query(&format!(
+                        r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: 1}}) {{ _docID }} }}"#
+                    ))
+                    .expect("increment");
+            }
+        }
+        expected += nodes as i64 * burst_per_node;
+
+        let deadline = Instant::now() + Duration::from_secs(40);
+        loop {
+            let h: Vec<i64> = (0..nodes).map(|n| hits(&cluster.client(n))).collect();
+            let ok = h.iter().all(|&x| x == expected);
+            if ok || Instant::now() >= deadline {
+                eprintln!(
+                    "BUGHUNT[same_doc_merge_storm:{label}] round={round} hits={h:?} | expected {expected} each | CONVERGED={ok}"
+                );
+                if !ok {
+                    // Dump each node's commit DAG so we can name the missing
+                    // composite(s) and grep the logs for that CID's fate.
+                    for n in 0..nodes {
+                        let cids = support::commit_cids(&cluster.client(n), &id);
+                        eprintln!(
+                            "DAGSET[{label}] node{n} hits={} commits({})={:?}",
+                            hits(&cluster.client(n)),
+                            cids.len(),
+                            cids
+                        );
+                    }
+                    return;
+                }
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+}
+
 /// PNCounter with DECREMENT — the counter reconcile fix (#1014) was validated for
 /// PCounter (increment-only). PNCounter allows negative deltas, so a node's local
 /// state can be BELOW the seed. node0 +50, node1 -30, concurrently (optionally
