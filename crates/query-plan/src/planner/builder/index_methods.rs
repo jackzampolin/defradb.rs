@@ -2,7 +2,7 @@
 //!
 //! Determines whether a query can use an index for filtering or ordering.
 
-use schema::CollectionVersion;
+use schema::{CollectionVersion, IndexDescription};
 
 use crate::planner::index_selection::{
     can_be_ordered_by_index, filter_to_index_scan, or_filter_to_index_scan, select_best_index,
@@ -46,7 +46,6 @@ impl super::Planner {
                     limit,
                     offset,
                 ) {
-                    // Check if this index also provides ordering
                     let provides_ordering = select
                         .order_by
                         .as_ref()
@@ -71,18 +70,7 @@ impl super::Planner {
             for index in &collection.indexes {
                 let (can_order, needs_reverse) = can_be_ordered_by_index(order_by, index);
                 if can_order {
-                    let params = IndexScanParams {
-                        index_name: index.name.clone(),
-                        scan_type: IndexScanType::PrefixScan {
-                            prefix_values: vec![],
-                            reverse: needs_reverse,
-                        },
-                        // Pass limit/offset for early termination (index provides ordering)
-                        limit,
-                        offset,
-                        value_filter: None,
-                        cursor_seek: None,
-                    };
+                    let params = order_index_scan_params(index, needs_reverse, limit, offset);
                     return Some((params, true));
                 }
             }
@@ -136,22 +124,32 @@ impl super::Planner {
                 let (can_order, needs_reverse) = can_be_ordered_by_index(order_by, index);
                 if can_order {
                     return Some((
-                        IndexScanParams {
-                            index_name: index.name.clone(),
-                            scan_type: IndexScanType::PrefixScan {
-                                prefix_values: vec![],
-                                reverse: needs_reverse,
-                            },
-                            limit,
-                            offset,
-                            value_filter: None,
-                            cursor_seek: None,
-                        },
+                        order_index_scan_params(index, needs_reverse, limit, offset),
                         true,
                     ));
                 }
             }
         }
         None
+    }
+}
+
+fn order_index_scan_params(
+    index: &IndexDescription,
+    needs_reverse: bool,
+    limit: Option<u64>,
+    offset: u64,
+) -> IndexScanParams {
+    IndexScanParams {
+        index_name: index.name.clone(),
+        scan_type: IndexScanType::PrefixScan {
+            prefix_values: vec![],
+            reverse: needs_reverse,
+        },
+        // Pass limit/offset for early termination when the index provides ordering.
+        limit,
+        offset,
+        value_filter: None,
+        cursor_seek: None,
     }
 }

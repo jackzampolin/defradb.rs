@@ -1,6 +1,6 @@
 use super::*;
 use crate::planner::index_selection::IndexScanType;
-use query_types::mapper::{Field, Filter};
+use query_types::mapper::{CursorParams, Field, Filter, OrderBy, OrderCondition, OrderDirection};
 use schema::{FieldDescription, FieldKind, IndexDescription, IndexedFieldDescription};
 
 fn map<const N: usize>(
@@ -45,6 +45,56 @@ fn make_test_collection_with_index() -> CollectionVersion {
     })
     .with_index(IndexDescription {
         id: 2,
+        name: "age_idx".to_string(),
+        unique: false,
+        auto_generated: false,
+        fields: vec![IndexedFieldDescription {
+            name: "age".to_string(),
+            descending: false,
+        }],
+    })
+}
+
+fn make_test_collection_with_filter_and_order_indexes() -> CollectionVersion {
+    CollectionVersion::new(
+        "Users",
+        "v1",
+        "coll-1",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "age", FieldKind::int()),
+            FieldDescription::new("4", "score", FieldKind::int()),
+        ],
+    )
+    .with_index(IndexDescription {
+        id: 1,
+        name: "score_idx".to_string(),
+        unique: false,
+        auto_generated: false,
+        fields: vec![IndexedFieldDescription {
+            name: "score".to_string(),
+            descending: false,
+        }],
+    })
+    .with_index(IndexDescription {
+        id: 2,
+        name: "age_name_idx".to_string(),
+        unique: false,
+        auto_generated: false,
+        fields: vec![
+            IndexedFieldDescription {
+                name: "age".to_string(),
+                descending: false,
+            },
+            IndexedFieldDescription {
+                name: "name".to_string(),
+                descending: false,
+            },
+        ],
+    })
+    .with_index(IndexDescription {
+        id: 3,
         name: "age_idx".to_string(),
         unique: false,
         auto_generated: false,
@@ -329,6 +379,59 @@ async fn test_plan_result_uses_index_method() {
     let select_no_filter = Select::new("Users").with_field(Field::new("name"));
     let result_no_filter = planner.plan_with_index_info(&select_no_filter).unwrap();
     assert!(!result_no_filter.uses_index());
+}
+
+#[test]
+fn test_active_cursor_filter_and_order_keeps_filter_index() {
+    let planner = Planner::new(vec![make_test_collection_with_filter_and_order_indexes()]);
+    let collection = planner.collection("Users").unwrap();
+
+    let filter =
+        Filter::from_conditions(map([("score".to_string(), serde_json::json!({"_eq": 90}))]));
+    let order = OrderBy::new().with_condition(OrderCondition::new("age", OrderDirection::Asc));
+
+    let mut select = Select::new("Users")
+        .with_field(Field::new("name"))
+        .with_filter(filter)
+        .with_order(order);
+    select.is_cursor = true;
+    select.cursor_params = Some(CursorParams {
+        first: Some(2),
+        after: Some("encoded-cursor".to_string()),
+        ..Default::default()
+    });
+
+    let (params, provides_ordering) = planner.try_select_index(&select, collection).unwrap();
+
+    assert_eq!(params.index_name, "score_idx");
+    assert!(!provides_ordering);
+}
+
+#[test]
+fn test_first_cursor_page_still_prefers_filter_index() {
+    let planner = Planner::new(vec![make_test_collection_with_index()]);
+    let collection = planner.collection("Users").unwrap();
+
+    let filter = Filter::from_conditions(map([(
+        "name".to_string(),
+        serde_json::json!({"_eq": "Alice"}),
+    )]));
+    let order = OrderBy::new().with_condition(OrderCondition::new("age", OrderDirection::Asc));
+
+    let mut select = Select::new("Users")
+        .with_field(Field::new("name"))
+        .with_filter(filter)
+        .with_order(order);
+    select.is_cursor = true;
+    select.cursor_params = Some(CursorParams {
+        first: Some(2),
+        ..Default::default()
+    });
+
+    let (params, provides_ordering) = planner.try_select_index(&select, collection).unwrap();
+
+    assert_eq!(params.index_name, "name_idx");
+    assert!(!provides_ordering);
 }
 
 // ========================================================================
