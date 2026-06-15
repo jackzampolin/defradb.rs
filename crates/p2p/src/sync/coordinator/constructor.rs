@@ -17,7 +17,10 @@ use crate::error::Result;
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::{NoOpCollectionStorage, P2PCollectionStorage};
 use crate::sync::head_provider::{DocumentHeadProvider, NoOpHeadProvider};
-use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager, DEFAULT_PUSH_SEND_TIMEOUT};
+use crate::sync::manager::{
+    SyncConfig, SyncEvent, SyncManager, DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
+    DEFAULT_PUSH_SEND_TIMEOUT,
+};
 use crate::sync::peer_state::PeerStateTracker;
 use crate::sync::rate_limiter::PeerRateLimiter;
 use crate::transport::P2PTransport;
@@ -106,7 +109,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let rate_limit_burst = config.rate_limit_burst;
         let rate_limit_rate = config.rate_limit_rate;
         let rate_limit_backoff = config.rate_limit_backoff.clone();
-        let max_doc_sync_request_doc_ids = config.max_doc_sync_request_doc_ids.max(1);
+        let max_doc_sync_request_doc_ids =
+            resolve_max_doc_sync_request_doc_ids(config.max_doc_sync_request_doc_ids);
         let push_send_timeout = if config.push_send_timeout.is_zero() {
             DEFAULT_PUSH_SEND_TIMEOUT
         } else {
@@ -173,4 +177,21 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub fn set_failure_channel(&mut self, tx: tokio::sync::mpsc::Sender<super::PushFailure>) {
         self.runtime.failure_tx = Some(tx);
     }
+}
+
+/// Resolve the effective DocSync request doc-ID limit from a configured value.
+///
+/// A configured `0` means "use the default" across every entry point
+/// (CLI/config, FFI, embedded, mobile), matching the documented default
+/// behavior. Any other value is used as-is.
+fn resolve_max_doc_sync_request_doc_ids(configured: usize) -> usize {
+    if configured == 0 {
+        tracing::warn!(
+            configured = 0,
+            effective = DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
+            "max_doc_sync_request_doc_ids of 0 is invalid, using default"
+        );
+        return DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS;
+    }
+    configured
 }

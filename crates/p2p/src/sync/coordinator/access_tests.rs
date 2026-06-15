@@ -938,6 +938,71 @@ async fn doc_sync_rejects_requests_above_configured_doc_id_limit() {
     assert!(message.contains("limit of 2"));
 }
 
+#[tokio::test]
+async fn doc_sync_accepts_requests_at_exactly_configured_doc_id_limit() {
+    let transport = NoopTransport::new();
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let config = SyncConfig {
+        max_doc_sync_request_doc_ids: 2,
+        ..Default::default()
+    };
+    let (coordinator, _events) = SyncCoordinator::new(transport, blockstore, config)
+        .await
+        .unwrap();
+
+    let result = coordinator
+        .handle_transport_event(doc_sync_event_with_ids(
+            random_peer_id(),
+            vec!["doc1".into(), "doc2".into()],
+        ))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::InvalidConfig(_))),
+        "a request with exactly the configured limit of doc IDs must be accepted, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn doc_sync_zero_config_resolves_to_default_limit() {
+    let transport = NoopTransport::new();
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let config = SyncConfig {
+        max_doc_sync_request_doc_ids: 0,
+        ..Default::default()
+    };
+    let (coordinator, _events) = SyncCoordinator::new(transport, blockstore, config)
+        .await
+        .unwrap();
+
+    let at_default = (0..DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS)
+        .map(|i| format!("doc{i}"))
+        .collect::<Vec<_>>();
+    let result = coordinator
+        .handle_transport_event(doc_sync_event_with_ids(random_peer_id(), at_default))
+        .await;
+    assert!(
+        !matches!(&result, Err(Error::InvalidConfig(_))),
+        "config 0 should resolve to the default limit, accepting a default-sized request, got {:?}",
+        result
+    );
+
+    let over_default = (0..=DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS)
+        .map(|i| format!("doc{i}"))
+        .collect::<Vec<_>>();
+    let result = coordinator
+        .handle_transport_event(doc_sync_event_with_ids(random_peer_id(), over_default))
+        .await;
+    assert!(
+        matches!(&result, Err(Error::InvalidConfig(_))),
+        "config 0 should resolve to the default limit, rejecting an over-default request, got {:?}",
+        result
+    );
+}
+
 // --- BranchableSync access check tests ---
 
 #[tokio::test]
