@@ -537,6 +537,106 @@ async fn rust_filtered_replication_encrypted_respects_filter() {
     );
 }
 
+/// #1038 Gap 3: the filter must gate the encrypted (SE-artifact) push path with a
+/// RICH (`_in`) predicate too. Two of three encrypted docs match the set
+/// (alice + carol); the third (bob) must not reach the filtered peer. As with the
+/// `_eq` encrypted test, the payload is encrypted so visibility is asserted on
+/// `_docID`. CAROL is the ordering anchor, created after the non-matching BOB doc:
+/// once she arrives the push pipeline has provably run, so BOB's absence is the
+/// filter rather than a not-yet-delivered race.
+#[tokio::test]
+async fn rust_filtered_replication_encrypted_rich_filter() {
+    const SECRET_SCHEMA: &str = "type SecretDoc { agent_did: String @immutable  secret: String }";
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(SECRET_SCHEMA).expect("schema node0");
+    node1.schema_add(SECRET_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["SecretDoc"])
+        .expect("subscribe 0");
+
+    let filter_json = format!(r#"{{"agent_did":{{"_in":["{ALICE}","{CAROL}"]}}}}"#);
+    let out = run_replicator_add_filter(&cluster, 0, &["SecretDoc"], &addr1, &filter_json);
+    assert!(
+        out.status.success(),
+        "IN-set encrypted replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mk = |did: &str, secret: &str| {
+        format!(
+            r#"mutation {{ add_SecretDoc(input: {{agent_did: "{did}", secret: "{secret}"}}, encryptFields: [secret]) {{ _docID }} }}"#
+        )
+    };
+
+    let alice_doc = node0
+        .query(&mk(ALICE, "s-alice"))
+        .expect("create matching encrypted alice doc");
+    let alice_id = extract_doc_id(&alice_doc, "add_SecretDoc");
+
+    node0
+        .query(&mk(BOB, "s-bob"))
+        .expect("create non-matching encrypted bob doc");
+
+    let carol_doc = node0
+        .query(&mk(CAROL, "s-carol"))
+        .expect("create matching encrypted carol doc (ordering anchor)");
+    let carol_id = extract_doc_id(&carol_doc, "add_SecretDoc");
+
+    let node1_poll = cluster.client(1);
+    let a_id = alice_id.clone();
+    let c_id = carol_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { SecretDoc { _docID } }")
+                .unwrap_or_default();
+            let Some(rows) = result["SecretDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&a_id.as_str()) && ids.contains(&c_id.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "matching encrypted docs did not replicate to IN-set filtered peer",
+    )
+    .await;
+
+    let result = node1
+        .query("query { SecretDoc { _docID } }")
+        .expect("query SecretDoc on node1");
+    let ids: Vec<String> = result["SecretDoc"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r["_docID"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        ids.len(),
+        2,
+        "IN-set filtered peer must hold exactly the two matching encrypted docs, found: {ids:?}"
+    );
+    assert!(
+        ids.contains(&alice_id) && ids.contains(&carol_id),
+        "IN-set filtered peer must hold the alice and carol encrypted docs, found: {ids:?}"
+    );
+}
+
 const DUMMY_PEER_ADDR: &str =
     "/ip4/127.0.0.1/tcp/1/p2p/12D3KooWGjMkcMy5PM9iSbgWWgUnH5dQhvzhNu7w3Gk4kHZBsxnJ";
 
