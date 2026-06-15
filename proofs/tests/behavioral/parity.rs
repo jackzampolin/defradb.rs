@@ -535,29 +535,13 @@ async fn parity_counter_3node_mixed() {
     run_counter_3node_parity(cluster, "counter_3node_mixed(rust0,go1,go2)").await;
 }
 
-fn indexed_user_age(node: &DefraClient) -> i64 {
-    node.query("query { User { age } }").unwrap_or_default()["User"][0]["age"]
-        .as_i64()
-        .unwrap_or(-1)
-}
-
-fn index_count(node: &DefraClient, age: i64) -> usize {
-    node.query(&format!(
-        "query {{ User(filter: {{age: {{_eq: {age}}}}}) {{ name }} }}"
-    ))
-    .unwrap_or_default()["User"]
-        .as_array()
-        .map(|a| a.len())
-        .unwrap_or(0)
-}
-
 async fn poll_index_resolved(node: &DefraClient, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if indexed_user_age(node) == 99
-            && index_count(node, 99) == 1
-            && index_count(node, 20) == 0
-            && index_count(node, 10) == 0
+        if support::indexed_age(node) == 99
+            && support::count_by_index(node, 99) == 1
+            && support::count_by_index(node, 20) == 0
+            && support::count_by_index(node, 10) == 0
         {
             return true;
         }
@@ -630,7 +614,9 @@ async fn run_indexed_lww_parity(
     // Barrier: node1 has the seed (resolvable by index) before the concurrent edits.
     let seed_deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if indexed_user_age(&cluster.client(1)) == 10 && index_count(&cluster.client(1), 10) == 1 {
+        if support::indexed_age(&cluster.client(1)) == 10
+            && support::count_by_index(&cluster.client(1), 10) == 1
+        {
             break;
         }
         assert!(
@@ -654,14 +640,29 @@ async fn run_indexed_lww_parity(
         ))
         .expect("node1 age=99");
 
+    // MERGE PROOF: node1 locally wrote the winner (99), so its index-resolved
+    // check is satisfied by its own write; require the identical commit DAG on
+    // both impls first, so node1's leg only passes once it has actually MERGED
+    // node0's delta (and node0 received node1's) — not from a local write alone.
+    assert!(
+        support::poll_dags_converged(
+            &cluster.client(0),
+            &cluster.client(1),
+            &id,
+            Duration::from_secs(40)
+        )
+        .await,
+        "[{label}] indexed-LWW DAGs did not converge across impls: a replica never merged the other's delta"
+    );
+
     for n in [0usize, 1] {
         assert!(
             poll_index_resolved(&cluster.client(n), Duration::from_secs(40)).await,
             "[{label}] node{n} index did not reconcile to 99-only; age={} idx99={} idx20={} idx10={}",
-            indexed_user_age(&cluster.client(n)),
-            index_count(&cluster.client(n), 99),
-            index_count(&cluster.client(n), 20),
-            index_count(&cluster.client(n), 10),
+            support::indexed_age(&cluster.client(n)),
+            support::count_by_index(&cluster.client(n), 99),
+            support::count_by_index(&cluster.client(n), 20),
+            support::count_by_index(&cluster.client(n), 10),
         );
     }
 

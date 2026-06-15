@@ -568,9 +568,11 @@ async fn poll_vault_secret(node: &DefraClient, want: &str, timeout: Duration) ->
 ///   per-write key to decrypt it — the genuine cross-node merge + KMS key-delivery
 ///   path.
 /// - node1 (received the seed by replication, then locally wrote the WINNER "zzz")
-///   is the two-store bug-trigger: its assertion holds iff its own local winner
-///   survives the merge of node0's delta rather than being clobbered by a
-///   re-materialization from a stale priority store.
+///   is the two-store bug-trigger: its local winner must survive the merge of
+///   node0's delta rather than being clobbered by a re-materialization from a
+///   stale priority store. A commit-DAG convergence gate forces that merge to
+///   actually occur first, so this leg is not satisfied by node1's local write
+///   alone.
 ///
 /// REGRESSION: this is the encrypted twin of the LWW priority two-store bug. The
 /// plaintext lives in the materialized blob; the LWW priority lives in the CRDT
@@ -674,6 +676,22 @@ async fn convergence_encrypted_lww_restart_merge() {
     cluster.client(0).p2p_replicator_set(&["Vault"], &a1b).ok();
     cluster.client(1).p2p_replicator_set(&["Vault"], &a0b).ok();
 
+    // MERGE PROOF: both replicas must hold the IDENTICAL commit DAG. node1
+    // locally wrote the winner ("zzz"), so its assertion below is satisfied by
+    // its own write; it only guards the two-store clobber once node1 has actually
+    // MERGED node0's delta. Equal commit sets prove the merge happened (the
+    // ciphertext blocks crossed), so the winner-survives checks aren't inert.
+    assert!(
+        support::poll_dags_converged(
+            &cluster.client(0),
+            &cluster.client(1),
+            &id,
+            Duration::from_secs(40)
+        )
+        .await,
+        "encrypted-LWW DAGs did not converge: a replica never merged the other's delta, so the winner-survives-merge check would be inert"
+    );
+
     // CONVERGE: both replicas decrypt and materialize the LWW winner "zzz".
     if !poll_vault_secret(&cluster.client(0), "zzz", Duration::from_secs(40)).await {
         panic!(
@@ -689,29 +707,13 @@ async fn convergence_encrypted_lww_restart_merge() {
     }
 }
 
-fn indexed_age(node: &DefraClient) -> i64 {
-    node.query("query { User { age } }").unwrap_or_default()["User"][0]["age"]
-        .as_i64()
-        .unwrap_or(-1)
-}
-
-fn count_by_index(node: &DefraClient, age: i64) -> usize {
-    node.query(&format!(
-        "query {{ User(filter: {{age: {{_eq: {age}}}}}) {{ name }} }}"
-    ))
-    .unwrap_or_default()["User"]
-        .as_array()
-        .map(|a| a.len())
-        .unwrap_or(0)
-}
-
 /// Index reconciles correctly iff the winner (99) is the only indexed value and
 /// neither the loser (20) nor the stale seed (10) is still resolvable by index.
 fn index_reconciled(node: &DefraClient) -> bool {
-    indexed_age(node) == 99
-        && count_by_index(node, 99) == 1
-        && count_by_index(node, 20) == 0
-        && count_by_index(node, 10) == 0
+    support::indexed_age(node) == 99
+        && support::count_by_index(node, 99) == 1
+        && support::count_by_index(node, 20) == 0
+        && support::count_by_index(node, 10) == 0
 }
 
 async fn poll_index_reconciled(node: &DefraClient, timeout: Duration) -> bool {
@@ -732,7 +734,7 @@ async fn poll_index_reconciled(node: &DefraClient, timeout: Duration) -> bool {
 async fn poll_index_reconciled_seed(node: &DefraClient, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if indexed_age(node) == 10 && count_by_index(node, 10) == 1 {
+        if support::indexed_age(node) == 10 && support::count_by_index(node, 10) == 1 {
             return true;
         }
         if Instant::now() >= deadline {
@@ -749,9 +751,11 @@ async fn poll_index_reconciled_seed(node: &DefraClient, timeout: Duration) -> bo
 ///
 /// The two replicas guard different halves, deliberately:
 /// - node1 (received the seed by replication, then locally wrote the WINNER 99)
-///   is the two-store bug-trigger: its assertion holds iff its own local winner
-///   SURVIVES the subsequent merge of node0's delta rather than being clobbered
-///   by a re-materialization from a stale priority store.
+///   is the two-store bug-trigger: its local winner must SURVIVE the merge of
+///   node0's delta rather than being clobbered by a re-materialization from a
+///   stale priority store. A commit-DAG convergence gate forces that merge to
+///   actually occur first, so this leg is not satisfied by node1's local write
+///   alone (the loser value is dominated and otherwise invisible).
 /// - node0 (locally wrote the LOSER 20) must MERGE node1's winning 99, flipping
 ///   its index from 20 to 99 — the genuine cross-node merge + index-follow leg.
 ///
@@ -854,23 +858,40 @@ async fn convergence_indexed_lww_restart_merge() {
     cluster.client(0).p2p_replicator_set(&["User"], &a1b).ok();
     cluster.client(1).p2p_replicator_set(&["User"], &a0b).ok();
 
+    // MERGE PROOF: both replicas must hold the IDENTICAL commit DAG. node1
+    // locally wrote the winner (99), so its index-reconciled assertion below is
+    // satisfied by its own write; it only genuinely guards the two-store clobber
+    // once node1 has actually MERGED node0's delta. Equal commit sets prove that
+    // merge happened (and that node0 received node1's), so the winner-survives
+    // checks become meaningful rather than inert.
+    assert!(
+        support::poll_dags_converged(
+            &cluster.client(0),
+            &cluster.client(1),
+            &id,
+            Duration::from_secs(40)
+        )
+        .await,
+        "indexed-LWW DAGs did not converge: a replica never merged the other's delta, so the winner-survives-merge check would be inert"
+    );
+
     // CONVERGE: both replicas materialize 99 and resolve ONLY 99 by index.
     if !poll_index_reconciled(&cluster.client(0), Duration::from_secs(40)).await {
         panic!(
             "node0 index did not reconcile; age={} idx99={} idx20={} idx10={}",
-            indexed_age(&cluster.client(0)),
-            count_by_index(&cluster.client(0), 99),
-            count_by_index(&cluster.client(0), 20),
-            count_by_index(&cluster.client(0), 10),
+            support::indexed_age(&cluster.client(0)),
+            support::count_by_index(&cluster.client(0), 99),
+            support::count_by_index(&cluster.client(0), 20),
+            support::count_by_index(&cluster.client(0), 10),
         );
     }
     if !poll_index_reconciled(&cluster.client(1), Duration::from_secs(40)).await {
         panic!(
             "node1 index did not reconcile; age={} idx99={} idx20={} idx10={}",
-            indexed_age(&cluster.client(1)),
-            count_by_index(&cluster.client(1), 99),
-            count_by_index(&cluster.client(1), 20),
-            count_by_index(&cluster.client(1), 10),
+            support::indexed_age(&cluster.client(1)),
+            support::count_by_index(&cluster.client(1), 99),
+            support::count_by_index(&cluster.client(1), 20),
+            support::count_by_index(&cluster.client(1), 10),
         );
     }
 
