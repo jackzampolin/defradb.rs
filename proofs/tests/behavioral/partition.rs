@@ -444,3 +444,427 @@ async fn convergence_concurrent_counter_increments_sum() {
         );
     }
 }
+
+/// THREE-node counter accumulation: each of three fully-meshed nodes increments
+/// the same `hits=0` counter by 10, concurrently; all three must converge to 30.
+///
+/// REGRESSION: extends the two-node counter guard above to a topology where each
+/// node's delta reaches the others via TWO distinct peers. A third node exposes
+/// failures the symmetric two-node reconcile cannot: a cross-peer delta dropped
+/// by applied-CID dedup, a missing-field-block fetch routed to a provider that
+/// lacks it, or a local-increment-vs-concurrent-merge clobber on the creator.
+/// node0 (the creator) under-counting while node1/node2 reach 30 is the
+/// signature this guards against (the shape seen when #894's node-construction
+/// rewrite re-split the blob vs accumulation stores). Convergence here requires
+/// both the counter store reconcile and reliable cross-peer DAG delivery.
+#[tokio::test]
+async fn convergence_concurrent_counter_3node_full_mesh_sum() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(3)
+        .with_p2p()
+        .with_store("redb")
+        // Stable peer-ids so a peer-id churn can't confound the cross-peer fetch.
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("build 3-node p2p cluster");
+
+    let schema = "type Tally { name: String  hits: Int @crdt(type: pcounter) }";
+    let addr: Vec<String> = (0..3).map(|n| node_addr(&cluster, n)).collect();
+    for n in 0..3 {
+        cluster.client(n).schema_add(schema).expect("schema");
+        cluster
+            .client(n)
+            .p2p_collection_add(&["Tally"])
+            .expect("subscribe");
+    }
+    // Full mesh: every node replicates to the other two.
+    for i in 0..3 {
+        for (j, peer_addr) in addr.iter().enumerate() {
+            if i != j {
+                cluster
+                    .client(i)
+                    .p2p_connect(&[peer_addr.as_str()])
+                    .expect("connect");
+                cluster
+                    .client(i)
+                    .p2p_replicator_set(&["Tally"], peer_addr)
+                    .expect("replicator");
+            }
+        }
+    }
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_Tally(input: {name: "t", hits: 0}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_Tally"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+
+    // BARRIER: every node must hold the seed (hits==0) before any increment, so a
+    // node can't build its increment on a pre-seed base — isolating a genuine
+    // merge/dedup/delivery failure from seed-propagation timing.
+    for n in 0..3 {
+        assert!(
+            poll_hits(&cluster.client(n), 0, Duration::from_secs(20)).await,
+            "seed document must replicate to node{n} before the concurrent increments"
+        );
+    }
+
+    // Concurrent increments: each node adds 10.
+    for n in 0..3 {
+        cluster
+            .client(n)
+            .query(&format!(
+                r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: 10}}) {{ _docID }} }}"#
+            ))
+            .expect("increment");
+    }
+
+    // CONVERGE: every replica accumulates ALL THREE increments → 30.
+    for n in 0..3 {
+        if !poll_hits(&cluster.client(n), 30, Duration::from_secs(40)).await {
+            panic!(
+                "node{n} did not converge to 30; hits = {}",
+                tally_hits(&cluster.client(n))
+            );
+        }
+    }
+}
+
+fn vault_secret(node: &DefraClient) -> String {
+    node.query("query { Vault { secret } }").unwrap_or_default()["Vault"][0]["secret"]
+        .as_str()
+        .unwrap_or("<none>")
+        .to_string()
+}
+
+async fn poll_vault_secret(node: &DefraClient, want: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if vault_secret(node) == want {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// ENCRYPTED-field LWW convergence across a restart-partition. An encrypted field
+/// routes its delta through the KMS write path (a random per-write key gossiped
+/// over the encryption topic) rather than the plain block path. node1 is
+/// restarted to sever the link, both nodes concurrently update the same encrypted
+/// field, then reconnect; both must materialize the same plaintext LWW winner
+/// ("zzz" > "aaa" on the equal-priority lexicographic tie-break).
+///
+/// REGRESSION: this is the encrypted twin of the LWW priority two-store bug. The
+/// plaintext lives in the materialized blob; the LWW priority lives in the CRDT
+/// store, advanced only by merges. A local update across a restart that strands
+/// its value in the blob — or an encryption key that fails to reach the peer so
+/// the winning ciphertext can't be decrypted — diverges here. Convergence
+/// requires both the LWW store reconcile AND correct key delivery over the
+/// restart.
+#[tokio::test]
+async fn convergence_encrypted_lww_restart_merge() {
+    let mut cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_encryption()
+        .with_store("redb")
+        // Stable peer-id across the restart (so a peer-id change can't confound).
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("build 2-node encrypted p2p cluster");
+
+    let schema = "type Vault { name: String  secret: String }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+
+    let (a0, a1) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+    cluster
+        .client(0)
+        .p2p_connect(&[a1.as_str()])
+        .expect("connect 0->1");
+    cluster
+        .client(1)
+        .p2p_connect(&[a0.as_str()])
+        .expect("connect 1->0");
+    cluster
+        .client(0)
+        .p2p_collection_add(&["Vault"])
+        .expect("subscribe node0");
+    cluster
+        .client(1)
+        .p2p_collection_add(&["Vault"])
+        .expect("subscribe node1");
+    cluster
+        .client(0)
+        .p2p_replicator_set(&["Vault"], &a1)
+        .expect("replicator 0->1");
+    cluster
+        .client(1)
+        .p2p_replicator_set(&["Vault"], &a0)
+        .expect("replicator 1->0");
+
+    let created = cluster
+        .client(0)
+        .query(
+            r#"mutation { add_Vault(input: {name: "v", secret: "s0"}, encryptFields: [secret]) { _docID } }"#,
+        )
+        .expect("create encrypted");
+    let id = created["add_Vault"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    assert!(
+        poll_vault_secret(&cluster.client(1), "s0", Duration::from_secs(20)).await,
+        "encrypted seed must replicate and decrypt on node1 before the concurrent updates"
+    );
+
+    // Sever the link by restarting node1, then update concurrently.
+    cluster
+        .restart_node(1, Duration::from_secs(30))
+        .await
+        .expect("restart node1");
+
+    cluster
+        .client(0)
+        .query(&format!(
+            r#"mutation {{ update_Vault(docID: "{id}", input: {{secret: "aaa"}}) {{ _docID }} }}"#
+        ))
+        .expect("node0 update");
+    cluster
+        .client(1)
+        .query(&format!(
+            r#"mutation {{ update_Vault(docID: "{id}", input: {{secret: "zzz"}}) {{ _docID }} }}"#
+        ))
+        .expect("node1 update");
+
+    // Reconnect after the restart-partition.
+    let (a0b, a1b) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+    cluster.client(0).p2p_connect(&[a1b.as_str()]).ok();
+    cluster.client(1).p2p_connect(&[a0b.as_str()]).ok();
+    cluster.client(0).p2p_collection_add(&["Vault"]).ok();
+    cluster.client(1).p2p_collection_add(&["Vault"]).ok();
+    cluster
+        .client(0)
+        .p2p_replicator_delete(&["Vault"], Some(&a1b))
+        .ok();
+    cluster
+        .client(1)
+        .p2p_replicator_delete(&["Vault"], Some(&a0b))
+        .ok();
+    cluster.client(0).p2p_replicator_set(&["Vault"], &a1b).ok();
+    cluster.client(1).p2p_replicator_set(&["Vault"], &a0b).ok();
+
+    // CONVERGE: both replicas decrypt and materialize the LWW winner "zzz".
+    if !poll_vault_secret(&cluster.client(0), "zzz", Duration::from_secs(40)).await {
+        panic!(
+            "node0 did not converge to \"zzz\"; secret = {:?}",
+            vault_secret(&cluster.client(0))
+        );
+    }
+    if !poll_vault_secret(&cluster.client(1), "zzz", Duration::from_secs(40)).await {
+        panic!(
+            "node1 did not converge to \"zzz\"; secret = {:?}",
+            vault_secret(&cluster.client(1))
+        );
+    }
+}
+
+fn indexed_age(node: &DefraClient) -> i64 {
+    node.query("query { User { age } }").unwrap_or_default()["User"][0]["age"]
+        .as_i64()
+        .unwrap_or(-1)
+}
+
+fn count_by_index(node: &DefraClient, age: i64) -> usize {
+    node.query(&format!(
+        "query {{ User(filter: {{age: {{_eq: {age}}}}}) {{ name }} }}"
+    ))
+    .unwrap_or_default()["User"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0)
+}
+
+/// Index reconciles correctly iff the winner (99) is the only indexed value and
+/// neither the loser (20) nor the stale seed (10) is still resolvable by index.
+fn index_reconciled(node: &DefraClient) -> bool {
+    indexed_age(node) == 99
+        && count_by_index(node, 99) == 1
+        && count_by_index(node, 20) == 0
+        && count_by_index(node, 10) == 0
+}
+
+async fn poll_index_reconciled(node: &DefraClient, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if index_reconciled(node) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// SECONDARY-INDEX reconciliation across a restart-partition. An `@index`ed LWW
+/// field is updated concurrently on both nodes (node0 -> 20, node1 -> 99) after
+/// node1 is restarted; the higher value wins and BOTH nodes must, after merging,
+/// (a) materialize age=99 AND (b) resolve age=99 — and ONLY 99 — through the
+/// index. The stale seed (10) and the losing edit (20) must not remain findable
+/// by index.
+///
+/// REGRESSION: the index is a THIRD store layered on the two-store seam. A local
+/// write advances the materialized blob and writes its own index entry, while the
+/// LWW priority store advances only on merge. If a merge re-materializes the blob
+/// from a stale priority store (the LWW two-store bug) the index can be left
+/// pointing at an orphaned value — the document shows 99 but a filtered query
+/// still returns the loser, or returns nothing. This guards that index
+/// maintenance follows the reconciled merge, not the clobbered local write.
+#[tokio::test]
+async fn convergence_indexed_lww_restart_merge() {
+    let mut cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_store("redb")
+        // Stable peer-id across the restart (so a peer-id change can't confound).
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("build 2-node p2p cluster");
+
+    let schema = "type User { name: String  age: Int @index }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+
+    let (a0, a1) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+    cluster
+        .client(0)
+        .p2p_connect(&[a1.as_str()])
+        .expect("connect 0->1");
+    cluster
+        .client(1)
+        .p2p_connect(&[a0.as_str()])
+        .expect("connect 1->0");
+    cluster
+        .client(0)
+        .p2p_collection_add(&["User"])
+        .expect("subscribe node0");
+    cluster
+        .client(1)
+        .p2p_collection_add(&["User"])
+        .expect("subscribe node1");
+    cluster
+        .client(0)
+        .p2p_replicator_set(&["User"], &a1)
+        .expect("replicator 0->1");
+    cluster
+        .client(1)
+        .p2p_replicator_set(&["User"], &a0)
+        .expect("replicator 1->0");
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 10}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_User"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    assert!(
+        poll_index_reconciled_seed(&cluster.client(1), Duration::from_secs(20)).await,
+        "seed document (age=10) must replicate and be index-resolvable on node1"
+    );
+
+    // Sever the link by restarting node1, then update concurrently.
+    cluster
+        .restart_node(1, Duration::from_secs(30))
+        .await
+        .expect("restart node1");
+
+    cluster
+        .client(0)
+        .query(&format!(
+            r#"mutation {{ update_User(docID: "{id}", input: {{age: 20}}) {{ _docID }} }}"#
+        ))
+        .expect("node0 update");
+    cluster
+        .client(1)
+        .query(&format!(
+            r#"mutation {{ update_User(docID: "{id}", input: {{age: 99}}) {{ _docID }} }}"#
+        ))
+        .expect("node1 update");
+
+    // Reconnect after the restart-partition.
+    let (a0b, a1b) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+    cluster.client(0).p2p_connect(&[a1b.as_str()]).ok();
+    cluster.client(1).p2p_connect(&[a0b.as_str()]).ok();
+    cluster.client(0).p2p_collection_add(&["User"]).ok();
+    cluster.client(1).p2p_collection_add(&["User"]).ok();
+    cluster
+        .client(0)
+        .p2p_replicator_delete(&["User"], Some(&a1b))
+        .ok();
+    cluster
+        .client(1)
+        .p2p_replicator_delete(&["User"], Some(&a0b))
+        .ok();
+    cluster.client(0).p2p_replicator_set(&["User"], &a1b).ok();
+    cluster.client(1).p2p_replicator_set(&["User"], &a0b).ok();
+
+    // CONVERGE: both replicas materialize 99 and resolve ONLY 99 by index.
+    if !poll_index_reconciled(&cluster.client(0), Duration::from_secs(40)).await {
+        panic!(
+            "node0 index did not reconcile; age={} idx99={} idx20={} idx10={}",
+            indexed_age(&cluster.client(0)),
+            count_by_index(&cluster.client(0), 99),
+            count_by_index(&cluster.client(0), 20),
+            count_by_index(&cluster.client(0), 10),
+        );
+    }
+    if !poll_index_reconciled(&cluster.client(1), Duration::from_secs(40)).await {
+        panic!(
+            "node1 index did not reconcile; age={} idx99={} idx20={} idx10={}",
+            indexed_age(&cluster.client(1)),
+            count_by_index(&cluster.client(1), 99),
+            count_by_index(&cluster.client(1), 20),
+            count_by_index(&cluster.client(1), 10),
+        );
+    }
+
+    // HONESTY CHECK: confirm the filter actually plans an index scan, so the
+    // counts above exercise index maintenance rather than a full collection scan.
+    let index_used = cluster
+        .client(0)
+        .query("query @explain(type: simple) { User(filter: {age: {_eq: 99}}) { name } }")
+        .map(|v| v.to_string().to_lowercase().contains("index"))
+        .unwrap_or(false);
+    assert!(
+        index_used,
+        "filtered query must plan an index scan, else the index counts prove nothing"
+    );
+}
+
+async fn poll_index_reconciled_seed(node: &DefraClient, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if indexed_age(node) == 10 && count_by_index(node, 10) == 1 {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
