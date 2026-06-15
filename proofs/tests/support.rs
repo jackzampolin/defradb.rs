@@ -3,6 +3,7 @@
 
 use defra_harness::BinarySource;
 use std::path::PathBuf;
+use std::sync::Once;
 
 const CONFORMANCE_RUST_LOG: &str = "info";
 
@@ -20,8 +21,7 @@ const CONFORMANCE_RUST_LOG: &str = "info";
 /// `proofs/verify-all.sh`).
 pub fn release_binary() -> BinarySource {
     let root = workspace_root();
-    ensure_harness_uses_workspace(&root);
-    ensure_harness_logs_are_visible();
+    init_harness_env(&root);
 
     if let Some(path) = std::env::var_os("DEFRA_CONFORMANCE_BINARY") {
         return BinarySource::Path(PathBuf::from(path));
@@ -34,6 +34,17 @@ pub fn workspace_root() -> PathBuf {
         .parent()
         .expect("proofs/ has a parent (the workspace root)")
         .to_path_buf()
+}
+
+/// Mutate process env exactly once. `release_binary()` is called from every
+/// `#[tokio::test]`, which run in parallel; `set_var` from multiple threads is
+/// unsound, so the env setup is gated behind a `Once`.
+fn init_harness_env(root: &std::path::Path) {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        ensure_harness_uses_workspace(root);
+        ensure_harness_logs_are_visible();
+    });
 }
 
 fn ensure_harness_logs_are_visible() {
