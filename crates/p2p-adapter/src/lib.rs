@@ -38,6 +38,56 @@ pub use defra_http::router::{
     P2pDocumentRequest, ReplicationFilter, ReplicationFilters, ReplicatorInfo,
 };
 
+/// Resolve replicator-delete collection arguments from names to CIDs.
+///
+/// The push registry is keyed by collection CID (see `add_replicator`, which stores
+/// CIDs), so a name passed to delete must be resolved to its CID to match. Lenient:
+/// an unresolved string is kept as-is, so a CID (or already-resolved id) passed
+/// directly still works. An empty input is returned untouched (full-delete path).
+pub fn resolve_remove_collections<F>(collections: Vec<String>, resolve: F) -> Vec<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if collections.is_empty() {
+        return collections;
+    }
+    collections
+        .into_iter()
+        .map(|c| resolve(&c).unwrap_or(c))
+        .collect()
+}
+
+#[cfg(test)]
+mod resolve_remove_collections_tests {
+    use super::resolve_remove_collections;
+    use std::collections::HashMap;
+
+    fn resolver(map: HashMap<&'static str, &'static str>) -> impl Fn(&str) -> Option<String> {
+        move |name| map.get(name).map(|cid| cid.to_string())
+    }
+
+    #[test]
+    fn resolves_name_to_cid() {
+        let map = HashMap::from([("AgentDoc", "bafyCID")]);
+        let out = resolve_remove_collections(vec!["AgentDoc".to_string()], resolver(map));
+        assert_eq!(out, vec!["bafyCID".to_string()]);
+    }
+
+    #[test]
+    fn keeps_unresolved_string_lenient() {
+        let map = HashMap::new();
+        let out = resolve_remove_collections(vec!["bafyAlreadyCID".to_string()], resolver(map));
+        assert_eq!(out, vec!["bafyAlreadyCID".to_string()]);
+    }
+
+    #[test]
+    fn empty_is_untouched_full_delete() {
+        let map = HashMap::from([("AgentDoc", "bafyCID")]);
+        let out = resolve_remove_collections(Vec::new(), resolver(map));
+        assert!(out.is_empty());
+    }
+}
+
 /// Convert a p2p `ReplicatorInfo` into the HTTP-facing `ReplicatorInfo`.
 pub(crate) fn to_http_replicator_info(info: p2p::ReplicatorInfo) -> ReplicatorInfo {
     let address = info.addresses_str().first().map(|addr| addr.to_string());

@@ -188,8 +188,9 @@ async fn filtered_excludes_nonmatching(cluster: TestCluster) {
 
     // Confirm the predicate landed in the persisted replicator record, read via
     // the HTTP API (wire-format coverage for the Rust-only `Filters` extension).
-    // NOTE: the CLI `replicator list` deserializer (`P2pReplicatorInfo`) does not
-    // carry a `filters` field, so this must be asserted over HTTP, not the CLI.
+    // `P2pReplicatorInfo` now also carries the `Filters` field, so the CLI
+    // `replicator list` path is asserted separately in
+    // `rust_filtered_replication_cli_list_renders_filter`.
     let listed: serde_json::Value =
         reqwest::get(format!("{}/api/v0/p2p/replicators", cluster.api_url(0)))
             .await
@@ -533,6 +534,106 @@ async fn rust_filtered_replication_encrypted_respects_filter() {
     assert_eq!(
         count, 2,
         "filtered peer must hold only the two matching encrypted documents"
+    );
+}
+
+/// #1038 Gap 3: the filter must gate the encrypted (SE-artifact) push path with a
+/// RICH (`_in`) predicate too. Two of three encrypted docs match the set
+/// (alice + carol); the third (bob) must not reach the filtered peer. As with the
+/// `_eq` encrypted test, the payload is encrypted so visibility is asserted on
+/// `_docID`. CAROL is the ordering anchor, created after the non-matching BOB doc:
+/// once she arrives the push pipeline has provably run, so BOB's absence is the
+/// filter rather than a not-yet-delivered race.
+#[tokio::test]
+async fn rust_filtered_replication_encrypted_rich_filter() {
+    const SECRET_SCHEMA: &str = "type SecretDoc { agent_did: String @immutable  secret: String }";
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(SECRET_SCHEMA).expect("schema node0");
+    node1.schema_add(SECRET_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["SecretDoc"])
+        .expect("subscribe 0");
+
+    let filter_json = format!(r#"{{"agent_did":{{"_in":["{ALICE}","{CAROL}"]}}}}"#);
+    let out = run_replicator_add_filter(&cluster, 0, &["SecretDoc"], &addr1, &filter_json);
+    assert!(
+        out.status.success(),
+        "IN-set encrypted replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mk = |did: &str, secret: &str| {
+        format!(
+            r#"mutation {{ add_SecretDoc(input: {{agent_did: "{did}", secret: "{secret}"}}, encryptFields: [secret]) {{ _docID }} }}"#
+        )
+    };
+
+    let alice_doc = node0
+        .query(&mk(ALICE, "s-alice"))
+        .expect("create matching encrypted alice doc");
+    let alice_id = extract_doc_id(&alice_doc, "add_SecretDoc");
+
+    node0
+        .query(&mk(BOB, "s-bob"))
+        .expect("create non-matching encrypted bob doc");
+
+    let carol_doc = node0
+        .query(&mk(CAROL, "s-carol"))
+        .expect("create matching encrypted carol doc (ordering anchor)");
+    let carol_id = extract_doc_id(&carol_doc, "add_SecretDoc");
+
+    let node1_poll = cluster.client(1);
+    let a_id = alice_id.clone();
+    let c_id = carol_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { SecretDoc { _docID } }")
+                .unwrap_or_default();
+            let Some(rows) = result["SecretDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&a_id.as_str()) && ids.contains(&c_id.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "matching encrypted docs did not replicate to IN-set filtered peer",
+    )
+    .await;
+
+    let result = node1
+        .query("query { SecretDoc { _docID } }")
+        .expect("query SecretDoc on node1");
+    let ids: Vec<String> = result["SecretDoc"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r["_docID"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        ids.len(),
+        2,
+        "IN-set filtered peer must hold exactly the two matching encrypted docs, found: {ids:?}"
+    );
+    assert!(
+        ids.contains(&alice_id) && ids.contains(&carol_id),
+        "IN-set filtered peer must hold the alice and carol encrypted docs, found: {ids:?}"
     );
 }
 
@@ -880,6 +981,44 @@ fn run_replicator_add_filter(
         ])
         .output()
         .expect("exec replicator add --filter")
+}
+
+/// Add a replicator with a raw query-filter conditions JSON authenticated as
+/// `identity_hex` (Controlled/ACP mode). Combines `--filter <json>` with `-i`.
+fn add_filtered_replicator_json_with_identity(
+    cluster: &TestCluster,
+    node: usize,
+    collections: &[&str],
+    addr: &str,
+    filter_json: &str,
+    identity_hex: &str,
+) {
+    let client = cluster.client(node);
+    let cols = collections.join(",");
+    let output = Command::new(client.binary_path())
+        .arg("--url")
+        .arg(socket_addr(cluster, node))
+        .args([
+            "client",
+            "-i",
+            identity_hex,
+            "p2p",
+            "replicator",
+            "add",
+            "-c",
+            &cols,
+            "--filter",
+            filter_json,
+            addr,
+        ])
+        .output()
+        .expect("exec replicator add --filter (with identity)");
+    assert!(
+        output.status.success(),
+        "rich filtered replicator add (identity) failed: status={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// IN-set predicate: only docs whose `agent_did` is in `[alice, carol]` replicate.
@@ -2046,5 +2185,1146 @@ async fn rust_filtered_replication_in_set_iroh() {
     assert!(
         !dids.iter().any(|d| d == BOB),
         "bob must be excluded by iroh IN-set filter, found: {dids:?}"
+    );
+}
+
+/// Gap 2: deleting a filtered replicator must stop further filtered pushes. A
+/// matching doc created BEFORE the delete replicates; a matching doc created
+/// AFTER the delete must not, even though it satisfies the (now-removed) filter.
+#[tokio::test]
+async fn rust_filtered_replication_delete_stops_push() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+    add_filtered_replicator(&cluster, 0, &["AgentDoc"], &addr1, "agent_did", ALICE);
+
+    // A matching doc created while the replicator is live must replicate.
+    let before = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "before-delete"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching doc before delete");
+    let before_id = extract_doc_id(&before, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let before_id_poll = before_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(before_id_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "matching doc did not replicate before replicator delete",
+    )
+    .await;
+
+    // Delete the replicator (try full multiaddr first, then bare peer ID).
+    let peer_id = addr1.rsplit("/p2p/").next().unwrap_or(&addr1);
+    node0
+        .p2p_replicator_delete(&["AgentDoc"], Some(&addr1))
+        .or_else(|_| node0.p2p_replicator_delete(&["AgentDoc"], Some(peer_id)))
+        .expect("p2p_replicator_delete");
+
+    // A NEW matching doc created after the delete must NOT arrive. With no
+    // replicator left there is no ordering anchor, so absence is confirmed over
+    // the fixed ABSENCE_GRACE window (the push pipeline already proved live above).
+    let after = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "after-delete"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching doc after delete");
+    let after_id = extract_doc_id(&after, "add_AgentDoc");
+
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let result = node1
+        .query("query { AgentDoc { _docID } }")
+        .expect("query node1 after delete");
+    let ids: Vec<&str> = result["AgentDoc"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(|r| r["_docID"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        ids.contains(&before_id.as_str()),
+        "the pre-delete doc must remain on node1, found: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&after_id.as_str()),
+        "a matching doc created after replicator delete must NOT be pushed, found: {ids:?}"
+    );
+}
+
+/// Iroh transport variant of `rust_filtered_replication_delete_stops_push`:
+/// deleting a filtered replicator over Iroh (defra-agent's production transport)
+/// must stop further filtered pushes. Exercises the iroh adapter's delete path
+/// end to end — name->CID resolution, coordinator/registry removal, and
+/// peerstore handling. A matching doc created BEFORE the delete replicates; a
+/// matching doc created AFTER the delete must not.
+#[tokio::test]
+async fn rust_filtered_replication_delete_stops_push_iroh() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_iroh_transport()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+    add_filtered_replicator(&cluster, 0, &["AgentDoc"], &addr1, "agent_did", ALICE);
+
+    // A matching doc created while the replicator is live must replicate.
+    let before = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "before-delete"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching doc before delete");
+    let before_id = extract_doc_id(&before, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let before_id_poll = before_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(before_id_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "matching doc did not replicate before replicator delete over iroh",
+    )
+    .await;
+
+    // Delete the replicator (try full multiaddr first, then bare peer ID).
+    let peer_id = addr1.rsplit("/p2p/").next().unwrap_or(&addr1);
+    node0
+        .p2p_replicator_delete(&["AgentDoc"], Some(&addr1))
+        .or_else(|_| node0.p2p_replicator_delete(&["AgentDoc"], Some(peer_id)))
+        .expect("p2p_replicator_delete");
+
+    // A NEW matching doc created after the delete must NOT arrive. With no
+    // replicator left there is no ordering anchor, so absence is confirmed over
+    // the fixed ABSENCE_GRACE window (the push pipeline already proved live above).
+    let after = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "after-delete"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching doc after delete");
+    let after_id = extract_doc_id(&after, "add_AgentDoc");
+
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let result = node1
+        .query("query { AgentDoc { _docID } }")
+        .expect("query node1 after delete");
+    let ids: Vec<&str> = result["AgentDoc"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(|r| r["_docID"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        ids.contains(&before_id.as_str()),
+        "the pre-delete doc must remain on node1 over iroh, found: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&after_id.as_str()),
+        "a matching doc created after replicator delete must NOT be pushed over iroh, found: {ids:?}"
+    );
+}
+
+/// Gap 5/6: a rich `Conditions` predicate created over the direct HTTP
+/// `POST /api/v0/p2p/replicators` endpoint must round-trip structurally through
+/// the `GET` list response (no P2P replication exercised — pure wire-format
+/// coverage for the create -> list rich-predicate seam).
+#[tokio::test]
+async fn rust_filtered_replication_http_conditions_roundtrip() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 1).await;
+    cluster.client(0).schema_add(AGENT_SCHEMA).expect("schema");
+
+    let conditions = serde_json::json!({"agent_did": {"_in": [ALICE, CAROL]}});
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/v0/p2p/replicators", cluster.api_url(0)))
+        .json(&serde_json::json!({
+            "Collections": ["AgentDoc"],
+            "Addresses": [DUMMY_PEER_ADDR],
+            "Filters": {"AgentDoc": {"Conditions": conditions}}
+        }))
+        .send()
+        .await
+        .expect("POST replicators with rich Conditions");
+    assert!(
+        resp.status().is_success(),
+        "rich-Conditions replicator add failed: {}",
+        resp.status()
+    );
+
+    let listed: serde_json::Value =
+        reqwest::get(format!("{}/api/v0/p2p/replicators", cluster.api_url(0)))
+            .await
+            .expect("GET replicators")
+            .json()
+            .await
+            .expect("parse replicators json");
+
+    let entry = listed
+        .as_array()
+        .and_then(|arr| arr.first())
+        .expect("at least one replicator listed");
+    let filters = entry["Filters"]
+        .as_object()
+        .expect("replicator must carry a Filters object");
+    // The Filters key may be the resolved collection-id rather than the name.
+    let (_collection, filter) = filters
+        .iter()
+        .next()
+        .expect("Filters object must have exactly one entry");
+    assert_eq!(
+        filter["Conditions"], conditions,
+        "rich predicate must round-trip through the HTTP list intact, got: {listed}"
+    );
+}
+
+/// Gap 7: the CLI `replicator list` must render a rich `Conditions` predicate
+/// structurally (not just as an opaque blob). Proves `P2pReplicatorInfo` carries
+/// and re-serializes the `Filters` field.
+#[tokio::test]
+async fn rust_filtered_replication_cli_list_renders_filter() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 1).await;
+    cluster.client(0).schema_add(AGENT_SCHEMA).expect("schema");
+
+    let conditions = serde_json::json!({"agent_did": {"_in": [ALICE, BOB]}});
+    let filter_json = serde_json::to_string(&conditions).unwrap();
+    let out = run_replicator_add_filter(&cluster, 0, &["AgentDoc"], DUMMY_PEER_ADDR, &filter_json);
+    assert!(
+        out.status.success(),
+        "CLI rich-filter replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let listed = cluster
+        .client(0)
+        .p2p_replicator_list()
+        .expect("p2p_replicator_list");
+
+    let entry = listed
+        .as_array()
+        .and_then(|arr| arr.first())
+        .expect("CLI must list at least one replicator");
+    let filters = entry["Filters"]
+        .as_object()
+        .expect("CLI replicator list must render a Filters object");
+    let (_collection, filter) = filters
+        .iter()
+        .next()
+        .expect("Filters object must have exactly one entry");
+    assert_eq!(
+        filter["Conditions"], conditions,
+        "CLI replicator list must render the rich predicate structurally, got: {listed}"
+    );
+}
+
+/// Iroh transport variant of `rust_filtered_replication_composite_and`: a
+/// composite `agent_did = alice AND kind = keep` predicate must gate the live
+/// push path over Iroh (defra-agent's production transport). A doc matching both
+/// arms replicates; a doc matching only one arm must be excluded.
+#[tokio::test]
+async fn rust_filtered_replication_composite_and_iroh() {
+    const AND_SCHEMA: &str =
+        "type AndDoc { agent_did: String @immutable  kind: String @immutable  seq: Int }";
+
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_iroh_transport()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AND_SCHEMA).expect("schema node0");
+    node1.schema_add(AND_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0.p2p_collection_add(&["AndDoc"]).expect("subscribe 0");
+
+    let filter_json = format!(r#"{{"agent_did":{{"_eq":"{ALICE}"}},"kind":{{"_eq":"keep"}}}}"#);
+    let out = run_replicator_add_filter(&cluster, 0, &["AndDoc"], &addr1, &filter_json);
+    assert!(
+        out.status.success(),
+        "composite AND iroh replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mk = |did: &str, kind: &str, seq: i32| {
+        format!(
+            r#"mutation {{ add_AndDoc(input: {{agent_did: "{did}", kind: "{kind}", seq: {seq}}}) {{ _docID }} }}"#
+        )
+    };
+
+    let match1 = node0
+        .query(&mk(ALICE, "keep", 1))
+        .expect("create (alice, keep, 1) doc");
+    let match1_id = extract_doc_id(&match1, "add_AndDoc");
+
+    node0
+        .query(&mk(ALICE, "drop", 2))
+        .expect("create (alice, drop) doc — matches only one arm");
+    node0
+        .query(&mk(BOB, "keep", 3))
+        .expect("create (bob, keep) doc — matches only one arm");
+
+    let match2 = node0
+        .query(&mk(ALICE, "keep", 4))
+        .expect("create second (alice, keep, 4) anchor");
+    let match2_id = extract_doc_id(&match2, "add_AndDoc");
+
+    let node1_poll = cluster.client(1);
+    let m1 = match1_id.clone();
+    let m2 = match2_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AndDoc { _docID agent_did kind } }")
+                .unwrap_or_default();
+            let Some(rows) = result["AndDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&m1.as_str()) && ids.contains(&m2.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "composite AND matching docs did not replicate over iroh",
+    )
+    .await;
+
+    let result = node1
+        .query("query { AndDoc { agent_did kind } }")
+        .expect("query AndDoc on node1");
+    let rows = result["AndDoc"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        rows.len(),
+        2,
+        "iroh composite AND filtered peer must hold exactly 2 (alice,keep) docs, found: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r["agent_did"].as_str() == Some(ALICE) && r["kind"].as_str() == Some("keep")),
+        "iroh composite AND filtered peer must hold only (alice,keep) docs, found: {rows:?}"
+    );
+}
+
+/// Iroh transport variant of `rust_filtered_replication_backfill_respects_filter`:
+/// documents created BEFORE the replicator is added must be backfilled over Iroh,
+/// respecting the filter. This exercises the iroh backfill path
+/// (`push_existing_docs_via_transport`) with a predicate — the matching doc must
+/// arrive while the non-matching doc stays absent.
+#[tokio::test]
+async fn rust_filtered_replication_backfill_iroh() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_iroh_transport()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    // Create documents BEFORE wiring replication so delivery comes from
+    // backfill, not live push.
+    let matching = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "backfilled-iroh"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching doc");
+    let matching_id = extract_doc_id(&matching, "add_AgentDoc");
+    node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{BOB}", body: "excluded-iroh"}}) {{ _docID }} }}"#
+        ))
+        .expect("create non-matching doc");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+    add_filtered_replicator(&cluster, 0, &["AgentDoc"], &addr1, "agent_did", ALICE);
+
+    let node1_for_poll = cluster.client(1);
+    let matching_id_poll = matching_id.clone();
+    poll_until(
+        || {
+            let result = node1_for_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(matching_id_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "matching document did not backfill to filtered peer over iroh",
+    )
+    .await;
+
+    // Backfill is unordered (no "after" anchor like the live-push tests), so a
+    // short settle window remains before asserting the non-matching doc's absence.
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let dids = agent_did_values(&cluster, 1);
+    assert_eq!(
+        dids,
+        vec![ALICE.to_string()],
+        "iroh backfill must respect the filter, found: {dids:?}"
+    );
+}
+
+/// #1038 Gap 4: a rich `_in` predicate composed with the Controlled-mode ACP
+/// gate. The push path runs TWO independent gates in sequence — the ACP access
+/// check + creator-DID resolution, AND the replication filter. This proves an
+/// `_in` set filter and the ACP gate compose: alice+carol (in the set) replicate,
+/// bob (out of set) is excluded, all under Controlled access.
+#[tokio::test]
+async fn rust_filtered_replication_acp_in_set_controlled_mode() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    let alice = generate_identity(node0.binary_path()).expect("generate identity");
+
+    let policy = node0
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("policy node0");
+    let policy_id = policy["PolicyID"]
+        .as_str()
+        .or_else(|| policy["policyID"].as_str())
+        .expect("policy id")
+        .to_string();
+    node1
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("policy node1");
+
+    let schema = format!(
+        r#"type User @policy(id: "{policy_id}", resource: "users") {{ agent_did: String @immutable  name: String }}"#
+    );
+    node0
+        .schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("schema node0");
+    node1
+        .schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0.p2p_collection_add(&["User"]).expect("subscribe 0");
+
+    let filter_json = format!(r#"{{"agent_did":{{"_in":["{ALICE}","{CAROL}"]}}}}"#);
+    add_filtered_replicator_json_with_identity(
+        &cluster,
+        0,
+        &["User"],
+        &addr1,
+        &filter_json,
+        &alice.private_key_hex,
+    );
+
+    let mk = |did: &str, name: &str| {
+        format!(
+            r#"mutation {{ add_User(input: {{agent_did: "{did}", name: "{name}"}}) {{ _docID }} }}"#
+        )
+    };
+
+    let alice_doc = node0
+        .query_with_identity(&mk(ALICE, "a"), &alice.private_key_hex)
+        .expect("create alice doc");
+    let alice_id = extract_doc_id(&alice_doc, "add_User");
+
+    node0
+        .query_with_identity(&mk(BOB, "b"), &alice.private_key_hex)
+        .expect("create bob doc");
+
+    // CAROL is the ordering anchor: created after BOB, so once she arrives on
+    // node1 the push pipeline has provably run and BOB's absence is the filter.
+    let carol_doc = node0
+        .query_with_identity(&mk(CAROL, "c"), &alice.private_key_hex)
+        .expect("create carol doc (ordering anchor)");
+    let carol_id = extract_doc_id(&carol_doc, "add_User");
+
+    // Replicated docs are unregistered on node1, so they are public there.
+    let node1_poll = cluster.client(1);
+    let a_id = alice_id.clone();
+    let c_id = carol_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { User { _docID agent_did } }")
+                .unwrap_or_default();
+            let Some(rows) = result["User"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&a_id.as_str()) && ids.contains(&c_id.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "alice and carol did not replicate to ACP IN-set filtered peer",
+    )
+    .await;
+
+    let result = node1
+        .query("query { User { agent_did } }")
+        .expect("query node1");
+    let dids: Vec<String> = result["User"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r["agent_did"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        dids.len(),
+        2,
+        "ACP IN-set filtered peer must hold exactly 2 docs (alice + carol), found: {dids:?}"
+    );
+    assert!(
+        dids.iter().all(|d| d == ALICE || d == CAROL),
+        "ACP IN-set filtered peer must hold only alice and carol, found: {dids:?}"
+    );
+    assert!(
+        !dids.iter().any(|d| d == BOB),
+        "bob must be excluded by ACP IN-set filter, found: {dids:?}"
+    );
+}
+
+/// #1038 Gap 4: a composite AND predicate composed with the Controlled-mode ACP
+/// gate. Two filter clauses (`agent_did = alice` AND `kind = keep`) × ACP gating
+/// × creator-DID resolution — the composition most likely to hide a seam. A doc
+/// matching BOTH clauses replicates; a doc matching only one is excluded, under
+/// Controlled access.
+#[tokio::test]
+async fn rust_filtered_replication_acp_composite_controlled_mode() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    let alice = generate_identity(node0.binary_path()).expect("generate identity");
+
+    let policy = node0
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("policy node0");
+    let policy_id = policy["PolicyID"]
+        .as_str()
+        .or_else(|| policy["policyID"].as_str())
+        .expect("policy id")
+        .to_string();
+    node1
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("policy node1");
+
+    let schema = format!(
+        r#"type User @policy(id: "{policy_id}", resource: "users") {{ agent_did: String @immutable  kind: String @immutable  name: String }}"#
+    );
+    node0
+        .schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("schema node0");
+    node1
+        .schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0.p2p_collection_add(&["User"]).expect("subscribe 0");
+
+    let filter_json = format!(r#"{{"agent_did":{{"_eq":"{ALICE}"}},"kind":{{"_eq":"keep"}}}}"#);
+    add_filtered_replicator_json_with_identity(
+        &cluster,
+        0,
+        &["User"],
+        &addr1,
+        &filter_json,
+        &alice.private_key_hex,
+    );
+
+    let mk = |did: &str, kind: &str, name: &str| {
+        format!(
+            r#"mutation {{ add_User(input: {{agent_did: "{did}", kind: "{kind}", name: "{name}"}}) {{ _docID }} }}"#
+        )
+    };
+
+    let match1 = node0
+        .query_with_identity(&mk(ALICE, "keep", "m1"), &alice.private_key_hex)
+        .expect("create (alice, keep) doc");
+    let match1_id = extract_doc_id(&match1, "add_User");
+
+    node0
+        .query_with_identity(&mk(ALICE, "drop", "x1"), &alice.private_key_hex)
+        .expect("create (alice, drop) doc — matches only one clause");
+    node0
+        .query_with_identity(&mk(BOB, "keep", "x2"), &alice.private_key_hex)
+        .expect("create (bob, keep) doc — matches only one clause");
+
+    let match2 = node0
+        .query_with_identity(&mk(ALICE, "keep", "m2"), &alice.private_key_hex)
+        .expect("create second (alice, keep) anchor");
+    let match2_id = extract_doc_id(&match2, "add_User");
+
+    // Replicated docs are unregistered on node1, so they are public there.
+    let node1_poll = cluster.client(1);
+    let m1 = match1_id.clone();
+    let m2 = match2_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { User { _docID agent_did kind } }")
+                .unwrap_or_default();
+            let Some(rows) = result["User"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&m1.as_str()) && ids.contains(&m2.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "composite (alice,keep) docs did not replicate to ACP filtered peer",
+    )
+    .await;
+
+    let result = node1
+        .query("query { User { agent_did kind } }")
+        .expect("query node1");
+    let rows = result["User"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        rows.len(),
+        2,
+        "ACP composite filtered peer must hold exactly 2 (alice,keep) docs, found: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r["agent_did"].as_str() == Some(ALICE) && r["kind"].as_str() == Some("keep")),
+        "ACP composite filtered peer must hold only (alice,keep) docs, found: {rows:?}"
+    );
+}
+
+/// #1038 Gap 1: the filter must hold on the push-RETRY/recovery path, not only on
+/// the live push. A push to a down replicator fails and is recorded in the
+/// peerstore retry queue; the server's retry-drain loop later re-pushes via
+/// `db_merge::retry_doc`, which re-loads the document and re-applies
+/// `document_matches_filter` (so a non-matching queued doc is skipped at retry
+/// time). This drives that path by killing node1 while node0 enqueues both a
+/// matching and a non-matching doc, then restarts node1 and asserts recovery
+/// delivered the matching doc while the filter still excluded the non-matching one.
+#[tokio::test]
+async fn rust_filtered_replication_retry_respects_filter() {
+    // A keyring is required so each node's libp2p peer identity is persisted and
+    // survives restart (without it the node uses an ephemeral peer key and comes
+    // back with a new peer ID, which the source node's replicator can never reach).
+    // A persistent store likewise keeps node1's prior data across the restart.
+    let mut cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_keyring()
+        .with_store("redb")
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+    add_filtered_replicator(&cluster, 0, &["AgentDoc"], &addr1, "agent_did", ALICE);
+
+    // A matching doc delivered while both nodes are up proves the live path works
+    // before we exercise recovery.
+    let live = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "live-match"}}) {{ _docID }} }}"#
+        ))
+        .expect("create live matching doc");
+    let live_id = extract_doc_id(&live, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let live_poll = live_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(live_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "live matching doc did not replicate before takedown",
+    )
+    .await;
+
+    // Take node1 down so node0's pushes fail and enter the retry queue. The push
+    // failure is what populates the retry path the filter must continue to gate.
+    cluster.nodes[1].process.kill();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // While node1 is DOWN, create both a matching and a non-matching doc on node0.
+    // Both pushes fail (peer unreachable) and are queued for retry; the filter is
+    // applied at retry time, not enqueue time.
+    let retry_match = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "retry-match"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching doc during downtime");
+    let retry_match_id = extract_doc_id(&retry_match, "add_AgentDoc");
+
+    let retry_skip = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{BOB}", body: "retry-skip"}}) {{ _docID }} }}"#
+        ))
+        .expect("create non-matching doc during downtime");
+    let retry_skip_id = extract_doc_id(&retry_skip, "add_AgentDoc");
+
+    // Bring node1 back. It reuses its rootdir and ports, so node0's persisted
+    // replicator can reconnect and the retry-drain loop can deliver.
+    cluster
+        .restart_node(1, Duration::from_secs(60))
+        .await
+        .expect("restart node1");
+    cluster
+        .wait_for_log(1, "p2p_listening", P2P_TIMEOUT)
+        .await
+        .expect("node1 P2P after restart");
+
+    // Ephemeral transport state is lost on restart; re-establish the connection so
+    // the replicator/retry-drain has a live channel to push over.
+    let addr1_after = extract_p2p_addr(&cluster, 1);
+    cluster
+        .client(0)
+        .p2p_connect(&[&addr1_after])
+        .expect("reconnect 0->1 after restart");
+
+    // The matching doc must arrive on the recovery path. A generous deadline
+    // accommodates reconnect latency plus the retry-drain interval.
+    let recovery_deadline = P2P_TIMEOUT + Duration::from_secs(30);
+    let node1_after = cluster.client(1);
+    let match_poll = retry_match_id.clone();
+    poll_until(
+        || {
+            let result = node1_after
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(match_poll.as_str()))
+            })
+        },
+        recovery_deadline,
+        P2P_POLL_INTERVAL,
+        "retry-match doc did not arrive on the recovery path after restart",
+    )
+    .await;
+
+    // The matching doc arriving is the sync barrier: the recovery path has run.
+    // A short grace confirms the non-matching doc stays absent — the filter held
+    // on the retry/recovery path.
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let result = node1_after
+        .query("query { AgentDoc { _docID } }")
+        .expect("query node1 after recovery");
+    let ids: Vec<&str> = result["AgentDoc"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(|r| r["_docID"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        ids.contains(&live_id.as_str()),
+        "the live pre-takedown doc must remain on node1, found: {ids:?}"
+    );
+    assert!(
+        ids.contains(&retry_match_id.as_str()),
+        "the matching doc must be delivered on the recovery path, found: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&retry_skip_id.as_str()),
+        "the non-matching doc must NOT be delivered on the retry/recovery path, found: {ids:?}"
+    );
+}
+
+/// #1038 Gap 2: the filter must survive a SOURCE-node restart. On startup the
+/// replicator-restore loop reloads persisted `ReplicatorInfo` into the in-memory
+/// swarm registry; if it reloads only the collections (dropping `.filters`), the
+/// restored replicator becomes push-everything and leaks non-matching documents.
+/// This kills and restarts the SOURCE (node0), then proves the restored
+/// replicator both still pushes matching docs AND still excludes non-matching ones.
+#[tokio::test]
+async fn rust_filtered_replication_source_restart_preserves_filter() {
+    // Keyring => stable peer identity across restart; redb => persistent
+    // peerstore/data so the persisted replicator (and its filter) survive.
+    let mut cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_keyring()
+        .with_store("redb")
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+    add_filtered_replicator(&cluster, 0, &["AgentDoc"], &addr1, "agent_did", ALICE);
+
+    // A matching doc delivered while both nodes are up proves live filtered
+    // replication works before the restart.
+    let live = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "live-match"}}) {{ _docID }} }}"#
+        ))
+        .expect("create live matching doc");
+    let live_id = extract_doc_id(&live, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let live_poll = live_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(live_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "live matching doc did not replicate before source restart",
+    )
+    .await;
+
+    // Restart the SOURCE node. On startup node0 reloads its persisted replicator
+    // (the path under test) into the swarm registry.
+    cluster.nodes[0].process.kill();
+    cluster
+        .restart_node(0, Duration::from_secs(60))
+        .await
+        .expect("restart node0");
+    cluster
+        .wait_for_log(0, "p2p_listening", P2P_TIMEOUT)
+        .await
+        .expect("node0 P2P after restart");
+
+    // Ephemeral transport state is lost on restart; re-establish the connection so
+    // the restored replicator has a live channel to push over.
+    let addr1_after = extract_p2p_addr(&cluster, 1);
+    cluster
+        .client(0)
+        .p2p_connect(&[&addr1_after])
+        .expect("reconnect 0->1 after source restart");
+
+    // After restart create a NON-MATCHING (BOB) doc, then a MATCHING (ALICE) doc as
+    // a delivery/ordering barrier. With the bug the restored replicator has no
+    // filter, so BOB leaks; with the fix BOB is excluded.
+    let node0_after = cluster.client(0);
+    let skip = node0_after
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{BOB}", body: "post-restart-skip"}}) {{ _docID }} }}"#
+        ))
+        .expect("create non-matching doc after restart");
+    let skip_id = extract_doc_id(&skip, "add_AgentDoc");
+
+    let after_match = node0_after
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "post-restart-match"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching anchor doc after restart");
+    let after_match_id = extract_doc_id(&after_match, "add_AgentDoc");
+
+    // The post-restart matching doc arriving proves the restored replicator is
+    // pushing again, making it a meaningful sync barrier for the absence check.
+    let recovery_deadline = P2P_TIMEOUT + Duration::from_secs(30);
+    let node1_after = cluster.client(1);
+    let match_poll = after_match_id.clone();
+    poll_until(
+        || {
+            let result = node1_after
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(match_poll.as_str()))
+            })
+        },
+        recovery_deadline,
+        P2P_POLL_INTERVAL,
+        "post-restart matching doc did not replicate (restored replicator not pushing)",
+    )
+    .await;
+
+    // The restored replicator demonstrably pushed; a short grace confirms the
+    // non-matching doc stays absent — the filter survived the source restart.
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let result = node1_after
+        .query("query { AgentDoc { _docID } }")
+        .expect("query node1 after source restart");
+    let ids: Vec<&str> = result["AgentDoc"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(|r| r["_docID"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        ids.contains(&live_id.as_str()),
+        "the live pre-restart doc must remain on node1, found: {ids:?}"
+    );
+    assert!(
+        ids.contains(&after_match_id.as_str()),
+        "the post-restart matching doc must be delivered, found: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&skip_id.as_str()),
+        "the non-matching doc must NOT be delivered after source restart, found: {ids:?}"
+    );
+}
+
+/// Add a (non-filtered) replicator covering multiple collections via the CLI.
+fn run_replicator_add_plain(
+    cluster: &TestCluster,
+    node: usize,
+    collections: &[&str],
+    addr: &str,
+) -> std::process::Output {
+    let client = cluster.client(node);
+    let cols = collections.join(",");
+    Command::new(client.binary_path())
+        .arg("--url")
+        .arg(socket_addr(cluster, node))
+        .args(["client", "p2p", "replicator", "add", "-c", &cols, addr])
+        .output()
+        .expect("exec plain replicator add")
+}
+
+async fn list_replicators_http(cluster: &TestCluster, node: usize) -> serde_json::Value {
+    reqwest::get(format!("{}/api/v0/p2p/replicators", cluster.api_url(node)))
+        .await
+        .expect("GET replicators")
+        .json()
+        .await
+        .expect("parse replicators json")
+}
+
+/// #1038 two-store divergence: a PARTIAL `replicator delete -c <one>` on a
+/// multi-collection replicator removes only that collection from the in-memory
+/// push registry, but the CLI adapter must ALSO re-persist the remaining
+/// collections to the peerstore — not wipe the whole peer entry. On the buggy
+/// code the peerstore is deleted unconditionally, so `replicator list` (read from
+/// the peerstore) shows the peer GONE while push still serves the survivor, and
+/// the survivor silently stops after a restart. The fix mirrors the embedded
+/// adapter: delete the peerstore entry only on FULL removal, else re-persist the
+/// remaining collections.
+#[tokio::test]
+async fn rust_filtered_replication_partial_delete_keeps_remaining() {
+    const OTHER_SCHEMA: &str = "type OtherDoc { body: String }";
+
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0
+        .schema_add(AGENT_SCHEMA)
+        .expect("AgentDoc schema node0");
+    node1
+        .schema_add(AGENT_SCHEMA)
+        .expect("AgentDoc schema node1");
+    node0
+        .schema_add(OTHER_SCHEMA)
+        .expect("OtherDoc schema node0");
+    node1
+        .schema_add(OTHER_SCHEMA)
+        .expect("OtherDoc schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc", "OtherDoc"])
+        .expect("subscribe 0 to both");
+
+    // One replicator covering BOTH collections (no filter — the bug is about the
+    // peerstore re-persist branch, not predicate matching).
+    let out = run_replicator_add_plain(&cluster, 0, &["AgentDoc", "OtherDoc"], &addr1);
+    assert!(
+        out.status.success(),
+        "two-collection replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Sanity: the peer is listed with both collections.
+    let before = list_replicators_http(&cluster, 0).await;
+    let before_entry = before
+        .as_array()
+        .and_then(|arr| arr.first())
+        .expect("replicator listed before delete");
+    let before_cols = before_entry["CollectionIDs"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    assert_eq!(
+        before_cols, 2,
+        "replicator must list both collections before partial delete, got: {before}"
+    );
+
+    // PARTIAL delete: remove only AgentDoc, leaving OtherDoc.
+    let peer_id = addr1.rsplit("/p2p/").next().unwrap_or(&addr1);
+    node0
+        .p2p_replicator_delete(&["AgentDoc"], Some(&addr1))
+        .or_else(|_| node0.p2p_replicator_delete(&["AgentDoc"], Some(peer_id)))
+        .expect("partial p2p_replicator_delete");
+
+    // CORE ASSERTION: the peer must STILL be present, now with exactly one
+    // remaining collection. On the buggy code the peerstore entry is wiped, so
+    // the list is empty and this fails.
+    let after = list_replicators_http(&cluster, 0).await;
+    let after_arr = after.as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        after_arr.len(),
+        1,
+        "peer must remain after PARTIAL delete (not be wiped from peerstore), got: {after}"
+    );
+    let remaining_cols = after_arr[0]["CollectionIDs"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    assert_eq!(
+        remaining_cols, 1,
+        "exactly the survivor (OtherDoc) must remain listed, got: {after}"
+    );
+
+    // The survivor still replicates; the removed collection no longer does.
+    let other = node0
+        .query(r#"mutation { add_OtherDoc(input: {body: "survivor"}) { _docID } }"#)
+        .expect("create OtherDoc");
+    let other_id = extract_doc_id(&other, "add_OtherDoc");
+    let removed = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "removed"}}) {{ _docID }} }}"#
+        ))
+        .expect("create AgentDoc after partial delete");
+    let removed_id = extract_doc_id(&removed, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let other_id_poll = other_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { OtherDoc { _docID } }")
+                .unwrap_or_default();
+            result["OtherDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(other_id_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "survivor (OtherDoc) did not replicate after partial delete",
+    )
+    .await;
+
+    // The OtherDoc arrived (push pipeline proved live); the removed-collection
+    // doc must stay absent over the grace window.
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let result = node1
+        .query("query { AgentDoc { _docID } }")
+        .expect("query node1 AgentDoc after partial delete");
+    let agent_ids: Vec<&str> = result["AgentDoc"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(|r| r["_docID"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        !agent_ids.contains(&removed_id.as_str()),
+        "a doc in the removed collection must NOT replicate after partial delete, found: {agent_ids:?}"
     );
 }

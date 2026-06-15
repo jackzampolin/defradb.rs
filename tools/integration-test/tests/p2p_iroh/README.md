@@ -14,7 +14,7 @@ The CLI binary must be built with `--features iroh` for P2P transport tests.
 |-------|-------|------|------|---------|-------------|
 | connection/ | 18 | 18 | 0 | 0 | Peer connectivity, smoke tests, signature verification |
 | sync/ | 25 | 25 | 0 | 0 | Document sync, branchable sync, version sync with views |
-| replication/ | 40 | 40 | 0 | 0 | Replicator lifecycle, persistence, filtering |
+| replication/ | 40 | 40 | 0 | 0 | Replicator lifecycle, persistence, GraphQL filter-query reads (replication-side filtered push: see p2p/filtered_replication.rs `*_iroh`) |
 | peer/ | 43 | 42 | 0 | 1 | Peer events, subscriptions, create/update/delete |
 | schema/ | 38 | 31 | 0 | 7 | Encryption, schema migration with lens transforms |
 | acp/ | 65 | 53 | 12 | 0 | Access control: local ACP, NAC, DAC |

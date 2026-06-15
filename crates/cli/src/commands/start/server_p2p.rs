@@ -618,9 +618,7 @@ impl Node {
                 for (_peer_id_str, data) in entries {
                     if let Ok(rep_info) = p2p::ReplicatorInfo::from_bytes(&data) {
                         if let Some(pid) = rep_info.peer_id() {
-                            let _ = handle
-                                .create_replicator(pid, rep_info.collections.clone())
-                                .await;
+                            let _ = handle.create_replicator_info(pid, rep_info.clone()).await;
                             for cid in &rep_info.collections {
                                 let _ = handle
                                     .subscribe(p2p::topics::DefraTopic::collection(cid))
@@ -1133,7 +1131,7 @@ impl Node {
                     if let Ok(rep_info) = p2p::ReplicatorInfo::from_bytes(&data) {
                         let pid = p2p::transport::PeerId::new(rep_info.peer_id_str().to_string());
                         let _ = coordinator
-                            .create_replicator(&pid, rep_info.collections.clone(), false)
+                            .create_replicator_info(&pid, rep_info.clone(), false)
                             .await;
                     }
                 }

@@ -228,6 +228,18 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
         Ok(resolved)
     }
 
+    /// Resolve collection names to CIDs for removal, mirroring `add_replicator`.
+    fn resolve_collections_for_remove(&self, collections: Vec<String>) -> Vec<String> {
+        match self.doc_pusher {
+            Some(ref pusher) => {
+                defra_p2p_adapter::resolve_remove_collections(collections, |name| {
+                    pusher.get_collection_id(name)
+                })
+            }
+            None => collections,
+        }
+    }
+
     /// Pre-populate tracked documents from persisted state without re-subscribing.
     pub fn set_initial_tracked_documents(&self, docs: HashSet<String>) {
         if let Ok(mut tracked) = self.tracked_documents.write() {
@@ -663,12 +675,17 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .map_err(|e| P2PError::InvalidInput(e.to_string()))?;
         let peer_id = parsed.peer_id;
 
-        if let Some(ref coordinator) = self.sync_coordinator {
+        // The push registry is keyed by collection CID, so a name passed here must be
+        // resolved to its CID to match (symmetric with add_replicator); be lenient and
+        // keep unresolved strings so a CID passed directly still works.
+        let collections = self.resolve_collections_for_remove(collections);
+
+        let fully_deleted = if let Some(ref coordinator) = self.sync_coordinator {
             let transport_pid = p2p::transport::PeerId::from(peer_id);
             coordinator
                 .remove_replicator_collections(&transport_pid, collections)
                 .await
-                .map_err(|e| P2PError::Transport(e.to_string()))?;
+                .map_err(|e| P2PError::Transport(e.to_string()))?
         } else {
             if !collections.is_empty() {
                 tracing::warn!(
@@ -681,19 +698,42 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 .delete_replicator(peer_id)
                 .await
                 .map_err(|e| P2PError::Transport(e.to_string()))?;
-        }
+            true
+        };
 
-        // Delete from peerstore (best-effort, log warning on failure)
+        // Reconcile the peerstore with the registry: wipe the peer entry only on a
+        // full removal, else re-persist the remaining collections (preserving their
+        // filters) so `replicator list` and post-restart restore stay consistent.
         if let Some(ref pusher) = self.doc_pusher {
-            if let Err(e) = pusher
-                .delete_persisted_replicator(&peer_id.to_string())
-                .await
-            {
-                tracing::warn!(
-                    peer_id = %peer_id,
-                    error = %e,
-                    "Failed to delete replicator from storage"
-                );
+            if fully_deleted {
+                if let Err(e) = pusher
+                    .delete_persisted_replicator(&peer_id.to_string())
+                    .await
+                {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Failed to delete replicator from storage"
+                    );
+                }
+            } else {
+                let remaining = self
+                    .handle
+                    .get_replicator(peer_id)
+                    .await
+                    .map_err(|e| P2PError::Transport(e.to_string()))?;
+                if let Some(info) = remaining {
+                    if let Err(e) = pusher
+                        .persist_replicator(&peer_id.to_string(), &info.collections)
+                        .await
+                    {
+                        tracing::warn!(
+                            peer_id = %peer_id,
+                            error = %e,
+                            "Failed to update persisted replicator"
+                        );
+                    }
+                }
             }
         }
 
