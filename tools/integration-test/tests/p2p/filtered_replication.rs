@@ -2932,3 +2932,145 @@ async fn rust_filtered_replication_retry_respects_filter() {
         "the non-matching doc must NOT be delivered on the retry/recovery path, found: {ids:?}"
     );
 }
+
+/// #1038 Gap 2: the filter must survive a SOURCE-node restart. On startup the
+/// replicator-restore loop reloads persisted `ReplicatorInfo` into the in-memory
+/// swarm registry; if it reloads only the collections (dropping `.filters`), the
+/// restored replicator becomes push-everything and leaks non-matching documents.
+/// This kills and restarts the SOURCE (node0), then proves the restored
+/// replicator both still pushes matching docs AND still excludes non-matching ones.
+#[tokio::test]
+async fn rust_filtered_replication_source_restart_preserves_filter() {
+    // Keyring => stable peer identity across restart; redb => persistent
+    // peerstore/data so the persisted replicator (and its filter) survive.
+    let mut cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_keyring()
+        .with_store("redb")
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+    add_filtered_replicator(&cluster, 0, &["AgentDoc"], &addr1, "agent_did", ALICE);
+
+    // A matching doc delivered while both nodes are up proves live filtered
+    // replication works before the restart.
+    let live = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "live-match"}}) {{ _docID }} }}"#
+        ))
+        .expect("create live matching doc");
+    let live_id = extract_doc_id(&live, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let live_poll = live_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(live_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "live matching doc did not replicate before source restart",
+    )
+    .await;
+
+    // Restart the SOURCE node. On startup node0 reloads its persisted replicator
+    // (the path under test) into the swarm registry.
+    cluster.nodes[0].process.kill();
+    cluster
+        .restart_node(0, Duration::from_secs(60))
+        .await
+        .expect("restart node0");
+    cluster
+        .wait_for_log(0, "p2p_listening", P2P_TIMEOUT)
+        .await
+        .expect("node0 P2P after restart");
+
+    // Ephemeral transport state is lost on restart; re-establish the connection so
+    // the restored replicator has a live channel to push over.
+    let addr1_after = extract_p2p_addr(&cluster, 1);
+    cluster
+        .client(0)
+        .p2p_connect(&[&addr1_after])
+        .expect("reconnect 0->1 after source restart");
+
+    // After restart create a NON-MATCHING (BOB) doc, then a MATCHING (ALICE) doc as
+    // a delivery/ordering barrier. With the bug the restored replicator has no
+    // filter, so BOB leaks; with the fix BOB is excluded.
+    let node0_after = cluster.client(0);
+    let skip = node0_after
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{BOB}", body: "post-restart-skip"}}) {{ _docID }} }}"#
+        ))
+        .expect("create non-matching doc after restart");
+    let skip_id = extract_doc_id(&skip, "add_AgentDoc");
+
+    let after_match = node0_after
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "post-restart-match"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching anchor doc after restart");
+    let after_match_id = extract_doc_id(&after_match, "add_AgentDoc");
+
+    // The post-restart matching doc arriving proves the restored replicator is
+    // pushing again, making it a meaningful sync barrier for the absence check.
+    let recovery_deadline = P2P_TIMEOUT + Duration::from_secs(30);
+    let node1_after = cluster.client(1);
+    let match_poll = after_match_id.clone();
+    poll_until(
+        || {
+            let result = node1_after
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(match_poll.as_str()))
+            })
+        },
+        recovery_deadline,
+        P2P_POLL_INTERVAL,
+        "post-restart matching doc did not replicate (restored replicator not pushing)",
+    )
+    .await;
+
+    // The restored replicator demonstrably pushed; a short grace confirms the
+    // non-matching doc stays absent — the filter survived the source restart.
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let result = node1_after
+        .query("query { AgentDoc { _docID } }")
+        .expect("query node1 after source restart");
+    let ids: Vec<&str> = result["AgentDoc"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(|r| r["_docID"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        ids.contains(&live_id.as_str()),
+        "the live pre-restart doc must remain on node1, found: {ids:?}"
+    );
+    assert!(
+        ids.contains(&after_match_id.as_str()),
+        "the post-restart matching doc must be delivered, found: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&skip_id.as_str()),
+        "the non-matching doc must NOT be delivered after source restart, found: {ids:?}"
+    );
+}
