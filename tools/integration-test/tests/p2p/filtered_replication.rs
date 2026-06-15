@@ -2782,3 +2782,153 @@ async fn rust_filtered_replication_acp_composite_controlled_mode() {
         "ACP composite filtered peer must hold only (alice,keep) docs, found: {rows:?}"
     );
 }
+
+/// #1038 Gap 1: the filter must hold on the push-RETRY/recovery path, not only on
+/// the live push. A push to a down replicator fails and is recorded in the
+/// peerstore retry queue; the server's retry-drain loop later re-pushes via
+/// `db_merge::retry_doc`, which re-loads the document and re-applies
+/// `document_matches_filter` (so a non-matching queued doc is skipped at retry
+/// time). This drives that path by killing node1 while node0 enqueues both a
+/// matching and a non-matching doc, then restarts node1 and asserts recovery
+/// delivered the matching doc while the filter still excluded the non-matching one.
+#[tokio::test]
+async fn rust_filtered_replication_retry_respects_filter() {
+    // A keyring is required so each node's libp2p peer identity is persisted and
+    // survives restart (without it the node uses an ephemeral peer key and comes
+    // back with a new peer ID, which the source node's replicator can never reach).
+    // A persistent store likewise keeps node1's prior data across the restart.
+    let mut cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_keyring()
+        .with_store("redb")
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+    add_filtered_replicator(&cluster, 0, &["AgentDoc"], &addr1, "agent_did", ALICE);
+
+    // A matching doc delivered while both nodes are up proves the live path works
+    // before we exercise recovery.
+    let live = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "live-match"}}) {{ _docID }} }}"#
+        ))
+        .expect("create live matching doc");
+    let live_id = extract_doc_id(&live, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let live_poll = live_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(live_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "live matching doc did not replicate before takedown",
+    )
+    .await;
+
+    // Take node1 down so node0's pushes fail and enter the retry queue. The push
+    // failure is what populates the retry path the filter must continue to gate.
+    cluster.nodes[1].process.kill();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // While node1 is DOWN, create both a matching and a non-matching doc on node0.
+    // Both pushes fail (peer unreachable) and are queued for retry; the filter is
+    // applied at retry time, not enqueue time.
+    let retry_match = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "retry-match"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching doc during downtime");
+    let retry_match_id = extract_doc_id(&retry_match, "add_AgentDoc");
+
+    let retry_skip = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{BOB}", body: "retry-skip"}}) {{ _docID }} }}"#
+        ))
+        .expect("create non-matching doc during downtime");
+    let retry_skip_id = extract_doc_id(&retry_skip, "add_AgentDoc");
+
+    // Bring node1 back. It reuses its rootdir and ports, so node0's persisted
+    // replicator can reconnect and the retry-drain loop can deliver.
+    cluster
+        .restart_node(1, Duration::from_secs(60))
+        .await
+        .expect("restart node1");
+    cluster
+        .wait_for_log(1, "p2p_listening", P2P_TIMEOUT)
+        .await
+        .expect("node1 P2P after restart");
+
+    // Ephemeral transport state is lost on restart; re-establish the connection so
+    // the replicator/retry-drain has a live channel to push over.
+    let addr1_after = extract_p2p_addr(&cluster, 1);
+    cluster
+        .client(0)
+        .p2p_connect(&[&addr1_after])
+        .expect("reconnect 0->1 after restart");
+
+    // The matching doc must arrive on the recovery path. A generous deadline
+    // accommodates reconnect latency plus the retry-drain interval.
+    let recovery_deadline = P2P_TIMEOUT + Duration::from_secs(30);
+    let node1_after = cluster.client(1);
+    let match_poll = retry_match_id.clone();
+    poll_until(
+        || {
+            let result = node1_after
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(match_poll.as_str()))
+            })
+        },
+        recovery_deadline,
+        P2P_POLL_INTERVAL,
+        "retry-match doc did not arrive on the recovery path after restart",
+    )
+    .await;
+
+    // The matching doc arriving is the sync barrier: the recovery path has run.
+    // A short grace confirms the non-matching doc stays absent — the filter held
+    // on the retry/recovery path.
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let result = node1_after
+        .query("query { AgentDoc { _docID } }")
+        .expect("query node1 after recovery");
+    let ids: Vec<&str> = result["AgentDoc"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(|r| r["_docID"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        ids.contains(&live_id.as_str()),
+        "the live pre-takedown doc must remain on node1, found: {ids:?}"
+    );
+    assert!(
+        ids.contains(&retry_match_id.as_str()),
+        "the matching doc must be delivered on the recovery path, found: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&retry_skip_id.as_str()),
+        "the non-matching doc must NOT be delivered on the retry/recovery path, found: {ids:?}"
+    );
+}
