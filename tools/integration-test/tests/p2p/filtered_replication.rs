@@ -188,8 +188,9 @@ async fn filtered_excludes_nonmatching(cluster: TestCluster) {
 
     // Confirm the predicate landed in the persisted replicator record, read via
     // the HTTP API (wire-format coverage for the Rust-only `Filters` extension).
-    // NOTE: the CLI `replicator list` deserializer (`P2pReplicatorInfo`) does not
-    // carry a `filters` field, so this must be asserted over HTTP, not the CLI.
+    // `P2pReplicatorInfo` now also carries the `Filters` field, so the CLI
+    // `replicator list` path is asserted separately in
+    // `rust_filtered_replication_cli_list_renders_filter`.
     let listed: serde_json::Value =
         reqwest::get(format!("{}/api/v0/p2p/replicators", cluster.api_url(0)))
             .await
@@ -2046,5 +2047,195 @@ async fn rust_filtered_replication_in_set_iroh() {
     assert!(
         !dids.iter().any(|d| d == BOB),
         "bob must be excluded by iroh IN-set filter, found: {dids:?}"
+    );
+}
+
+/// Gap 2: deleting a filtered replicator must stop further filtered pushes. A
+/// matching doc created BEFORE the delete replicates; a matching doc created
+/// AFTER the delete must not, even though it satisfies the (now-removed) filter.
+#[tokio::test]
+async fn rust_filtered_replication_delete_stops_push() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+    add_filtered_replicator(&cluster, 0, &["AgentDoc"], &addr1, "agent_did", ALICE);
+
+    // A matching doc created while the replicator is live must replicate.
+    let before = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "before-delete"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching doc before delete");
+    let before_id = extract_doc_id(&before, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let before_id_poll = before_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(before_id_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "matching doc did not replicate before replicator delete",
+    )
+    .await;
+
+    // Delete the replicator (try full multiaddr first, then bare peer ID).
+    let peer_id = addr1.rsplit("/p2p/").next().unwrap_or(&addr1);
+    node0
+        .p2p_replicator_delete(&["AgentDoc"], Some(&addr1))
+        .or_else(|_| node0.p2p_replicator_delete(&["AgentDoc"], Some(peer_id)))
+        .expect("p2p_replicator_delete");
+
+    // A NEW matching doc created after the delete must NOT arrive. With no
+    // replicator left there is no ordering anchor, so absence is confirmed over
+    // the fixed ABSENCE_GRACE window (the push pipeline already proved live above).
+    let after = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "after-delete"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching doc after delete");
+    let after_id = extract_doc_id(&after, "add_AgentDoc");
+
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let result = node1
+        .query("query { AgentDoc { _docID } }")
+        .expect("query node1 after delete");
+    let ids: Vec<&str> = result["AgentDoc"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(|r| r["_docID"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        ids.contains(&before_id.as_str()),
+        "the pre-delete doc must remain on node1, found: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&after_id.as_str()),
+        "a matching doc created after replicator delete must NOT be pushed, found: {ids:?}"
+    );
+}
+
+/// Gap 5/6: a rich `Conditions` predicate created over the direct HTTP
+/// `POST /api/v0/p2p/replicators` endpoint must round-trip structurally through
+/// the `GET` list response (no P2P replication exercised — pure wire-format
+/// coverage for the create -> list rich-predicate seam).
+#[tokio::test]
+async fn rust_filtered_replication_http_conditions_roundtrip() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 1).await;
+    cluster.client(0).schema_add(AGENT_SCHEMA).expect("schema");
+
+    let conditions = serde_json::json!({"agent_did": {"_in": [ALICE, CAROL]}});
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/v0/p2p/replicators", cluster.api_url(0)))
+        .json(&serde_json::json!({
+            "Collections": ["AgentDoc"],
+            "Addresses": [DUMMY_PEER_ADDR],
+            "Filters": {"AgentDoc": {"Conditions": conditions}}
+        }))
+        .send()
+        .await
+        .expect("POST replicators with rich Conditions");
+    assert!(
+        resp.status().is_success(),
+        "rich-Conditions replicator add failed: {}",
+        resp.status()
+    );
+
+    let listed: serde_json::Value =
+        reqwest::get(format!("{}/api/v0/p2p/replicators", cluster.api_url(0)))
+            .await
+            .expect("GET replicators")
+            .json()
+            .await
+            .expect("parse replicators json");
+
+    let entry = listed
+        .as_array()
+        .and_then(|arr| arr.first())
+        .expect("at least one replicator listed");
+    let filters = entry["Filters"]
+        .as_object()
+        .expect("replicator must carry a Filters object");
+    // The Filters key may be the resolved collection-id rather than the name.
+    let (_collection, filter) = filters
+        .iter()
+        .next()
+        .expect("Filters object must have exactly one entry");
+    assert_eq!(
+        filter["Conditions"], conditions,
+        "rich predicate must round-trip through the HTTP list intact, got: {listed}"
+    );
+}
+
+/// Gap 7: the CLI `replicator list` must render a rich `Conditions` predicate
+/// structurally (not just as an opaque blob). Proves `P2pReplicatorInfo` carries
+/// and re-serializes the `Filters` field.
+#[tokio::test]
+async fn rust_filtered_replication_cli_list_renders_filter() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 1).await;
+    cluster.client(0).schema_add(AGENT_SCHEMA).expect("schema");
+
+    let conditions = serde_json::json!({"agent_did": {"_in": [ALICE, BOB]}});
+    let filter_json = serde_json::to_string(&conditions).unwrap();
+    let out = run_replicator_add_filter(&cluster, 0, &["AgentDoc"], DUMMY_PEER_ADDR, &filter_json);
+    assert!(
+        out.status.success(),
+        "CLI rich-filter replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let listed = cluster
+        .client(0)
+        .p2p_replicator_list()
+        .expect("p2p_replicator_list");
+
+    let entry = listed
+        .as_array()
+        .and_then(|arr| arr.first())
+        .expect("CLI must list at least one replicator");
+    let filters = entry["Filters"]
+        .as_object()
+        .expect("CLI replicator list must render a Filters object");
+    let (_collection, filter) = filters
+        .iter()
+        .next()
+        .expect("Filters object must have exactly one entry");
+    assert_eq!(
+        filter["Conditions"], conditions,
+        "CLI replicator list must render the rich predicate structurally, got: {listed}"
     );
 }

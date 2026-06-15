@@ -420,6 +420,33 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_peer_collections_by_name_vs_cid() {
+        // The push registry is keyed by collection CID. Removing by the collection
+        // NAME must NOT clear the peer (it never matches the stored CID) — this is
+        // exactly the divergence the adapter's name->CID resolution fixes. Removing
+        // by the CID does clear the peer. Regression guard for #1038.
+        let registry = ReplicatorRegistry::new();
+        let peer = random_peer_id();
+        let cid = "bafyCollectionCID".to_string();
+        let name = "AgentDoc".to_string();
+
+        registry.add_replicator(&cid, &peer);
+        assert!(registry.is_replicator(&cid, &peer));
+
+        // Buggy path: caller passed the NAME -> no match -> peer stays in push list.
+        let fully_removed = registry.remove_peer_collections(&peer, &[name]);
+        assert!(!fully_removed);
+        assert!(registry.is_replicator(&cid, &peer));
+        assert!(registry.get_replicators(&cid).contains(&peer));
+
+        // Fixed path: caller passed the resolved CID -> peer removed from push list.
+        let fully_removed = registry.remove_peer_collections(&peer, std::slice::from_ref(&cid));
+        assert!(fully_removed);
+        assert!(!registry.is_replicator(&cid, &peer));
+        assert!(registry.get_replicators(&cid).is_empty());
+    }
+
+    #[test]
     fn test_replicator_registry_get_all_peer_ids() {
         let registry = ReplicatorRegistry::new();
         let peer1 = random_peer_id();

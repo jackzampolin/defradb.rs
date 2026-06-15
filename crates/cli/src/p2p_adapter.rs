@@ -228,6 +228,18 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
         Ok(resolved)
     }
 
+    /// Resolve collection names to CIDs for removal, mirroring `add_replicator`.
+    fn resolve_collections_for_remove(&self, collections: Vec<String>) -> Vec<String> {
+        match self.doc_pusher {
+            Some(ref pusher) => {
+                defra_p2p_adapter::resolve_remove_collections(collections, |name| {
+                    pusher.get_collection_id(name)
+                })
+            }
+            None => collections,
+        }
+    }
+
     /// Pre-populate tracked documents from persisted state without re-subscribing.
     pub fn set_initial_tracked_documents(&self, docs: HashSet<String>) {
         if let Ok(mut tracked) = self.tracked_documents.write() {
@@ -662,6 +674,11 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         let parsed = p2p::parse_multiaddr_with_peer_id(addr_str)
             .map_err(|e| P2PError::InvalidInput(e.to_string()))?;
         let peer_id = parsed.peer_id;
+
+        // The push registry is keyed by collection CID, so a name passed here must be
+        // resolved to its CID to match (symmetric with add_replicator); be lenient and
+        // keep unresolved strings so a CID passed directly still works.
+        let collections = self.resolve_collections_for_remove(collections);
 
         if let Some(ref coordinator) = self.sync_coordinator {
             let transport_pid = p2p::transport::PeerId::from(peer_id);

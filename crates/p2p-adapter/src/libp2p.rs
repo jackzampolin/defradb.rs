@@ -209,6 +209,16 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             *tracked = docs;
         }
     }
+
+    /// Resolve collection names to CIDs for removal, mirroring `add_replicator`.
+    fn resolve_collections_for_remove(&self, collections: Vec<String>) -> Vec<String> {
+        match self.doc_pusher {
+            Some(ref pusher) => crate::resolve_remove_collections(collections, |name| {
+                pusher.get_collection_id(name)
+            }),
+            None => collections,
+        }
+    }
 }
 
 #[async_trait]
@@ -557,6 +567,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 P2PError::invalid_input(format!("invalid peer ID '{}': {}", addr_str, error))
             })?,
         };
+
+        // Push registry is CID-keyed; resolve names symmetric with add_replicator.
+        let collections = self.resolve_collections_for_remove(collections);
 
         let fully_deleted = if let Some(ref coordinator) = self.sync_coordinator {
             let transport_peer_id = p2p::transport::PeerId::from(peer_id);

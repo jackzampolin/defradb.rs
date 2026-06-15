@@ -200,6 +200,18 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
 
         any_sent
     }
+
+    /// Resolve collection names to CIDs for removal, mirroring `add_replicator`.
+    fn resolve_collections_for_remove(&self, collections: Vec<String>) -> Vec<String> {
+        match self.doc_pusher {
+            Some(ref pusher) => {
+                defra_p2p_adapter::resolve_remove_collections(collections, |name| {
+                    pusher.get_collection_id(name)
+                })
+            }
+            None => collections,
+        }
+    }
 }
 
 #[async_trait]
@@ -528,6 +540,9 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         let addr_str = addr.ok_or_else(|| P2PError::InvalidInput("address is required".into()))?;
         let (peer_id, _) =
             parse_public_peer_addr(addr_str).map_err(|e| P2PError::InvalidInput(e.to_string()))?;
+
+        // Push registry is CID-keyed; resolve names symmetric with add_replicator.
+        let collections = self.resolve_collections_for_remove(collections);
 
         if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
