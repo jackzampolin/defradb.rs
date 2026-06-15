@@ -883,6 +883,44 @@ fn run_replicator_add_filter(
         .expect("exec replicator add --filter")
 }
 
+/// Add a replicator with a raw query-filter conditions JSON authenticated as
+/// `identity_hex` (Controlled/ACP mode). Combines `--filter <json>` with `-i`.
+fn add_filtered_replicator_json_with_identity(
+    cluster: &TestCluster,
+    node: usize,
+    collections: &[&str],
+    addr: &str,
+    filter_json: &str,
+    identity_hex: &str,
+) {
+    let client = cluster.client(node);
+    let cols = collections.join(",");
+    let output = Command::new(client.binary_path())
+        .arg("--url")
+        .arg(socket_addr(cluster, node))
+        .args([
+            "client",
+            "-i",
+            identity_hex,
+            "p2p",
+            "replicator",
+            "add",
+            "-c",
+            &cols,
+            "--filter",
+            filter_json,
+            addr,
+        ])
+        .output()
+        .expect("exec replicator add --filter (with identity)");
+    assert!(
+        output.status.success(),
+        "rich filtered replicator add (identity) failed: status={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// IN-set predicate: only docs whose `agent_did` is in `[alice, carol]` replicate.
 ///
 /// The ordering-anchor is the carol doc created after the non-matching bob doc.
@@ -2401,5 +2439,246 @@ async fn rust_filtered_replication_backfill_iroh() {
         dids,
         vec![ALICE.to_string()],
         "iroh backfill must respect the filter, found: {dids:?}"
+    );
+}
+
+/// #1038 Gap 4: a rich `_in` predicate composed with the Controlled-mode ACP
+/// gate. The push path runs TWO independent gates in sequence — the ACP access
+/// check + creator-DID resolution, AND the replication filter. This proves an
+/// `_in` set filter and the ACP gate compose: alice+carol (in the set) replicate,
+/// bob (out of set) is excluded, all under Controlled access.
+#[tokio::test]
+async fn rust_filtered_replication_acp_in_set_controlled_mode() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    let alice = generate_identity(node0.binary_path()).expect("generate identity");
+
+    let policy = node0
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("policy node0");
+    let policy_id = policy["PolicyID"]
+        .as_str()
+        .or_else(|| policy["policyID"].as_str())
+        .expect("policy id")
+        .to_string();
+    node1
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("policy node1");
+
+    let schema = format!(
+        r#"type User @policy(id: "{policy_id}", resource: "users") {{ agent_did: String @immutable  name: String }}"#
+    );
+    node0
+        .schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("schema node0");
+    node1
+        .schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0.p2p_collection_add(&["User"]).expect("subscribe 0");
+
+    let filter_json = format!(r#"{{"agent_did":{{"_in":["{ALICE}","{CAROL}"]}}}}"#);
+    add_filtered_replicator_json_with_identity(
+        &cluster,
+        0,
+        &["User"],
+        &addr1,
+        &filter_json,
+        &alice.private_key_hex,
+    );
+
+    let mk = |did: &str, name: &str| {
+        format!(
+            r#"mutation {{ add_User(input: {{agent_did: "{did}", name: "{name}"}}) {{ _docID }} }}"#
+        )
+    };
+
+    let alice_doc = node0
+        .query_with_identity(&mk(ALICE, "a"), &alice.private_key_hex)
+        .expect("create alice doc");
+    let alice_id = extract_doc_id(&alice_doc, "add_User");
+
+    node0
+        .query_with_identity(&mk(BOB, "b"), &alice.private_key_hex)
+        .expect("create bob doc");
+
+    // CAROL is the ordering anchor: created after BOB, so once she arrives on
+    // node1 the push pipeline has provably run and BOB's absence is the filter.
+    let carol_doc = node0
+        .query_with_identity(&mk(CAROL, "c"), &alice.private_key_hex)
+        .expect("create carol doc (ordering anchor)");
+    let carol_id = extract_doc_id(&carol_doc, "add_User");
+
+    // Replicated docs are unregistered on node1, so they are public there.
+    let node1_poll = cluster.client(1);
+    let a_id = alice_id.clone();
+    let c_id = carol_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { User { _docID agent_did } }")
+                .unwrap_or_default();
+            let Some(rows) = result["User"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&a_id.as_str()) && ids.contains(&c_id.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "alice and carol did not replicate to ACP IN-set filtered peer",
+    )
+    .await;
+
+    let result = node1
+        .query("query { User { agent_did } }")
+        .expect("query node1");
+    let dids: Vec<String> = result["User"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r["agent_did"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        dids.len(),
+        2,
+        "ACP IN-set filtered peer must hold exactly 2 docs (alice + carol), found: {dids:?}"
+    );
+    assert!(
+        dids.iter().all(|d| d == ALICE || d == CAROL),
+        "ACP IN-set filtered peer must hold only alice and carol, found: {dids:?}"
+    );
+    assert!(
+        !dids.iter().any(|d| d == BOB),
+        "bob must be excluded by ACP IN-set filter, found: {dids:?}"
+    );
+}
+
+/// #1038 Gap 4: a composite AND predicate composed with the Controlled-mode ACP
+/// gate. Two filter clauses (`agent_did = alice` AND `kind = keep`) × ACP gating
+/// × creator-DID resolution — the composition most likely to hide a seam. A doc
+/// matching BOTH clauses replicates; a doc matching only one is excluded, under
+/// Controlled access.
+#[tokio::test]
+async fn rust_filtered_replication_acp_composite_controlled_mode() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    let alice = generate_identity(node0.binary_path()).expect("generate identity");
+
+    let policy = node0
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("policy node0");
+    let policy_id = policy["PolicyID"]
+        .as_str()
+        .or_else(|| policy["policyID"].as_str())
+        .expect("policy id")
+        .to_string();
+    node1
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("policy node1");
+
+    let schema = format!(
+        r#"type User @policy(id: "{policy_id}", resource: "users") {{ agent_did: String @immutable  kind: String @immutable  name: String }}"#
+    );
+    node0
+        .schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("schema node0");
+    node1
+        .schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0.p2p_collection_add(&["User"]).expect("subscribe 0");
+
+    let filter_json = format!(r#"{{"agent_did":{{"_eq":"{ALICE}"}},"kind":{{"_eq":"keep"}}}}"#);
+    add_filtered_replicator_json_with_identity(
+        &cluster,
+        0,
+        &["User"],
+        &addr1,
+        &filter_json,
+        &alice.private_key_hex,
+    );
+
+    let mk = |did: &str, kind: &str, name: &str| {
+        format!(
+            r#"mutation {{ add_User(input: {{agent_did: "{did}", kind: "{kind}", name: "{name}"}}) {{ _docID }} }}"#
+        )
+    };
+
+    let match1 = node0
+        .query_with_identity(&mk(ALICE, "keep", "m1"), &alice.private_key_hex)
+        .expect("create (alice, keep) doc");
+    let match1_id = extract_doc_id(&match1, "add_User");
+
+    node0
+        .query_with_identity(&mk(ALICE, "drop", "x1"), &alice.private_key_hex)
+        .expect("create (alice, drop) doc — matches only one clause");
+    node0
+        .query_with_identity(&mk(BOB, "keep", "x2"), &alice.private_key_hex)
+        .expect("create (bob, keep) doc — matches only one clause");
+
+    let match2 = node0
+        .query_with_identity(&mk(ALICE, "keep", "m2"), &alice.private_key_hex)
+        .expect("create second (alice, keep) anchor");
+    let match2_id = extract_doc_id(&match2, "add_User");
+
+    // Replicated docs are unregistered on node1, so they are public there.
+    let node1_poll = cluster.client(1);
+    let m1 = match1_id.clone();
+    let m2 = match2_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { User { _docID agent_did kind } }")
+                .unwrap_or_default();
+            let Some(rows) = result["User"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&m1.as_str()) && ids.contains(&m2.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "composite (alice,keep) docs did not replicate to ACP filtered peer",
+    )
+    .await;
+
+    let result = node1
+        .query("query { User { agent_did kind } }")
+        .expect("query node1");
+    let rows = result["User"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        rows.len(),
+        2,
+        "ACP composite filtered peer must hold exactly 2 (alice,keep) docs, found: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r["agent_did"].as_str() == Some(ALICE) && r["kind"].as_str() == Some("keep")),
+        "ACP composite filtered peer must hold only (alice,keep) docs, found: {rows:?}"
     );
 }
