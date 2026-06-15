@@ -542,6 +542,52 @@ mod tests {
         );
     }
 
+    // Converse of the date-like-String case: a real DateTime field must seek
+    // with Time (DateTime) bytes, not String bytes, so cursor pagination lands
+    // on the right index entry. Guards the schema-typed seek path for #1026.
+    #[test]
+    fn seek_key_uses_time_bytes_for_datetime_field() {
+        use document::NormalValue;
+        use schema::{FieldDescription, FieldKind};
+        use storage::field_value::encode_field_value;
+        use storage::keys::IndexDataStoreKey;
+
+        let idx = make_index("idx_stamp", vec![("stamp", false)], true);
+
+        let stamp_field = FieldDescription::new("1", "stamp", FieldKind::datetime());
+        let mut coll = CollectionVersion::new("test", "v1", "coll_test_001", vec![stamp_field]);
+        coll.indexes = vec![idx.clone()];
+
+        let stamp = "2026-05-29T13:06:28Z";
+        let mut keys = std::collections::BTreeMap::new();
+        keys.insert("stamp".to_string(), serde_json::json!(stamp));
+        let cursor = Cursor {
+            keys,
+            doc_id: "bae-test".to_string(),
+            direction: String::new(),
+        };
+        let order = order_asc("stamp");
+
+        let key = build_cursor_seek_key(&cursor, &order, &coll, &idx).unwrap();
+
+        let prefix = IndexDataStoreKey::index_prefix(coll.resolved_root_id(), idx.id);
+        let parsed_time = chrono::DateTime::parse_from_rfc3339(stamp).unwrap();
+        let expected = encode_field_value(prefix.clone(), &NormalValue::Time(parsed_time), false)
+            .expect("time value should encode");
+        let string_encoded =
+            encode_field_value(prefix, &NormalValue::String(stamp.to_string()), false)
+                .expect("string value should encode");
+
+        assert_eq!(
+            key, expected,
+            "seek key must use DateTime (Time) bytes for a DateTime field"
+        );
+        assert_ne!(
+            key, string_encoded,
+            "seek key must not use String bytes for a DateTime field"
+        );
+    }
+
     #[test]
     fn seek_key_preserves_null_for_schema_typed_field() {
         use document::NormalValue;
