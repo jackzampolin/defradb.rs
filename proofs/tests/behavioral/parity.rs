@@ -10,12 +10,18 @@
 //!   PATH=<go-repo>/build:$PATH cargo test -p conformance --test tla_conformance \
 //!     parity:: -- --ignored --test-threads=1 --nocapture
 //!
-//! These report (not assert) — they print each node's converged state so we can
-//! compare Go-only, Rust-only, and mixed.
+//! The `parity_samedoc_*` / `parity_delete_update_*` probes REPORT (not assert) —
+//! they print each node's converged state so we can compare Go-only, Rust-only,
+//! and mixed at a semantic-divergence point. The `parity_counter_3node_*` and
+//! `parity_indexed_lww_*` tests ASSERT: Rust must converge to the SAME value Go
+//! does (Go is the parity target). They stay `#[ignore]` (the default no-Go
+//! conformance run skips them) and are exercised by the go-compat CI step
+//! (`cargo test -p conformance --test tla_conformance parity:: -- --ignored`)
+//! with the Go binary on PATH.
 
 use crate::support;
 use defra_harness::{DefraClient, TestCluster};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn node_addr(cluster: &TestCluster, i: usize) -> String {
     let info = cluster.client(i).p2p_info().expect("p2p info");
@@ -404,4 +410,249 @@ async fn parity_samedoc_go_go() {
         .await
         .expect("go-go cluster");
     run_samedoc(cluster, "go_go", Some(1)).await;
+}
+
+fn tally_hits(node: &DefraClient) -> i64 {
+    node.query("query { Tally { hits } }").unwrap_or_default()["Tally"][0]["hits"]
+        .as_i64()
+        .unwrap_or(-1)
+}
+
+async fn poll_all_tally_hits(
+    cluster: &TestCluster,
+    nodes: usize,
+    want: i64,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if (0..nodes).all(|n| tally_hits(&cluster.client(n)) == want) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// THREE-node PCounter parity (ASSERTING): three fully-meshed nodes each `+10`
+/// must converge to `30` on every node. Go is the parity target — `go_go` must
+/// converge to 30, and a mixed Rust/Go mesh must agree. This is the cross-impl
+/// twin of `partition::convergence_concurrent_counter_3node_full_mesh_sum`: it
+/// confirms Rust's two-store counter reconcile produces the same accumulation Go
+/// does even when each delta arrives via two distinct peers of the OTHER impl.
+async fn run_counter_3node_parity(cluster: TestCluster, label: &str) {
+    let schema = "type Tally { name: String  hits: Int @crdt(type: pcounter) }";
+    let addr: Vec<String> = (0..3).map(|n| node_addr(&cluster, n)).collect();
+    for n in 0..3 {
+        cluster.client(n).schema_add(schema).expect("schema");
+        cluster.client(n).p2p_collection_add(&["Tally"]).ok();
+    }
+    for i in 0..3 {
+        for (j, peer) in addr.iter().enumerate() {
+            if i != j {
+                cluster.client(i).p2p_connect(&[peer.as_str()]).ok();
+                cluster.client(i).p2p_replicator_set(&["Tally"], peer).ok();
+            }
+        }
+    }
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_Tally(input: {name: "t", hits: 0}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_Tally"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+
+    // Barrier: every node holds the seed before any increment.
+    assert!(
+        poll_all_tally_hits(&cluster, 3, 0, Duration::from_secs(30)).await,
+        "[{label}] seed (hits=0) did not reach all three nodes"
+    );
+
+    for n in 0..3 {
+        cluster
+            .client(n)
+            .query(&format!(
+                r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: 10}}) {{ _docID }} }}"#
+            ))
+            .expect("increment");
+    }
+
+    let converged = poll_all_tally_hits(&cluster, 3, 30, Duration::from_secs(40)).await;
+    assert!(
+        converged,
+        "[{label}] did not converge to 30 on all nodes; hits = [{}, {}, {}]",
+        tally_hits(&cluster.client(0)),
+        tally_hits(&cluster.client(1)),
+        tally_hits(&cluster.client(2)),
+    );
+}
+
+/// Go<->Go<->Go 3-node counter (badger) — the parity target.
+#[ignore = "parity (asserting); needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_counter_3node_go_go() {
+    let cluster = TestCluster::builder()
+        .go_nodes(3)
+        .with_p2p()
+        .with_store("badger")
+        .with_development()
+        .build()
+        .await
+        .expect("go-go-go cluster");
+    run_counter_3node_parity(cluster, "counter_3node_go_go").await;
+}
+
+/// Mixed Rust(node0)<->Go(node1,node2) 3-node counter — a Rust creator with two
+/// Go peers in a full mesh; all must agree with Go's accumulation.
+#[ignore = "parity (asserting); needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_counter_3node_mixed() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .go_nodes(2)
+        .with_p2p()
+        .with_development()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("mixed 3-node cluster");
+    run_counter_3node_parity(cluster, "counter_3node_mixed(rust0,go1,go2)").await;
+}
+
+fn indexed_user_age(node: &DefraClient) -> i64 {
+    node.query("query { User { age } }").unwrap_or_default()["User"][0]["age"]
+        .as_i64()
+        .unwrap_or(-1)
+}
+
+fn index_count(node: &DefraClient, age: i64) -> usize {
+    node.query(&format!(
+        "query {{ User(filter: {{age: {{_eq: {age}}}}}) {{ name }} }}"
+    ))
+    .unwrap_or_default()["User"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0)
+}
+
+async fn poll_index_resolved(node: &DefraClient, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if indexed_user_age(node) == 99
+            && index_count(node, 99) == 1
+            && index_count(node, 20) == 0
+            && index_count(node, 10) == 0
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// INDEXED-LWW parity (ASSERTING): an `@index`'d LWW field updated concurrently
+/// (node0 -> 20, node1 -> 99) must, on both impls, materialize 99 AND resolve
+/// ONLY 99 through the index — no stale entry for the seed (10) or the loser
+/// (20). Cross-impl twin of `partition::convergence_indexed_lww_restart_merge`:
+/// it confirms Rust's index maintenance follows the reconciled merge exactly as
+/// Go's does. (No `@explain` honesty check here — Go and Rust print different
+/// explain shapes; the index-resolution counts are the cross-impl property.)
+async fn run_indexed_lww_parity(cluster: TestCluster, label: &str) {
+    let schema = "type User { name: String  age: Int @index }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+
+    let (a0, a1) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+    cluster.client(0).p2p_connect(&[a1.as_str()]).ok();
+    cluster.client(1).p2p_connect(&[a0.as_str()]).ok();
+    cluster.client(0).p2p_collection_add(&["User"]).ok();
+    cluster.client(1).p2p_collection_add(&["User"]).ok();
+    cluster.client(0).p2p_replicator_set(&["User"], &a1).ok();
+    cluster.client(1).p2p_replicator_set(&["User"], &a0).ok();
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 10}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_User"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+
+    // Barrier: node1 has the seed (resolvable by index) before the concurrent edits.
+    let seed_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if indexed_user_age(&cluster.client(1)) == 10 && index_count(&cluster.client(1), 10) == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < seed_deadline,
+            "[{label}] seed (age=10) did not reach node1 via index"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    // Concurrent same-field LWW: node0 -> 20, node1 -> 99. Higher value wins (99).
+    cluster
+        .client(0)
+        .query(&format!(
+            r#"mutation {{ update_User(docID: "{id}", input: {{age: 20}}) {{ _docID }} }}"#
+        ))
+        .expect("node0 age=20");
+    cluster
+        .client(1)
+        .query(&format!(
+            r#"mutation {{ update_User(docID: "{id}", input: {{age: 99}}) {{ _docID }} }}"#
+        ))
+        .expect("node1 age=99");
+
+    for n in [0usize, 1] {
+        assert!(
+            poll_index_resolved(&cluster.client(n), Duration::from_secs(40)).await,
+            "[{label}] node{n} index did not reconcile to 99-only; age={} idx99={} idx20={} idx10={}",
+            indexed_user_age(&cluster.client(n)),
+            index_count(&cluster.client(n), 99),
+            index_count(&cluster.client(n), 20),
+            index_count(&cluster.client(n), 10),
+        );
+    }
+}
+
+/// Go<->Go indexed-LWW (badger) — the parity target.
+#[ignore = "parity (asserting); needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_indexed_lww_go_go() {
+    let cluster = TestCluster::builder()
+        .go_nodes(2)
+        .with_p2p()
+        .with_store("badger")
+        .with_development()
+        .build()
+        .await
+        .expect("go-go cluster");
+    run_indexed_lww_parity(cluster, "indexed_lww_go_go").await;
+}
+
+/// Mixed Rust(node0)<->Go(node1) indexed-LWW, live — Rust seeds/loses, Go wins;
+/// both impls must resolve the winner through the index.
+#[ignore = "parity (asserting); needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_indexed_lww_mixed() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .go_nodes(1)
+        .with_p2p()
+        .with_development()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("mixed cluster");
+    run_indexed_lww_parity(cluster, "indexed_lww_mixed(rust0,go1)").await;
 }
