@@ -2239,3 +2239,167 @@ async fn rust_filtered_replication_cli_list_renders_filter() {
         "CLI replicator list must render the rich predicate structurally, got: {listed}"
     );
 }
+
+/// Iroh transport variant of `rust_filtered_replication_composite_and`: a
+/// composite `agent_did = alice AND kind = keep` predicate must gate the live
+/// push path over Iroh (defra-agent's production transport). A doc matching both
+/// arms replicates; a doc matching only one arm must be excluded.
+#[tokio::test]
+async fn rust_filtered_replication_composite_and_iroh() {
+    const AND_SCHEMA: &str =
+        "type AndDoc { agent_did: String @immutable  kind: String @immutable  seq: Int }";
+
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_iroh_transport()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AND_SCHEMA).expect("schema node0");
+    node1.schema_add(AND_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0.p2p_collection_add(&["AndDoc"]).expect("subscribe 0");
+
+    let filter_json = format!(r#"{{"agent_did":{{"_eq":"{ALICE}"}},"kind":{{"_eq":"keep"}}}}"#);
+    let out = run_replicator_add_filter(&cluster, 0, &["AndDoc"], &addr1, &filter_json);
+    assert!(
+        out.status.success(),
+        "composite AND iroh replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mk = |did: &str, kind: &str, seq: i32| {
+        format!(
+            r#"mutation {{ add_AndDoc(input: {{agent_did: "{did}", kind: "{kind}", seq: {seq}}}) {{ _docID }} }}"#
+        )
+    };
+
+    let match1 = node0
+        .query(&mk(ALICE, "keep", 1))
+        .expect("create (alice, keep, 1) doc");
+    let match1_id = extract_doc_id(&match1, "add_AndDoc");
+
+    node0
+        .query(&mk(ALICE, "drop", 2))
+        .expect("create (alice, drop) doc — matches only one arm");
+    node0
+        .query(&mk(BOB, "keep", 3))
+        .expect("create (bob, keep) doc — matches only one arm");
+
+    let match2 = node0
+        .query(&mk(ALICE, "keep", 4))
+        .expect("create second (alice, keep, 4) anchor");
+    let match2_id = extract_doc_id(&match2, "add_AndDoc");
+
+    let node1_poll = cluster.client(1);
+    let m1 = match1_id.clone();
+    let m2 = match2_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AndDoc { _docID agent_did kind } }")
+                .unwrap_or_default();
+            let Some(rows) = result["AndDoc"].as_array() else {
+                return false;
+            };
+            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
+            ids.contains(&m1.as_str()) && ids.contains(&m2.as_str())
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "composite AND matching docs did not replicate over iroh",
+    )
+    .await;
+
+    let result = node1
+        .query("query { AndDoc { agent_did kind } }")
+        .expect("query AndDoc on node1");
+    let rows = result["AndDoc"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        rows.len(),
+        2,
+        "iroh composite AND filtered peer must hold exactly 2 (alice,keep) docs, found: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r["agent_did"].as_str() == Some(ALICE) && r["kind"].as_str() == Some("keep")),
+        "iroh composite AND filtered peer must hold only (alice,keep) docs, found: {rows:?}"
+    );
+}
+
+/// Iroh transport variant of `rust_filtered_replication_backfill_respects_filter`:
+/// documents created BEFORE the replicator is added must be backfilled over Iroh,
+/// respecting the filter. This exercises the iroh backfill path
+/// (`push_existing_docs_via_transport`) with a predicate — the matching doc must
+/// arrive while the non-matching doc stays absent.
+#[tokio::test]
+async fn rust_filtered_replication_backfill_iroh() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_iroh_transport()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    // Create documents BEFORE wiring replication so delivery comes from
+    // backfill, not live push.
+    let matching = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "backfilled-iroh"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching doc");
+    let matching_id = extract_doc_id(&matching, "add_AgentDoc");
+    node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{BOB}", body: "excluded-iroh"}}) {{ _docID }} }}"#
+        ))
+        .expect("create non-matching doc");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+    add_filtered_replicator(&cluster, 0, &["AgentDoc"], &addr1, "agent_did", ALICE);
+
+    let node1_for_poll = cluster.client(1);
+    let matching_id_poll = matching_id.clone();
+    poll_until(
+        || {
+            let result = node1_for_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(matching_id_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "matching document did not backfill to filtered peer over iroh",
+    )
+    .await;
+
+    // Backfill is unordered (no "after" anchor like the live-push tests), so a
+    // short settle window remains before asserting the non-matching doc's absence.
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let dids = agent_did_values(&cluster, 1);
+    assert_eq!(
+        dids,
+        vec![ALICE.to_string()],
+        "iroh backfill must respect the filter, found: {dids:?}"
+    );
+}
