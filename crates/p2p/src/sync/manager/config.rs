@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crate::message::MAX_DOC_IDS;
+
 /// Default maximum number of concurrent DAG fetch tasks.
 ///
 /// Lowered from 16 to 4 for mobile client compatibility — 16 concurrent
@@ -10,6 +12,9 @@ pub const DEFAULT_MAX_CONCURRENT_DAG_FETCHES: usize = 4;
 
 /// Default maximum number of concurrent push tasks.
 pub const DEFAULT_MAX_CONCURRENT_PUSH_TASKS: usize = 8;
+
+/// Default maximum document IDs accepted in one DocSync request.
+pub const DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS: usize = MAX_DOC_IDS;
 
 /// Default per-peer rate limit burst capacity.
 pub const DEFAULT_RATE_LIMIT_BURST: u32 = 500;
@@ -54,6 +59,12 @@ pub struct SyncConfig {
     /// prevent resource exhaustion when many documents are created in a burst.
     pub max_concurrent_push_tasks: usize,
 
+    /// Maximum document IDs accepted in a single DocSync request.
+    ///
+    /// Keeps pull-based document sync bounded while allowing deployments to tune
+    /// static document-ID batch sizes for filtered-replication workflows.
+    pub max_doc_sync_request_doc_ids: usize,
+
     /// Per-peer rate limit burst capacity (max tokens in bucket).
     pub rate_limit_burst: u32,
 
@@ -73,6 +84,7 @@ impl Default for SyncConfig {
             event_buffer_size: 256,
             max_concurrent_dag_fetches: DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
             max_concurrent_push_tasks: DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+            max_doc_sync_request_doc_ids: DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
             rate_limit_burst: DEFAULT_RATE_LIMIT_BURST,
             rate_limit_rate: DEFAULT_RATE_LIMIT_RATE,
             rate_limit_backoff: default_rate_limit_backoff(),

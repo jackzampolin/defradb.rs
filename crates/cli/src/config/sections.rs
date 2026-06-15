@@ -318,6 +318,9 @@ pub struct NetConfig {
     /// Per-peer rate limit refill rate (tokens per second). Default: 50.
     #[serde(default = "default_rate_limit_rate")]
     pub p2p_rate_limit_rate: f64,
+    /// Max document IDs accepted in one DocSync request. Default: 1000.
+    #[serde(default = "default_max_doc_sync_request_doc_ids")]
+    pub p2p_max_doc_sync_request_doc_ids: usize,
 }
 
 fn default_max_msg_size() -> u64 {
@@ -350,6 +353,9 @@ fn default_rate_limit_burst() -> u32 {
 fn default_rate_limit_rate() -> f64 {
     50.0
 }
+fn default_max_doc_sync_request_doc_ids() -> usize {
+    p2p::sync::DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS
+}
 fn default_true() -> bool {
     true
 }
@@ -381,6 +387,7 @@ impl Default for NetConfig {
             iroh_bind_addr: None,
             p2p_rate_limit_burst: default_rate_limit_burst(),
             p2p_rate_limit_rate: default_rate_limit_rate(),
+            p2p_max_doc_sync_request_doc_ids: default_max_doc_sync_request_doc_ids(),
         }
     }
 }

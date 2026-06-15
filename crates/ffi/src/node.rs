@@ -244,6 +244,11 @@ fn resolve_embedded_config(
         } else {
             None
         },
+        max_doc_sync_request_doc_ids: if options.max_doc_sync_request_doc_ids > 0 {
+            Some(options.max_doc_sync_request_doc_ids)
+        } else {
+            None
+        },
         rate_limit_burst: if options.rate_limit_burst > 0 {
             Some(options.rate_limit_burst)
         } else {

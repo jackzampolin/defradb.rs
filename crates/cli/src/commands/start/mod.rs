@@ -213,6 +213,10 @@ pub struct StartArgs {
     #[arg(long)]
     pub p2p_rate_limit_rate: Option<f64>,
 
+    /// Max document IDs accepted in one DocSync request. Default: 1000.
+    #[arg(long)]
+    pub p2p_max_doc_sync_request_doc_ids: Option<usize>,
+
     /// P2P transport backend: "libp2p" (default) or "iroh"
     #[arg(long)]
     pub p2p_transport: Option<String>,
@@ -435,6 +439,9 @@ impl StartArgs {
         }
         if let Some(rate) = self.p2p_rate_limit_rate {
             config.net.p2p_rate_limit_rate = rate;
+        }
+        if let Some(max) = self.p2p_max_doc_sync_request_doc_ids {
+            config.net.p2p_max_doc_sync_request_doc_ids = max;
         }
         if let Some(ref transport) = self.p2p_transport {
             config.net.transport = transport.parse()?;

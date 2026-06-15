@@ -8,7 +8,7 @@ use super::super::authorizer::AccessAuthorizer;
 use super::super::dag_context::{block_context_from_data, DagFetchContext};
 use super::super::SyncCoordinator;
 use crate::error::{Error, Result};
-use crate::message::{DocSyncItem, DocSyncReply, MAX_DOC_IDS};
+use crate::message::{DocSyncItem, DocSyncReply};
 use crate::signing::sign_with_transport;
 use crate::transport::{P2PTransport, PeerId};
 
@@ -128,17 +128,18 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     ) -> Result<()> {
         self.check_peer_is_replicator(&peer_id).await?;
 
-        if request.doc_ids.len() > MAX_DOC_IDS {
+        let max_doc_ids = self.runtime.max_doc_sync_request_doc_ids;
+        if request.doc_ids.len() > max_doc_ids {
             tracing::warn!(
                 peer_id = %peer_id,
                 doc_ids_count = request.doc_ids.len(),
-                max = MAX_DOC_IDS,
-                "DocSyncRequest exceeds MAX_DOC_IDS limit, rejecting"
+                max = max_doc_ids,
+                "DocSyncRequest exceeds configured doc ID limit, rejecting"
             );
             return Err(Error::InvalidConfig(format!(
                 "DocSyncRequest contains {} doc IDs, exceeding the limit of {}",
                 request.doc_ids.len(),
-                MAX_DOC_IDS,
+                max_doc_ids,
             )));
         }
 

@@ -218,6 +218,8 @@ pub struct NodeInitOptions {
     pub max_concurrent_dag_fetches: usize,
     /// Maximum concurrent push tasks. 0 means use default.
     pub max_concurrent_push_tasks: usize,
+    /// Maximum DocSync request document IDs. 0 means use default (1000).
+    pub max_doc_sync_request_doc_ids: usize,
     /// Per-peer rate limit burst capacity. 0 means use default (500).
     pub rate_limit_burst: u32,
     /// Per-peer rate limit refill rate (tokens/sec). 0 means use default (50).
@@ -251,6 +253,7 @@ impl Default for NodeInitOptions {
             iroh_key_path: ptr::null(),
             max_concurrent_dag_fetches: 0,
             max_concurrent_push_tasks: 0,
+            max_doc_sync_request_doc_ids: 0,
             rate_limit_burst: 0,
             rate_limit_rate: 0.0,
         }

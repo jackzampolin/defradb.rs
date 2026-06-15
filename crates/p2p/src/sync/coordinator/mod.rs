@@ -84,6 +84,7 @@ use super::rate_limiter::PeerRateLimiter;
 #[cfg(test)]
 pub(crate) use super::manager::{
     DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+    DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
 };
 
 /// A push failure notification sent when a PushLog to a replicator peer fails.
@@ -259,6 +260,9 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
 
     /// Timeout for one outbound PushLog send to a replicator peer.
     pub(super) push_send_timeout: Duration,
+
+    /// Maximum document IDs accepted in a single DocSync request.
+    pub(super) max_doc_sync_request_doc_ids: usize,
 
     /// Shutdown state for coordinator-owned background tasks.
     pub(super) shutdown: SyncShutdownHandle,

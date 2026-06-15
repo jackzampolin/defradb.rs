@@ -21,8 +21,9 @@ mod process;
 
 pub use config::{
     default_rate_limit_backoff, SyncConfig, DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
-    DEFAULT_MAX_CONCURRENT_PUSH_TASKS, DEFAULT_PUSH_SEND_TIMEOUT, DEFAULT_RATE_LIMIT_BACKOFF_SECS,
-    DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RATE,
+    DEFAULT_MAX_CONCURRENT_PUSH_TASKS, DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
+    DEFAULT_PUSH_SEND_TIMEOUT, DEFAULT_RATE_LIMIT_BACKOFF_SECS, DEFAULT_RATE_LIMIT_BURST,
+    DEFAULT_RATE_LIMIT_RATE,
 };
 #[cfg(any(feature = "libp2p-transport", feature = "iroh-transport"))]
 pub(crate) use diagnostics::record_gossip_decode_failure_sample;

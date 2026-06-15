@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use super::cbor::{nullable_bytes, optional_bytes, vec_of_bytes};
 use super::traits::Message;
 
-/// Maximum number of document IDs allowed in a single DocSyncRequest.
+/// Default maximum number of document IDs allowed in a single DocSyncRequest.
 ///
-/// Enforces an upper bound to prevent memory exhaustion from malicious peers
-/// sending oversized arrays.
+/// Coordinators may lower or raise this runtime limit through
+/// `SyncConfig::max_doc_sync_request_doc_ids`.
 pub const MAX_DOC_IDS: usize = 1000;
 
 /// DocSync request message for pulling specific documents from peers.

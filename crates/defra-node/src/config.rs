@@ -107,6 +107,8 @@ pub struct P2PConfig {
     /// Maximum concurrent push tasks for sending blocks to replicators.
     /// Default: 8.
     pub max_concurrent_push_tasks: usize,
+    /// Maximum document IDs accepted in a single DocSync request. Default: 1000.
+    pub max_doc_sync_request_doc_ids: usize,
     /// Per-peer rate limit burst capacity (max tokens in bucket). Default: 500.
     pub rate_limit_burst: u32,
     /// Per-peer rate limit refill rate (tokens per second). Default: 50.
