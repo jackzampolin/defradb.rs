@@ -349,20 +349,23 @@ jobs:
           --skip go_acp_link_collection_missing_update_perm_reject
           --skip go_acp_link_collection_missing_delete_perm_reject
 
-      # Rust<->Go CONVERGENCE parity (asserting). The conformance `parity::`
-      # probes need a Go `defradb` on PATH (added by "Prepare Go DefraDB binary"
-      # above) and are `#[ignore]` so the no-Go conformance run skips them. The
-      # asserting ones (parity_counter_3node_*, parity_indexed_lww_*) require Rust
-      # to converge to the SAME value Go does; the report-only ones print mixed
-      # state. DEFRA_CONFORMANCE_BINARY points the harness at the restored Rust
+      # Rust<->Go CONVERGENCE parity (asserting). These parity tests need a Go
+      # `defradb` on PATH (added by "Prepare Go DefraDB binary" above) and are
+      # `#[ignore]` so the no-Go conformance run skips them. We select ONLY the
+      # asserting tests by name (filters after `--` are OR'd by libtest) — the
+      # report-only `parity_samedoc_*`/`parity_delete_update_*` probes are
+      # deliberately excluded: they `eprintln!` mixed state rather than assert, so
+      # in a blocking leg they add runtime and hard-fail surface without gating
+      # value. DEFRA_CONFORMANCE_BINARY points the harness at the restored Rust
       # binary (this job builds to target/ci, not target/debug).
       - name: Run go-compat conformance parity
         if: matrix.suite == 'go-compat'
         env:
           DEFRA_CONFORMANCE_BINARY: ${{ github.workspace }}/target/ci/defra
         run: >-
-          cargo test -p conformance --test tla_conformance parity::
+          cargo test -p conformance --test tla_conformance
           -- --ignored --test-threads=1
+          parity_counter_3node parity_indexed_lww
 
       - name: Run iroh integration tests
         if: matrix.suite == 'iroh'

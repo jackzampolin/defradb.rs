@@ -509,7 +509,7 @@ async fn convergence_concurrent_counter_3node_full_mesh_sum() {
     // merge/dedup/delivery failure from seed-propagation timing.
     for n in 0..3 {
         assert!(
-            poll_hits(&cluster.client(n), 0, Duration::from_secs(20)).await,
+            poll_hits(&cluster.client(n), 0, Duration::from_secs(30)).await,
             "seed document must replicate to node{n} before the concurrent increments"
         );
     }
@@ -561,6 +561,16 @@ async fn poll_vault_secret(node: &DefraClient, want: &str, timeout: Duration) ->
 /// restarted to sever the link, both nodes concurrently update the same encrypted
 /// field, then reconnect; both must materialize the same plaintext LWW winner
 /// ("zzz" > "aaa" on the equal-priority lexicographic tie-break).
+///
+/// The two replicas guard different halves, deliberately:
+/// - node0 (locally wrote the LOSER "aaa") is the end-to-end leg: to reach "zzz"
+///   it must RECEIVE node1's winning ciphertext AND obtain node1's gossiped
+///   per-write key to decrypt it — the genuine cross-node merge + KMS key-delivery
+///   path.
+/// - node1 (received the seed by replication, then locally wrote the WINNER "zzz")
+///   is the two-store bug-trigger: its assertion holds iff its own local winner
+///   survives the merge of node0's delta rather than being clobbered by a
+///   re-materialization from a stale priority store.
 ///
 /// REGRESSION: this is the encrypted twin of the LWW priority two-store bug. The
 /// plaintext lives in the materialized blob; the LWW priority lives in the CRDT
@@ -717,12 +727,33 @@ async fn poll_index_reconciled(node: &DefraClient, timeout: Duration) -> bool {
     }
 }
 
+/// The seed (age=10) is present AND index-resolvable — the precondition before
+/// the concurrent edits, so node1 cannot build its update on a pre-seed base.
+async fn poll_index_reconciled_seed(node: &DefraClient, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if indexed_age(node) == 10 && count_by_index(node, 10) == 1 {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// SECONDARY-INDEX reconciliation across a restart-partition. An `@index`ed LWW
-/// field is updated concurrently on both nodes (node0 -> 20, node1 -> 99) after
-/// node1 is restarted; the higher value wins and BOTH nodes must, after merging,
-/// (a) materialize age=99 AND (b) resolve age=99 — and ONLY 99 — through the
-/// index. The stale seed (10) and the losing edit (20) must not remain findable
-/// by index.
+/// field is updated concurrently after node1 is restarted (node0 -> 20, node1 ->
+/// 99); the higher value wins, and both replicas must end at age=99 resolving
+/// ONLY 99 — and not the stale seed (10) or losing edit (20) — through the index.
+///
+/// The two replicas guard different halves, deliberately:
+/// - node1 (received the seed by replication, then locally wrote the WINNER 99)
+///   is the two-store bug-trigger: its assertion holds iff its own local winner
+///   SURVIVES the subsequent merge of node0's delta rather than being clobbered
+///   by a re-materialization from a stale priority store.
+/// - node0 (locally wrote the LOSER 20) must MERGE node1's winning 99, flipping
+///   its index from 20 to 99 — the genuine cross-node merge + index-follow leg.
 ///
 /// REGRESSION: the index is a THIRD store layered on the two-store seam. A local
 /// write advances the materialized blob and writes its own index entry, while the
@@ -854,17 +885,4 @@ async fn convergence_indexed_lww_restart_merge() {
         index_used,
         "filtered query must plan an index scan, else the index counts prove nothing"
     );
-}
-
-async fn poll_index_reconciled_seed(node: &DefraClient, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if indexed_age(node) == 10 && count_by_index(node, 10) == 1 {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
 }

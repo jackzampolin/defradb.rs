@@ -15,9 +15,9 @@
 //! and mixed at a semantic-divergence point. The `parity_counter_3node_*` and
 //! `parity_indexed_lww_*` tests ASSERT: Rust must converge to the SAME value Go
 //! does (Go is the parity target). They stay `#[ignore]` (the default no-Go
-//! conformance run skips them) and are exercised by the go-compat CI step
-//! (`cargo test -p conformance --test tla_conformance parity:: -- --ignored`)
-//! with the Go binary on PATH.
+//! conformance run skips them) and are exercised by the go-compat CI step, which
+//! selects ONLY the asserting tests by name (`-- --ignored parity_counter_3node
+//! parity_indexed_lww`) with the Go binary on PATH.
 
 use crate::support;
 use defra_harness::{DefraClient, TestCluster};
@@ -447,13 +447,24 @@ async fn run_counter_3node_parity(cluster: TestCluster, label: &str) {
     let addr: Vec<String> = (0..3).map(|n| node_addr(&cluster, n)).collect();
     for n in 0..3 {
         cluster.client(n).schema_add(schema).expect("schema");
-        cluster.client(n).p2p_collection_add(&["Tally"]).ok();
+        cluster
+            .client(n)
+            .p2p_collection_add(&["Tally"])
+            .expect("subscribe");
     }
+    // Fail fast on a wiring error rather than degrade into a converge-deadline
+    // timeout (a swallowed setup failure would look like non-convergence).
     for i in 0..3 {
         for (j, peer) in addr.iter().enumerate() {
             if i != j {
-                cluster.client(i).p2p_connect(&[peer.as_str()]).ok();
-                cluster.client(i).p2p_replicator_set(&["Tally"], peer).ok();
+                cluster
+                    .client(i)
+                    .p2p_connect(&[peer.as_str()])
+                    .expect("connect");
+                cluster
+                    .client(i)
+                    .p2p_replicator_set(&["Tally"], peer)
+                    .expect("replicator");
             }
         }
     }
@@ -562,20 +573,50 @@ async fn poll_index_resolved(node: &DefraClient, timeout: Duration) -> bool {
 /// ONLY 99 through the index — no stale entry for the seed (10) or the loser
 /// (20). Cross-impl twin of `partition::convergence_indexed_lww_restart_merge`:
 /// it confirms Rust's index maintenance follows the reconciled merge exactly as
-/// Go's does. (No `@explain` honesty check here — Go and Rust print different
-/// explain shapes; the index-resolution counts are the cross-impl property.)
-async fn run_indexed_lww_parity(cluster: TestCluster, label: &str) {
+/// Go's does.
+///
+/// `rust_explain_node` names the Rust node (when the cluster has one) on which to
+/// assert the filter actually plans an index scan — otherwise a broken index that
+/// silently fell back to a full collection scan would still return the right
+/// counts and the assertions would prove nothing. We only check the Rust node
+/// (the regression target); Go is the trusted reference, and Go/Rust print
+/// different explain shapes so a single substring check can't span both.
+async fn run_indexed_lww_parity(
+    cluster: TestCluster,
+    label: &str,
+    rust_explain_node: Option<usize>,
+) {
     let schema = "type User { name: String  age: Int @index }";
     cluster.client(0).schema_add(schema).expect("schema node0");
     cluster.client(1).schema_add(schema).expect("schema node1");
 
+    // Fail fast on a wiring error rather than degrade into a converge-deadline
+    // timeout (a swallowed setup failure would look like non-convergence).
     let (a0, a1) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
-    cluster.client(0).p2p_connect(&[a1.as_str()]).ok();
-    cluster.client(1).p2p_connect(&[a0.as_str()]).ok();
-    cluster.client(0).p2p_collection_add(&["User"]).ok();
-    cluster.client(1).p2p_collection_add(&["User"]).ok();
-    cluster.client(0).p2p_replicator_set(&["User"], &a1).ok();
-    cluster.client(1).p2p_replicator_set(&["User"], &a0).ok();
+    cluster
+        .client(0)
+        .p2p_connect(&[a1.as_str()])
+        .expect("connect 0->1");
+    cluster
+        .client(1)
+        .p2p_connect(&[a0.as_str()])
+        .expect("connect 1->0");
+    cluster
+        .client(0)
+        .p2p_collection_add(&["User"])
+        .expect("subscribe node0");
+    cluster
+        .client(1)
+        .p2p_collection_add(&["User"])
+        .expect("subscribe node1");
+    cluster
+        .client(0)
+        .p2p_replicator_set(&["User"], &a1)
+        .expect("replicator 0->1");
+    cluster
+        .client(1)
+        .p2p_replicator_set(&["User"], &a0)
+        .expect("replicator 1->0");
 
     let created = cluster
         .client(0)
@@ -623,6 +664,20 @@ async fn run_indexed_lww_parity(cluster: TestCluster, label: &str) {
             index_count(&cluster.client(n), 10),
         );
     }
+
+    // Honesty: confirm the Rust node actually plans an index scan, so the counts
+    // above exercise index maintenance rather than a full collection scan.
+    if let Some(n) = rust_explain_node {
+        let index_used = cluster
+            .client(n)
+            .query("query @explain(type: simple) { User(filter: {age: {_eq: 99}}) { name } }")
+            .map(|v| v.to_string().to_lowercase().contains("index"))
+            .unwrap_or(false);
+        assert!(
+            index_used,
+            "[{label}] node{n} (Rust) must plan an index scan, else the index counts prove nothing"
+        );
+    }
 }
 
 /// Go<->Go indexed-LWW (badger) — the parity target.
@@ -637,7 +692,7 @@ async fn parity_indexed_lww_go_go() {
         .build()
         .await
         .expect("go-go cluster");
-    run_indexed_lww_parity(cluster, "indexed_lww_go_go").await;
+    run_indexed_lww_parity(cluster, "indexed_lww_go_go", None).await;
 }
 
 /// Mixed Rust(node0)<->Go(node1) indexed-LWW, live — Rust seeds/loses, Go wins;
@@ -654,5 +709,5 @@ async fn parity_indexed_lww_mixed() {
         .build()
         .await
         .expect("mixed cluster");
-    run_indexed_lww_parity(cluster, "indexed_lww_mixed(rust0,go1)").await;
+    run_indexed_lww_parity(cluster, "indexed_lww_mixed(rust0,go1)", Some(0)).await;
 }
