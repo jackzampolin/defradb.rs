@@ -28,7 +28,6 @@ impl super::Planner {
         // Extract limit/offset from select for passing to index scan
         let limit = select.limit.as_ref().and_then(|l| l.limit);
         let offset = select.limit.as_ref().map(|l| l.offset).unwrap_or(0);
-        let active_cursor_order_index = select_active_cursor_order_index(select, collection);
 
         // Try filter-based index selection.
         // Relation fields in the filter (e.g., `owner: {name: {_eq: "X"}}`) are
@@ -39,21 +38,6 @@ impl super::Planner {
         // match any index. This means `select_best_index` safely ignores them.
         if let Some(filter) = select.filter.as_ref() {
             if let Some(best_index) = select_best_index(filter, &collection.indexes) {
-                let provides_ordering = select
-                    .order_by
-                    .as_ref()
-                    .map(|o| can_be_ordered_by_index(o, best_index).0)
-                    .unwrap_or(false);
-
-                if !provides_ordering {
-                    if let Some((order_index, needs_reverse)) = active_cursor_order_index {
-                        return Some((
-                            order_index_scan_params(order_index, needs_reverse, None, 0),
-                            true,
-                        ));
-                    }
-                }
-
                 if let Some(params) = filter_to_index_scan(
                     filter,
                     best_index,
@@ -62,15 +46,13 @@ impl super::Planner {
                     limit,
                     offset,
                 ) {
+                    let provides_ordering = select
+                        .order_by
+                        .as_ref()
+                        .map(|o| can_be_ordered_by_index(o, best_index).0)
+                        .unwrap_or(false);
                     return Some((params, provides_ordering));
                 }
-            }
-
-            if let Some((order_index, needs_reverse)) = active_cursor_order_index {
-                return Some((
-                    order_index_scan_params(order_index, needs_reverse, None, 0),
-                    true,
-                ));
             }
         }
 
@@ -150,54 +132,6 @@ impl super::Planner {
         }
         None
     }
-}
-
-fn select_active_cursor_order_index<'a>(
-    select: &Select,
-    collection: &'a CollectionVersion,
-) -> Option<(&'a IndexDescription, bool)> {
-    if !select.is_cursor || !has_active_cursor_token(select) {
-        return None;
-    }
-
-    let order_by = select.order_by.as_ref()?;
-    if order_by.is_empty() || is_doc_id_order(order_by) {
-        return None;
-    }
-
-    collection.indexes.iter().find_map(|index| {
-        let (can_order, needs_reverse) = can_be_ordered_by_index(order_by, index);
-        if !can_order {
-            return None;
-        }
-        if order_by.conditions.len() < index.fields.len() {
-            return None;
-        }
-        Some((index, needs_reverse))
-    })
-}
-
-fn has_active_cursor_token(select: &Select) -> bool {
-    let Some(params) = select.cursor_params.as_ref() else {
-        return false;
-    };
-
-    params.after.as_ref().is_some_and(|token| !token.is_empty())
-        || params
-            .before
-            .as_ref()
-            .is_some_and(|token| !token.is_empty())
-}
-
-fn is_doc_id_order(order_by: &query_types::mapper::OrderBy) -> bool {
-    matches!(
-        order_by
-            .conditions
-            .first()
-            .and_then(|condition| condition.fields.first())
-            .map(String::as_str),
-        Some("_docID")
-    )
 }
 
 fn order_index_scan_params(

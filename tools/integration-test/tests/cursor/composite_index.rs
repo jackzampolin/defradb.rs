@@ -377,11 +377,12 @@ async fn rust_unique_composite_prefix_after_paginates_via_slow_path() {
 /// the seek bytes encoded for `idx_age`'s field positions were applied to the
 /// `idx_score` scan, producing garbage page 2 results.
 ///
-/// After the fix, active cursor pages prefer the order-supporting index, so the
-/// cursor seek applies to `idx_age` and the residual score filter is still applied
-/// after fetching rows in order.
+/// The planner must not switch from the filter index to the order index only
+/// because an `after` token is present. Keeping the same filter-first scan lets
+/// `OrderByNode` provide a stable order on every page, while cursor slow-path
+/// skipping advances past the boundary docID.
 #[tokio::test]
-async fn rust_cursor_with_filter_and_order_uses_correct_index() {
+async fn rust_cursor_with_filter_and_order_keeps_filter_index_consistent() {
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
     let node = cluster.client(0);
     node.schema_add(USER_COMPOSITE_SCHEMA)
@@ -435,15 +436,16 @@ async fn rust_cursor_with_filter_and_order_uses_correct_index() {
         .expect("endCursor present")
         .to_string();
 
-    // Page 2: continue from cursor using the age order index. The scan starts
-    // after `b`, skips `d` via the residual score filter, and returns `c`, `e`.
+    // Page 2: continue from cursor. The filter index is scanned again, the
+    // `OrderByNode` applies the same ordering as page 1, and the cursor slow
+    // path skips past `b`.
     let p2: Value = node
         .query(&format!(
         r#"{{ _cursor {{
             User(first: 2, after: "{end_cursor}", filter: {{ score: {{ _eq: 90 }} }}, order: [{{age: ASC}}]) {{ name age score }}
         }} }}"#
     ))
-        .expect("page 2 filter/order cursor should seek on order index");
+        .expect("page 2 filter/order cursor should continue after the boundary");
 
     let names2: Vec<String> = p2["_cursor"]["User"]
         .as_array()
@@ -456,4 +458,89 @@ async fn rust_cursor_with_filter_and_order_uses_correct_index() {
     for row in p2["_cursor"]["User"].as_array().unwrap() {
         assert_eq!(row["score"], Value::Number(90.into()));
     }
+}
+
+/// Regression: filtered cursor pagination must not change tie ordering between
+/// page 1 and active-token pages.
+///
+/// A previous order-index override used the filter index on page 1, then used
+/// the order index on page 2+. For non-unique order fields, page 1 ties followed
+/// filter-scan input order while later pages followed order-index docID order,
+/// which could drop or duplicate rows at the page boundary.
+#[tokio::test]
+async fn rust_filtered_cursor_order_ties_keep_page_boundary_stable() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    let node = cluster.client(0);
+    node.schema_add(USER_COMPOSITE_SCHEMA)
+        .expect("add User schema");
+
+    node.index_create("User", &["score"], Some("idx_score"), false)
+        .expect("score idx");
+    node.index_create("User", &["age"], Some("idx_age"), false)
+        .expect("age idx");
+
+    for (name, age, score) in [
+        ("a", 40, 80),
+        ("b", 50, 80),
+        ("c", 50, 85),
+        ("d", 50, 90),
+        ("e", 50, 95),
+        ("f", 60, 100),
+    ] {
+        let mutation = format!(
+            r#"mutation {{ add_User(input: {{ name: "{name}", age: {age}, score: {score} }}) {{ _docID }} }}"#
+        );
+        node.query(&mutation).expect("seed");
+    }
+
+    let all: Value = node
+        .query(
+            r#"{ _cursor {
+            User(first: 6, filter: { score: { _gte: 80 } }, order: [{age: ASC}]) { name }
+        } }"#,
+        )
+        .expect("baseline filtered order");
+    let expected: Vec<String> = all["_cursor"]["User"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(expected.len(), 6);
+
+    let p1: Value = node
+        .query(
+            r#"{ _cursor {
+            User(first: 3, filter: { score: { _gte: 80 } }, order: [{age: ASC}]) { name }
+            _pageInfo { endCursor hasNext }
+        } }"#,
+        )
+        .expect("page 1");
+    assert_eq!(p1["_cursor"]["_pageInfo"]["hasNext"], Value::Bool(true));
+    let end_cursor = p1["_cursor"]["_pageInfo"]["endCursor"]
+        .as_str()
+        .expect("endCursor present")
+        .to_string();
+
+    let p2: Value = node
+        .query(&format!(
+            r#"{{ _cursor {{
+            User(first: 3, after: "{end_cursor}", filter: {{ score: {{ _gte: 80 }} }}, order: [{{age: ASC}}]) {{ name }}
+        }} }}"#
+        ))
+        .expect("page 2");
+
+    let mut paged: Vec<String> = p1["_cursor"]["User"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(p2["_cursor"]["User"].as_array().unwrap())
+        .map(|u| u["name"].as_str().unwrap().to_string())
+        .collect();
+    paged.truncate(expected.len());
+
+    assert_eq!(
+        paged, expected,
+        "paginated tie order must match the no-token filtered order"
+    );
 }
