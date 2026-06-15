@@ -544,28 +544,58 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         // Push registry is CID-keyed; resolve names symmetric with add_replicator.
         let collections = self.resolve_collections_for_remove(collections);
 
-        if let Some(ref coordinator) = self.sync_coordinator {
+        let fully_deleted = if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
                 .remove_replicator_collections(&peer_id, collections)
                 .await
-                .map_err(|e| P2PError::Transport(e.to_string()))?;
+                .map_err(|e| P2PError::Transport(e.to_string()))?
         } else {
             self.transport
                 .delete_replicator(&peer_id)
                 .await
                 .map_err(|e| P2PError::Transport(e.to_string()))?;
-        }
+            true
+        };
 
+        // Reconcile the peerstore with the registry: wipe the peer entry only on a
+        // full removal, else re-persist the remaining collections (preserving their
+        // filters) so `replicator list` and post-restart restore stay consistent.
         if let Some(ref pusher) = self.doc_pusher {
-            if let Err(e) = pusher
-                .delete_persisted_replicator(&peer_id.to_string())
-                .await
-            {
-                tracing::warn!(
-                    peer_id = %peer_id,
-                    error = %e,
-                    "Failed to delete replicator from storage"
-                );
+            if fully_deleted {
+                if let Err(e) = pusher
+                    .delete_persisted_replicator(&peer_id.to_string())
+                    .await
+                {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Failed to delete replicator from storage"
+                    );
+                }
+            } else {
+                let remaining = if let Some(ref coordinator) = self.sync_coordinator {
+                    coordinator
+                        .get_replicator(&peer_id)
+                        .await
+                        .map_err(|e| P2PError::Transport(e.to_string()))?
+                } else {
+                    self.transport
+                        .get_replicator(&peer_id)
+                        .await
+                        .map_err(|e| P2PError::Transport(e.to_string()))?
+                };
+                if let Some(info) = remaining {
+                    if let Err(e) = pusher
+                        .persist_replicator(&peer_id.to_string(), &info.collections)
+                        .await
+                    {
+                        tracing::warn!(
+                            peer_id = %peer_id,
+                            error = %e,
+                            "Failed to update persisted replicator"
+                        );
+                    }
+                }
             }
         }
 

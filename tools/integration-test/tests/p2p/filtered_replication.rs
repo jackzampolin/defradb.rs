@@ -3074,3 +3074,168 @@ async fn rust_filtered_replication_source_restart_preserves_filter() {
         "the non-matching doc must NOT be delivered after source restart, found: {ids:?}"
     );
 }
+
+/// Add a (non-filtered) replicator covering multiple collections via the CLI.
+fn run_replicator_add_plain(
+    cluster: &TestCluster,
+    node: usize,
+    collections: &[&str],
+    addr: &str,
+) -> std::process::Output {
+    let client = cluster.client(node);
+    let cols = collections.join(",");
+    Command::new(client.binary_path())
+        .arg("--url")
+        .arg(socket_addr(cluster, node))
+        .args(["client", "p2p", "replicator", "add", "-c", &cols, addr])
+        .output()
+        .expect("exec plain replicator add")
+}
+
+async fn list_replicators_http(cluster: &TestCluster, node: usize) -> serde_json::Value {
+    reqwest::get(format!("{}/api/v0/p2p/replicators", cluster.api_url(node)))
+        .await
+        .expect("GET replicators")
+        .json()
+        .await
+        .expect("parse replicators json")
+}
+
+/// #1038 two-store divergence: a PARTIAL `replicator delete -c <one>` on a
+/// multi-collection replicator removes only that collection from the in-memory
+/// push registry, but the CLI adapter must ALSO re-persist the remaining
+/// collections to the peerstore — not wipe the whole peer entry. On the buggy
+/// code the peerstore is deleted unconditionally, so `replicator list` (read from
+/// the peerstore) shows the peer GONE while push still serves the survivor, and
+/// the survivor silently stops after a restart. The fix mirrors the embedded
+/// adapter: delete the peerstore entry only on FULL removal, else re-persist the
+/// remaining collections.
+#[tokio::test]
+async fn rust_filtered_replication_partial_delete_keeps_remaining() {
+    const OTHER_SCHEMA: &str = "type OtherDoc { body: String }";
+
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0
+        .schema_add(AGENT_SCHEMA)
+        .expect("AgentDoc schema node0");
+    node1
+        .schema_add(AGENT_SCHEMA)
+        .expect("AgentDoc schema node1");
+    node0
+        .schema_add(OTHER_SCHEMA)
+        .expect("OtherDoc schema node0");
+    node1
+        .schema_add(OTHER_SCHEMA)
+        .expect("OtherDoc schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc", "OtherDoc"])
+        .expect("subscribe 0 to both");
+
+    // One replicator covering BOTH collections (no filter — the bug is about the
+    // peerstore re-persist branch, not predicate matching).
+    let out = run_replicator_add_plain(&cluster, 0, &["AgentDoc", "OtherDoc"], &addr1);
+    assert!(
+        out.status.success(),
+        "two-collection replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Sanity: the peer is listed with both collections.
+    let before = list_replicators_http(&cluster, 0).await;
+    let before_entry = before
+        .as_array()
+        .and_then(|arr| arr.first())
+        .expect("replicator listed before delete");
+    let before_cols = before_entry["CollectionIDs"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    assert_eq!(
+        before_cols, 2,
+        "replicator must list both collections before partial delete, got: {before}"
+    );
+
+    // PARTIAL delete: remove only AgentDoc, leaving OtherDoc.
+    let peer_id = addr1.rsplit("/p2p/").next().unwrap_or(&addr1);
+    node0
+        .p2p_replicator_delete(&["AgentDoc"], Some(&addr1))
+        .or_else(|_| node0.p2p_replicator_delete(&["AgentDoc"], Some(peer_id)))
+        .expect("partial p2p_replicator_delete");
+
+    // CORE ASSERTION: the peer must STILL be present, now with exactly one
+    // remaining collection. On the buggy code the peerstore entry is wiped, so
+    // the list is empty and this fails.
+    let after = list_replicators_http(&cluster, 0).await;
+    let after_arr = after.as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        after_arr.len(),
+        1,
+        "peer must remain after PARTIAL delete (not be wiped from peerstore), got: {after}"
+    );
+    let remaining_cols = after_arr[0]["CollectionIDs"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    assert_eq!(
+        remaining_cols, 1,
+        "exactly the survivor (OtherDoc) must remain listed, got: {after}"
+    );
+
+    // The survivor still replicates; the removed collection no longer does.
+    let other = node0
+        .query(r#"mutation { add_OtherDoc(input: {body: "survivor"}) { _docID } }"#)
+        .expect("create OtherDoc");
+    let other_id = extract_doc_id(&other, "add_OtherDoc");
+    let removed = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "removed"}}) {{ _docID }} }}"#
+        ))
+        .expect("create AgentDoc after partial delete");
+    let removed_id = extract_doc_id(&removed, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let other_id_poll = other_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { OtherDoc { _docID } }")
+                .unwrap_or_default();
+            result["OtherDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(other_id_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "survivor (OtherDoc) did not replicate after partial delete",
+    )
+    .await;
+
+    // The OtherDoc arrived (push pipeline proved live); the removed-collection
+    // doc must stay absent over the grace window.
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let result = node1
+        .query("query { AgentDoc { _docID } }")
+        .expect("query node1 AgentDoc after partial delete");
+    let agent_ids: Vec<&str> = result["AgentDoc"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(|r| r["_docID"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        !agent_ids.contains(&removed_id.as_str()),
+        "a doc in the removed collection must NOT replicate after partial delete, found: {agent_ids:?}"
+    );
+}
