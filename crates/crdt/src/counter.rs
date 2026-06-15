@@ -518,18 +518,40 @@ impl Counter {
     /// would leak dead markers into the datastore and reintroduce the dedup
     /// contract #847 removed.
     pub async fn reconcile_int64(&self, rw: &mut dyn ReaderWriter, value: i64) -> Result<()> {
-        if self.has_value(rw).await? {
-            return Ok(());
+        if !self.has_value(rw).await? {
+            return self.set_int64(rw, value).await;
         }
-        self.set_int64(rw, value).await
+        // The store is present (authoritative). For an increment-only PCounter the
+        // value can only GROW, so a present store that is BEHIND the materialized
+        // `value` can only be a PRE-FIX document whose local increments were written
+        // to the blob but never to the store — adopt the larger to migrate it. Never
+        // LOWER a present store (no clobber: under the intra-batch lag the store is
+        // ahead of the lagging blob, so value <= current is a no-op). Skipped for a
+        // decrement-capable PNCounter: a decrement legitimately lowers the value, so
+        // `value < current` is ambiguous and `max` would be wrong — there it stays
+        // strict init-if-absent.
+        if !self.allow_decrement {
+            let current = self.get_int64(rw).await?;
+            if value > current {
+                self.set_int64(rw, value).await?;
+            }
+        }
+        Ok(())
     }
 
-    /// Float64 variant of `reconcile_int64`. Init-if-absent only — see that method.
+    /// Float64 variant of `reconcile_int64` — same init-if-absent + PCounter
+    /// migrate-via-max semantics. See that method.
     pub async fn reconcile_float64(&self, rw: &mut dyn ReaderWriter, value: f64) -> Result<()> {
-        if self.has_value(rw).await? {
-            return Ok(());
+        if !self.has_value(rw).await? {
+            return self.set_float64(rw, value).await;
         }
-        self.set_float64(rw, value).await
+        if !self.allow_decrement {
+            let current = self.get_float64(rw).await?;
+            if value > current {
+                self.set_float64(rw, value).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Whether the accumulation store (`value_key`) currently holds a value.

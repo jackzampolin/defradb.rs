@@ -132,6 +132,20 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         &self,
         blocks: &[MergeBlock],
     ) -> Result<Vec<Result<MergeOutcome, MergeError>>, MergeError> {
+        // Serialize this batch against concurrent same-doc writes/merges (#1021).
+        // The per-block `_in_txn` handlers below do NOT take the per-doc guard
+        // (they share one txn), so acquire it here for every DISTINCT doc in the
+        // batch — in SORTED doc-id order so it can never deadlock against any other
+        // guard taker (a single-doc update/merge, or another batch). Held for the
+        // whole batch txn.
+        let mut batch_doc_ids: Vec<String> = blocks.iter().map(|b| b.doc_id.clone()).collect();
+        batch_doc_ids.sort();
+        batch_doc_ids.dedup();
+        let mut _doc_guards = Vec::with_capacity(batch_doc_ids.len());
+        for doc_id in &batch_doc_ids {
+            _doc_guards.push(self.merge_queue.acquire(doc_id).await);
+        }
+
         let txn = self.db.new_txn(false).await?;
         let batch_merged: std::sync::Mutex<HashSet<Cid>> = std::sync::Mutex::new(HashSet::new());
         let batch_merged_collections: std::sync::Mutex<HashSet<Cid>> =

@@ -37,11 +37,15 @@ namespace DefraConvergence.CounterReconcile
     by considering each delta once). Mirrors `crdt::counter::apply_delta`. -/
 def mergeInto (store d : Nat) : Nat := store + d
 
-/-- Reconcile the accumulation store up to the committed blob before merging.
-    The blob is written after the store within each merge txn and only local
-    increments push it ahead, so `store ≤ committed` and adopting `committed`
-    captures exactly the pending local increments. Mirrors the unconditional
-    `Counter::reconcile_int64`. -/
+/-- SUPERSEDED MODEL (#1014 design). Models the UNCONDITIONAL reconcile-from-blob
+    `acc := committed` that the code USED to do. It is exact only *sequentially*
+    (`store ≤ committed`); under concurrency it clobbers (proven RED by
+    `proofs/tla/TwoStoreCounter`), so #1021 replaced it with the single-store design
+    proven in the post-fix section below (`Counter::reconcile_int64` is now
+    init-if-absent + PCounter migrate-via-max, NOT this). The `reconcile*` defs and
+    `reconciledMerge_exact` / `reconciled_replicas_converge` / `seedIfUninit_can_diverge`
+    theorems are retained to document why the conditional band-aid was wrong and to
+    motivate the single-store theorems — they do NOT model current code. -/
 def reconcile (committed _store : Nat) : Nat := committed
 
 /-- The buggy *conditional* band-aid: seed the store from the committed blob ONLY

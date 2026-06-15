@@ -33,6 +33,15 @@
 \* (a local apply, or a merge commit). It is independent of the stores. The headline
 \* safety property is that the materialized value equals that count — no increment is
 \* lost. `acc` is carried to mirror the code but the user-visible value is `blob`.
+\*
+\* HOW THE FIX REALIZES GREEN (#1021): the GREEN "Unified" mode here abstracts the
+\* conflict-free RMW as a re-check-and-retry. The implementation achieves the SAME
+\* no-lost-update invariant via a per-doc write lock (crates/db/src/doc_write_queue.rs,
+\* shared by the local-write and merge paths; see MergeQueue.tla) PLUS reconcile being
+\* init-if-absent (PCounter migrate-via-max), so a local write and a merge on one doc
+\* never interleave their store RMW. The conflict-retry and the lock are two
+\* realizations of the same GREEN safety story; this model checks the invariant, and
+\* MergeQueue.tla checks the per-doc serialization that the code uses to enforce it.
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS

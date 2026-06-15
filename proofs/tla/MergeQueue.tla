@@ -108,8 +108,15 @@ CanAcquire(b) ==
 \* ---- Adversary: a local user-write to a doc, concurrent with merges -----------------
 \* Models "a user updates a document while a merge is in progress" (Go merge.go comment):
 \* it bumps docVer, which makes any in-flight merge attempt (whose readVer is now stale)
-\* conflict at commit. Permitted regardless of the merge mutex (the mutex serializes
-\* merge-vs-merge, not user-vs-merge).
+\* conflict at commit. Permitted regardless of the merge mutex — modeling the conflict
+\* path, the OTHER realization of user-vs-merge safety.
+\* NOTE (#1021): in defradb.rs the lock now ALSO spans user-writes — update_impl/
+\* create_impl acquire the same per-doc DocWriteQueue guard the merge takes, so a local
+\* counter RMW and a merge on one doc are mutually serialized (not merely conflict-
+\* retried). This lock-free UserWrite therefore models the conflict-detection story
+\* (and the pre-#1021 adversary); the lock story is what the counter fix actually relies
+\* on. A future strengthening could add a PerDoc UserWrite variant that acquires
+\* lockOwner[d] to model the shared guard directly.
 UserWrite(d) ==
   /\ userWrites[d] < MaxUserWrites
   /\ docVer'     = [docVer     EXCEPT ![d] = @ + 1]
