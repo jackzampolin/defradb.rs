@@ -2274,6 +2274,95 @@ async fn rust_filtered_replication_delete_stops_push() {
     );
 }
 
+/// Iroh transport variant of `rust_filtered_replication_delete_stops_push`:
+/// deleting a filtered replicator over Iroh (defra-agent's production transport)
+/// must stop further filtered pushes. Exercises the iroh adapter's delete path
+/// end to end — name->CID resolution, coordinator/registry removal, and
+/// peerstore handling. A matching doc created BEFORE the delete replicates; a
+/// matching doc created AFTER the delete must not.
+#[tokio::test]
+async fn rust_filtered_replication_delete_stops_push_iroh() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_iroh_transport()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0");
+    add_filtered_replicator(&cluster, 0, &["AgentDoc"], &addr1, "agent_did", ALICE);
+
+    // A matching doc created while the replicator is live must replicate.
+    let before = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "before-delete"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching doc before delete");
+    let before_id = extract_doc_id(&before, "add_AgentDoc");
+
+    let node1_poll = cluster.client(1);
+    let before_id_poll = before_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(before_id_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "matching doc did not replicate before replicator delete over iroh",
+    )
+    .await;
+
+    // Delete the replicator (try full multiaddr first, then bare peer ID).
+    let peer_id = addr1.rsplit("/p2p/").next().unwrap_or(&addr1);
+    node0
+        .p2p_replicator_delete(&["AgentDoc"], Some(&addr1))
+        .or_else(|_| node0.p2p_replicator_delete(&["AgentDoc"], Some(peer_id)))
+        .expect("p2p_replicator_delete");
+
+    // A NEW matching doc created after the delete must NOT arrive. With no
+    // replicator left there is no ordering anchor, so absence is confirmed over
+    // the fixed ABSENCE_GRACE window (the push pipeline already proved live above).
+    let after = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "after-delete"}}) {{ _docID }} }}"#
+        ))
+        .expect("create matching doc after delete");
+    let after_id = extract_doc_id(&after, "add_AgentDoc");
+
+    tokio::time::sleep(ABSENCE_GRACE).await;
+    let result = node1
+        .query("query { AgentDoc { _docID } }")
+        .expect("query node1 after delete");
+    let ids: Vec<&str> = result["AgentDoc"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(|r| r["_docID"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        ids.contains(&before_id.as_str()),
+        "the pre-delete doc must remain on node1 over iroh, found: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&after_id.as_str()),
+        "a matching doc created after replicator delete must NOT be pushed over iroh, found: {ids:?}"
+    );
+}
+
 /// Gap 5/6: a rich `Conditions` predicate created over the direct HTTP
 /// `POST /api/v0/p2p/replicators` endpoint must round-trip structurally through
 /// the `GET` list response (no P2P replication exercised — pure wire-format
