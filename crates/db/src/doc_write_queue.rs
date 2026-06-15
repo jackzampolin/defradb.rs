@@ -5,16 +5,25 @@ use tokio::sync::OwnedMutexGuard;
 
 const PRUNE_THRESHOLD: usize = 10_000;
 
-/// Per-key async merge serialization queue.
+/// Per-document write serialization queue.
 ///
-/// Ensures that merges for the same document (or collection, for branchable
-/// types) are processed one at a time, while merges for different keys run
-/// in parallel. Matches Go DefraDB's `docMergeQueue`/`colMergeQueue`.
-pub struct MergeQueue {
+/// Serializes mutations that touch the same document so that a local write and
+/// a P2P merge (or two of either) never interleave their read-modify-write on a
+/// document's CRDT state. This is required for counter convergence: a local
+/// increment and an incoming merge both read-modify-write the counter
+/// accumulation store, and without per-doc serialization their txns can race in
+/// a way the underlying store's optimistic-conflict detection does not always
+/// catch, dropping increments while the commit DAG still converges (#1021).
+///
+/// The merge handler shares the DB's instance of this queue (it already holds an
+/// `Arc<DB>`), so local writes and merges contend on the same per-doc lock.
+/// Different documents proceed in parallel. Mirrors Go DefraDB's per-doc merge
+/// queue, extended to also cover local writes.
+pub struct DocWriteQueue {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
-impl Default for MergeQueue {
+impl Default for DocWriteQueue {
     fn default() -> Self {
         Self {
             locks: Mutex::new(HashMap::new()),
@@ -22,23 +31,23 @@ impl Default for MergeQueue {
     }
 }
 
-impl MergeQueue {
+impl DocWriteQueue {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Acquire the merge lock for a given key.
+    /// Acquire the write lock for a document.
     ///
-    /// Returns an owned guard that serializes access. Different keys
-    /// proceed in parallel; the same key blocks until the previous
-    /// holder drops the guard.
-    pub async fn acquire(&self, key: &str) -> OwnedMutexGuard<()> {
+    /// Returns an owned guard that serializes access. Different documents
+    /// proceed in parallel; the same document blocks until the previous holder
+    /// drops the guard.
+    pub async fn acquire(&self, doc_id: &str) -> OwnedMutexGuard<()> {
         let mutex = {
             let mut map = self.locks.lock();
             if map.len() > PRUNE_THRESHOLD {
                 map.retain(|_, v| Arc::strong_count(v) > 1);
             }
-            map.entry(key.to_string())
+            map.entry(doc_id.to_string())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
@@ -52,8 +61,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
-    async fn same_key_serializes() {
-        let queue = Arc::new(MergeQueue::new());
+    async fn same_doc_serializes() {
+        let queue = Arc::new(DocWriteQueue::new());
         let counter = Arc::new(AtomicUsize::new(0));
         let max_concurrent = Arc::new(AtomicUsize::new(0));
 
@@ -77,8 +86,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn different_keys_run_in_parallel() {
-        let queue = Arc::new(MergeQueue::new());
+    async fn different_docs_run_in_parallel() {
+        let queue = Arc::new(DocWriteQueue::new());
         let counter = Arc::new(AtomicUsize::new(0));
         let max_concurrent = Arc::new(AtomicUsize::new(0));
 

@@ -156,6 +156,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
                     .await
                     .map_err(|e| crate::error::index_write_query_error("create", e))?;
+
+                super::helpers::init_counter_stores_on_create(&datastore, &collection, &doc)
+                    .await?;
             } // datastore dropped
 
             // Insert pre-computed blocks + collection blocks

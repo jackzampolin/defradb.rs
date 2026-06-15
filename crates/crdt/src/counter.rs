@@ -496,37 +496,49 @@ impl Counter {
         Ok(MergeResult::Applied)
     }
 
-    /// Reconcile the CRDT accumulation store (`value_key`) up to the document's
-    /// current materialized value, unconditionally, before merging a remote delta.
+    /// Initialize the CRDT accumulation store (`value_key`) from the document's
+    /// current materialized value, but only if the store has no value yet.
     ///
-    /// Local increments (create AND update) store the counter value in the
-    /// document blob but never in the accumulation store. On the node that
-    /// *created* the document the accumulation store is uninitialized when the
-    /// first remote delta arrives, so it can simply adopt the blob value. But a
-    /// node that received the document by *replication* first already has an
-    /// initialized accumulation store, so a conditional "seed only if empty"
-    /// leaves its later local increment stranded in the blob — and the next
-    /// remote merge re-materializes the blob from the stale store, silently
-    /// dropping that increment.
+    /// The accumulation store (`value_key`) is the single source of truth for a
+    /// counter. Both local writes and merges apply their *delta* to it via a
+    /// read-modify-write; the document blob merely mirrors the resulting store
+    /// value. Because local writes now also advance the accumulation store, a
+    /// local increment is never "stranded in the blob" relative to the store, so
+    /// reconcile only needs to seed the store the *first* time the counter is
+    /// touched on this node — e.g. migrating an old document whose store predates
+    /// this single-store invariant, or a node that materialized the blob via a
+    /// non-counter path. Once the store has a value it is authoritative and must
+    /// never be overwritten from a possibly-stale/lagging blob.
     ///
-    /// Unconditional reconcile closes the gap. The blob is always written *after*
-    /// the accumulation store within each merge transaction, and only local
-    /// increments push the blob ahead of the store, so
-    /// `blob - store == pending local increments`. Overwriting the store with the
-    /// blob therefore captures exactly those increments and never double-counts
-    /// (the arriving delta is still deduped by the merged-set).
+    /// This is deliberately *init-if-absent*, not a value comparison: a PNCounter
+    /// allows decrements, so `blob < store` is ambiguous and `max` would be wrong.
     ///
     /// NOTE: per #847, counter merge is unconditional and there is no nonce
     /// tracking. A reconcile must never call a `mark_nonce(..)` helper — that
     /// would leak dead markers into the datastore and reintroduce the dedup
     /// contract #847 removed.
     pub async fn reconcile_int64(&self, rw: &mut dyn ReaderWriter, value: i64) -> Result<()> {
+        if self.has_value(rw).await? {
+            return Ok(());
+        }
         self.set_int64(rw, value).await
     }
 
-    /// Float64 variant of `reconcile_int64`.
+    /// Float64 variant of `reconcile_int64`. Init-if-absent only — see that method.
     pub async fn reconcile_float64(&self, rw: &mut dyn ReaderWriter, value: f64) -> Result<()> {
+        if self.has_value(rw).await? {
+            return Ok(());
+        }
         self.set_float64(rw, value).await
+    }
+
+    /// Whether the accumulation store (`value_key`) currently holds a value.
+    async fn has_value(&self, reader: &dyn Reader) -> Result<bool> {
+        Ok(reader
+            .get(&self.value_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .is_some())
     }
 
     /// Get current value bytes (for internal use)

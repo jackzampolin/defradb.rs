@@ -350,6 +350,118 @@ async fn poll_hits(node: &DefraClient, want: i64, timeout: Duration) -> bool {
     }
 }
 
+async fn poll_all_hits(cluster: &TestCluster, nodes: usize, want: i64, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if (0..nodes).all(|n| tally_hits(&cluster.client(n)) == want) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// CONCURRENT same-document merge STORM. Under heavy concurrent increments of ONE
+/// counter doc across a 3-node full mesh, every node must converge to the EXACT
+/// running sum each round — a PCounter is the exact oracle (a value below the sum
+/// means a delta was dropped, above means one was double-applied).
+///
+/// REGRESSION (#1021, the merge-queue concurrency boundary made behavioral): the
+/// counter value lived in two stores — the materialized blob and the CRDT
+/// accumulation store — and local writes advanced only the blob while merges
+/// reconciled the store FROM the blob. Under concurrency the blob was read stale
+/// (a local write racing a merge; a batch of merges reconciling from a lagging
+/// blob), dropping increments while the commit DAG still converged (identical
+/// `_commits`, divergent value). Fixed by the Go-parity single-store design: both
+/// local writes and merges apply their DELTA to the authoritative accumulation
+/// store (reconcile is init-if-absent), and a per-doc write lock
+/// (`crates/db/src/doc_write_queue.rs`, shared by the local-write and merge paths)
+/// serializes a document's writes. Modeled by `proofs/tla/TwoStoreCounter`
+/// (concurrency) + `DefraConvergence.CounterReconcile` single-store theorems
+/// (the order-independent multiset fold).
+#[tokio::test]
+async fn convergence_concurrent_same_doc_merge_storm() {
+    const NODES: usize = 3;
+    const ROUNDS: i64 = 4;
+    const BURST_PER_NODE: i64 = 4;
+
+    let cluster = TestCluster::builder()
+        .rust_nodes(NODES)
+        .with_p2p()
+        .with_store("redb")
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("build 3-node p2p cluster");
+
+    let schema = "type Tally { name: String  hits: Int @crdt(type: pcounter) }";
+    let addr: Vec<String> = (0..NODES).map(|n| node_addr(&cluster, n)).collect();
+    for n in 0..NODES {
+        cluster.client(n).schema_add(schema).expect("schema");
+        cluster
+            .client(n)
+            .p2p_collection_add(&["Tally"])
+            .expect("subscribe");
+    }
+    for i in 0..NODES {
+        for (j, peer) in addr.iter().enumerate() {
+            if i != j {
+                cluster
+                    .client(i)
+                    .p2p_connect(&[peer.as_str()])
+                    .expect("connect");
+                cluster
+                    .client(i)
+                    .p2p_replicator_set(&["Tally"], peer)
+                    .expect("replicator");
+            }
+        }
+    }
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_Tally(input: {name: "t", hits: 0}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_Tally"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    assert!(
+        poll_all_hits(&cluster, NODES, 0, Duration::from_secs(30)).await,
+        "seed (hits=0) must reach all nodes before the storm"
+    );
+
+    let mut expected = 0i64;
+    for round in 0..ROUNDS {
+        // Burst: every node fires BURST_PER_NODE single increments at the same doc
+        // back-to-back, so NODES*BURST_PER_NODE same-doc deltas are merging
+        // concurrently across the mesh within the round.
+        for _ in 0..BURST_PER_NODE {
+            for n in 0..NODES {
+                cluster
+                    .client(n)
+                    .query(&format!(
+                        r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: 1}}) {{ _docID }} }}"#
+                    ))
+                    .expect("increment");
+            }
+        }
+        expected += NODES as i64 * BURST_PER_NODE;
+
+        // EXACT-SUM BARRIER: a dropped delta lands below `expected`, a
+        // double-applied one above it; only the exact value passes.
+        if !poll_all_hits(&cluster, NODES, expected, Duration::from_secs(40)).await {
+            let got: Vec<i64> = (0..NODES).map(|n| tally_hits(&cluster.client(n))).collect();
+            panic!(
+                "round {round}: nodes did not all reach exactly {expected} (no loss, no double-apply); hits = {got:?}"
+            );
+        }
+    }
+}
+
 /// Concurrent PCounter increments must converge to the SUM. Two nodes share a
 /// `hits=0` document over a live bidirectional connection; each increments by 45,
 /// concurrently; both must converge to 90.

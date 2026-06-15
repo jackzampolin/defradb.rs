@@ -1,4 +1,4 @@
-use super::helpers::ensure_collection_is_active;
+use super::helpers::{ensure_collection_is_active, init_counter_stores_on_create};
 use super::*;
 
 #[allow(clippy::type_complexity)]
@@ -47,6 +47,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution("document should have ID after generation")
         })?;
 
+        // Serialize this create against concurrent merges/writes on the same
+        // document so counter accumulation-store seeding cannot race (#1021).
+        let _doc_guard = self.db.doc_write_queue().acquire(&doc_id.to_string()).await;
+
         // Execute the mutation in a block to drop datastore before commit
         let result = {
             let datastore = txn.datastore().map_err(|e| {
@@ -73,10 +77,18 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
             // Use create_with_indexes to enforce unique constraints and maintain indexes.
             // Blind create skips existence check for content-addressed (generated) IDs.
-            collection
+            let created = collection
                 .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
                 .await
-                .map_err(|e| crate::error::index_write_query_error("create", e))
+                .map_err(|e| crate::error::index_write_query_error("create", e));
+
+            // Seed the authoritative CRDT accumulation store for counter fields so
+            // it is authoritative from creation (#1021 single-store invariant).
+            if created.is_ok() {
+                init_counter_stores_on_create(&datastore, &collection, &doc).await?;
+            }
+
+            created
         };
 
         match result {

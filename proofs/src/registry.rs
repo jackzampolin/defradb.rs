@@ -168,16 +168,21 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral],
     },
     Property {
-        // Same-doc merge serialization is a race: forcing two concurrent merges
-        // of one document deterministically needs two peers pushing conflicting
-        // heads at once, and the txn-registry sweep is internal — neither is
-        // deterministically drivable through the public CLI. Structural.
+        // No-loss / no-double-apply under concurrent same-document mutation is now
+        // BEHAVIORAL: `partition::convergence_concurrent_same_doc_merge_storm`
+        // storms one PCounter doc from a 3-node mesh and asserts the exact sum
+        // (below => a delta dropped, above => double-applied). This found and fixed
+        // #1021's residual two-store counter race — local writes and merges both
+        // RMW the authoritative accumulation store, serialized per-doc by
+        // `crates/db/src/doc_write_queue.rs` (shared by the local-write and merge
+        // paths). The internal `INV_SameDocSerialized` "≤1 worker in the critical
+        // section" + the txn-registry sweep remain a structural Boundary.
         family: "Transaction & merge-queue concurrency",
-        name: "INV_SameDocSerialized — per-doc merge serialized, no loss/double-apply",
+        name: "INV_NoLoss / INV_NoDoubleApply under concurrent same-doc mutation",
         axis: Tla,
-        anchor: "crates/db txn registry; crates/db-merge merge queue",
-        model_ref: "MC_MergeQueue_Green.cfg / MC_TxnRegistry_Green.cfg",
-        tiers: &[Boundary],
+        anchor: "crates/db/src/doc_write_queue.rs (per-doc write lock, shared with crates/db-merge merge handler); crates/db txn registry",
+        model_ref: "MC_MergeQueue_Green.cfg / MC_TxnRegistry_Green.cfg / MC_TwoStoreCounter_Green.cfg",
+        tiers: &[Behavioral, Boundary],
     },
     Property {
         // The DID-binding half (a distinct identity cannot impersonate another)

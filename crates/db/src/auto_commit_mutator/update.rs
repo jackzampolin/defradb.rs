@@ -1,4 +1,4 @@
-use super::helpers::ensure_collection_is_active;
+use super::helpers::{apply_local_counter_deltas, ensure_collection_is_active};
 use super::*;
 
 #[allow(clippy::type_complexity)]
@@ -36,6 +36,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             modified_fields.insert(field);
         }
 
+        // Serialize this write against concurrent merges (and other local writes)
+        // touching the same document. Local counter increments and P2P merges both
+        // read-modify-write the CRDT accumulation store; without this per-doc lock
+        // their txns can race in a way the store's optimistic-conflict detection
+        // does not always catch, dropping increments (#1021). The guard is held
+        // across the whole write + commit.
+        let _doc_guard = match doc.id() {
+            Some(id) => Some(self.db.doc_write_queue().acquire(&id.to_string()).await),
+            None => None,
+        };
+
         // Create a write transaction
         let txn = self.db.new_txn(false).await.map_err(|e| {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
@@ -69,6 +80,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 )
                 .await
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
+            // Apply counter increments to the authoritative CRDT accumulation
+            // store via a fresh read-modify-write, and mirror the result into the
+            // blob — overriding the absolute value the query-plan layer computed
+            // from a possibly-stale read (#1021). Must run before the doc blob is
+            // persisted below so the blob mirrors the store.
+            apply_local_counter_deltas(&datastore, &collection, &mut doc, false).await?;
 
             // Use update_with_indexes to maintain index consistency
             collection

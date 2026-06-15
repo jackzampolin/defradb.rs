@@ -1,8 +1,10 @@
 ---- MODULE MergeQueue ----
-\* Per-document merge-queue serialization + bounded conflict-retry, abstracting
-\* crates/db-merge/src/merge_handler/queue.rs (MergeQueue) and
+\* Per-document write serialization + bounded conflict-retry, abstracting
+\* crates/db/src/doc_write_queue.rs (DocWriteQueue, owned by the DB and shared by
+\* BOTH the local-write path and the db-merge merge handler — #1021) and
 \* crates/db-merge/src/merge_handler/batch.rs (merge_blocks_individually retry loop).
-\* Anchors are in MergeQueue_DESIGN.md.
+\* (Was crates/db-merge/src/merge_handler/queue.rs before #1021 unified local
+\* writes and merges onto one per-doc lock.) Anchors are in MergeQueue_DESIGN.md.
 \*
 \* The property: the per-doc async mutex serializes same-document merges while letting
 \* different documents run in parallel; the bounded (MaxRetries) txn-conflict retry loop
