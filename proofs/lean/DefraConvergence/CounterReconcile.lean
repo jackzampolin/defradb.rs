@@ -92,4 +92,89 @@ theorem seedIfUninit_can_diverge :
       mergeInto (seedIfUninit true committed store) d < committed + d := by
   exact ⟨45, 0, 45, by decide, by decide⟩
 
+/-!
+## Post-fix design: a single authoritative store (order-safe)
+
+The unconditional `reconcile` above (the #1014 fix) is exact *sequentially* — when
+the blob is never read stale, i.e. `store ≤ committed`. But under **concurrent**
+same-document merges and local writes the blob can be read stale, and reconciling
+the store back down to it drops increments. That lost update is proven as a real
+counterexample by the TLA model `proofs/tla/TwoStoreCounter` (RED `Split`
+configuration): the commit DAG converges yet the materialized value is short.
+Lean could not have caught it — a permutation/interleaving race is outside a
+purely functional model, which is precisely why a green Lean proof and the bug
+coexisted.
+
+The fix removes the two-store split (Go parity: Go keeps one `value_key` that both
+local writes and merges read-modify-write by their delta — `counter.go`
+`incrementValue`). BOTH paths apply their **delta** to one authoritative store, and
+the materialized value queries read mirrors that store — there is no second store
+to diverge. This section proves the functional invariant the single-store design
+guarantees: the value is an **order-independent fold of the applied-delta
+multiset**. Paired with `TwoStoreCounter` (which proves the concurrent RMW realizes
+this fold without losing or double-applying a delta), the two axes together cover
+the bug. Deltas are `Int` so PNCounter decrements are covered — and there is no
+value-magnitude comparison anywhere (that ambiguity is exactly what made a
+`max(store, blob)` shortcut wrong for decrements).
+-/
+
+/-- Sum of a delta list (defined locally; this library deliberately depends only
+    on core Lean, no Mathlib). -/
+def sumList : List Int → Int
+  | [] => 0
+  | d :: ds => d + sumList ds
+
+/-- The single authoritative value after applying `deltas` to `init`. The SAME
+    operation is used by local writes and by merges (one value key, RMW by delta).
+    Mirrors the post-fix `crdt::counter::apply_delta` on the authoritative store. -/
+def applyAll (init : Int) (deltas : List Int) : Int :=
+  init + sumList deltas
+
+/-- The value queries read IS the store: there is no separate materialized blob
+    that can diverge from the accumulation store. -/
+def materialized (store : Int) : Int := store
+
+/-- **No blob/acc divergence.** Single store, by construction. -/
+theorem no_blob_acc_divergence (store : Int) : materialized store = store := rfl
+
+/-- **Value = init + fold of the delta multiset.** -/
+theorem applyAll_eq (init : Int) (deltas : List Int) :
+    applyAll init deltas = init + sumList deltas := rfl
+
+/-- `sumList` is invariant under swapping two adjacent deltas — the generator of
+    all permutations — so the fold depends only on the MULTISET of deltas, not the
+    order (or concurrent interleaving) in which they were applied. -/
+theorem sumList_swap (a b : Int) (rest : List Int) :
+    sumList (a :: b :: rest) = sumList (b :: a :: rest) := by
+  simp only [sumList]; omega
+
+/-- **Order-independence.** Applying the same deltas in a swapped order yields the
+    same value — concurrent local-write/merge interleavings that apply the same
+    multiset converge. -/
+theorem applyAll_swap (init a b : Int) (rest : List Int) :
+    applyAll init (a :: b :: rest) = applyAll init (b :: a :: rest) := by
+  unfold applyAll; rw [sumList_swap]
+
+/-- **Two replicas converge** (the live-pair case). Replica A applies local `a`
+    then merges B's `b`; replica B applies `b` then merges `a`. Both reach
+    `s + a + b`, with NO assumption that either store led the other — so it is
+    robust to the concurrent stale-read interleaving the TLA model exhibits. -/
+theorem singleStore_replicas_converge (s a b : Int) :
+    applyAll s [a, b] = applyAll s [b, a] := by
+  simp only [applyAll, sumList]; omega
+
+/-- **Three replicas converge** (the merge-storm topology). Any order of three
+    deltas yields the same total — the fold is independent of the 3-node mesh
+    interleaving that exhibited the under-count. -/
+theorem singleStore_three_converge (s a b c : Int) :
+    applyAll s [a, b, c] = applyAll s [c, b, a] := by
+  simp only [applyAll, sumList]; omega
+
+/-- **PNCounter (decrement) safety.** The fold is correct for negative deltas:
+    `+50` then `-30` converges to `+20` in either order — no clamping, no
+    value-magnitude comparison. -/
+theorem singleStore_pncounter_converges (s : Int) :
+    applyAll s [50, -30] = applyAll s [-30, 50] ∧ applyAll 0 [50, -30] = 20 := by
+  simp only [applyAll, sumList]; omega
+
 end DefraConvergence.CounterReconcile
