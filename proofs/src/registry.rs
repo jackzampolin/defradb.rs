@@ -69,9 +69,15 @@ pub const PROPERTIES: &[Property] = &[
     },
     Property {
         family: "CRDT merge laws",
-        name: "lww/counter merge commutative+associative+idempotent",
+        // Generic CrdtField core (DefraConvergence.CrdtField): comm+assoc => the merge
+        // fold is order-independent (every field). Idempotence is the dividing line:
+        // LWW (lwwMerge) is idempotent => a join-semilattice, re-delivery-safe, no dedup
+        // (lww_dup_safe); the counter (Int +) is NOT idempotent (counter_not_idempotent)
+        // => it must apply each delta exactly once, the algebraic root of the #4935
+        // double-apply. Both fields fully instantiate the core (counterCM / lwwCM).
+        name: "CrdtField: comm+assoc => order-independent; idempotence => dedup-free (LWW) vs dedup-required (counter)",
         axis: Lean,
-        anchor: "crates/crdt/src/lww.rs set_value; crates/crdt/src/traits.rs MergeResult",
+        anchor: "crates/crdt/src/lww.rs set_value; crates/crdt/src/counter.rs; crates/crdt/src/traits.rs MergeResult",
         model_ref: "DefraConvergence (lake build)",
         tiers: &[Contract, Behavioral],
     },
@@ -177,6 +183,10 @@ pub const PROPERTIES: &[Property] = &[
         // `crates/db/src/doc_write_queue.rs` (shared by the local-write and merge
         // paths). The internal `INV_SameDocSerialized` "≤1 worker in the critical
         // section" + the txn-registry sweep remain a structural Boundary.
+        // `MC_TwoStoreCounter` proves BOTH counter hazards RED-then-GREEN: the
+        // two-store split lost-update (`MC_TwoStoreCounter_Red_Split`, INV_NoLoss) and
+        // the merged-set/is_merged double-apply (`MC_TwoStoreCounter_Red_DoubleApply`,
+        // INV_NoDoubleApply — the model twin of upstream Go #4935 / our #1043).
         family: "Transaction & merge-queue concurrency",
         name: "INV_NoLoss / INV_NoDoubleApply under concurrent same-doc mutation",
         axis: Tla,

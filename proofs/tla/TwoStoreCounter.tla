@@ -47,10 +47,12 @@ EXTENDS Naturals, FiniteSets
 CONSTANTS
   LocalOps,   \* finite set of local-write increment ids (db crate doc_mutator path)
   RemoteOps,  \* finite set of remote-merge increment ids (db-merge counter merge path)
-  StoreMode   \* "Split" | "Unified"
+  StoreMode,  \* "Split" | "Unified"   — the two-store split (lost-update axis)
+  Dedup       \* "On" | "Off"          — the per-block merged-set guard (double-apply axis)
 
 ASSUME LocalOps \cap RemoteOps = {}
 ASSUME StoreMode \in {"Split", "Unified"}
+ASSUME Dedup \in {"On", "Off"}
 
 Ops == LocalOps \cup RemoteOps
 
@@ -125,16 +127,38 @@ MergeCommit(o) ==
                    /\ acc' = blob
                    /\ UNCHANGED <<blob, doneCount, pc>>
 
-Next == \E o \in Ops : LocalApply(o) \/ MergeReconcile(o) \/ MergeCommit(o)
+\* ---- Double-apply (#4935): a remote delta RE-APPLIED. ------------------------------
+\* A counter field block delivered as its own PushLog head (or re-delivered via two
+\* channels) is merged a SECOND time. Go's `coreblock.ProcessBlock` applies the delta
+\* unconditionally; idempotency rests entirely on the blockstore merged-set / is_merged
+\* guard. With that guard OFF the re-merge re-applies the +1 (blob/acc climb) WITHOUT a
+\* new increment (doneCount unchanged) — so blob exceeds the committed count. With it ON
+\* the re-merge is skipped (no-op). This is the counter's idempotency axis, orthogonal to
+\* the two-store split above; the Lean twin is `CounterReconcile.counter_not_idempotent`.
+MergeRedeliver(o) ==
+  /\ o \in RemoteOps
+  /\ pc[o] = "done"      \* its delta was already applied once
+  /\ Dedup = "Off"       \* RED: no merged-set/is_merged guard -> the re-merge re-applies
+  /\ blob' = blob + 1
+  /\ acc' = acc + 1
+  /\ UNCHANGED <<pc, snap, doneCount>>
+
+Next == \E o \in Ops : LocalApply(o) \/ MergeReconcile(o) \/ MergeCommit(o) \/ MergeRedeliver(o)
 
 Spec == Init /\ [][Next]_vars
 
 \* ===================================================================================
-\* SAFETY: no increment is lost. The materialized value equals the number of committed
-\* increments. RED (Split) reaches blob < doneCount when a merge clobbers an
-\* interleaved local write; GREEN (Unified) holds it in every reachable state.
+\* SAFETY: the materialized value is EXACT — it equals the number of committed
+\* increments, neither short nor over. Two independent hazards can break it:
+\*   * lost update  (blob < doneCount): RED under StoreMode="Split" — a merge's
+\*     reconcile-from-blob clobbers an interleaved local increment.
+\*   * double-apply (blob > doneCount): RED under Dedup="Off" — a re-delivered delta
+\*     is merged twice (the #4935 field-block-as-head re-merge).
+\* GREEN (StoreMode="Unified", Dedup="On") holds equality in every reachable state.
 \* ===================================================================================
-INV_NoLoss == blob = doneCount
+INV_NoLoss == blob >= doneCount        \* no increment dropped (Split breaks this)
+INV_NoDoubleApply == blob <= doneCount \* no increment counted twice (Dedup=Off breaks this)
+INV_Exact == blob = doneCount          \* both directions (the headline)
 
 INV_TypeOK == TypeOK
 ====

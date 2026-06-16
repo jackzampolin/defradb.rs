@@ -1,3 +1,5 @@
+import DefraConvergence.CrdtField
+
 /-!
 # Counter reconciliation — regression guard for the same-doc counter convergence bug
 
@@ -180,5 +182,40 @@ theorem singleStore_three_converge (s a b c : Int) :
 theorem singleStore_pncounter_converges (s : Int) :
     applyAll s [50, -30] = applyAll s [-30, 50] ∧ applyAll 0 [50, -30] = 20 := by
   simp only [applyAll, sumList]; omega
+
+/-! ## Instantiating the generic CRDT-field core (`DefraConvergence.CrdtField`)
+
+The counter is the op-based regime: its merge is integer addition of deltas —
+commutative and associative (so convergence is the generic order-independent
+fold) but NOT idempotent (so it must dedup every delta exactly once). -/
+
+/-- The counter merge as a generic commutative-associative merge: integer delta
+    addition. (`Int` ⇒ PNCounter decrements are covered.) -/
+def counterCM : CrdtField.CommMerge Int where
+  merge := (· + ·)
+  comm := Int.add_comm
+  assoc := Int.add_assoc
+
+/-- Two-replica counter convergence is the generic fold theorem at `counterCM` —
+    no counter-specific reasoning. -/
+theorem counter_two_converge (s a b : Int) :
+    counterCM.merge (counterCM.merge s a) b = counterCM.merge (counterCM.merge s b) a :=
+  CrdtField.two_converge counterCM s a b
+
+/-- Three-replica (merge-storm) counter convergence, likewise inherited. -/
+theorem counter_three_converge (s a b c : Int) :
+    counterCM.merge (counterCM.merge (counterCM.merge s a) b) c
+      = counterCM.merge (counterCM.merge (counterCM.merge s c) b) a :=
+  CrdtField.three_converge counterCM s a b c
+
+/-- **The counter is NOT idempotent** (`1 + 1 ≠ 1`). By
+    `CrdtField.nonidem_has_dup_witness` this means a re-delivered delta changes the
+    value — the counter MUST apply each delta exactly once. That dedup obligation
+    is discharged by the blockstore merged-set / `is_merged` guard; its violation
+    is the upstream double-apply bug `sourcenetwork/defradb#4935`. -/
+theorem counter_not_idempotent : ¬ CrdtField.Idempotent counterCM := by
+  intro h
+  have h1 : (1 : Int) + 1 = 1 := h 1
+  omega
 
 end DefraConvergence.CounterReconcile
