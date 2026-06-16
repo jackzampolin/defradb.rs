@@ -350,10 +350,21 @@ async fn poll_hits(node: &DefraClient, want: i64, timeout: Duration) -> bool {
     }
 }
 
-async fn poll_all_hits(cluster: &TestCluster, nodes: usize, want: i64, timeout: Duration) -> bool {
+fn tally_hits_f64(node: &DefraClient) -> f64 {
+    node.query("query { Tally { hits } }").unwrap_or_default()["Tally"][0]["hits"]
+        .as_f64()
+        .unwrap_or(f64::NAN)
+}
+
+async fn poll_all_hits_exact(
+    cluster: &TestCluster,
+    nodes: usize,
+    want: f64,
+    timeout: Duration,
+) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if (0..nodes).all(|n| tally_hits(&cluster.client(n)) == want) {
+        if (0..nodes).all(|n| tally_hits_f64(&cluster.client(n)) == want) {
             return true;
         }
         if Instant::now() >= deadline {
@@ -363,50 +374,59 @@ async fn poll_all_hits(cluster: &TestCluster, nodes: usize, want: i64, timeout: 
     }
 }
 
-/// CONCURRENT same-document merge STORM. Under heavy concurrent increments of ONE
-/// counter doc across a 3-node full mesh, every node must converge to the EXACT
-/// running sum each round — a PCounter is the exact oracle (a value below the sum
-/// means a delta was dropped, above means one was double-applied).
+/// Reusable CONCURRENT same-document merge STORM for COUNTER fields — the
+/// counter-family instantiation of the same-doc-storm template (#1021). `nodes` =
+/// `node_deltas.len()`; each node fires `burst` increments of its signed delta per
+/// round at ONE doc across a full mesh, and every node must converge to the EXACT
+/// running sum each round (below = a delta dropped, above = one double-applied).
 ///
-/// REGRESSION (#1021, the merge-queue concurrency boundary made behavioral): the
-/// counter value lived in two stores — the materialized blob and the CRDT
-/// accumulation store — and local writes advanced only the blob while merges
-/// reconciled the store FROM the blob. Under concurrency the blob was read stale
-/// (a local write racing a merge; a batch of merges reconciling from a lagging
-/// blob), dropping increments while the commit DAG still converged (identical
-/// `_commits`, divergent value). Fixed by the Go-parity single-store design: both
-/// local writes and merges apply their DELTA to the authoritative accumulation
-/// store (reconcile is init-if-absent), and a per-doc write lock
-/// (`crates/db/src/doc_write_queue.rs`, shared by the local-write and merge paths)
-/// serializes a document's writes. Modeled by `proofs/tla/TwoStoreCounter`
-/// (concurrency) + `DefraConvergence.CounterReconcile` single-store theorems
-/// (the order-independent multiset fold).
-#[tokio::test]
-async fn convergence_concurrent_same_doc_merge_storm() {
-    const NODES: usize = 3;
-    const ROUNDS: i64 = 4;
-    const BURST_PER_NODE: i64 = 4;
-
+/// Parameterized by `crdt_type` ("pcounter"|"pncounter"), `field_type`
+/// ("Int"|"Float"), and per-node signed `node_deltas`, so all counter variants
+/// reuse one driver.
+///
+/// REGRESSION: the counter value lived in two stores (materialized blob + CRDT
+/// accumulation store); local writes advanced only the blob while merges reconciled
+/// the store FROM a concurrently-stale blob, dropping increments while the commit
+/// DAG converged. Fixed by the Go-parity single store (local writes + merges RMW the
+/// authoritative store by delta; reconcile init-if-absent / PCounter migrate-via-max)
+/// serialized per-doc (`crates/db/src/doc_write_queue.rs`). Modeled by
+/// `proofs/tla/TwoStoreCounter` + `DefraConvergence.CounterReconcile`.
+async fn run_counter_storm(
+    crdt_type: &str,
+    field_type: &str,
+    node_deltas: &[f64],
+    rounds: i64,
+    burst: i64,
+) {
+    let nodes = node_deltas.len();
+    let lit = |v: f64| -> String {
+        if field_type == "Float" {
+            format!("{v:?}")
+        } else {
+            format!("{}", v as i64)
+        }
+    };
     let cluster = TestCluster::builder()
-        .rust_nodes(NODES)
+        .rust_nodes(nodes)
         .with_p2p()
         .with_store("redb")
         .with_keyring()
         .with_rust_binary(support::release_binary())
         .build()
         .await
-        .expect("build 3-node p2p cluster");
+        .expect("build p2p cluster");
 
-    let schema = "type Tally { name: String  hits: Int @crdt(type: pcounter) }";
-    let addr: Vec<String> = (0..NODES).map(|n| node_addr(&cluster, n)).collect();
-    for n in 0..NODES {
-        cluster.client(n).schema_add(schema).expect("schema");
+    let schema =
+        format!("type Tally {{ name: String  hits: {field_type} @crdt(type: {crdt_type}) }}");
+    let addr: Vec<String> = (0..nodes).map(|n| node_addr(&cluster, n)).collect();
+    for n in 0..nodes {
+        cluster.client(n).schema_add(&schema).expect("schema");
         cluster
             .client(n)
             .p2p_collection_add(&["Tally"])
             .expect("subscribe");
     }
-    for i in 0..NODES {
+    for i in 0..nodes {
         for (j, peer) in addr.iter().enumerate() {
             if i != j {
                 cluster
@@ -423,43 +443,70 @@ async fn convergence_concurrent_same_doc_merge_storm() {
 
     let created = cluster
         .client(0)
-        .query(r#"mutation { add_Tally(input: {name: "t", hits: 0}) { _docID } }"#)
+        .query(&format!(
+            r#"mutation {{ add_Tally(input: {{name: "t", hits: {}}}) {{ _docID }} }}"#,
+            lit(0.0)
+        ))
         .expect("create");
     let id = created["add_Tally"][0]["_docID"]
         .as_str()
         .expect("_docID")
         .to_string();
     assert!(
-        poll_all_hits(&cluster, NODES, 0, Duration::from_secs(30)).await,
+        poll_all_hits_exact(&cluster, nodes, 0.0, Duration::from_secs(30)).await,
         "seed (hits=0) must reach all nodes before the storm"
     );
 
-    let mut expected = 0i64;
-    for round in 0..ROUNDS {
-        // Burst: every node fires BURST_PER_NODE single increments at the same doc
-        // back-to-back, so NODES*BURST_PER_NODE same-doc deltas are merging
-        // concurrently across the mesh within the round.
-        for _ in 0..BURST_PER_NODE {
-            for n in 0..NODES {
+    let per_round: f64 = node_deltas.iter().sum::<f64>() * burst as f64;
+    let mut expected = 0.0f64;
+    for round in 0..rounds {
+        // Burst: every node fires `burst` increments of its signed delta at the same
+        // doc, so nodes*burst same-doc deltas merge concurrently within the round.
+        for _ in 0..burst {
+            for (n, delta) in node_deltas.iter().enumerate() {
                 cluster
                     .client(n)
                     .query(&format!(
-                        r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: 1}}) {{ _docID }} }}"#
+                        r#"mutation {{ update_Tally(docID: "{id}", input: {{hits: {}}}) {{ _docID }} }}"#,
+                        lit(*delta)
                     ))
                     .expect("increment");
             }
         }
-        expected += NODES as i64 * BURST_PER_NODE;
+        expected += per_round;
 
-        // EXACT-SUM BARRIER: a dropped delta lands below `expected`, a
-        // double-applied one above it; only the exact value passes.
-        if !poll_all_hits(&cluster, NODES, expected, Duration::from_secs(40)).await {
-            let got: Vec<i64> = (0..NODES).map(|n| tally_hits(&cluster.client(n))).collect();
+        if !poll_all_hits_exact(&cluster, nodes, expected, Duration::from_secs(40)).await {
+            let got: Vec<f64> = (0..nodes)
+                .map(|n| tally_hits_f64(&cluster.client(n)))
+                .collect();
             panic!(
-                "round {round}: nodes did not all reach exactly {expected} (no loss, no double-apply); hits = {got:?}"
+                "round {round} ({crdt_type}/{field_type}): nodes did not all reach exactly {expected} (no loss, no double-apply); hits = {got:?}"
             );
         }
     }
+}
+
+/// PCounter: three nodes each +1, concurrent — converge to the exact sum.
+#[tokio::test]
+async fn convergence_concurrent_same_doc_merge_storm() {
+    run_counter_storm("pcounter", "Int", &[1.0, 1.0, 1.0], 4, 4).await;
+}
+
+/// PNCounter: mixed signed deltas (two +1, one -1) under the storm — the signed
+/// running sum must converge exactly, exercising the decrement path and the
+/// PNCounter (strict init-if-absent) reconcile branch under concurrency.
+#[tokio::test]
+async fn convergence_concurrent_pncounter_same_doc_merge_storm() {
+    run_counter_storm("pncounter", "Int", &[1.0, 1.0, -1.0], 4, 4).await;
+}
+
+/// Float PCounter: exactly-representable +1.0 increments converge to the exact sum.
+/// (Float counters are only order-independent for exactly-representable deltas; the
+/// non-associativity of general f64 sums is a documented Go-parity limitation, not
+/// asserted here.)
+#[tokio::test]
+async fn convergence_concurrent_float_counter_same_doc_merge_storm() {
+    run_counter_storm("pcounter", "Float", &[1.0, 1.0, 1.0], 4, 4).await;
 }
 
 /// Concurrent PCounter increments must converge to the SUM. Two nodes share a
