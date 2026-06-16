@@ -356,8 +356,13 @@ jobs:
       # report-only `parity_samedoc_*`/`parity_delete_update_*` probes are
       # deliberately excluded: they `eprintln!` mixed state rather than assert, so
       # in a blocking leg they add runtime and hard-fail surface without gating
-      # value. DEFRA_CONFORMANCE_BINARY points the harness at the restored Rust
-      # binary (this job builds to target/ci, not target/debug).
+      # value. `parity_counter_storm_go_go` (Go-only oracle) IS selected; the
+      # mixed Rust<->Go counter storm (`parity_counter_storm_mixed`) is NOT — it
+      # exposes a known, timing-sensitive double-apply on the GO reference side
+      # (Rust materializes the identical DAG correctly; Go over-counts). It stays
+      # asserting for manual diagnosis but is kept out of the blocking leg until
+      # the upstream race is resolved (see #1043). DEFRA_CONFORMANCE_BINARY points
+      # the harness at the restored Rust binary (this job builds to target/ci).
       - name: Run go-compat conformance parity
         if: matrix.suite == 'go-compat'
         env:
@@ -365,7 +370,7 @@ jobs:
         run: >-
           cargo test -p conformance --test tla_conformance
           -- --ignored --test-threads=1
-          parity_counter_3node parity_indexed_lww
+          parity_counter_3node parity_counter_storm_go_go parity_indexed_lww
 
       - name: Run iroh integration tests
         if: matrix.suite == 'iroh'

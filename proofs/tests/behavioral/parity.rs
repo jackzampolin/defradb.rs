@@ -712,3 +712,52 @@ async fn parity_indexed_lww_mixed() {
         .expect("mixed cluster");
     run_indexed_lww_parity(cluster, "indexed_lww_mixed(rust0,go1)", Some(0)).await;
 }
+
+/// Go<->Go<->Go same-doc counter STORM — the parity target. Confirms the upstream
+/// Go binary converges to the exact sum under the identical concurrent-burst storm
+/// that exposed the Rust #1021 under-count (it does; Go's single value key + merge
+/// queue serialize it). Uses the cluster-agnostic `support::run_counter_storm`.
+#[ignore = "parity (asserting); needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_counter_storm_go_go() {
+    let cluster = TestCluster::builder()
+        .go_nodes(3)
+        .with_p2p()
+        .with_store("badger")
+        .with_development()
+        .build()
+        .await
+        .expect("go-go-go cluster");
+    support::run_counter_storm(&cluster, "pcounter", "Int", &[1.0, 1.0, 1.0], 3, 4).await;
+}
+
+/// Mixed Rust(node0)<->Go(node1,node2) same-doc counter STORM — every node (Rust AND
+/// the two Go peers) must converge to the exact accumulation under concurrent
+/// same-doc bursts across a mixed mesh (the cross-impl twin of
+/// `partition::convergence_concurrent_same_doc_merge_storm`).
+///
+/// KNOWN-FAILING DIAGNOSTIC (intermittent), kept asserting but OUT of the blocking
+/// go-compat CI leg. Investigation (link-level DAG dumps + instrumented Go binary)
+/// established: all three nodes hold a byte-identical commit DAG, Rust materializes
+/// the EXACT sum, and the two Go peers intermittently materialize +k too high. The
+/// miscount is a timing-sensitive DOUBLE-APPLY on the Go reference side — Go's
+/// `coreblock.ProcessBlock` runs `incrementValue` (RMW) unconditionally with no
+/// per-block `IsMerged` guard (dedup is purely structural via `loadComposites`),
+/// whereas Rust's counter merge guards on `is_merged(cid)`. It never reproduces in
+/// pure go<->go (`parity_counter_storm_go_go`), is triggered by the Rust node's
+/// delivery timing (`RUST_LOG=info`), and is suppressed by Go-side instrumentation.
+/// Tracked in #1043; promote back into the blocking leg once resolved.
+#[ignore = "known-failing diagnostic (Go-side double-apply, #1043); needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_counter_storm_mixed() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .go_nodes(2)
+        .with_p2p()
+        .with_development()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("mixed 3-node cluster");
+    support::run_counter_storm(&cluster, "pcounter", "Int", &[1.0, 1.0, 1.0], 3, 4).await;
+}
