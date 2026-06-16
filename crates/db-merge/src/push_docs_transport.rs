@@ -221,6 +221,18 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
 
             let mut requests = Vec::new();
             for (block_cid, block_data) in doc_blocks {
+                // #1043: only push COMPOSITE blocks as PushLog heads. A field
+                // block pushed as its own head is merged as a standalone head by
+                // the receiver, whose merge then walks and re-applies the entire
+                // field-block chain (counter double-apply against cross-impl
+                // peers). Field blocks are fetched by the receiver via DAG sync
+                // from the composite links, matching Go's SendUpdate.
+                if !matches!(
+                    defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta),
+                    Ok(defra_core::CrdtDelta::Composite(_))
+                ) {
+                    continue;
+                }
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
                     Bytes::from(block_cid.to_bytes()),
@@ -501,6 +513,15 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
         for (block_cid, block_data) in
             load_push_dag_blocks(&*block_txn, &*enc_txn, head_cid, block_data).await
         {
+            // #1043: only push COMPOSITE blocks as PushLog heads (see backfill
+            // above). Field blocks pushed as heads cause counter double-apply on
+            // cross-impl peers; the receiver fetches them via DAG sync.
+            if !matches!(
+                defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta),
+                Ok(defra_core::CrdtDelta::Composite(_))
+            ) {
+                continue;
+            }
             let mut request = PushLogRequest::new(
                 doc_id.to_string(),
                 Bytes::from(block_cid.to_bytes()),
