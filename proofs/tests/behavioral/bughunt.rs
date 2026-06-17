@@ -668,8 +668,8 @@ async fn bughunt_counter_3node() {
 /// no-double-apply oracle (below => a delta dropped, above => one double-applied).
 ///
 /// FINDING (2026-06-15): reliably UNDER-counts (e.g. 12/11/11 for an expected 12)
-/// and does NOT recover within 40s. Distinct from the documented #1021 Bitswap
-/// fetch-failure: node logs show ZERO bitswap timeouts; the lagging nodes simply
+/// and does NOT recover within 40s. Distinct from a Bitswap DAG-fetch timeout:
+/// node logs show ZERO bitswap timeouts; the lagging nodes simply
 /// process one FEWER composite delta. The signature is a gossip-DELIVERY drop
 /// under concurrent full-mesh load — "Dropping GossipSub message outside accepted
 /// replication direction", "not authorized for collection", and a "document topic

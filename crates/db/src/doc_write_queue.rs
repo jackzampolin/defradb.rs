@@ -27,6 +27,15 @@ pub struct DocWriteQueue {
     /// acquiring them, so two multi-doc acquirers can never grab overlapping
     /// documents in opposite orders and deadlock. Single-doc callers never take
     /// it, so the common path (single-doc writes and merges) is unaffected.
+    ///
+    /// Deadlock-freedom also relies on `new_txn()` being non-blocking (the
+    /// backends use optimistic MVCC: a write txn snapshots on open and acquires
+    /// the exclusive store write lock only at commit, which holds neither the gate
+    /// nor any per-doc guard). That keeps the gate the only resource ever
+    /// contended across a txn open, so the two acquirer orderings (BatchMutator
+    /// opens its txn before taking the gate; create_many / try_batch_merge take
+    /// the gate before opening their txn) cannot invert into a cycle. A future
+    /// blocking-writer backend would need to revisit this.
     batch_gate: Arc<tokio::sync::Mutex<()>>,
 }
 

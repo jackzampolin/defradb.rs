@@ -20,16 +20,29 @@ materialized layer.
 
 The bug was found by the conformance harness
 (`proofs/tests/behavioral/bughunt.rs`) — concurrent `+45 / +45` over a live
-connection converged to `node0=90, node1=45` instead of `90/90` — and fixed in
-`crates/db-merge/src/merge_handler/counter.rs` by reconciling the store up to the
-committed blob before every merge (`Counter::reconcile_int64`).
+connection converged to `node0=90, node1=45` instead of `90/90`.
 
-This models the fix and proves: (1) reconciled accumulation is exact
-(`committed + d`); (2) two replicas applying concurrent local increments then
-merging each other's delta converge; and (3) the previous *conditional* band-aid
-(`seed only if the store is uninitialized`) produces the exact asymmetric
-`90 / 45` divergence — so the unconditional reconcile is necessary, not
-decorative.
+The LANDED fix (#1021) removes the two-store split entirely: there is ONE
+authoritative `value_key`, and BOTH local writes and merges read-modify-write it
+by their delta — Go parity with `counter.go incrementValue`. The materialized
+value queries read mirrors that single store, so there is no second store to
+diverge. `Counter::reconcile_int64` is deliberately *init-if-absent* (seed the
+store from the committed blob only when absent; for a PCounter, migrate a legacy
+blob-only value via `max`) — NOT a value comparison and NOT a reconcile-from-blob.
+
+This file models that landed design and proves the functional invariant it
+guarantees: the value is an **order-independent fold of the applied-delta
+multiset** (so any local-write/merge interleaving applying the same multiset
+converges; `Int` deltas ⇒ PNCounter decrements covered, no value-magnitude
+comparison). The concurrency axis — that the concurrent RMW realizes this fold
+without losing or double-applying a delta — is proven by `proofs/tla/TwoStoreCounter`.
+
+The `## Instantiating the generic CRDT-field core` section then plugs this merge
+into `DefraConvergence.CrdtField`, inheriting `{two,three}_converge`.
+
+A SUPERSEDED block below preserves the earlier #1014 design (an unconditional
+reconcile-from-blob, plus a conditional `seed-only-if-uninitialized` band-aid)
+and the theorems showing why each was wrong, to motivate the single-store design.
 -/
 
 namespace DefraConvergence.CounterReconcile

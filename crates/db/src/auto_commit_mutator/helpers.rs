@@ -23,7 +23,7 @@ use schema::{FieldKind, ScalarKind};
 ///
 /// `is_create` skips the committed-doc lookup: on create there is no prior
 /// committed value, so the seed is 0 and the delta is the created value.
-pub(super) async fn apply_local_counter_deltas(
+pub(crate) async fn apply_local_counter_deltas(
     datastore: &NamespaceView,
     collection: &Collection,
     doc: &mut Document,
@@ -156,7 +156,7 @@ pub(super) async fn apply_local_counter_deltas(
 /// creation so the store is authoritative from creation (matching the
 /// single-store invariant). The created value is absolute (no delta recorded on
 /// create), so the store is seeded directly to it via init-if-absent.
-pub(super) async fn init_counter_stores_on_create(
+pub(crate) async fn init_counter_stores_on_create(
     datastore: &NamespaceView,
     collection: &Collection,
     doc: &Document,

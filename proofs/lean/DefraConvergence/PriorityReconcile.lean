@@ -200,4 +200,12 @@ theorem lww_two_converge (s a b : Entry) :
     lwwCM.merge (lwwCM.merge s a) b = lwwCM.merge (lwwCM.merge s b) a :=
   CrdtField.two_converge lwwCM s a b
 
+/-- Three-replica (merge-storm) LWW convergence, likewise inherited — the same
+    generic theorem the counter instantiates (`counter_three_converge`), so both
+    fields expose the identical convergence set. -/
+theorem lww_three_converge (s a b c : Entry) :
+    lwwCM.merge (lwwCM.merge (lwwCM.merge s a) b) c
+      = lwwCM.merge (lwwCM.merge (lwwCM.merge s c) b) a :=
+  CrdtField.three_converge lwwCM s a b c
+
 end DefraConvergence.PriorityReconcile

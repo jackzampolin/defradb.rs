@@ -55,6 +55,7 @@ Field instantiations:
 - `PriorityReconcile.lww_idempotent`: `[propext, Classical.choice, Quot.sound]`
 - `PriorityReconcile.lww_dup_safe`: `[propext, Classical.choice, Quot.sound]`
 - `PriorityReconcile.lww_two_converge`: `[propext, Classical.choice, Quot.sound]`
+- `PriorityReconcile.lww_three_converge`: `[propext, Classical.choice, Quot.sound]`
 
 `nonidem_has_dup_witness` is the generic core's only classical lemma (it pulls in
 `Classical.choice` via `Classical.byContradiction`), and it is the trivial
@@ -69,6 +70,37 @@ independently: it enters through the `lwwMerge` case analysis, not through
 Lean 4's core logic, not project-defined axioms. No theorem uses `sorry` or any
 custom (project-defined) axiom. Float32/Float64 counter laws are not claimed here
 because IEEE-754 addition is not generally associative.
+
+## Adding a new CRDT field
+
+This PR is the reference template. A new field's proof (composite, object, mixed,
+PN-counter) follows the same recipe — the two canonical exemplars are the counter
+(op-based, `DefraConvergence/CounterReconcile.lean`) and LWW (state-based,
+`DefraConvergence/PriorityReconcile.lean`):
+
+1. **Define your merge and prove its two laws.** Implement the field's binary
+   merge and prove it commutative + associative, then package it:
+   `def fooCM : CrdtField.CommMerge V := { merge := …, comm := …, assoc := … }`.
+2. **Settle the idempotence axis.** A state-based join (componentwise / lexicographic
+   max — like LWW) is idempotent: prove `CrdtField.Idempotent fooCM` and inherit
+   `dup_absorb` (re-delivery safe, NO dedup). An op-based field (delta accumulation —
+   like the counter) is NOT idempotent: prove `¬ CrdtField.Idempotent fooCM`, which
+   makes the per-delta dedup obligation explicit (discharged upstream by the
+   merged-set / `is_merged` guard).
+3. **Derive convergence by instantiation only.** Get `foo_two_converge` from
+   `CrdtField.two_converge fooCM` and `foo_three_converge` from
+   `CrdtField.three_converge fooCM`. Both fields expose the IDENTICAL convergence
+   set — no field-specific reasoning in these theorems. ("Implement `CommMerge`,
+   plug in, inherit the same named theorems" is the copyable invariant.)
+4. **Concurrency axis (TLA+).** Copy `proofs/tla/TwoStoreCounter.tla`'s structure:
+   one `CONSTANT` knob per hazard, so each interleaving hazard is toggled
+   independently and shown RED/GREEN.
+5. **Behavioral conformance leg.** If the field is numeric/counter-like, reuse
+   `run_counter_storm` (`proofs/tests/support.rs`) — its exact-sum oracle is the
+   behavioral template for the COUNTER FAMILY. For a non-numeric field
+   (LWW/composite/object) reuse only its connect/replicate/seed/round scaffolding
+   and supply the field's own convergence predicate (a last-writer-wins assertion,
+   componentwise equality, etc.) in place of the numeric exact-sum oracle.
 
 `DefraConvergence/PriorityReconcile.lean` proves the invariant behind the
 same-doc convergence bug this project found and fixed: a field's priority lives
