@@ -125,9 +125,24 @@ pub fn best_shareable_public_addr(peer_id: &PeerId, raw_addrs: &[PeerAddr]) -> O
     let formatted = format_public_listen_addrs(peer_id, raw_addrs);
     formatted
         .iter()
-        .find(|addr| is_ticket_string(addr))
+        .find(|addr| ticket_has_dialable_addr(addr))
         .cloned()
         .or_else(|| formatted.into_iter().find(|addr| addr.contains("/p2p/")))
+}
+
+/// True if `value` is an iroh endpoint ticket that embeds at least one
+/// transport address. An identity-only ticket (no embedded addrs — e.g. emitted
+/// before direct-address discovery has populated `endpoint.addr()`) is NOT a
+/// shareable address: a peer that dials it resolves to zero direct addrs and
+/// falls back to relay/discovery, which is off in trusted-fleet/loopback
+/// deployments, failing with "Address Lookup failed". Such a ticket is
+/// functionally equivalent to the bare endpoint-id fallback, so it must be
+/// skipped exactly like it — otherwise `shareable_address()` advertises an
+/// undialable address and reverse mesh edges never converge (#511).
+fn ticket_has_dialable_addr(value: &str) -> bool {
+    EndpointTicket::from_str(value.trim())
+        .map(|ticket| ticket.endpoint_addr().addrs.iter().next().is_some())
+        .unwrap_or(false)
 }
 
 /// Build an [`EndpointAddr`] from a peer id and a list of dial hints.
@@ -297,6 +312,20 @@ mod tests {
 
         let selected =
             best_shareable_public_addr(&peer_id, &[PeerAddr::new(format!("iroh://{}", peer_id))]);
+
+        assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn best_shareable_public_addr_skips_identity_only_ticket() {
+        // A ticket carrying NO embedded transport addrs (e.g. emitted before
+        // direct-address discovery populated `endpoint.addr()`) resolves to zero
+        // dial hints, so it must be skipped just like the bare endpoint-id
+        // fallback rather than advertised as a shareable address (#511).
+        let peer_id = PeerId::new(endpoint_id().to_string());
+        let addrless_ticket = EndpointTicket::from(EndpointAddr::new(endpoint_id())).to_string();
+
+        let selected = best_shareable_public_addr(&peer_id, &[PeerAddr::new(addrless_ticket)]);
 
         assert_eq!(selected, None);
     }
