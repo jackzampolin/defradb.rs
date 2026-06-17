@@ -994,10 +994,13 @@ mod tests {
     /// at exactly 8 (NOT 11 from a double-apply).
     ///
     /// Note: this test does NOT exercise base-capture's load-bearing path. Because
-    /// the create stages the accumulation store in the same txn, a missing base
-    /// here would still finalize to 8 (PCounter migrates the present store 5 UPWARD
-    /// to 8 via max, then the +3 is absorbed by max as a no-op). The missing-base →
-    /// wrong-value guard lives in
+    /// the create stages the accumulation store at 5 in the same txn, the update's
+    /// reconcile(base) is a no-op for any base ≤ 5 (the store is already present at
+    /// 5; reconcile is init-if-absent / migrate-via-max, and neither base=5 nor a
+    /// missing base=0 raises a present 5), and the +3 is then added UNCONDITIONALLY
+    /// (counter merge is plain addition, not max) → 8. So a missing base would also
+    /// yield 8 here — the base value is irrelevant once the create has seeded the
+    /// store. The missing-base → wrong-value guard lives in
     /// `update_seeds_absent_store_from_committed_base_load_bearing`, where the
     /// accumulation store is absent at update-finalize.
     #[tokio::test]
