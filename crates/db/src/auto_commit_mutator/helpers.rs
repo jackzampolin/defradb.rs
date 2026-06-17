@@ -48,6 +48,158 @@ pub(crate) async fn write_local_create(
     init_counter_stores_on_create(datastore, collection, doc).await
 }
 
+/// Persist a local UPDATE WITHOUT the counter read-modify-write (#1044
+/// interactive path). The doc blob + indexes are written with the provisional
+/// value; the counter RMW (and the blob correction) is deferred to the
+/// commit-time finalize. Used only by the interactive `DbDocMutator`; the
+/// auto-commit/batch paths keep `write_local_update` (RMW bundled in).
+pub(crate) async fn write_local_update_deferred(
+    datastore: &NamespaceView,
+    collection: &Collection,
+    doc: &Document,
+    index_manager: &IndexManager,
+) -> query::error::Result<()> {
+    collection
+        .update_with_indexes(datastore, doc, index_manager)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::DocumentNotFound(id) => {
+                query::error::QueryError::document_not_found(id)
+            }
+            other => crate::error::index_write_query_error("update", other),
+        })
+}
+
+/// Persist a local CREATE WITHOUT seeding the counter store (#1044 interactive
+/// path). The blob is written; the counter store is seeded at the commit-time
+/// finalize. Used only by the interactive `DbDocMutator`.
+pub(crate) async fn write_local_create_deferred(
+    datastore: &NamespaceView,
+    collection: &Collection,
+    doc: &Document,
+    index_manager: &IndexManager,
+    id_was_generated: bool,
+) -> query::error::Result<()> {
+    collection
+        .create_with_indexes(datastore, doc, index_manager, id_was_generated)
+        .await
+        .map_err(|e| crate::error::index_write_query_error("create", e))?;
+    Ok(())
+}
+
+/// Apply a SINGLE recorded counter delta (or create-seed) to the authoritative
+/// accumulation store at the commit-time finalize (#1044). For updates this is
+/// the delta-driven equivalent of `apply_local_counter_deltas` for one field;
+/// for creates it seeds the store like `init_counter_stores_on_create`. Returns
+/// the post-operation store value so the caller can mirror it into the blob.
+///
+/// The per-doc guard protecting this RMW is held by the caller (the finalize
+/// driver) and released only after the durable commit, preserving the #1021
+/// invariant that a concurrent merge never observes a partial RMW.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_pending_counter_op(
+    datastore: &NamespaceView,
+    collection: &Collection,
+    schema_version_id: &str,
+    doc_id: &str,
+    field: &str,
+    delta: &NormalValue,
+    is_create: bool,
+) -> query::error::Result<Option<NormalValue>> {
+    let Some(field_desc) = collection.schema().fields.iter().find(|f| f.name == field) else {
+        return Ok(None);
+    };
+    if !field_desc.crdt_type.is_counter() {
+        return Ok(None);
+    }
+    let Some(kind) = numeric_kind_from_field_kind(&field_desc.kind) else {
+        return Ok(None);
+    };
+    let allow_decrement = field_desc.crdt_type.allows_decrement();
+
+    let doc_id_bytes = doc_id.as_bytes().to_vec();
+    let counter = Counter::new(
+        schema_version_id.to_string(),
+        &doc_id_bytes,
+        field.to_string(),
+        allow_decrement,
+        kind,
+    )
+    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
+    let mut rw = datastore.clone();
+
+    if is_create {
+        // Seed the store directly to the created (absolute) value, init-if-absent.
+        match (kind, delta) {
+            (NumericKind::Int64, NormalValue::Int(v)) => counter
+                .reconcile_int64(&mut rw, *v)
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
+            (NumericKind::Float64, NormalValue::Float64(v)) => counter
+                .reconcile_float64(&mut rw, *v)
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
+            (NumericKind::Float64, NormalValue::Float32(v)) => counter
+                .reconcile_float64(&mut rw, *v as f64)
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
+            (NumericKind::Float64, NormalValue::Int(v)) => counter
+                .reconcile_float64(&mut rw, *v as f64)
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
+            _ => {}
+        }
+        // On create the blob already equals the seeded value — no correction.
+        return Ok(None);
+    }
+
+    // UPDATE: init-if-absent from the committed blob, then apply the delta.
+    let doc_id_typed = DocID::from_string(doc_id)
+        .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+    let committed = collection
+        .get_with_datastore(datastore, &doc_id_typed)
+        .await
+        .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+    let committed_value = committed.as_ref().and_then(|d| d.get(field));
+    match (kind, committed_value) {
+        (NumericKind::Int64, Some(NormalValue::Int(v))) => counter
+            .reconcile_int64(&mut rw, *v)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
+        (NumericKind::Float64, Some(NormalValue::Float64(v))) => counter
+            .reconcile_float64(&mut rw, *v)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
+        (NumericKind::Int64, None) => counter
+            .reconcile_int64(&mut rw, 0)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
+        (NumericKind::Float64, None) => counter
+            .reconcile_float64(&mut rw, 0.0)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
+        _ => {}
+    }
+
+    let counter_delta =
+        build_local_counter_delta(&doc_id_bytes, field, schema_version_id, kind, delta)?;
+    let ctx = Context {
+        doc_id: CrdtDocId::new(doc_id)
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
+        schema_version: schema_version_id.to_string(),
+        is_create: false,
+    };
+    crdt::traits::ReplicatedData::merge(&counter, &mut rw, &ctx, &counter_delta)
+        .await
+        .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
+    let bytes = ValueReader::value(&counter, &rw)
+        .await
+        .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+    Ok(decode_counter_value(&bytes, kind))
+}
+
 /// Apply local counter-field increments to the CRDT accumulation store (the
 /// single source of truth) via a fresh read-modify-write, then mirror the
 /// resulting value back into the document blob.
