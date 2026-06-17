@@ -693,7 +693,8 @@ pub(super) async fn handle_command(
 struct DialContext {
     endpoint: Endpoint,
     peer_map: Arc<parking_lot::Mutex<PeerMap>>,
-    pending_pushlog_replies: Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
+    pending_pushlog_replies:
+        Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
     subscription_senders: SubscriptionSenders,
     spawned_tasks: SpawnedTasks,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
