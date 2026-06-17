@@ -19,8 +19,8 @@ use crate::QueryId;
 use super::addr::{endpoint_addr_from_parts, endpoint_ticket_string};
 use super::command::IrohCommand;
 use super::endpoint::{
-    join_peer_to_subscriptions, peer_direct_addr, track_task, ActiveSync, SpawnedTasks,
-    TopicSubscription,
+    join_peer_to_subscription_senders, peer_direct_addr, snapshot_subscription_senders, track_task,
+    ActiveSync, SpawnedTasks, SubscriptionSenders, TopicSubscription,
 };
 use super::endpoint_rpc::{
     close_cached_connections, handle_block_sync, handle_car_request_response,
@@ -59,16 +59,26 @@ pub(super) async fn handle_command(
             addrs,
             reply,
         } => {
+            // SPAWN the dial off the command loop. `handle_dial` blocks on
+            // `endpoint.connect()` (up to the dial timeout); awaiting it inline
+            // here would park the endpoint `select!` in this branch and stop it
+            // polling `accept()`, so two peers dialing each other in-window can
+            // never accept each other's inbound connection — a mutual-dial
+            // deadlock. The reply is delivered from the spawned task, so callers
+            // still get their result.
             let ctx = DialContext {
-                endpoint,
-                peer_map,
-                pending_pushlog_replies,
-                subscriptions,
-                spawned_tasks,
-                event_tx,
+                endpoint: endpoint.clone(),
+                peer_map: Arc::clone(peer_map),
+                pending_pushlog_replies: Arc::clone(pending_pushlog_replies),
+                subscription_senders: snapshot_subscription_senders(subscriptions),
+                spawned_tasks: Arc::clone(spawned_tasks),
+                event_tx: event_tx.clone(),
             };
-            let result = handle_dial(ctx, &peer_id, addrs).await;
-            let _ = reply.send(result);
+            let task = tokio::spawn(async move {
+                let result = handle_dial(ctx, &peer_id, addrs).await;
+                let _ = reply.send(result);
+            });
+            track_task(spawned_tasks, task);
         }
         IrohCommand::Disconnect { peer_id, reply } => {
             let result = handle_disconnect(peer_id, peer_map, connection_cache);
@@ -672,18 +682,21 @@ pub(super) async fn handle_command(
     false
 }
 
-/// Long-lived endpoint state borrowed for a single dial. Groups the
-/// references that `handle_dial` needs so the function signature stays
-/// under clippy's `too_many_arguments` budget without losing the
-/// lifetime-by-reference semantics of the individual fields.
-struct DialContext<'a> {
-    endpoint: &'a Endpoint,
-    peer_map: &'a Arc<parking_lot::Mutex<PeerMap>>,
-    pending_pushlog_replies:
-        &'a Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
-    subscriptions: &'a HashMap<String, TopicSubscription>,
-    spawned_tasks: &'a SpawnedTasks,
-    event_tx: &'a mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
+/// OWNED endpoint state for a single dial. Owned (not borrowed) so the dial can
+/// run in a SPAWNED task off the endpoint command loop: `endpoint.connect()`
+/// blocks for up to the dial timeout, and awaiting it inline in the command
+/// branch of the endpoint `select!` starves the sibling `accept()` branch — so
+/// two peers dialing each other in-window deadlock (neither accepts the other's
+/// inbound connection). Spawning the dial (like `accept()` already spawns) keeps
+/// the loop free to accept. `subscriptions` is captured as an owned senders
+/// snapshot (the only previously-borrowed field).
+struct DialContext {
+    endpoint: Endpoint,
+    peer_map: Arc<parking_lot::Mutex<PeerMap>>,
+    pending_pushlog_replies: Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
+    subscription_senders: SubscriptionSenders,
+    spawned_tasks: SpawnedTasks,
+    event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 }
 
 /// Dial a peer by EndpointId.
@@ -691,7 +704,7 @@ struct DialContext<'a> {
 /// Keeps the connection alive by spawning a stream handler task.
 #[allow(clippy::too_many_arguments)]
 async fn handle_dial(
-    ctx: DialContext<'_>,
+    ctx: DialContext,
     peer_id: &PeerId,
     addrs: Vec<PeerAddr>,
 ) -> crate::error::Result<()> {
@@ -708,7 +721,7 @@ async fn handle_dial(
     // edge dial back over the path the peer opened to us, instead of failing
     // "Address Lookup failed" under no-relay/no-discovery.
     if endpoint_addr.ip_addrs().next().is_none() {
-        if let Some(observed) = peer_direct_addr(ctx.peer_map, peer_id) {
+        if let Some(observed) = peer_direct_addr(&ctx.peer_map, peer_id) {
             endpoint_addr = endpoint_addr.with_ip_addr(observed);
         }
     }
@@ -740,14 +753,14 @@ async fn handle_dial(
     }
 
     if is_new {
-        join_peer_to_subscriptions(ctx.subscriptions, endpoint_id).await;
+        join_peer_to_subscription_senders(&ctx.subscription_senders, endpoint_id).await;
     }
 
     // Keep connection alive by spawning a handler for incoming streams.
     let event_tx = ctx.event_tx.clone();
-    let peer_map = Arc::clone(ctx.peer_map);
-    let pending_pushlog_replies = Arc::clone(ctx.pending_pushlog_replies);
-    let spawned_tasks_for_connection = Arc::clone(ctx.spawned_tasks);
+    let peer_map = Arc::clone(&ctx.peer_map);
+    let pending_pushlog_replies = Arc::clone(&ctx.pending_pushlog_replies);
+    let spawned_tasks_for_connection = Arc::clone(&ctx.spawned_tasks);
     let task = tokio::spawn(async move {
         super::endpoint_streams::handle_connection_streams_from_dial(
             connection,
@@ -760,7 +773,7 @@ async fn handle_dial(
         )
         .await;
     });
-    track_task(ctx.spawned_tasks, task);
+    track_task(&ctx.spawned_tasks, task);
 
     Ok(())
 }
