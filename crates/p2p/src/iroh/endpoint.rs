@@ -278,19 +278,6 @@ async fn run_event_loop(
     );
 }
 
-/// Join a newly connected peer into all active gossip topic subscriptions.
-///
-/// iroh-gossip subscriptions are created with an explicit neighbor list.
-/// When a new peer connects after subscription, we add them as a neighbor
-/// so they can receive (and send us) gossip messages on all subscribed topics.
-pub(super) async fn join_peer_to_subscriptions(
-    subscriptions: &HashMap<String, TopicSubscription>,
-    endpoint_id: EndpointId,
-) {
-    let subscription_senders = snapshot_subscription_senders(subscriptions);
-    join_peer_to_subscription_senders(&subscription_senders, endpoint_id).await;
-}
-
 pub(super) fn snapshot_subscription_senders(
     subscriptions: &HashMap<String, TopicSubscription>,
 ) -> SubscriptionSenders {
@@ -300,6 +287,11 @@ pub(super) fn snapshot_subscription_senders(
         .collect()
 }
 
+/// Join a newly connected peer into all active gossip topic subscriptions.
+///
+/// iroh-gossip subscriptions are created with an explicit neighbor list.
+/// When a new peer connects after subscription, we add them as a neighbor
+/// so they can receive (and send us) gossip messages on all subscribed topics.
 pub(super) async fn join_peer_to_subscription_senders(
     subscriptions: &[(String, iroh_gossip::api::GossipSender)],
     endpoint_id: EndpointId,
