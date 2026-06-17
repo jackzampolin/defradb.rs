@@ -2,7 +2,8 @@
 \* Guard-acquisition LIFECYCLE of the interactive / explicit-transaction counter mutator,
 \* abstracting crates/db/src/doc_mutator.rs (DbDocMutator), crates/db/src/txn.rs (DbTxn
 \* pending counter deltas + commit) and crates/db/src/doc_write_queue.rs (acquire /
-\* acquire_batch_gate). This is the #1044 TARGET design (NOT yet implemented in full — see
+\* acquire_batch_gate). This is the #1044 design, IMPLEMENTED in the tree (commit-time
+\* finalize in txn_registry.rs::finalize_and_commit / apply_counter_ops_at_finalize — see
 \* InteractiveTxnCounter_DESIGN.md). Companion to MergeQueue.tla, which models the per-doc
 \* serialization itself; this slice isolates WHEN the interactive txn takes the
 \* process-wide batch_gate over its user-controlled lifetime.

@@ -991,7 +991,15 @@ mod tests {
     /// PCounter create-then-update in ONE registry txn: create at 5 then +3 in the
     /// SAME txn, commit. The update's `committed_pre_write` read sees the
     /// same-txn-staged create (5), so the recorded base is 5 and the finalize ends
-    /// at exactly 8 (NOT 11 from a double-apply, NOT 3 from a missing base seed).
+    /// at exactly 8 (NOT 11 from a double-apply).
+    ///
+    /// Note: this test does NOT exercise base-capture's load-bearing path. Because
+    /// the create stages the accumulation store in the same txn, a missing base
+    /// here would still finalize to 8 (PCounter migrates the present store 5 UPWARD
+    /// to 8 via max, then the +3 is absorbed by max as a no-op). The missing-base →
+    /// wrong-value guard lives in
+    /// `update_seeds_absent_store_from_committed_base_load_bearing`, where the
+    /// accumulation store is absent at update-finalize.
     #[tokio::test]
     async fn explicit_txn_pcounter_create_then_update_same_txn() {
         use crate::txn_registry::DbTransactionRegistry;
@@ -1034,6 +1042,102 @@ mod tests {
             read_counter_store(&db, "pcv1", &doc_id, "count").await,
             8,
             "PCounter create(5)+update(+3) in one txn must finalize to exactly 8"
+        );
+    }
+
+    /// LOAD-BEARING regression for the #1044 base-capture: the finalize must seed
+    /// the accumulation store init-if-absent from the PRE-WRITE COMMITTED value
+    /// (`base`) before applying the delta. This is the ONLY scenario where base is
+    /// load-bearing — a doc whose materialized blob holds a counter value but whose
+    /// accumulation store is ABSENT (e.g. a legacy / pre-#1021 / migrated doc that
+    /// was written before counter stores were seeded on create).
+    ///
+    /// Setup writes the doc DIRECTLY via `create_with_indexes` (blob + indexes
+    /// only), deliberately bypassing `init_counter_stores_on_create`, so the store
+    /// key is absent while the blob value is 5. A PNCounter field is used so the
+    /// PCounter migrate-via-max can't mask a missing base. An interactive UPDATE +3
+    /// then commits: the finalize seeds 5 from the committed base (init-if-absent)
+    /// and applies +3 → 8.
+    ///
+    /// Without base-capture (forcing `base = None`) the finalize would seed 0 then
+    /// apply +3 → 3 (verified fail-before / pass-after: 3 vs 8). The assertion of
+    /// EXACTLY 8 is what makes base-capture load-bearing.
+    #[tokio::test]
+    async fn update_seeds_absent_store_from_committed_base_load_bearing() {
+        use crate::index_manager::IndexManager;
+        use crate::txn_registry::DbTransactionRegistry;
+        use query::txn::TransactionRegistry;
+
+        let (db, _bus) = make_test_db_with_bus().await;
+        db.create_collection(counter_collection())
+            .await
+            .expect("schema");
+
+        // SETUP: write a doc with blob `count = 5` directly via create_with_indexes
+        // (blob + indexes), WITHOUT seeding the counter accumulation store. Commit
+        // via force_commit so the registry finalize never runs for this setup.
+        let collection = db
+            .get_collection("Counters")
+            .expect("get collection")
+            .expect("collection exists");
+        let index_manager =
+            IndexManager::from_collection(collection.resolved_root_id(), collection.schema())
+                .expect("index manager");
+
+        let mut setup_doc = Document::from_json_str(r#"{"count": 5}"#).expect("doc");
+        setup_doc
+            .generate_and_set_doc_id()
+            .expect("generate doc id");
+        let doc_id = setup_doc.id().expect("doc id").to_string();
+
+        let setup_txn = db.new_txn(false).await.expect("write txn");
+        let datastore = setup_txn.datastore().expect("datastore");
+        collection
+            .create_with_indexes(&datastore, &setup_doc, &index_manager, true)
+            .await
+            .expect("direct create");
+        drop(datastore);
+        setup_txn.force_commit().await.expect("force commit setup");
+
+        // Confirm the setup left the store ABSENT but the blob value present.
+        assert_eq!(
+            read_counter_store_opt(&db, "cv1", &doc_id, "count").await,
+            None,
+            "setup must leave the accumulation store ABSENT (blob-only doc)"
+        );
+        let committed = read_committed_doc(&db, "Counters", &doc_id)
+            .await
+            .expect("committed doc present after setup");
+        assert_eq!(
+            committed.get("count"),
+            Some(&document::NormalValue::Int(5)),
+            "setup blob must hold the committed counter value 5"
+        );
+
+        // Interactive UPDATE +3 on the absent-store doc, commit via the registry.
+        let registry = DbTransactionRegistry::new(Arc::clone(&db));
+        let handle = registry.begin(false).await.expect("begin");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+        let mut update_doc = Document::from_json_str(r#"{"count": 8}"#).expect("doc");
+        update_doc.set_id(document::DocID::from_string(&doc_id).expect("doc id"));
+        update_doc.set_counter_delta("count".to_string(), document::NormalValue::Int(3));
+        let mut modified = std::collections::HashSet::new();
+        modified.insert("count".to_string());
+        mutator
+            .update("Counters", update_doc, modified)
+            .await
+            .expect("update");
+        drop(mutator);
+        drop(ctx);
+        registry.commit(&handle).await.expect("commit");
+
+        // base-capture seeds the absent store from the committed base (5), then
+        // applies +3 → 8. A missing base would seed 0 and finalize to 3.
+        assert_eq!(
+            read_counter_store(&db, "cv1", &doc_id, "count").await,
+            8,
+            "absent-store finalize must seed committed base 5 (init-if-absent) then +3 → 8 (NOT 3)"
         );
     }
 

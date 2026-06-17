@@ -6,12 +6,14 @@ which models the per-doc serialization mechanism itself; this slice isolates **w
 process-wide `batch_gate` is held over the interactive transaction's user-controlled
 lifetime.
 
-> **Status: TARGET design, not yet fully implemented.** #1041 shipped a correct (no
-> lost-increment) interactive counter path, but it holds the process-wide gate across the
-> whole user-controlled txn lifetime (the liveness HIGH this issue removes). The GREEN
-> behavior modeled here — gate taken only at a bounded commit-time finalize — is the #1044
-> redesign that is not all in the tree yet (the blob-mirror-at-commit coupling described in
-> the issue is the hard part). The RED config reproduces the #1041 lifecycle.
+> **Status: IMPLEMENTED.** #1041 shipped a correct (no lost-increment) interactive counter
+> path, but it held the process-wide gate across the whole user-controlled txn lifetime (the
+> liveness HIGH this issue removes). The GREEN behavior modeled here — gate taken only at a
+> bounded commit-time finalize — is the #1044 redesign, now landed: the commit-time finalize
+> lives in `crates/db/src/txn_registry.rs::finalize_and_commit` (the sole commit path),
+> which calls `apply_counter_ops_at_finalize`; pending deltas are recorded during the txn in
+> `crates/db/src/doc_mutator.rs` (`DbDocMutator::create`/`update` via `record_counter_op`,
+> with the deferred blob writes). The RED config reproduces the #1041 lifecycle.
 
 ## Mechanism (corrected)
 
@@ -56,13 +58,13 @@ Two knobs:
 
 ## Source anchors (read the real code, not the abstraction)
 
-These are the **#1044 TARGET** symbols. Where noted they are not yet all implemented.
+These are the **#1044 IMPLEMENTED** symbols, anchored to the landed code.
 
 | Symbol in model | Rust source | What it abstracts |
 |---|---|---|
-| interactive actor, `iPhase`, `IGoIdle`/`IGoActive`/`IBeginFinalize`/`IFinalizeCommit` | `crates/db/src/doc_mutator.rs` (`DbDocMutator`) | the explicit-txn mutator; today it acquires the gate + per-doc guards incrementally (`doc_mutator.rs:113-140`, `acquire_batch_gate()` then `acquire(doc_id)`), holding them on `DbTxn` across the lifetime — **#1044 moves this to commit-time** |
-| pending counter deltas recorded during the txn (no guard yet) | `crates/db/src/txn.rs` (`DbTxn` — counter pending-ops; **target: add per-doc pending counter deltas**, holding no guard while active/idle) | "during the txn: record deltas, take no guard"; the `iHeld`/finalize split |
-| commit-time finalize (gate + sorted guards + RMW + release) | `crates/db/src/txn.rs` `DbTxn::commit` (`txn.rs:540`) — **target: sorted acquire of touched-counter-doc guards at commit**, RMW under them, release on durable commit | `IBeginFinalize` -> `IAcquire` (sorted) -> `IFinalizeCommit` -> `IExitCrit` |
+| interactive actor, `iPhase`, `IGoIdle`/`IGoActive`/`IBeginFinalize`/`IFinalizeCommit` | `crates/db/src/doc_mutator.rs` (`DbDocMutator::create`/`update`) | the explicit-txn mutator; it records pending counter deltas during the txn (`record_counter_op`) holding NO guard over the user lifetime, deferring guard acquisition + RMW to the commit-time finalize |
+| pending counter deltas recorded during the txn (no guard yet) | `crates/db/src/doc_mutator.rs` (`DbDocMutator::create`/`update` → `record_counter_op`) + `crates/db/src/txn.rs` (`DbTxn::record_counter_op`, `pending_counter_ops`) | "during the txn: record deltas, take no guard"; the `iHeld`/finalize split |
+| commit-time finalize (gate + sorted guards + RMW + release) | `crates/db/src/txn_registry.rs::finalize_and_commit` (the sole commit path) → `apply_counter_ops_at_finalize` — sorted acquire of touched-counter-doc guards at commit, RMW under them, release on durable commit | `IBeginFinalize` -> `IAcquire` (sorted) -> `IFinalizeCommit` -> `IExitCrit` |
 | process-wide `batch_gate` (`gate`), `acquire_batch_gate` / `try_acquire_batch_gate` | `crates/db/src/doc_write_queue.rs:82` `acquire_batch_gate`, `:91` `try_acquire_batch_gate` | the single process-wide mutex serializing the guard-acquisition phase of multi-doc acquirers |
 | per-doc guard (`lockOwner`), `acquire` | `crates/db/src/doc_write_queue.rs:61` `DocWriteQueue::acquire` | per-doc `OwnedMutexGuard`; same key blocks, different keys parallel |
 | arbitrary-order incremental acquire (batch actor `BAcquire`) | `crates/db/src/auto_commit_mutator/batch.rs` (`BatchMutator`, `ensure_doc_guard` per mutation) | the irreducibly-incremental multi-doc acquirer the **gate** protects against: it discovers docs one mutation at a time so it **cannot** pre-sort — modeled as arbitrary-order acquire. NOTE: `try_batch_merge` (`merge_handler/batch.rs`, `sort()`+`dedup()` before acquire) and `create_many` (`auto_commit_mutator/create_many.rs`, sorted upfront) are **sorted** acquirers protected by the same gate — they are NOT what `BAcquire` models |
@@ -120,8 +122,9 @@ Run from `proofs/tla` (the module argument is the real `.tla` filename
   unbounded user think-time; `IBeginFinalize` -> `IAcquire`* -> `IFinalizeCommit` ->
   `IExitCrit` is the bounded commit action. The gate is held only across the latter under
   GREEN — that is the whole property.
-- **Model ≠ code.** Anchored by symbol above; no automated conformance harness. Several
-  anchors are #1044 TARGET symbols not yet in the tree (noted inline).
+- **Model ≠ code.** Anchored by symbol above; no automated conformance harness. The anchors
+  are the landed #1044 symbols (`finalize_and_commit` / `apply_counter_ops_at_finalize` /
+  `record_counter_op`).
 
 ## Findings
 
