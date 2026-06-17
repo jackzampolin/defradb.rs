@@ -241,6 +241,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                     doc_id: doc_id.to_string(),
                     field: field.name.clone(),
                     delta: value.clone(),
+                    base: None,
                     is_create: true,
                 });
             }
@@ -372,6 +373,27 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         // interactive txn from holding the process-wide gate over its
         // user-controlled lifetime. See `InteractiveTxnCounter.tla`.
         let mut counter_ops = Vec::new();
+        // Read the PRE-WRITE committed doc ONCE (before the provisional blob write
+        // below) so each counter op records its pre-update committed value as the
+        // reconcile base — replicating the inline `apply_local_counter_deltas`
+        // semantics. Re-reading at finalize would observe the already-overwritten
+        // provisional blob and double-apply the delta for a PCounter (#1044).
+        let committed_pre_write = if collection
+            .schema()
+            .fields
+            .iter()
+            .any(|f| f.crdt_type.is_counter() && doc.get_counter_delta(&f.name).is_some())
+        {
+            match doc.id() {
+                Some(id) => collection
+                    .get_with_datastore(&datastore, id)
+                    .await
+                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
+                None => None,
+            }
+        } else {
+            None
+        };
         for field in &collection.schema().fields {
             if !field.crdt_type.is_counter() {
                 continue;
@@ -380,6 +402,10 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 continue;
             };
             if let Some(id) = doc.id().map(|id| id.to_string()) {
+                let base = committed_pre_write
+                    .as_ref()
+                    .and_then(|d| d.get(&field.name))
+                    .cloned();
                 counter_ops.push(crate::txn::PendingCounterOp {
                     collection_name: collection_name.to_string(),
                     schema_version_id: collection.version_id().to_string(),
@@ -387,6 +413,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                     doc_id: id,
                     field: field.name.clone(),
                     delta: delta.clone(),
+                    base,
                     is_create: false,
                 });
             }
@@ -752,6 +779,83 @@ mod tests {
             read_counter_store(&db, "cv1", &doc_id, "count").await,
             8,
             "explicit-txn increment must advance the accumulation store at finalize (#1044)"
+        );
+    }
+
+    /// PCounter (increment-only) collection: reconcile MIGRATES a present store
+    /// upward via max, so the finalize must NOT re-read the provisional blob as the
+    /// reconcile base (that would double-apply the delta). See #1044 BUG 1.
+    fn pcounter_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "PCounters",
+            "pcv1",
+            "col-pcounters",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "count", FieldKind::int())
+                    .with_crdt_type(CType::PCounter),
+            ],
+        )
+    }
+
+    /// Regression for #1044 BUG 1 (PCounter explicit-txn double-apply): create a
+    /// PCounter doc at 5, then increment +3 in a separate explicit txn. The
+    /// authoritative store must end at 8, NOT 11. Before the fix the finalize
+    /// re-read the provisional blob (8) as the reconcile base, migrated the present
+    /// store (5) UPWARD to 8 via PCounter max, then applied +3 → 11. Capturing the
+    /// pre-write committed value (5) as the reconcile base fixes it.
+    #[tokio::test]
+    async fn explicit_txn_pcounter_increment_no_double_apply() {
+        use crate::txn_registry::DbTransactionRegistry;
+        use query::txn::TransactionRegistry;
+
+        let (db, _bus) = make_test_db_with_bus().await;
+        db.create_collection(pcounter_collection())
+            .await
+            .expect("schema");
+        let registry = DbTransactionRegistry::new(Arc::clone(&db));
+
+        // Create the doc (count = 5) in an explicit txn, commit via the registry.
+        let handle = registry.begin(false).await.expect("begin");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+        let create_doc = Document::from_json_str(r#"{"count": 5}"#).expect("doc");
+        let created = mutator
+            .create("PCounters", create_doc)
+            .await
+            .expect("create");
+        let doc_id = created.doc_id.to_string();
+        drop(mutator);
+        drop(ctx);
+        registry.commit(&handle).await.expect("commit");
+
+        assert_eq!(
+            read_counter_store(&db, "pcv1", &doc_id, "count").await,
+            5,
+            "create must seed the PCounter accumulation store at 5"
+        );
+
+        // Increment by 3 in a fresh explicit txn (provisional blob = 8).
+        let handle = registry.begin(false).await.expect("begin");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+        let mut update_doc = Document::from_json_str(r#"{"count": 8}"#).expect("doc");
+        update_doc.set_id(document::DocID::from_string(&doc_id).expect("doc id"));
+        update_doc.set_counter_delta("count".to_string(), document::NormalValue::Int(3));
+        let mut modified = std::collections::HashSet::new();
+        modified.insert("count".to_string());
+        mutator
+            .update("PCounters", update_doc, modified)
+            .await
+            .expect("update");
+        drop(mutator);
+        drop(ctx);
+        registry.commit(&handle).await.expect("commit");
+
+        assert_eq!(
+            read_counter_store(&db, "pcv1", &doc_id, "count").await,
+            8,
+            "PCounter increment must NOT double-apply: store == 8 (not 11) (#1044)"
         );
     }
 

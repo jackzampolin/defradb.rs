@@ -103,6 +103,7 @@ pub(crate) async fn apply_pending_counter_op(
     schema_version_id: &str,
     doc_id: &str,
     field: &str,
+    base: Option<&NormalValue>,
     delta: &NormalValue,
     is_create: bool,
 ) -> query::error::Result<Option<NormalValue>> {
@@ -154,15 +155,14 @@ pub(crate) async fn apply_pending_counter_op(
         return Ok(None);
     }
 
-    // UPDATE: init-if-absent from the committed blob, then apply the delta.
-    let doc_id_typed = DocID::from_string(doc_id)
-        .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-    let committed = collection
-        .get_with_datastore(datastore, &doc_id_typed)
-        .await
-        .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-    let committed_value = committed.as_ref().and_then(|d| d.get(field));
-    match (kind, committed_value) {
+    // UPDATE: init-if-absent from the PRE-WRITE committed value captured at record
+    // time (`base`), then apply the recorded delta. We deliberately do NOT re-read
+    // the committed doc here: the deferred update already overwrote the blob with
+    // the query-plan's provisional (base+delta) value, so re-reading it as the
+    // reconcile base would migrate a present PCounter store UPWARD to base+delta
+    // and then add the delta again — double-counting (#1044). Using the captured
+    // pre-update `base` exactly replicates the inline `apply_local_counter_deltas`.
+    match (kind, base) {
         (NumericKind::Int64, Some(NormalValue::Int(v))) => counter
             .reconcile_int64(&mut rw, *v)
             .await

@@ -33,6 +33,15 @@ pub struct PendingCounterOp {
     pub field: String,
     /// For updates: the recorded increment delta. For creates: the seeded value.
     pub delta: document::NormalValue,
+    /// For UPDATE ops: the PRE-WRITE committed counter value, captured at record
+    /// time, used as the reconcile (init-if-absent) base at finalize. This must
+    /// be read BEFORE the provisional deferred blob write so the finalize does not
+    /// re-read the already-overwritten provisional blob as the "committed" value —
+    /// re-reading it would double-apply the delta for an increment-only PCounter
+    /// (whose reconcile migrates a present store UPWARD when blob > store). `None`
+    /// when the doc had no committed value for the field (seed 0). Unused for
+    /// creates.
+    pub base: Option<document::NormalValue>,
     /// Whether this op was recorded on a CREATE (seed) vs an UPDATE (delta RMW).
     pub is_create: bool,
 }
@@ -566,6 +575,9 @@ impl<S: Store> DbTxn<S> {
         if self.explicit {
             return Err(Error::ExplicitTxnMustUseForce);
         }
+        if !self.pending_counter_ops.is_empty() {
+            return Err(Error::UnfinalizedCounterOps);
+        }
 
         match self.txn.take() {
             Some(txn) => {
@@ -603,6 +615,9 @@ impl<S: Store> DbTxn<S> {
     ///
     /// This should only be called by the transaction creator.
     pub async fn force_commit(mut self) -> Result<()> {
+        if !self.pending_counter_ops.is_empty() {
+            return Err(Error::UnfinalizedCounterOps);
+        }
         match self.txn.take() {
             Some(txn) => {
                 txn.commit().await.map_err(Error::Datastore)?;

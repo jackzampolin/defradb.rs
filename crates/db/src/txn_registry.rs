@@ -823,8 +823,12 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
         // Apply each op's RMW (or create-seed) to the authoritative store,
         // collecting the post-RMW values to mirror into the blob (updates only).
-        // doc_id -> (field -> post-RMW value)
-        let mut corrections: HashMap<String, Vec<(String, document::NormalValue)>> = HashMap::new();
+        // DocIDs are content-derived, NOT collection-scoped, so two collections can
+        // share a doc_id — key the corrections by (collection_name, doc_id) so each
+        // (collection, doc) is corrected against its own collection.
+        // (collection_name, doc_id) -> (field -> post-RMW value)
+        let mut corrections: HashMap<(String, String), Vec<(String, document::NormalValue)>> =
+            HashMap::new();
         for op in ops {
             let (collection, _) = collections
                 .get(&op.collection_name)
@@ -835,13 +839,14 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                 &op.schema_version_id,
                 &op.doc_id,
                 &op.field,
+                op.base.as_ref(),
                 &op.delta,
                 op.is_create,
             )
             .await?;
             if let Some(value) = post {
                 corrections
-                    .entry(op.doc_id.clone())
+                    .entry((op.collection_name.clone(), op.doc_id.clone()))
                     .or_default()
                     .push((op.field.clone(), value));
             }
@@ -850,13 +855,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         // Blob correction: for update ops, re-read the doc and set each counter
         // field to its authoritative post-RMW store value, then re-write the blob
         // so the materialized document mirrors the accumulation store.
-        for (doc_id, fields) in corrections {
-            // Find the collection for this doc via any op that referenced it.
-            let collection_name = ops
-                .iter()
-                .find(|op| op.doc_id == doc_id)
-                .map(|op| op.collection_name.clone())
-                .expect("doc_id came from an op");
+        for ((collection_name, doc_id), fields) in corrections {
             let (collection, index_manager) = collections
                 .get(&collection_name)
                 .expect("collection loaded above");
