@@ -171,6 +171,14 @@ pub(crate) async fn apply_pending_counter_op(
             .reconcile_float64(&mut rw, *v)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
+        (NumericKind::Float64, Some(NormalValue::Float32(v))) => counter
+            .reconcile_float64(&mut rw, *v as f64)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
+        (NumericKind::Float64, Some(NormalValue::Int(v))) => counter
+            .reconcile_float64(&mut rw, *v as f64)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
         (NumericKind::Int64, None) => counter
             .reconcile_int64(&mut rw, 0)
             .await
@@ -287,6 +295,18 @@ async fn apply_local_counter_deltas(
             (NumericKind::Float64, Some(NormalValue::Float64(v))) => {
                 counter
                     .reconcile_float64(&mut rw, *v)
+                    .await
+                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+            }
+            (NumericKind::Float64, Some(NormalValue::Float32(v))) => {
+                counter
+                    .reconcile_float64(&mut rw, *v as f64)
+                    .await
+                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+            }
+            (NumericKind::Float64, Some(NormalValue::Int(v))) => {
+                counter
+                    .reconcile_float64(&mut rw, *v as f64)
                     .await
                     .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
             }

@@ -25,8 +25,6 @@ pub struct PendingCounterOp {
     pub collection_name: String,
     /// Schema version id of the collection at record time.
     pub schema_version_id: String,
-    /// Collection id.
-    pub collection_id: String,
     /// Document id the counter belongs to.
     pub doc_id: String,
     /// Counter field name.

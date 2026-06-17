@@ -237,7 +237,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 counter_ops.push(crate::txn::PendingCounterOp {
                     collection_name: collection_name.to_string(),
                     schema_version_id: collection.version_id().to_string(),
-                    collection_id: collection.collection_id().to_string(),
                     doc_id: doc_id.to_string(),
                     field: field.name.clone(),
                     delta: value.clone(),
@@ -409,7 +408,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 counter_ops.push(crate::txn::PendingCounterOp {
                     collection_name: collection_name.to_string(),
                     schema_version_id: collection.version_id().to_string(),
-                    collection_id: collection.collection_id().to_string(),
                     doc_id: id,
                     field: field.name.clone(),
                     delta: delta.clone(),
@@ -939,6 +937,385 @@ mod tests {
             "doc B store must reflect +5"
         );
     }
+
+    /// Read the counter accumulation store value, returning `None` when the store
+    /// key is absent (the counter was never durably finalized). Used by the
+    /// discard test to prove a rolled-back interactive txn ran no RMW.
+    async fn read_counter_store_opt(
+        db: &Arc<DB<MemoryStore>>,
+        schema_version_id: &str,
+        doc_id: &str,
+        field: &str,
+    ) -> Option<i64> {
+        use crdt::traits::ValueReader;
+        use crdt::{Counter, NumericKind};
+
+        let txn = db.new_txn(true).await.expect("read txn");
+        let datastore = txn.datastore().expect("datastore");
+        let counter = Counter::new(
+            schema_version_id.to_string(),
+            doc_id.as_bytes(),
+            field.to_string(),
+            true,
+            NumericKind::Int64,
+        )
+        .expect("counter");
+        match ValueReader::value(&counter, &datastore).await {
+            Ok(bytes) => {
+                assert_eq!(bytes.len(), 8, "int64 counter store value is 8 bytes");
+                Some(i64::from_be_bytes(bytes.try_into().unwrap()))
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Read a doc from the committed store via a fresh read txn; `None` if absent.
+    async fn read_committed_doc(
+        db: &Arc<DB<MemoryStore>>,
+        collection_name: &str,
+        doc_id: &str,
+    ) -> Option<Document> {
+        let collection = db
+            .get_collection(collection_name)
+            .expect("get collection")
+            .expect("collection exists");
+        let txn = db.new_txn(true).await.expect("read txn");
+        let datastore = txn.datastore().expect("datastore");
+        let doc_id_typed = document::DocID::from_string(doc_id).expect("doc id");
+        collection
+            .get_with_datastore(&datastore, &doc_id_typed)
+            .await
+            .expect("get doc")
+    }
+
+    /// PCounter create-then-update in ONE registry txn: create at 5 then +3 in the
+    /// SAME txn, commit. The update's `committed_pre_write` read sees the
+    /// same-txn-staged create (5), so the recorded base is 5 and the finalize ends
+    /// at exactly 8 (NOT 11 from a double-apply, NOT 3 from a missing base seed).
+    #[tokio::test]
+    async fn explicit_txn_pcounter_create_then_update_same_txn() {
+        use crate::txn_registry::DbTransactionRegistry;
+        use query::txn::TransactionRegistry;
+
+        let (db, _bus) = make_test_db_with_bus().await;
+        db.create_collection(pcounter_collection())
+            .await
+            .expect("schema");
+        let registry = DbTransactionRegistry::new(Arc::clone(&db));
+
+        let handle = registry.begin(false).await.expect("begin");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+
+        let created = mutator
+            .create(
+                "PCounters",
+                Document::from_json_str(r#"{"count": 5}"#).unwrap(),
+            )
+            .await
+            .expect("create");
+        let doc_id = created.doc_id.to_string();
+
+        let mut update_doc = Document::from_json_str(r#"{"count": 8}"#).unwrap();
+        update_doc.set_id(document::DocID::from_string(&doc_id).unwrap());
+        update_doc.set_counter_delta("count".to_string(), document::NormalValue::Int(3));
+        let mut modified = std::collections::HashSet::new();
+        modified.insert("count".to_string());
+        mutator
+            .update("PCounters", update_doc, modified)
+            .await
+            .expect("update");
+
+        drop(mutator);
+        drop(ctx);
+        registry.commit(&handle).await.expect("commit");
+
+        assert_eq!(
+            read_counter_store(&db, "pcv1", &doc_id, "count").await,
+            8,
+            "PCounter create(5)+update(+3) in one txn must finalize to exactly 8"
+        );
+    }
+
+    /// PNCounter create-then-update in ONE registry txn: +3 then -5 in one txn
+    /// (create at 3, then decrement by 5). The signed accumulation store result is
+    /// -2 (3 + (-5)), proving the same-txn decrement path stages and finalizes the
+    /// signed delta against the same-txn-staged base.
+    #[tokio::test]
+    async fn explicit_txn_pncounter_create_then_decrement_same_txn() {
+        use crate::txn_registry::DbTransactionRegistry;
+        use query::txn::TransactionRegistry;
+
+        let (db, _bus) = make_test_db_with_bus().await;
+        db.create_collection(counter_collection())
+            .await
+            .expect("schema");
+        let registry = DbTransactionRegistry::new(Arc::clone(&db));
+
+        let handle = registry.begin(false).await.expect("begin");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+
+        let created = mutator
+            .create(
+                "Counters",
+                Document::from_json_str(r#"{"count": 3}"#).unwrap(),
+            )
+            .await
+            .expect("create");
+        let doc_id = created.doc_id.to_string();
+
+        let mut update_doc = Document::from_json_str(r#"{"count": -2}"#).unwrap();
+        update_doc.set_id(document::DocID::from_string(&doc_id).unwrap());
+        update_doc.set_counter_delta("count".to_string(), document::NormalValue::Int(-5));
+        let mut modified = std::collections::HashSet::new();
+        modified.insert("count".to_string());
+        mutator
+            .update("Counters", update_doc, modified)
+            .await
+            .expect("update");
+
+        drop(mutator);
+        drop(ctx);
+        registry.commit(&handle).await.expect("commit");
+
+        assert_eq!(
+            read_counter_store(&db, "cv1", &doc_id, "count").await,
+            -2,
+            "PNCounter create(+3)+decrement(-5) in one txn must finalize to exactly -2"
+        );
+    }
+
+    /// Discard with pending counter ops: create a counter doc and increment it in
+    /// one registry txn, then roll back. The accumulation store must have NO value
+    /// and the doc must be absent — proving discard drops the pending ops and never
+    /// ran the finalize RMW.
+    #[tokio::test]
+    async fn explicit_txn_discard_drops_pending_counter_ops() {
+        use crate::txn_registry::DbTransactionRegistry;
+        use query::txn::TransactionRegistry;
+
+        let (db, _bus) = make_test_db_with_bus().await;
+        db.create_collection(counter_collection())
+            .await
+            .expect("schema");
+        let registry = DbTransactionRegistry::new(Arc::clone(&db));
+
+        let handle = registry.begin(false).await.expect("begin");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+
+        let created = mutator
+            .create(
+                "Counters",
+                Document::from_json_str(r#"{"count": 7}"#).unwrap(),
+            )
+            .await
+            .expect("create");
+        let doc_id = created.doc_id.to_string();
+
+        let mut update_doc = Document::from_json_str(r#"{"count": 9}"#).unwrap();
+        update_doc.set_id(document::DocID::from_string(&doc_id).unwrap());
+        update_doc.set_counter_delta("count".to_string(), document::NormalValue::Int(2));
+        let mut modified = std::collections::HashSet::new();
+        modified.insert("count".to_string());
+        mutator
+            .update("Counters", update_doc, modified)
+            .await
+            .expect("update");
+
+        drop(mutator);
+        drop(ctx);
+        registry.rollback(&handle).await.expect("rollback");
+
+        assert_eq!(
+            read_counter_store_opt(&db, "cv1", &doc_id, "count").await,
+            None,
+            "discard must leave NO accumulation store value (finalize RMW never ran)"
+        );
+        assert!(
+            read_committed_doc(&db, "Counters", &doc_id).await.is_none(),
+            "discard must leave the doc absent in the committed store"
+        );
+    }
+
+    /// Multiple updates to the SAME counter field in ONE registry txn: create at 0,
+    /// then +3 then +2 in the same txn. The two recorded delta ops both finalize
+    /// against the SAME doc/field, summing to exactly 5 (each delta applied once).
+    #[tokio::test]
+    async fn explicit_txn_multiple_updates_same_field_sum_once() {
+        use crate::txn_registry::DbTransactionRegistry;
+        use query::txn::TransactionRegistry;
+
+        let (db, _bus) = make_test_db_with_bus().await;
+        db.create_collection(counter_collection())
+            .await
+            .expect("schema");
+        let registry = DbTransactionRegistry::new(Arc::clone(&db));
+
+        // Seed a doc at 0 in its own committed txn.
+        let handle = registry.begin(false).await.expect("begin");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+        let created = mutator
+            .create(
+                "Counters",
+                Document::from_json_str(r#"{"count": 0}"#).unwrap(),
+            )
+            .await
+            .expect("create");
+        let doc_id = created.doc_id.to_string();
+        drop(mutator);
+        drop(ctx);
+        registry.commit(&handle).await.expect("commit create");
+
+        // Two updates to the same field in ONE txn: +3 then +2.
+        let handle = registry.begin(false).await.expect("begin");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+
+        let mut up1 = Document::from_json_str(r#"{"count": 3}"#).unwrap();
+        up1.set_id(document::DocID::from_string(&doc_id).unwrap());
+        up1.set_counter_delta("count".to_string(), document::NormalValue::Int(3));
+        let mut m1 = std::collections::HashSet::new();
+        m1.insert("count".to_string());
+        mutator.update("Counters", up1, m1).await.expect("update 1");
+
+        let mut up2 = Document::from_json_str(r#"{"count": 5}"#).unwrap();
+        up2.set_id(document::DocID::from_string(&doc_id).unwrap());
+        up2.set_counter_delta("count".to_string(), document::NormalValue::Int(2));
+        let mut m2 = std::collections::HashSet::new();
+        m2.insert("count".to_string());
+        mutator.update("Counters", up2, m2).await.expect("update 2");
+
+        drop(mutator);
+        drop(ctx);
+        registry.commit(&handle).await.expect("commit updates");
+
+        assert_eq!(
+            read_counter_store(&db, "cv1", &doc_id, "count").await,
+            5,
+            "two same-field updates (+3,+2) in one txn must sum to exactly 5"
+        );
+    }
+
+    /// Counter collection with an @index on the counter field, exercising the
+    /// finalize blob-correction's `update_with_indexes` index maintenance.
+    fn indexed_counter_collection() -> CollectionVersion {
+        let mut col = CollectionVersion::new(
+            "IdxCounters",
+            "icv1",
+            "col-idx-counters",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "count", FieldKind::int())
+                    .with_crdt_type(CType::PnCounter),
+            ],
+        );
+        col.indexes = vec![schema::IndexDescription::new("idx_count").with_field("count", false)];
+        col
+    }
+
+    /// Indexed counter: increment in an interactive txn, commit, then assert the
+    /// index entry materialized at the AUTHORITATIVE post-RMW value (8), proving
+    /// the finalize blob-correction maintained the index. The unit-test layer has
+    /// no GraphQL filter-query executor, so this asserts the index entry directly
+    /// (the value a filter query would resolve against).
+    #[tokio::test]
+    async fn explicit_txn_indexed_counter_index_reflects_post_rmw_value() {
+        use crate::index_manager::IndexManager;
+        use crate::txn_registry::DbTransactionRegistry;
+        use query::txn::TransactionRegistry;
+        use storage::index::IndexIterator;
+
+        let (db, _bus) = make_test_db_with_bus().await;
+        let col_version = indexed_counter_collection();
+        db.create_collection(col_version).await.expect("schema");
+        let registry = DbTransactionRegistry::new(Arc::clone(&db));
+
+        // Create at 5, commit.
+        let handle = registry.begin(false).await.expect("begin");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+        let created = mutator
+            .create(
+                "IdxCounters",
+                Document::from_json_str(r#"{"count": 5}"#).unwrap(),
+            )
+            .await
+            .expect("create");
+        let doc_id = created.doc_id.to_string();
+        drop(mutator);
+        drop(ctx);
+        registry.commit(&handle).await.expect("commit create");
+
+        // Increment +3 in an interactive txn, commit.
+        let handle = registry.begin(false).await.expect("begin");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+        let mut update_doc = Document::from_json_str(r#"{"count": 8}"#).unwrap();
+        update_doc.set_id(document::DocID::from_string(&doc_id).unwrap());
+        update_doc.set_counter_delta("count".to_string(), document::NormalValue::Int(3));
+        let mut modified = std::collections::HashSet::new();
+        modified.insert("count".to_string());
+        mutator
+            .update("IdxCounters", update_doc, modified)
+            .await
+            .expect("update");
+        drop(mutator);
+        drop(ctx);
+        registry.commit(&handle).await.expect("commit update");
+
+        // Authoritative store advanced to 8.
+        assert_eq!(
+            read_counter_store(&db, "icv1", &doc_id, "count").await,
+            8,
+            "indexed counter store must reflect +3 → 8"
+        );
+
+        // The index entry must exist at the post-RMW value 8 (what a filter query
+        // `count: {_eq: 8}` would resolve), and must NOT exist at the stale 5.
+        let collection = db
+            .get_collection("IdxCounters")
+            .expect("get collection")
+            .expect("collection exists");
+        let manager =
+            IndexManager::from_collection(collection.resolved_root_id(), collection.schema())
+                .expect("index manager");
+        let index = manager.get_index("idx_count").expect("idx_count present");
+
+        let txn = db.new_txn(true).await.expect("read txn");
+        let datastore = txn.datastore().expect("datastore");
+
+        let mut iter_8 = index
+            .get(&datastore, &[document::NormalValue::Int(8)])
+            .await
+            .expect("index get 8");
+        let entries_8 = iter_8.collect_all().await.expect("collect 8");
+        assert_eq!(
+            entries_8.len(),
+            1,
+            "index must have exactly one entry at the post-RMW value 8"
+        );
+
+        let mut iter_5 = index
+            .get(&datastore, &[document::NormalValue::Int(5)])
+            .await
+            .expect("index get 5");
+        let entries_5 = iter_5.collect_all().await.expect("collect 5");
+        assert!(
+            entries_5.is_empty(),
+            "index must NOT have a stale entry at the pre-update value 5"
+        );
+    }
+
+    // finalize-error-rollback and concurrent-finalize-vs-merge are intentionally
+    // NOT tested at this unit layer: there is no fault-injection seam to force a
+    // finalize error mid-RMW and no deterministic interleave seam for a concurrent
+    // merge. The error path is covered by the whole-txn discard semantics
+    // (`explicit_txn_discard_drops_pending_counter_ops` proves a non-committed txn
+    // applies no RMW), and the concurrent-finalize-vs-merge guard lifecycle is
+    // covered by `proofs/tla/InteractiveTxnCounter.tla`.
 
     #[tokio::test]
     async fn create_in_tx_publishes_event_on_commit() {

@@ -725,6 +725,18 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// The per-doc guards live on the `DbTxn` and release only AFTER the durable
     /// commit (`IExitCrit`), preserving the #1021 invariant that a concurrent
     /// merge never observes a partial RMW.
+    ///
+    /// GUARD SCOPE — the per-doc guard prevents a concurrent merge from
+    /// interleaving its RMW with this finalize's RMW DURING the held window, but
+    /// it does NOT serialize against a merge that COMMITTED before this finalize
+    /// took the guard. In that case the interactive txn's `begin()` snapshot is
+    /// stale and the storage SSI/OCC conflict tracker aborts the commit with a
+    /// `TxnConflict` (the client retries the whole txn). No data loss, no
+    /// double-apply — this matches Go's storage-txn isolation. So the guard's role
+    /// is partial-RMW exclusion, not merge serialization; cross-merge convergence
+    /// rests on OCC (`proofs/tla/Ssi.tla`), which is why
+    /// `InteractiveTxnCounter.tla` models only the guard lifecycle, not store
+    /// values / OCC.
     async fn finalize_and_commit(
         &self,
         handle: &TransactionHandle,
