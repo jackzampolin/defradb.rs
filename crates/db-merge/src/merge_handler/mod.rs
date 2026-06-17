@@ -1347,6 +1347,223 @@ mod tests {
         assert!(blockstore.is_merged(&cid).await.unwrap());
     }
 
+    /// Read the PNCounter accumulation store value (authoritative store, not the
+    /// materialized blob) for a doc/field via a fresh read txn on `db`.
+    async fn read_counter_accumulation_store(
+        db: &Arc<DB<MemoryStore>>,
+        schema_version_id: &str,
+        doc_id: &str,
+        field: &str,
+    ) -> i64 {
+        use crdt::traits::ValueReader;
+        use crdt::{Counter, NumericKind};
+
+        let txn = db.new_txn(true).await.expect("read txn");
+        let datastore = txn.datastore().expect("datastore");
+        let counter = Counter::new(
+            schema_version_id.to_string(),
+            doc_id.as_bytes(),
+            field.to_string(),
+            true,
+            NumericKind::Int64,
+        )
+        .expect("counter");
+        let bytes = ValueReader::value(&counter, &datastore)
+            .await
+            .expect("counter value");
+        assert_eq!(bytes.len(), 8, "int64 counter store value is 8 bytes");
+        i64::from_be_bytes(bytes.try_into().unwrap())
+    }
+
+    /// Build + store a standalone counter delta block for `doc_id`/`score` with the
+    /// given integer increment, returning its CID and the metadata to merge it.
+    /// The block is persisted in the blockstore so `process_counter_delta` can find
+    /// and mark it merged.
+    async fn put_counter_delta_block(
+        blockstore: &Arc<DefraBlockstore<MemoryStore>>,
+        doc_id: &str,
+        increment: i64,
+        priority: u64,
+        nonce: i64,
+    ) -> (Cid, CounterDeltaPayload) {
+        let mut delta_data = Vec::new();
+        ciborium::into_writer(&increment, &mut delta_data).unwrap();
+        let payload = CounterDeltaPayload {
+            doc_id: doc_id.as_bytes().to_vec(),
+            field_name: "score".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority,
+            data: delta_data,
+            nonce,
+        };
+        let block = Block {
+            delta: CrdtDelta::Counter(payload.clone()),
+            heads: None,
+            links: None,
+            encryption: None,
+            signature: None,
+        };
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+        blockstore.put(&cid, &block_data).await.unwrap();
+        (cid, payload)
+    }
+
+    /// #1044 residual coverage gap: an interactive/explicit-transaction counter
+    /// increment racing a same-document P2P merge.
+    ///
+    /// PROPERTY (proven DETERMINISTICALLY by controlling ordering, not a real
+    /// race): an interactive counter txn must NOT silently clobber a concurrent
+    /// same-doc merge. The per-doc guard excludes partial-RMW interleaving during
+    /// the finalize's held window, but a merge that COMMITS *before* the
+    /// interactive finalize makes the interactive txn's `begin()` snapshot stale →
+    /// on commit the storage SSI/OCC conflict tracker (`ConflictTracker` in
+    /// `storage::backends::shared`, used by `MemoryStore`) aborts the interactive
+    /// commit with a `TxnConflict` ("transaction conflict. Please retry"), and the
+    /// merge's value survives. No data loss, no double-apply — the client retries.
+    /// This matches Go's storage-txn isolation.
+    ///
+    /// CONSTRUCTION (real merge handler, no fallback):
+    ///   1. Seed doc with `score` (PNCounter) at N=10 via the registry auto-finalize
+    ///      path; confirm the accumulation store == 10.
+    ///   2. `begin()` an explicit txn and `update` +3 through the interactive
+    ///      mutator — this RECORDS the pending op and writes the provisional blob but
+    ///      does NOT finalize. The txn's `read_version` snapshot is fixed here.
+    ///   3. BEFORE committing, apply a same-doc merge of +5 through the REAL merge
+    ///      handler (`process_counter_delta`, which takes its own `merge_queue`
+    ///      guard and commits its own txn). Confirm the store advanced to 15.
+    ///   4. Commit the interactive txn. ASSERT: commit returns a conflict ERROR and
+    ///      the store STILL == 15 (the merge survived; no clobber to 13).
+    ///   5. RETRY the +3 in a fresh explicit txn (snapshot now sees 15) → store == 18.
+    ///
+    /// REGRESSION CAUGHT: if the finalize ignored OCC and force-wrote its stale RMW,
+    /// the interactive commit would succeed and the store would be 13 (the merge's
+    /// +5 lost) — both assertions (error + store==15) would fail.
+    #[tokio::test]
+    async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge() {
+        use db::DbTransactionRegistry;
+        use query::txn::TransactionRegistry;
+
+        let (handler, blockstore) = make_handler_with_counter_schema().await;
+        let db = Arc::clone(&handler.db);
+        // Same DB / same MemoryStore => same ConflictTracker shared across the
+        // interactive registry txn and the merge handler's own txn.
+        let registry = DbTransactionRegistry::new(Arc::clone(&db));
+
+        // (1) Seed the doc with score = 10 via the registry (auto-finalize on commit).
+        let handle = registry.begin(false).await.expect("begin seed");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+        let created = mutator
+            .create(
+                "Counters",
+                Document::from_json_str(r#"{"score": 10}"#).unwrap(),
+            )
+            .await
+            .expect("create seed");
+        let doc_id = created.doc_id.to_string();
+        drop(mutator);
+        drop(ctx);
+        registry.commit(&handle).await.expect("commit seed");
+        assert_eq!(
+            read_counter_accumulation_store(&db, "v1", &doc_id, "score").await,
+            10,
+            "seed must leave the accumulation store at N=10"
+        );
+
+        // (2) Begin an EXPLICIT txn and increment +3 through the interactive
+        // mutator. This records the pending op + writes the provisional blob but
+        // does NOT finalize; the txn's read_version snapshot is fixed at begin().
+        let handle = registry.begin(false).await.expect("begin interactive");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+        let mut update_doc = Document::from_json_str(r#"{"score": 13}"#).unwrap();
+        update_doc.set_id(document::DocID::from_string(&doc_id).unwrap());
+        update_doc.set_counter_delta("score".to_string(), NormalValue::Int(3));
+        let mut modified = std::collections::HashSet::new();
+        modified.insert("score".to_string());
+        mutator
+            .update("Counters", update_doc, modified)
+            .await
+            .expect("interactive update +3");
+        drop(mutator);
+        drop(ctx);
+        // NOTE: NOT committed yet.
+
+        // (3) BEFORE committing, apply a concurrent same-doc merge of +5 through the
+        // REAL merge handler. process_counter_delta takes its own merge_queue guard
+        // and commits its OWN txn, advancing the accumulation store to N+D2 = 15.
+        let (merge_cid, merge_payload) =
+            put_counter_delta_block(&blockstore, &doc_id, 5, 2, 7777).await;
+        let metadata = BlockMetadata::normal(
+            &doc_id,
+            "col-counters",
+            "did:key:z6MkrInteractiveMergeRace",
+            None,
+            false,
+        );
+        let merge_outcome = handler
+            .process_counter_delta(&merge_cid, &merge_payload, &metadata)
+            .await
+            .expect("merge handler must apply the +5 delta");
+        assert_eq!(merge_outcome, MergeOutcome::Merged);
+        assert_eq!(
+            read_counter_accumulation_store(&db, "v1", &doc_id, "score").await,
+            15,
+            "merge of +5 must advance the accumulation store to N+D2 = 15"
+        );
+
+        // (4) Now COMMIT the interactive txn. Its begin() snapshot is stale (the
+        // merge committed after it), so the OCC tracker aborts the commit with a
+        // TxnConflict.
+        let commit_result = registry.commit(&handle).await;
+        let err = commit_result.expect_err(
+            "interactive commit MUST conflict with the committed merge — if it \
+             succeeds it silently clobbered the merge (CRITICAL production bug)",
+        );
+        let err_msg = err.to_string().to_lowercase();
+        assert!(
+            err_msg.contains("transaction conflict"),
+            "interactive commit must fail with the storage OCC TxnConflict \
+             (corekv Error::TxnConflict = \"transaction conflict. Please retry\"), \
+             got: {err}"
+        );
+        // (4b) The merge's value survived; the interactive txn did NOT clobber it
+        // down to N+D1 = 13.
+        assert_eq!(
+            read_counter_accumulation_store(&db, "v1", &doc_id, "score").await,
+            15,
+            "after the conflicted interactive commit the merge's value (15) must \
+             survive — NOT be clobbered to 13"
+        );
+
+        // (5) Correct recovery: RETRY the +3 in a fresh explicit txn (snapshot now
+        // sees 15) → store == N+D2+D1 = 18. Conflict → retry → correct convergence.
+        let handle = registry.begin(false).await.expect("begin retry");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+        let mut retry_doc = Document::from_json_str(r#"{"score": 18}"#).unwrap();
+        retry_doc.set_id(document::DocID::from_string(&doc_id).unwrap());
+        retry_doc.set_counter_delta("score".to_string(), NormalValue::Int(3));
+        let mut modified = std::collections::HashSet::new();
+        modified.insert("score".to_string());
+        mutator
+            .update("Counters", retry_doc, modified)
+            .await
+            .expect("retry update +3");
+        drop(mutator);
+        drop(ctx);
+        registry
+            .commit(&handle)
+            .await
+            .expect("retry commit must succeed");
+        assert_eq!(
+            read_counter_accumulation_store(&db, "v1", &doc_id, "score").await,
+            18,
+            "retry on a fresh snapshot must converge to N+D2+D1 = 18"
+        );
+    }
+
     #[tokio::test]
     async fn handle_block_serializes_standalone_counter_by_doc_id() {
         let (handler, blockstore) = make_handler_with_counter_schema().await;
