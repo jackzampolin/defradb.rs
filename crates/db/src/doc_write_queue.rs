@@ -158,6 +158,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn try_acquire_batch_gate_reflects_held_state() {
+        // The non-blocking gate signal that the batch-merge path relies on to
+        // degrade to per-block when an interactive txn holds the gate (#1041).
+        let queue = Arc::new(DocWriteQueue::new());
+        let held = queue
+            .try_acquire_batch_gate()
+            .expect("try_acquire must succeed when the gate is free");
+        assert!(
+            queue.try_acquire_batch_gate().is_none(),
+            "try_acquire must return None (not block) while the gate is held"
+        );
+        drop(held);
+        assert!(
+            queue.try_acquire_batch_gate().is_some(),
+            "try_acquire must succeed again once the gate is released"
+        );
+    }
+
+    #[tokio::test]
     async fn different_docs_run_in_parallel() {
         let queue = Arc::new(DocWriteQueue::new());
         let counter = Arc::new(AtomicUsize::new(0));
