@@ -8,6 +8,46 @@ use defra_core::types::DocId as CrdtDocId;
 use document::NormalValue;
 use schema::{FieldKind, ScalarKind};
 
+/// Persist a local UPDATE: apply CRDT field deltas to the authoritative store
+/// (the counter RMW, #1021) and then write the document + maintain indexes. These
+/// are bundled so no mutator can write a document blob without first advancing the
+/// CRDT accumulation store — the single-store invariant is enforced by
+/// construction, not by each mutator remembering to call the counter helper.
+pub(crate) async fn write_local_update(
+    datastore: &NamespaceView,
+    collection: &Collection,
+    doc: &mut Document,
+    index_manager: &IndexManager,
+) -> query::error::Result<()> {
+    apply_local_counter_deltas(datastore, collection, doc, false).await?;
+    collection
+        .update_with_indexes(datastore, doc, index_manager)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::DocumentNotFound(id) => {
+                query::error::QueryError::document_not_found(id)
+            }
+            other => crate::error::index_write_query_error("update", other),
+        })
+}
+
+/// Persist a local CREATE: write the document + maintain indexes, then seed the
+/// CRDT accumulation store for counter fields (#1021). Bundled for the same
+/// by-construction reason as `write_local_update`.
+pub(crate) async fn write_local_create(
+    datastore: &NamespaceView,
+    collection: &Collection,
+    doc: &Document,
+    index_manager: &IndexManager,
+    id_was_generated: bool,
+) -> query::error::Result<()> {
+    collection
+        .create_with_indexes(datastore, doc, index_manager, id_was_generated)
+        .await
+        .map_err(|e| crate::error::index_write_query_error("create", e))?;
+    init_counter_stores_on_create(datastore, collection, doc).await
+}
+
 /// Apply local counter-field increments to the CRDT accumulation store (the
 /// single source of truth) via a fresh read-modify-write, then mirror the
 /// resulting value back into the document blob.
@@ -23,7 +63,7 @@ use schema::{FieldKind, ScalarKind};
 ///
 /// `is_create` skips the committed-doc lookup: on create there is no prior
 /// committed value, so the seed is 0 and the delta is the created value.
-pub(crate) async fn apply_local_counter_deltas(
+async fn apply_local_counter_deltas(
     datastore: &NamespaceView,
     collection: &Collection,
     doc: &mut Document,
@@ -156,7 +196,7 @@ pub(crate) async fn apply_local_counter_deltas(
 /// creation so the store is authoritative from creation (matching the
 /// single-store invariant). The created value is absolute (no delta recorded on
 /// create), so the store is seeded directly to it via init-if-absent.
-pub(crate) async fn init_counter_stores_on_create(
+async fn init_counter_stores_on_create(
     datastore: &NamespaceView,
     collection: &Collection,
     doc: &Document,

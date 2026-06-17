@@ -1,4 +1,4 @@
-use super::helpers::{apply_local_counter_deltas, ensure_collection_is_active};
+use super::helpers::{ensure_collection_is_active, write_local_update};
 use super::*;
 
 #[allow(clippy::type_complexity)]
@@ -81,23 +81,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .await
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-            // Apply counter increments to the authoritative CRDT accumulation
-            // store via a fresh read-modify-write, and mirror the result into the
-            // blob — overriding the absolute value the query-plan layer computed
-            // from a possibly-stale read (#1021). Must run before the doc blob is
-            // persisted below so the blob mirrors the store.
-            apply_local_counter_deltas(&datastore, &collection, &mut doc, false).await?;
-
-            // Use update_with_indexes to maintain index consistency
-            collection
-                .update_with_indexes(&datastore, &doc, &index_manager)
-                .await
-                .map_err(|e| match e {
-                    crate::error::Error::DocumentNotFound(id) => {
-                        query::error::QueryError::document_not_found(id)
-                    }
-                    other => crate::error::index_write_query_error("update", other),
-                })
+            // Bundle the counter RMW (#1021) with the doc blob + index write so
+            // the authoritative CRDT accumulation store always advances before the
+            // blob is persisted — enforced by construction in `write_local_update`.
+            write_local_update(&datastore, &collection, &mut doc, &index_manager).await
         };
 
         match result {

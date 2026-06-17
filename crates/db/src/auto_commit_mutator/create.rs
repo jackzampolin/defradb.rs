@@ -1,4 +1,4 @@
-use super::helpers::{ensure_collection_is_active, init_counter_stores_on_create};
+use super::helpers::{ensure_collection_is_active, write_local_create};
 use super::*;
 
 #[allow(clippy::type_complexity)]
@@ -77,24 +77,23 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .await
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-            // Use create_with_indexes to enforce unique constraints and maintain indexes.
-            // Blind create skips existence check for content-addressed (generated) IDs.
-            let created = collection
-                .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
-                .await
-                .map_err(|e| crate::error::index_write_query_error("create", e));
-
-            // Seed the authoritative CRDT accumulation store for counter fields so
-            // it is authoritative from creation (#1021 single-store invariant).
-            if created.is_ok() {
-                init_counter_stores_on_create(&datastore, &collection, &doc).await?;
-            }
-
-            created
+            // Bundle the doc blob + index write with the counter-store seeding so
+            // the authoritative CRDT accumulation store is always seeded on create
+            // (#1021 single-store invariant) — enforced by construction in
+            // `write_local_create`. Blind create skips the existence check for
+            // content-addressed (generated) IDs.
+            write_local_create(
+                &datastore,
+                &collection,
+                &doc,
+                &index_manager,
+                id_was_generated,
+            )
+            .await
         };
 
         match result {
-            Ok(_returned_doc_id) => {
+            Ok(()) => {
                 // Build blocks and write to blockstore/headstore in a scoped block
                 // This enables _commits queries to find the document's version history
                 // The stores must be dropped before commit, so scope them

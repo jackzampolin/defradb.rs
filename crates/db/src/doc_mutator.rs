@@ -258,20 +258,16 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-        // Use create_with_indexes to enforce unique constraints and maintain indexes.
-        // Blind create skips existence check for content-addressed (generated) IDs.
-        collection
-            .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
-            .await
-            .map_err(|e| crate::error::index_write_query_error("create", e))?;
-
-        // Seed the authoritative CRDT accumulation store for counter fields so it
-        // is authoritative from creation (#1021 single-store invariant). Mirrors
-        // the auto-commit and batch create paths.
-        crate::auto_commit_mutator::helpers::init_counter_stores_on_create(
+        // Bundle the doc blob + index write with the counter-store seeding so the
+        // authoritative CRDT accumulation store is always seeded on create (#1021
+        // single-store invariant). Blind create skips the existence check for
+        // content-addressed (generated) IDs. Mirrors the auto-commit/batch paths.
+        crate::auto_commit_mutator::helpers::write_local_create(
             &datastore,
             &collection,
             &doc,
+            &index_manager,
+            id_was_generated,
         )
         .await?;
 
@@ -392,27 +388,16 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-        // Apply counter increments to the authoritative CRDT accumulation store
-        // via a fresh read-modify-write, mirroring the result into the blob —
-        // overriding the absolute value the query-plan layer computed from a
-        // possibly-stale read (#1021). Must run before the blob is persisted.
-        crate::auto_commit_mutator::helpers::apply_local_counter_deltas(
+        // Bundle the counter RMW (#1021) with the doc blob + index write so the
+        // authoritative CRDT accumulation store always advances before the blob is
+        // persisted — enforced by construction in `write_local_update`.
+        crate::auto_commit_mutator::helpers::write_local_update(
             &datastore,
             &collection,
             &mut doc,
-            false,
+            &index_manager,
         )
         .await?;
-
-        collection
-            .update_with_indexes(&datastore, &doc, &index_manager)
-            .await
-            .map_err(|e| match e {
-                crate::error::Error::DocumentNotFound(id) => {
-                    query::error::QueryError::document_not_found(id)
-                }
-                other => crate::error::index_write_query_error("update", other),
-            })?;
 
         let (doc_cid, doc_block, col_block_data) = {
             let txn_guard = self.txn.lock().await;

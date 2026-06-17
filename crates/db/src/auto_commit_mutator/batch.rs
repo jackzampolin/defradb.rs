@@ -12,9 +12,7 @@ use storage::corekv::Store;
 use tokio::sync::OwnedMutexGuard;
 use tracing::warn;
 
-use super::helpers::{
-    apply_local_counter_deltas, ensure_collection_is_active, init_counter_stores_on_create,
-};
+use super::helpers::{ensure_collection_is_active, write_local_create, write_local_update};
 use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
@@ -211,12 +209,14 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-        collection
-            .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
-            .await
-            .map_err(|e| crate::error::index_write_query_error("create", e))?;
-
-        init_counter_stores_on_create(&datastore, &collection, &doc).await?;
+        write_local_create(
+            &datastore,
+            &collection,
+            &doc,
+            &index_manager,
+            id_was_generated,
+        )
+        .await?;
 
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
@@ -344,17 +344,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-        apply_local_counter_deltas(&datastore, &collection, &mut doc, false).await?;
-
-        collection
-            .update_with_indexes(&datastore, &doc, &index_manager)
-            .await
-            .map_err(|e| match e {
-                crate::error::Error::DocumentNotFound(id) => {
-                    query::error::QueryError::document_not_found(id)
-                }
-                other => crate::error::index_write_query_error("update", other),
-            })?;
+        write_local_update(&datastore, &collection, &mut doc, &index_manager).await?;
 
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();

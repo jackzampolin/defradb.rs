@@ -1,4 +1,4 @@
-use super::helpers::ensure_collection_is_active;
+use super::helpers::{ensure_collection_is_active, write_local_create};
 use super::*;
 
 use crate::block_builder::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
@@ -171,13 +171,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     .await
                     .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-                collection
-                    .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
-                    .await
-                    .map_err(|e| crate::error::index_write_query_error("create", e))?;
-
-                super::helpers::init_counter_stores_on_create(&datastore, &collection, &doc)
-                    .await?;
+                write_local_create(
+                    &datastore,
+                    &collection,
+                    &doc,
+                    &index_manager,
+                    id_was_generated,
+                )
+                .await?;
             } // datastore dropped
 
             // Insert pre-computed blocks + collection blocks
