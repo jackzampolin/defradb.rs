@@ -101,6 +101,13 @@ PN-counter) follows the same recipe — the two canonical exemplars are the coun
    (LWW/composite/object) reuse only its connect/replicate/seed/round scaffolding
    and supply the field's own convergence predicate (a last-writer-wins assertion,
    componentwise equality, etc.) in place of the numeric exact-sum oracle.
+6. **Code plug-point.** The new field's local-write handling plugs into
+   `crates/db/src/auto_commit_mutator/helpers.rs` — `apply_local_counter_deltas`
+   (update path) and `init_counter_stores_on_create` (create path) are the counter
+   exemplars — reached through the single `write_local_update` / `write_local_create`
+   chokepoint that ALL local-write mutators (auto-commit, batch, explicit-txn) call.
+   Add the field-CRDT logic THERE (the shared chokepoint), NOT in the individual
+   per-mutator files, so the single-store invariant stays enforced by construction.
 
 `DefraConvergence/PriorityReconcile.lean` proves the invariant behind the
 same-doc convergence bug this project found and fixed: a field's priority lives

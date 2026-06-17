@@ -19,7 +19,7 @@ pub(crate) async fn write_local_update(
     doc: &mut Document,
     index_manager: &IndexManager,
 ) -> query::error::Result<()> {
-    apply_local_counter_deltas(datastore, collection, doc, false).await?;
+    apply_local_counter_deltas(datastore, collection, doc).await?;
     collection
         .update_with_indexes(datastore, doc, index_manager)
         .await
@@ -59,15 +59,12 @@ pub(crate) async fn write_local_create(
 /// here (never writing the query-plan's pre-computed absolute value), local
 /// writes and merges share one delta-based code path, matching Go DefraDB. The
 /// approach is delta-based (no value-magnitude comparison) so it is correct for
-/// PNCounter decrements too.
-///
-/// `is_create` skips the committed-doc lookup: on create there is no prior
-/// committed value, so the seed is 0 and the delta is the created value.
+/// PNCounter decrements too. Used by the update path; create seeding goes through
+/// `init_counter_stores_on_create`.
 async fn apply_local_counter_deltas(
     datastore: &NamespaceView,
     collection: &Collection,
     doc: &mut Document,
-    is_create: bool,
 ) -> query::error::Result<()> {
     let schema_version_id = collection.version_id().to_string();
 
@@ -103,15 +100,12 @@ async fn apply_local_counter_deltas(
     let doc_id_bytes = doc_id_str.as_bytes().to_vec();
 
     // Freshly read committed doc (inside this write txn) to seed the store the
-    // first time it is touched. On create there is no committed doc → seed 0.
-    let committed = if is_create {
-        None
-    } else {
-        collection
-            .get_with_datastore(datastore, &doc_id)
-            .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()))?
-    };
+    // first time it is touched (init-if-absent). A first update of a doc with no
+    // committed value seeds 0.
+    let committed = collection
+        .get_with_datastore(datastore, &doc_id)
+        .await
+        .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
     // The CRDT operates on a mutable `ReaderWriter`; `NamespaceView` is one, but
     // it is shared by `&` here. Take an owned clone to obtain a mutable handle —

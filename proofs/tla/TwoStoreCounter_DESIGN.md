@@ -1,9 +1,21 @@
 # TwoStoreCounter — design & anchors
 
-Models the counter materialization race found 2026-06-15 by the same-doc merge
-storm (`proofs/tests/behavioral/bughunt.rs::bughunt_same_doc_merge_storm`): under
-concurrent same-document increments, Rust loses an increment while the commit DAG
-fully converges (identical `_commits` set on every node, divergent values 12/12/11).
+Models the #1021 two-store counter materialization clobber: under concurrent
+same-document increments, every node ends with an IDENTICAL, fully-converged commit
+DAG (identical `_commits` set on every node) yet a DIVERGENT materialized counter
+value. The cause is the two-store split — local increments RMW the materialized blob
+key while merges touch a separate accumulation key, so the storage layer's
+transactional conflict detection never fires between a local write and a same-doc
+merge, and a merge's stale reconciled snapshot clobbers an interleaved local
+increment. Evidence: the asserting in-suite test
+`proofs/tests/behavioral/partition.rs::convergence_concurrent_same_doc_merge_storm`
+(and the rest of the `convergence_concurrent_counter_*` family), which converge to the
+exact expected value after the fix.
+
+(A SEPARATE, still-open issue — a load-dependent gossip/DAG-delivery under-count where
+the DAG itself fails to fully converge under a burst — is probed by the non-asserting,
+`#[ignore]`'d `proofs/tests/behavioral/bughunt.rs::bughunt_same_doc_merge_storm`. That
+is NOT the #1021 bug modeled here and is NOT fixed by this PR.)
 
 ## What it abstracts
 
@@ -11,7 +23,7 @@ fully converges (identical `_commits` set on every node, divergent values 12/12/
 |---|---|
 | `blob` (materialized value, queries read it; local writes RMW it) | the CBOR document blob written by `db` crate `doc_mutator` (local increments) and by `db-merge` composite materialization |
 | `acc` (accumulation store) | the counter `value_key` in `crates/crdt/src/counter.rs` |
-| `MergeReconcile` (`acc := blob`) | `Counter::reconcile_int64(datastore, blob_value)` in `crates/db-merge/src/merge_handler/counter.rs` (process_counter_delta ~L91, process_counter_delta_in_txn ~L202) |
+| `MergeReconcile` (`acc := blob`) | `Counter::reconcile_int64(datastore, blob_value)` in `crates/db-merge/src/merge_handler/counter.rs` (`process_counter_delta` / `process_counter_delta_in_txn`) |
 | `MergeCommit` (`acc += δ; blob := acc`) | `counter.merge(+delta)` then blob re-materialization |
 | `LocalApply` (`blob += 1`, no lock, no `acc`) | local increment via the `db` crate; in the Split (pre-#1021) abstraction it does NOT acquire the shared per-doc guard |
 | `MergeRedeliver` (re-delivery; inline `Dedup` branch) | a delta delivered twice; `is_merged(cid)` merged-set guard in `counter.rs`/`composite.rs` (suppresses when `Dedup="On"`) |
@@ -83,6 +95,9 @@ increments and merges serialize on the shared per-doc write guard
 (`crates/db/src/doc_write_queue.rs`, taken by BOTH the local-write path and the db-merge
 merge handler — see `MergeQueue.tla`), and reconcile is init-if-absent (PCounter
 migrate-via-max), so a local write and a same-doc merge never interleave their store RMW.
-The behavioral repro `bughunt_same_doc_merge_storm` (+ `_go` control) now passes. The
-GREEN `Unified` mode here abstracts that fix as a conflict-checked RMW; the per-doc-lock
-realization is checked directly in `MergeQueue.tla`'s `INV_NoLocalMergeInterleave`.
+Validated by the asserting in-suite test
+`partition::convergence_concurrent_same_doc_merge_storm` (driven by
+`support::run_counter_storm`) and the rest of the `convergence_concurrent_counter_*`
+family, which converge to the exact expected value. The GREEN `Unified` mode here
+abstracts that fix as a conflict-checked RMW; the per-doc-lock realization is checked
+directly in `MergeQueue.tla`'s `INV_NoLocalMergeInterleave`.

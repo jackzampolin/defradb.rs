@@ -277,8 +277,13 @@ INV_SameDocSerialized ==
 \* ---- Shared-guard mutual exclusion: a local user-write and a merge are NEVER both in
 \* the critical section on the SAME doc (#1021). This is the property the counter fix
 \* actually relies on — that a local counter RMW and a same-doc merge RMW cannot
-\* interleave inside the store. Under UserWriteMode="LockFree" (pre-#1021) it is FALSE;
-\* the #1021 GREEN config sets UserWriteMode="PerDoc" and this must hold.
+\* interleave inside the store. It is falsified by REMOVING the shared guard:
+\* LockMode="None" with UserWriteMode="PerDoc" lets a local write and a same-doc merge
+\* both enter the critical section (counterexample inCrit=[d1|->{"b1"}],
+\* uwInCrit=[d1|->TRUE]; RED-anchored by MC_MergeQueue_Red_LocalMergeInterleave). It is
+\* NOT falsified by UserWriteMode="LockFree": there UserWriteAcquire is disabled so
+\* uwInCrit is never set TRUE and the invariant is VACUOUSLY true. The #1021 GREEN config
+\* sets LockMode="PerDoc" with UserWriteMode="PerDoc" and this must hold.
 INV_NoLocalMergeInterleave ==
   \A d \in Docs : ~(uwInCrit[d] /\ inCrit[d] # {})
 

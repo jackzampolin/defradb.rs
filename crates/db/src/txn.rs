@@ -605,9 +605,9 @@ impl<S: Store> DbTxn<S> {
     }
 
     /// Release the per-doc guards and the batch gate. Called only AFTER the txn
-    /// is durably committed or discarded (#1021). Dropping is also covered by
-    /// `Drop` for any path that drops the `DbTxn` without an explicit lifecycle
-    /// call, but the explicit drop here makes the release point unambiguous.
+    /// is durably committed or discarded (#1021). The guard fields also drop
+    /// automatically when the `DbTxn` itself is dropped (no explicit `Drop` impl
+    /// is needed), but releasing here makes the release point unambiguous.
     fn release_doc_guards(&mut self) {
         self.doc_guards.clear();
         self.batch_gate = None;

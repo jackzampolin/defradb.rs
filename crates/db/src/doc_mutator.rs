@@ -251,7 +251,18 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
         // Serialize this create's counter-store seeding against concurrent
         // merges/writes on the same document, held until the txn commits (#1021).
-        self.ensure_doc_guard(&doc_id.to_string()).await?;
+        // Only the counter CRDT needs this RMW serialization, so skip the guard —
+        // and thus the process-wide batch gate — for collections with no counter
+        // field. Otherwise an ordinary interactive transaction would hold the gate
+        // for its (user-controlled) lifetime and stall all inbound batch merges.
+        if collection
+            .schema()
+            .fields
+            .iter()
+            .any(|f| f.crdt_type.is_counter())
+        {
+            self.ensure_doc_guard(&doc_id.to_string()).await?;
+        }
 
         self.db
             .validate_downsample_write(&datastore, collection.schema(), &doc, None)
@@ -373,9 +384,19 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         // Serialize this update's counter read-modify-write against concurrent
         // merges/writes on the same document, held until the txn commits. Without
         // it a concurrent P2P counter merge can interleave its RMW and drop this
-        // increment (#1021). Acquired before the RMW below.
-        if let Some(id) = doc.id().map(|id| id.to_string()) {
-            self.ensure_doc_guard(&id).await?;
+        // increment (#1021). Take the guard — and thus the process-wide batch gate
+        // — ONLY when this update actually carries a counter increment, so a
+        // non-counter interactive transaction never holds the gate for its
+        // (user-controlled) lifetime and stalls inbound batch merges.
+        let touches_counter = collection
+            .schema()
+            .fields
+            .iter()
+            .any(|f| f.crdt_type.is_counter() && doc.get_counter_delta(&f.name).is_some());
+        if touches_counter {
+            if let Some(id) = doc.id().map(|id| id.to_string()) {
+                self.ensure_doc_guard(&id).await?;
+            }
         }
 
         self.db

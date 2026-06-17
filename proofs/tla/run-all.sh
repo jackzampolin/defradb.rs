@@ -68,6 +68,7 @@ RUNS=(
   "MC_MergeQueue_CrossDocParallel.cfg MC_MergeQueue_CrossDocParallel.tla RED" # anti-vacuity probe: cross-doc merges DO parallelize
   "MC_MergeQueue_Red_FailOpen.cfg  MC_MergeQueue_Red_FailOpen.tla  RED"   # retry exhaustion silently drops a block
   "MC_MergeQueue_Red_NoMutex.cfg   MC_MergeQueue_Red_NoMutex.tla   RED"   # no per-doc mutex -> same-doc double-apply
+  "MC_MergeQueue_Red_LocalMergeInterleave.cfg MC_MergeQueue_Red_LocalMergeInterleave.tla RED" # shared guard removed -> local write + same-doc merge interleave (INV_NoLocalMergeInterleave)
   "MC_TwoStoreCounter_Red_Split.cfg TwoStoreCounter.tla           RED"   # counter reconcile-from-blob clobbers a concurrent local increment (INV_NoLoss)
   "MC_TwoStoreCounter_Red_DoubleApply.cfg TwoStoreCounter.tla     RED"   # #4935: re-delivered delta merged twice w/o dedup -> double-apply (INV_NoDoubleApply)
   "MC_TwoStoreCounter_Green.cfg     TwoStoreCounter.tla           GREEN" # unified RMW + merged-set dedup -> exact (no loss, no double)

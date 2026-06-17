@@ -96,8 +96,10 @@ a binding.
 
 ### Realized status — all 18 families bound
 
-**13 behavioral tests** (driven against `target/release/defra`, each break-tested
-for non-vacuity), **2 Lean-axis contract bindings**, **6 honest Boundaries**. One
+**14 behavioral tests** (driven against `target/release/defra`, each break-tested
+for non-vacuity), **2 Lean-axis contract bindings**, **6 honest Boundaries** (one,
+Transaction & merge-queue concurrency, is now both — a Behavioral no-loss/no-double-apply
+storm leg plus a Boundary internal-serialization leg). One
 of these (`partition::convergence_concurrent_same_doc_writes_merge`) found a real
 Rust-specific CRDT convergence bug — divergent materialization on identical DAGs
 after a restart — which is now **fixed** in `crates/db-merge/.../lww.rs`
@@ -113,6 +115,7 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 | Storage SSI serializability | Behavioral | `ssi.rs` (real `409 Conflict` on write-skew) |
 | Management-channel auth (NAC gate) | Behavioral | `nac.rs` |
 | NAC lifecycle priv-escalation | Behavioral | `nac_lifecycle.rs` |
+| Transaction & merge-queue concurrency | Behavioral + Boundary | `partition::convergence_concurrent_same_doc_merge_storm` (no-loss/no-double-apply exact-sum oracle); the internal "≤1 worker in the critical section" + txn-registry sweep stay Boundary |
 | Deferred-ACP overlay | Behavioral | `deferred_acp.rs` (txn-local gating) |
 | CID determinism | Behavioral | `cid.rs` |
 | Index-maintenance | Behavioral | `index.rs` |
@@ -121,7 +124,6 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 | Multi-instance claim | Boundary | defra-agent substrate, not this binary |
 | Block integrity / signatures | Boundary | needs adversarial peer; Rust verify mandatory |
 | P2P capability replay gate | Boundary | P2P-wire internal |
-| Transaction & merge-queue concurrency | Boundary | same-doc merge race, not CLI-forceable |
 | JWT issuer / algorithm binding | Boundary | DID-binding via `acp.rs`; forge unreachable via CLI |
 | Order-preserving key encoding | Boundary | ordered query may sort in memory; consts `pub(crate)` |
 

@@ -7,7 +7,11 @@ EXTENDS MergeQueue
 \* of b1 on doc d1) to exercise the is_merged idempotency guard, plus local user-writes
 \* that take the shared guard and perform their write inside the critical section. Every
 \* safety invariant -- including INV_NoLocalMergeInterleave (no local-write-vs-merge
-\* interleave on one doc, the property the counter fix relies on) -- must hold.
+\* interleave on one doc, the property the counter fix relies on) -- must hold. That
+\* invariant is falsified only by REMOVING the shared guard (LockMode="None" with
+\* UserWriteMode="PerDoc"; RED-anchored by MC_MergeQueue_Red_LocalMergeInterleave), NOT by
+\* lock-free user-writes (UserWriteMode="LockFree" never sets uwInCrit, so it is vacuous
+\* there).
 
 mcBlocks  == {"b1", "b2", "b3"}
 mcDocs    == {"d1", "d2"}
