@@ -696,12 +696,24 @@ async fn handle_dial(
     addrs: Vec<PeerAddr>,
 ) -> crate::error::Result<()> {
     let endpoint_id = parse_endpoint_id(peer_id)?;
-    let endpoint_addr = endpoint_addr_from_parts(peer_id, &addrs)?;
+    let mut endpoint_addr = endpoint_addr_from_parts(peer_id, &addrs)?;
 
-    let direct_addresses: Vec<std::net::SocketAddr> = addrs
-        .iter()
-        .filter_map(|a| a.as_str().parse().ok())
-        .collect();
+    // Fix B (#511 reverse-edge dial): the advertised address may be
+    // identity-only — an iroh ticket published before direct-addr discovery
+    // completed carries no dialable direct addr. iroh rc.0 `connect()` requires
+    // the addr to be present in the EndpointAddr (there is no persistent
+    // address book to seed), so when no direct addr was supplied, reuse the
+    // observed address learned from an existing inbound connection (e.g. a peer
+    // that already dialed us during its network join). This lets a reverse mesh
+    // edge dial back over the path the peer opened to us, instead of failing
+    // "Address Lookup failed" under no-relay/no-discovery.
+    if endpoint_addr.ip_addrs().next().is_none() {
+        if let Some(observed) = peer_direct_addr(ctx.peer_map, peer_id) {
+            endpoint_addr = endpoint_addr.with_ip_addr(observed);
+        }
+    }
+
+    let direct_addresses: Vec<std::net::SocketAddr> = endpoint_addr.ip_addrs().copied().collect();
 
     let connection = ctx
         .endpoint
