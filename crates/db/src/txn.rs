@@ -7,12 +7,12 @@
 use crate::collection::{populate_collection_root_id, Collection};
 use crate::collection_cache::CollectionCache;
 use crate::error::{Error, Result};
+use async_lock::MutexGuardArc;
 use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
 use schema::CollectionVersion;
 use std::collections::{BTreeMap, HashSet};
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
-use tokio::sync::OwnedMutexGuard;
 
 /// Database transaction wrapper.
 ///
@@ -53,10 +53,10 @@ pub struct DbTxn<S: Store> {
     /// durable commit. `batch_gate` keeps this incremental multi-doc acquirer
     /// deadlock-free against other multi-doc acquirers (batch merges,
     /// `create_many`); see `ensure_doc_guard`.
-    doc_guards: BTreeMap<String, OwnedMutexGuard<()>>,
+    doc_guards: BTreeMap<String, MutexGuardArc<()>>,
     /// The shared batch gate, taken on the first per-doc guard and held for the
     /// whole transaction (see `doc_guards`).
-    batch_gate: Option<OwnedMutexGuard<()>>,
+    batch_gate: Option<MutexGuardArc<()>>,
     /// Phantom data for the store type.
     _marker: std::marker::PhantomData<S>,
 }
@@ -517,7 +517,7 @@ impl<S: Store> DbTxn<S> {
 
     /// Store the shared batch gate on this txn, held until the txn is consumed
     /// by commit/discard. Idempotent: a second gate is dropped immediately.
-    pub fn set_batch_gate(&mut self, gate: OwnedMutexGuard<()>) {
+    pub fn set_batch_gate(&mut self, gate: MutexGuardArc<()>) {
         if self.batch_gate.is_none() {
             self.batch_gate = Some(gate);
         }
@@ -525,7 +525,7 @@ impl<S: Store> DbTxn<S> {
 
     /// Store a per-doc write guard on this txn, held until the txn is consumed
     /// by commit/discard. Idempotent per doc: a duplicate guard is dropped.
-    pub fn insert_doc_guard(&mut self, doc_id: String, guard: OwnedMutexGuard<()>) {
+    pub fn insert_doc_guard(&mut self, doc_id: String, guard: MutexGuardArc<()>) {
         self.doc_guards.entry(doc_id).or_insert(guard);
     }
 

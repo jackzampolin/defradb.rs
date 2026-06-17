@@ -108,6 +108,17 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
 
             match self.try_batch_merge(blocks).await {
                 Ok(results) => results,
+                Err(MergeError::GateContended) => {
+                    // A long-lived local/interactive txn holds the per-doc batch
+                    // gate. Don't block node-wide inbound replication — degrade to
+                    // the gate-free per-block path, which is correct and takes only
+                    // single per-doc guards (#1041).
+                    tracing::debug!(
+                        batch_size = blocks.len(),
+                        "batch gate contended; merging per-block"
+                    );
+                    self.merge_blocks_individually(blocks).await
+                }
                 Err(e) => {
                     tracing::debug!(
                         error = %e,
@@ -147,7 +158,15 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
             // acquirer can never deadlock against an incremental local mutation
             // batch (which holds the gate for its whole batch). Once all guards
             // are held the gate is released; the per-doc guards stay until commit.
-            let _batch_gate = self.merge_queue.acquire_batch_gate().await;
+            //
+            // Acquire it NON-BLOCKING: batch merging is an optimization, so if the
+            // gate is held by a long-lived local/interactive txn we signal the
+            // caller to fall back to the gate-free per-block path rather than stall
+            // node-wide inbound replication (#1041).
+            let _batch_gate = self
+                .merge_queue
+                .try_acquire_batch_gate()
+                .ok_or(MergeError::GateContended)?;
             for doc_id in &batch_doc_ids {
                 _doc_guards.push(self.merge_queue.acquire(doc_id).await);
             }

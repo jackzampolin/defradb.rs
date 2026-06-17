@@ -1,4 +1,4 @@
-use async_lock::Mutex as TokioMutex;
+use async_lock::{Mutex as TokioMutex, MutexGuardArc};
 use async_trait::async_trait;
 use cid::Cid;
 use document::{DocID, Document};
@@ -9,7 +9,6 @@ use query::mutator::{
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use storage::corekv::Store;
-use tokio::sync::OwnedMutexGuard;
 use tracing::warn;
 
 use super::helpers::{ensure_collection_is_active, write_local_create, write_local_update};
@@ -30,8 +29,8 @@ pub struct BatchMutator<S: Store> {
     /// after the batch commits/rolls back, so a concurrent merge observes the
     /// committed counter state, never a partial. `batch_gate` keeps this
     /// incremental multi-doc acquirer deadlock-free (see `ensure_doc_guard`).
-    doc_guards: PlMutex<BTreeMap<String, OwnedMutexGuard<()>>>,
-    batch_gate: PlMutex<Option<OwnedMutexGuard<()>>>,
+    doc_guards: PlMutex<BTreeMap<String, MutexGuardArc<()>>>,
+    batch_gate: PlMutex<Option<MutexGuardArc<()>>>,
 }
 
 impl<S: Store> BatchMutator<S> {

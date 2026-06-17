@@ -1,7 +1,7 @@
+use async_lock::{Mutex as AsyncMutex, MutexGuardArc};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::OwnedMutexGuard;
 
 const PRUNE_THRESHOLD: usize = 10_000;
 
@@ -20,7 +20,7 @@ const PRUNE_THRESHOLD: usize = 10_000;
 /// Different documents proceed in parallel. Mirrors Go DefraDB's per-doc merge
 /// queue, extended to also cover local writes.
 pub struct DocWriteQueue {
-    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     /// Serializes the guard-ACQUISITION phase of multi-document writers (local
     /// mutation batches, batch merges) against one another. A caller that will
     /// hold more than one per-doc guard at once must hold this gate while
@@ -36,14 +36,14 @@ pub struct DocWriteQueue {
     /// opens its txn before taking the gate; create_many / try_batch_merge take
     /// the gate before opening their txn) cannot invert into a cycle. A future
     /// blocking-writer backend would need to revisit this.
-    batch_gate: Arc<tokio::sync::Mutex<()>>,
+    batch_gate: Arc<AsyncMutex<()>>,
 }
 
 impl Default for DocWriteQueue {
     fn default() -> Self {
         Self {
             locks: Mutex::new(HashMap::new()),
-            batch_gate: Arc::new(tokio::sync::Mutex::new(())),
+            batch_gate: Arc::new(AsyncMutex::new(())),
         }
     }
 }
@@ -58,17 +58,17 @@ impl DocWriteQueue {
     /// Returns an owned guard that serializes access. Different documents
     /// proceed in parallel; the same document blocks until the previous holder
     /// drops the guard.
-    pub async fn acquire(&self, doc_id: &str) -> OwnedMutexGuard<()> {
+    pub async fn acquire(&self, doc_id: &str) -> MutexGuardArc<()> {
         let mutex = {
             let mut map = self.locks.lock();
             if map.len() > PRUNE_THRESHOLD {
                 map.retain(|_, v| Arc::strong_count(v) > 1);
             }
             map.entry(doc_id.to_string())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
                 .clone()
         };
-        mutex.lock_owned().await
+        mutex.lock_arc().await
     }
 
     /// Acquire the multi-document batch gate.
@@ -79,8 +79,17 @@ impl DocWriteQueue {
     /// holds it for the whole batch; an upfront acquirer (a batch merge, or
     /// `create_many`) holds it only while taking its sorted guards, then releases
     /// it. This makes the per-doc guards deadlock-free across multi-doc writers.
-    pub async fn acquire_batch_gate(&self) -> OwnedMutexGuard<()> {
-        self.batch_gate.clone().lock_owned().await
+    pub async fn acquire_batch_gate(&self) -> MutexGuardArc<()> {
+        self.batch_gate.lock_arc().await
+    }
+
+    /// Non-blocking variant of [`Self::acquire_batch_gate`]. Returns `None` if the
+    /// gate is currently held. A caller for whom batching is an optimization (the
+    /// batch-merge path) uses this to degrade to the gate-free per-block path
+    /// instead of blocking behind a long-lived gate holder (e.g. an interactive
+    /// transaction that holds the gate across its user-controlled lifetime, #1041).
+    pub fn try_acquire_batch_gate(&self) -> Option<MutexGuardArc<()>> {
+        self.batch_gate.try_lock_arc()
     }
 }
 
