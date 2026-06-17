@@ -771,3 +771,71 @@ async fn test_counter_float32_accumulation_uses_f32_precision() {
         "Float32 result should differ from f64-promoted arithmetic"
     );
 }
+
+/// PCounter (increment-only) reconcile MIGRATES a present-but-stale store via max,
+/// and NEVER lowers a present store (#1021). A pre-fix document has its value in
+/// the blob but a store left behind (old local increments hit only the blob); the
+/// first post-fix touch must adopt the larger so those increments are not dropped.
+/// The intra-batch lag — where the store leads the lagging blob — must be a no-op
+/// (never lower), so reconcile can never clobber.
+#[tokio::test]
+async fn test_pcounter_reconcile_migrates_via_max_never_lowers() {
+    let store = MemoryStore::new();
+    // allow_decrement = false => PCounter.
+    let counter = Counter::new(
+        "v1".to_string(),
+        b"doc1",
+        "count".to_string(),
+        false,
+        NumericKind::Int64,
+    )
+    .unwrap();
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    let read = |bytes: Vec<u8>| i64::from_be_bytes(bytes.try_into().unwrap());
+
+    // Absent -> initialize from the materialized value.
+    counter.reconcile_int64(&mut *txn, 5).await.unwrap();
+    assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
+
+    // Present but BEHIND (pre-fix doc: blob=8 ahead of store=5) -> migrate to 8.
+    counter.reconcile_int64(&mut *txn, 8).await.unwrap();
+    assert_eq!(read(counter.value(&*txn).await.unwrap()), 8);
+
+    // Present and AHEAD of the passed value (intra-batch lag) -> no-op, never lower.
+    counter.reconcile_int64(&mut *txn, 3).await.unwrap();
+    assert_eq!(read(counter.value(&*txn).await.unwrap()), 8);
+
+    txn.commit().await.unwrap();
+}
+
+/// PNCounter (decrement-capable) reconcile stays STRICT init-if-absent: a present
+/// store is never overwritten. With decrements allowed, `value < store` is
+/// ambiguous (a legitimate decrement vs. a stale store), so `max` would be unsound.
+#[tokio::test]
+async fn test_pncounter_reconcile_init_if_absent_only() {
+    let store = MemoryStore::new();
+    // allow_decrement = true => PNCounter.
+    let counter = Counter::new(
+        "v1".to_string(),
+        b"doc1",
+        "count".to_string(),
+        true,
+        NumericKind::Int64,
+    )
+    .unwrap();
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    let read = |bytes: Vec<u8>| i64::from_be_bytes(bytes.try_into().unwrap());
+
+    counter.reconcile_int64(&mut *txn, 5).await.unwrap();
+    assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
+
+    // Present -> never overwritten, regardless of the value passed (higher or lower).
+    counter.reconcile_int64(&mut *txn, 8).await.unwrap();
+    assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
+    counter.reconcile_int64(&mut *txn, 2).await.unwrap();
+    assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
+
+    txn.commit().await.unwrap();
+}

@@ -69,9 +69,15 @@ pub const PROPERTIES: &[Property] = &[
     },
     Property {
         family: "CRDT merge laws",
-        name: "lww/counter merge commutative+associative+idempotent",
+        // Generic CrdtField core (DefraConvergence.CrdtField): comm+assoc => the merge
+        // fold is order-independent (every field). Idempotence is the dividing line:
+        // LWW (lwwMerge) is idempotent => a join-semilattice, re-delivery-safe, no dedup
+        // (lww_dup_safe); the counter (Int +) is NOT idempotent (counter_not_idempotent)
+        // => it must apply each delta exactly once, the algebraic root of the #4935
+        // double-apply. Both fields fully instantiate the core (counterCM / lwwCM).
+        name: "CrdtField: comm+assoc => order-independent; idempotence => dedup-free (LWW) vs dedup-required (counter)",
         axis: Lean,
-        anchor: "crates/crdt/src/lww.rs set_value; crates/crdt/src/traits.rs MergeResult",
+        anchor: "crates/crdt/src/lww.rs set_value; crates/crdt/src/counter.rs; crates/crdt/src/traits.rs MergeResult",
         model_ref: "DefraConvergence (lake build)",
         tiers: &[Contract, Behavioral],
     },
@@ -168,16 +174,25 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral],
     },
     Property {
-        // Same-doc merge serialization is a race: forcing two concurrent merges
-        // of one document deterministically needs two peers pushing conflicting
-        // heads at once, and the txn-registry sweep is internal — neither is
-        // deterministically drivable through the public CLI. Structural.
+        // No-loss / no-double-apply under concurrent same-document mutation is now
+        // BEHAVIORAL: `partition::convergence_concurrent_same_doc_merge_storm`
+        // storms one PCounter doc from a 3-node mesh and asserts the exact sum
+        // (below => a delta dropped, above => double-applied). This found and fixed
+        // #1021's residual two-store counter race — local writes and merges both
+        // RMW the authoritative accumulation store, serialized per-doc by
+        // `crates/db/src/doc_write_queue.rs` (shared by the local-write and merge
+        // paths). The internal `INV_SameDocSerialized` "≤1 worker in the critical
+        // section" + the txn-registry sweep remain a structural Boundary.
+        // `MC_TwoStoreCounter` proves BOTH counter hazards RED-then-GREEN: the
+        // two-store split lost-update (`MC_TwoStoreCounter_Red_Split`, INV_NoLoss) and
+        // the merged-set/is_merged double-apply (`MC_TwoStoreCounter_Red_DoubleApply`,
+        // INV_NoDoubleApply — the model twin of upstream Go #4935 / our #1043).
         family: "Transaction & merge-queue concurrency",
-        name: "INV_SameDocSerialized — per-doc merge serialized, no loss/double-apply",
+        name: "INV_NoLoss / INV_NoDoubleApply under concurrent same-doc mutation",
         axis: Tla,
-        anchor: "crates/db txn registry; crates/db-merge merge queue",
-        model_ref: "MC_MergeQueue_Green.cfg / MC_TxnRegistry_Green.cfg",
-        tiers: &[Boundary],
+        anchor: "crates/db/src/doc_write_queue.rs (per-doc write lock, shared with crates/db-merge merge handler); crates/db txn registry",
+        model_ref: "MC_MergeQueue_Green.cfg / MC_TxnRegistry_Green.cfg / MC_TwoStoreCounter_Green.cfg",
+        tiers: &[Behavioral, Boundary],
     },
     Property {
         // The DID-binding half (a distinct identity cannot impersonate another)

@@ -1,4 +1,4 @@
-use super::helpers::ensure_collection_is_active;
+use super::helpers::{ensure_collection_is_active, write_local_update};
 use super::*;
 
 #[allow(clippy::type_complexity)]
@@ -36,6 +36,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             modified_fields.insert(field);
         }
 
+        // Serialize this write against concurrent merges (and other local writes)
+        // touching the same document. Local counter increments and P2P merges both
+        // read-modify-write the CRDT accumulation store; without this per-doc lock
+        // their txns can race in a way the store's optimistic-conflict detection
+        // does not always catch, dropping increments (#1021). The guard is held
+        // across the whole write + commit.
+        let _doc_guard = match doc.id() {
+            Some(id) => Some(self.db.doc_write_queue().acquire(&id.to_string()).await),
+            None => None,
+        };
+
         // Create a write transaction
         let txn = self.db.new_txn(false).await.map_err(|e| {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
@@ -70,16 +81,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .await
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-            // Use update_with_indexes to maintain index consistency
-            collection
-                .update_with_indexes(&datastore, &doc, &index_manager)
-                .await
-                .map_err(|e| match e {
-                    crate::error::Error::DocumentNotFound(id) => {
-                        query::error::QueryError::document_not_found(id)
-                    }
-                    other => crate::error::index_write_query_error("update", other),
-                })
+            // Bundle the counter RMW (#1021) with the doc blob + index write so
+            // the authoritative CRDT accumulation store always advances before the
+            // blob is persisted — enforced by construction in `write_local_update`.
+            write_local_update(&datastore, &collection, &mut doc, &index_manager).await
         };
 
         match result {

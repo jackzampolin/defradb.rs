@@ -101,6 +101,51 @@ impl<S: Store> DbDocMutator<S> {
         self.txn.lock().await.is_none()
     }
 
+    /// Serialize this explicit-txn write to `doc_id` against concurrent
+    /// merges/writes on the same document, holding the guard until the txn
+    /// commits/rolls back (#1021).
+    ///
+    /// The guards live on the `DbTxn` (not on this per-call mutator, which is
+    /// recreated and dropped before commit), so they release only after the
+    /// durable commit. Like `BatchMutator`, an explicit txn discovers its
+    /// documents incrementally, so the first guard also takes the shared batch
+    /// gate (held for the whole txn) to stay deadlock-free against other
+    /// multi-doc acquirers (batch merges, `create_many`).
+    ///
+    /// The gate and per-doc guards are acquired WITHOUT holding the txn lock so
+    /// acquisition (which may block on other holders) cannot deadlock against a
+    /// merge that needs the txn's stores; only the brief insert into the txn is
+    /// done under the lock.
+    async fn ensure_doc_guard(&self, doc_id: &str) -> query::error::Result<()> {
+        let (already_held, need_gate) = {
+            let txn_guard = self.txn.lock().await;
+            let txn = txn_guard.as_ref().ok_or_else(|| {
+                query::error::QueryError::execution("transaction is no longer active")
+            })?;
+            (txn.holds_doc_guard(doc_id), !txn.holds_batch_gate())
+        };
+        if already_held {
+            return Ok(());
+        }
+
+        if need_gate {
+            let gate = self.db.doc_write_queue().acquire_batch_gate().await;
+            let mut txn_guard = self.txn.lock().await;
+            let txn = txn_guard.as_mut().ok_or_else(|| {
+                query::error::QueryError::execution("transaction is no longer active")
+            })?;
+            txn.set_batch_gate(gate);
+        }
+
+        let guard = self.db.doc_write_queue().acquire(doc_id).await;
+        let mut txn_guard = self.txn.lock().await;
+        let txn = txn_guard.as_mut().ok_or_else(|| {
+            query::error::QueryError::execution("transaction is no longer active")
+        })?;
+        txn.insert_doc_guard(doc_id.to_string(), guard);
+        Ok(())
+    }
+
     async fn ensure_collection_can_write(
         &self,
         collection_name: &str,
@@ -204,17 +249,38 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             query::error::QueryError::execution("document should have ID after generation")
         })?;
 
+        // Serialize this create's counter-store seeding against concurrent
+        // merges/writes on the same document, held until the txn commits (#1021).
+        // Only the counter CRDT needs this RMW serialization, so skip the guard —
+        // and thus the process-wide batch gate — for collections with no counter
+        // field. Otherwise an ordinary interactive transaction would hold the gate
+        // for its (user-controlled) lifetime and stall all inbound batch merges.
+        if collection
+            .schema()
+            .fields
+            .iter()
+            .any(|f| f.crdt_type.is_counter())
+        {
+            self.ensure_doc_guard(&doc_id.to_string()).await?;
+        }
+
         self.db
             .validate_downsample_write(&datastore, collection.schema(), &doc, None)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-        // Use create_with_indexes to enforce unique constraints and maintain indexes.
-        // Blind create skips existence check for content-addressed (generated) IDs.
-        collection
-            .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
-            .await
-            .map_err(|e| crate::error::index_write_query_error("create", e))?;
+        // Bundle the doc blob + index write with the counter-store seeding so the
+        // authoritative CRDT accumulation store is always seeded on create (#1021
+        // single-store invariant). Blind create skips the existence check for
+        // content-addressed (generated) IDs. Mirrors the auto-commit/batch paths.
+        crate::auto_commit_mutator::helpers::write_local_create(
+            &datastore,
+            &collection,
+            &doc,
+            &index_manager,
+            id_was_generated,
+        )
+        .await?;
 
         let (doc_cid, doc_block, col_block_data) = {
             let txn_guard = self.txn.lock().await;
@@ -302,7 +368,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     async fn update(
         &self,
         collection_name: &str,
-        doc: Document,
+        mut doc: Document,
         modified_fields: std::collections::HashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         self.db
@@ -315,6 +381,24 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
+        // Serialize this update's counter read-modify-write against concurrent
+        // merges/writes on the same document, held until the txn commits. Without
+        // it a concurrent P2P counter merge can interleave its RMW and drop this
+        // increment (#1021). Take the guard — and thus the process-wide batch gate
+        // — ONLY when this update actually carries a counter increment, so a
+        // non-counter interactive transaction never holds the gate for its
+        // (user-controlled) lifetime and stalls inbound batch merges.
+        let touches_counter = collection
+            .schema()
+            .fields
+            .iter()
+            .any(|f| f.crdt_type.is_counter() && doc.get_counter_delta(&f.name).is_some());
+        if touches_counter {
+            if let Some(id) = doc.id().map(|id| id.to_string()) {
+                self.ensure_doc_guard(&id).await?;
+            }
+        }
+
         self.db
             .validate_downsample_write(
                 &datastore,
@@ -325,15 +409,16 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-        collection
-            .update_with_indexes(&datastore, &doc, &index_manager)
-            .await
-            .map_err(|e| match e {
-                crate::error::Error::DocumentNotFound(id) => {
-                    query::error::QueryError::document_not_found(id)
-                }
-                other => crate::error::index_write_query_error("update", other),
-            })?;
+        // Bundle the counter RMW (#1021) with the doc blob + index write so the
+        // authoritative CRDT accumulation store always advances before the blob is
+        // persisted — enforced by construction in `write_local_update`.
+        crate::auto_commit_mutator::helpers::write_local_update(
+            &datastore,
+            &collection,
+            &mut doc,
+            &index_manager,
+        )
+        .await?;
 
         let (doc_cid, doc_block, col_block_data) = {
             let txn_guard = self.txn.lock().await;
@@ -554,7 +639,7 @@ mod tests {
     use super::*;
     use events::{Bus, ChannelBus, EventName};
     use query::mutator::DocMutator;
-    use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use schema::{CType, CollectionVersion, FieldDescription, FieldKind};
     use storage::backends::MemoryStore;
 
     async fn make_test_db_with_bus() -> (Arc<DB<MemoryStore>>, Arc<dyn Bus>) {
@@ -574,6 +659,99 @@ mod tests {
                 FieldDescription::new("2", "x", FieldKind::int()),
             ],
         )
+    }
+
+    fn counter_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "Counters",
+            "cv1",
+            "col-counters",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "count", FieldKind::int())
+                    .with_crdt_type(CType::PnCounter),
+            ],
+        )
+    }
+
+    /// Read the PNCounter accumulation store value for a doc/field from the
+    /// committed store (a fresh read txn), proving the authoritative store — not
+    /// just the materialized blob — advanced.
+    async fn read_counter_store(
+        db: &Arc<DB<MemoryStore>>,
+        schema_version_id: &str,
+        doc_id: &str,
+        field: &str,
+    ) -> i64 {
+        use crdt::traits::ValueReader;
+        use crdt::{Counter, NumericKind};
+
+        let txn = db.new_txn(true).await.expect("read txn");
+        let datastore = txn.datastore().expect("datastore");
+        let counter = Counter::new(
+            schema_version_id.to_string(),
+            doc_id.as_bytes(),
+            field.to_string(),
+            true,
+            NumericKind::Int64,
+        )
+        .expect("counter");
+        let bytes = ValueReader::value(&counter, &datastore)
+            .await
+            .expect("counter value");
+        assert_eq!(bytes.len(), 8, "int64 counter store value is 8 bytes");
+        i64::from_be_bytes(bytes.try_into().unwrap())
+    }
+
+    #[tokio::test]
+    async fn explicit_txn_counter_increment_advances_accumulation_store() {
+        // Regression for #1021: an explicit-transaction counter increment must
+        // read-modify-write the authoritative CRDT accumulation store (not only
+        // the materialized blob). If the store stayed stale, a later merge would
+        // re-materialize from it and silently drop the increment.
+        let (db, _bus) = make_test_db_with_bus().await;
+        db.create_collection(counter_collection())
+            .await
+            .expect("schema");
+
+        // Create the doc (count = 5) in an explicit txn.
+        let txn = db.new_txn(false).await.expect("new_txn");
+        let mutator = DbDocMutator::new(Arc::clone(&db), txn);
+        let create_doc = Document::from_json_str(r#"{"count": 5}"#).expect("doc");
+        let created = mutator
+            .create("Counters", create_doc)
+            .await
+            .expect("create");
+        let doc_id = created.doc_id.to_string();
+        let txn = mutator.take_txn().await.expect("take txn");
+        txn.force_commit().await.expect("commit");
+
+        assert_eq!(
+            read_counter_store(&db, "cv1", &doc_id, "count").await,
+            5,
+            "create must seed the accumulation store"
+        );
+
+        // Increment by 3 in a fresh explicit txn.
+        let txn = db.new_txn(false).await.expect("new_txn");
+        let mutator = DbDocMutator::new(Arc::clone(&db), txn);
+        let mut update_doc = Document::from_json_str(r#"{"count": 8}"#).expect("doc");
+        update_doc.set_id(document::DocID::from_string(&doc_id).expect("doc id"));
+        update_doc.set_counter_delta("count".to_string(), document::NormalValue::Int(3));
+        let mut modified = std::collections::HashSet::new();
+        modified.insert("count".to_string());
+        mutator
+            .update("Counters", update_doc, modified)
+            .await
+            .expect("update");
+        let txn = mutator.take_txn().await.expect("take txn");
+        txn.force_commit().await.expect("commit");
+
+        assert_eq!(
+            read_counter_store(&db, "cv1", &doc_id, "count").await,
+            8,
+            "explicit-txn increment must advance the accumulation store (#1021)"
+        );
     }
 
     #[tokio::test]

@@ -24,6 +24,9 @@ The model proves:
 | `word64Add_not_idempotent` | Raw counter merge is not idempotent. Duplicate suppression is not local to `Counter::merge`. | `crates/crdt/src/counter.rs` |
 | `appliedSet_merge_*` | The durable merged-CID/applied set is the idempotent layer used for duplicate suppression. | `crates/db-merge/src/merge_handler/counter.rs` |
 | `composite_merge_*` | Composite local state merges componentwise from the LWW and applied-set components. | `crates/crdt/src/composite.rs` |
+| `CrdtField.swap` / `two_converge` / `three_converge` | Generic reusable core (`DefraConvergence/CrdtField.lean`): for ANY commutative-associative merge, the fold is order-independent (replicas applying the same multiset converge). | — (field-agnostic) |
+| `CrdtField.dup_absorb` / `nonidem_has_dup_witness` | Idempotence is the dedup dividing line: idempotent ⇒ re-delivery-safe (no dedup); ¬idempotent ⇒ a duplicate changes the result (must dedup). | — |
+| `CounterReconcile.counterCM` + `counter_not_idempotent`; `PriorityReconcile.lwwCM` + `lww_idempotent` | Both fields fully instantiate the core: the counter (op-based, `Int +`, **not** idempotent ⇒ must apply each delta once — the algebraic root of the #4935 double-apply) and LWW (state-based join, **idempotent** ⇒ re-delivery-safe). | `crates/crdt/src/{counter,lww}.rs` |
 
 `#print axioms` status checked with Lean 4.18:
 
@@ -34,8 +37,77 @@ The model proves:
 - `reconciled_merge_ge_committed`: `[propext, Quot.sound]`
 - `unreconciled_merge_can_clobber`: *(no axioms)*
 
-No theorem uses `sorry` or custom axioms. Float32/Float64 counter laws are not
-claimed here because IEEE-754 addition is not generally associative.
+Generic `CrdtField` core:
+
+- `CrdtField.swap`: *(no axioms)*
+- `CrdtField.two_converge`: *(no axioms)*
+- `CrdtField.three_converge`: *(no axioms)*
+- `CrdtField.dup_absorb`: *(no axioms)*
+- `CrdtField.nonidem_has_dup_witness`: `[propext, Classical.choice, Quot.sound]`
+
+Field instantiations:
+
+- `CounterReconcile.counterCM`: `[propext]`
+- `CounterReconcile.counter_not_idempotent`: `[propext, Quot.sound]`
+- `CounterReconcile.counter_two_converge`: `[propext]`
+- `CounterReconcile.counter_three_converge`: `[propext]`
+- `PriorityReconcile.lwwCM`: `[propext, Classical.choice, Quot.sound]`
+- `PriorityReconcile.lww_idempotent`: `[propext, Classical.choice, Quot.sound]`
+- `PriorityReconcile.lww_dup_safe`: `[propext, Classical.choice, Quot.sound]`
+- `PriorityReconcile.lww_two_converge`: `[propext, Classical.choice, Quot.sound]`
+- `PriorityReconcile.lww_three_converge`: `[propext, Classical.choice, Quot.sound]`
+
+`nonidem_has_dup_witness` is the generic core's only classical lemma (it pulls in
+`Classical.choice` via `Classical.byContradiction`), and it is the trivial
+existential dual of the `Idempotent` definition — it is NOT consumed by any field
+convergence or dedup result. The counter results (`counterCM`,
+`counter_not_idempotent`, `counter_*_converge`) are fully constructive
+(`Classical.choice`-free). The LWW results also depend on `Classical.choice`, but
+independently: it enters through the `lwwMerge` case analysis, not through
+`nonidem_has_dup_witness`.
+
+`Classical.choice`, `propext`, and `Quot.sound` are the three built-in axioms of
+Lean 4's core logic, not project-defined axioms. No theorem uses `sorry` or any
+custom (project-defined) axiom. Float32/Float64 counter laws are not claimed here
+because IEEE-754 addition is not generally associative.
+
+## Adding a new CRDT field
+
+This PR is the reference template. A new field's proof (composite, object, mixed,
+PN-counter) follows the same recipe — the two canonical exemplars are the counter
+(op-based, `DefraConvergence/CounterReconcile.lean`) and LWW (state-based,
+`DefraConvergence/PriorityReconcile.lean`):
+
+1. **Define your merge and prove its two laws.** Implement the field's binary
+   merge and prove it commutative + associative, then package it:
+   `def fooCM : CrdtField.CommMerge V := { merge := …, comm := …, assoc := … }`.
+2. **Settle the idempotence axis.** A state-based join (componentwise / lexicographic
+   max — like LWW) is idempotent: prove `CrdtField.Idempotent fooCM` and inherit
+   `dup_absorb` (re-delivery safe, NO dedup). An op-based field (delta accumulation —
+   like the counter) is NOT idempotent: prove `¬ CrdtField.Idempotent fooCM`, which
+   makes the per-delta dedup obligation explicit (discharged upstream by the
+   merged-set / `is_merged` guard).
+3. **Derive convergence by instantiation only.** Get `foo_two_converge` from
+   `CrdtField.two_converge fooCM` and `foo_three_converge` from
+   `CrdtField.three_converge fooCM`. Both fields expose the IDENTICAL convergence
+   set — no field-specific reasoning in these theorems. ("Implement `CommMerge`,
+   plug in, inherit the same named theorems" is the copyable invariant.)
+4. **Concurrency axis (TLA+).** Copy `proofs/tla/TwoStoreCounter.tla`'s structure:
+   one `CONSTANT` knob per hazard, so each interleaving hazard is toggled
+   independently and shown RED/GREEN.
+5. **Behavioral conformance leg.** If the field is numeric/counter-like, reuse
+   `run_counter_storm` (`proofs/tests/support.rs`) — its exact-sum oracle is the
+   behavioral template for the COUNTER FAMILY. For a non-numeric field
+   (LWW/composite/object) reuse only its connect/replicate/seed/round scaffolding
+   and supply the field's own convergence predicate (a last-writer-wins assertion,
+   componentwise equality, etc.) in place of the numeric exact-sum oracle.
+6. **Code plug-point.** The new field's local-write handling plugs into
+   `crates/db/src/auto_commit_mutator/helpers.rs` — `apply_local_counter_deltas`
+   (update path) and `init_counter_stores_on_create` (create path) are the counter
+   exemplars — reached through the single `write_local_update` / `write_local_create`
+   chokepoint that ALL local-write mutators (auto-commit, batch, explicit-txn) call.
+   Add the field-CRDT logic THERE (the shared chokepoint), NOT in the individual
+   per-mutator files, so the single-store invariant stays enforced by construction.
 
 `DefraConvergence/PriorityReconcile.lean` proves the invariant behind the
 same-doc convergence bug this project found and fixed: a field's priority lives

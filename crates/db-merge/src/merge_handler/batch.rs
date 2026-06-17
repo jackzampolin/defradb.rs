@@ -108,6 +108,17 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
 
             match self.try_batch_merge(blocks).await {
                 Ok(results) => results,
+                Err(MergeError::GateContended) => {
+                    // A long-lived local/interactive txn holds the per-doc batch
+                    // gate. Don't block node-wide inbound replication — degrade to
+                    // the gate-free per-block path, which is correct and takes only
+                    // single per-doc guards (#1041).
+                    tracing::debug!(
+                        batch_size = blocks.len(),
+                        "batch gate contended; merging per-block"
+                    );
+                    self.merge_blocks_individually(blocks).await
+                }
                 Err(e) => {
                     tracing::debug!(
                         error = %e,
@@ -132,6 +143,35 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         &self,
         blocks: &[MergeBlock],
     ) -> Result<Vec<Result<MergeOutcome, MergeError>>, MergeError> {
+        // Serialize this batch against concurrent same-doc writes/merges (#1021).
+        // The per-block `_in_txn` handlers below do NOT take the per-doc guard
+        // (they share one txn), so acquire it here for every DISTINCT doc in the
+        // batch — in SORTED doc-id order so it can never deadlock against any other
+        // guard taker (a single-doc update/merge, or another batch). Held for the
+        // whole batch txn.
+        let mut batch_doc_ids: Vec<String> = blocks.iter().map(|b| b.doc_id.clone()).collect();
+        batch_doc_ids.sort();
+        batch_doc_ids.dedup();
+        let mut _doc_guards = Vec::with_capacity(batch_doc_ids.len());
+        {
+            // Hold the shared batch gate only while acquiring, so this multi-doc
+            // acquirer can never deadlock against an incremental local mutation
+            // batch (which holds the gate for its whole batch). Once all guards
+            // are held the gate is released; the per-doc guards stay until commit.
+            //
+            // Acquire it NON-BLOCKING: batch merging is an optimization, so if the
+            // gate is held by a long-lived local/interactive txn we signal the
+            // caller to fall back to the gate-free per-block path rather than stall
+            // node-wide inbound replication (#1041).
+            let _batch_gate = self
+                .merge_queue
+                .try_acquire_batch_gate()
+                .ok_or(MergeError::GateContended)?;
+            for doc_id in &batch_doc_ids {
+                _doc_guards.push(self.merge_queue.acquire(doc_id).await);
+            }
+        }
+
         let txn = self.db.new_txn(false).await?;
         let batch_merged: std::sync::Mutex<HashSet<Cid>> = std::sync::Mutex::new(HashSet::new());
         let batch_merged_collections: std::sync::Mutex<HashSet<Cid>> =

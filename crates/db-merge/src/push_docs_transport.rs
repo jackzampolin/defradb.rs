@@ -221,6 +221,27 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
 
             let mut requests = Vec::new();
             for (block_cid, block_data) in doc_blocks {
+                // #1043: do not push COUNTER field blocks as PushLog heads. A
+                // counter block pushed as its own head is merged as a standalone
+                // head by the receiver, whose merge then walks and re-applies the
+                // entire counter chain (double-apply against cross-impl peers).
+                // Counter field blocks are fetched by the receiver via DAG sync
+                // from the composite links instead, matching Go's SendUpdate.
+                //
+                // All other blocks (composite + non-counter field blocks, e.g.
+                // encrypted LWW) are still pushed as heads: an encrypted LWW field
+                // block must reach the receiver as a head so its merge triggers a
+                // KMS DEK request, which is how an unauthorized peer's denial fires
+                // (proofs/tests/behavioral/kms.rs). LWW is idempotent on re-walk,
+                // so it carries no double-apply hazard.
+                match defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta) {
+                    Ok(defra_core::CrdtDelta::Counter(_)) => continue,
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(cid = %block_cid, error = %e, "skipping unparseable block in replicator push");
+                        continue;
+                    }
+                }
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
                     Bytes::from(block_cid.to_bytes()),
@@ -501,6 +522,20 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
         for (block_cid, block_data) in
             load_push_dag_blocks(&*block_txn, &*enc_txn, head_cid, block_data).await
         {
+            // #1043: do not push COUNTER field blocks as PushLog heads (see
+            // backfill above). Counter blocks pushed as heads cause double-apply
+            // on cross-impl peers; the receiver fetches them via DAG sync. Other
+            // blocks (composite + non-counter field blocks, e.g. encrypted LWW)
+            // are still pushed as heads so an encrypted LWW field reaches the
+            // receiver and its merge triggers the KMS DEK request.
+            match defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta) {
+                Ok(defra_core::CrdtDelta::Counter(_)) => continue,
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(cid = %block_cid, error = %e, "skipping unparseable block in replicator push");
+                    continue;
+                }
+            }
             let mut request = PushLogRequest::new(
                 doc_id.to_string(),
                 Bytes::from(block_cid.to_bytes()),

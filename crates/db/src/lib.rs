@@ -68,6 +68,7 @@ pub mod database;
 pub use db_search as dense_search;
 pub(crate) mod doc_fetcher;
 pub(crate) mod doc_mutator;
+pub mod doc_write_queue;
 pub mod downsample;
 pub(crate) mod dump;
 pub mod error;
@@ -117,6 +118,7 @@ pub use collection_snapshot::CollectionSnapshot;
 pub use commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
 pub use database::{DbOptions, EmbeddingClientConfig, DB};
 pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
+pub use doc_write_queue::DocWriteQueue;
 // dense_search items re-exported transparently from db-search
 pub use db_search::{
     embed_text, hybrid_search_dense, require_query_success, DenseHybridSearchHit,

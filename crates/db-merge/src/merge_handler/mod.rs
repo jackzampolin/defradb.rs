@@ -14,13 +14,11 @@ mod definition;
 pub(crate) mod error;
 pub(crate) mod hook;
 mod lww;
-mod queue;
 pub(crate) mod se_merge;
 mod signature;
 
 pub use error::MergeError;
 pub(crate) use error::{CounterMergeResult, LwwMergeResult};
-pub use queue::MergeQueue;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -95,16 +93,18 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// retrieval through the KMS (NAC/DAC-gated, cross-peer fetch) instead
     /// of reading the raw key directly from the Encryption block.
     kms: std::sync::OnceLock<Arc<dyn kms::KmsService>>,
-    /// Per-document merge serialization queue.
-    ///
-    /// Ensures concurrent P2P merges for the same document are processed one
-    /// at a time, preventing write-write races at the storage level.
-    pub(crate) merge_queue: Arc<MergeQueue>,
+    /// Per-document write serialization queue, shared with the DB so that local
+    /// writes and P2P merges that touch the same document are mutually
+    /// serialized. Ensures concurrent merges (and concurrent local writes) for
+    /// the same document are processed one at a time, preventing read-modify-write
+    /// races on the CRDT accumulation store (#1021).
+    pub(crate) merge_queue: Arc<db::DocWriteQueue>,
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     /// Create a new database merge handler.
     pub fn new(db: Arc<DB<S>>, blockstore: Arc<B>) -> Self {
+        let merge_queue = db.doc_write_queue();
         Self {
             db,
             blockstore,
@@ -113,7 +113,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             merged_collections: std::sync::Mutex::new(HashSet::new()),
             se_enc_key: std::sync::OnceLock::new(),
             kms: std::sync::OnceLock::new(),
-            merge_queue: Arc::new(MergeQueue::new()),
+            merge_queue,
         }
     }
 

@@ -82,12 +82,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             let mut datastore = txn.datastore()?;
             let mut doc_exists = false;
 
-            // Reconcile the CRDT accumulation store up to the document's current
-            // materialized value before merging. Local increments update only the
-            // document blob, not the accumulation store, so a node that received
-            // the document by replication first (accumulation store already
-            // initialized) would otherwise drop its own local increments when this
-            // remote delta re-materializes the blob. See `Counter::reconcile_int64`.
+            // Seed the CRDT accumulation store from the document's current
+            // materialized value only if the store is not yet initialized
+            // (init-if-absent). The store is the single source of truth; local
+            // writes and merges both RMW their delta into it, so once it holds a
+            // value it is authoritative and must not be overwritten from a
+            // possibly-stale blob. See `Counter::reconcile_int64`.
             if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
                 if let Ok(Some(existing_doc)) =
                     collection.get_with_datastore(&datastore, &doc_id).await
@@ -199,12 +199,26 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         )
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
-        // Reconcile the CRDT accumulation store up to the document's current
-        // materialized value before merging. Local increments (create AND update)
-        // store the counter value in the document blob but not in the accumulation
-        // store, so a node that received the document by replication first would
-        // otherwise drop its own local increments when this remote delta
-        // re-materializes the blob. See `Counter::reconcile_int64`.
+        // Already-merged (re-delivered) block: skip BEFORE any reconcile side
+        // effect, mirroring the standalone `process_counter_delta` ordering so the
+        // dedup/replay path never mutates the store. The block was already applied,
+        // so the store value is authoritative.
+        if self.blockstore.is_merged(cid).await.unwrap_or(false) {
+            let value = self
+                .read_counter_value(&counter, datastore, numeric_kind, &payload.field_name)
+                .await;
+            return Ok(CounterMergeResult {
+                applied: false,
+                value,
+            });
+        }
+
+        // Seed the CRDT accumulation store from the document's current
+        // materialized value only if the store is not yet initialized
+        // (init-if-absent). The store is the single source of truth; local writes
+        // and merges both RMW their delta into it, so once it holds a value it is
+        // authoritative and must not be overwritten from a possibly-stale blob.
+        // See `Counter::reconcile_int64`.
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
         let mut doc_exists = false;
         if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
@@ -223,16 +237,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     }
                 }
             }
-        }
-
-        if self.blockstore.is_merged(cid).await.unwrap_or(false) {
-            let value = self
-                .read_counter_value(&counter, datastore, numeric_kind, &payload.field_name)
-                .await;
-            return Ok(CounterMergeResult {
-                applied: false,
-                value,
-            });
         }
 
         // Create the CounterDelta from payload

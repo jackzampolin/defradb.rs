@@ -1,4 +1,4 @@
-use super::helpers::ensure_collection_is_active;
+use super::helpers::{ensure_collection_is_active, write_local_create};
 use super::*;
 
 #[allow(clippy::type_complexity)]
@@ -15,11 +15,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let collection = self.get_collection_or_err(collection_name)?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
-
-        // Create a write transaction
-        let txn = self.db.new_txn(false).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
 
         // Generate embeddings before doc ID (embedding values affect content hash)
         let embedding_config = self.db.options().embedding_config();
@@ -47,6 +42,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution("document should have ID after generation")
         })?;
 
+        // Serialize this create against concurrent merges/writes on the same
+        // document so counter accumulation-store seeding cannot race (#1021).
+        // Acquire the per-doc guard BEFORE opening the write txn (lock-before-txn,
+        // matching `update_impl`) so the lock/txn order is uniform across paths.
+        let _doc_guard = self.db.doc_write_queue().acquire(&doc_id.to_string()).await;
+
+        // Create a write transaction
+        let txn = self.db.new_txn(false).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
         // Execute the mutation in a block to drop datastore before commit
         let result = {
             let datastore = txn.datastore().map_err(|e| {
@@ -71,16 +77,23 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .await
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-            // Use create_with_indexes to enforce unique constraints and maintain indexes.
-            // Blind create skips existence check for content-addressed (generated) IDs.
-            collection
-                .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
-                .await
-                .map_err(|e| crate::error::index_write_query_error("create", e))
+            // Bundle the doc blob + index write with the counter-store seeding so
+            // the authoritative CRDT accumulation store is always seeded on create
+            // (#1021 single-store invariant) — enforced by construction in
+            // `write_local_create`. Blind create skips the existence check for
+            // content-addressed (generated) IDs.
+            write_local_create(
+                &datastore,
+                &collection,
+                &doc,
+                &index_manager,
+                id_was_generated,
+            )
+            .await
         };
 
         match result {
-            Ok(_returned_doc_id) => {
+            Ok(()) => {
                 // Build blocks and write to blockstore/headstore in a scoped block
                 // This enables _commits queries to find the document's version history
                 // The stores must be dropped before commit, so scope them

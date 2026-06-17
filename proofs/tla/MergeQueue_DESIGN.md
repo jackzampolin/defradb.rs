@@ -6,9 +6,18 @@ defradb.rs's `db-merge` crate.
 
 ## Property
 
-> The per-document `MergeQueue` serializes same-document merges while allowing
-> cross-document parallelism; the bounded (5×) conflict-retry loop loses and duplicates
-> no block; retry exhaustion **fails closed** (errors, never silently drops a block).
+> The per-document write guard (the `DocWriteQueue` owned by the DB, shared by BOTH the
+> local-write path and the db-merge merge handler since #1021) serializes same-document
+> writes — merge-vs-merge AND local-write-vs-merge — while allowing cross-document
+> parallelism; the bounded (5×) conflict-retry loop loses and duplicates no block; retry
+> exhaustion **fails closed** (errors, never silently drops a block).
+
+`UserWriteMode="PerDoc"` (the #1021 GREEN config) models a local user-write taking the
+same per-doc guard the merge takes: it acquires `lockOwner[d]`, writes inside the critical
+section, and releases. `INV_NoLocalMergeInterleave` then checks that a local write and a
+same-doc merge are never both in the critical section — the mutual exclusion the counter
+fix relies on. `UserWriteMode="LockFree"` keeps the pre-#1021 adversary (a lock-free
+user-write that only drives the txn-conflict retry loop), used by the other configs.
 
 ## Source anchors (read the real code, not an abstraction)
 
@@ -16,13 +25,13 @@ defradb.rs's `db-merge` crate.
 
 | Symbol in model | Rust source | What it abstracts |
 |---|---|---|
-| per-doc mutex / `lockOwner`, `CanAcquire`, `Acquire` | `crates/db-merge/src/merge_handler/queue.rs:13-47` (`MergeQueue`, `acquire`) | `Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>`; `acquire(key)` returns an `OwnedMutexGuard` — same key blocks, different keys parallel |
-| acquire-before-loop | `crates/db-merge/src/merge_handler/batch.rs:45` `let _guard = self.merge_queue.acquire(&block.doc_id).await;` | the guard is held across the whole retry loop |
+| per-doc mutex / `lockOwner`, `CanAcquire`, `Acquire` | `crates/db/src/doc_write_queue.rs` (`DocWriteQueue::acquire`, `DocWriteQueue::acquire_batch_gate`) — shared by the DB's local-write paths and the merge handler | `Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>`; `acquire(key)` returns an `OwnedMutexGuard` — same key blocks, different keys parallel; the batch gate keeps multi-doc acquirers deadlock-free |
+| acquire-before-apply | individual path: `crates/db-merge/src/merge_handler/counter.rs` (`process_counter_delta`, `self.merge_queue.acquire(&doc_id_str)`); batch path: `crates/db-merge/src/merge_handler/batch.rs` (`try_batch_merge` — all distinct docs acquired in sorted order under `acquire_batch_gate`) | the per-doc guard is held while the delta is applied and committed |
 | `MaxRetries = 5`, retry loop, `Retry`/`Exhaust` | `crates/db-merge/src/merge_handler/batch.rs:29` `const MAX_MERGE_RETRIES: usize = 5;` and `batch.rs:57-89` | `for attempt in 0..MAX_MERGE_RETRIES { … Err(e) if e.is_txn_conflict() => continue; … }` |
 | `NoConflict` / txn conflict | `crates/db-merge/src/merge_handler/error.rs:56-67` (`is_txn_conflict`) | the retry trigger: storage SSI `ErrTxnConflict` |
-| `AlreadyApplied` / `seenMerged` (is_merged guard) | `crates/db-merge/src/merge_handler/composite.rs:82-90`, `counter.rs:22-28` (`is_merged(cid)` → `terminal_skip("already merged")`) | the blockstore merged-set: the single source of CRDT idempotency (survey §State machines; #847) |
+| `AlreadyApplied` / `seenMerged` (is_merged guard) | counters/LWW: `crates/db-merge/src/merge_handler/counter.rs` (`blockstore.is_merged(cid)` → skip); composites: `crates/db-merge/src/merge_handler/composite.rs` (`merged_composites` set → `terminal_skip("already merged")`) | the blockstore merged-set + in-memory merged-composites: the single source of CRDT idempotency (survey §State machines; #847) |
 | fail-CLOSED on exhaustion (`FailMode="Closed"`) | `crates/db-merge/src/merge_handler/batch.rs:78-89` — `final_result = last_result.unwrap()`; the last `Err(txn_conflict)` is returned, not swallowed | exhausted retries yield `Err`, not a fake success |
-| `marked` oracle (merged-set marking) | `crates/p2p/src/sync/replication/handlers.rs:630-659` — `Ok(Merged)`/`Ok(terminal Skip)` → `merged_cids.push`; `Err(_)` → `ReplicationResult::Failed`, **not** pushed | a block is recorded "done" (won't be re-delivered) iff merged or terminally skipped; an `Err` leaves it re-deliverable |
+| `marked` oracle (merged-set marking) | `crates/p2p/src/sync/replication/handlers.rs` — on `Ok(Merged)`/`Ok(terminal Skip)` → `coordinator.mark_as_merged(cid)`; `Err(_)` → `ReplicationResult::Failed`, **not** marked | a block is recorded "done" (won't be re-delivered) iff merged or terminally skipped; an `Err` leaves it re-deliverable |
 | `MergeOutcome` (`Merged` / terminal vs retryable `Skipped`) | `crates/p2p/src/sync/merge.rs:74-122` | only `terminal` skips are marked as merged |
 
 ### Go (the upstream parity reference — fetched from `origin/develop`, not the stale checkout)
@@ -58,7 +67,8 @@ critical sections at once.
 
 | Name | Plain English |
 |---|---|
-| `INV_SameDocSerialized` | at most one worker per doc is inside its critical section (`acquire`) |
+| `INV_SameDocSerialized` | at most one occupant per doc inside its critical section (merge workers + a local user-write under `UserWriteMode="PerDoc"`) |
+| `INV_NoLocalMergeInterleave` | a local user-write and a merge are never both in the critical section on the same doc (#1021 shared guard) |
 | `INV_NoDoubleApply` | an original block's delta is committed at most once (idempotency) |
 | `INV_NoSilentDrop` | a block marked done is actually delivered (applied, or its original already was) |
 | `INV_NoLoss` | a terminated block is either delivered or still un-marked (hence re-deliverable) |

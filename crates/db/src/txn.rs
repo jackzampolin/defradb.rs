@@ -7,9 +7,10 @@
 use crate::collection::{populate_collection_root_id, Collection};
 use crate::collection_cache::CollectionCache;
 use crate::error::{Error, Result};
+use async_lock::MutexGuardArc;
 use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
 use schema::CollectionVersion;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
@@ -42,6 +43,20 @@ pub struct DbTxn<S: Store> {
     collection_cache: CollectionCache,
     /// Collection IDs created inside this transaction.
     locally_created_collection_ids: HashSet<String>,
+    /// Per-doc write guards held across the WHOLE explicit transaction so a
+    /// local counter read-modify-write and a P2P merge on the same document
+    /// never interleave (#1021). The merge handler shares the same
+    /// `DocWriteQueue`. Because these guards live on the `DbTxn` (not on the
+    /// per-call `DbDocMutator`, which is recreated and dropped before commit),
+    /// they are released only when the `DbTxn` is consumed by
+    /// `commit`/`discard`/`force_commit`/`force_discard` — i.e. after the
+    /// durable commit. `batch_gate` keeps this incremental multi-doc acquirer
+    /// deadlock-free against other multi-doc acquirers (batch merges,
+    /// `create_many`); see `ensure_doc_guard`.
+    doc_guards: BTreeMap<String, MutexGuardArc<()>>,
+    /// The shared batch gate, taken on the first per-doc guard and held for the
+    /// whole transaction (see `doc_guards`).
+    batch_gate: Option<MutexGuardArc<()>>,
     /// Phantom data for the store type.
     _marker: std::marker::PhantomData<S>,
 }
@@ -54,6 +69,8 @@ impl<S: Store> DbTxn<S> {
             explicit: false,
             collection_cache: CollectionCache::new(),
             locally_created_collection_ids: HashSet::new(),
+            doc_guards: BTreeMap::new(),
+            batch_gate: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -65,6 +82,8 @@ impl<S: Store> DbTxn<S> {
             explicit: true,
             collection_cache: CollectionCache::new(),
             locally_created_collection_ids: HashSet::new(),
+            doc_guards: BTreeMap::new(),
+            batch_gate: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -483,6 +502,34 @@ impl<S: Store> DbTxn<S> {
     }
 
     // =========================================================================
+    // Per-doc write guards (#1021)
+    // =========================================================================
+
+    /// Whether a per-doc write guard for `doc_id` is already held by this txn.
+    pub fn holds_doc_guard(&self, doc_id: &str) -> bool {
+        self.doc_guards.contains_key(doc_id)
+    }
+
+    /// Whether this txn already holds the shared batch gate.
+    pub fn holds_batch_gate(&self) -> bool {
+        self.batch_gate.is_some()
+    }
+
+    /// Store the shared batch gate on this txn, held until the txn is consumed
+    /// by commit/discard. Idempotent: a second gate is dropped immediately.
+    pub fn set_batch_gate(&mut self, gate: MutexGuardArc<()>) {
+        if self.batch_gate.is_none() {
+            self.batch_gate = Some(gate);
+        }
+    }
+
+    /// Store a per-doc write guard on this txn, held until the txn is consumed
+    /// by commit/discard. Idempotent per doc: a duplicate guard is dropped.
+    pub fn insert_doc_guard(&mut self, doc_id: String, guard: MutexGuardArc<()>) {
+        self.doc_guards.entry(doc_id).or_insert(guard);
+    }
+
+    // =========================================================================
     // Transaction Lifecycle Methods
     // =========================================================================
 
@@ -498,6 +545,10 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.commit().await.map_err(Error::Datastore)?;
+                // Release per-doc guards only AFTER the durable commit so a
+                // concurrent merge observes the committed counter state, never a
+                // partial RMW (#1021).
+                self.release_doc_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
@@ -516,6 +567,7 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.discard().map_err(Error::Datastore)?;
+                self.release_doc_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
@@ -529,6 +581,9 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.commit().await.map_err(Error::Datastore)?;
+                // Release per-doc guards only AFTER the durable commit so a
+                // concurrent merge observes the committed counter state (#1021).
+                self.release_doc_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
@@ -542,9 +597,19 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.discard().map_err(Error::Datastore)?;
+                self.release_doc_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
         }
+    }
+
+    /// Release the per-doc guards and the batch gate. Called only AFTER the txn
+    /// is durably committed or discarded (#1021). The guard fields also drop
+    /// automatically when the `DbTxn` itself is dropped (no explicit `Drop` impl
+    /// is needed), but releasing here makes the release point unambiguous.
+    fn release_doc_guards(&mut self) {
+        self.doc_guards.clear();
+        self.batch_gate = None;
     }
 }

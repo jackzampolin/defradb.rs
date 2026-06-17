@@ -1,3 +1,5 @@
+import DefraConvergence.CrdtField
+
 /-!
 # Priority reconciliation — regression guard for the same-doc convergence bug
 
@@ -83,5 +85,127 @@ theorem unreconciled_merge_can_clobber :
       view.priority < committed.priority ∧
       (lwwMerge view d).priority < committed.priority := by
   exact ⟨⟨2, 0⟩, ⟨1, 1⟩, ⟨1, 1⟩, by decide, by decide⟩
+
+/-! ## Instantiating the generic CRDT-field core (`DefraConvergence.CrdtField`)
+
+LWW is the state-based regime: its merge is the lexicographic max over
+`(priority, value)` — commutative, associative, AND idempotent. Idempotence is
+the extra law that makes it a join-semilattice, so (unlike the counter) LWW is
+re-delivery-safe and needs NO dedup. -/
+
+/-- `lwwMerge` is idempotent: merging an entry with itself is a no-op. This is the
+    defining extra law of a state-based join — and the reason LWW (unlike the
+    counter, `CounterReconcile.counter_not_idempotent`) needs NO dedup: by
+    `CrdtField.dup_absorb` a re-delivered entry is absorbed. -/
+theorem lwwMerge_idem (a : Entry) : lwwMerge a a = a := by
+  obtain ⟨p, v⟩ := a
+  unfold lwwMerge
+  rw [if_neg (by omega : ¬ p > p)]
+  rw [if_neg (by intro h; omega : ¬ (p = p ∧ v > v))]
+
+/-- `lwwMerge` is commutative (it is the max under the total `(priority, value)`
+    order; ties occur only at full equality). -/
+theorem lwwMerge_comm (a b : Entry) : lwwMerge a b = lwwMerge b a := by
+  obtain ⟨pa, va⟩ := a
+  obtain ⟨pb, vb⟩ := b
+  unfold lwwMerge
+  rcases Nat.lt_trichotomy pa pb with h | h | h
+  · rw [if_pos (by omega : pb > pa), if_neg (by omega : ¬ pa > pb),
+        if_neg (by intro hh; omega : ¬ (pa = pb ∧ va > vb))]
+  · subst h
+    rcases Nat.lt_trichotomy va vb with hv | hv | hv
+    · rw [if_neg (by omega : ¬ pa > pa), if_pos (by exact ⟨rfl, by omega⟩ : pa = pa ∧ vb > va),
+          if_neg (by omega : ¬ pa > pa), if_neg (by intro hh; omega : ¬ (pa = pa ∧ va > vb))]
+    · subst hv; rfl
+    · rw [if_neg (by omega : ¬ pa > pa), if_neg (by intro hh; omega : ¬ (pa = pa ∧ vb > va)),
+          if_neg (by omega : ¬ pa > pa), if_pos (by exact ⟨rfl, by omega⟩ : pa = pa ∧ va > vb)]
+  · rw [if_neg (by omega : ¬ pb > pa), if_neg (by intro hh; omega : ¬ (pb = pa ∧ vb > va)),
+        if_pos (by omega : pa > pb)]
+
+/-- The lexicographic order `lwwMerge` selects under: priority first, then value. -/
+def le (a b : Entry) : Prop :=
+  a.priority < b.priority ∨ (a.priority = b.priority ∧ a.value ≤ b.value)
+
+/-- The order is total. -/
+theorem le_total (a b : Entry) : le a b ∨ le b a := by
+  obtain ⟨pa, va⟩ := a; obtain ⟨pb, vb⟩ := b
+  simp only [le]; omega
+
+/-- The order is transitive. -/
+theorem le_trans {a b c : Entry} (h1 : le a b) (h2 : le b c) : le a c := by
+  obtain ⟨pa, va⟩ := a; obtain ⟨pb, vb⟩ := b; obtain ⟨pc, vc⟩ := c
+  simp only [le] at h1 h2 ⊢; omega
+
+/-- When `a ⊑ b`, the merge keeps `b` (the larger entry). -/
+theorem lwwMerge_eq_of_le {a b : Entry} (h : le a b) : lwwMerge a b = b := by
+  obtain ⟨pa, va⟩ := a; obtain ⟨pb, vb⟩ := b
+  simp only [le] at h; unfold lwwMerge
+  by_cases h1 : pb > pa
+  · rw [if_pos h1]
+  · rw [if_neg h1]
+    by_cases h2 : pb = pa ∧ vb > va
+    · rw [if_pos h2]
+    · rw [if_neg h2]
+      have hpe : pa = pb := by omega
+      subst hpe
+      have hve : va = vb := by omega
+      rw [hve]
+
+/-- When `b ⊑ a`, the merge keeps `a`. -/
+theorem lwwMerge_eq_of_ge {a b : Entry} (h : le b a) : lwwMerge a b = a := by
+  obtain ⟨pa, va⟩ := a; obtain ⟨pb, vb⟩ := b
+  simp only [le] at h; unfold lwwMerge
+  by_cases h1 : pb > pa
+  · exfalso; omega
+  · rw [if_neg h1]
+    by_cases h2 : pb = pa ∧ vb > va
+    · exfalso; obtain ⟨he, hv⟩ := h2; omega
+    · rw [if_neg h2]
+
+/-- `lwwMerge` is associative — it is the maximum under the total lex order, so
+    folding three entries is order-independent regardless of association. -/
+theorem lwwMerge_assoc (a b c : Entry) :
+    lwwMerge (lwwMerge a b) c = lwwMerge a (lwwMerge b c) := by
+  rcases le_total a b with hab | hab
+  · rw [lwwMerge_eq_of_le hab]
+    rcases le_total b c with hbc | hbc
+    · rw [lwwMerge_eq_of_le hbc, lwwMerge_eq_of_le (le_trans hab hbc)]
+    · rw [lwwMerge_eq_of_ge hbc, lwwMerge_eq_of_le hab]
+  · rw [lwwMerge_eq_of_ge hab]
+    rcases le_total b c with hbc | hbc
+    · rw [lwwMerge_eq_of_le hbc]
+    · rw [lwwMerge_eq_of_ge hbc, lwwMerge_eq_of_ge (le_trans hbc hab),
+          lwwMerge_eq_of_ge hab]
+
+/-- The LWW merge as a generic commutative-associative merge — LWW instantiates the
+    same `CrdtField` core the counter does. -/
+def lwwCM : CrdtField.CommMerge Entry where
+  merge := lwwMerge
+  comm := lwwMerge_comm
+  assoc := lwwMerge_assoc
+
+/-- **LWW is idempotent** — the defining extra law of a state-based join. By
+    `CrdtField.dup_absorb`, re-delivering the same entry is harmless, so LWW (unlike
+    the counter, `CounterReconcile.counter_not_idempotent`) needs NO dedup. -/
+theorem lww_idempotent : CrdtField.Idempotent lwwCM := lwwMerge_idem
+
+/-- **Re-delivery safety**, inherited from the generic core: applying the same entry
+    twice equals applying it once (the counterpart to the counter's dedup obligation). -/
+theorem lww_dup_safe (s a : Entry) :
+    lwwCM.merge (lwwCM.merge s a) a = lwwCM.merge s a :=
+  CrdtField.dup_absorb lwwCM lww_idempotent s a
+
+/-- Two-replica LWW convergence is the generic order-independent fold at `lwwCM`. -/
+theorem lww_two_converge (s a b : Entry) :
+    lwwCM.merge (lwwCM.merge s a) b = lwwCM.merge (lwwCM.merge s b) a :=
+  CrdtField.two_converge lwwCM s a b
+
+/-- Three-replica (merge-storm) LWW convergence, likewise inherited — the same
+    generic theorem the counter instantiates (`counter_three_converge`), so both
+    fields expose the identical convergence set. -/
+theorem lww_three_converge (s a b c : Entry) :
+    lwwCM.merge (lwwCM.merge (lwwCM.merge s a) b) c
+      = lwwCM.merge (lwwCM.merge (lwwCM.merge s c) b) a :=
+  CrdtField.three_converge lwwCM s a b c
 
 end DefraConvergence.PriorityReconcile

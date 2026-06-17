@@ -1,4 +1,4 @@
-use super::helpers::ensure_collection_is_active;
+use super::helpers::{ensure_collection_is_active, write_local_create};
 use super::*;
 
 use crate::block_builder::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
@@ -122,6 +122,25 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             })
             .collect();
 
+        // Serialize this batch's counter-store seeding against concurrent
+        // merges/writes on the same documents, held across the shared txn +
+        // commit (#1021). Doc IDs are known here, so acquire the per-doc guards
+        // in SORTED order (deadlock-free against other multi-doc acquirers),
+        // holding the shared batch gate only while acquiring them.
+        let mut guard_doc_ids: Vec<String> = prepared_docs
+            .iter()
+            .filter_map(|(doc, _)| doc.id().map(|id| id.to_string()))
+            .collect();
+        guard_doc_ids.sort();
+        guard_doc_ids.dedup();
+        let mut _doc_guards = Vec::with_capacity(guard_doc_ids.len());
+        {
+            let _batch_gate = self.db.doc_write_queue().acquire_batch_gate().await;
+            for id in &guard_doc_ids {
+                _doc_guards.push(self.db.doc_write_queue().acquire(id).await);
+            }
+        } // gate released; per-doc guards held until end of function
+
         // === Phase 3: Transaction — sequential writes ===
         let txn = self.db.new_txn(false).await.map_err(|e| {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
@@ -152,10 +171,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     .await
                     .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-                collection
-                    .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
-                    .await
-                    .map_err(|e| crate::error::index_write_query_error("create", e))?;
+                write_local_create(
+                    &datastore,
+                    &collection,
+                    &doc,
+                    &index_manager,
+                    id_was_generated,
+                )
+                .await?;
             } // datastore dropped
 
             // Insert pre-computed blocks + collection blocks

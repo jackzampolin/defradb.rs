@@ -172,6 +172,10 @@ pub struct DB<S: Store> {
     /// [`DB::set_nac_manager`]. When unset, all `check_node_access` calls are
     /// no-ops (NAC not configured).
     nac_manager: std::sync::OnceLock<std::sync::Arc<dyn NacManagerApi>>,
+    /// Per-document write serialization queue. Shared with the merge handler so
+    /// local writes and P2P merges that touch the same document never interleave
+    /// their CRDT read-modify-write (#1021 counter convergence).
+    doc_write_queue: Arc<crate::doc_write_queue::DocWriteQueue>,
 }
 
 impl<S: Store> DB<S> {
@@ -203,6 +207,7 @@ impl<S: Store> DB<S> {
             kms: std::sync::OnceLock::new(),
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
+            doc_write_queue: Arc::new(crate::doc_write_queue::DocWriteQueue::new()),
         })
     }
 
@@ -256,6 +261,7 @@ impl<S: Store> DB<S> {
             kms: std::sync::OnceLock::new(),
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
+            doc_write_queue: Arc::new(crate::doc_write_queue::DocWriteQueue::new()),
         })
     }
 
@@ -288,6 +294,13 @@ impl<S: Store> DB<S> {
     /// Get a reference to the event bus, if configured.
     pub fn event_bus(&self) -> Option<&Arc<dyn Bus>> {
         self.event_bus.as_ref()
+    }
+
+    /// Get the shared per-document write serialization queue. The merge handler
+    /// acquires this same queue so local writes and merges that touch the same
+    /// document are mutually serialized (#1021).
+    pub fn doc_write_queue(&self) -> Arc<crate::doc_write_queue::DocWriteQueue> {
+        self.doc_write_queue.clone()
     }
 
     /// Install the KMS service. First call wins (OnceLock); subsequent calls
