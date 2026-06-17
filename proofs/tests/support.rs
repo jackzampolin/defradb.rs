@@ -1,11 +1,13 @@
 //! Shared scaffolding for binary-axis conformance: locate the release artifact
-//! under test, plus query helpers shared by the behavioral convergence/parity
-//! twins. Included via `#[path]` from the behavioral test binaries.
+//! under test. Included via `#[path]` from the behavioral test binaries.
 
 use defra_harness::{BinarySource, DefraClient, TestCluster};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Once;
 use std::time::{Duration, Instant};
+
+const CONFORMANCE_RUST_LOG: &str = "info";
 
 /// The artifact under test.
 ///
@@ -20,10 +22,13 @@ use std::time::{Duration, Instant};
 /// artifact (e.g. a downloaded tagged release, or a local release build from
 /// `proofs/verify-all.sh`).
 pub fn release_binary() -> BinarySource {
+    let root = workspace_root();
+    init_harness_env(&root);
+
     if let Some(path) = std::env::var_os("DEFRA_CONFORMANCE_BINARY") {
         return BinarySource::Path(PathBuf::from(path));
     }
-    BinarySource::Path(workspace_root().join("target/debug/defra"))
+    BinarySource::Path(root.join("target/debug/defra"))
 }
 
 pub fn workspace_root() -> PathBuf {
@@ -201,5 +206,61 @@ pub async fn run_counter_storm(
                 "round {round} ({crdt_type}/{field_type}): nodes did not all reach exactly {expected} (below=loss, above=double-apply); hits = {got:?}"
             );
         }
+    }
+}
+
+/// Mutate process env exactly once. `release_binary()` is called from every
+/// `#[tokio::test]`, which run in parallel; `set_var` from multiple threads is
+/// unsound, so the env setup is gated behind a `Once`.
+fn init_harness_env(root: &std::path::Path) {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        ensure_harness_uses_workspace(root);
+        ensure_harness_logs_are_visible();
+    });
+}
+
+fn ensure_harness_logs_are_visible() {
+    let should_set = std::env::var("RUST_LOG")
+        .map(|value| !global_filter_allows_info(&value))
+        .unwrap_or(true);
+
+    if should_set {
+        std::env::set_var("RUST_LOG", CONFORMANCE_RUST_LOG);
+    }
+}
+
+fn ensure_harness_uses_workspace(root: &std::path::Path) {
+    std::env::set_var("DEFRA_WORKSPACE_ROOT", root);
+}
+
+fn global_filter_allows_info(value: &str) -> bool {
+    value.split(',').any(|directive| {
+        let directive = directive.trim();
+        if directive.is_empty() || directive.contains('=') {
+            return false;
+        }
+
+        matches!(
+            directive.to_ascii_lowercase().as_str(),
+            "info" | "debug" | "trace"
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::global_filter_allows_info;
+
+    #[test]
+    fn global_rust_log_filter_must_include_info_for_harness_readiness() {
+        assert!(global_filter_allows_info("info"));
+        assert!(global_filter_allows_info("warn,info"));
+        assert!(global_filter_allows_info("debug,cranelift=warn"));
+
+        assert!(!global_filter_allows_info(""));
+        assert!(!global_filter_allows_info("warn"));
+        assert!(!global_filter_allows_info("error"));
+        assert!(!global_filter_allows_info("defra_http::server=info"));
     }
 }

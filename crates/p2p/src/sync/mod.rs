@@ -37,8 +37,8 @@ pub use manager::{
     default_rate_limit_backoff, GossipDecodeFailureSample, GossipTransport, SyncConfig,
     SyncDiagnostics, SyncDiagnosticsSnapshot, SyncEvent, SyncManager,
     DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
-    DEFAULT_PUSH_SEND_TIMEOUT, DEFAULT_RATE_LIMIT_BACKOFF_SECS, DEFAULT_RATE_LIMIT_BURST,
-    DEFAULT_RATE_LIMIT_RATE,
+    DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS, DEFAULT_PUSH_SEND_TIMEOUT,
+    DEFAULT_RATE_LIMIT_BACKOFF_SECS, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RATE,
 };
 pub use merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome, RecoveredBlockMetadata};
 pub use peer_state::{PeerStateTracker, PeerStats};

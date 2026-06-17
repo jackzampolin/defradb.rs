@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 /// Upper bound on document IDs per DocSync request / items per reply.
 /// Prevents memory exhaustion from malicious peers; matches the
-/// `MAX_DOC_IDS` constant used on the two-stream path.
+/// default `MAX_DOC_IDS` constant used on the two-stream path.
 pub const MAX_DOC_IDS: usize = 1000;
 
 /// Upper bound on the number of head CIDs per document in a DocSync reply.

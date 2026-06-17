@@ -284,6 +284,11 @@ pub extern "C" fn defra_mobile_open_node(config_json: *const c_char) -> NewNodeR
                 .as_ref()
                 .and_then(|p2p| p2p.max_concurrent_push_tasks)
                 .unwrap_or(0),
+            max_doc_sync_request_doc_ids: config
+                .p2p
+                .as_ref()
+                .and_then(|p2p| p2p.max_doc_sync_request_doc_ids)
+                .unwrap_or(0),
             rate_limit_burst: config
                 .p2p
                 .as_ref()

@@ -37,6 +37,7 @@ use super::authorizer::RuntimeAuthorizer;
 use super::{
     DagFetchLimiter, SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState,
     DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+    DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
 };
 
 type TestBlockstore = DefraBlockstore<MemoryStore>;
@@ -145,6 +146,7 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
             )),
             rate_limiter,
             push_send_timeout: DEFAULT_PUSH_SEND_TIMEOUT,
+            max_doc_sync_request_doc_ids: DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
             shutdown: SyncShutdownHandle::new(),
             filter_matcher: Arc::new(crate::replicator::EqOnlyFilterMatcher),
         },
@@ -531,9 +533,13 @@ impl P2PTransport for NoopTransport {
 }
 
 fn doc_sync_event(peer_id: PeerId) -> TransportEvent<()> {
+    doc_sync_event_with_ids(peer_id, vec!["doc1".to_string()])
+}
+
+fn doc_sync_event_with_ids(peer_id: PeerId, doc_ids: Vec<String>) -> TransportEvent<()> {
     TransportEvent::DocSyncRequest {
         peer_id,
-        request: DocSyncRequest::new(vec!["doc1".to_string()]),
+        request: DocSyncRequest::new(doc_ids),
         token: None,
     }
 }
@@ -906,6 +912,98 @@ async fn doc_sync_open_mode_allows_any_peer() {
     assert!(
         !matches!(&result, Err(Error::AccessDenied { .. })),
         "Open mode should not deny access, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn doc_sync_rejects_requests_above_configured_doc_id_limit() {
+    let transport = NoopTransport::new();
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let config = SyncConfig {
+        max_doc_sync_request_doc_ids: 2,
+        ..Default::default()
+    };
+    let (coordinator, _events) = SyncCoordinator::new(transport, blockstore, config)
+        .await
+        .unwrap();
+
+    let result = coordinator
+        .handle_transport_event(doc_sync_event_with_ids(
+            random_peer_id(),
+            vec!["doc1".into(), "doc2".into(), "doc3".into()],
+        ))
+        .await;
+
+    let Err(Error::InvalidConfig(message)) = result else {
+        panic!("expected InvalidConfig, got {:?}", result);
+    };
+    assert!(message.contains("3 doc IDs"));
+    assert!(message.contains("limit of 2"));
+}
+
+#[tokio::test]
+async fn doc_sync_accepts_requests_at_exactly_configured_doc_id_limit() {
+    let transport = NoopTransport::new();
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let config = SyncConfig {
+        max_doc_sync_request_doc_ids: 2,
+        ..Default::default()
+    };
+    let (coordinator, _events) = SyncCoordinator::new(transport, blockstore, config)
+        .await
+        .unwrap();
+
+    let result = coordinator
+        .handle_transport_event(doc_sync_event_with_ids(
+            random_peer_id(),
+            vec!["doc1".into(), "doc2".into()],
+        ))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::InvalidConfig(_))),
+        "a request with exactly the configured limit of doc IDs must be accepted, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn doc_sync_zero_config_resolves_to_default_limit() {
+    let transport = NoopTransport::new();
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let config = SyncConfig {
+        max_doc_sync_request_doc_ids: 0,
+        ..Default::default()
+    };
+    let (coordinator, _events) = SyncCoordinator::new(transport, blockstore, config)
+        .await
+        .unwrap();
+
+    let at_default = (0..DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS)
+        .map(|i| format!("doc{i}"))
+        .collect::<Vec<_>>();
+    let result = coordinator
+        .handle_transport_event(doc_sync_event_with_ids(random_peer_id(), at_default))
+        .await;
+    assert!(
+        !matches!(&result, Err(Error::InvalidConfig(_))),
+        "config 0 should resolve to the default limit, accepting a default-sized request, got {:?}",
+        result
+    );
+
+    let over_default = (0..=DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS)
+        .map(|i| format!("doc{i}"))
+        .collect::<Vec<_>>();
+    let result = coordinator
+        .handle_transport_event(doc_sync_event_with_ids(random_peer_id(), over_default))
+        .await;
+    assert!(
+        matches!(&result, Err(Error::InvalidConfig(_))),
+        "config 0 should resolve to the default limit, rejecting an over-default request, got {:?}",
         result
     );
 }

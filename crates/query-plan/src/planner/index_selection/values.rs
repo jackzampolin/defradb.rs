@@ -1,7 +1,7 @@
 //! Value conversion and normalization for index selection.
 
 use document::{JsonLeafValue, JsonPath, JsonScalarValue, NormalValue};
-use schema::{FieldKind, ScalarKind};
+use schema::{FieldDescription, FieldKind, ScalarKind};
 use serde_json::Value as JsonValue;
 
 /// Convert JSON value to NormalValue.
@@ -21,6 +21,40 @@ pub(crate) fn json_to_normal_value(value: &JsonValue) -> Option<NormalValue> {
             Some(NormalValue::String(s.clone()))
         }
         _ => None,
+    }
+}
+
+/// Convert a cursor/index JSON value using the declared schema kind when known.
+///
+/// Cursor tokens are JSON, so shape-based inference is ambiguous: the same JSON
+/// string can be either a `String` or a `DateTime`. Use schema metadata before
+/// falling back to legacy inference so seek-key bytes match index write bytes.
+pub(crate) fn json_to_normal_value_for_index_field(
+    value: &JsonValue,
+    field_name: &str,
+    collection_fields: &[FieldDescription],
+) -> Option<NormalValue> {
+    if value.is_null() {
+        return Some(NormalValue::Null);
+    }
+
+    match collection_fields
+        .iter()
+        .find(|field| field.name == field_name)
+        .map(|field| &field.kind)
+    {
+        Some(FieldKind::Scalar(kind)) => match kind {
+            ScalarKind::Json | ScalarKind::None => json_to_normal_value(value),
+            _ => document::encoding::json_to_normal_value_for_kind(value, kind),
+        },
+        _ => {
+            let raw = json_to_normal_value(value)?;
+            Some(normalize_for_index_field(
+                raw,
+                field_name,
+                collection_fields,
+            ))
+        }
     }
 }
 

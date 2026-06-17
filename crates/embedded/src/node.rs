@@ -482,6 +482,9 @@ where
         max_concurrent_push_tasks: config
             .max_concurrent_push_tasks
             .unwrap_or(p2p::sync::DEFAULT_MAX_CONCURRENT_PUSH_TASKS),
+        max_doc_sync_request_doc_ids: config
+            .max_doc_sync_request_doc_ids
+            .unwrap_or(p2p::sync::DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS),
         rate_limit_burst: config
             .rate_limit_burst
             .unwrap_or(p2p::sync::DEFAULT_RATE_LIMIT_BURST),

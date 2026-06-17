@@ -18,4 +18,4 @@ pub use filter_to_scan::{can_or_filter_use_index, filter_to_index_scan, or_filte
 pub use types::{
     ConditionValue, CursorSeek, FieldCondition, IndexScanParams, IndexScanType, ScanValueFilter,
 };
-pub(crate) use values::{json_to_normal_value, normalize_for_index_field};
+pub(crate) use values::json_to_normal_value_for_index_field;

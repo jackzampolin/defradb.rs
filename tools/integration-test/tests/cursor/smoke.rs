@@ -158,6 +158,162 @@ async fn rust_pagination_round_trip() {
 }
 
 #[tokio::test]
+async fn rust_cursor_after_date_like_string_uses_string_seek_key() {
+    let cluster = integration_test::TestCluster::builder()
+        .rust_nodes(1)
+        .build()
+        .await
+        .unwrap();
+    let node = cluster.client(0);
+    node.schema_add("type Event { name: String  stamp: String }")
+        .expect("add Event schema");
+    node.index_create("Event", &["stamp"], Some("idx_stamp"), false)
+        .expect("create stamp index");
+
+    let events = [
+        ("jan", "2026-01-05T18:05:40Z"),
+        ("feb", "2026-02-10T09:00:00Z"),
+        ("mar", "2026-03-15T12:30:00Z"),
+        ("apr", "2026-04-20T08:15:00Z"),
+    ];
+    for (name, stamp) in events {
+        node.query(&format!(
+            r#"mutation {{ add_Event(input: {{ name: "{name}", stamp: "{stamp}" }}) {{ _docID }} }}"#
+        ))
+        .expect("seed event");
+    }
+
+    let page1: Value = node
+        .query(
+            r#"{ _cursor {
+            Event(first: 2, order: [{stamp: ASC}]) { name stamp }
+            _pageInfo { endCursor hasNext }
+        } }"#,
+        )
+        .expect("page 1");
+
+    let first_page_names: Vec<&str> = page1["_cursor"]["Event"]
+        .as_array()
+        .expect("page 1 events")
+        .iter()
+        .map(|event| event["name"].as_str().expect("event name"))
+        .collect();
+    assert_eq!(first_page_names, vec!["jan", "feb"]);
+    assert_eq!(
+        page1["_cursor"]["_pageInfo"]["hasNext"],
+        Value::Bool(true),
+        "hasNext should be true on page 1"
+    );
+
+    let end_cursor = page1["_cursor"]["_pageInfo"]["endCursor"]
+        .as_str()
+        .expect("endCursor present");
+    let page2: Value = node
+        .query(&format!(
+            r#"{{ _cursor {{
+            Event(first: 2, after: "{end_cursor}", order: [{{stamp: ASC}}]) {{ name stamp }}
+        }} }}"#
+        ))
+        .expect("page 2");
+
+    let second_page_names: Vec<&str> = page2["_cursor"]["Event"]
+        .as_array()
+        .expect("page 2 events")
+        .iter()
+        .map(|event| event["name"].as_str().expect("event name"))
+        .collect();
+    assert_eq!(
+        second_page_names,
+        vec!["mar", "apr"],
+        "cursor seek must use String bytes, not DateTime bytes, for String fields"
+    );
+}
+
+// Converse of `rust_cursor_after_date_like_string_uses_string_seek_key`: a real
+// DateTime field must paginate correctly across pages via the schema-typed seek
+// path (Time bytes), with no rows dropped or duplicated at the page boundary.
+#[tokio::test]
+async fn rust_cursor_after_datetime_paginates_across_pages() {
+    let cluster = integration_test::TestCluster::builder()
+        .rust_nodes(1)
+        .build()
+        .await
+        .unwrap();
+    let node = cluster.client(0);
+    node.schema_add("type Reading { name: String  stamp: DateTime }")
+        .expect("add Reading schema");
+    node.index_create("Reading", &["stamp"], Some("idx_stamp"), false)
+        .expect("create stamp index");
+
+    let readings = [
+        ("jan", "2026-01-05T18:05:40Z"),
+        ("feb", "2026-02-10T09:00:00Z"),
+        ("mar", "2026-03-15T12:30:00Z"),
+        ("apr", "2026-04-20T08:15:00Z"),
+    ];
+    for (name, stamp) in readings {
+        node.query(&format!(
+            r#"mutation {{ add_Reading(input: {{ name: "{name}", stamp: "{stamp}" }}) {{ _docID }} }}"#
+        ))
+        .expect("seed reading");
+    }
+
+    let page1: Value = node
+        .query(
+            r#"{ _cursor {
+            Reading(first: 2, order: [{stamp: ASC}]) { name stamp }
+            _pageInfo { endCursor hasNext }
+        } }"#,
+        )
+        .expect("page 1");
+
+    let first_page_names: Vec<&str> = page1["_cursor"]["Reading"]
+        .as_array()
+        .expect("page 1 readings")
+        .iter()
+        .map(|reading| reading["name"].as_str().expect("reading name"))
+        .collect();
+    assert_eq!(first_page_names, vec!["jan", "feb"]);
+    assert_eq!(
+        page1["_cursor"]["_pageInfo"]["hasNext"],
+        Value::Bool(true),
+        "hasNext should be true on page 1"
+    );
+
+    let end_cursor = page1["_cursor"]["_pageInfo"]["endCursor"]
+        .as_str()
+        .expect("endCursor present");
+    let page2: Value = node
+        .query(&format!(
+            r#"{{ _cursor {{
+            Reading(first: 2, after: "{end_cursor}", order: [{{stamp: ASC}}]) {{ name stamp }}
+        }} }}"#
+        ))
+        .expect("page 2");
+
+    let second_page_names: Vec<&str> = page2["_cursor"]["Reading"]
+        .as_array()
+        .expect("page 2 readings")
+        .iter()
+        .map(|reading| reading["name"].as_str().expect("reading name"))
+        .collect();
+    assert_eq!(
+        second_page_names,
+        vec!["mar", "apr"],
+        "DateTime cursor seek must use Time bytes and continue past the boundary"
+    );
+
+    // No rows dropped or duplicated across the page boundary.
+    let mut all_names = first_page_names;
+    all_names.extend(second_page_names);
+    assert_eq!(
+        all_names,
+        vec!["jan", "feb", "mar", "apr"],
+        "every seeded reading must appear exactly once, in stamp order, across both pages"
+    );
+}
+
+#[tokio::test]
 async fn rust_forward_first_after_doc_id_desc() {
     // Regression: forward slow path with _docID DESC used `row > after` (ASC comparison).
     // For DESC order, smaller doc_ids come next, so the correct comparison is `row < after`.
