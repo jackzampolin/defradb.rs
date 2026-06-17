@@ -1,7 +1,7 @@
 ---- MODULE MC_InteractiveTxnCounter_Common ----
 EXTENDS InteractiveTxnCounter
 \* Shared model values for the InteractiveTxnCounter GREEN/RED configs. Two docs so the
-\* interactive finalize and the batch (create_many) acquirer can CONTEND on a shared doc set
+\* interactive finalize and the incremental batch (BatchMutator) acquirer can CONTEND on a shared doc set
 \* (so that with the gate Off they can grab docs in OPPOSITE orders and deadlock), plus a
 \* single-doc merge on d1 so a local interactive RMW and a same-doc merge can race the
 \* per-doc critical section.

@@ -55,7 +55,7 @@ EXTENDS Naturals, FiniteSets, Sequences, TLC
 CONSTANTS
   Docs,            \* finite set of document ids
   ITouched,        \* SUBSET Docs — counter docs the interactive txn touches (>=1)
-  BTouched,        \* SUBSET Docs — counter docs the batch acquirer (create_many) touches (>=1)
+  BTouched,        \* SUBSET Docs — counter docs the incremental batch acquirer (BatchMutator) touches (>=1)
   MergeDoc,        \* a single doc the merge worker contends on
   GateMode,        \* "On" | "Off" — whether multi-doc acquirers take the process-wide gate
   InteractiveGate  \* "AtCommitOnly" | "AcrossLifetime"
@@ -70,7 +70,7 @@ ASSUME InteractiveGate \in {"AtCommitOnly", "AcrossLifetime"}
 NoOwner == "none"
 \* Sentinel lock holders, one per actor (a doc guard records WHO holds it).
 ITok == "itxn"     \* interactive txn
-BTok == "batch"    \* batch / create_many acquirer
+BTok == "batch"    \* BatchMutator (incremental); try_batch_merge/create_many are sorted-upfront, same gate
 MTok == "merge"    \* single-doc merge worker
 
 VARIABLES
@@ -196,8 +196,10 @@ IExitCrit ==
   /\ UNCHANGED <<gate, iPhase, bPhase, bHeld, mPhase, mInCrit>>
 
 \* =====================================================================================
-\* BATCH / create_many ACQUIRER  (IRREDUCIBLY INCREMENTAL: discovers docs one at a time and
-\* CANNOT pre-sort -> acquires in ARBITRARY order; this is the actor the gate protects against)
+\* INCREMENTAL BATCH ACQUIRER = BatchMutator  (IRREDUCIBLY INCREMENTAL: discovers docs one at a
+\* time and CANNOT pre-sort -> acquires in ARBITRARY order; this is the actor the gate protects
+\* against. try_batch_merge / create_many sort+dedup UPFRONT, so they are NOT this actor — they
+\* are sorted acquirers protected by the same gate.)
 \* =====================================================================================
 \* GateMode="On": take the gate before acquiring (real BatchMutator). GateMode="Off": skip it.
 BTakeGate ==
