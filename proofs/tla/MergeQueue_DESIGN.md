@@ -6,9 +6,18 @@ defradb.rs's `db-merge` crate.
 
 ## Property
 
-> The per-document `MergeQueue` serializes same-document merges while allowing
-> cross-document parallelism; the bounded (5×) conflict-retry loop loses and duplicates
-> no block; retry exhaustion **fails closed** (errors, never silently drops a block).
+> The per-document write guard (the `DocWriteQueue` owned by the DB, shared by BOTH the
+> local-write path and the db-merge merge handler since #1021) serializes same-document
+> writes — merge-vs-merge AND local-write-vs-merge — while allowing cross-document
+> parallelism; the bounded (5×) conflict-retry loop loses and duplicates no block; retry
+> exhaustion **fails closed** (errors, never silently drops a block).
+
+`UserWriteMode="PerDoc"` (the #1021 GREEN config) models a local user-write taking the
+same per-doc guard the merge takes: it acquires `lockOwner[d]`, writes inside the critical
+section, and releases. `INV_NoLocalMergeInterleave` then checks that a local write and a
+same-doc merge are never both in the critical section — the mutual exclusion the counter
+fix relies on. `UserWriteMode="LockFree"` keeps the pre-#1021 adversary (a lock-free
+user-write that only drives the txn-conflict retry loop), used by the other configs.
 
 ## Source anchors (read the real code, not an abstraction)
 
@@ -58,7 +67,8 @@ critical sections at once.
 
 | Name | Plain English |
 |---|---|
-| `INV_SameDocSerialized` | at most one worker per doc is inside its critical section (`acquire`) |
+| `INV_SameDocSerialized` | at most one occupant per doc inside its critical section (merge workers + a local user-write under `UserWriteMode="PerDoc"`) |
+| `INV_NoLocalMergeInterleave` | a local user-write and a merge are never both in the critical section on the same doc (#1021 shared guard) |
 | `INV_NoDoubleApply` | an original block's delta is committed at most once (idempotency) |
 | `INV_NoSilentDrop` | a block marked done is actually delivered (applied, or its original already was) |
 | `INV_NoLoss` | a terminated block is either delivered or still un-marked (hence re-deliverable) |

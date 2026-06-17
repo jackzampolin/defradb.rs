@@ -142,8 +142,15 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         batch_doc_ids.sort();
         batch_doc_ids.dedup();
         let mut _doc_guards = Vec::with_capacity(batch_doc_ids.len());
-        for doc_id in &batch_doc_ids {
-            _doc_guards.push(self.merge_queue.acquire(doc_id).await);
+        {
+            // Hold the shared batch gate only while acquiring, so this multi-doc
+            // acquirer can never deadlock against an incremental local mutation
+            // batch (which holds the gate for its whole batch). Once all guards
+            // are held the gate is released; the per-doc guards stay until commit.
+            let _batch_gate = self.merge_queue.acquire_batch_gate().await;
+            for doc_id in &batch_doc_ids {
+                _doc_guards.push(self.merge_queue.acquire(doc_id).await);
+            }
         }
 
         let txn = self.db.new_txn(false).await?;

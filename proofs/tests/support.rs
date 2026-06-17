@@ -145,6 +145,18 @@ pub async fn run_counter_storm(
     burst: i64,
 ) {
     let nodes = node_deltas.len();
+    // Guard against a degenerate storm that would pass vacuously: with rounds==0
+    // the round loop never runs, and with a zero per-round sum every round
+    // trivially re-asserts the already-converged seed. Either way the no-loss /
+    // no-double-apply oracle below never actually exercises a merge.
+    assert!(
+        rounds > 0 && burst > 0,
+        "run_counter_storm requires rounds>0 and burst>0 (got rounds={rounds}, burst={burst})"
+    );
+    assert!(
+        node_deltas.iter().sum::<f64>() * burst as f64 != 0.0,
+        "run_counter_storm requires a non-zero per-round delta sum so the exact-sum oracle advances each round"
+    );
     let lit = |v: f64| -> String {
         if field_type == "Float" {
             format!("{v:?}")

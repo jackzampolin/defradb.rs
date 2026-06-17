@@ -21,12 +21,21 @@
 \* The headline safety invariants relate these ledgers; the mutex/retry mechanism cannot
 \* fake them by agreeing with itself.
 \*
-\* Two knobs select correct mechanism vs. adversary variant:
+\* Three knobs select correct mechanism vs. adversary variant:
 \*   LockMode = "PerDoc" - real code: MergeQueue.acquire(doc) before the retry loop  [GREEN]
 \*            = "None"    - bug: no per-doc mutex; same-doc merges run concurrently  [RED]
 \*   FailMode = "Closed"  - real Rust: exhausted retries -> Err -> NOT marked done   [GREEN]
 \*            = "Open"     - Go merge.go bug: exhausted retries -> return nil ->
 \*                           caller treats block as done -> silent drop              [RED]
+\*   UserWriteMode = "PerDoc" - #1021 fix: a local user-write ALSO acquires the shared
+\*                              per-doc DocWriteQueue guard (update_impl/create_impl take
+\*                              the SAME lock the merge handler takes). A local write and a
+\*                              same-doc merge are MUTUALLY EXCLUDED in the critical section,
+\*                              not merely conflict-retried.                         [GREEN]
+\*                 = "LockFree" - pre-#1021 adversary: the local-write path does NOT take the
+\*                              merge lock; it only bumps docVer and is reconciled by the
+\*                              txn-conflict retry loop (the conflict-detection story).  This
+\*                              alone does NOT serialize the store RMW the counter fix needs.
 EXTENDS Naturals, FiniteSets, Sequences, TLC
 
 CONSTANTS
@@ -37,7 +46,8 @@ CONSTANTS
   MaxRetries,  \* retry budget (MAX_MERGE_RETRIES = 5; node.go MaxTxnRetries = 5)
   MaxUserWrites, \* bound on adversarial concurrent local user-writes per doc
   LockMode,    \* "PerDoc" | "None"
-  FailMode     \* "Closed" | "Open"
+  FailMode,    \* "Closed" | "Open"
+  UserWriteMode \* "PerDoc" | "LockFree"  — does a local user-write take the shared guard?
 
 ASSUME Blocks # {} /\ Docs # {}
 ASSUME BlockDoc \in [Blocks -> Docs]
@@ -48,24 +58,29 @@ ASSUME MaxRetries \in Nat /\ MaxRetries >= 1
 ASSUME MaxUserWrites \in Nat
 ASSUME LockMode \in {"PerDoc", "None"}
 ASSUME FailMode \in {"Closed", "Open"}
+ASSUME UserWriteMode \in {"PerDoc", "LockFree"}
 
 NoOwner == "none"
+\* Sentinel lock holder for a local user-write inside the shared per-doc guard.
+UserTok == "user"
 
 VARIABLES
   pc,          \* [Blocks -> phase]  per-worker control state
   attempt,     \* [Blocks -> Nat]    attempts consumed in the retry loop
   readVer,     \* [Blocks -> Nat]    docVer snapshotted at the START of the current attempt
   seenMerged,  \* [Blocks -> BOOLEAN] is_merged(cid) snapshotted at the START of the attempt
-  lockOwner,   \* [Docs -> Blocks \cup {NoOwner}]  per-doc async mutex holder
+  lockOwner,   \* [Docs -> Blocks \cup {NoOwner, UserTok}]  per-doc async mutex holder
   docVer,      \* [Docs -> Nat]      bumped by each local user-write (drives txn conflict)
   userWrites,  \* [Docs -> Nat]      adversarial user-writes spent (bounded by MaxUserWrites)
   applied,     \* [Blocks -> Nat]    ORACLE: times this block's effect hit doc state
   docState,    \* [Docs -> SUBSET Blocks]  the merged-set: original ids applied to each doc
   marked,      \* [Blocks -> BOOLEAN]  ORACLE: caller recorded the block as "done"
-  inCrit       \* [Docs -> SUBSET Blocks]  workers currently inside the per-doc critical section
+  inCrit,      \* [Docs -> SUBSET Blocks]  merge workers currently inside the critical section
+  uwInCrit     \* [Docs -> BOOLEAN]  is a local user-write currently inside the critical section
+               \*                    (only reachable when UserWriteMode="PerDoc")
 
 vars == <<pc, attempt, readVer, seenMerged, lockOwner, docVer, userWrites,
-          applied, docState, marked, inCrit>>
+          applied, docState, marked, inCrit, uwInCrit>>
 
 Phases == {"start", "crit", "done"}
 
@@ -77,13 +92,14 @@ TypeOK ==
   /\ attempt   \in [Blocks -> 0..MaxRetries]
   /\ readVer   \in [Blocks -> Nat]
   /\ seenMerged\in [Blocks -> BOOLEAN]
-  /\ lockOwner \in [Docs -> Blocks \cup {NoOwner}]
+  /\ lockOwner \in [Docs -> Blocks \cup {NoOwner, UserTok}]
   /\ docVer    \in [Docs -> Nat]
   /\ userWrites\in [Docs -> 0..MaxUserWrites]
   /\ applied   \in [Blocks -> Nat]
   /\ docState  \in [Docs -> SUBSET Blocks]
   /\ marked    \in [Blocks -> BOOLEAN]
   /\ inCrit    \in [Docs -> SUBSET Blocks]
+  /\ uwInCrit  \in [Docs -> BOOLEAN]
 
 Init ==
   /\ pc         = [b \in Blocks |-> "start"]
@@ -97,6 +113,7 @@ Init ==
   /\ docState   = [d \in Docs   |-> {}]
   /\ marked     = [b \in Blocks |-> FALSE]
   /\ inCrit     = [d \in Docs   |-> {}]
+  /\ uwInCrit   = [d \in Docs   |-> FALSE]
 
 \* ---- Mutex semantics, parameterized by LockMode -------------------------------------
 \* PerDoc: acquire blocks while another worker holds the doc's lock (queue.rs acquire()).
@@ -105,23 +122,46 @@ CanAcquire(b) ==
   LET d == BlockDoc[b] IN
   IF LockMode = "PerDoc" THEN lockOwner[d] = NoOwner ELSE TRUE
 
-\* ---- Adversary: a local user-write to a doc, concurrent with merges -----------------
+\* ---- Adversary (pre-#1021, conflict-retry path): a LOCK-FREE local user-write ---------
 \* Models "a user updates a document while a merge is in progress" (Go merge.go comment):
 \* it bumps docVer, which makes any in-flight merge attempt (whose readVer is now stale)
-\* conflict at commit. Permitted regardless of the merge mutex — modeling the conflict
-\* path, the OTHER realization of user-vs-merge safety.
-\* NOTE (#1021): in defradb.rs the lock now ALSO spans user-writes — update_impl/
-\* create_impl acquire the same per-doc DocWriteQueue guard the merge takes, so a local
-\* counter RMW and a merge on one doc are mutually serialized (not merely conflict-
-\* retried). This lock-free UserWrite therefore models the conflict-detection story
-\* (and the pre-#1021 adversary); the lock story is what the counter fix actually relies
-\* on. A future strengthening could add a PerDoc UserWrite variant that acquires
-\* lockOwner[d] to model the shared guard directly.
+\* conflict at commit. It does NOT take the merge lock, so it can fire even while a merge
+\* holds the doc's critical section — the conflict-detection realization of user-vs-merge
+\* safety. This is the pre-#1021 behavior (the local-write path bypassed the shared guard,
+\* the bug behind the #1021 counter clobber). Reachable only when UserWriteMode="LockFree".
 UserWrite(d) ==
+  /\ UserWriteMode = "LockFree"
   /\ userWrites[d] < MaxUserWrites
   /\ docVer'     = [docVer     EXCEPT ![d] = @ + 1]
   /\ userWrites' = [userWrites EXCEPT ![d] = @ + 1]
-  /\ UNCHANGED <<pc, attempt, readVer, seenMerged, lockOwner, applied, docState, marked, inCrit>>
+  /\ UNCHANGED <<pc, attempt, readVer, seenMerged, lockOwner, applied, docState, marked,
+                 inCrit, uwInCrit>>
+
+\* ---- #1021 fix: a local user-write that ACQUIRES the shared per-doc guard -------------
+\* update_impl/create_impl take the SAME per-doc DocWriteQueue guard the merge handler
+\* takes (crates/db/src/doc_write_queue.rs, shared by both paths). The write is performed
+\* INSIDE the critical section and the guard is released afterwards, so a local write and a
+\* same-doc merge are mutually excluded — never interleaved in the critical section. The
+\* merge worker's CanAcquire already refuses while lockOwner = UserTok, and vice-versa.
+\* Modeled as acquire -> (write) -> release so the serialization is observable in uwInCrit.
+UserWriteAcquire(d) ==
+  /\ UserWriteMode = "PerDoc"
+  /\ userWrites[d] < MaxUserWrites
+  /\ ~uwInCrit[d]
+  /\ IF LockMode = "PerDoc" THEN lockOwner[d] = NoOwner ELSE TRUE
+  /\ lockOwner' = [lockOwner EXCEPT ![d] = IF LockMode = "PerDoc" THEN UserTok ELSE @]
+  /\ uwInCrit'  = [uwInCrit  EXCEPT ![d] = TRUE]
+  /\ UNCHANGED <<pc, attempt, readVer, seenMerged, docVer, userWrites,
+                 applied, docState, marked, inCrit>>
+
+UserWriteRelease(d) ==
+  /\ UserWriteMode = "PerDoc"
+  /\ uwInCrit[d]
+  /\ docVer'     = [docVer     EXCEPT ![d] = @ + 1]
+  /\ userWrites' = [userWrites EXCEPT ![d] = @ + 1]
+  /\ lockOwner'  = [lockOwner  EXCEPT ![d] = IF LockMode = "PerDoc" THEN NoOwner ELSE @]
+  /\ uwInCrit'   = [uwInCrit   EXCEPT ![d] = FALSE]
+  /\ UNCHANGED <<pc, attempt, readVer, seenMerged, applied, docState, marked, inCrit>>
 
 \* ---- Worker: acquire the per-doc lock, enter the critical section, snapshot the txn ---
 \* At txn start the worker snapshots BOTH the doc version (for conflict detection) and the
@@ -138,7 +178,7 @@ Acquire(b) ==
   /\ readVer'    = [readVer    EXCEPT ![b] = docVer[d]]
   /\ seenMerged' = [seenMerged EXCEPT ![b] = (Orig(b) \in docState[d])]
   /\ attempt'    = [attempt    EXCEPT ![b] = 1]
-  /\ UNCHANGED <<docVer, userWrites, applied, docState, marked>>
+  /\ UNCHANGED <<docVer, userWrites, applied, docState, marked, uwInCrit>>
 
 \* A merge attempt commits iff the doc version it snapshotted is still current
 \* (no intervening user-write) -- i.e. no txn conflict. Mirrors executeMerge's txn:
@@ -170,7 +210,7 @@ Commit(b) ==
        ELSE \* first application: write the delta into doc state, bump the merged-set
          /\ applied'  = [applied  EXCEPT ![Orig(b)] = @ + 1]
          /\ docState' = [docState EXCEPT ![d] = @ \cup {Orig(b)}]
-  /\ UNCHANGED <<attempt, readVer, seenMerged, docVer, userWrites>>
+  /\ UNCHANGED <<attempt, readVer, seenMerged, docVer, userWrites, uwInCrit>>
 
 \* RETRY: attempt hit a txn conflict (stale snapshot) and budget remains. Re-snapshot
 \* docVer and loop. The lock is HELD across retries (the retry loop is inside the guard
@@ -183,7 +223,7 @@ Retry(b) ==
   /\ attempt'    = [attempt    EXCEPT ![b] = @ + 1]
   /\ readVer'    = [readVer    EXCEPT ![b] = docVer[d]]
   /\ seenMerged' = [seenMerged EXCEPT ![b] = (Orig(b) \in docState[d])]
-  /\ UNCHANGED <<pc, lockOwner, docVer, userWrites, applied, docState, marked, inCrit>>
+  /\ UNCHANGED <<pc, lockOwner, docVer, userWrites, applied, docState, marked, inCrit, uwInCrit>>
 
 \* EXHAUST: conflict persists and the retry budget is spent. This is the fail-open vs
 \* fail-closed fork:
@@ -201,7 +241,7 @@ Exhaust(b) ==
   /\ lockOwner' = [lockOwner EXCEPT ![d] = IF LockMode = "PerDoc" THEN NoOwner ELSE @]
   /\ inCrit'    = [inCrit EXCEPT ![d] = @ \ {b}]
   /\ marked'    = [marked EXCEPT ![b] = (FailMode = "Open")]
-  /\ UNCHANGED <<attempt, readVer, seenMerged, docVer, userWrites, applied, docState>>
+  /\ UNCHANGED <<attempt, readVer, seenMerged, docVer, userWrites, applied, docState, uwInCrit>>
 
 Next ==
   \/ \E b \in Blocks : Acquire(b)
@@ -209,10 +249,12 @@ Next ==
   \/ \E b \in Blocks : Retry(b)
   \/ \E b \in Blocks : Exhaust(b)
   \/ \E d \in Docs   : UserWrite(d)
+  \/ \E d \in Docs   : UserWriteAcquire(d)
+  \/ \E d \in Docs   : UserWriteRelease(d)
 
-\* Stutter once every worker has terminated, so TLC does not report deadlock on a
-\* finished schedule.
-Done == \A b \in Blocks : pc[b] = "done"
+\* Stutter once every merge worker has terminated AND no user-write is mid-critical-section,
+\* so TLC does not report deadlock on a finished schedule.
+Done == (\A b \in Blocks : pc[b] = "done") /\ (\A d \in Docs : ~uwInCrit[d])
 Terminating == Done /\ UNCHANGED vars
 
 Spec == Init /\ [][Next \/ Terminating]_vars
@@ -222,10 +264,23 @@ Spec == Init /\ [][Next \/ Terminating]_vars
 \* =====================================================================================
 INV_TypeOK == TypeOK
 
-\* ---- Serialization: at most one worker per doc inside its critical section ----------
-\* This is the direct property of MergeQueue.acquire. RED under LockMode = "None".
+\* ---- Serialization: at most one occupant per doc inside its critical section --------
+\* The occupants of a doc's critical section are the merge workers in inCrit[d] PLUS a
+\* local user-write (uwInCrit[d]) when UserWriteMode="PerDoc". This is the direct property
+\* of the shared per-doc guard (MergeQueue.acquire / DocWriteQueue). RED under
+\* LockMode = "None".
+DocOccupants(d) == Cardinality(inCrit[d]) + (IF uwInCrit[d] THEN 1 ELSE 0)
+
 INV_SameDocSerialized ==
-  \A d \in Docs : Cardinality(inCrit[d]) <= 1
+  \A d \in Docs : DocOccupants(d) <= 1
+
+\* ---- Shared-guard mutual exclusion: a local user-write and a merge are NEVER both in
+\* the critical section on the SAME doc (#1021). This is the property the counter fix
+\* actually relies on — that a local counter RMW and a same-doc merge RMW cannot
+\* interleave inside the store. Under UserWriteMode="LockFree" (pre-#1021) it is FALSE;
+\* the #1021 GREEN config sets UserWriteMode="PerDoc" and this must hold.
+INV_NoLocalMergeInterleave ==
+  \A d \in Docs : ~(uwInCrit[d] /\ inCrit[d] # {})
 
 \* ---- No double-apply: an original block's delta is committed at most once ------------
 \* Independent oracle: the apply ledger, not the skip decision. A duplicate delivery

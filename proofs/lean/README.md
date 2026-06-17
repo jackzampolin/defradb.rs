@@ -37,8 +37,38 @@ The model proves:
 - `reconciled_merge_ge_committed`: `[propext, Quot.sound]`
 - `unreconciled_merge_can_clobber`: *(no axioms)*
 
-No theorem uses `sorry` or custom axioms. Float32/Float64 counter laws are not
-claimed here because IEEE-754 addition is not generally associative.
+Generic `CrdtField` core:
+
+- `CrdtField.swap`: *(no axioms)*
+- `CrdtField.two_converge`: *(no axioms)*
+- `CrdtField.three_converge`: *(no axioms)*
+- `CrdtField.dup_absorb`: *(no axioms)*
+- `CrdtField.nonidem_has_dup_witness`: `[propext, Classical.choice, Quot.sound]`
+
+Field instantiations:
+
+- `CounterReconcile.counterCM`: `[propext]`
+- `CounterReconcile.counter_not_idempotent`: `[propext, Quot.sound]`
+- `CounterReconcile.counter_two_converge`: `[propext]`
+- `CounterReconcile.counter_three_converge`: `[propext]`
+- `PriorityReconcile.lwwCM`: `[propext, Classical.choice, Quot.sound]`
+- `PriorityReconcile.lww_idempotent`: `[propext, Classical.choice, Quot.sound]`
+- `PriorityReconcile.lww_dup_safe`: `[propext, Classical.choice, Quot.sound]`
+- `PriorityReconcile.lww_two_converge`: `[propext, Classical.choice, Quot.sound]`
+
+`nonidem_has_dup_witness` is the generic core's only classical lemma (it pulls in
+`Classical.choice` via `Classical.byContradiction`), and it is the trivial
+existential dual of the `Idempotent` definition — it is NOT consumed by any field
+convergence or dedup result. The counter results (`counterCM`,
+`counter_not_idempotent`, `counter_*_converge`) are fully constructive
+(`Classical.choice`-free). The LWW results also depend on `Classical.choice`, but
+independently: it enters through the `lwwMerge` case analysis, not through
+`nonidem_has_dup_witness`.
+
+`Classical.choice`, `propext`, and `Quot.sound` are the three built-in axioms of
+Lean 4's core logic, not project-defined axioms. No theorem uses `sorry` or any
+custom (project-defined) axiom. Float32/Float64 counter laws are not claimed here
+because IEEE-754 addition is not generally associative.
 
 `DefraConvergence/PriorityReconcile.lean` proves the invariant behind the
 same-doc convergence bug this project found and fixed: a field's priority lives

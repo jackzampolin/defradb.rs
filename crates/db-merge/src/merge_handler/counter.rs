@@ -199,6 +199,20 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         )
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
+        // Already-merged (re-delivered) block: skip BEFORE any reconcile side
+        // effect, mirroring the standalone `process_counter_delta` ordering so the
+        // dedup/replay path never mutates the store. The block was already applied,
+        // so the store value is authoritative.
+        if self.blockstore.is_merged(cid).await.unwrap_or(false) {
+            let value = self
+                .read_counter_value(&counter, datastore, numeric_kind, &payload.field_name)
+                .await;
+            return Ok(CounterMergeResult {
+                applied: false,
+                value,
+            });
+        }
+
         // Seed the CRDT accumulation store from the document's current
         // materialized value only if the store is not yet initialized
         // (init-if-absent). The store is the single source of truth; local writes
@@ -223,16 +237,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     }
                 }
             }
-        }
-
-        if self.blockstore.is_merged(cid).await.unwrap_or(false) {
-            let value = self
-                .read_counter_value(&counter, datastore, numeric_kind, &payload.field_name)
-                .await;
-            return Ok(CounterMergeResult {
-                applied: false,
-                value,
-            });
         }
 
         // Create the CounterDelta from payload

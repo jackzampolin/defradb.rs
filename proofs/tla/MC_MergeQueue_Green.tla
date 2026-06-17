@@ -1,10 +1,13 @@
 ---- MODULE MC_MergeQueue_Green ----
 EXTENDS MergeQueue
 \* GREEN: correct mechanism -- per-doc async mutex (LockMode="PerDoc") + fail-closed
-\* exhaustion (FailMode="Closed"). Three workers over two docs, including a DUPLICATE
-\* delivery (b2 is a re-delivery of b1 on doc d1) to exercise the is_merged idempotency
-\* guard, plus an adversary that can issue concurrent user-writes to drive txn conflicts
-\* and retries. Every safety invariant must hold over all interleavings.
+\* exhaustion (FailMode="Closed") + the #1021 shared guard on local writes
+\* (UserWriteMode="PerDoc": a local user-write acquires the SAME per-doc guard the merge
+\* takes). Three workers over two docs, including a DUPLICATE delivery (b2 is a re-delivery
+\* of b1 on doc d1) to exercise the is_merged idempotency guard, plus local user-writes
+\* that take the shared guard and perform their write inside the critical section. Every
+\* safety invariant -- including INV_NoLocalMergeInterleave (no local-write-vs-merge
+\* interleave on one doc, the property the counter fix relies on) -- must hold.
 
 mcBlocks  == {"b1", "b2", "b3"}
 mcDocs    == {"d1", "d2"}

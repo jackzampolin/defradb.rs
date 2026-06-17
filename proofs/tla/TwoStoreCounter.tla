@@ -127,20 +127,32 @@ MergeCommit(o) ==
                    /\ acc' = blob
                    /\ UNCHANGED <<blob, doneCount, pc>>
 
-\* ---- Double-apply (#4935): a remote delta RE-APPLIED. ------------------------------
+\* ---- Re-delivery (#4935): a remote delta is DELIVERED A SECOND TIME. ----------------
 \* A counter field block delivered as its own PushLog head (or re-delivered via two
-\* channels) is merged a SECOND time. Go's `coreblock.ProcessBlock` applies the delta
-\* unconditionally; idempotency rests entirely on the blockstore merged-set / is_merged
-\* guard. With that guard OFF the re-merge re-applies the +1 (blob/acc climb) WITHOUT a
-\* new increment (doneCount unchanged) — so blob exceeds the committed count. With it ON
-\* the re-merge is skipped (no-op). This is the counter's idempotency axis, orthogonal to
-\* the two-store split above; the Lean twin is `CounterReconcile.counter_not_idempotent`.
+\* channels) is handed to the merge handler a SECOND time. Go's `coreblock.ProcessBlock`
+\* applies the delta unconditionally; idempotency rests entirely on the blockstore
+\* merged-set / is_merged guard. This action models the re-delivery itself; the guard is
+\* modeled INLINE as a no-op transition (not a disabled action) so BOTH settings exercise
+\* the re-delivery path:
+\*   Dedup="On"  (GREEN): is_merged(cid) finds the block already in the merged-set and
+\*                        SUPPRESSES the re-apply -> UNCHANGED. This no-op is what makes
+\*                        GREEN non-vacuous on the double-apply axis (the guard actively
+\*                        fires, rather than the re-delivery being structurally absent).
+\*   Dedup="Off" (RED):   no guard -> the re-merge re-applies the +1 (blob/acc climb)
+\*                        WITHOUT a new increment (doneCount unchanged) -> blob exceeds
+\*                        the committed count.
+\* The counter's idempotency axis, orthogonal to the two-store split above; the Lean twin
+\* is `CounterReconcile.counter_not_idempotent`.
 MergeRedeliver(o) ==
   /\ o \in RemoteOps
-  /\ pc[o] = "done"      \* its delta was already applied once
-  /\ Dedup = "Off"       \* RED: no merged-set/is_merged guard -> the re-merge re-applies
-  /\ blob' = blob + 1
-  /\ acc' = acc + 1
+  /\ pc[o] = "done"      \* its delta was already applied once; now re-delivered
+  /\ IF Dedup = "On"
+       \* GREEN: the merged-set guard suppresses the re-apply (a no-op). The re-delivery
+       \* is exercised; dedup actively prevents the double-count.
+       THEN UNCHANGED <<blob, acc>>
+       \* RED: no guard -> the delta is applied a second time.
+       ELSE /\ blob' = blob + 1
+            /\ acc'  = acc + 1
   /\ UNCHANGED <<pc, snap, doneCount>>
 
 Next == \E o \in Ops : LocalApply(o) \/ MergeReconcile(o) \/ MergeCommit(o) \/ MergeRedeliver(o)

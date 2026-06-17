@@ -2,12 +2,14 @@ use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use cid::Cid;
 use document::{DocID, Document};
+use parking_lot::Mutex as PlMutex;
 use query::mutator::{
     CreateResult, DeleteResult, DocMutator, MutationBatchController, UpdateResult,
 };
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use storage::corekv::Store;
+use tokio::sync::OwnedMutexGuard;
 use tracing::warn;
 
 use super::helpers::{
@@ -24,11 +26,54 @@ use defra_core::signing::get_signing_config;
 pub struct BatchMutator<S: Store> {
     db: Arc<DB<S>>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+    /// Per-doc write guards held across the WHOLE batch txn so a local counter
+    /// read-modify-write and a P2P merge on the same document never interleave
+    /// (#1021). The merge handler shares the same `DocWriteQueue`. Released only
+    /// after the batch commits/rolls back, so a concurrent merge observes the
+    /// committed counter state, never a partial. `batch_gate` keeps this
+    /// incremental multi-doc acquirer deadlock-free (see `ensure_doc_guard`).
+    doc_guards: PlMutex<BTreeMap<String, OwnedMutexGuard<()>>>,
+    batch_gate: PlMutex<Option<OwnedMutexGuard<()>>>,
 }
 
 impl<S: Store> BatchMutator<S> {
     pub fn new(db: Arc<DB<S>>, txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
-        Self { db, txn }
+        Self {
+            db,
+            txn,
+            doc_guards: PlMutex::new(BTreeMap::new()),
+            batch_gate: PlMutex::new(None),
+        }
+    }
+
+    /// Serialize this batch's writes to `doc_id` against concurrent merges/writes
+    /// on the same document, holding the guard until the batch commits/rolls back
+    /// (#1021). Idempotent per doc within the batch. The first guard taken also
+    /// acquires the shared batch gate, held for the whole batch: because this
+    /// acquirer discovers its documents incrementally (one mutation at a time) it
+    /// cannot pre-sort, so the gate — taken by every other multi-doc acquirer
+    /// (batch merges, `create_many`) while they acquire — is what prevents a
+    /// lock-ordering deadlock.
+    async fn ensure_doc_guard(&self, doc_id: &str) {
+        if self.doc_guards.lock().contains_key(doc_id) {
+            return;
+        }
+        if self.batch_gate.lock().is_none() {
+            let gate = self.db.doc_write_queue().acquire_batch_gate().await;
+            let mut slot = self.batch_gate.lock();
+            if slot.is_none() {
+                *slot = Some(gate);
+            }
+        }
+        let guard = self.db.doc_write_queue().acquire(doc_id).await;
+        self.doc_guards.lock().insert(doc_id.to_string(), guard);
+    }
+
+    /// Release the per-doc guards and the batch gate. Called only AFTER the batch
+    /// txn is durably committed or discarded.
+    fn release_doc_guards(&self) {
+        self.doc_guards.lock().clear();
+        *self.batch_gate.lock() = None;
     }
 
     async fn block_and_head_stores(
@@ -98,15 +143,22 @@ impl<S: Store + 'static> BatchMutator<S> {
 impl<S: Store + 'static> MutationBatchController for BatchMutator<S> {
     async fn commit(&self) -> query::error::Result<()> {
         let txn = self.take_txn().await?;
-        txn.commit()
+        let result = txn
+            .commit()
             .await
-            .map_err(|e| query::error::QueryError::execution(format!("commit error: {}", e)))
+            .map_err(|e| query::error::QueryError::execution(format!("commit error: {}", e)));
+        // Release per-doc guards only after the durable commit (#1021).
+        self.release_doc_guards();
+        result
     }
 
     async fn rollback(&self) -> query::error::Result<()> {
         let txn = self.take_txn().await?;
-        txn.discard()
-            .map_err(|e| query::error::QueryError::execution(format!("discard error: {}", e)))
+        let result = txn
+            .discard()
+            .map_err(|e| query::error::QueryError::execution(format!("discard error: {}", e)));
+        self.release_doc_guards();
+        result
     }
 }
 
@@ -148,6 +200,11 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let doc_id = doc.id().cloned().ok_or_else(|| {
             query::error::QueryError::execution("document should have ID after generation")
         })?;
+
+        // Serialize this create's counter-store seeding against concurrent
+        // merges/writes on the same document, held until the batch commits
+        // (#1021).
+        self.ensure_doc_guard(&doc_id.to_string()).await;
 
         self.db
             .validate_downsample_write(&datastore, collection.schema(), &doc, None)
@@ -265,6 +322,16 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         for field in generated {
             modified_fields.insert(field);
+        }
+
+        // Serialize this update's counter read-modify-write against concurrent
+        // merges/writes on the same document, held until the batch commits. The
+        // single-mutation path (`update_impl`) takes the same guard; without it a
+        // concurrent P2P counter merge can interleave its RMW and drop this
+        // increment (#1021).
+        let guard_doc_id = doc.id().map(|id| id.to_string());
+        if let Some(id) = guard_doc_id {
+            self.ensure_doc_guard(&id).await;
         }
 
         self.db

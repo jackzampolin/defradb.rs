@@ -21,12 +21,20 @@ const PRUNE_THRESHOLD: usize = 10_000;
 /// queue, extended to also cover local writes.
 pub struct DocWriteQueue {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Serializes the guard-ACQUISITION phase of multi-document writers (local
+    /// mutation batches, batch merges) against one another. A caller that will
+    /// hold more than one per-doc guard at once must hold this gate while
+    /// acquiring them, so two multi-doc acquirers can never grab overlapping
+    /// documents in opposite orders and deadlock. Single-doc callers never take
+    /// it, so the common path (single-doc writes and merges) is unaffected.
+    batch_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Default for DocWriteQueue {
     fn default() -> Self {
         Self {
             locks: Mutex::new(HashMap::new()),
+            batch_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
@@ -52,6 +60,18 @@ impl DocWriteQueue {
                 .clone()
         };
         mutex.lock_owned().await
+    }
+
+    /// Acquire the multi-document batch gate.
+    ///
+    /// Any caller that will simultaneously hold more than one per-doc guard must
+    /// hold this gate while acquiring those guards. An incremental acquirer (a
+    /// local mutation batch that discovers its documents one mutation at a time)
+    /// holds it for the whole batch; an upfront acquirer (a batch merge, or
+    /// `create_many`) holds it only while taking its sorted guards, then releases
+    /// it. This makes the per-doc guards deadlock-free across multi-doc writers.
+    pub async fn acquire_batch_gate(&self) -> OwnedMutexGuard<()> {
+        self.batch_gate.clone().lock_owned().await
     }
 }
 
@@ -83,6 +103,40 @@ mod tests {
             h.await.unwrap();
         }
         assert_eq!(max_concurrent.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn batch_gate_is_exclusive() {
+        use std::time::Duration;
+        let queue = Arc::new(DocWriteQueue::new());
+        let gate = queue.acquire_batch_gate().await;
+
+        let q2 = queue.clone();
+        let waiter = tokio::spawn(async move { q2.acquire_batch_gate().await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !waiter.is_finished(),
+            "a second batch-gate acquire must block while the gate is held"
+        );
+
+        drop(gate);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("second acquire completes once the gate is released")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_gate_does_not_block_per_doc_guards() {
+        // The gate only serializes the acquisition phase of multi-doc writers; a
+        // single-doc per-doc guard is independent and must proceed while the gate
+        // is held (otherwise the common single-doc path would stall behind a batch).
+        use std::time::Duration;
+        let queue = Arc::new(DocWriteQueue::new());
+        let _gate = queue.acquire_batch_gate().await;
+        tokio::time::timeout(Duration::from_secs(1), queue.acquire("doc-1"))
+            .await
+            .expect("per-doc guard acquisition must not block on the batch gate");
     }
 
     #[tokio::test]

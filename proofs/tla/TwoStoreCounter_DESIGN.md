@@ -13,9 +13,14 @@ fully converges (identical `_commits` set on every node, divergent values 12/12/
 | `acc` (accumulation store) | the counter `value_key` in `crates/crdt/src/counter.rs` |
 | `MergeReconcile` (`acc := blob`) | `Counter::reconcile_int64(datastore, blob_value)` in `crates/db-merge/src/merge_handler/counter.rs` (process_counter_delta ~L91, process_counter_delta_in_txn ~L202) |
 | `MergeCommit` (`acc += δ; blob := acc`) | `counter.merge(+delta)` then blob re-materialization |
-| `LocalApply` (`blob += 1`, no lock, no `acc`) | local increment via the `db` crate, which does NOT acquire the `db-merge` `merge_queue` lock |
+| `LocalApply` (`blob += 1`, no lock, no `acc`) | local increment via the `db` crate; in the Split (pre-#1021) abstraction it does NOT acquire the shared per-doc guard |
+| `MergeRedeliver` (re-delivery; inline `Dedup` branch) | a delta delivered twice; `is_merged(cid)` merged-set guard in `counter.rs`/`composite.rs` (suppresses when `Dedup="On"`) |
 
-## The knob
+## The knobs
+
+The model has two orthogonal axes, each with a CONSTANT knob.
+
+### `StoreMode` — the lost-update / two-store-split axis
 
 - `StoreMode = "Split"` [RED]: the merge commits its stale reconciled snapshot+delta
   with no cross-store conflict check. A local increment that interleaves between a
@@ -30,17 +35,54 @@ fully converges (identical `_commits` set on every node, divergent values 12/12/
   commit and the loser retries) and equivalently a per-doc lock spanning both the
   local-write and merge paths.
 
-## Invariant
+### `Dedup` — the double-apply / idempotency axis (added by this PR)
 
-`INV_NoLoss == blob = doneCount` — the materialized value equals the number of
-committed increments (oracle independent of the stores). TLC: RED violates it
-(counterexample `blob=1, doneCount=2`); GREEN holds it over all reachable states.
+Orthogonal to the store split: even with a unified store, a remote counter delta can
+be DELIVERED twice (a field block arriving as its own PushLog head, then again via its
+composite — upstream `sourcenetwork/defradb#4935`). Go's `coreblock.ProcessBlock`
+applies the delta unconditionally; idempotency rests entirely on the blockstore
+merged-set / `is_merged(cid)` guard. The `MergeRedeliver` action models the re-delivery
+and branches INLINE on `Dedup` (it is a no-op transition, not a disabled action, so the
+re-delivery path is exercised in BOTH settings):
 
-## Fix direction it validates
+- `Dedup = "On"` [GREEN]: the merged-set guard finds the block already merged and
+  SUPPRESSES the re-apply — `MergeRedeliver` is a no-op (`UNCHANGED <<blob, acc>>`).
+  This active no-op is what makes GREEN non-vacuous on the double-apply axis.
+- `Dedup = "Off"` [RED]: no guard → the +1 is applied a second time (`blob`/`acc` climb)
+  with no new increment → `blob > doneCount`, violating `INV_NoDoubleApply`. The Lean
+  twin is `CounterReconcile.counter_not_idempotent`.
 
-Make Rust's counter value behave as one store under concurrency — either local
-increments and merges serialize on a shared per-doc primitive, or (Go-parity) the
-accumulation store is authoritative and local increments apply through it so a
-concurrent merge conflicts. Avoids a new hot-path lock if done via the existing SSI
-conflict detection on a shared key. Not yet implemented; `bughunt_same_doc_merge_storm`
-(+ `_go` control) is the behavioral repro to flip green once the fix lands.
+## Invariants
+
+The real definitions in `TwoStoreCounter.tla`:
+
+- `INV_NoLoss == blob >= doneCount` — no increment dropped (the **Split** axis breaks
+  this: a clobbered local write makes `blob < doneCount`).
+- `INV_NoDoubleApply == blob <= doneCount` — no increment counted twice (the **Dedup=Off**
+  axis breaks this: a re-applied delta makes `blob > doneCount`).
+- `INV_Exact == blob = doneCount` — the headline: the materialized value equals the
+  number of committed increments (oracle independent of the stores). Equivalent to
+  `INV_NoLoss /\ INV_NoDoubleApply`.
+
+The GREEN config (`MC_TwoStoreCounter_Green.cfg`, `StoreMode="Unified"`, `Dedup="On"`)
+checks `INV_Exact` and holds it over all reachable states. The RED configs each check the
+one directional invariant their bug violates.
+
+## Scenarios / configs / verdicts
+
+| Config | Knobs | Invariant | Expected |
+|---|---|---|---|
+| `MC_TwoStoreCounter_Green` | Unified + On | `INV_Exact` | GREEN |
+| `MC_TwoStoreCounter_Red_Split` | Split + On | `INV_NoLoss` | RED (`blob < doneCount`) |
+| `MC_TwoStoreCounter_Red_DoubleApply` | Unified + Off | `INV_NoDoubleApply` | RED (`blob > doneCount`) |
+
+## Fix status
+
+**Landed (#1021).** Rust's counter value behaves as one store under concurrency: local
+increments and merges serialize on the shared per-doc write guard
+(`crates/db/src/doc_write_queue.rs`, taken by BOTH the local-write path and the db-merge
+merge handler — see `MergeQueue.tla`), and reconcile is init-if-absent (PCounter
+migrate-via-max), so a local write and a same-doc merge never interleave their store RMW.
+The behavioral repro `bughunt_same_doc_merge_storm` (+ `_go` control) now passes. The
+GREEN `Unified` mode here abstracts that fix as a conflict-checked RMW; the per-doc-lock
+realization is checked directly in `MergeQueue.tla`'s `INV_NoLocalMergeInterleave`.

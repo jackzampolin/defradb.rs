@@ -226,12 +226,16 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
                 // the receiver, whose merge then walks and re-applies the entire
                 // field-block chain (counter double-apply against cross-impl
                 // peers). Field blocks are fetched by the receiver via DAG sync
-                // from the composite links, matching Go's SendUpdate.
-                if !matches!(
-                    defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta),
-                    Ok(defra_core::CrdtDelta::Composite(_))
-                ) {
-                    continue;
+                // from the composite links, matching Go's SendUpdate. This is
+                // composite-only for filtered replicators too: the receiver
+                // fetches any missing field links it is allowed to see.
+                match defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta) {
+                    Ok(defra_core::CrdtDelta::Composite(_)) => {}
+                    Ok(_) => continue,
+                    Err(e) => {
+                        tracing::warn!(cid = %block_cid, error = %e, "skipping unparseable block in replicator push");
+                        continue;
+                    }
                 }
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
@@ -516,11 +520,13 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
             // #1043: only push COMPOSITE blocks as PushLog heads (see backfill
             // above). Field blocks pushed as heads cause counter double-apply on
             // cross-impl peers; the receiver fetches them via DAG sync.
-            if !matches!(
-                defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta),
-                Ok(defra_core::CrdtDelta::Composite(_))
-            ) {
-                continue;
+            match defra_core::Block::from_dag_cbor(&block_data).map(|b| b.delta) {
+                Ok(defra_core::CrdtDelta::Composite(_)) => {}
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::warn!(cid = %block_cid, error = %e, "skipping unparseable block in replicator push");
+                    continue;
+                }
             }
             let mut request = PushLogRequest::new(
                 doc_id.to_string(),

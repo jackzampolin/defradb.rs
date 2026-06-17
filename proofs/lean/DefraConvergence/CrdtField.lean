@@ -70,12 +70,17 @@ theorem dup_absorb (m : CommMerge V) (idem : Idempotent m) (s a : V) :
     m.merge (m.merge s a) a = m.merge s a := by
   rw [m.assoc, idem]
 
-/-- **The dedup obligation (op-based fields).** A merge that is NOT idempotent has
-    a value at which re-merging (a duplicate delivery) changes the result — so the
-    field cannot be re-delivery-safe and MUST apply each operation exactly once.
-    This is the algebraic root of `#4935`: a counter delta re-applied is a delta
-    double-counted (`CounterReconcile.counter_not_idempotent` supplies the
-    concrete `1 + 1 ≠ 1` witness). -/
+/-- The trivial existential dual of `Idempotent`: if `merge x x = x` fails to hold
+    universally, then it fails at some `x`. This is pure classical logic (the De
+    Morgan dual of the `∀` in `Idempotent`) — it holds for ANY binary function and
+    carries no CRDT-specific content. It depends on `Classical.choice` (via
+    `Classical.byContradiction`) and is NOT consumed by any field instantiation.
+
+    The actual dedup content for the counter is the concrete witness
+    `CounterReconcile.counter_not_idempotent` (`1 + 1 ≠ 1`), which exhibits the
+    specific value where a re-applied counter delta double-counts — the algebraic
+    root of `#4935`. This lemma only restates, in existential form, that such a
+    witness must exist whenever the field is not idempotent. -/
 theorem nonidem_has_dup_witness (m : CommMerge V) (hne : ¬ Idempotent m) :
     ∃ x : V, m.merge x x ≠ x :=
   Classical.byContradiction fun hcon =>

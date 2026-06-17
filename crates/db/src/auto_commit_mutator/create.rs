@@ -16,11 +16,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let collection = self.get_collection_or_err(collection_name)?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
-        // Create a write transaction
-        let txn = self.db.new_txn(false).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
-
         // Generate embeddings before doc ID (embedding values affect content hash)
         let embedding_config = self.db.options().embedding_config();
         db_search::set_embedding(
@@ -49,7 +44,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         // Serialize this create against concurrent merges/writes on the same
         // document so counter accumulation-store seeding cannot race (#1021).
+        // Acquire the per-doc guard BEFORE opening the write txn (lock-before-txn,
+        // matching `update_impl`) so the lock/txn order is uniform across paths.
         let _doc_guard = self.db.doc_write_queue().acquire(&doc_id.to_string()).await;
+
+        // Create a write transaction
+        let txn = self.db.new_txn(false).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
 
         // Execute the mutation in a block to drop datastore before commit
         let result = {
