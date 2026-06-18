@@ -2,3 +2,4 @@ import DefraConvergence.LocalState
 import DefraConvergence.CrdtField
 import DefraConvergence.PriorityReconcile
 import DefraConvergence.CounterReconcile
+import DefraConvergence.MixedField

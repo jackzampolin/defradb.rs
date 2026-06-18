@@ -115,12 +115,12 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 | Storage SSI serializability | Behavioral | `ssi.rs` (real `409 Conflict` on write-skew) |
 | Management-channel auth (NAC gate) | Behavioral | `nac.rs` |
 | NAC lifecycle priv-escalation | Behavioral | `nac_lifecycle.rs` |
-| Transaction & merge-queue concurrency | Behavioral + Boundary | `partition::convergence_concurrent_same_doc_merge_storm` (no-loss/no-double-apply exact-sum oracle); the internal "≤1 worker in the critical section" + txn-registry sweep stay Boundary |
+| Transaction & merge-queue concurrency | Behavioral + Boundary | `partition::convergence_concurrent_same_doc_merge_storm` (no-loss/no-double-apply exact-sum oracle); `partition::convergence_restart_mixed_lww_and_counter_fields_merge` (mixed Counter×LWW exact-state after restart replay); the internal "≤1 worker in the critical section" + txn-registry sweep stay Boundary |
 | Deferred-ACP overlay | Behavioral | `deferred_acp.rs` (txn-local gating) |
 | CID determinism | Behavioral | `cid.rs` |
 | Index-maintenance | Behavioral | `index.rs` |
 | KMS key distribution | Behavioral | `kms.rs` (node0 denies the DEK to unauthorized node1) |
-| CRDT merge laws | Contract | `MergeResult` vocab |
+| CRDT merge laws | Contract | `MergeResult` vocab; `DefraConvergence.MixedField` product proof |
 | Multi-instance claim | Boundary | defra-agent substrate, not this binary |
 | Block integrity / signatures | Boundary | needs adversarial peer; Rust verify mandatory |
 | P2P capability replay gate | Boundary | P2P-wire internal |

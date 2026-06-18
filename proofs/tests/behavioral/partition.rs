@@ -1079,16 +1079,12 @@ async fn convergence_concurrent_pncounter_signed_deltas_sum() {
     }
 }
 
-/// Mixed-field convergence: the same document carries an LWW field and a
-/// counter field, and different nodes update different CRDT families
-/// concurrently. Persisting one linked field must not re-materialize the
-/// document from stale state and clobber the other field's local write.
-#[tokio::test]
-async fn convergence_concurrent_mixed_lww_and_counter_fields_merge() {
-    let cluster = TestCluster::builder()
+async fn run_mixed_lww_counter_merge(restart_node: Option<usize>) {
+    let mut cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
         .with_store("redb")
+        .with_keyring()
         .with_rust_binary(support::release_binary())
         .build()
         .await
@@ -1112,6 +1108,13 @@ async fn convergence_concurrent_mixed_lww_and_counter_fields_merge() {
         "seed document must replicate to node1 before mixed-field updates"
     );
 
+    if let Some(node) = restart_node {
+        cluster
+            .restart_node(node, Duration::from_secs(30))
+            .await
+            .expect("restart mixed-field node");
+    }
+
     cluster
         .client(0)
         .query(&format!(
@@ -1124,6 +1127,35 @@ async fn convergence_concurrent_mixed_lww_and_counter_fields_merge() {
             r#"mutation {{ update_Mixed(docID: "{id}", input: {{views: 10}}) {{ _docID }} }}"#
         ))
         .expect("node1 views increment");
+
+    if restart_node.is_some() {
+        let (a0, a1) = (node_addr(&cluster, 0), node_addr(&cluster, 1));
+        cluster.client(0).p2p_connect(&[a1.as_str()]).ok();
+        cluster.client(1).p2p_connect(&[a0.as_str()]).ok();
+        cluster.client(0).p2p_collection_add(&["Mixed"]).ok();
+        cluster.client(1).p2p_collection_add(&["Mixed"]).ok();
+        cluster
+            .client(0)
+            .p2p_replicator_delete(&["Mixed"], Some(&a1))
+            .ok();
+        cluster
+            .client(1)
+            .p2p_replicator_delete(&["Mixed"], Some(&a0))
+            .ok();
+        cluster.client(0).p2p_replicator_set(&["Mixed"], &a1).ok();
+        cluster.client(1).p2p_replicator_set(&["Mixed"], &a0).ok();
+
+        assert!(
+            support::poll_dags_converged(
+                &cluster.client(0),
+                &cluster.client(1),
+                &id,
+                Duration::from_secs(40)
+            )
+            .await,
+            "mixed-field DAGs did not converge: a replica never merged the other field's delta, so the exact-state assertion would be inert"
+        );
+    }
 
     if !poll_mixed_state(&cluster.client(0), "alice", 10, Duration::from_secs(30)).await {
         panic!(
@@ -1142,4 +1174,23 @@ async fn convergence_concurrent_mixed_lww_and_counter_fields_merge() {
         mixed_state(&cluster.client(1)),
         "replicas must materialize identical mixed-field state"
     );
+}
+
+/// Mixed-field convergence: the same document carries an LWW field and a
+/// counter field, and different nodes update different CRDT families
+/// concurrently. Persisting one linked field must not re-materialize the
+/// document from stale state and clobber the other field's local write.
+#[tokio::test]
+async fn convergence_concurrent_mixed_lww_and_counter_fields_merge() {
+    run_mixed_lww_counter_merge(None).await;
+}
+
+/// Restart-partition variant of the mixed-field regression. This is the promoted
+/// asserting form of the original `bughunt_mixed_fields_restart` probe: after a
+/// restart clears transient merge state, one replica writes the LWW field and the
+/// other increments the counter. Both deltas must cross, and the final
+/// materialized document must contain the product state `name=alice, views=10`.
+#[tokio::test]
+async fn convergence_restart_mixed_lww_and_counter_fields_merge() {
+    run_mixed_lww_counter_merge(Some(1)).await;
 }
