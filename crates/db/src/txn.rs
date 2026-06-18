@@ -14,6 +14,36 @@ use std::collections::{BTreeMap, HashSet};
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
+/// A counter mutation RECORDED during an interactive/explicit transaction but
+/// not yet applied to the authoritative CRDT accumulation store. The
+/// read-modify-write (and the per-doc guard that protects it) is deferred to the
+/// commit-time finalize (#1044) so the interactive txn holds no guard/gate over
+/// its user-controlled lifetime. See `InteractiveTxnCounter.tla`.
+#[derive(Clone, Debug)]
+pub struct PendingCounterOp {
+    /// Collection name (used to reload the collection + index manager at finalize).
+    pub collection_name: String,
+    /// Schema version id of the collection at record time.
+    pub schema_version_id: String,
+    /// Document id the counter belongs to.
+    pub doc_id: String,
+    /// Counter field name.
+    pub field: String,
+    /// For updates: the recorded increment delta. For creates: the seeded value.
+    pub delta: document::NormalValue,
+    /// For UPDATE ops: the PRE-WRITE committed counter value, captured at record
+    /// time, used as the reconcile (init-if-absent) base at finalize. This must
+    /// be read BEFORE the provisional deferred blob write so the finalize does not
+    /// re-read the already-overwritten provisional blob as the "committed" value —
+    /// re-reading it would double-apply the delta for an increment-only PCounter
+    /// (whose reconcile migrates a present store UPWARD when blob > store). `None`
+    /// when the doc had no committed value for the field (seed 0). Unused for
+    /// creates.
+    pub base: Option<document::NormalValue>,
+    /// Whether this op was recorded on a CREATE (seed) vs an UPDATE (delta RMW).
+    pub is_create: bool,
+}
+
 /// Database transaction wrapper.
 ///
 /// This wraps a BasicTxn and provides:
@@ -43,20 +73,20 @@ pub struct DbTxn<S: Store> {
     collection_cache: CollectionCache,
     /// Collection IDs created inside this transaction.
     locally_created_collection_ids: HashSet<String>,
-    /// Per-doc write guards held across the WHOLE explicit transaction so a
-    /// local counter read-modify-write and a P2P merge on the same document
-    /// never interleave (#1021). The merge handler shares the same
-    /// `DocWriteQueue`. Because these guards live on the `DbTxn` (not on the
-    /// per-call `DbDocMutator`, which is recreated and dropped before commit),
-    /// they are released only when the `DbTxn` is consumed by
-    /// `commit`/`discard`/`force_commit`/`force_discard` — i.e. after the
-    /// durable commit. `batch_gate` keeps this incremental multi-doc acquirer
-    /// deadlock-free against other multi-doc acquirers (batch merges,
-    /// `create_many`); see `ensure_doc_guard`.
+    /// Per-doc write guards held so a local counter read-modify-write and a P2P
+    /// merge on the same document never interleave (#1021). The merge handler
+    /// shares the same `DocWriteQueue`. For the interactive/explicit path
+    /// (#1044) these are acquired at the commit-time finalize (under the briefly
+    /// held batch gate, a finalize local) and inserted here, so they release
+    /// only when the `DbTxn` is consumed by
+    /// `commit`/`discard`/`force_commit`/`force_discard` — i.e. AFTER the durable
+    /// commit. See the finalize driver in `txn_registry.rs` and
+    /// `InteractiveTxnCounter.tla`.
     doc_guards: BTreeMap<String, MutexGuardArc<()>>,
-    /// The shared batch gate, taken on the first per-doc guard and held for the
-    /// whole transaction (see `doc_guards`).
-    batch_gate: Option<MutexGuardArc<()>>,
+    /// Counter deltas RECORDED by the interactive mutator during the txn but not
+    /// yet applied to the authoritative CRDT accumulation store. Drained and
+    /// RMW'd at the commit-time finalize under per-doc guards (#1044).
+    pending_counter_ops: Vec<PendingCounterOp>,
     /// Phantom data for the store type.
     _marker: std::marker::PhantomData<S>,
 }
@@ -70,7 +100,7 @@ impl<S: Store> DbTxn<S> {
             collection_cache: CollectionCache::new(),
             locally_created_collection_ids: HashSet::new(),
             doc_guards: BTreeMap::new(),
-            batch_gate: None,
+            pending_counter_ops: Vec::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -83,7 +113,7 @@ impl<S: Store> DbTxn<S> {
             collection_cache: CollectionCache::new(),
             locally_created_collection_ids: HashSet::new(),
             doc_guards: BTreeMap::new(),
-            batch_gate: None,
+            pending_counter_ops: Vec::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -505,28 +535,30 @@ impl<S: Store> DbTxn<S> {
     // Per-doc write guards (#1021)
     // =========================================================================
 
-    /// Whether a per-doc write guard for `doc_id` is already held by this txn.
-    pub fn holds_doc_guard(&self, doc_id: &str) -> bool {
-        self.doc_guards.contains_key(doc_id)
-    }
-
-    /// Whether this txn already holds the shared batch gate.
-    pub fn holds_batch_gate(&self) -> bool {
-        self.batch_gate.is_some()
-    }
-
-    /// Store the shared batch gate on this txn, held until the txn is consumed
-    /// by commit/discard. Idempotent: a second gate is dropped immediately.
-    pub fn set_batch_gate(&mut self, gate: MutexGuardArc<()>) {
-        if self.batch_gate.is_none() {
-            self.batch_gate = Some(gate);
-        }
-    }
-
     /// Store a per-doc write guard on this txn, held until the txn is consumed
     /// by commit/discard. Idempotent per doc: a duplicate guard is dropped.
     pub fn insert_doc_guard(&mut self, doc_id: String, guard: MutexGuardArc<()>) {
         self.doc_guards.entry(doc_id).or_insert(guard);
+    }
+
+    // =========================================================================
+    // Pending counter ops (#1044): recorded during the txn, RMW'd at finalize.
+    // =========================================================================
+
+    /// Record a counter op to be applied to the authoritative store at the
+    /// commit-time finalize (under a per-doc guard).
+    pub fn record_counter_op(&mut self, op: PendingCounterOp) {
+        self.pending_counter_ops.push(op);
+    }
+
+    /// Drain the recorded counter ops (consumed by the finalize driver).
+    pub fn take_counter_ops(&mut self) -> Vec<PendingCounterOp> {
+        std::mem::take(&mut self.pending_counter_ops)
+    }
+
+    /// Whether any counter ops were recorded on this txn.
+    pub fn has_pending_counter_ops(&self) -> bool {
+        !self.pending_counter_ops.is_empty()
     }
 
     // =========================================================================
@@ -540,6 +572,9 @@ impl<S: Store> DbTxn<S> {
     pub async fn commit(mut self) -> Result<()> {
         if self.explicit {
             return Err(Error::ExplicitTxnMustUseForce);
+        }
+        if !self.pending_counter_ops.is_empty() {
+            return Err(Error::UnfinalizedCounterOps);
         }
 
         match self.txn.take() {
@@ -578,6 +613,9 @@ impl<S: Store> DbTxn<S> {
     ///
     /// This should only be called by the transaction creator.
     pub async fn force_commit(mut self) -> Result<()> {
+        if !self.pending_counter_ops.is_empty() {
+            return Err(Error::UnfinalizedCounterOps);
+        }
         match self.txn.take() {
             Some(txn) => {
                 txn.commit().await.map_err(Error::Datastore)?;
@@ -604,12 +642,11 @@ impl<S: Store> DbTxn<S> {
         }
     }
 
-    /// Release the per-doc guards and the batch gate. Called only AFTER the txn
-    /// is durably committed or discarded (#1021). The guard fields also drop
-    /// automatically when the `DbTxn` itself is dropped (no explicit `Drop` impl
-    /// is needed), but releasing here makes the release point unambiguous.
+    /// Release the per-doc guards. Called only AFTER the txn is durably
+    /// committed or discarded (#1021). The guards also drop automatically when
+    /// the `DbTxn` itself is dropped (no explicit `Drop` impl is needed), but
+    /// releasing here makes the release point unambiguous.
     fn release_doc_guards(&mut self) {
         self.doc_guards.clear();
-        self.batch_gate = None;
     }
 }
