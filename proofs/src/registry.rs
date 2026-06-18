@@ -75,11 +75,12 @@ pub const PROPERTIES: &[Property] = &[
         // (lww_dup_safe); the counter (Int +) is NOT idempotent (counter_not_idempotent)
         // => it must apply each delta exactly once, the algebraic root of the #4935
         // double-apply. Counter, LWW, and the mixed Counter×LWW product fully
-        // instantiate the core (counterCM / lwwCM / mixedCM).
+        // instantiate the core (counterCM / lwwCM / mixedCM). The mixed product's
+        // cross-field materialization hazard is checked by MixedFieldMaterialization.
         name: "CrdtField: comm+assoc => order-independent; mixed Counter×LWW inherits counter dedup obligation",
         axis: Lean,
         anchor: "crates/crdt/src/lww.rs set_value; crates/crdt/src/counter.rs; crates/crdt/src/composite.rs componentwise field merge",
-        model_ref: "DefraConvergence (lake build)",
+        model_ref: "DefraConvergence.MixedField (lake build); MC_MixedFieldMaterialization_Green.cfg",
         tiers: &[Contract, Behavioral],
     },
     Property {
@@ -178,9 +179,10 @@ pub const PROPERTIES: &[Property] = &[
         // No-loss / no-double-apply under concurrent same-document mutation is now
         // BEHAVIORAL: `partition::convergence_concurrent_same_doc_merge_storm`
         // storms one PCounter doc from a 3-node mesh and asserts the exact sum
-        // (below => a delta dropped, above => double-applied). The mixed-field
-        // restart leg (`partition::convergence_restart_mixed_lww_and_counter_fields_merge`)
-        // asserts the product state (LWW name + counter views) after a restart replay.
+        // (below => a delta dropped, above => double-applied). Mixed-field legs
+        // assert the product state (LWW name + counter views) after live, restart,
+        // and 3-node full-mesh replay; `MC_MixedFieldMaterialization` proves the
+        // stale whole-document commit hazard RED/GREEN.
         // This found and fixed #1021's residual two-store counter race — local writes and merges both
         // RMW the authoritative accumulation store, serialized per-doc by
         // `crates/db/src/doc_write_queue.rs` (shared by the local-write and merge
@@ -194,7 +196,7 @@ pub const PROPERTIES: &[Property] = &[
         name: "INV_NoLoss / INV_NoDoubleApply under concurrent same-doc mutation",
         axis: Tla,
         anchor: "crates/db/src/doc_write_queue.rs (per-doc write lock, shared with crates/db-merge merge handler); crates/db txn registry",
-        model_ref: "MC_MergeQueue_Green.cfg / MC_TxnRegistry_Green.cfg / MC_TwoStoreCounter_Green.cfg",
+        model_ref: "MC_MergeQueue_Green.cfg / MC_TxnRegistry_Green.cfg / MC_TwoStoreCounter_Green.cfg / MC_MixedFieldMaterialization_Green.cfg",
         tiers: &[Behavioral, Boundary],
     },
     Property {

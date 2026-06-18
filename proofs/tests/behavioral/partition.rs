@@ -428,6 +428,26 @@ fn wire_bidirectional(cluster: &TestCluster, collection: &str) {
         .expect("replicator 1->0");
 }
 
+fn wire_full_mesh(cluster: &TestCluster, nodes: usize, collection: &str) {
+    let addr: Vec<String> = (0..nodes).map(|n| node_addr(cluster, n)).collect();
+    for i in 0..nodes {
+        cluster
+            .client(i)
+            .p2p_collection_add(&[collection])
+            .expect("subscribe node");
+        for (j, peer) in addr.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            cluster.client(i).p2p_connect(&[peer.as_str()]).ok();
+            cluster
+                .client(i)
+                .p2p_replicator_set(&[collection], peer)
+                .expect("replicator set");
+        }
+    }
+}
+
 fn mixed_state(node: &DefraClient) -> (String, i64) {
     let r = node
         .query("query { Mixed { name views } }")
@@ -448,6 +468,46 @@ async fn poll_mixed_state(node: &DefraClient, name: &str, views: i64, timeout: D
     let deadline = Instant::now() + timeout;
     loop {
         if mixed_state(node) == (name.to_string(), views) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn poll_all_mixed_state(
+    cluster: &TestCluster,
+    nodes: usize,
+    name: &str,
+    views: i64,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if (0..nodes).all(|n| mixed_state(&cluster.client(n)) == (name.to_string(), views)) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn poll_mixed_dags_full_mesh(
+    cluster: &TestCluster,
+    nodes: usize,
+    doc_id: &str,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let commits: Vec<_> = (0..nodes)
+            .map(|n| support::commit_cids(&cluster.client(n), doc_id))
+            .collect();
+        if !commits.iter().any(|c| c.is_empty()) && commits.windows(2).all(|w| w[0] == w[1]) {
             return true;
         }
         if Instant::now() >= deadline {
@@ -1193,4 +1253,70 @@ async fn convergence_concurrent_mixed_lww_and_counter_fields_merge() {
 #[tokio::test]
 async fn convergence_restart_mixed_lww_and_counter_fields_merge() {
     run_mixed_lww_counter_merge(Some(1)).await;
+}
+
+/// THREE-node mixed-field full-mesh convergence. Each replica contributes to the
+/// same document, across both CRDT regimes:
+///
+/// - node0 writes the LWW field `name = "alice"`
+/// - node1 increments the counter field `views += 10`
+/// - node2 increments the counter field `views += 7`
+///
+/// All three replicas must hold the same commit DAG and materialize the exact
+/// product state `name=alice, views=17`. This is the mixed-field counterpart to the
+/// 3-node counter storm: a field-local merge must not re-materialize the whole
+/// document from a stale snapshot and clobber another field's local contribution.
+#[tokio::test]
+async fn convergence_mixed_lww_and_counter_3node_full_mesh() {
+    let nodes = 3;
+    let cluster = rust_storm_cluster(nodes).await;
+
+    let schema = "type Mixed { name: String  views: Int @crdt(type: pcounter) }";
+    for n in 0..nodes {
+        cluster.client(n).schema_add(schema).expect("schema");
+    }
+    wire_full_mesh(&cluster, nodes, "Mixed");
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_Mixed(input: {name: "seed", views: 0}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_Mixed"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    assert!(
+        poll_all_mixed_state(&cluster, nodes, "seed", 0, Duration::from_secs(30)).await,
+        "seed document must replicate to all nodes before the mixed 3-node updates"
+    );
+
+    cluster
+        .client(0)
+        .query(&format!(
+            r#"mutation {{ update_Mixed(docID: "{id}", input: {{name: "alice"}}) {{ _docID }} }}"#
+        ))
+        .expect("node0 name update");
+    cluster
+        .client(1)
+        .query(&format!(
+            r#"mutation {{ update_Mixed(docID: "{id}", input: {{views: 10}}) {{ _docID }} }}"#
+        ))
+        .expect("node1 views increment");
+    cluster
+        .client(2)
+        .query(&format!(
+            r#"mutation {{ update_Mixed(docID: "{id}", input: {{views: 7}}) {{ _docID }} }}"#
+        ))
+        .expect("node2 views increment");
+
+    assert!(
+        poll_mixed_dags_full_mesh(&cluster, nodes, &id, Duration::from_secs(45)).await,
+        "mixed 3-node DAGs did not converge, so the exact-state assertion would be inert"
+    );
+    if !poll_all_mixed_state(&cluster, nodes, "alice", 17, Duration::from_secs(45)).await {
+        let got: Vec<_> = (0..nodes)
+            .map(|n| mixed_state(&cluster.client(n)))
+            .collect();
+        panic!("mixed 3-node replicas did not converge to name=alice views=17; states = {got:?}");
+    }
 }

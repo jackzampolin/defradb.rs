@@ -17,8 +17,10 @@ grounded facts for B3 live in [DESIGN.md](DESIGN.md); each later slice has its o
 - **Block integrity** — signature verification before merge (`Integrity_DESIGN.md`).
 - **ACP soundness** — no-escalation (Lean) + revocation consistency (`Acp_DESIGN.md`);
   Lean half under [`../lean/`](../lean/README.md).
+- **Mixed-field materialization** — Counter×LWW componentwise document state
+  (`MixedFieldMaterialization_DESIGN.md`).
 
-Run **all 38 models** at once with `./run-all.sh` (red/green oracle, exits non-zero on mismatch).
+Run all configured models at once with `./run-all.sh` (red/green oracle, exits non-zero on mismatch).
 
 ---
 

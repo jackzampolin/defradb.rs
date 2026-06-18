@@ -17,11 +17,11 @@ mixed document state. The product remains non-idempotent because the counter
 component remains non-idempotent, so mixed documents inherit the counter's
 exactly-once/dedup obligation.
 
-The temporal/concurrency part is covered by the existing models for the
-components: `PriorityReconcile` for LWW priority reconciliation and
-`TwoStoreCounter` for exactly-once counter RMW/dedup. No new TLA model is needed
-unless a future implementation change introduces a cross-field ordering hazard not
-captured by those component models.
+The temporal/concurrency part is split across the component models and a
+mixed-specific materialization model: `PriorityReconcile` covers LWW priority
+reconciliation, `TwoStoreCounter` covers exactly-once counter RMW/dedup, and
+`MixedFieldMaterialization.tla` proves that a field merge must materialize
+componentwise rather than committing a stale whole-document snapshot.
 -/
 
 namespace DefraConvergence.MixedField
