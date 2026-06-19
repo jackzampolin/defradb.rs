@@ -20,7 +20,7 @@ Status of the effort across the 40-crate surface, from the per-crate survey in
 are plumbing covered by integration tests / Go-FFI parity / unit tests. The point of this
 section is the **diff**: what is proven vs. the accepted gap.
 
-### Modeled — 9 families (proven)
+### Modeled — 18 families (proven)
 | Family | Tool | Crates it covers |
 |---|---|---|
 | B3 filtered replication | TLA+ | p2p, db-merge |
@@ -96,7 +96,7 @@ a binding.
 
 ### Realized status — all 18 families bound
 
-**14 behavioral tests** (driven against `target/release/defra`, each break-tested
+**17 behavioral tests** (driven against `target/release/defra`, each break-tested
 for non-vacuity), **2 Lean-axis contract bindings**, **6 honest Boundaries** (one,
 Transaction & merge-queue concurrency, is now both — a Behavioral no-loss/no-double-apply
 storm leg plus a Boundary internal-serialization leg). One
@@ -115,12 +115,12 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 | Storage SSI serializability | Behavioral | `ssi.rs` (real `409 Conflict` on write-skew) |
 | Management-channel auth (NAC gate) | Behavioral | `nac.rs` |
 | NAC lifecycle priv-escalation | Behavioral | `nac_lifecycle.rs` |
-| Transaction & merge-queue concurrency | Behavioral + Boundary | `partition::convergence_concurrent_same_doc_merge_storm` (no-loss/no-double-apply exact-sum oracle); the internal "≤1 worker in the critical section" + txn-registry sweep stay Boundary |
+| Transaction & merge-queue concurrency | Behavioral + Boundary | `partition::convergence_concurrent_same_doc_merge_storm` (no-loss/no-double-apply exact-sum oracle); `partition::{convergence_concurrent_mixed_lww_and_counter_fields_merge,convergence_restart_mixed_lww_and_counter_fields_merge,convergence_mixed_lww_and_counter_3node_full_mesh}` (mixed Counter×LWW exact-state); `MC_MixedFieldMaterialization_{Red_WholeDoc,Green}`; the internal "≤1 worker in the critical section" + txn-registry sweep stay Boundary |
 | Deferred-ACP overlay | Behavioral | `deferred_acp.rs` (txn-local gating) |
 | CID determinism | Behavioral | `cid.rs` |
 | Index-maintenance | Behavioral | `index.rs` |
 | KMS key distribution | Behavioral | `kms.rs` (node0 denies the DEK to unauthorized node1) |
-| CRDT merge laws | Contract | `MergeResult` vocab |
+| CRDT merge laws | Contract | `MergeResult` vocab; `DefraConvergence.MixedField` product proof; `MixedFieldMaterialization.tla` |
 | Multi-instance claim | Boundary | defra-agent substrate, not this binary |
 | Block integrity / signatures | Boundary | needs adversarial peer; Rust verify mandatory |
 | P2P capability replay gate | Boundary | P2P-wire internal |

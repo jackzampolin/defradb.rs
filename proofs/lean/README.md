@@ -27,6 +27,7 @@ The model proves:
 | `CrdtField.swap` / `two_converge` / `three_converge` | Generic reusable core (`DefraConvergence/CrdtField.lean`): for ANY commutative-associative merge, the fold is order-independent (replicas applying the same multiset converge). | — (field-agnostic) |
 | `CrdtField.dup_absorb` / `nonidem_has_dup_witness` | Idempotence is the dedup dividing line: idempotent ⇒ re-delivery-safe (no dedup); ¬idempotent ⇒ a duplicate changes the result (must dedup). | — |
 | `CounterReconcile.counterCM` + `counter_not_idempotent`; `PriorityReconcile.lwwCM` + `lww_idempotent` | Both fields fully instantiate the core: the counter (op-based, `Int +`, **not** idempotent ⇒ must apply each delta once — the algebraic root of the #4935 double-apply) and LWW (state-based join, **idempotent** ⇒ re-delivery-safe). | `crates/crdt/src/{counter,lww}.rs` |
+| `MixedField.mixedCM` + `mixed_two_converge` / `mixed_three_converge` + `mixed_not_idempotent` | Same-document `Counter × LWW` is a componentwise product of the two #1041 field instances. It converges when both components receive the same operations, but the product is still non-idempotent because the counter component still needs exactly-once dedup. The cross-field stale whole-document materialization hazard is modeled red/green by `MixedFieldMaterialization.tla`. | `crates/crdt/src/composite.rs`; `crates/crdt/src/{counter,lww}.rs` |
 
 `#print axioms` status checked with Lean 4.18:
 
@@ -56,6 +57,11 @@ Field instantiations:
 - `PriorityReconcile.lww_dup_safe`: `[propext, Classical.choice, Quot.sound]`
 - `PriorityReconcile.lww_two_converge`: `[propext, Classical.choice, Quot.sound]`
 - `PriorityReconcile.lww_three_converge`: `[propext, Classical.choice, Quot.sound]`
+- `MixedField.mixedCM`: `[propext, Classical.choice, Quot.sound]`
+- `MixedField.mixed_two_converge`: `[propext, Classical.choice, Quot.sound]`
+- `MixedField.mixed_three_converge`: `[propext, Classical.choice, Quot.sound]`
+- `MixedField.mixed_not_idempotent`: `[propext, Classical.choice, Quot.sound]`
+- `MixedField.mixed_lww_component_dup_safe`: `[propext, Classical.choice, Quot.sound]`
 
 `nonidem_has_dup_witness` is the generic core's only classical lemma (it pulls in
 `Classical.choice` via `Classical.byContradiction`), and it is the trivial
@@ -64,7 +70,8 @@ convergence or dedup result. The counter results (`counterCM`,
 `counter_not_idempotent`, `counter_*_converge`) are fully constructive
 (`Classical.choice`-free). The LWW results also depend on `Classical.choice`, but
 independently: it enters through the `lwwMerge` case analysis, not through
-`nonidem_has_dup_witness`.
+`nonidem_has_dup_witness`. The mixed-field product inherits that same footprint
+from its LWW component.
 
 `Classical.choice`, `propext`, and `Quot.sound` are the three built-in axioms of
 Lean 4's core logic, not project-defined axioms. No theorem uses `sorry` or any
@@ -73,10 +80,11 @@ because IEEE-754 addition is not generally associative.
 
 ## Adding a new CRDT field
 
-This PR is the reference template. A new field's proof (composite, object, mixed,
-PN-counter) follows the same recipe — the two canonical exemplars are the counter
-(op-based, `DefraConvergence/CounterReconcile.lean`) and LWW (state-based,
-`DefraConvergence/PriorityReconcile.lean`):
+This PR is the reference template. A new field's proof (composite, object,
+PN-counter) follows the same recipe — the canonical exemplars are the counter
+(op-based, `DefraConvergence/CounterReconcile.lean`), LWW (state-based,
+`DefraConvergence/PriorityReconcile.lean`), and the first follow-up product
+instance (`DefraConvergence/MixedField.lean`):
 
 1. **Define your merge and prove its two laws.** Implement the field's binary
    merge and prove it commutative + associative, then package it:

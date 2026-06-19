@@ -12,15 +12,15 @@
 //!
 //! The `parity_samedoc_*` / `parity_delete_update_*` probes REPORT (not assert) —
 //! they print each node's converged state so we can compare Go-only, Rust-only,
-//! and mixed at a semantic-divergence point. The `parity_counter_3node_*` and
+//! and mixed at a semantic-divergence point. The `parity_counter_3node_*`,
+//! `parity_mixed_fields_3node_*`, `parity_lww_tie_partition_*`, and
 //! `parity_indexed_lww_*` tests ASSERT: Rust must converge to the SAME value Go
 //! does (Go is the parity target). They stay `#[ignore]` (the default no-Go
-//! conformance run skips them) and are exercised by the go-compat CI step, which
-//! selects ONLY the asserting tests by name (`-- --ignored parity_counter_3node
-//! parity_indexed_lww`) with the Go binary on PATH.
+//! conformance run skips them) and are exercised manually unless the go-compat CI
+//! step opts into them.
 
 use crate::support;
-use defra_harness::{DefraClient, TestCluster};
+use defra_harness::{DefraClient, NodeKind, TestCluster};
 use std::time::{Duration, Instant};
 
 fn node_addr(cluster: &TestCluster, i: usize) -> String {
@@ -41,6 +41,245 @@ fn city_age(node: &DefraClient) -> (String, i64) {
         d["city"].as_str().unwrap_or("<none>").to_string(),
         d["age"].as_i64().unwrap_or(-1),
     )
+}
+
+fn created_user_doc_id<'a>(created: &'a serde_json::Value, create_field: &str) -> Option<&'a str> {
+    created[create_field]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .and_then(|doc| doc["_docID"].as_str())
+        .or_else(|| created[create_field]["_docID"].as_str())
+}
+
+fn create_user_seed(node: &DefraClient, label: &str) -> String {
+    let create_fields = match node.kind() {
+        NodeKind::Rust => ["add_User", "create_User"],
+        NodeKind::Go => ["create_User", "add_User"],
+    };
+    let mut attempts = Vec::new();
+    for create_field in create_fields {
+        match node.query(&format!(
+            r#"mutation {{ {create_field}(input: {{name: "seed"}}) {{ _docID }} }}"#
+        )) {
+            Ok(created) => {
+                if let Some(id) = created_user_doc_id(&created, create_field) {
+                    return id.to_string();
+                }
+                attempts.push(format!("{create_field}: {created}"));
+            }
+            Err(err) => attempts.push(format!("{create_field}: {err:#}")),
+        }
+    }
+    panic!(
+        "[{label}] no User create mutation returned _docID in expected shape; attempts: {}",
+        attempts.join(" | ")
+    );
+}
+
+fn user_name(node: &DefraClient) -> String {
+    node.query("query { User { name } }").unwrap_or_default()["User"]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .and_then(|doc| doc["name"].as_str())
+        .unwrap_or("<missing>")
+        .to_string()
+}
+
+async fn poll_all_user_name(
+    cluster: &TestCluster,
+    nodes: usize,
+    want: &str,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if (0..nodes).all(|n| user_name(&cluster.client(n)) == want) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+async fn poll_user_names_agree(
+    cluster: &TestCluster,
+    nodes: usize,
+    timeout: Duration,
+) -> Option<String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let states: Vec<_> = (0..nodes).map(|n| user_name(&cluster.client(n))).collect();
+        if states
+            .first()
+            .is_some_and(|first| first != "<missing>" && states.iter().all(|state| state == first))
+        {
+            return states.into_iter().next();
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+fn user_name_commits(node: &DefraClient, doc_id: &str) -> serde_json::Value {
+    node.query(&format!(
+        r#"query {{
+            _commits(
+                docID: "{doc_id}",
+                filter: {{fieldName: {{_eq: "name"}}}},
+                order: {{height: ASC}}
+            ) {{
+                cid
+                height
+                fieldName
+                delta
+                links {{ cid }}
+                heads {{ cid }}
+            }}
+        }}"#
+    ))
+    .unwrap_or_default()
+}
+
+fn wire_user_bidirectional(cluster: &TestCluster) {
+    let (a0, a1) = (node_addr(cluster, 0), node_addr(cluster, 1));
+    cluster.client(0).p2p_connect(&[a1.as_str()]).ok();
+    cluster.client(1).p2p_connect(&[a0.as_str()]).ok();
+    cluster
+        .client(0)
+        .p2p_collection_add(&["User"])
+        .expect("subscribe node0");
+    cluster
+        .client(1)
+        .p2p_collection_add(&["User"])
+        .expect("subscribe node1");
+    cluster
+        .client(0)
+        .p2p_replicator_set(&["User"], &a1)
+        .expect("replicator node0");
+    cluster
+        .client(1)
+        .p2p_replicator_set(&["User"], &a0)
+        .expect("replicator node1");
+}
+
+/// Controlled equal-priority LWW probe: the nodes are intentionally not wired
+/// until after they independently create the same seed document and write
+/// height-2 sibling values. This avoids the live-mesh artifact where one writer
+/// can observe the other first and produce a higher-priority, non-tie update.
+async fn run_lww_tie_partition_probe(cluster: TestCluster, label: &str, expected_name: &str) {
+    let schema = "type User { name: String }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+
+    let id = create_user_seed(&cluster.client(0), label);
+    let id1 = create_user_seed(&cluster.client(1), label);
+    assert_eq!(
+        id, id1,
+        "[{label}] independently-created seed docs must share a content-addressed docID"
+    );
+    assert!(
+        poll_all_user_name(&cluster, 2, "seed", Duration::from_secs(30)).await,
+        "[{label}] seed was not visible on both isolated nodes"
+    );
+
+    cluster
+        .client(0)
+        .query(&format!(
+            r#"mutation {{ update_User(docID: "{id}", input: {{name: "alice"}}) {{ _docID }} }}"#
+        ))
+        .expect("node0 name=alice");
+    cluster
+        .client(1)
+        .query(&format!(
+            r#"mutation {{ update_User(docID: "{id}", input: {{name: "zoe"}}) {{ _docID }} }}"#
+        ))
+        .expect("node1 name=zoe");
+
+    eprintln!(
+        "LWW_TIE[{label}] before connect: node0={} commits0={} | node1={} commits1={}",
+        user_name(&cluster.client(0)),
+        user_name_commits(&cluster.client(0), &id),
+        user_name(&cluster.client(1)),
+        user_name_commits(&cluster.client(1), &id),
+    );
+
+    wire_user_bidirectional(&cluster);
+    assert!(
+        support::poll_dags_converged(
+            &cluster.client(0),
+            &cluster.client(1),
+            &id,
+            Duration::from_secs(45),
+        )
+        .await,
+        "[{label}] DAGs did not converge after heal"
+    );
+
+    let agreed = poll_user_names_agree(&cluster, 2, Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "[{label}] nodes did not agree after DAG convergence: node0={} node1={}",
+                user_name(&cluster.client(0)),
+                user_name(&cluster.client(1)),
+            )
+        });
+    eprintln!(
+        "LWW_TIE[{label}] after heal: agreed={agreed} commits0={} commits1={}",
+        user_name_commits(&cluster.client(0), &id),
+        user_name_commits(&cluster.client(1), &id),
+    );
+    assert_eq!(agreed, expected_name, "[{label}] LWW tie winner");
+}
+
+#[ignore = "parity instrumentation; run with --ignored"]
+#[tokio::test]
+async fn parity_lww_tie_partition_rust_rust() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_store("redb")
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("rust-rust cluster");
+    run_lww_tie_partition_probe(cluster, "lww_tie_partition_rust_rust", "alice").await;
+}
+
+#[ignore = "parity instrumentation; needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_lww_tie_partition_go_go() {
+    let cluster = TestCluster::builder()
+        .go_nodes(2)
+        .with_p2p()
+        .with_store("badger")
+        .with_keyring()
+        .with_development()
+        .build()
+        .await
+        .expect("go-go cluster");
+    run_lww_tie_partition_probe(cluster, "lww_tie_partition_go_go", "alice").await;
+}
+
+#[ignore = "parity instrumentation; needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_lww_tie_partition_mixed() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .go_nodes(1)
+        .with_p2p()
+        .with_keyring()
+        .with_development()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("mixed cluster");
+    run_lww_tie_partition_probe(cluster, "lww_tie_partition_mixed(rust0,go1)", "alice").await;
 }
 
 /// Same-doc concurrent-edit convergence: seed one doc, optionally restart
@@ -533,6 +772,261 @@ async fn parity_counter_3node_mixed() {
         .await
         .expect("mixed 3-node cluster");
     run_counter_3node_parity(cluster, "counter_3node_mixed(rust0,go1,go2)").await;
+}
+
+fn mixed_fields_state(node: &DefraClient) -> (String, i64) {
+    let r = node
+        .query("query { Mixed { name views } }")
+        .expect("query Mixed");
+    r["Mixed"]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .map(|doc| {
+            (
+                doc["name"].as_str().unwrap_or("<none>").to_string(),
+                doc["views"].as_i64().unwrap_or(-1),
+            )
+        })
+        .unwrap_or_else(|| ("<missing>".to_string(), -1))
+}
+
+fn created_mixed_doc_id<'a>(created: &'a serde_json::Value, create_field: &str) -> Option<&'a str> {
+    created[create_field]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .and_then(|doc| doc["_docID"].as_str())
+        .or_else(|| created[create_field]["_docID"].as_str())
+}
+
+fn create_mixed_seed(node: &DefraClient, label: &str) -> String {
+    let create_fields = match node.kind() {
+        NodeKind::Rust => ["add_Mixed", "create_Mixed"],
+        NodeKind::Go => ["create_Mixed", "add_Mixed"],
+    };
+    let mut attempts = Vec::new();
+    for create_field in create_fields {
+        match node.query(&format!(
+            r#"mutation {{ {create_field}(input: {{name: "seed", views: 0}}) {{ _docID }} }}"#
+        )) {
+            Ok(created) => {
+                if let Some(id) = created_mixed_doc_id(&created, create_field) {
+                    return id.to_string();
+                }
+                attempts.push(format!("{create_field}: {created}"));
+            }
+            Err(err) => attempts.push(format!("{create_field}: {err:#}")),
+        }
+    }
+    panic!(
+        "[{label}] no Mixed create mutation returned _docID in expected shape; attempts: {}",
+        attempts.join(" | ")
+    );
+}
+
+async fn poll_all_mixed_fields_state(
+    cluster: &TestCluster,
+    nodes: usize,
+    want: (&str, i64),
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if (0..nodes)
+            .all(|n| mixed_fields_state(&cluster.client(n)) == (want.0.to_string(), want.1))
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+async fn poll_mixed_fields_dags_converged(
+    cluster: &TestCluster,
+    nodes: usize,
+    doc_id: &str,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let commits: Vec<_> = (0..nodes)
+            .map(|n| support::commit_cids(&cluster.client(n), doc_id))
+            .collect();
+        if !commits.iter().any(|c| c.is_empty()) && commits.windows(2).all(|w| w[0] == w[1]) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+async fn poll_mixed_fields_agreed_state(
+    cluster: &TestCluster,
+    nodes: usize,
+    timeout: Duration,
+) -> Option<(String, i64)> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let states: Vec<_> = (0..nodes)
+            .map(|n| mixed_fields_state(&cluster.client(n)))
+            .collect();
+        if states.first().is_some_and(|first| {
+            first.0 != "<missing>" && states.iter().all(|state| state == first)
+        }) {
+            return states.into_iter().next();
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// THREE-node mixed-field probe (ASSERTING): the same document receives one LWW
+/// update and two counter increments.
+///
+/// This is the mixed Counter/LWW counterpart to the partition tests for #1048:
+/// every runtime combination must materialize the same LWW value (`alice`) while
+/// still accumulating the independent counter deltas to 17. Same-field LWW
+/// tie-breaking is pinned separately by `parity_lww_tie_partition_*`.
+async fn run_mixed_fields_3node_probe(
+    cluster: TestCluster,
+    label: &str,
+    expected_name: &str,
+    expected_views: i64,
+) {
+    let schema = "type Mixed { name: String  views: Int @crdt(type: pcounter) }";
+    let addr: Vec<String> = (0..3).map(|n| node_addr(&cluster, n)).collect();
+    for n in 0..3 {
+        cluster.client(n).schema_add(schema).expect("schema");
+        cluster
+            .client(n)
+            .p2p_collection_add(&["Mixed"])
+            .expect("subscribe");
+    }
+    for i in 0..3 {
+        for (j, peer) in addr.iter().enumerate() {
+            if i != j {
+                cluster
+                    .client(i)
+                    .p2p_connect(&[peer.as_str()])
+                    .expect("connect");
+                cluster
+                    .client(i)
+                    .p2p_replicator_set(&["Mixed"], peer)
+                    .expect("replicator");
+            }
+        }
+    }
+
+    let id = create_mixed_seed(&cluster.client(0), label);
+
+    assert!(
+        poll_all_mixed_fields_state(&cluster, 3, ("seed", 0), Duration::from_secs(30)).await,
+        "[{label}] seed (name=seed, views=0) did not reach all three nodes"
+    );
+    assert!(
+        poll_mixed_fields_dags_converged(&cluster, 3, &id, Duration::from_secs(30)).await,
+        "[{label}] seed DAG did not converge before the mixed-field updates"
+    );
+
+    cluster
+        .client(0)
+        .query(&format!(
+            r#"mutation {{ update_Mixed(docID: "{id}", input: {{name: "alice"}}) {{ _docID }} }}"#
+        ))
+        .expect("node0 name=alice");
+    cluster
+        .client(1)
+        .query(&format!(
+            r#"mutation {{ update_Mixed(docID: "{id}", input: {{views: 10}}) {{ _docID }} }}"#
+        ))
+        .expect("node1 views=10");
+    cluster
+        .client(2)
+        .query(&format!(
+            r#"mutation {{ update_Mixed(docID: "{id}", input: {{views: 7}}) {{ _docID }} }}"#
+        ))
+        .expect("node2 views=7");
+
+    assert!(
+        poll_mixed_fields_dags_converged(&cluster, 3, &id, Duration::from_secs(45)).await,
+        "[{label}] mixed-field DAGs did not converge, so final-state parity would be inert"
+    );
+
+    let agreed = poll_mixed_fields_agreed_state(&cluster, 3, Duration::from_secs(45))
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "[{label}] did not materialize one agreed mixed-field state after DAG convergence; states = [{:?}, {:?}, {:?}]",
+                mixed_fields_state(&cluster.client(0)),
+                mixed_fields_state(&cluster.client(1)),
+                mixed_fields_state(&cluster.client(2)),
+            )
+        });
+    assert!(
+        agreed.0 == expected_name && agreed.1 == expected_views,
+        "[{label}] mixed-field state diverged from Go-compatible semantics; got {agreed:?}, expected name={expected_name} and views={expected_views}",
+    );
+}
+
+/// Rust<->Rust<->Rust mixed-field control for the asserting parity probe.
+#[ignore = "parity (asserting); run with --ignored"]
+#[tokio::test]
+async fn parity_mixed_fields_3node_rust_rust() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(3)
+        .with_p2p()
+        .with_store("redb")
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("rust-rust-rust cluster");
+    run_mixed_fields_3node_probe(cluster, "mixed_fields_3node_rust_rust", "alice", 17).await;
+}
+
+/// Go<->Go<->Go mixed-field control. Go is the parity target; Rust and mixed
+/// clusters must match this materialized state exactly.
+#[ignore = "parity (asserting); needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_mixed_fields_3node_go_go() {
+    let cluster = TestCluster::builder()
+        .go_nodes(3)
+        .with_p2p()
+        .with_store("badger")
+        .with_development()
+        .build()
+        .await
+        .expect("go-go-go cluster");
+    run_mixed_fields_3node_probe(cluster, "mixed_fields_3node_go_go", "alice", 17).await;
+}
+
+/// Mixed Rust(node0)<->Go(node1,node2) mixed-field control. The cross-impl mesh
+/// must agree with Go's materialized LWW value and exact counter sum.
+#[ignore = "parity (asserting); needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_mixed_fields_3node_mixed() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .go_nodes(2)
+        .with_p2p()
+        .with_development()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("mixed 3-node cluster");
+    run_mixed_fields_3node_probe(
+        cluster,
+        "mixed_fields_3node_mixed(rust0,go1,go2)",
+        "alice",
+        17,
+    )
+    .await;
 }
 
 async fn poll_index_resolved(node: &DefraClient, timeout: Duration) -> bool {

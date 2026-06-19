@@ -403,8 +403,12 @@ jobs:
       # exposes a known, timing-sensitive double-apply on the GO reference side
       # (Rust materializes the identical DAG correctly; Go over-counts). It stays
       # asserting for manual diagnosis but is kept out of the blocking leg until
-      # the upstream race is resolved (see #1043). DEFRA_CONFORMANCE_BINARY points
-      # the harness at the restored Rust binary (this job builds to target/ci).
+      # the upstream race is resolved (see #1043). The mixed `Counter×LWW`
+      # convergence (`parity_mixed_fields_3node_*`) and equal-priority LWW-tie
+      # (`parity_lww_tie_partition_*`) probes ARE selected — they assert the exact
+      # convergent state (name=alice, views=17 / tie winner) identically across
+      # Rust-only, Go-only, and mixed Rust<->Go clusters. DEFRA_CONFORMANCE_BINARY
+      # points the harness at the restored Rust binary (this job builds to target/ci).
       - name: Run go-compat conformance parity
         if: matrix.suite == 'go-compat'
         env:
@@ -413,6 +417,7 @@ jobs:
           cargo test -p conformance --test tla_conformance
           -- --ignored --test-threads=1
           parity_counter_3node parity_counter_storm_go_go parity_indexed_lww
+          parity_mixed_fields_3node parity_lww_tie_partition
 
       - name: Run iroh integration tests
         if: matrix.suite == 'iroh'
