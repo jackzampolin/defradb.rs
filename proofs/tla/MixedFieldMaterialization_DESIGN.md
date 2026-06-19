@@ -31,6 +31,7 @@ The model is bound to Rust by:
 - `partition::convergence_mixed_lww_and_counter_3node_full_mesh`
 
 The 3-node test is the strongest live behavioral witness: node0 writes the LWW
-field, node1 increments the counter, and node2 writes both fields. All three
-replicas must converge to the exact mixed product state after their commit DAGs
-match.
+field (`name=alice`) while node1 and node2 each increment the counter
+(`views += 10` and `views += 7`). All three replicas must converge to the exact
+mixed product state (`name=alice, views=17`) after their commit DAGs match — a
+concurrent LWW write plus two concurrent counter writes folding to one document.

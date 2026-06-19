@@ -20,7 +20,7 @@ Status of the effort across the 40-crate surface, from the per-crate survey in
 are plumbing covered by integration tests / Go-FFI parity / unit tests. The point of this
 section is the **diff**: what is proven vs. the accepted gap.
 
-### Modeled — 9 families (proven)
+### Modeled — 18 families (proven)
 | Family | Tool | Crates it covers |
 |---|---|---|
 | B3 filtered replication | TLA+ | p2p, db-merge |
@@ -96,7 +96,7 @@ a binding.
 
 ### Realized status — all 18 families bound
 
-**14 behavioral tests** (driven against `target/release/defra`, each break-tested
+**17 behavioral tests** (driven against `target/release/defra`, each break-tested
 for non-vacuity), **2 Lean-axis contract bindings**, **6 honest Boundaries** (one,
 Transaction & merge-queue concurrency, is now both — a Behavioral no-loss/no-double-apply
 storm leg plus a Boundary internal-serialization leg). One
