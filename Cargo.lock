@@ -34,7 +34,7 @@ dependencies = [
 [[package]]
 name = "acp-light-client"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
+source = "git+ssh://git@github.com/sourcenetwork/backbone.git?rev=086ddadc98bc55183920aa0fe6bc4d3719e0e5e7#086ddadc98bc55183920aa0fe6bc4d3719e0e5e7"
 dependencies = [
  "alloy-primitives",
  "borsh",
@@ -14809,6 +14809,7 @@ version = "0.5.0"
 dependencies = [
  "async-lock",
  "async-trait",
+ "futures",
  "identity",
  "parking_lot 0.12.5",
  "serde",

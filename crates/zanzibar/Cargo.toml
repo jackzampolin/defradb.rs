@@ -12,6 +12,7 @@ description = "Standalone Zanzibar permission engine with pluggable KV backend"
 identity = { path = "../identity" }
 async-trait.workspace = true
 async-lock.workspace = true
+futures.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
