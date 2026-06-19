@@ -53,6 +53,7 @@ pub use store::AcpStore;
 pub use validation::{validate_resource_interface, REQUIRED_DOCUMENT_PERMISSIONS};
 
 // Re-export key zanzibar engine types from the standalone zanzibar crate
+pub use zanzibar::parse_target_subject;
 pub use zanzibar::PersistentZanzibarStore;
 pub use zanzibar::ZanzibarDocumentACP;
 

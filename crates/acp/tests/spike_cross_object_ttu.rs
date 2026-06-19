@@ -10,18 +10,19 @@
 //! `get_relation_targets`, and `MemoryZanzibarStore::get_relation_targets` maps a
 //! `Subject::EntitySet { resource, object_id, .. }` to an `ObjectRef`.
 //!
-//! This spike seeds that edge directly through the store (standing in for the
-//! seam method we'd add) and asserts that `check_doc_access` then resolves
-//! `file#read` through `parent->read` to the directory's `reader`. The before/
-//! after assertions prove the cross-object edge is what grants access — not some
-//! pre-existing direct grant.
+//! This spike seeds that edge through the new seam (`parse_target_subject` +
+//! `ZanzibarDocumentACP::add_subject_relationship`) and asserts that
+//! `check_doc_access` then resolves `file#read` through `parent->read` to the
+//! directory's `reader`. The before/after assertions prove the cross-object edge
+//! is what grants access — not some pre-existing direct grant.
 
 use std::sync::Arc;
 
 use acp::{
+    parse_target_subject,
     policy_yaml::{build_policy, parse_policy_yaml, validate_policy_expressions},
-    DocumentACP, DocumentPermission, Identity, MemoryZanzibarStore, Relationship, Subject,
-    ZanzibarDocumentACP, ZanzibarStore,
+    DocumentACP, DocumentPermission, Identity, MemoryZanzibarStore, ZanzibarDocumentACP,
+    ZanzibarStore,
 };
 use identity::Did;
 
@@ -134,18 +135,25 @@ async fn spike_cross_object_ttu_read_inheritance() {
         "without a parent edge, directory access must NOT leak to the file"
     );
 
-    // --- seed the cross-object edge: file:report#parent@directory:teamdir ---
-    // The live actor-DID-only seam cannot express this; we seed it directly
-    // through the store as the seam method would. An object subject is carried as
-    // `Subject::EntitySet { resource, object_id, .. }`; the engine's TTU arm and
-    // `get_relation_targets` key on (resource, object_id) and ignore the relation.
-    let parent_edge = Relationship::new(
-        "file",
-        "report",
-        "parent",
-        Subject::entity_set("directory", "teamdir", ""),
-    );
-    store.store_relationship(&policy_id, &parent_edge).await.unwrap();
+    // --- seed the cross-object edge through the real seam API ---
+    // `parse_target_subject` turns the object reference `directory:teamdir` into a
+    // cross-object subject, and `add_subject_relationship` stores it under the same
+    // owner/manager authority check as an actor grant. This is the minimal
+    // collection-level-ACP seam — no store backdoor.
+    let parent_target = parse_target_subject("directory:teamdir").unwrap();
+    let added = acp
+        .add_subject_relationship(
+            &owner,
+            parent_target,
+            &policy_id,
+            "file",
+            "report",
+            "parent",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(added, "the cross-object parent edge should be newly added");
 
     // AFTER: alice now reaches the file via parent->read -> directory#read -> reader.
     assert!(

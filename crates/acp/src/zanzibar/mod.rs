@@ -10,5 +10,5 @@
 mod acp;
 pub mod store;
 
-pub use acp::ZanzibarDocumentACP;
+pub use acp::{parse_target_subject, ZanzibarDocumentACP};
 pub use store::PersistentZanzibarStore;

@@ -9,12 +9,57 @@ use identity::Did;
 use zanzibar::engine::PermissionEngine;
 use zanzibar::expression::RelationExpression;
 use zanzibar::store::ZanzibarStore;
-use zanzibar::types::{Policy, Relation, Resource};
+use zanzibar::types::{Policy, Relation, Relationship, Resource, Subject};
 
 use crate::error::{Error, Result};
 use crate::permission::DocumentPermission;
 
 pub const OWNER_RELATION: &str = "owner";
+
+/// Parse a relationship-target string into a [`Subject`], supporting the full
+/// document-ACP language rather than only actor DIDs. This is the collection-
+/// level-ACP seam: it lets a document relation point at another object (a TTU
+/// parent edge) or at a userset, mirroring what the Zanzibar engine and store
+/// already resolve.
+///
+/// Forms:
+/// - `*`                     → [`Subject::Wildcard`] (all actors)
+/// - `did:...`               → [`Subject::Entity`] (a single actor)
+/// - `resource:id#relation`  → [`Subject::EntitySet`] (a userset)
+/// - `resource:id`           → [`Subject::EntitySet`] with an empty relation
+///   (a cross-object / TTU edge; the engine keys object edges on the
+///   (resource, object_id) pair and ignores the relation)
+pub fn parse_target_subject(target: &str) -> Result<Subject> {
+    if target == "*" {
+        return Ok(Subject::Wildcard);
+    }
+    if target.starts_with("did:") {
+        let did = Did::new(target).map_err(|e| {
+            Error::InvalidRelation(format!("invalid actor DID '{}': {}", target, e))
+        })?;
+        return Ok(Subject::Entity(did));
+    }
+
+    // Object form: `resource:object_id` with an optional `#relation` suffix.
+    let (object, relation) = match target.split_once('#') {
+        Some((object, relation)) => (object, relation),
+        None => (target, ""),
+    };
+    let (resource, object_id) = object.split_once(':').ok_or_else(|| {
+        Error::InvalidRelation(format!(
+            "invalid relationship target '{}': expected 'did:...', '*', \
+             'resource:id', or 'resource:id#relation'",
+            target
+        ))
+    })?;
+    if resource.is_empty() || object_id.is_empty() {
+        return Err(Error::InvalidRelation(format!(
+            "invalid relationship target '{}': empty resource or object id",
+            target
+        )));
+    }
+    Ok(Subject::entity_set(resource, object_id, relation))
+}
 pub const READER_RELATION: &str = "reader";
 pub const UPDATER_RELATION: &str = "updater";
 pub const DELETER_RELATION: &str = "deleter";
@@ -183,6 +228,55 @@ impl<S: ZanzibarStore + ?Sized> ZanzibarDocumentACP<S> {
         }
     }
 
+    /// Seed a relationship whose subject may be a userset or a cross-object
+    /// edge, not only an actor DID — the collection-level-ACP seam.
+    ///
+    /// Authority follows the same rule as `add_actor_relationship`: the
+    /// requestor must own the document or hold a managing relation for
+    /// `relation`. The `target` subject is stored verbatim, so a caller can pass
+    /// a [`Subject::EntitySet`] (userset / TTU parent edge) that the engine then
+    /// resolves through `TupleToUserset`.
+    pub async fn add_subject_relationship(
+        &self,
+        requestor: &Did,
+        target: Subject,
+        policy_id: &str,
+        collection_id: &str,
+        doc_id: &str,
+        relation: &str,
+        _managing_relations: &[String],
+    ) -> Result<bool> {
+        self.ensure_policy(policy_id, collection_id).await?;
+
+        if relation == OWNER_RELATION {
+            return Err(Error::InvalidRelation(
+                "cannot add owner relation".to_string(),
+            ));
+        }
+
+        self.check_manage_relation(
+            requestor,
+            policy_id,
+            collection_id,
+            doc_id,
+            relation,
+            "create",
+        )
+        .await?;
+
+        let has = self
+            .store
+            .has_relationship(policy_id, collection_id, doc_id, relation, &target)
+            .await?;
+        if has {
+            return Ok(false);
+        }
+
+        let rel = Relationship::new(collection_id, doc_id, relation, target);
+        self.store.store_relationship(policy_id, &rel).await?;
+        Ok(true)
+    }
+
     fn permission_to_relation(permission: DocumentPermission) -> &'static str {
         match permission {
             DocumentPermission::Read => "read",
@@ -204,5 +298,68 @@ impl<S: ZanzibarStore + ?Sized> ZanzibarDocumentACP<S> {
     pub async fn clear_policy_cache(&self) {
         let mut engine = self.engine.write().await;
         engine.clear_cache();
+    }
+}
+
+#[cfg(test)]
+mod parse_target_subject_tests {
+    use super::*;
+
+    #[test]
+    fn parses_wildcard() {
+        assert!(matches!(
+            parse_target_subject("*").unwrap(),
+            Subject::Wildcard
+        ));
+    }
+
+    #[test]
+    fn parses_actor_did() {
+        let subject =
+            parse_target_subject("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK")
+                .unwrap();
+        assert!(subject.is_entity());
+    }
+
+    #[test]
+    fn parses_userset() {
+        match parse_target_subject("group:hr#participant").unwrap() {
+            Subject::EntitySet {
+                resource,
+                object_id,
+                relation,
+            } => {
+                assert_eq!(resource, "group");
+                assert_eq!(object_id, "hr");
+                assert_eq!(relation, "participant");
+            }
+            other => panic!("expected EntitySet userset, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_cross_object_edge() {
+        match parse_target_subject("directory:teamdir").unwrap() {
+            Subject::EntitySet {
+                resource,
+                object_id,
+                relation,
+            } => {
+                assert_eq!(resource, "directory");
+                assert_eq!(object_id, "teamdir");
+                assert_eq!(relation, "", "an object edge carries no subject relation");
+            }
+            other => panic!("expected EntitySet object edge, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_unqualified_target() {
+        assert!(parse_target_subject("not-a-target").is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_did() {
+        assert!(parse_target_subject("did:bogus").is_err());
     }
 }
