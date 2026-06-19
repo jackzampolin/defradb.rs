@@ -375,7 +375,11 @@ fn test_dpi_expression_missing_owner() {
 }
 
 #[test]
-fn test_dpi_disallowed_intersection() {
+fn test_dpi_intersection_requires_owner_in_all_branches() {
+    // `editor = owner & approved` is now structurally allowed (intersection is no
+    // longer a disallowed operation), but it must still be rejected: a pure owner
+    // who is not `approved` would have no access, violating the owner guarantee.
+    // The owner-presence check (`.all()` over intersection branches) catches it.
     let policy = Policy::new("policy1", "Test").with_resource(
         Resource::new("document")
             .with_relation(Relation::direct("owner"))
@@ -391,9 +395,41 @@ fn test_dpi_disallowed_intersection() {
 
     let result = policy.validate_dpi();
     assert!(
-        matches!(result, Err(Error::DpiDisallowedOperation { .. })),
-        "Expected DpiDisallowedOperation, got {:?}",
+        matches!(result, Err(Error::DpiExpressionMissingOwner { .. })),
+        "Expected DpiExpressionMissingOwner, got {:?}",
         result
+    );
+}
+
+#[test]
+fn test_dpi_intersection_allowed_when_owner_guaranteed() {
+    // Intersection is permitted when `owner` is present in EVERY branch, so the
+    // owner always satisfies the AND and retains access:
+    //   editor = (owner + reviewer) & (owner + approver)
+    let policy = Policy::new("policy1", "Test").with_resource(
+        Resource::new("document")
+            .with_relation(Relation::direct("owner"))
+            .with_relation(Relation::direct("reviewer"))
+            .with_relation(Relation::direct("approver"))
+            .with_relation(Relation::computed(
+                "editor",
+                RelationExpression::intersection(vec![
+                    RelationExpression::union(vec![
+                        RelationExpression::computed_userset("owner"),
+                        RelationExpression::computed_userset("reviewer"),
+                    ]),
+                    RelationExpression::union(vec![
+                        RelationExpression::computed_userset("owner"),
+                        RelationExpression::computed_userset("approver"),
+                    ]),
+                ]),
+            )),
+    );
+
+    assert!(
+        policy.validate_dpi().is_ok(),
+        "owner-guaranteed intersection should pass DPI, got {:?}",
+        policy.validate_dpi()
     );
 }
 
