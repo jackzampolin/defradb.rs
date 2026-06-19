@@ -128,9 +128,11 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
 
         let (policy_id, resource_name) = self.get_policy_info(collection)?;
 
-        let target: identity::Did = target_actor
-            .parse()
-            .map_err(|e| format!("invalid target actor DID: {}", e))?;
+        // Parse the target into a structured subject once, at the edge: an actor
+        // DID, all-actors `*`, a cross-object edge, or a userset. The structured
+        // subject is carried straight into the API, never re-stringified.
+        let target = acp::parse_target_subject(target_actor)
+            .map_err(|e| format!("invalid target: {}", e))?;
 
         let managing = self
             .validate_and_get_managing_relations(&policy_id, &resource_name, relation)
@@ -138,9 +140,9 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
 
         let added = self
             .acp
-            .add_actor_relationship(
+            .add_relationship(
                 requestor,
-                &target,
+                target,
                 &policy_id,
                 &resource_name,
                 doc_id,

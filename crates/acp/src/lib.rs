@@ -36,6 +36,7 @@ mod persistent;
 pub mod policy_yaml;
 mod relation;
 mod store;
+mod target_subject;
 mod validation;
 pub mod zanzibar;
 
@@ -50,6 +51,7 @@ pub use relation::{
     RelationTuple, DELETER_RELATION, OWNER_RELATION, READER_RELATION, UPDATER_RELATION,
 };
 pub use store::AcpStore;
+pub use target_subject::parse_target_subject;
 pub use validation::{validate_resource_interface, REQUIRED_DOCUMENT_PERMISSIONS};
 
 // Re-export key zanzibar engine types from the standalone zanzibar crate
