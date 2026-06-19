@@ -5,8 +5,9 @@
 use async_trait::async_trait;
 use identity::Did;
 use storage::corekv::MaybeSendSync;
+use zanzibar::types::Subject;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::identity::Identity;
 use crate::permission::DocumentPermission;
 
@@ -132,6 +133,43 @@ pub trait DocumentACP: MaybeSendSync {
         relation: &str,
         managing_relations: &[String],
     ) -> Result<bool>;
+
+    /// Add a relationship whose target may be any [`Subject`] — an actor DID,
+    /// the all-actors wildcard, a cross-object edge, or a userset — subject to
+    /// the policy's declared relation `types:`.
+    ///
+    /// The default implementation supports only actor subjects (a DID or `*`),
+    /// delegating to [`add_actor_relationship`](Self::add_actor_relationship),
+    /// and rejects anything a bare-DID backend cannot represent with
+    /// [`Error::UnsupportedSubject`]. Backends that model the full subject
+    /// language (the Zanzibar backend) override this to store cross-object and
+    /// userset edges, validating the subject against the policy first.
+    async fn add_relationship(
+        &self,
+        requestor: &Did,
+        target: Subject,
+        policy_id: &str,
+        collection_id: &str,
+        doc_id: &str,
+        relation: &str,
+        managing_relations: &[String],
+    ) -> Result<bool> {
+        let actor = match target {
+            Subject::Entity(did) => did,
+            Subject::Wildcard => Did::wildcard(),
+            other => return Err(Error::UnsupportedSubject(other.to_string())),
+        };
+        self.add_actor_relationship(
+            requestor,
+            &actor,
+            policy_id,
+            collection_id,
+            doc_id,
+            relation,
+            managing_relations,
+        )
+        .await
+    }
 
     /// Remove actor relationship.
     ///
