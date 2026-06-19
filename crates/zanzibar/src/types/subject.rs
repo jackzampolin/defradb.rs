@@ -6,8 +6,20 @@ use crate::did::Did;
 #[non_exhaustive]
 pub enum SubjectRestriction {
     Entity,
-    EntitySet { resource: String, relation: String },
-    TypedWildcard { resource: String },
+    EntitySet {
+        resource: String,
+        relation: String,
+    },
+    TypedWildcard {
+        resource: String,
+    },
+    /// An actor: a single entity (DID) or the all-actors wildcard (`*`). This is
+    /// what `types: [actor]` maps to — unlike [`Entity`](Self::Entity), it also
+    /// admits [`Subject::Wildcard`] so existing all-actors grants stay valid.
+    Actor,
+    /// Satisfied if the subject satisfies any inner restriction — how a relation
+    /// declaring multiple `types:` is enforced.
+    AnyOf(Vec<SubjectRestriction>),
     Any,
 }
 
@@ -59,6 +71,23 @@ impl SubjectRestriction {
                     subject_type_name(subject)
                 )),
             },
+            SubjectRestriction::Actor => match subject {
+                Subject::Entity(_) | Subject::Wildcard => Ok(()),
+                _ => Err(format!(
+                    "expected an actor (entity or '*'), got {}",
+                    subject_type_name(subject)
+                )),
+            },
+            SubjectRestriction::AnyOf(restrictions) => {
+                if restrictions.iter().any(|r| r.satisfies(subject).is_ok()) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "subject {} satisfies none of the relation's declared types",
+                        subject_type_name(subject)
+                    ))
+                }
+            }
             SubjectRestriction::Any => Ok(()),
         }
     }
