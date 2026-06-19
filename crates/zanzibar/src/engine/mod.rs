@@ -157,6 +157,38 @@ impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
         .await
     }
 
+    /// Synchronous, runtime-free wrapper over [`check`](Self::check) for
+    /// consensus / deterministic evaluation (e.g. on-chain or replicated-log
+    /// authorization), where no async reactor is available and every validator
+    /// must independently reach the identical decision.
+    ///
+    /// Drives the [`check`](Self::check) future to completion on the current
+    /// thread via [`futures::executor::block_on`], which needs no reactor.
+    ///
+    /// # Contract
+    ///
+    /// Determinism holds only if the backing [`ZanzibarStore`] honours:
+    /// - **all-Ready**: every store future resolves without yielding to a
+    ///   reactor — no real I/O, timers, or network. A future that returns
+    ///   `Pending` awaiting an external event parks this thread indefinitely.
+    /// - **side-effect-free**: the check performs reads only and must not
+    ///   mutate observable state.
+    /// - **order-stable**: policy and relationship traversal is deterministically
+    ///   ordered, so identical inputs yield the identical decision on every node.
+    ///
+    /// `MemoryZanzibarStore` satisfies all three. A network- or disk-backed
+    /// store generally does not and must not be used through this entry point.
+    pub fn check_blocking(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        subject: &Did,
+    ) -> Result<bool> {
+        futures::executor::block_on(self.check(policy_id, resource, object_id, relation, subject))
+    }
+
     pub async fn check_many(&self, requests: &[PermissionCheckRequest<'_>]) -> Vec<Result<bool>> {
         let cache = Arc::new(CheckCache::new());
 
@@ -230,5 +262,50 @@ impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
             subject: subject.to_string(),
             trace,
         })
+    }
+}
+
+#[cfg(test)]
+mod check_blocking_tests {
+    use std::sync::Arc;
+
+    use crate::store::{MemoryZanzibarStore, ZanzibarStore};
+    use crate::types::{Policy, Relation, Relationship, Resource};
+    use crate::Did;
+
+    use super::PermissionEngine;
+
+    fn owner_did() -> Did {
+        Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap()
+    }
+    fn stranger_did() -> Did {
+        Did::new("did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH").unwrap()
+    }
+
+    // A plain `#[test]`, deliberately not `#[tokio::test]`: there is no async
+    // runtime present. This is the consensus-evaluation contract — `check_blocking`
+    // must drive an all-Ready, side-effect-free store to a decision synchronously,
+    // with no reactor, so independent validators reach the same answer.
+    #[test]
+    fn check_blocking_resolves_decision_without_a_runtime() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let mut engine = PermissionEngine::new(store.clone());
+
+        let policy = Policy::new("policy1", "Test")
+            .with_resource(Resource::new("document").with_relation(Relation::direct("owner")));
+        engine.add_policy(&policy);
+
+        let owner = owner_did();
+        let rel = Relationship::with_entity("document", "doc1", "owner", owner.clone());
+        futures::executor::block_on(store.store_relationship("policy1", &rel)).unwrap();
+
+        // Same decisions `check` would return — owner granted, stranger denied —
+        // produced synchronously.
+        assert!(engine
+            .check_blocking("policy1", "document", "doc1", "owner", &owner)
+            .unwrap());
+        assert!(!engine
+            .check_blocking("policy1", "document", "doc1", "owner", &stranger_did())
+            .unwrap());
     }
 }
