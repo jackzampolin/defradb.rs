@@ -181,6 +181,30 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         collection_id: &str,
         doc_id: &str,
         relation: &str,
+        managing_relations: &[String],
+    ) -> Result<bool> {
+        // The actor path is a thin wrapper over the general subject path, so
+        // authority and floor validation run through a single implementation.
+        self.add_relationship(
+            requestor,
+            actor_subject(target),
+            policy_id,
+            collection_id,
+            doc_id,
+            relation,
+            managing_relations,
+        )
+        .await
+    }
+
+    async fn add_relationship(
+        &self,
+        requestor: &Did,
+        target: Subject,
+        policy_id: &str,
+        collection_id: &str,
+        doc_id: &str,
+        relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
         self.ensure_policy(policy_id, collection_id).await?;
@@ -201,38 +225,40 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         )
         .await?;
 
-        let subject = actor_subject(target);
+        // Soundness floor: a declared relation's subject must satisfy its
+        // `types:` (and any cross-object reference must point at a declared
+        // resource) before it is stored. Undeclared relations are still accepted
+        // — relation-vs-policy validation is an adapter-layer concern in Go, and
+        // an undeclared relation carries no type contract to enforce.
+        let rel = Relationship::new(collection_id, doc_id, relation, target);
+        let policy = self
+            .store
+            .get_policy(policy_id)
+            .await?
+            .ok_or_else(|| Error::InvalidPolicy(format!("policy '{}' not found", policy_id)))?;
+        if policy.get_relation(collection_id, relation).is_some() {
+            rel.validate(&policy)?;
+        }
+
         let has = self
             .store
-            .has_relationship(policy_id, collection_id, doc_id, relation, &subject)
+            .has_relationship(policy_id, collection_id, doc_id, relation, &rel.subject)
             .await?;
-
         if has {
-            tracing::debug!(
-                target: "acp::audit",
-                event = "relationship_exists",
-                requestor = %requestor,
-                target = %target,
-                relation = %relation,
-                collection = %collection_id,
-                doc_id = %doc_id,
-                "Relationship already exists"
-            );
             return Ok(false);
         }
 
-        let rel = Relationship::new(collection_id, doc_id, relation, subject);
         self.store.store_relationship(policy_id, &rel).await?;
 
         tracing::info!(
             target: "acp::audit",
             event = "relationship_added",
             requestor = %requestor,
-            target = %target,
+            subject = %rel.subject,
             relation = %relation,
             collection = %collection_id,
             doc_id = %doc_id,
-            "Actor relationship added via Zanzibar"
+            "Relationship added via Zanzibar"
         );
 
         Ok(true)

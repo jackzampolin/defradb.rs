@@ -29,6 +29,11 @@ pub enum Error {
     #[error("invalid relation: {0}")]
     InvalidRelation(String),
 
+    /// The backend cannot represent the requested subject (e.g. a cross-object
+    /// or userset edge on the Local or SourceHub backend, which store bare DIDs).
+    #[error("unsupported subject for this backend: {0}")]
+    UnsupportedSubject(String),
+
     /// Not the owner of the document (UNAUTHORIZED)
     #[error("UNAUTHORIZED: not document owner, cannot {operation}")]
     NotOwner { operation: String },
