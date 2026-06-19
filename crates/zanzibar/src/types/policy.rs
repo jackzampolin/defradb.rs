@@ -104,8 +104,13 @@ impl Policy {
                 computed_relation, ..
             } => computed_relation == "owner",
             RelationExpression::Union(exprs) => exprs.iter().any(Self::expression_includes_owner),
+            // Intersection requires `owner` in EVERY branch. An actor only gains
+            // access through an intersection if they satisfy all branches, so the
+            // "owner always has access" guarantee holds only when each branch grants
+            // the owner (e.g. `(owner + a) & (owner + b)`). Using `.any()` here would
+            // let `owner & reader` pass DPI while leaving a pure owner without access.
             RelationExpression::Intersection(exprs) => {
-                exprs.iter().any(Self::expression_includes_owner)
+                exprs.iter().all(Self::expression_includes_owner)
             }
             RelationExpression::Difference { base, subtract } => {
                 Self::expression_includes_owner(base) || Self::expression_includes_owner(subtract)
@@ -121,7 +126,9 @@ impl Policy {
             RelationExpression::Union(exprs) => {
                 exprs.iter().find_map(Self::find_disallowed_operation)
             }
-            RelationExpression::Intersection(_) => Some("intersection (&)".to_string()),
+            RelationExpression::Intersection(exprs) => {
+                exprs.iter().find_map(Self::find_disallowed_operation)
+            }
             RelationExpression::Difference { base, subtract } => {
                 Self::find_disallowed_operation(base)
                     .or_else(|| Self::find_disallowed_operation(subtract))
