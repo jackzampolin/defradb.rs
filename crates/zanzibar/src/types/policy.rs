@@ -198,7 +198,17 @@ impl Relationship {
             resource, relation, ..
         } = &self.subject
         {
-            if policy.get_relation(resource, relation).is_none() {
+            let reference_exists = if relation.is_empty() {
+                // Object-edge (cross-object / TTU target): the subject names an
+                // object of `resource` and carries no subject relation, so the
+                // referenced *resource* is what must be declared.
+                policy.get_resource(resource).is_some()
+            } else {
+                // Userset: the subject names objects via `resource#relation`, so
+                // that relation must be declared.
+                policy.get_relation(resource, relation).is_some()
+            };
+            if !reference_exists {
                 return Err(Error::InvalidEntitySetReference {
                     resource: resource.clone(),
                     relation: relation.clone(),

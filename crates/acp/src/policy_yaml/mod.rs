@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use zanzibar::{Policy, Relation, RelationExpression, Resource};
+use zanzibar::{Policy, Relation, RelationExpression, Resource, SubjectRestriction};
 
 /// Generate a Go-compatible policy ID from parsed policy fields.
 ///
@@ -83,7 +83,60 @@ pub struct PolicyPermission {
 pub struct PolicyRelation {
     pub name: String,
     #[serde(default)]
+    pub types: Vec<String>,
+    #[serde(default)]
     pub manages: Vec<String>,
+}
+
+/// Map a relation's declared `types:` to an enforced [`SubjectRestriction`].
+///
+/// Each type names an allowed subject shape:
+/// - `actor`               → an actor DID or the all-actors wildcard `*`
+/// - `resource`            → a cross-object edge to an object of `resource`
+/// - `resource->relation`  → a userset `resource:obj#relation`
+///
+/// The userset separator is acp_core's tuple-to-userset operator `->`, not `#`
+/// (which is the tuple-subject grammar handled by `parse_target_subject`).
+///
+/// Multiple types combine as a union. An empty list yields `None` (no
+/// restriction), preserving the behaviour of relations that omit `types:`.
+fn build_subject_restriction(types: &[String]) -> crate::error::Result<Option<SubjectRestriction>> {
+    let mut restrictions = Vec::with_capacity(types.len());
+    for ty in types {
+        let ty = ty.trim();
+        let restriction = if ty == "actor" {
+            SubjectRestriction::Actor
+        } else if let Some((resource, relation)) = ty.split_once("->") {
+            if resource.is_empty() || relation.is_empty() {
+                return Err(crate::error::Error::InvalidRelation(format!(
+                    "invalid relation type '{}': expected 'actor', 'resource', or 'resource->relation'",
+                    ty
+                )));
+            }
+            SubjectRestriction::EntitySet {
+                resource: resource.to_string(),
+                relation: relation.to_string(),
+            }
+        } else if ty.is_empty() {
+            return Err(crate::error::Error::InvalidRelation(
+                "empty relation type".to_string(),
+            ));
+        } else {
+            // A bare resource name authorises a cross-object edge: an EntitySet
+            // subject of that resource carrying no relation.
+            SubjectRestriction::EntitySet {
+                resource: ty.to_string(),
+                relation: String::new(),
+            }
+        };
+        restrictions.push(restriction);
+    }
+
+    Ok(match restrictions.len() {
+        0 => None,
+        1 => Some(restrictions.into_iter().next().unwrap()),
+        _ => Some(SubjectRestriction::AnyOf(restrictions)),
+    })
 }
 
 impl ParsedPolicy {
@@ -137,6 +190,9 @@ pub fn build_policy(parsed: &ParsedPolicy, counter: u64) -> crate::error::Result
             let mut relation = Relation::direct(&rel.name);
             if !rel.manages.is_empty() {
                 relation = relation.with_manages(rel.manages.clone());
+            }
+            if let Some(restriction) = build_subject_restriction(&rel.types)? {
+                relation = relation.with_restriction(restriction);
             }
             relations.push(relation);
         }
