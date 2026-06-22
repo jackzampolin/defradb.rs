@@ -473,6 +473,60 @@ impl SourceHubProvider for HubRsProvider {
         Ok(true)
     }
 
+    async fn set_relationship_subject(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        kind: u8,
+        subject_resource: &str,
+        subject_object_id: &str,
+        subject_relation: &str,
+    ) -> Result<bool, ProviderError> {
+        let pid = Self::policy_id_to_bytes32(policy_id);
+        let call = IAcp::setRelationshipSubjectCall {
+            policyId: pid,
+            resource: resource.to_string(),
+            objectId: object_id.to_string(),
+            relation: relation.to_string(),
+            subjectKind: kind,
+            subjectResource: subject_resource.to_string(),
+            subjectObjectId: subject_object_id.to_string(),
+            subjectRelation: subject_relation.to_string(),
+        };
+        let calldata = Bytes::from(call.abi_encode());
+        self.send_tx(calldata).await?;
+        Ok(true)
+    }
+
+    async fn delete_relationship_subject(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        kind: u8,
+        subject_resource: &str,
+        subject_object_id: &str,
+        subject_relation: &str,
+    ) -> Result<bool, ProviderError> {
+        let pid = Self::policy_id_to_bytes32(policy_id);
+        let call = IAcp::deleteRelationshipSubjectCall {
+            policyId: pid,
+            resource: resource.to_string(),
+            objectId: object_id.to_string(),
+            relation: relation.to_string(),
+            subjectKind: kind,
+            subjectResource: subject_resource.to_string(),
+            subjectObjectId: subject_object_id.to_string(),
+            subjectRelation: subject_relation.to_string(),
+        };
+        let calldata = Bytes::from(call.abi_encode());
+        self.send_tx(calldata).await?;
+        Ok(true)
+    }
+
     async fn query_policy(
         &self,
         policy_id: &str,

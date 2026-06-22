@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use identity::Did;
 
-use acp::{DocumentACP, DocumentPermission, Identity, Result};
+use acp::{DocumentACP, DocumentPermission, Identity, Result, Subject};
 
 use crate::access_cache::AccessCache;
 use crate::provider::{AcpLightClientStatus, ProviderError, SourceHubProvider, SubjectRef};
@@ -100,6 +100,17 @@ fn did_to_subject(target: &Did) -> SubjectRef {
         SubjectRef::AllActors
     } else {
         SubjectRef::Actor(target.as_str().to_string())
+    }
+}
+
+/// Lowers an actor [`Subject`] (`Entity`/`Wildcard`) to the bare-DID actor the
+/// existing relationship path operates on. Non-actor subjects must be routed to
+/// the structured `*_relationship_subject` provider methods instead.
+fn subject_to_actor_did(target: &Subject) -> Did {
+    match target {
+        Subject::Wildcard => Did::wildcard(),
+        Subject::Entity(did) => Did::new_unchecked(did.to_string()),
+        _ => Did::new_unchecked(String::new()),
     }
 }
 
@@ -307,6 +318,102 @@ impl DocumentACP for SourceHubDocumentACP {
         Ok(result)
     }
 
+    async fn add_relationship(
+        &self,
+        requestor: &Did,
+        target: Subject,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+        relation: &str,
+        managing_relations: &[String],
+    ) -> Result<bool> {
+        match target {
+            Subject::Entity(_) | Subject::Wildcard => {
+                let actor = subject_to_actor_did(&target);
+                self.add_actor_relationship(
+                    requestor,
+                    &actor,
+                    policy_id,
+                    resource_name,
+                    doc_id,
+                    relation,
+                    managing_relations,
+                )
+                .await
+            }
+            Subject::EntitySet { .. } => {
+                let (kind, sr, so, srel) =
+                    zanzibar::encode_subject(&target).map_err(acp::Error::from)?;
+                let result = self
+                    .provider
+                    .set_relationship_subject(
+                        policy_id,
+                        resource_name,
+                        doc_id,
+                        relation,
+                        kind,
+                        &sr,
+                        &so,
+                        &srel,
+                    )
+                    .await
+                    .map_err(provider_err)?;
+                self.invalidate_cached_access(policy_id, resource_name, doc_id);
+                Ok(result)
+            }
+            other => Err(acp::Error::UnsupportedSubject(other.to_string())),
+        }
+    }
+
+    async fn delete_relationship(
+        &self,
+        requestor: &Did,
+        target: Subject,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+        relation: &str,
+        managing_relations: &[String],
+    ) -> Result<bool> {
+        match target {
+            Subject::Entity(_) | Subject::Wildcard => {
+                let actor = subject_to_actor_did(&target);
+                self.delete_actor_relationship(
+                    requestor,
+                    &actor,
+                    policy_id,
+                    resource_name,
+                    doc_id,
+                    relation,
+                    managing_relations,
+                )
+                .await
+            }
+            Subject::EntitySet { .. } => {
+                let (kind, sr, so, srel) =
+                    zanzibar::encode_subject(&target).map_err(acp::Error::from)?;
+                let result = self
+                    .provider
+                    .delete_relationship_subject(
+                        policy_id,
+                        resource_name,
+                        doc_id,
+                        relation,
+                        kind,
+                        &sr,
+                        &so,
+                        &srel,
+                    )
+                    .await
+                    .map_err(provider_err)?;
+                self.invalidate_cached_access(policy_id, resource_name, doc_id);
+                Ok(result)
+            }
+            other => Err(acp::Error::UnsupportedSubject(other.to_string())),
+        }
+    }
+
     async fn unregister_doc_object(
         &self,
         policy_id: &str,
@@ -347,10 +454,21 @@ mod tests {
 
     use super::*;
 
+    /// Records which relationship-emitting provider method a routing test drove,
+    /// plus the structured-subject codec tuple for the EntitySet path.
+    #[derive(Default)]
+    struct RelationshipCalls {
+        set_relationship: bool,
+        delete_relationship: bool,
+        set_subject: Option<(u8, String, String, String)>,
+        delete_subject: Option<(u8, String, String, String)>,
+    }
+
     struct MockProvider {
         decisions: Mutex<VecDeque<bool>>,
         created_decision: Mutex<Option<String>>,
         verify_calls: Mutex<usize>,
+        rel_calls: Mutex<RelationshipCalls>,
     }
 
     impl MockProvider {
@@ -359,6 +477,7 @@ mod tests {
                 decisions: Mutex::new(decisions.into()),
                 created_decision: Mutex::new(None),
                 verify_calls: Mutex::new(0),
+                rel_calls: Mutex::new(RelationshipCalls::default()),
             }
         }
 
@@ -381,7 +500,7 @@ mod tests {
             &self,
             _did: &str,
         ) -> std::result::Result<String, ProviderError> {
-            unreachable!("create_bearer_token is not used in this test")
+            Ok("mock.bearer.token".to_string())
         }
 
         fn self_did(&self) -> Option<String> {
@@ -424,7 +543,8 @@ mod tests {
             _relation: &str,
             _subject: &SubjectRef,
         ) -> std::result::Result<bool, ProviderError> {
-            unreachable!("set_relationship is not used in this test")
+            self.rel_calls.lock().unwrap().set_relationship = true;
+            Ok(true)
         }
 
         async fn delete_relationship(
@@ -436,7 +556,48 @@ mod tests {
             _relation: &str,
             _subject: &SubjectRef,
         ) -> std::result::Result<bool, ProviderError> {
-            unreachable!("delete_relationship is not used in this test")
+            self.rel_calls.lock().unwrap().delete_relationship = true;
+            Ok(true)
+        }
+
+        async fn set_relationship_subject(
+            &self,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+            _relation: &str,
+            kind: u8,
+            subject_resource: &str,
+            subject_object_id: &str,
+            subject_relation: &str,
+        ) -> std::result::Result<bool, ProviderError> {
+            self.rel_calls.lock().unwrap().set_subject = Some((
+                kind,
+                subject_resource.to_string(),
+                subject_object_id.to_string(),
+                subject_relation.to_string(),
+            ));
+            Ok(true)
+        }
+
+        async fn delete_relationship_subject(
+            &self,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+            _relation: &str,
+            kind: u8,
+            subject_resource: &str,
+            subject_object_id: &str,
+            subject_relation: &str,
+        ) -> std::result::Result<bool, ProviderError> {
+            self.rel_calls.lock().unwrap().delete_subject = Some((
+                kind,
+                subject_resource.to_string(),
+                subject_object_id.to_string(),
+                subject_relation.to_string(),
+            ));
+            Ok(true)
         }
 
         async fn query_policy(
@@ -571,5 +732,242 @@ mod tests {
 
         assert_eq!(decision_id, Some(format!("decision-for-{}", did.as_str())));
         assert_eq!(provider.created_decision(), decision_id);
+    }
+
+    fn requestor() -> Did {
+        Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap()
+    }
+
+    #[tokio::test]
+    async fn add_relationship_routes_actor_to_set_relationship() {
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let acp = SourceHubDocumentACP::without_access_cache(provider.clone());
+        let target = Subject::Entity(zanzibar::Did::new_unchecked(
+            "did:key:zActorTarget".to_string(),
+        ));
+
+        let result = acp
+            .add_relationship(
+                &requestor(),
+                target,
+                "policy-1",
+                "users",
+                "doc-1",
+                "reader",
+                &[],
+            )
+            .await
+            .expect("actor relationship should route to set_relationship");
+        assert!(result);
+
+        let calls = provider.rel_calls.lock().unwrap();
+        assert!(calls.set_relationship, "actor must hit set_relationship");
+        assert!(
+            calls.set_subject.is_none(),
+            "actor must not hit subject path"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_relationship_routes_object_edge_to_subject_kind_2() {
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let acp = SourceHubDocumentACP::without_access_cache(provider.clone());
+        let target = Subject::entity_set("directory", "d1", "");
+
+        let result = acp
+            .add_relationship(
+                &requestor(),
+                target,
+                "policy-1",
+                "users",
+                "doc-1",
+                "reader",
+                &[],
+            )
+            .await
+            .expect("object edge should route to set_relationship_subject");
+        assert!(result);
+
+        let calls = provider.rel_calls.lock().unwrap();
+        assert!(
+            !calls.set_relationship,
+            "object edge must not hit actor path"
+        );
+        assert_eq!(
+            calls.set_subject,
+            Some((2, "directory".to_string(), "d1".to_string(), String::new()))
+        );
+    }
+
+    #[tokio::test]
+    async fn add_relationship_routes_userset_to_subject_kind_3() {
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let acp = SourceHubDocumentACP::without_access_cache(provider.clone());
+        let target = Subject::entity_set("directory", "d1", "member");
+
+        acp.add_relationship(
+            &requestor(),
+            target,
+            "policy-1",
+            "users",
+            "doc-1",
+            "reader",
+            &[],
+        )
+        .await
+        .expect("userset should route to set_relationship_subject");
+
+        let calls = provider.rel_calls.lock().unwrap();
+        assert_eq!(
+            calls.set_subject,
+            Some((
+                3,
+                "directory".to_string(),
+                "d1".to_string(),
+                "member".to_string()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_relationship_routes_object_edge_to_subject_kind_2() {
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let acp = SourceHubDocumentACP::without_access_cache(provider.clone());
+        let target = Subject::entity_set("directory", "d1", "");
+
+        acp.delete_relationship(
+            &requestor(),
+            target,
+            "policy-1",
+            "users",
+            "doc-1",
+            "reader",
+            &[],
+        )
+        .await
+        .expect("object edge delete should route to delete_relationship_subject");
+
+        let calls = provider.rel_calls.lock().unwrap();
+        assert!(!calls.delete_relationship);
+        assert_eq!(
+            calls.delete_subject,
+            Some((2, "directory".to_string(), "d1".to_string(), String::new()))
+        );
+    }
+
+    /// A provider that omits the structured-subject overrides, so the trait
+    /// default (`Unsupported`) is exercised on the EntitySet path.
+    struct NoSubjectProvider;
+
+    #[async_trait]
+    impl SourceHubProvider for NoSubjectProvider {
+        fn authorized_account(&self) -> String {
+            "0x0".to_string()
+        }
+        async fn create_bearer_token(
+            &self,
+            _did: &str,
+        ) -> std::result::Result<String, ProviderError> {
+            Ok("mock.bearer.token".to_string())
+        }
+        fn self_did(&self) -> Option<String> {
+            None
+        }
+        async fn create_policy(
+            &self,
+            _policy_yaml: &str,
+        ) -> std::result::Result<String, ProviderError> {
+            unreachable!()
+        }
+        async fn register_object(
+            &self,
+            _bearer_token: &str,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+        ) -> std::result::Result<(), ProviderError> {
+            unreachable!()
+        }
+        async fn archive_object(
+            &self,
+            _bearer_token: &str,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+        ) -> std::result::Result<(), ProviderError> {
+            unreachable!()
+        }
+        async fn set_relationship(
+            &self,
+            _bearer_token: &str,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+            _relation: &str,
+            _subject: &SubjectRef,
+        ) -> std::result::Result<bool, ProviderError> {
+            unreachable!()
+        }
+        async fn delete_relationship(
+            &self,
+            _bearer_token: &str,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+            _relation: &str,
+            _subject: &SubjectRef,
+        ) -> std::result::Result<bool, ProviderError> {
+            unreachable!()
+        }
+        async fn query_policy(
+            &self,
+            _policy_id: &str,
+        ) -> std::result::Result<Option<crate::provider::ProviderPolicyInfo>, ProviderError>
+        {
+            unreachable!()
+        }
+        async fn query_object_owner(
+            &self,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+        ) -> std::result::Result<(bool, String), ProviderError> {
+            unreachable!()
+        }
+        async fn verify_access(
+            &self,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+            _permission: &str,
+            _actor_did: &str,
+        ) -> std::result::Result<bool, ProviderError> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn add_relationship_subject_default_is_unsupported() {
+        let provider = Arc::new(NoSubjectProvider);
+        let acp = SourceHubDocumentACP::without_access_cache(provider);
+        let target = Subject::entity_set("directory", "d1", "");
+
+        let err = acp
+            .add_relationship(
+                &requestor(),
+                target,
+                "policy-1",
+                "users",
+                "doc-1",
+                "reader",
+                &[],
+            )
+            .await
+            .expect_err("provider without subject support must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("unsupported"),
+            "expected Unsupported error, got: {message}"
+        );
     }
 }
