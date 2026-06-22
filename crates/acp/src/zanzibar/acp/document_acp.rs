@@ -272,6 +272,30 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         collection_id: &str,
         doc_id: &str,
         relation: &str,
+        managing_relations: &[String],
+    ) -> Result<bool> {
+        // The actor path is a thin wrapper over the general subject path, so
+        // authority runs through a single implementation.
+        self.delete_relationship(
+            requestor,
+            actor_subject(target),
+            policy_id,
+            collection_id,
+            doc_id,
+            relation,
+            managing_relations,
+        )
+        .await
+    }
+
+    async fn delete_relationship(
+        &self,
+        requestor: &Did,
+        target: Subject,
+        policy_id: &str,
+        collection_id: &str,
+        doc_id: &str,
+        relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
         self.ensure_policy(policy_id, collection_id).await?;
@@ -292,7 +316,9 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         )
         .await?;
 
-        let rel = Relationship::new(collection_id, doc_id, relation, actor_subject(target));
+        // No floor validation on the revoke path: type validation guards what a
+        // grant introduces, but a revoke only removes an existing edge.
+        let rel = Relationship::new(collection_id, doc_id, relation, target);
         let deleted = self.store.delete_relationship(policy_id, &rel).await?;
 
         if deleted {
@@ -300,18 +326,18 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
                 target: "acp::audit",
                 event = "relationship_deleted",
                 requestor = %requestor,
-                target = %target,
+                subject = %rel.subject,
                 relation = %relation,
                 collection = %collection_id,
                 doc_id = %doc_id,
-                "Actor relationship deleted via Zanzibar"
+                "Relationship deleted via Zanzibar"
             );
         } else {
             tracing::debug!(
                 target: "acp::audit",
                 event = "relationship_not_found",
                 requestor = %requestor,
-                target = %target,
+                subject = %rel.subject,
                 relation = %relation,
                 collection = %collection_id,
                 doc_id = %doc_id,

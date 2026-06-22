@@ -199,6 +199,47 @@ pub trait DocumentACP: MaybeSendSync {
         managing_relations: &[String],
     ) -> Result<bool>;
 
+    /// Remove a relationship whose target may be any [`Subject`] — an actor DID,
+    /// the all-actors wildcard, a cross-object edge, or a userset.
+    ///
+    /// This is the revoke mirror of [`add_relationship`](Self::add_relationship):
+    /// an edge that can be granted through a structured subject must also be
+    /// removable through one, so a cross-object edge can be revoked rather than
+    /// leaking access forever.
+    ///
+    /// The default implementation supports only actor subjects (a DID or `*`),
+    /// delegating to [`delete_actor_relationship`](Self::delete_actor_relationship),
+    /// and rejects anything a bare-DID backend cannot represent with
+    /// [`Error::UnsupportedSubject`]. Backends that model the full subject
+    /// language (the Zanzibar backend) override this to remove cross-object and
+    /// userset edges.
+    async fn delete_relationship(
+        &self,
+        requestor: &Did,
+        target: Subject,
+        policy_id: &str,
+        collection_id: &str,
+        doc_id: &str,
+        relation: &str,
+        managing_relations: &[String],
+    ) -> Result<bool> {
+        let actor = match target {
+            Subject::Entity(did) => did,
+            Subject::Wildcard => Did::wildcard(),
+            other => return Err(Error::UnsupportedSubject(other.to_string())),
+        };
+        self.delete_actor_relationship(
+            requestor,
+            &actor,
+            policy_id,
+            collection_id,
+            doc_id,
+            relation,
+            managing_relations,
+        )
+        .await
+    }
+
     /// Unregister a document, removing all ACP tuples.
     ///
     /// This should be called when a document is deleted to clean up
