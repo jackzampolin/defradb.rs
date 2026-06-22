@@ -166,6 +166,7 @@ impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
                                 cache.clone(),
                             )
                             .await?
+                            .0
                         {
                             trace.add_step(EvaluationStep {
                                 expression_type: "TTU target match".to_string(),
@@ -222,6 +223,7 @@ impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
                                         cache.clone(),
                                     )
                                     .await?
+                                    .0
                                 {
                                     trace.add_step(EvaluationStep {
                                         expression_type: "TTU EntitySet match".to_string(),
@@ -289,6 +291,7 @@ impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
                                 cache.clone(),
                             )
                             .await?
+                            .0
                         {
                             trace.add_step(EvaluationStep {
                                 expression_type: format!("Union branch {}", i + 1),
@@ -337,6 +340,7 @@ impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
                                 cache.clone(),
                             )
                             .await?
+                            .0
                         {
                             trace.add_step(EvaluationStep {
                                 expression_type: format!("Intersection branch {}", i + 1),
@@ -372,7 +376,7 @@ impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
                         details: Some("Evaluating base AND NOT subtract".to_string()),
                     });
 
-                    let base_result = self
+                    let (base_result, _) = self
                         .evaluate_expr_inner(
                             policy_id,
                             resource,
@@ -397,7 +401,7 @@ impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
                         return Ok(false);
                     }
 
-                    let subtract_result = self
+                    let (subtract_result, _) = self
                         .evaluate_expr_inner(
                             policy_id, resource, object_id, relation, subject, subtract, trail,
                             cache,

@@ -151,10 +151,12 @@ impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
 
         let cache = Arc::new(CheckCache::new());
 
-        self.evaluate_expr_cached(
-            policy_id, resource, object_id, relation, subject, expression, trail, cache,
-        )
-        .await
+        let (granted, _tainted) = self
+            .evaluate_expr_cached(
+                policy_id, resource, object_id, relation, subject, expression, trail, cache,
+            )
+            .await?;
+        Ok(granted)
     }
 
     /// Synchronous, runtime-free wrapper over [`check`](Self::check) for
@@ -225,10 +227,12 @@ impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
         let node_id = NodeId::new(resource, object_id, relation);
         let trail = NodeTrail::new().with_node(node_id);
 
-        self.evaluate_expr_cached(
-            policy_id, resource, object_id, relation, subject, expression, trail, cache,
-        )
-        .await
+        let (granted, _tainted) = self
+            .evaluate_expr_cached(
+                policy_id, resource, object_id, relation, subject, expression, trail, cache,
+            )
+            .await?;
+        Ok(granted)
     }
 
     pub async fn explain(
