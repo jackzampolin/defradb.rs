@@ -14812,6 +14812,7 @@ dependencies = [
  "futures",
  "identity",
  "parking_lot 0.12.5",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
