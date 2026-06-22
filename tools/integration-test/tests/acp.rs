@@ -2,6 +2,8 @@
 mod audit;
 #[path = "acp/basic.rs"]
 mod basic;
+#[path = "acp/cross_object.rs"]
+mod cross_object;
 #[path = "acp/custom_policy.rs"]
 mod custom_policy;
 #[path = "acp/events_sse.rs"]
