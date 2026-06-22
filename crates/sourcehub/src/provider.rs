@@ -38,6 +38,10 @@ pub enum ProviderError {
     /// All access decisions must fail-closed when this is returned.
     #[error("SourceHub unavailable: {0}")]
     Unavailable(String),
+
+    /// The provider backend does not support the requested operation.
+    #[error("unsupported operation: {0}")]
+    Unsupported(String),
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -86,6 +90,71 @@ pub trait SourceHubProvider: MaybeSendSync {
         relation: &str,
         subject: &SubjectRef,
     ) -> Result<bool, ProviderError>;
+
+    /// Emit a structured cross-object (object-edge) or userset subject to the
+    /// backend, routed by `kind` per the frozen cross-object wire contract
+    /// (`kind` 2 = object edge, `kind` 3 = userset). The `subject_*` fields are
+    /// the codec output of [`zanzibar::encode_subject`].
+    ///
+    /// Authentication is by the provider's own signing key (no bearer token);
+    /// only backends that implement the typed precompile override this. The
+    /// default rejects with [`ProviderError::Unsupported`].
+    #[allow(clippy::too_many_arguments)]
+    async fn set_relationship_subject(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        kind: u8,
+        subject_resource: &str,
+        subject_object_id: &str,
+        subject_relation: &str,
+    ) -> Result<bool, ProviderError> {
+        let _ = (
+            policy_id,
+            resource,
+            object_id,
+            relation,
+            kind,
+            subject_resource,
+            subject_object_id,
+            subject_relation,
+        );
+        Err(ProviderError::Unsupported(
+            "structured cross-object/userset subjects are not supported by this provider".into(),
+        ))
+    }
+
+    /// Remove a structured cross-object or userset subject. Revoke mirror of
+    /// [`set_relationship_subject`](Self::set_relationship_subject); the default
+    /// rejects with [`ProviderError::Unsupported`].
+    #[allow(clippy::too_many_arguments)]
+    async fn delete_relationship_subject(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        kind: u8,
+        subject_resource: &str,
+        subject_object_id: &str,
+        subject_relation: &str,
+    ) -> Result<bool, ProviderError> {
+        let _ = (
+            policy_id,
+            resource,
+            object_id,
+            relation,
+            kind,
+            subject_resource,
+            subject_object_id,
+            subject_relation,
+        );
+        Err(ProviderError::Unsupported(
+            "structured cross-object/userset subjects are not supported by this provider".into(),
+        ))
+    }
 
     async fn query_policy(
         &self,
