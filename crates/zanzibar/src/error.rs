@@ -50,6 +50,9 @@ pub enum Error {
 
     #[error("serialization error: {0}")]
     Serialization(String),
+
+    #[error("invalid subject encoding: {0}")]
+    InvalidSubjectEncoding(String),
 }
 
 #[cfg(test)]
