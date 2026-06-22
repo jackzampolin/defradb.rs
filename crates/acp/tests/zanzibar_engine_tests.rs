@@ -443,3 +443,52 @@ async fn test_explain_denied() {
         .collect();
     assert!(!denied_steps.is_empty());
 }
+
+// Regression: a cycle-truncated `false` must not be memoized under the
+// trail-independent cache key, or a diamond+cycle replays a wrong DENY.
+//
+// perm = y & x ; y = x + this ; x = y. A direct grant on `y` makes x genuinely
+// true (x = y = granted). Evaluating the intersection's `y` arm first walks
+// y -> x -> y, truncating the cycle to x=false and (buggily) caching it; the
+// `x` arm then reads that poisoned false and the intersection wrongly denies.
+#[tokio::test]
+async fn cache_does_not_replay_cycle_truncated_deny() {
+    let store = Arc::new(MemoryZanzibarStore::new());
+    let mut engine = PermissionEngine::new(store.clone());
+
+    let policy = Policy::new("policy1", "Test").with_resource(
+        Resource::new("doc")
+            .with_relation(Relation::computed(
+                "x",
+                RelationExpression::computed_userset("y"),
+            ))
+            .with_relation(Relation::computed(
+                "y",
+                RelationExpression::union(vec![
+                    RelationExpression::computed_userset("x"),
+                    RelationExpression::this(),
+                ]),
+            ))
+            .with_relation(Relation::computed(
+                "perm",
+                RelationExpression::intersection(vec![
+                    RelationExpression::computed_userset("y"),
+                    RelationExpression::computed_userset("x"),
+                ]),
+            )),
+    );
+    engine.add_policy(&policy);
+
+    let did = test_did();
+    let rel = Relationship::with_entity("doc", "doc1", "y", did.clone());
+    store.store_relationship("policy1", &rel).await.unwrap();
+
+    let granted = engine
+        .check("policy1", "doc", "doc1", "perm", &did)
+        .await
+        .unwrap();
+    assert!(
+        granted,
+        "perm = y & x must be granted; the cache must not replay the cycle-truncated x=false"
+    );
+}
