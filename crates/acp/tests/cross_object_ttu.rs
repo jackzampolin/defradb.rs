@@ -192,6 +192,93 @@ async fn add_relationship_enforces_the_subject_floor() {
 }
 
 #[tokio::test]
+async fn cross_object_revoke_removes_inherited_access() {
+    // The security property: an inherited cross-object grant can be REVOKED.
+    let (acp, policy_id) = fs_acp().await;
+    let owner = did_owner();
+
+    // alice is a direct reader on the directory.
+    acp.add_relationship(
+        &owner,
+        Subject::Entity(did_alice()),
+        &policy_id,
+        "directory",
+        "teamdir",
+        "reader",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // Seed the cross-object parent edge so the file inherits directory reads.
+    acp.add_relationship(
+        &owner,
+        Subject::entity_set("directory", "teamdir", ""),
+        &policy_id,
+        "file",
+        "report",
+        "parent",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert!(
+        can_read(&acp, &policy_id, did_alice(), "file", "report").await,
+        "alice reads the file via the cross-object parent edge"
+    );
+
+    // Revoke the cross-object edge through the widened delete API.
+    let deleted = acp
+        .delete_relationship(
+            &owner,
+            Subject::entity_set("directory", "teamdir", ""),
+            &policy_id,
+            "file",
+            "report",
+            "parent",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(deleted, "the cross-object parent edge should be removed");
+
+    // AFTER revoke: alice can no longer reach the file. Access did not leak.
+    assert!(
+        !can_read(&acp, &policy_id, did_alice(), "file", "report").await,
+        "revoking the parent edge must remove inherited file access"
+    );
+}
+
+#[tokio::test]
+async fn local_backend_rejects_cross_object_delete() {
+    // The Local backend stores bare DIDs and cannot represent a cross-object
+    // edge; it must reject a delete of one with a typed UnsupportedSubject error.
+    let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
+    let owner = did_owner();
+    acp.register_doc_object(&owner, "policy1", "file", "report")
+        .await
+        .unwrap();
+
+    let err = acp
+        .delete_relationship(
+            &owner,
+            Subject::entity_set("directory", "teamdir", ""),
+            "policy1",
+            "file",
+            "report",
+            "parent",
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::UnsupportedSubject(_)),
+        "Local backend must reject a cross-object delete subject, got {:?}",
+        err
+    );
+}
+
+#[tokio::test]
 async fn local_backend_rejects_cross_object_subjects() {
     // The Local backend stores bare DIDs and cannot represent a cross-object
     // edge; it must reject one with a typed UnsupportedSubject error.

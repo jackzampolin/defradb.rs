@@ -176,9 +176,12 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
 
         let (policy_id, resource_name) = self.get_policy_info(collection)?;
 
-        let target: identity::Did = target_actor
-            .parse()
-            .map_err(|e| format!("invalid target actor DID: {}", e))?;
+        // Parse the target into a structured subject once, at the edge: an actor
+        // DID, all-actors `*`, a cross-object edge, or a userset. A revoke must
+        // accept every subject a grant accepts, or a cross-object edge could be
+        // granted but never removed.
+        let target = acp::parse_target_subject(target_actor)
+            .map_err(|e| format!("invalid target: {}", e))?;
 
         let managing = self
             .validate_and_get_managing_relations(&policy_id, &resource_name, relation)
@@ -186,9 +189,9 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
 
         let deleted = self
             .acp
-            .delete_actor_relationship(
+            .delete_relationship(
                 requestor,
-                &target,
+                target,
                 &policy_id,
                 &resource_name,
                 doc_id,
