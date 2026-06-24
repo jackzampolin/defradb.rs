@@ -109,6 +109,33 @@ async fn sign_and_broadcast_resets_sequence_after_inclusion_failure() {
     assert_eq!(state.broadcasts.load(Ordering::SeqCst), 2);
 }
 
+#[test]
+fn encode_subject_from_json_encodes_object_subject() {
+    let bytes = encode_subject_from_json(&serde_json::json!({
+        "object": { "resource": "directory", "id": "team" }
+    }));
+
+    let object = decode_field_bytes(&bytes, 4).expect("subject.object");
+    assert_eq!(field_string(&object, 1), "directory");
+    assert_eq!(field_string(&object, 2), "team");
+}
+
+#[test]
+fn encode_subject_from_json_encodes_actor_set_subject() {
+    let bytes = encode_subject_from_json(&serde_json::json!({
+        "actor_set": {
+            "object": { "resource": "directory", "id": "team" },
+            "relation": "reader",
+        }
+    }));
+
+    let actor_set = decode_field_bytes(&bytes, 2).expect("subject.actor_set");
+    let object = decode_field_bytes(&actor_set, 1).expect("actor_set.object");
+    assert_eq!(field_string(&object, 1), "directory");
+    assert_eq!(field_string(&object, 2), "team");
+    assert_eq!(field_string(&actor_set, 2), "reader");
+}
+
 async fn spawn_sourcehub_rpc(state: Arc<RpcState>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -293,4 +320,9 @@ fn test_msg(name: &str) -> Any {
         type_url: format!("/test.{name}"),
         value: Vec::new(),
     }
+}
+
+fn field_string(bytes: &[u8], field: u32) -> String {
+    String::from_utf8(decode_field_bytes(bytes, field).expect("field bytes"))
+        .expect("field should be utf8")
 }

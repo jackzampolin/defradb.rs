@@ -361,8 +361,21 @@ fn encode_subject_from_json(json: &serde_json::Value) -> Vec<u8> {
             encode_string_field(&mut actor_buf, 1, id);
         }
         encode_bytes_field(&mut buf, 1, &actor_buf);
+    } else if let Some(actor_set) = json.get("actor_set") {
+        let mut actor_set_buf = Vec::new();
+        if let Some(obj) = actor_set.get("object") {
+            let obj_bytes = encode_object_from_json(obj);
+            encode_bytes_field(&mut actor_set_buf, 1, &obj_bytes);
+        }
+        if let Some(relation) = actor_set.get("relation").and_then(|v| v.as_str()) {
+            encode_string_field(&mut actor_set_buf, 2, relation);
+        }
+        encode_bytes_field(&mut buf, 2, &actor_set_buf);
     } else if json.get("all_actors").is_some() {
         encode_bytes_field(&mut buf, 3, &[]);
+    } else if let Some(obj) = json.get("object") {
+        let obj_bytes = encode_object_from_json(obj);
+        encode_bytes_field(&mut buf, 4, &obj_bytes);
     }
     buf
 }

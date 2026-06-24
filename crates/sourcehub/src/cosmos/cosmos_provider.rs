@@ -86,6 +86,44 @@ fn subject_to_json(subject: &SubjectRef) -> serde_json::Value {
     }
 }
 
+fn structured_subject_to_json(
+    kind: u8,
+    subject_resource: &str,
+    subject_object_id: &str,
+    subject_relation: &str,
+) -> Result<serde_json::Value, ProviderError> {
+    match kind {
+        2 if !subject_resource.is_empty()
+            && !subject_object_id.is_empty()
+            && subject_relation.is_empty() =>
+        {
+            Ok(serde_json::json!({
+                "object": {
+                    "resource": subject_resource,
+                    "id": subject_object_id,
+                }
+            }))
+        }
+        3 if !subject_resource.is_empty()
+            && !subject_object_id.is_empty()
+            && !subject_relation.is_empty() =>
+        {
+            Ok(serde_json::json!({
+                "actor_set": {
+                    "object": {
+                        "resource": subject_resource,
+                        "id": subject_object_id,
+                    },
+                    "relation": subject_relation,
+                }
+            }))
+        }
+        _ => Err(ProviderError::Unsupported(format!(
+            "unsupported structured subject tuple kind={kind} resource='{subject_resource}' object_id='{subject_object_id}' relation='{subject_relation}'"
+        ))),
+    }
+}
+
 fn resolve_cosmos_bearer_token(
     did: &str,
     authorized_account: &str,
@@ -265,6 +303,86 @@ impl SourceHubProvider for CosmosProvider {
         Ok(record_found)
     }
 
+    async fn set_relationship_subject(
+        &self,
+        bearer_token: &str,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        kind: u8,
+        subject_resource: &str,
+        subject_object_id: &str,
+        subject_relation: &str,
+    ) -> Result<bool, ProviderError> {
+        let subject = structured_subject_to_json(
+            kind,
+            subject_resource,
+            subject_object_id,
+            subject_relation,
+        )?;
+        let cmd = serde_json::json!({
+            "set_relationship_cmd": {
+                "relationship": {
+                    "object": { "resource": resource, "id": object_id },
+                    "relation": relation,
+                    "subject": subject,
+                }
+            }
+        });
+        let result = self
+            .signer
+            .bearer_policy_cmd(&self.client, bearer_token, policy_id, cmd)
+            .await
+            .map_err(|e| ProviderError::Transaction(e.to_string()))?;
+
+        let record_existed = result
+            .get("record_existed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        Ok(!record_existed)
+    }
+
+    async fn delete_relationship_subject(
+        &self,
+        bearer_token: &str,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        kind: u8,
+        subject_resource: &str,
+        subject_object_id: &str,
+        subject_relation: &str,
+    ) -> Result<bool, ProviderError> {
+        let subject = structured_subject_to_json(
+            kind,
+            subject_resource,
+            subject_object_id,
+            subject_relation,
+        )?;
+        let cmd = serde_json::json!({
+            "delete_relationship_cmd": {
+                "relationship": {
+                    "object": { "resource": resource, "id": object_id },
+                    "relation": relation,
+                    "subject": subject,
+                }
+            }
+        });
+        let result = self
+            .signer
+            .bearer_policy_cmd(&self.client, bearer_token, policy_id, cmd)
+            .await
+            .map_err(|e| ProviderError::Transaction(e.to_string()))?;
+
+        let record_found = result
+            .get("record_found")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        Ok(record_found)
+    }
+
     /// Query a policy by ID, using the local cache when available.
     ///
     /// A cache miss (absent or expired entry) always falls back to an on-chain
@@ -349,6 +467,49 @@ mod tests {
                 signing_authorization: None,
             },
         );
+    }
+
+    #[test]
+    fn structured_subject_to_json_encodes_object_edges() {
+        let subject =
+            structured_subject_to_json(2, "directory", "team", "").expect("object subject");
+
+        assert_eq!(
+            subject,
+            serde_json::json!({
+                "object": {
+                    "resource": "directory",
+                    "id": "team",
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn structured_subject_to_json_encodes_usersets() {
+        let subject =
+            structured_subject_to_json(3, "directory", "team", "reader").expect("userset subject");
+
+        assert_eq!(
+            subject,
+            serde_json::json!({
+                "actor_set": {
+                    "object": {
+                        "resource": "directory",
+                        "id": "team",
+                    },
+                    "relation": "reader",
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn structured_subject_to_json_rejects_invalid_tuples() {
+        let err = structured_subject_to_json(2, "directory", "team", "reader")
+            .expect_err("object edges must not carry a relation");
+
+        assert!(matches!(err, ProviderError::Unsupported(_)));
     }
 
     #[test]

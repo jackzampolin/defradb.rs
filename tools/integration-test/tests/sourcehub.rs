@@ -2,6 +2,8 @@
 mod acp_tuning;
 #[path = "sourcehub/compartments.rs"]
 mod compartments;
+#[path = "sourcehub/cross_object.rs"]
+mod cross_object;
 #[path = "sourcehub/encryption_acp.rs"]
 mod encryption_acp;
 #[path = "sourcehub/p2p_acp.rs"]

@@ -475,6 +475,7 @@ impl SourceHubProvider for HubRsProvider {
 
     async fn set_relationship_subject(
         &self,
+        _bearer_token: &str,
         policy_id: &str,
         resource: &str,
         object_id: &str,
@@ -502,6 +503,7 @@ impl SourceHubProvider for HubRsProvider {
 
     async fn delete_relationship_subject(
         &self,
+        _bearer_token: &str,
         policy_id: &str,
         resource: &str,
         object_id: &str,

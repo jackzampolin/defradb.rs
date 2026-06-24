@@ -343,11 +343,13 @@ impl DocumentACP for SourceHubDocumentACP {
                 .await
             }
             Subject::EntitySet { .. } => {
+                let bearer_token = self.create_bearer_token(requestor.as_str()).await?;
                 let (kind, sr, so, srel) =
                     zanzibar::encode_subject(&target).map_err(acp::Error::from)?;
                 let result = self
                     .provider
                     .set_relationship_subject(
+                        &bearer_token,
                         policy_id,
                         resource_name,
                         doc_id,
@@ -391,11 +393,13 @@ impl DocumentACP for SourceHubDocumentACP {
                 .await
             }
             Subject::EntitySet { .. } => {
+                let bearer_token = self.create_bearer_token(requestor.as_str()).await?;
                 let (kind, sr, so, srel) =
                     zanzibar::encode_subject(&target).map_err(acp::Error::from)?;
                 let result = self
                     .provider
                     .delete_relationship_subject(
+                        &bearer_token,
                         policy_id,
                         resource_name,
                         doc_id,
@@ -562,6 +566,7 @@ mod tests {
 
         async fn set_relationship_subject(
             &self,
+            _bearer_token: &str,
             _policy_id: &str,
             _resource: &str,
             _object_id: &str,
@@ -582,6 +587,7 @@ mod tests {
 
         async fn delete_relationship_subject(
             &self,
+            _bearer_token: &str,
             _policy_id: &str,
             _resource: &str,
             _object_id: &str,

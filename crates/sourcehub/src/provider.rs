@@ -96,12 +96,13 @@ pub trait SourceHubProvider: MaybeSendSync {
     /// (`kind` 2 = object edge, `kind` 3 = userset). The `subject_*` fields are
     /// the codec output of [`zanzibar::encode_subject`].
     ///
-    /// Authentication is by the provider's own signing key (no bearer token);
-    /// only backends that implement the typed precompile override this. The
-    /// default rejects with [`ProviderError::Unsupported`].
+    /// Backends that route through SourceHub policy commands may use the bearer
+    /// token; typed-precompile backends may ignore it. The default rejects with
+    /// [`ProviderError::Unsupported`].
     #[allow(clippy::too_many_arguments)]
     async fn set_relationship_subject(
         &self,
+        bearer_token: &str,
         policy_id: &str,
         resource: &str,
         object_id: &str,
@@ -112,6 +113,7 @@ pub trait SourceHubProvider: MaybeSendSync {
         subject_relation: &str,
     ) -> Result<bool, ProviderError> {
         let _ = (
+            bearer_token,
             policy_id,
             resource,
             object_id,
@@ -132,6 +134,7 @@ pub trait SourceHubProvider: MaybeSendSync {
     #[allow(clippy::too_many_arguments)]
     async fn delete_relationship_subject(
         &self,
+        bearer_token: &str,
         policy_id: &str,
         resource: &str,
         object_id: &str,
@@ -142,6 +145,7 @@ pub trait SourceHubProvider: MaybeSendSync {
         subject_relation: &str,
     ) -> Result<bool, ProviderError> {
         let _ = (
+            bearer_token,
             policy_id,
             resource,
             object_id,
