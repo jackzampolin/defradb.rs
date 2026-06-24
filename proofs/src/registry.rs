@@ -249,4 +249,16 @@ pub const PROPERTIES: &[Property] = &[
         model_ref: "IndexMaintenance (lake build)",
         tiers: &[Behavioral, Contract],
     },
+    Property {
+        // `index::index_reconciles_lww_merge_after_restart` drives a restart
+        // partition where two replicas write different values for the same indexed
+        // LWW field. Once the DAG converges, indexed filters must expose exactly
+        // the winning value and no stale seed/loser keys.
+        family: "Index-maintenance consistency",
+        name: "INV_IndexMatchesWinner — indexed filters equal the converged CRDT value",
+        axis: Tla,
+        anchor: "crates/db-merge LWW materialization; crates/db-index on_document_update",
+        model_ref: "MC_IndexReconciliation_Green.cfg",
+        tiers: &[Behavioral],
+    },
 ];
