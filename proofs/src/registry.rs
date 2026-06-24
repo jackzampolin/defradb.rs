@@ -200,6 +200,20 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral, Boundary],
     },
     Property {
+        // `partition::convergence_delete_update_race_preserves_tombstone`
+        // partitions a replicated doc, deletes on one side, updates a mutable field
+        // on the other, then heals and asserts the merged materialized view stays
+        // tombstoned on both replicas. The TLA red leg captures the bad policy:
+        // committing an active update from a stale whole-document snapshot clears
+        // the delete marker.
+        family: "Document materialization status convergence",
+        name: "INV_DeletedMarkerAbsorbs — active rematerialization never clears a tombstone",
+        axis: Tla,
+        anchor: "crates/db-merge/src/merge_handler/composite_persist.rs handle_deletion / persist_merged_document; crates/crdt/src/composite.rs status",
+        model_ref: "MC_DocumentMaterialization_Green.cfg; DefraConvergence.DocumentMaterialization.delete_active_age_converge",
+        tiers: &[Behavioral],
+    },
+    Property {
         // The DID-binding half (a distinct identity cannot impersonate another)
         // IS observed behaviorally by the ACP test (ungranted bob denied). The
         // signer-binding half — forging a malformed / alg-confused token, or one

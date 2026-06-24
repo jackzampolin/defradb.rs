@@ -74,6 +74,8 @@ RUNS=(
   "MC_TwoStoreCounter_Green.cfg     TwoStoreCounter.tla           GREEN" # unified RMW + merged-set dedup -> exact (no loss, no double)
   "MC_MixedFieldMaterialization_Red_WholeDoc.cfg MixedFieldMaterialization.tla RED" # stale whole-doc field merge clobbers another field
   "MC_MixedFieldMaterialization_Green.cfg MixedFieldMaterialization.tla GREEN" # componentwise field materialization preserves mixed product state
+  "MC_DocumentMaterialization_Red_Overwrite.cfg DocumentMaterialization.tla RED" # active rematerialization must not clear delete marker
+  "MC_DocumentMaterialization_Green.cfg DocumentMaterialization.tla GREEN" # deletion marker is componentwise/absorbing
   "MC_InteractiveTxnCounter_Green.cfg MC_InteractiveTxnCounter_Common.tla GREEN" # #1044: gate On + commit-only finalize -> deadlock-free + gate never held across idle
   "MC_InteractiveTxnCounter_Red_NoGate.cfg MC_InteractiveTxnCounter_Common.tla RED" # gate Off -> arbitrary-order batch vs finalize circular-wait DEADLOCK (gate is load-bearing)
   "MC_InteractiveTxnCounter_Red_AcrossLifetime.cfg MC_InteractiveTxnCounter_Common.tla RED" # #1041 old path: gate held across user-controlled idle lifetime (INV_GateBoundedHold)

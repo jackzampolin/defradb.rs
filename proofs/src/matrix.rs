@@ -23,6 +23,7 @@ pub const MODELED_FAMILIES: &[&str] = &[
     "P2P explicit-replay capability gate",
     "NAC lifecycle privilege-escalation",
     "Transaction & merge-queue concurrency",
+    "Document materialization status convergence",
     "JWT issuer / algorithm binding",
     "CID content-addressing determinism + Block canonicalization",
     "Deferred-ACP overlay consistency",
