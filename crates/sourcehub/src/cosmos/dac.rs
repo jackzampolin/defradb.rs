@@ -464,8 +464,8 @@ mod tests {
     struct RelationshipCalls {
         set_relationship: bool,
         delete_relationship: bool,
-        set_subject: Option<(u8, String, String, String)>,
-        delete_subject: Option<(u8, String, String, String)>,
+        set_subject: Option<(String, u8, String, String, String)>,
+        delete_subject: Option<(String, u8, String, String, String)>,
     }
 
     struct MockProvider {
@@ -566,7 +566,7 @@ mod tests {
 
         async fn set_relationship_subject(
             &self,
-            _bearer_token: &str,
+            bearer_token: &str,
             _policy_id: &str,
             _resource: &str,
             _object_id: &str,
@@ -577,6 +577,7 @@ mod tests {
             subject_relation: &str,
         ) -> std::result::Result<bool, ProviderError> {
             self.rel_calls.lock().unwrap().set_subject = Some((
+                bearer_token.to_string(),
                 kind,
                 subject_resource.to_string(),
                 subject_object_id.to_string(),
@@ -587,7 +588,7 @@ mod tests {
 
         async fn delete_relationship_subject(
             &self,
-            _bearer_token: &str,
+            bearer_token: &str,
             _policy_id: &str,
             _resource: &str,
             _object_id: &str,
@@ -598,6 +599,7 @@ mod tests {
             subject_relation: &str,
         ) -> std::result::Result<bool, ProviderError> {
             self.rel_calls.lock().unwrap().delete_subject = Some((
+                bearer_token.to_string(),
                 kind,
                 subject_resource.to_string(),
                 subject_object_id.to_string(),
@@ -801,7 +803,13 @@ mod tests {
         );
         assert_eq!(
             calls.set_subject,
-            Some((2, "directory".to_string(), "d1".to_string(), String::new()))
+            Some((
+                "mock.bearer.token".to_string(),
+                2,
+                "directory".to_string(),
+                "d1".to_string(),
+                String::new()
+            ))
         );
     }
 
@@ -827,6 +835,7 @@ mod tests {
         assert_eq!(
             calls.set_subject,
             Some((
+                "mock.bearer.token".to_string(),
                 3,
                 "directory".to_string(),
                 "d1".to_string(),
@@ -857,7 +866,13 @@ mod tests {
         assert!(!calls.delete_relationship);
         assert_eq!(
             calls.delete_subject,
-            Some((2, "directory".to_string(), "d1".to_string(), String::new()))
+            Some((
+                "mock.bearer.token".to_string(),
+                2,
+                "directory".to_string(),
+                "d1".to_string(),
+                String::new()
+            ))
         );
     }
 
