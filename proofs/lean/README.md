@@ -28,6 +28,7 @@ The model proves:
 | `CrdtField.dup_absorb` / `nonidem_has_dup_witness` | Idempotence is the dedup dividing line: idempotent ⇒ re-delivery-safe (no dedup); ¬idempotent ⇒ a duplicate changes the result (must dedup). | — |
 | `CounterReconcile.counterCM` + `counter_not_idempotent`; `PriorityReconcile.lwwCM` + `lww_idempotent` | Both fields fully instantiate the core: the counter (op-based, `Int +`, **not** idempotent ⇒ must apply each delta once — the algebraic root of the #4935 double-apply) and LWW (state-based join, **idempotent** ⇒ re-delivery-safe). | `crates/crdt/src/{counter,lww}.rs` |
 | `MixedField.mixedCM` + `mixed_two_converge` / `mixed_three_converge` + `mixed_not_idempotent` | Same-document `Counter × LWW` is a componentwise product of the two #1041 field instances. It converges when both components receive the same operations, but the product is still non-idempotent because the counter component still needs exactly-once dedup. The cross-field stale whole-document materialization hazard is modeled red/green by `MixedFieldMaterialization.tla`. | `crates/crdt/src/composite.rs`; `crates/crdt/src/{counter,lww}.rs` |
+| `DocumentMaterialization.active_age_after_delete_keeps_deleted` / `delete_active_age_converge` | Document status is a component of materialization: active field rematerialization may update retained bytes, but cannot clear a tombstone. | `crates/db-merge/src/merge_handler/composite_persist.rs`; `crates/crdt/src/composite.rs` |
 
 `#print axioms` status checked with Lean 4.18:
 
@@ -62,6 +63,8 @@ Field instantiations:
 - `MixedField.mixed_three_converge`: `[propext, Classical.choice, Quot.sound]`
 - `MixedField.mixed_not_idempotent`: `[propext, Classical.choice, Quot.sound]`
 - `MixedField.mixed_lww_component_dup_safe`: `[propext, Classical.choice, Quot.sound]`
+- `DocumentMaterialization.active_age_after_delete_keeps_deleted`: *(no axioms)*
+- `DocumentMaterialization.delete_active_age_converge`: *(no axioms)*
 
 `nonidem_has_dup_witness` is the generic core's only classical lemma (it pulls in
 `Classical.choice` via `Classical.byContradiction`), and it is the trivial

@@ -20,7 +20,7 @@ Status of the effort across the 40-crate surface, from the per-crate survey in
 are plumbing covered by integration tests / Go-FFI parity / unit tests. The point of this
 section is the **diff**: what is proven vs. the accepted gap.
 
-### Modeled — 18 families (proven)
+### Modeled — 19 families (proven)
 | Family | Tool | Crates it covers |
 |---|---|---|
 | B3 filtered replication | TLA+ | p2p, db-merge |
@@ -36,6 +36,7 @@ section is the **diff**: what is proven vs. the accepted gap.
 | P2P explicit-replay capability gate | TLA+ | p2p |
 | NAC lifecycle privilege-escalation | TLA+ | acp, db-nac |
 | Transaction & merge-queue concurrency | TLA+ | db, db-merge |
+| Document materialization status convergence | TLA+ & Lean | db-merge, crdt, db |
 | JWT issuer / algorithm binding | TLA+ | identity |
 | CID content-addressing determinism + Block canonicalization | Lean | defra-core |
 | Deferred-ACP overlay consistency | TLA+ | query-plan |
@@ -94,7 +95,7 @@ substrate) — so a green run never reads as "this was proven against the
 artifact." `matrix::every_modeled_family_is_bound` fails if a model lands without
 a binding.
 
-### Realized status — all 18 families bound
+### Realized status — all 19 families bound
 
 **18 behavioral tests** (driven against `target/release/defra`, each break-tested
 for non-vacuity), **2 Lean-axis contract bindings**, **6 honest Boundaries** (one,
@@ -116,6 +117,7 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 | Management-channel auth (NAC gate) | Behavioral | `nac.rs` |
 | NAC lifecycle priv-escalation | Behavioral | `nac_lifecycle.rs` |
 | Transaction & merge-queue concurrency | Behavioral + Boundary | `partition::convergence_concurrent_same_doc_merge_storm` (no-loss/no-double-apply exact-sum oracle); `partition::{convergence_concurrent_mixed_lww_and_counter_fields_merge,convergence_restart_mixed_lww_and_counter_fields_merge,convergence_mixed_lww_and_counter_3node_full_mesh}` (mixed Counter×LWW exact-state); `MC_MixedFieldMaterialization_{Red_WholeDoc,Green}`; the internal "≤1 worker in the critical section" + txn-registry sweep stay Boundary |
+| Document materialization status convergence | Behavioral | `partition::convergence_delete_update_race_preserves_tombstone`; `MC_DocumentMaterialization_{Red_Overwrite,Green}`; `DefraConvergence.DocumentMaterialization` |
 | Deferred-ACP overlay | Behavioral | `deferred_acp.rs` (txn-local gating) |
 | CID determinism | Behavioral | `cid.rs` |
 | Index-maintenance | Behavioral | `index.rs` (single-node create/update/delete + indexed LWW restart/merge reconciliation); `MC_IndexReconciliation_{Red_SaveOnly,Green}` |

@@ -21,6 +21,8 @@ grounded facts for B3 live in [DESIGN.md](DESIGN.md); each later slice has its o
   (`MixedFieldMaterialization_DESIGN.md`).
 - **Index reconciliation** — secondary indexes track the winning CRDT value
   (`IndexReconciliation.tla`).
+- **Document materialization status** — delete/update status stays componentwise
+  (`DocumentMaterialization.tla`).
 
 Run all configured models at once with `./run-all.sh` (red/green oracle, exits non-zero on mismatch).
 

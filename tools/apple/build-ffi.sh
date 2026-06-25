@@ -22,10 +22,20 @@ require_tool() {
     fi
 }
 
+require_sdk() {
+    if ! xcrun --sdk "$1" --show-sdk-path >/dev/null 2>&1; then
+        echo "missing required Apple SDK: $1" >&2
+        echo "select a full Xcode installation with iOS platform support" >&2
+        exit 1
+    fi
+}
+
 require_tool cargo
 require_tool rustup
 require_tool cbindgen
 require_tool xcrun
+require_sdk iphoneos
+require_sdk iphonesimulator
 
 rm -rf "$OUT_DIR/include" "$OUT_DIR/lib" "$OUT_DIR/xcframework" "$SWIFT_PACKAGE_DIR"
 mkdir -p "$OUT_DIR/include" "$OUT_DIR/lib" "$OUT_DIR/xcframework" "$SWIFT_PACKAGE_DIR"
