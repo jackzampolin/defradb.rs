@@ -109,12 +109,12 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install protobuf
 
-      - name: Exclude tools with private deps from workspace
+      - name: Exclude workspace members with private deps
         run: |
           if [[ "$OSTYPE" == "darwin"* ]]; then
-            sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+            sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
           else
-            sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+            sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
           fi
 
       - name: Build
@@ -165,8 +165,8 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - name: Exclude tools with private deps from workspace
-        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+      - name: Exclude workspace members with private deps
+        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
 
       - name: Install wasm-pack
         run: cargo install wasm-pack
@@ -293,12 +293,12 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install protobuf
 
-      - name: Exclude tools with private deps from workspace
+      - name: Exclude workspace members with private deps
         run: |
           if [[ "$OSTYPE" == "darwin"* ]]; then
-            sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+            sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
           else
-            sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+            sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
           fi
 
       - name: Install cbindgen
@@ -353,8 +353,8 @@ jobs:
       - name: Install system dependencies
         run: brew install protobuf
 
-      - name: Exclude tools with private deps from workspace
-        run: sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+      - name: Exclude workspace members with private deps
+        run: sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
 
       - name: Install cbindgen
         run: cargo install cbindgen
