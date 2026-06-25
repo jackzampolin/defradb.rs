@@ -22,10 +22,22 @@ fn node_addr(cluster: &TestCluster, index: usize) -> String {
 
 fn wire_user(cluster: &TestCluster) {
     let (a0, a1) = (node_addr(cluster, 0), node_addr(cluster, 1));
-    cluster.client(0).p2p_connect(&[a1.as_str()]).ok();
-    cluster.client(1).p2p_connect(&[a0.as_str()]).ok();
-    cluster.client(0).p2p_collection_add(&["User"]).ok();
-    cluster.client(1).p2p_collection_add(&["User"]).ok();
+    cluster
+        .client(0)
+        .p2p_connect(&[a1.as_str()])
+        .expect("connect node0->node1");
+    cluster
+        .client(1)
+        .p2p_connect(&[a0.as_str()])
+        .expect("connect node1->node0");
+    cluster
+        .client(0)
+        .p2p_collection_add(&["User"])
+        .expect("subscribe node0 to User");
+    cluster
+        .client(1)
+        .p2p_collection_add(&["User"])
+        .expect("subscribe node1 to User");
     cluster
         .client(0)
         .p2p_replicator_set(&["User"], &a1)
@@ -38,18 +50,30 @@ fn wire_user(cluster: &TestCluster) {
 
 fn rewire_user(cluster: &TestCluster) {
     let (a0, a1) = (node_addr(cluster, 0), node_addr(cluster, 1));
-    cluster.client(0).p2p_connect(&[a1.as_str()]).ok();
-    cluster.client(1).p2p_connect(&[a0.as_str()]).ok();
-    cluster.client(0).p2p_collection_add(&["User"]).ok();
-    cluster.client(1).p2p_collection_add(&["User"]).ok();
+    cluster
+        .client(0)
+        .p2p_connect(&[a1.as_str()])
+        .expect("rewire connect node0->node1");
+    cluster
+        .client(1)
+        .p2p_connect(&[a0.as_str()])
+        .expect("rewire connect node1->node0");
+    cluster
+        .client(0)
+        .p2p_collection_add(&["User"])
+        .expect("rewire subscribe node0 to User");
+    cluster
+        .client(1)
+        .p2p_collection_add(&["User"])
+        .expect("rewire subscribe node1 to User");
     cluster
         .client(0)
         .p2p_replicator_delete(&["User"], Some(&a1))
-        .ok();
+        .expect("rewire delete stale replicator 0->1");
     cluster
         .client(1)
         .p2p_replicator_delete(&["User"], Some(&a0))
-        .ok();
+        .expect("rewire delete stale replicator 1->0");
     cluster
         .client(0)
         .p2p_replicator_set(&["User"], &a1)
@@ -94,10 +118,34 @@ fn indexed_lww_state(node: &DefraClient) -> (i64, usize, usize, usize) {
     )
 }
 
-fn index_filter_uses_index(node: &DefraClient) -> bool {
-    node.query("query @explain(type: simple) { User(filter: {age: {_eq: 99}}) { name } }")
-        .map(|v| v.to_string().to_lowercase().contains("index"))
-        .unwrap_or(false)
+fn contains_indexed_user_scan(value: &Value) -> bool {
+    match value {
+        Value::Object(obj) => {
+            if let Some(scan) = obj.get("scanNode").and_then(Value::as_object) {
+                let scans_user = scan.get("collectionName").and_then(Value::as_str) == Some("User");
+                let has_index = scan
+                    .get("indexName")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| !name.is_empty());
+                if scans_user && has_index {
+                    return true;
+                }
+            }
+            obj.values().any(contains_indexed_user_scan)
+        }
+        Value::Array(items) => items.iter().any(contains_indexed_user_scan),
+        _ => false,
+    }
+}
+
+fn assert_age_filter_uses_index(node: &DefraClient, context: &str) {
+    let explain = node
+        .query("query @explain(type: simple) { User(filter: {age: {_eq: 99}}) { name } }")
+        .expect("explain indexed age filter");
+    assert!(
+        contains_indexed_user_scan(&explain),
+        "{context} age filter must plan a User scanNode with indexName; explain={explain}"
+    );
 }
 
 async fn poll_index_matches_winner(node: &DefraClient, timeout: Duration) -> bool {
@@ -206,10 +254,7 @@ async fn index_reconciles_lww_merge_after_restart() {
         poll_age(&cluster.client(1), 10, Duration::from_secs(20)).await,
         "seed document must replicate to node1 before the indexed LWW partition"
     );
-    assert!(
-        index_filter_uses_index(&cluster.client(0)),
-        "age filter must exercise the secondary index, not just a full scan"
-    );
+    assert_age_filter_uses_index(&cluster.client(0), "pre-replay node0");
 
     cluster
         .restart_node(1, Duration::from_secs(30))
@@ -250,5 +295,6 @@ async fn index_reconciles_lww_merge_after_restart() {
                 indexed_lww_state(&cluster.client(n))
             );
         }
+        assert_age_filter_uses_index(&cluster.client(n), &format!("post-replay node{n}"));
     }
 }
