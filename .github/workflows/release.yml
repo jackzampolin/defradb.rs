@@ -205,43 +205,43 @@ jobs:
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
-            features: ""
+            features: "--features iroh"
           - variant: redb
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: ""
+            features: "--features iroh"
           - variant: redb
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: ""
+            features: "--features iroh"
           - variant: redb
             target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: ""
+            features: "--features iroh"
           # rocksdb
           - variant: rocksdb
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
-            features: "--features rocksdb"
+            features: "--features rocksdb,iroh"
           - variant: rocksdb
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--features rocksdb"
+            features: "--features rocksdb,iroh"
           - variant: rocksdb
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--features rocksdb"
+            features: "--features rocksdb,iroh"
           - variant: rocksdb
             target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--features rocksdb"
+            features: "--features rocksdb,iroh"
     steps:
       - uses: actions/checkout@v4
 
@@ -332,6 +332,63 @@ jobs:
           git checkout -- .
           git clean -fd
 
+  build-apple-ffi:
+    name: FFI iOS XCFramework
+    runs-on: ["self-hosted", "macOS", "ARM64", "studio"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-apple-ffi"
+          shared-key: "ios"
+
+      - name: Install system dependencies
+        run: brew install protobuf
+
+      - name: Exclude tools with private deps from workspace
+        run: sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+
+      - name: Install cbindgen
+        run: cargo install cbindgen
+
+      - name: Build Apple FFI
+        env:
+          FEATURES: iroh
+          OUT_DIR: ${{ github.workspace }}/target/apple-ffi
+        run: |
+          if command -v protoc >/dev/null 2>&1; then
+            export PROTOC="$(command -v protoc)"
+          fi
+          tools/apple/build-ffi.sh
+
+      - name: Package
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ARCHIVE="defra-ffi-iroh_${TAG}_ios_xcframework.tar.gz"
+          tar czf "${ARCHIVE}" -C target/apple-ffi include lib xcframework swift
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: defra-ffi-iroh-ios_xcframework
+          path: ${{ env.ARCHIVE }}
+
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git checkout -- .
+          git clean -fd
+
   docker:
     name: Docker
     needs: build
@@ -376,8 +433,14 @@ jobs:
 
   release:
     name: Release
-    needs: [build, build-ffi, build-wasm, docker]
-    if: always() && needs.build.result == 'success'
+    needs: [build, build-ffi, build-apple-ffi, build-wasm, docker]
+    if: >-
+      always() &&
+      needs.build.result == 'success' &&
+      needs['build-ffi'].result == 'success' &&
+      needs['build-apple-ffi'].result == 'success' &&
+      needs['build-wasm'].result == 'success' &&
+      needs.docker.result == 'success'
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/download-artifact@v4
