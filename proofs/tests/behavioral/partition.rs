@@ -73,6 +73,75 @@ async fn poll_field_state(node: &DefraClient, age: i64, city: &str, timeout: Dur
     }
 }
 
+fn user_age(node: &DefraClient) -> i64 {
+    node.query("query { User { age } }").unwrap_or_default()["User"]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .and_then(|doc| doc["age"].as_i64())
+        .unwrap_or(-1)
+}
+
+async fn poll_user_age(node: &DefraClient, age: i64, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if user_age(node) == age {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn visible_user_docs(node: &DefraClient) -> Vec<serde_json::Value> {
+    node.query("query { User { _docID age } }")
+        .unwrap_or_default()["User"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn show_deleted_user_docs(node: &DefraClient) -> Vec<serde_json::Value> {
+    node.query("query { User(showDeleted: true) { _docID age _deleted } }")
+        .unwrap_or_default()["User"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn delete_materialized(node: &DefraClient, doc_id: &str) -> bool {
+    let visible_has_doc = visible_user_docs(node)
+        .iter()
+        .any(|doc| doc["_docID"].as_str() == Some(doc_id));
+    let tombstone = show_deleted_user_docs(node)
+        .into_iter()
+        .find(|doc| doc["_docID"].as_str() == Some(doc_id));
+
+    !visible_has_doc && tombstone.as_ref().and_then(|doc| doc["_deleted"].as_bool()) == Some(true)
+}
+
+async fn poll_delete_materialized(node: &DefraClient, doc_id: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if delete_materialized(node, doc_id) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn delete_materialization_state(node: &DefraClient) -> String {
+    format!(
+        "visible={:?}, showDeleted={:?}",
+        visible_user_docs(node),
+        show_deleted_user_docs(node)
+    )
+}
+
 #[tokio::test]
 async fn convergence_partition_both_directions_merge() {
     let mut cluster = TestCluster::builder()
@@ -446,6 +515,30 @@ fn wire_full_mesh(cluster: &TestCluster, nodes: usize, collection: &str) {
                 .expect("replicator set");
         }
     }
+}
+
+fn rewire_bidirectional(cluster: &TestCluster, collection: &str) {
+    let (a0, a1) = (node_addr(cluster, 0), node_addr(cluster, 1));
+    cluster.client(0).p2p_connect(&[a1.as_str()]).ok();
+    cluster.client(1).p2p_connect(&[a0.as_str()]).ok();
+    cluster.client(0).p2p_collection_add(&[collection]).ok();
+    cluster.client(1).p2p_collection_add(&[collection]).ok();
+    cluster
+        .client(0)
+        .p2p_replicator_delete(&[collection], Some(&a1))
+        .ok();
+    cluster
+        .client(1)
+        .p2p_replicator_delete(&[collection], Some(&a0))
+        .ok();
+    cluster
+        .client(0)
+        .p2p_replicator_set(&[collection], &a1)
+        .expect("rewire replicator 0->1");
+    cluster
+        .client(1)
+        .p2p_replicator_set(&[collection], &a0)
+        .expect("rewire replicator 1->0");
 }
 
 fn mixed_state(node: &DefraClient) -> (String, i64) {
@@ -1233,6 +1326,91 @@ async fn run_mixed_lww_counter_merge(restart_node: Option<usize>) {
         mixed_state(&cluster.client(0)),
         mixed_state(&cluster.client(1)),
         "replicas must materialize identical mixed-field state"
+    );
+}
+
+/// Delete-vs-active-update materialization convergence. While partitioned, node0
+/// deletes a document and node1 updates a mutable field on that same document.
+/// After reconnect the active update may rematerialize retained bytes, but it
+/// must not overwrite the deletion marker back to visible.
+#[tokio::test]
+async fn convergence_delete_update_race_preserves_tombstone() {
+    let mut cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_store("redb")
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("build 2-node p2p cluster");
+
+    let schema = "type User { name: String  age: Int }";
+    cluster.client(0).schema_add(schema).expect("schema node0");
+    cluster.client(1).schema_add(schema).expect("schema node1");
+    wire_bidirectional(&cluster, "User");
+
+    let created = cluster
+        .client(0)
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID } }"#)
+        .expect("create");
+    let id = created["add_User"][0]["_docID"]
+        .as_str()
+        .expect("_docID")
+        .to_string();
+    assert!(
+        poll_user_age(&cluster.client(1), 30, Duration::from_secs(20)).await,
+        "seed document must replicate to node1 before the delete/update partition"
+    );
+
+    cluster
+        .restart_node(1, Duration::from_secs(30))
+        .await
+        .expect("restart node1");
+
+    cluster
+        .client(0)
+        .query(&format!(
+            r#"mutation {{ delete_User(docID: "{id}") {{ _docID }} }}"#
+        ))
+        .expect("node0 deletes document");
+    cluster
+        .client(1)
+        .query(&format!(
+            r#"mutation {{ update_User(docID: "{id}", input: {{age: 99}}) {{ _docID }} }}"#
+        ))
+        .expect("node1 updates document while partitioned");
+
+    rewire_bidirectional(&cluster, "User");
+    assert!(
+        support::poll_dags_converged(
+            &cluster.client(0),
+            &cluster.client(1),
+            &id,
+            Duration::from_secs(40)
+        )
+        .await,
+        "delete/update DAGs did not converge; node0={:?} node1={:?}",
+        support::commit_cids(&cluster.client(0), &id),
+        support::commit_cids(&cluster.client(1), &id)
+    );
+
+    if !poll_delete_materialized(&cluster.client(0), &id, Duration::from_secs(30)).await {
+        panic!(
+            "node0 cleared or lost the tombstone after delete/update merge; {}",
+            delete_materialization_state(&cluster.client(0))
+        );
+    }
+    if !poll_delete_materialized(&cluster.client(1), &id, Duration::from_secs(30)).await {
+        panic!(
+            "node1 cleared or lost the tombstone after delete/update merge; {}",
+            delete_materialization_state(&cluster.client(1))
+        );
+    }
+    assert_eq!(
+        show_deleted_user_docs(&cluster.client(0)),
+        show_deleted_user_docs(&cluster.client(1)),
+        "replicas must expose the same tombstoned materialized document"
     );
 }
 

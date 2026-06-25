@@ -19,6 +19,8 @@ grounded facts for B3 live in [DESIGN.md](DESIGN.md); each later slice has its o
   Lean half under [`../lean/`](../lean/README.md).
 - **Mixed-field materialization** — Counter×LWW componentwise document state
   (`MixedFieldMaterialization_DESIGN.md`).
+- **Document materialization status** — delete/update status stays componentwise
+  (`DocumentMaterialization.tla`).
 
 Run all configured models at once with `./run-all.sh` (red/green oracle, exits non-zero on mismatch).
 
