@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use identity::Did;
 use lens::{LensConfig, TransformId};
 use schema::CollectionVersion;
 
@@ -10,20 +11,33 @@ use crate::SchemaOps;
 pub(crate) struct DbSchemaOps<S: storage::corekv::Store + 'static> {
     database: Arc<db::DB<S>>,
     query_limits: query::QueryLimits,
+    document_acp: Arc<dyn acp::DocumentACP>,
 }
 
 impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
-    pub(crate) fn new(database: Arc<db::DB<S>>, query_limits: query::QueryLimits) -> Self {
+    pub(crate) fn new(
+        database: Arc<db::DB<S>>,
+        query_limits: query::QueryLimits,
+        document_acp: Arc<dyn acp::DocumentACP>,
+    ) -> Self {
         Self {
             database,
             query_limits,
+            document_acp,
         }
+    }
+
+    fn current_identity() -> Option<Did> {
+        defra_core::current_identity::try_get_scoped_identity()
+            .or_else(defra_core::current_identity::get_current_identity)
+            .and_then(|did| Did::new(did).ok())
     }
 }
 
 #[async_trait::async_trait]
 impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
     async fn add_schema(&self, sdl: &str) -> anyhow::Result<()> {
+        let creator = Self::current_identity();
         self.database
             .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
             .await
@@ -36,9 +50,24 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
             .map_err(|e| anyhow::anyhow!("schema validation error: {}", e))?;
 
         for collection in collections {
+            let collection_name = collection.name.clone();
             db::DB::create_collection(&self.database, collection)
                 .await
                 .map_err(|e| anyhow::anyhow!("create collection error: {}", e))?;
+            let finalized = self
+                .database
+                .get_collection(&collection_name)
+                .map_err(anyhow::Error::new)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("created collection '{}' was not cached", collection_name)
+                })?;
+            db::register_collection_if_needed(
+                self.document_acp.as_ref(),
+                creator.as_ref(),
+                finalized.schema(),
+            )
+            .await
+            .map_err(anyhow::Error::new)?;
         }
         Ok(())
     }
@@ -92,10 +121,22 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
             }
         }
 
-        self.database
+        let finalized = self
+            .database
             .create_collections_atomic(collections)
             .await
             .map_err(|e| anyhow::anyhow!("create view collection error: {}", e))?;
+
+        let creator = Self::current_identity();
+        for collection in &finalized {
+            db::register_collection_if_needed(
+                self.document_acp.as_ref(),
+                creator.as_ref(),
+                collection,
+            )
+            .await
+            .map_err(anyhow::Error::new)?;
+        }
 
         if !materialized_names.is_empty() {
             self.database

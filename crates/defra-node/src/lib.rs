@@ -1288,7 +1288,7 @@ impl NodeBuilder {
         let query_runner =
             query::QueryRunner::with_arc_registry_and_provider(fetcher, provider, registry)
                 .with_mutator(mutator)
-                .with_acp(document_acp)
+                .with_acp(document_acp.clone())
                 .with_lens_store(database.lens_store().clone())
                 .with_query_limits(query_limits);
         let query_runner = if let Some(timeout) = query_timeout {
@@ -1298,8 +1298,11 @@ impl NodeBuilder {
         };
 
         let runner: Arc<dyn QueryExecutor> = Arc::new(query_runner);
-        let schema_ops: Arc<dyn SchemaOps> =
-            Arc::new(db_impls::DbSchemaOps::new(database.clone(), query_limits));
+        let schema_ops: Arc<dyn SchemaOps> = Arc::new(db_impls::DbSchemaOps::new(
+            database.clone(),
+            query_limits,
+            document_acp,
+        ));
 
         #[cfg(feature = "p2p")]
         let (p2p_ops, p2p_lifecycle) = match p2p_result {

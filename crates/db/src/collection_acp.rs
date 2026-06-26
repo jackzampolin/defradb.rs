@@ -107,6 +107,46 @@ pub async fn register_doc_if_needed(
         .await
 }
 
+/// Register a branchable collection as an ACP object after creation.
+///
+/// Only registers if:
+/// 1. Collection is branchable
+/// 2. Collection has a policy
+/// 3. Identity is provided
+///
+/// The ACP object id is the stable collection ID. Re-registering an existing
+/// collection object is a no-op: the same collection can be defined on multiple
+/// nodes backed by a shared ACP store.
+pub async fn register_collection_if_needed(
+    acp: &dyn DocumentACP,
+    identity: Option<&Did>,
+    collection: &CollectionVersion,
+) -> acp::Result<()> {
+    if !collection.is_branchable {
+        return Ok(());
+    }
+
+    let (policy, did) = match (&collection.policy, identity) {
+        (Some(p), Some(id)) => (p, id),
+        _ => return Ok(()),
+    };
+
+    if acp
+        .is_doc_registered(&policy.id, &policy.resource_name, &collection.collection_id)
+        .await?
+    {
+        return Ok(());
+    }
+
+    acp.register_object(
+        did,
+        &policy.id,
+        &policy.resource_name,
+        &collection.collection_id,
+    )
+    .await
+}
+
 /// Clean up ACP relations when deleting a document.
 ///
 /// This should be called when deleting a document to remove all
@@ -199,6 +239,11 @@ impl AcpContext {
         doc_id: &str,
     ) -> acp::Result<()> {
         register_doc_if_needed(self.acp.as_ref(), self.identity.did(), collection, doc_id).await
+    }
+
+    /// Register a branchable collection after creation.
+    pub async fn register_collection(&self, collection: &CollectionVersion) -> acp::Result<()> {
+        register_collection_if_needed(self.acp.as_ref(), self.identity.did(), collection).await
     }
 }
 

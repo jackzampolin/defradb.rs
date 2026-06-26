@@ -107,8 +107,8 @@ pub use block_builder::{build_blocks_from_document, BlockResult};
 pub use collection::{collection_short_id, Collection};
 pub use collection_acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
-    register_doc_if_needed, unregister_doc_if_needed, warn_on_unsafe_policy_transition, AcpContext,
-    PolicyTransitionCheck,
+    register_collection_if_needed, register_doc_if_needed, unregister_doc_if_needed,
+    warn_on_unsafe_policy_transition, AcpContext, PolicyTransitionCheck,
 };
 pub use collection_cache::CollectionCache;
 pub use collection_name::CollectionName;

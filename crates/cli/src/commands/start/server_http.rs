@@ -150,6 +150,7 @@ impl Node {
             Some(acp) => crate::schema_adapter::SchemaAdapter::new_arc_with_acp(
                 database.clone(),
                 acp.clone(),
+                acp_setup.document_acp.clone(),
             ),
             None => crate::schema_adapter::SchemaAdapter::new_arc(database.clone()),
         };
@@ -170,8 +171,14 @@ impl Node {
         server = server.with_collection_mgmt_arc(collection_mgmt_adapter);
         info!("Collection management HTTP endpoints enabled");
 
-        let txn_adapter =
-            crate::txn_adapter::TxnRegistryAdapter::new_arc(query_setup.registry.clone());
+        let txn_adapter = if config.acp.document_type != AcpDocumentType::None {
+            crate::txn_adapter::TxnRegistryAdapter::new_arc_with_acp(
+                query_setup.registry.clone(),
+                acp_setup.document_acp.clone(),
+            )
+        } else {
+            crate::txn_adapter::TxnRegistryAdapter::new_arc(query_setup.registry.clone())
+        };
         server = server.with_txn_ops_arc(txn_adapter);
         info!("Transaction-scoped HTTP endpoints enabled");
 
@@ -243,7 +250,11 @@ impl Node {
                     db::node_access_checker(database.clone()),
                 )
             });
-            crate::schema_adapter::SchemaAdapter::new_pg_arc_with_acp(database, acp_adapter)
+            crate::schema_adapter::SchemaAdapter::new_pg_arc_with_acp(
+                database,
+                acp_adapter,
+                acp_setup.document_acp.clone(),
+            )
         } else {
             crate::schema_adapter::SchemaAdapter::new_pg_arc(database)
         };

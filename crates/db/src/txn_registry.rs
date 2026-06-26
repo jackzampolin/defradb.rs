@@ -517,6 +517,19 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         txn_id: &str,
         sdl: &str,
     ) -> Result<Vec<schema::CollectionVersion>> {
+        self.add_schema_in_txn_with_acp(txn_id, sdl, None, None)
+            .await
+    }
+
+    /// Add a schema within an existing transaction, optionally registering
+    /// branchable collection ACP objects after the storage commit succeeds.
+    pub async fn add_schema_in_txn_with_acp(
+        &self,
+        txn_id: &str,
+        sdl: &str,
+        document_acp: Option<Arc<dyn acp::DocumentACP>>,
+        creator: Option<identity::Did>,
+    ) -> Result<Vec<schema::CollectionVersion>> {
         let ctx = self
             .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
@@ -552,6 +565,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         // Register on_success callback to update the process-wide cache after commit
         let db = self.db.clone();
         let schemas_for_cache = finalized.clone();
+        let schemas_for_acp = finalized.clone();
         txn.on_success(Box::new(move || {
             for schema in &schemas_for_cache {
                 let _ = db.unforbid_collection_id(&schema.collection_id);
@@ -562,6 +576,56 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                 }
             }
         }))?;
+
+        if let (Some(document_acp), Some(creator)) = (document_acp, creator) {
+            let request_bearer_token =
+                defra_core::signing::get_request_bearer_token(creator.as_str());
+            txn.on_success_async(Box::new(move || {
+                let document_acp = document_acp.clone();
+                let creator = creator.clone();
+                let schemas = schemas_for_acp.clone();
+                let request_bearer_token = request_bearer_token.clone();
+                Box::pin(async move {
+                    let previous_token = request_bearer_token.as_ref().map(|token| {
+                        let previous =
+                            defra_core::signing::get_request_bearer_token(creator.as_str());
+                        defra_core::signing::set_request_bearer_token(
+                            creator.as_str(),
+                            token.clone(),
+                        );
+                        previous
+                    });
+
+                    for schema in &schemas {
+                        if let Err(error) = crate::collection_acp::register_collection_if_needed(
+                            document_acp.as_ref(),
+                            Some(&creator),
+                            schema,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                collection = %schema.name,
+                                collection_id = %schema.collection_id,
+                                error = %error,
+                                "Deferred ACP collection registration failed after commit"
+                            );
+                        }
+                    }
+
+                    if request_bearer_token.is_some() {
+                        if let Some(Some(previous)) = previous_token {
+                            defra_core::signing::set_request_bearer_token(
+                                creator.as_str(),
+                                previous,
+                            );
+                        } else {
+                            defra_core::signing::clear_request_bearer_token(creator.as_str());
+                        }
+                    }
+                })
+            }))?;
+        }
 
         Ok(finalized)
     }

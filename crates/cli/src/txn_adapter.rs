@@ -10,17 +10,33 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use defra_http::router::TransactionOperations;
+use identity::Did;
 use storage::corekv::Store;
 
 /// Adapter that implements TransactionOperations using a shared DbTransactionRegistry.
 pub struct TxnRegistryAdapter<S: Store> {
     registry: Arc<db::DbTransactionRegistry<S>>,
+    document_acp: Option<Arc<dyn acp::DocumentACP>>,
 }
 
 impl<S: Store + 'static> TxnRegistryAdapter<S> {
     /// Create an Arc-wrapped adapter backed by the shared transaction registry.
     pub fn new_arc(registry: Arc<db::DbTransactionRegistry<S>>) -> Arc<dyn TransactionOperations> {
-        Arc::new(Self { registry })
+        Arc::new(Self {
+            registry,
+            document_acp: None,
+        })
+    }
+
+    /// Create an Arc-wrapped adapter with document ACP registration support.
+    pub fn new_arc_with_acp(
+        registry: Arc<db::DbTransactionRegistry<S>>,
+        document_acp: Arc<dyn acp::DocumentACP>,
+    ) -> Arc<dyn TransactionOperations> {
+        Arc::new(Self {
+            registry,
+            document_acp: Some(document_acp),
+        })
     }
 }
 
@@ -73,6 +89,10 @@ impl<S: Store + 'static> TransactionOperations for TxnRegistryAdapter<S> {
         sdl: &str,
     ) -> Result<Vec<schema::CollectionVersion>, String> {
         let registry = self.registry.clone();
+        let document_acp = self.document_acp.clone();
+        let creator = defra_core::current_identity::try_get_scoped_identity()
+            .or_else(defra_core::current_identity::get_current_identity)
+            .and_then(|did| Did::new(did).ok());
         let txn_id = txn_id.to_string();
         let sdl = sdl.to_string();
         let handle = tokio::runtime::Handle::current();
@@ -80,7 +100,7 @@ impl<S: Store + 'static> TransactionOperations for TxnRegistryAdapter<S> {
         tokio::task::spawn_blocking(move || {
             handle.block_on(async {
                 registry
-                    .add_schema_in_txn(&txn_id, &sdl)
+                    .add_schema_in_txn_with_acp(&txn_id, &sdl, document_acp, creator)
                     .await
                     .map_err(|e| format!("{}", e))
             })

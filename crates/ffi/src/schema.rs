@@ -7,6 +7,7 @@ use std::ffi::c_char;
 use std::sync::Arc;
 
 use acp::nac::NodePermission;
+use identity::Did;
 
 use crate::ffi_entry;
 use crate::helpers::{get_node_database, get_rt, require_c_str};
@@ -50,21 +51,25 @@ pub unsafe extern "C" fn add_schema(
         ));
         let schema_str = try_ffi!(require_c_str(schema_sdl, "schema_sdl"));
 
-        // Validate node handle and get both database and policy store
-        let (database, policy_store) = match NODES.get(node_ptr, |state| {
-            (state.database.clone(), state.policy_store.clone())
+        // Validate node handle and get database, policy store, and document ACP
+        let (database, policy_store, document_acp) = match NODES.get(node_ptr, |state| {
+            (
+                state.database.clone(),
+                state.policy_store.clone(),
+                state.document_acp.clone(),
+            )
         }) {
-            Some(pair) => pair,
+            Some(tuple) => tuple,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
+        let identity_str = crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty());
+        let creator = identity_str.as_ref().and_then(|did| Did::new(did).ok());
 
         // Bind the caller's identity into the ambient context so the DB-layer NAC
         // gate on create_collection resolves the actual caller instead of the
         // wildcard. The body runs on this thread via `block_on`, so the
         // thread-local is visible throughout it; the guard restores on drop.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(identity_str);
 
         ffi_async!(rt, {
             // Get existing collection names so the SDL parser can resolve external type references
@@ -93,12 +98,23 @@ pub unsafe extern "C" fn add_schema(
             // Create each collection
             let mut created_versions = Vec::new();
             for schema in collections {
-                let version = schema.clone();
+                let collection_name = schema.name.clone();
                 database
                     .create_collection(schema)
                     .await
                     .map_err(|e| format!("failed to create collection: {}", e))?;
-                created_versions.push(version);
+                let finalized = database
+                    .get_collection(&collection_name)
+                    .map_err(|e| format!("failed to load created collection: {}", e))?
+                    .ok_or_else(|| format!("created collection '{}' was not cached", collection_name))?;
+                db::register_collection_if_needed(
+                    document_acp.as_ref(),
+                    creator.as_ref(),
+                    finalized.schema(),
+                )
+                .await
+                .map_err(|e| format!("failed to register collection with ACP: {}", e))?;
+                created_versions.push(finalized.schema().clone());
             }
 
             // Return JSON array of created collection versions
@@ -135,20 +151,24 @@ pub unsafe extern "C" fn add_schema_in_txn(
         let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
         let schema_str = try_ffi!(require_c_str(schema_sdl, "schema_sdl"));
 
-        let (registry, policy_store) = match NODES.get(node_ptr, |state| {
-            (state.txn_registry.clone(), state.policy_store.clone())
+        let (registry, policy_store, document_acp) = match NODES.get(node_ptr, |state| {
+            (
+                state.txn_registry.clone(),
+                state.policy_store.clone(),
+                state.document_acp.clone(),
+            )
         }) {
-            Some(pair) => pair,
+            Some(tuple) => tuple,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
+        let identity_str = crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty());
+        let creator = identity_str.as_ref().and_then(|did| Did::new(did).ok());
 
         // Bind the caller's identity into the ambient context so the registry-layer
         // NAC gate on add_schema_in_txn resolves the actual caller instead of the
         // wildcard. The body runs on this thread via `block_on`, so the
         // thread-local is visible throughout it; the guard restores on drop.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(identity_str);
 
         ffi_async!(rt, {
             let known_types: std::collections::HashSet<String> = registry
@@ -172,7 +192,12 @@ pub unsafe extern "C" fn add_schema_in_txn(
             }
 
             let created_versions = registry
-                .add_schema_in_txn(&txn_str, &schema_str)
+                .add_schema_in_txn_with_acp(
+                    &txn_str,
+                    &schema_str,
+                    Some(document_acp.clone()),
+                    creator.clone(),
+                )
                 .await
                 .map_err(|e| format!("failed to create collection in txn: {}", e))?;
 
