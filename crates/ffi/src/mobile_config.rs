@@ -81,6 +81,16 @@ pub(crate) struct MobileSyncRequest {
     pub version_ids: Option<Vec<String>>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MobileAddReplicatorRequest {
+    pub identity_did: Option<String>,
+    pub collections: Vec<String>,
+    #[serde(alias = "address")]
+    pub peer_addr: String,
+    pub filters: Option<defra_http::router::ReplicationFilters>,
+}
+
 pub(crate) fn maybe_cstring(
     value: Option<&str>,
     field_name: &str,
