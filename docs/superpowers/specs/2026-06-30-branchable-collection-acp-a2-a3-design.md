@@ -83,10 +83,13 @@ This mirrors Go's `identityFunc` parameterization. The rule lives in
 `crates/db/src/collection_acp.rs` next to `check_doc_permission`; the overlay impl is wired from
 `query-plan`.
 
-**Node-identity shortcut (review finding #6):** `check_doc_access_with_overlay` currently carries no
-`node_did`, so the node-identity full-access shortcut is unavailable on the commits-query path. The
-new read-access API threads `node_did` uniformly into both backends so the shortcut is honored
-everywhere (rather than narrowing the stated semantics).
+**Node-identity shortcut (review finding #6):** the node-identity full-access shortcut is itself Go
+behavior (`collection_acp.go::checkAccessOfDoc` short-circuits when the requester DID equals the
+node identity). In Go the node identity rides the request context, so it is naturally available at
+every site. In Rust, `check_doc_access_with_overlay` currently carries no `node_did`, so the
+shortcut is unavailable on the commits-query path. Threading `node_did` uniformly into both backends
+is therefore a **Rust plumbing requirement to preserve that behavior**, not a Go-specific rule — the
+*shortcut* matches Go; the *threading* is Rust-internal.
 
 ## Shared prerequisites (every site)
 
@@ -96,14 +99,24 @@ These were gaps in the first draft, surfaced by spec review; they are explicit r
   registered ACP objects under the stable `collection_id`. Every A2/A3 site must resolve the block's
   `schema_version_id` to its `CollectionVersion` and check ACP on `collection.collection_id` and
   `collection.is_branchable` — never the version id.
-- **Peer DID resolution + fail-closed (finding #2).** The serve-path gates run as the *requesting
-  peer*. Rust already resolves this: `host::handle::get_peer_identity(peer_id) -> Option<Did>`
-  (handle.rs:232), backed by a verified peer-identity cache populated through the identity protocol
-  (`identity::from_token` + `verify_auth_token`, the analog of Go's `identityProtocol.GetIdentity` +
-  `VerifyAuthToken`). Serve filters must call it and, when it returns `None` (identity unknown /
-  unverifiable), **fail closed** (deny) — except where a higher-priority passthrough already applies
-  (see serve model below). The Iroh serve path must reach the same resolution (confirm the Iroh
-  endpoint shares the libp2p `peer_identities` cache or add an equivalent).
+- **Peer DID resolution via a transport-agnostic resolver (finding #2).** The serve-path gates run
+  as the *requesting peer*. libp2p already resolves this on the host handle
+  (`host::handle::get_peer_identity(peer_id) -> Option<Did>`, handle.rs:232), backed by a verified
+  peer-identity cache populated through the identity protocol (`identity::from_token` +
+  `verify_auth_token`, the analog of Go's `identityProtocol.GetIdentity` + `VerifyAuthToken`).
+  However, this method is **not on the `P2PTransport` trait** (transport.rs:258) and the Iroh path
+  only carries a `PeerId` into CAR handling. **Implementation requirement:** introduce a
+  `PeerIdentityResolver` abstraction (`async fn resolve(&self, peer_id) -> Option<Did>`), implement
+  it for libp2p (delegating to `get_peer_identity`) and Iroh, and inject it into **both** the Bitswap
+  filter and the CAR handler so peer-DID resolution is identical across transports.
+- **Unresolved DID → Anonymous, not blanket-deny (finding #1, Go parity).** When the resolver
+  returns `None`, the serve gate passes `Identity::Anonymous` into `check_doc_read_access` rather
+  than denying outright. This matches Go: `hasAccess`'s `identFunc` returns `None` on lookup failure
+  and Go still runs `CheckDocReadAccess`, which **grants for public/unregistered objects** while an
+  anonymous actor is **denied any registered (private) object**. So private branchable data is still
+  withheld from an unverifiable peer, but public blocks remain fetchable — exactly as Go. (A
+  stricter fail-closed posture — deny on unresolved DID even for public blocks — is available as a
+  *documented deviation from Go* if desired, but is not the default here.)
 
 ## How Go's serve boundary actually works (and what "full parity" means)
 
@@ -191,7 +204,8 @@ Unit tests:
   collection-level} × {branchable, non-branchable} × {permissioned, unpermissioned} × {node-identity
   vs other}.
 - Serve-filter per-block decision (bitswap + CAR): replicator passthrough; non-replicator with no
-  resolvable DID → deny (fail-closed); non-replicator without collection access → deny; signature /
+  resolvable DID → treated as Anonymous (denied registered/private objects, **allowed** for
+  public/unregistered — Go parity); non-replicator without collection access → deny; signature /
   lens / definition blocks → allow.
 - KMS gate honors `is_branchable`.
 - CID-mismatch rejection regression (bitswap/CAR/pushlog).
@@ -220,7 +234,7 @@ Unit tests:
   transports and the pull/pushlog paths.
 - **Two-transport drift.** libp2p (bitswap) and Iroh (CAR/coordinator) serve paths must apply
   identical decisions and share peer-DID resolution; mitigated by routing both through the same
-  `check_doc_read_access` + a shared test, and confirming Iroh reaches `get_peer_identity`.
+  `check_doc_read_access` and the same injected `PeerIdentityResolver` + a shared test.
 - **Overlay vs direct backend drift.** Commits-query (overlay) and serve/verify/KMS (direct) must not
   diverge on the rule; mitigated by the single shared algorithm over `ObjectAccessChecker`.
 - **Hot-path performance.** Per-block serve checks add ACP lookups; the rule short-circuits for
