@@ -62,6 +62,10 @@ where
 /// The live registry/transport is authoritative for which peers and collections
 /// are currently replicators. Peerstore rows are persisted metadata and may lag
 /// live authorization changes, so they must not introduce peers or collections.
+///
+/// A persisted peer with no live counterpart is intentionally omitted (it is no
+/// longer an authorized replicator), but it is logged so the divergence is
+/// observable rather than a silently under-reported list.
 pub fn merge_live_replicators_with_persisted_metadata(
     live: Vec<p2p::ReplicatorInfo>,
     persisted: Option<Vec<p2p::ReplicatorInfo>>,
@@ -69,6 +73,17 @@ pub fn merge_live_replicators_with_persisted_metadata(
     let Some(persisted) = persisted else {
         return live;
     };
+
+    let live_peers: std::collections::HashSet<&str> =
+        live.iter().map(|info| info.peer_id_str()).collect();
+    for persisted_info in &persisted {
+        if !live_peers.contains(persisted_info.peer_id_str()) {
+            tracing::debug!(
+                peer_id = persisted_info.peer_id_str(),
+                "persisted replicator absent from live registry; omitting from reported state"
+            );
+        }
+    }
 
     let persisted_by_peer: std::collections::BTreeMap<String, p2p::ReplicatorInfo> = persisted
         .into_iter()
