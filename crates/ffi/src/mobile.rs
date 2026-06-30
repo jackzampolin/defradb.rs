@@ -8,14 +8,15 @@ use acp::nac::NodePermission;
 
 use crate::helpers::get_rt;
 use crate::mobile_config::{
-    c_string_ptr, decode_hex_field, ffi_result_error, maybe_cstring, MobileExecuteRequest,
-    MobileNodeConfig, MobileSyncRequest,
+    c_string_ptr, decode_hex_field, ffi_result_error, maybe_cstring, MobileAddReplicatorRequest,
+    MobileExecuteRequest, MobileNodeConfig, MobileSyncRequest,
 };
 use crate::nac_check::check_nac_for_node;
 use crate::node::{new_node, node_close};
 use crate::p2p::{
-    new_node_with_p2p, p2p_connect, p2p_notify_network_change, p2p_peer_info,
-    p2p_sync_branchable_collection, p2p_sync_collection_versions, p2p_sync_documents,
+    new_node_with_p2p, p2p_add_replicator_with_filter, p2p_connect, p2p_notify_network_change,
+    p2p_peer_info, p2p_sync_branchable_collection, p2p_sync_collection_versions,
+    p2p_sync_documents,
 };
 use crate::query::exec_request;
 use crate::schema::validate_collection_policy;
@@ -615,10 +616,98 @@ pub extern "C" fn defra_mobile_sync_collection(
     }
 }
 
+/// Add a P2P replicator with optional per-collection filters for mobile embedding.
+///
+/// `request_json` is camelCase and accepts `collections`, `peerAddr`, optional
+/// `identityDid`, and optional HTTP-shaped `filters` keyed by collection name.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn defra_mobile_add_replicator(
+    node_ptr: usize,
+    request_json: *const c_char,
+) -> FfiResult {
+    ffi_entry! {
+        let request_str = match unsafe { c_str_to_string(request_json) } {
+            Some(value) => value,
+            None => return FfiResult::error("invalid request_json parameter"),
+        };
+        let request: MobileAddReplicatorRequest = match serde_json::from_str(&request_str) {
+            Ok(request) => request,
+            Err(error) => return FfiResult::error(format!("invalid request_json: {}", error)),
+        };
+
+        let identity_did = if request.identity_did.is_some() {
+            match maybe_cstring(request.identity_did.as_deref(), "identityDid") {
+                Ok(value) => value,
+                Err(error) => return FfiResult::error(error),
+            }
+        } else {
+            match default_identity_cstring(node_ptr) {
+                Ok(value) => value,
+                Err(error) => return FfiResult::error(error),
+            }
+        };
+
+        let collections = match CString::new(serde_json::to_string(&request.collections).unwrap_or_default()) {
+            Ok(value) => value,
+            Err(_) => return FfiResult::error("collections contains an embedded null byte"),
+        };
+        let peer_addr = match CString::new(request.peer_addr) {
+            Ok(value) => value,
+            Err(_) => return FfiResult::error("peerAddr contains an embedded null byte"),
+        };
+        let filters = match CString::new(serde_json::to_string(&request.filters).unwrap_or_default()) {
+            Ok(value) => value,
+            Err(_) => return FfiResult::error("filters contains an embedded null byte"),
+        };
+
+        unsafe {
+            p2p_add_replicator_with_filter(
+                node_ptr,
+                c_string_ptr(&identity_did),
+                peer_addr.as_ptr(),
+                collections.as_ptr(),
+                filters.as_ptr(),
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::CStr;
+
+    #[test]
+    fn test_mobile_add_replicator_request_parse() {
+        let json = r#"{
+            "collections": ["Users"],
+            "peerAddr": "/ip4/1.2.3.4/tcp/9000/p2p/12D3",
+            "filters": {"Users": {"Conditions": {"agent_did": {"_eq": "did:key:z6"}}}}
+        }"#;
+        let request: MobileAddReplicatorRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.collections, vec!["Users".to_string()]);
+        assert_eq!(request.peer_addr, "/ip4/1.2.3.4/tcp/9000/p2p/12D3");
+        assert!(request.filters.contains_key("Users"));
+        assert!(request.filters["Users"].conditions.is_some());
+        assert!(request.identity_did.is_none());
+    }
+
+    #[test]
+    fn test_mobile_add_replicator_request_minimal() {
+        let json = r#"{"collections":["Posts"],"peerAddr":"/ip4/127.0.0.1/tcp/9000"}"#;
+        let request: MobileAddReplicatorRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.collections, vec!["Posts".to_string()]);
+        assert_eq!(request.peer_addr, "/ip4/127.0.0.1/tcp/9000");
+        assert!(request.filters.is_empty());
+    }
+
+    #[test]
+    fn test_mobile_add_replicator_request_accepts_address_alias() {
+        let json = r#"{"collections":["Posts"],"address":"/ip4/127.0.0.1/tcp/9000"}"#;
+        let request: MobileAddReplicatorRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.peer_addr, "/ip4/127.0.0.1/tcp/9000");
+    }
 
     #[test]
     fn test_mobile_open_schema_and_execute() {

@@ -21,7 +21,9 @@ pub use documents::{p2p_add_documents, p2p_delete_documents, p2p_list_documents}
 pub use node::new_node_with_p2p;
 pub use peer::{p2p_active_peers, p2p_connect, p2p_notify_network_change, p2p_peer_info};
 pub use push::p2p_retry_replicators;
-pub use replicator::{p2p_add_replicator, p2p_delete_replicator, p2p_list_replicators};
+pub use replicator::{
+    p2p_add_replicator, p2p_add_replicator_with_filter, p2p_delete_replicator, p2p_list_replicators,
+};
 pub use sync::{p2p_sync_branchable_collection, p2p_sync_documents};
 pub use version_sync::p2p_sync_collection_versions;
 
@@ -147,6 +149,22 @@ pub(crate) fn parse_collections_json(json_str: &str) -> FfiP2PResult<Vec<String>
     Ok(opt.unwrap_or_default())
 }
 
+/// Parse a JSON map of per-collection replication filters keyed by collection name.
+///
+/// Accepts `null`, `{}`, or an empty string as an empty (unfiltered) map. The
+/// accepted shape mirrors the HTTP `"Filters"` field (`ReplicationFilters`).
+pub(crate) fn parse_filters_json(
+    json_str: &str,
+) -> FfiP2PResult<defra_http::router::ReplicationFilters> {
+    if json_str.is_empty() {
+        return Ok(defra_http::router::ReplicationFilters::new());
+    }
+
+    let opt: Option<defra_http::router::ReplicationFilters> = serde_json::from_str(json_str)
+        .map_err(|e| FfiP2PError::invalid_input(format!("invalid filters JSON: {}", e)))?;
+    Ok(opt.unwrap_or_default())
+}
+
 pub(crate) fn parse_doc_ids_json(json_str: &str) -> FfiP2PResult<Vec<String>> {
     let opt: Option<Vec<String>> = serde_json::from_str(json_str)
         .map_err(|e| FfiP2PError::invalid_input(format!("invalid doc_ids JSON: {}", e)))?;
@@ -177,5 +195,48 @@ mod tests {
         let error = parse_collections_json("{").unwrap_err();
         assert_eq!(error.code, FfiP2PErrorCode::InvalidInput);
         assert!(error.message.contains("invalid collections JSON"));
+    }
+
+    #[test]
+    fn parse_filters_valid_map_with_http_conditions() {
+        use super::parse_filters_json;
+
+        let json = r#"{
+            "Users": {"Conditions": {"agent_did": {"_eq": "did:key:z6"}}},
+            "Posts": {"Conditions": {"active": {"_eq": true}}}
+        }"#;
+        let filters = parse_filters_json(json).unwrap();
+        assert_eq!(filters.len(), 2);
+        assert!(filters.contains_key("Users"));
+        assert!(filters.contains_key("Posts"));
+        assert!(filters["Users"].conditions.is_some());
+    }
+
+    #[test]
+    fn parse_filters_legacy_shape() {
+        use super::parse_filters_json;
+
+        let json = r#"{"Users": {"Field": "agent_did", "Value": "did:key:z6"}}"#;
+        let filters = parse_filters_json(json).unwrap();
+        assert_eq!(filters.len(), 1);
+        assert!(filters.contains_key("Users"));
+    }
+
+    #[test]
+    fn parse_filters_null_or_empty_yields_empty_map() {
+        use super::parse_filters_json;
+
+        assert!(parse_filters_json("null").unwrap().is_empty());
+        assert!(parse_filters_json("{}").unwrap().is_empty());
+        assert!(parse_filters_json("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_filters_invalid_json_is_invalid_input() {
+        use super::parse_filters_json;
+
+        let err = parse_filters_json("{not json}").unwrap_err();
+        assert_eq!(err.code, FfiP2PErrorCode::InvalidInput);
+        assert!(err.message.contains("invalid filters JSON"));
     }
 }
