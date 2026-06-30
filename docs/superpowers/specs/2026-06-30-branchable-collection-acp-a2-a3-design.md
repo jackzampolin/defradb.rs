@@ -104,11 +104,15 @@ These were gaps in the first draft, surfaced by spec review; they are explicit r
   (`host::handle::get_peer_identity(peer_id) -> Option<Did>`, handle.rs:232), backed by a verified
   peer-identity cache populated through the identity protocol (`identity::from_token` +
   `verify_auth_token`, the analog of Go's `identityProtocol.GetIdentity` + `VerifyAuthToken`).
-  However, this method is **not on the `P2PTransport` trait** (transport.rs:258) and the Iroh path
-  only carries a `PeerId` into CAR handling. **Implementation requirement:** introduce a
-  `PeerIdentityResolver` abstraction (`async fn resolve(&self, peer_id) -> Option<Did>`), implement
-  it for libp2p (delegating to `get_peer_identity`) and Iroh, and inject it into **both** the Bitswap
-  filter and the CAR handler so peer-DID resolution is identical across transports.
+  Transport identity and ACP identity are **independent** (Go decouples them): the peer presents a
+  signed identity token, verified against the local peer id as audience — the transport key is never
+  reinterpreted as the ACP DID. **Implementation requirement:** introduce a `PeerIdentityResolver`
+  abstraction (`async fn resolve(&self, peer_id) -> Option<Did>`), inject it into **both** the
+  Bitswap filter and the CAR handler. libp2p delegates to the existing active `get_peer_identity`
+  (cache → signed-token fetch → verify → cache). Iroh has **no token exchange today**, so its
+  resolver returns `None` (→ Anonymous): non-replicator Iroh peers can read only public/unregistered
+  blocks until the signed-token exchange is ported to Iroh streams (tracked as a follow-up). Iroh
+  replicators are unaffected (passthrough precedes identity resolution).
 - **Unresolved DID → Anonymous, not blanket-deny (finding #1, Go parity).** When the resolver
   returns `None`, the serve gate passes `Identity::Anonymous` into `check_doc_read_access` rather
   than denying outright. This matches Go: `hasAccess`'s `identFunc` returns `None` on lookup failure

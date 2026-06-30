@@ -4,7 +4,7 @@
 
 **Goal:** Enforce branchable-collection ACP on local read paths (A2) and the P2P serve boundary (A3), consuming the A1 collection-object registration, at full parity with Go v1.0.0 `3f627855`.
 
-**Architecture:** ONE algorithm — `acp::read_access::check_doc_read_access` — defined over an `ObjectAccessChecker` trait, with two checker impls: `DirectChecker` (in `acp`, used by signature-verify, KMS, and the P2P serve gate) and `OverlayChecker` (in `query-plan`, txn-aware, used by the commits query). It lives in the `acp` crate because `db`, `query-plan`, and `kms` all depend on `acp` (none can depend on `db`). The rule takes primitive params (`policy_id`, `resource_name`, `collection_id`, `is_branchable`, `doc_id`) so every caller — including KMS, which only has a `DocCollectionInfo` — can use it. A transport-agnostic `PeerIdentityResolver` supplies the requesting peer's DID at the serve boundary: libp2p via the existing token protocol, Iroh via direct `NodeId → did:key` derivation.
+**Architecture:** ONE algorithm — `acp::read_access::check_doc_read_access` — defined over an `ObjectAccessChecker` trait, with two checker impls: `DirectChecker` (in `acp`, used by signature-verify, KMS, and the P2P serve gate) and `OverlayChecker` (in `query-plan`, txn-aware, used by the commits query). It lives in the `acp` crate because `db`, `query-plan`, and `kms` all depend on `acp` (none can depend on `db`). The rule takes primitive params (`policy_id`, `resource_name`, `collection_id`, `is_branchable`, `doc_id`) so every caller — including KMS, which only has a `DocCollectionInfo` — can use it. A transport-agnostic `PeerIdentityResolver` supplies the requesting peer's ACP DID at the serve boundary via Go's signed-token exchange (transport identity ≠ ACP identity): libp2p reuses the existing active `get_peer_identity` token path; Iroh has no token exchange yet, so non-replicator Iroh peers resolve to Anonymous (documented narrowing).
 
 **Tech Stack:** Rust, async-trait, tokio; crates `acp`, `db`, `query`, `query-plan`, `kms`, `p2p`; integration harness in `tools/integration-test`.
 
@@ -34,10 +34,8 @@
 - `crates/db/src/block_verify.rs` — A2 signature-verify gating.
 - `crates/kms/src/policy.rs` — `is_branchable` on `DocCollectionInfo`; KMS gate calls `acp::check_doc_read_access`.
 - `crates/kms/src/nac_dac_policy.rs` — wire the rule into `check_release`.
-- `crates/p2p/src/peer_identity.rs` (new) — `PeerIdentityResolver`, shared `PeerIdentityStore`, `StoreResolver` (libp2p) + `IrohPeerIdentityResolver`.
-- `crates/p2p/src/host/p2p_host/mod.rs` — hoist `peer_identities` into the shared `PeerIdentityStore`.
-- `crates/embedded/src/{node_p2p.rs,node_identity.rs}` — bind the Iroh endpoint key to the ed25519 node identity when ACP+Iroh.
-- `crates/p2p/src/bitswap/{filter.rs,read_gate.rs}` — `BlockCollectionResolver` (metadata) + late-bound `BlockReadGate` (ACP) + metadata-first serve gate.
+- `crates/p2p/src/peer_identity.rs` (new) — `PeerIdentityResolver`; `HandlePeerIdentityResolver` (libp2p, active token exchange via `get_peer_identity`) + `AnonymousResolver` (Iroh).
+- `crates/p2p/src/bitswap/{filter.rs,read_gate.rs}` — `BlockCollectionResolver` (DB-backed metadata) + `BlockReadGate` (ACP) + `LateBoundServeAcp` (resolver+gate, installed at wire-time) + metadata-first serve gate.
 - `crates/p2p/src/sync/coordinator/event_handler/car.rs` — CAR per-block serve filtering.
 - `tools/integration-test/tests/acp.rs` — cross-impl scenarios.
 
@@ -637,55 +635,51 @@ git commit -m "feat(acp): A3 KMS key-gate uses shared branchable read rule"
 
 ---
 
-## Task 8: A3 — `PeerIdentityResolver` (shared store) + Iroh identity binding
+## Task 8: A3 — `PeerIdentityResolver` (Go-style token exchange, late-bound)
 
 **Files:**
 - Create: `crates/p2p/src/peer_identity.rs`
-- Modify: `crates/p2p/src/lib.rs`; `crates/p2p/src/host/p2p_host/mod.rs` (hoist `peer_identities` into a shared store); `crates/embedded/src/{node_p2p.rs,node_identity.rs}` (Iroh binding)
+- Modify: `crates/p2p/src/lib.rs`
 - Test: `crates/p2p/src/peer_identity.rs` unit tests
 
+**Go model (do NOT bind transport key to ACP DID).** Go's `hasAccess` resolves the requesting peer's ACP identity by asking the peer for a **signed identity token**, verifying it against the local peer id as audience, and caching it — transport identity and ACP identity are independent (`internal/db/p2p/p2p.go:411,418,433`). Rust already implements exactly this active path: `P2PHostHandle::get_peer_identity` → `HostCommand::GetPeerIdentity` → `handle_get_peer_identity` (`messaging.rs:348`): cache hit, else sign an `IdentityRequest` (local peer id audience), send to the peer, `from_token` + `verify_auth_token`, extract DID, cache. The resolver must use THIS, not a cache-only read.
+
 **Interfaces:**
-- Produces:
-  ```rust
-  use crate::transport::PeerId;   // NOT the crate-root libp2p::PeerId re-export (finding #4)
+```rust
+use crate::transport::PeerId;   // NOT the crate-root libp2p::PeerId re-export (finding #4)
 
-  #[async_trait]
-  pub trait PeerIdentityResolver: Send + Sync {
-      async fn resolve(&self, peer_id: &PeerId) -> Option<identity::Did>;
-  }
+#[async_trait]
+pub trait PeerIdentityResolver: Send + Sync {
+    /// Resolve the peer's ACP DID (active token exchange on cache miss), or None
+    /// when the peer presents no verifiable identity. None => Anonymous (Go parity).
+    async fn resolve(&self, peer_id: &PeerId) -> Option<identity::Did>;
+}
 
-  /// Shared, mutable peer→DID cache, created BEFORE DefraBehaviour::new (like the
-  /// ReplicatorRegistry Arc at p2p_host/mod.rs:394) so the bitswap filter can hold
-  /// a resolver at construction time while the identity protocol populates it later.
-  #[derive(Default, Clone)]
-  pub struct PeerIdentityStore(Arc<RwLock<HashMap<PeerId, identity::Did>>>);
-  impl PeerIdentityStore { pub fn insert(&self, p: PeerId, d: identity::Did); pub fn get(&self, p: &PeerId) -> Option<identity::Did>; }
+// HandlePeerIdentityResolver(P2PHostHandle): libp2p — calls get_peer_identity (active
+//   fetch+verify+cache). Built at wire-time when the handle exists (see Task 9 late binding).
+// AnonymousResolver: Iroh — no identity-token exchange exists on Iroh today, so non-replicator
+//   Iroh peers resolve to None (Anonymous). Documented narrowing; tracked by a follow-up issue
+//   to port the signed-token exchange onto Iroh streams. (Iroh replicators are unaffected —
+//   they pass the replicator gate before identity is consulted.)
+```
 
-  // StoreResolver(PeerIdentityStore): libp2p — reads the shared store the host fills.
-  // IrohPeerIdentityResolver: PeerId string is the ed25519 NodeId -> did:key (no store needed).
-  ```
-
-**Finding #1 (resolver lifecycle):** the bitswap filter is installed in `DefraBehaviour::new` (`behaviour.rs:292`) **before** `P2PHostHandle` exists, so a handle-backed resolver is not constructible there. Instead, hoist the host's `peer_identities` field (`p2p_host/mod.rs:258`) into a shared `PeerIdentityStore` created up-front and passed into both the host (which inserts verified DIDs from the identity protocol) and a `StoreResolver` given to the filter. This mirrors the existing up-front `ReplicatorRegistry` Arc.
-
-**Finding #3 (Iroh binding):** Iroh `NodeId` is ed25519 and authenticated by the QUIC handshake; deriving `NodeId → did:key` is only a valid identity if the node's DefraDB identity IS that ed25519 key. By default the node identity is secp256k1 (`node_identity.rs:32`) and the Iroh secret key is generated independently (`node_p2p.rs:376`). So binding must be enforced, not assumed.
+**Lifecycle (finding #1):** the bitswap filter is installed in `DefraBehaviour::new` (`behaviour.rs:292`) **before** the handle exists. But the resolver is only needed on the **non-replicator ACP path**, which only runs after the ACP gate is installed — and the gate is installed at `wire_document_acp` (`node.rs:557`), which fires **after** the P2P system is built, when the handle exists. So the resolver is **late-bound together with the gate** (Task 9), not constructed at filter-build. No shared `peer_identities` hoist is needed — the existing handle cache + active path is reused.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test]
-async fn iroh_resolver_derives_did_from_node_id() {
-    let (node_id_str, expected_did) = ed25519_node_id_and_did(); // same ed25519 key, two encodings
-    let r = IrohPeerIdentityResolver::default();
-    assert_eq!(r.resolve(&PeerId::new(node_id_str)).await, Some(expected_did));
+async fn handle_resolver_does_active_fetch_then_caches() {
+    // fake handle whose get_peer_identity returns Some(did) for a peer that presents
+    // a valid token, None otherwise.
+    let r = HandlePeerIdentityResolver::new(fake_handle_granting(known_peer(), known_did()));
+    assert_eq!(r.resolve(&known_peer()).await, Some(known_did()));
+    assert_eq!(r.resolve(&unknown_peer()).await, None);
 }
 
 #[tokio::test]
-async fn store_resolver_reads_shared_store() {
-    let store = PeerIdentityStore::default();
-    store.insert(known_peer(), known_did());
-    let r = StoreResolver(store.clone());
-    assert_eq!(r.resolve(&known_peer()).await, Some(known_did()));
-    assert_eq!(r.resolve(&unknown_peer()).await, None);
+async fn anonymous_resolver_returns_none() {
+    assert_eq!(AnonymousResolver.resolve(&any_peer()).await, None);
 }
 ```
 
@@ -694,44 +688,21 @@ async fn store_resolver_reads_shared_store() {
 Run: `cargo test -p p2p peer_identity`
 Expected: FAIL — trait/types not found.
 
-- [ ] **Step 3: Implement trait + `PeerIdentityStore` + both resolvers**
+- [ ] **Step 3: Implement the trait + both resolvers**
 
-Define the trait over `crate::transport::PeerId`. `PeerIdentityStore` wraps `Arc<RwLock<HashMap<PeerId, Did>>>`. `StoreResolver(store)` reads it. `IrohPeerIdentityResolver::resolve` parses the `PeerId` string as an `iroh::PublicKey`, takes its 32 ed25519 bytes, and derives a `did:key` `identity::Did` (add `identity::Did::from_ed25519_public_key(&[u8;32])` if absent). Add `pub mod peer_identity;` + re-exports in `lib.rs`.
+Define the trait over `crate::transport::PeerId`. `HandlePeerIdentityResolver` holds a `P2PHostHandle` and calls `get_peer_identity(peer_id).await.ok().flatten()` (this already does cache → active signed-token fetch → `verify_auth_token` → cache, matching Go). `AnonymousResolver::resolve` returns `None`. Add `pub mod peer_identity;` + re-exports in `lib.rs`. No changes to `node_identity.rs`/`node_p2p.rs`, no Iroh key binding.
 
-- [ ] **Step 4: Hoist `peer_identities` into the shared store**
+- [ ] **Step 4: Verify**
 
-In `crates/p2p/src/host/p2p_host/mod.rs`, replace the `peer_identities: HashMap<PeerId, Did>` field (line 258) with a `PeerIdentityStore` created up-front (alongside `replicators` at `mod.rs:394`) and inserted into on identity-protocol verification (`two_stream.rs:205`, `messaging.rs:383` insert sites). Keep `get_peer_identity` working by reading the store.
-
-Run: `cargo build -p p2p`
-
-- [ ] **Step 5: Enforce the Iroh identity binding**
-
-In `crates/embedded/src/node_p2p.rs` Iroh assembly: when `document_acp` is enabled, derive the Iroh `SecretKey` from the node's **ed25519** identity private-key bytes (instead of `load_or_generate_secret_key`), so the endpoint NodeId equals the node DID's key. In `node_identity.rs`, when ACP + Iroh are both configured, require an ed25519 node identity — return a startup error otherwise:
-
-```rust
-// node_p2p.rs (iroh + acp):
-let secret_key = if acp_enabled {
-    let ed = node_ed25519_secret_bytes()
-        .ok_or_else(|| anyhow!("ACP over Iroh requires an ed25519 node identity bound to the endpoint key"))?;
-    p2p::iroh::SecretKey::from_bytes(&ed)
-} else {
-    p2p::iroh::load_or_generate_secret_key(config.secret_key_path.as_deref()).await?
-};
-```
-
-Add a unit/assembly test asserting: ACP + Iroh + secp256k1 identity → startup error; ACP + Iroh + ed25519 identity → endpoint NodeId derives to the node DID.
-
-- [ ] **Step 6: Verify**
-
-Run: `cargo test -p p2p peer_identity && cargo test -p embedded iroh_acp_binding`
+Run: `cargo test -p p2p peer_identity`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 cargo fmt --all
-git add crates/p2p/src/peer_identity.rs crates/p2p/src/lib.rs crates/p2p/src/host crates/identity/src crates/embedded/src/node_p2p.rs crates/embedded/src/node_identity.rs
-git commit -m "feat(p2p): PeerIdentityResolver (shared store + Iroh NodeId), enforce Iroh ACP key binding"
+git add crates/p2p/src/peer_identity.rs crates/p2p/src/lib.rs
+git commit -m "feat(p2p): PeerIdentityResolver (Go-style signed-token exchange; Iroh anonymous)"
 ```
 
 ---
@@ -739,29 +710,37 @@ git commit -m "feat(p2p): PeerIdentityResolver (shared store + Iroh NodeId), enf
 ## Task 9: A3 — split metadata from ACP; Bitswap per-block serve gate
 
 **Files:**
-- Create: `crates/p2p/src/bitswap/read_gate.rs` (`BlockCollectionResolver` + `BlockReadGate` traits + `LateBoundReadGate`)
+- Create: `crates/p2p/src/bitswap/read_gate.rs` (`BlockCollectionResolver` + `BlockReadGate` traits + `ServeAcp` / `LateBoundServeAcp`)
 - Modify: `crates/p2p/src/bitswap/filter.rs:62-145`, `crates/p2p/src/behaviour.rs:292`
 - Modify: node assembly (`crates/embedded/src/node.rs:553-558`) to install the ACP gate via `wire_document_acp`
 - Test: `crates/p2p/tests/bitswap_acp_filter_tests.rs`
 
-**Interfaces (finding #2 — metadata split from ACP):**
+**Interfaces (finding #2 — metadata split from ACP; finding #3 — DB-backed metadata):**
 ```rust
-/// Pure metadata: block -> (stable collection_id, doc ids). NO ACP, NO identity.
-/// Available at construction (backed by the collection store, which exists before P2P).
+/// Pure metadata: block -> (stable collection_id, doc ids) + is_branchable. NO ACP, NO identity.
+/// Backed by DB/SCHEMA metadata (get_collection_by_version_id + collection cache), NOT the P2P
+/// subscription store (collection_store.rs only holds subscribed collection ids). The DB exists
+/// before P2P, so this is available at filter-construction.
 #[async_trait]
 pub trait BlockCollectionResolver: Send + Sync {
-    async fn resolve(&self, block: &DefraBlock) -> Option<(String /*collection_id*/, Vec<String> /*doc_ids; empty => collection-level*/)>;
+    async fn resolve(&self, block: &DefraBlock)
+        -> Option<(String /*collection_id*/, bool /*is_branchable*/, Vec<String> /*doc_ids; empty => collection-level*/)>;
 }
 
-/// ACP evaluation only. Late-bound (needs document_acp). Never consulted for replicators.
+/// ACP evaluation only. Never consulted for replicators.
 #[async_trait]
 pub trait BlockReadGate: Send + Sync {
     async fn may_read(&self, identity: &acp::Identity, collection_id: &str, is_branchable: bool, doc_ids: &[String]) -> bool;
 }
-pub struct LateBoundReadGate(std::sync::OnceLock<Arc<dyn BlockReadGate>>);
+
+/// Late-bound serve-ACP context: the resolver (active token exchange, Task 8) AND the gate are
+/// installed TOGETHER at wire_document_acp, when both the host handle and document_acp exist.
+/// Empty until then => non-replicator serve denied (fail-closed).
+pub struct ServeAcp { pub resolver: Arc<dyn PeerIdentityResolver>, pub gate: Arc<dyn BlockReadGate> }
+pub struct LateBoundServeAcp(std::sync::OnceLock<ServeAcp>);
 ```
 
-**Ordering (finding #2):** metadata → replicator passthrough → (non-replicator) identity + ACP. The replicator path uses ONLY `BlockCollectionResolver` + the registry; it never touches the ACP gate or identity, so a not-yet-installed gate or an ACP error cannot deny a replicator.
+**Ordering (finding #2):** metadata → replicator passthrough → (non-replicator) identity + ACP. The replicator path uses ONLY `BlockCollectionResolver` + the registry; it never touches the resolver or the ACP gate, so a not-yet-installed `ServeAcp` or an ACP error cannot deny a replicator.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -777,8 +756,8 @@ Expected: FAIL.
 Keep the signature/definition/lens passthroughs. Then:
 
 ```rust
-// 1) METADATA ONLY — stable collection id + doc ids. No ACP, no identity.
-let Some((collection_id, doc_ids)) = meta.resolve(&defra_block).await else {
+// 1) METADATA ONLY — stable collection id, is_branchable, doc ids. No ACP, no identity.
+let Some((collection_id, is_branchable, doc_ids)) = meta.resolve(&defra_block).await else {
     return false; // can't classify the block => deny (no existence leak)
 };
 let peer_str = peer_id.to_string();
@@ -787,21 +766,20 @@ let peer_str = peer_id.to_string();
 if registry.is_filtered_replicator(&collection_id, &peer_str) { return false; }
 if registry.is_replicator(&collection_id, &peer_str) { return true; }
 
-// 3) NON-REPLICATOR — resolve identity (None => Anonymous) and run the ACP gate.
-let Some(gate) = read_gate.get() else { return false; }; // fail closed until installed
-let identity = match resolver.resolve(&peer_id.clone().into()).await {  // libp2p::PeerId -> transport::PeerId
-    Some(did) => acp::Identity::Authenticated(did),
+// 3) NON-REPLICATOR — needs the late-bound ServeAcp (resolver + gate). Fail closed until installed.
+let Some(serve) = serve_acp.get() else { return false; };
+let identity = match serve.resolver.resolve(&peer_id.clone().into()).await {  // libp2p::PeerId -> transport::PeerId
+    Some(did) => acp::Identity::Authenticated(did),  // active signed-token exchange (Go parity)
     None => acp::Identity::Anonymous,
 };
-let is_branchable = meta.is_branchable(&collection_id).await; // cheap collection-store lookup
-gate.may_read(&identity, &collection_id, is_branchable, &doc_ids).await
+serve.gate.may_read(&identity, &collection_id, is_branchable, &doc_ids).await
 ```
 
-Thread `meta: Arc<dyn BlockCollectionResolver>`, `resolver: Arc<dyn PeerIdentityResolver>`, `read_gate: Arc<LateBoundReadGate>` through `make_peer_block_access_filter` + the closure. `behaviour.rs:292` constructs the `LateBoundReadGate` (empty), the `StoreResolver` (from the up-front `PeerIdentityStore`), and the `meta` resolver (from the collection store), all available at construction.
+Thread `meta: Arc<dyn BlockCollectionResolver>` and `serve_acp: Arc<LateBoundServeAcp>` through `make_peer_block_access_filter` + the closure. `behaviour.rs:292` constructs the empty `LateBoundServeAcp` and the `meta` resolver (DB/schema-backed, available at construction).
 
-- [ ] **Step 4: Implement the resolvers + install the ACP gate via `wire_document_acp`**
+- [ ] **Step 4: Implement the metadata resolver + install `ServeAcp` via `wire_document_acp`**
 
-`BlockCollectionResolver` impl (node/db layer, available up-front): decode is done by the filter (pass `&DefraBlock`); read `schema_version_id`; resolve `→ CollectionVersion` via the collection store; return `(collection.collection_id, doc_ids)` (collection-level => empty vec). `is_branchable(collection_id)` is a collection-store lookup. `BlockReadGate` impl (late-bound): `may_read` runs `acp::read_access::check_doc_read_access(DirectChecker{..}, policy, .., collection_id, is_branchable, doc)` for each doc id (empty list => one check with `""`), returning true if ANY grants. Install the gate into `LateBoundReadGate` inside the `wire_document_acp` closure at `node.rs:557` (+ defra-node equivalent).
+`BlockCollectionResolver` impl (db/embedded layer, up-front): the filter passes the decoded `&DefraBlock`; read `schema_version_id`; resolve `→ CollectionVersion` via `get_collection_by_version_id` (DB/schema, NOT the P2P subscription store); return `(collection.collection_id, collection.is_branchable, doc_ids)` (collection-level => empty vec). `BlockReadGate` impl: `may_read` runs `acp::read_access::check_doc_read_access(DirectChecker{ acp, identity, node_did }, policy.id, policy.resource_name, collection_id, is_branchable, doc)` per doc id (empty list => one check with `""`), true if ANY grants. Install `ServeAcp { resolver, gate }` into `LateBoundServeAcp` inside the `wire_document_acp` closure at `node.rs:557` (handle exists here), where `resolver` = `HandlePeerIdentityResolver(handle)` for libp2p or `AnonymousResolver` for Iroh, and `gate` = the `BlockReadGate` impl. (+ defra-node equivalent.)
 
 - [ ] **Step 5: Verify**
 
@@ -822,7 +800,7 @@ git commit -m "feat(p2p): A3 bitswap serve gate — metadata-first ordering, sta
 
 **Files:**
 - Modify: `crates/p2p/src/sync/coordinator/event_handler/car.rs:83-179`
-- Modify: `SyncCoordinator` construction to inject `BlockCollectionResolver` + `PeerIdentityResolver` + `LateBoundReadGate`
+- Modify: `SyncCoordinator` construction to inject `BlockCollectionResolver` (meta, up-front) + `LateBoundServeAcp` (resolver+gate)
 - Test: CAR test module under `crates/p2p/src/sync/coordinator/`
 
 **Context (finding #2):** same metadata-first ordering. Per block: resolve stable collection_id (metadata) → replicator passthrough on that id → non-replicator identity + ACP. Never `is_any_replicator`.
@@ -842,9 +820,14 @@ After `let blocks = collected.blocks;` (car.rs:133), before the empty check:
 
 ```rust
 let peer_str = peer_id.to_string();
-// Resolve the peer identity ONCE per request (None => Anonymous, Go parity).
-let identity = match self.peer_identity_resolver.resolve(&peer_id).await {
-    Some(did) => acp::Identity::Authenticated(did),
+// ServeAcp (resolver + gate) is late-bound; if absent only replicator passthrough works.
+let serve = self.serve_acp.get();
+// Resolve the peer identity ONCE (only when ServeAcp is installed); None => Anonymous.
+let identity = match serve {
+    Some(s) => match s.resolver.resolve(&peer_id).await {
+        Some(did) => acp::Identity::Authenticated(did),
+        None => acp::Identity::Anonymous,
+    },
     None => acp::Identity::Anonymous,
 };
 let mut kept = Vec::with_capacity(blocks.len());
@@ -853,23 +836,22 @@ for (cid, data) in blocks {
         Ok(b) => b,
         Err(_) => { kept.push((cid, data)); continue; } // signature/lens/non-CRDT passthrough
     };
-    let Some((collection_id, doc_ids)) = self.meta.resolve(&block).await else {
+    let Some((collection_id, is_branchable, doc_ids)) = self.meta.resolve(&block).await else {
         continue; // unclassifiable => drop (no existence leak)
     };
     // Replicator passthrough on the STABLE collection_id — no ACP/identity.
     if self.access.replicators.is_filtered_replicator(&collection_id, &peer_str) { continue; }
     if self.access.replicators.is_replicator(&collection_id, &peer_str) { kept.push((cid, data)); continue; }
-    // Non-replicator: ACP gate (fail closed until installed).
-    let Some(gate) = self.read_gate.get() else { continue; };
-    let is_branchable = self.meta.is_branchable(&collection_id).await;
-    if gate.may_read(&identity, &collection_id, is_branchable, &doc_ids).await {
+    // Non-replicator: needs ServeAcp (fail closed until installed).
+    let Some(serve) = serve else { continue; };
+    if serve.gate.may_read(&identity, &collection_id, is_branchable, &doc_ids).await {
         kept.push((cid, data));
     }
 }
 let blocks = kept;
 ```
 
-Hold `meta: Arc<dyn BlockCollectionResolver>`, `peer_identity_resolver: Arc<dyn PeerIdentityResolver>`, `read_gate: Arc<LateBoundReadGate>` on `SyncCoordinator` (inject alongside `authorizer`; populate the gate via the same `wire_document_acp` path).
+Hold `meta: Arc<dyn BlockCollectionResolver>` and `serve_acp: Arc<LateBoundServeAcp>` on `SyncCoordinator` (inject alongside `authorizer`; populate `serve_acp` via the same `wire_document_acp` path).
 
 - [ ] **Step 4: Verify**
 
@@ -957,11 +939,11 @@ Expected: PASS. Any regression here is a **blocker** → revisit serve-scope per
 
 - [ ] **Step 2: Adversarial review (ultracode Workflow)**
 
-Scope to the A3 diff (Tasks 8–10) + merge handler vs Go `3f627855` `hasAccess`/`trySelfHasAccess`. Hunt: private branchable block served to a non-replicator without access; unresolved-DID granting more than Anonymous; recursive-vs-exact CAR asymmetry; a transport skipping the gate; `is_any_replicator`/`schema_version_id` passthrough leaks (finding #2); block→docID resolution missing collection-level blocks; the `LateBoundReadGate` serving before initialization. Resolve or explicitly accept every CONFIRMED/PLAUSIBLE finding.
+Scope to the A3 diff (Tasks 8–10) + merge handler vs Go `3f627855` `hasAccess`/`trySelfHasAccess`. Hunt: private branchable block served to a non-replicator without access; unresolved-DID granting more than Anonymous; recursive-vs-exact CAR asymmetry; a transport skipping the gate; `is_any_replicator`/`schema_version_id` passthrough leaks (finding #2); block→docID resolution missing collection-level blocks; the `LateBoundServeAcp` serving before initialization; an Iroh non-replicator path leaking registered docs while resolving to Anonymous. Resolve or explicitly accept every CONFIRMED/PLAUSIBLE finding.
 
 - [ ] **Step 3: Update PR body**
 
-Change the PR description from "A1 registration" to the full A1–A3 security feature; note the cross-impl matrix, the Iroh NodeId-derivation constraint, and the adversarial audit outcome.
+Change the PR description from "A1 registration" to the full A1–A3 security feature; note the cross-impl matrix, the Iroh non-replicator Anonymous narrowing (+ follow-up issue to port the signed-token exchange to Iroh), and the adversarial audit outcome.
 
 ---
 
@@ -970,6 +952,8 @@ Change the PR description from "A1 registration" to the full A1–A3 security fe
 **Spec coverage:** rule once in `acp` (Tasks 1,3 — direct + overlay checkers) ✔; node_did (Tasks 2,4) ✔; version→collection_id at every site (Tasks 5,6,9,10) ✔; commits (5) ✔; verify (6) ✔; KMS is_branchable + corrected semantics (7) ✔; peer-DID resolver, libp2p + Iroh-native (8) ✔; bitswap late-bound serve gate + stable-collection passthrough (9) ✔; CAR serve filter, no is_any_replicator (10) ✔; unresolved-DID→Anonymous (9,10) ✔; pushlog CID already-done (11) ✔; cross-impl (12) ✔; regression gate + adversarial audit (13) ✔.
 
 **Review findings closed (round 2):** #1 KMS test semantics (Task 7 step 1: public-doc+deny → Deny, explicit-grant → Allow) ✔; #2 per-block stable-collection passthrough (Tasks 9,10; Global Constraints) ✔; #3 late-bound `LateBoundReadGate` via `wire_document_acp` (Task 9) ✔; #4 Iroh NodeId→did:key derivation + documented constraint (Task 8) ✔; #5 single rule in `acp`, two checker impls (Tasks 1,3,7 all call `acp::read_access::check_doc_read_access`) ✔; #6 explicit `node_did` field + builder + wiring on the query runner (Task 4) ✔.
+
+**Review findings closed (round 4 — Go-parity identity):** #1 dropped Iroh `NodeId→did:key` + ed25519 key-binding (Go decouples transport id from ACP id); resolver uses Go's signed-token exchange, late-bound at `wire_document_acp` when the handle exists; Iroh → Anonymous narrowing + follow-up issue (Task 8) ✔; #2 libp2p resolver uses the **active** `get_peer_identity` (cache→fetch→verify→cache, `messaging.rs:348`), not cache-only (Task 8 step 3) ✔; #3 `BlockCollectionResolver` is **DB/schema-backed** (`get_collection_by_version_id`), not the P2P subscription store (Task 9 interfaces + step 4) ✔.
 
 **Review findings closed (round 3):** #1 resolver lifecycle — shared `PeerIdentityStore` created up-front (mirrors the `ReplicatorRegistry` Arc), `StoreResolver` constructible at filter build, not the handle (Task 8 steps 3-4) ✔; #2 ordering — `BlockCollectionResolver` (metadata, no ACP/identity) → replicator passthrough → non-replicator ACP; replicator path never touches the gate/identity (Tasks 9,10; Global Constraints serve-gate ordering) ✔; #3 Iroh binding enforced — derive endpoint key from the ed25519 node identity + startup error on secp256k1 (Task 8 step 5) ✔; #4 `crate::transport::PeerId` in the trait + conversion at the bitswap call site (Task 8 interfaces; Global Constraints) ✔; #5 `collections_map()` returns `Arc<CollectionVersion>` — `by_version` stores `Arc` (Task 5 step 3) ✔.
 
