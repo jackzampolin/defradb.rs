@@ -1049,7 +1049,7 @@ async fn poll_index_resolved(node: &DefraClient, timeout: Duration) -> bool {
 /// INDEXED-LWW parity (ASSERTING): an `@index`'d LWW field updated concurrently
 /// (node0 -> 20, node1 -> 99) must, on both impls, materialize 99 AND resolve
 /// ONLY 99 through the index — no stale entry for the seed (10) or the loser
-/// (20). Cross-impl twin of `partition::convergence_indexed_lww_restart_merge`:
+/// (20). Cross-impl twin of `index::index_reconciles_lww_merge_after_restart`:
 /// it confirms Rust's index maintenance follows the reconciled merge exactly as
 /// Go's does.
 ///

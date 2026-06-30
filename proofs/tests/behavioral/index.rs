@@ -96,10 +96,13 @@ fn count_by_age(node: &DefraClient, age: i64) -> usize {
     support::count_by_index(node, age)
 }
 
-async fn poll_age(node: &DefraClient, age: i64, timeout: Duration) -> bool {
+/// The seed (age=10) must be both materialized AND index-resolvable on node1
+/// before the partition, so node1's later winning write is layered on the
+/// replicated seed rather than a pre-seed base.
+async fn poll_seed_indexed(node: &DefraClient, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if materialized_age(node) == age {
+        if indexed_lww_state(node) == (10, 0, 0, 1) {
             return true;
         }
         if Instant::now() >= deadline {
@@ -220,11 +223,30 @@ async fn index_no_stale_no_missing() {
     );
 }
 
-/// CRDT merge index reconciliation. The indexed field is an LWW value; after a
-/// restart partition, node0 writes the losing value `20` and node1 writes the
-/// winning value `99`. When the commit DAG converges, indexed queries must match
-/// the materialized winner exactly: `99` finds the doc, while both stale values
-/// (`20` and the seed `10`) find nothing.
+/// SECONDARY-INDEX reconciliation across a restart-partition. The `@index`ed
+/// field is an LWW value; after node1 is restarted, node0 writes the losing
+/// value `20` and node1 writes the winning value `99`. Once the commit DAG
+/// converges, indexed queries on both replicas must match the materialized
+/// winner exactly: `99` finds the doc, while both stale values (`20` and the
+/// seed `10`) find nothing.
+///
+/// The two replicas guard different halves, deliberately:
+/// - node1 received the seed by replication, then locally wrote the WINNER 99.
+///   Its local winner must SURVIVE the merge of node0's delta rather than being
+///   clobbered by a re-materialization from a stale priority store. The DAG
+///   convergence gate forces that merge to actually occur, so this leg is not
+///   satisfied by node1's local write alone.
+/// - node0 locally wrote the LOSER 20 and must MERGE node1's winning 99, flipping
+///   its index from 20 to 99 — the genuine cross-node merge + index-follow leg.
+///
+/// REGRESSION: the index is a THIRD store layered on the LWW two-store seam. A
+/// local write advances the materialized blob and writes its own index entry,
+/// while the LWW priority store advances only on merge. If a merge
+/// re-materializes the blob from a stale priority store, the index can be left
+/// pointing at an orphaned value — the document shows 99 but a filtered query
+/// returns the loser or nothing. The structured `@explain` oracle additionally
+/// proves the filtered query plans a `User` index scan, so the index counts are
+/// not silently satisfied by a full collection scan.
 #[tokio::test]
 async fn index_reconciles_lww_merge_after_restart() {
     let mut cluster = TestCluster::builder()
@@ -251,8 +273,8 @@ async fn index_reconciles_lww_merge_after_restart() {
         .expect("_docID")
         .to_string();
     assert!(
-        poll_age(&cluster.client(1), 10, Duration::from_secs(20)).await,
-        "seed document must replicate to node1 before the indexed LWW partition"
+        poll_seed_indexed(&cluster.client(1), Duration::from_secs(20)).await,
+        "seed document must replicate AND be index-resolvable on node1 before the indexed LWW partition"
     );
     assert_age_filter_uses_index(&cluster.client(0), "pre-replay node0");
 
