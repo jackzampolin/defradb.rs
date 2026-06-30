@@ -23,6 +23,24 @@ type EmbeddedTxnRegistry<S> = db::DbTransactionRegistry<S>;
 pub(crate) type WireDocumentAcpCallback = Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>;
 pub(crate) type WireKmsCallback = Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Send>;
 
+/// Resolve the ambient (scoped, then process) identity into a creator DID for
+/// ACP registration. Returns `Ok(None)` when no identity is present (the
+/// collection stays public/unregistered, as intended), but fails closed when an
+/// identity string is present yet malformed — never silently degrading a
+/// permissioned collection to public.
+fn resolve_creator_identity() -> Result<Option<identity::Did>> {
+    match defra_core::current_identity::try_get_scoped_identity()
+        .or_else(defra_core::current_identity::get_current_identity)
+    {
+        Some(raw) => {
+            Ok(Some(identity::Did::new(raw).map_err(|error| {
+                anyhow!("malformed ambient identity: {error}")
+            })?))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Embedded DefraDB node assembled for native/mobile embedding.
 pub struct EmbeddedNode<S: storage::corekv::Store> {
     pub database: Arc<db::DB<S>>,
@@ -73,12 +91,15 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
 
         let _id_guard =
             defra_core::current_identity::scoped_current_identity(self.node_identity_did.clone());
-        for collection in collections {
-            self.database
-                .create_collection(collection)
-                .await
-                .map_err(|error| anyhow!("create collection error: {error}"))?;
-        }
+        let creator = resolve_creator_identity()?;
+        self.database
+            .create_collections_atomic_with_acp_registration(
+                collections,
+                self.document_acp.clone(),
+                creator,
+            )
+            .await
+            .map_err(|error| anyhow!("create collection error: {error}"))?;
 
         Ok(())
     }

@@ -48,8 +48,6 @@ mod tests {
         node_close(node);
     }
 
-    /// add_schema with a malformed non-empty identity DID must error instead of
-    /// silently treating the caller as anonymous.
     #[test]
     fn add_schema_malformed_identity_did_returns_error() {
         init();

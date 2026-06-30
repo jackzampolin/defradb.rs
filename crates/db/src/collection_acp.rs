@@ -115,8 +115,11 @@ pub async fn register_doc_if_needed(
 /// 3. Identity is provided
 ///
 /// The ACP object id is the stable collection ID. Re-registering an existing
-/// collection object is a no-op: the same collection can be defined on multiple
-/// nodes backed by a shared ACP store.
+/// collection object owned by the same identity is a no-op: the same collection
+/// can be defined on multiple nodes backed by a shared ACP store. A
+/// registration that finds the object already owned by a *different* identity
+/// fails closed (mirrors Go's `bridgeDocumentACP.RegisterDocObject`, which
+/// no-ops only when the existing owner equals the caller and otherwise errors).
 pub async fn register_collection_if_needed(
     acp: &dyn DocumentACP,
     identity: Option<&Did>,
@@ -135,7 +138,28 @@ pub async fn register_collection_if_needed(
         .is_doc_registered(&policy.id, &policy.resource_name, &collection.collection_id)
         .await?
     {
-        return Ok(());
+        // Already registered (e.g. the same collection defined on another node
+        // of a shared ACP store). The local/zanzibar backends error on ANY
+        // pre-existing object, so the owner check must live here rather than in
+        // `register_object`. Same-owner => idempotent no-op; different or
+        // unknown owner => fail closed so the collection is not persisted under
+        // someone else's ACP ownership.
+        let existing_owner = acp
+            .get_doc_owner(&policy.id, &policy.resource_name, &collection.collection_id)
+            .await?;
+        if existing_owner.as_ref() == Some(did) {
+            return Ok(());
+        }
+        return Err(acp::Error::DocumentAlreadyRegistered(format!(
+            "collection object '{}' under resource '{}' is already registered to a different owner (expected {}, found {})",
+            collection.collection_id,
+            policy.resource_name,
+            did,
+            existing_owner
+                .as_ref()
+                .map(|o| o.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string()),
+        )));
     }
 
     acp.register_object(

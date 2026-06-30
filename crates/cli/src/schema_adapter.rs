@@ -85,9 +85,16 @@ impl<S: Store + 'static> SchemaAdapter<S> {
     }
 
     async fn add_schema_inner(&self, sdl: &str) -> Result<Vec<CollectionVersion>, String> {
-        let creator = defra_core::current_identity::try_get_scoped_identity()
+        // Fail closed: a present-but-malformed ambient identity must error, not
+        // silently degrade a permissioned collection to public (unregistered).
+        let creator = match defra_core::current_identity::try_get_scoped_identity()
             .or_else(defra_core::current_identity::get_current_identity)
-            .and_then(|did| Did::new(did).ok());
+        {
+            Some(raw) => {
+                Some(Did::new(raw).map_err(|e| format!("malformed ambient identity: {}", e))?)
+            }
+            None => None,
+        };
         let known_types: std::collections::HashSet<String> = self
             .database
             .list_collections()

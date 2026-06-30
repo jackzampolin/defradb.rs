@@ -90,9 +90,16 @@ impl<S: Store + 'static> TransactionOperations for TxnRegistryAdapter<S> {
     ) -> Result<Vec<schema::CollectionVersion>, String> {
         let registry = self.registry.clone();
         let document_acp = self.document_acp.clone();
-        let creator = defra_core::current_identity::try_get_scoped_identity()
+        // Fail closed: a present-but-malformed ambient identity must error, not
+        // silently degrade a permissioned collection to public (unregistered).
+        let creator = match defra_core::current_identity::try_get_scoped_identity()
             .or_else(defra_core::current_identity::get_current_identity)
-            .and_then(|did| Did::new(did).ok());
+        {
+            Some(raw) => {
+                Some(Did::new(raw).map_err(|e| format!("malformed ambient identity: {}", e))?)
+            }
+            None => None,
+        };
         let txn_id = txn_id.to_string();
         let sdl = sdl.to_string();
         let handle = tokio::runtime::Handle::current();

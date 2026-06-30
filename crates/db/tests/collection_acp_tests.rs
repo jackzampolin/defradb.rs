@@ -309,6 +309,39 @@ async fn double_collection_registration_is_idempotent() {
 }
 
 #[tokio::test]
+async fn different_owner_collection_registration_fails_closed() {
+    // Mirrors Go's bridgeDocumentACP.RegisterDocObject: a re-registration that
+    // finds the collection object already owned by a different identity must
+    // error (not silently no-op), so a node cannot persist a protected
+    // collection whose ACP object is owned by someone else.
+    let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
+    let collection = branchable_collection_with_policy();
+    let owner_a = test_did();
+    let owner_b = test_did2();
+
+    register_collection_if_needed(&acp, Some(&owner_a), &collection)
+        .await
+        .unwrap();
+
+    let err = register_collection_if_needed(&acp, Some(&owner_b), &collection)
+        .await
+        .expect_err("different-owner re-registration must fail closed");
+    assert!(
+        err.to_string().contains("different owner"),
+        "error should describe the owner mismatch, got: {err}"
+    );
+
+    // The original owner is unchanged.
+    let policy = collection.policy.as_ref().unwrap();
+    assert_eq!(
+        acp.get_doc_owner(&policy.id, &policy.resource_name, &collection.collection_id)
+            .await
+            .unwrap(),
+        Some(owner_a)
+    );
+}
+
+#[tokio::test]
 async fn branchable_permissioned_create_fails_closed_if_collection_acp_registration_fails() {
     let db = db::DB::new(MemoryStore::new()).unwrap();
     let acp = Arc::new(FailingDocumentAcp);

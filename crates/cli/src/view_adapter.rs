@@ -126,9 +126,16 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
             }
         }
 
-        let creator = defra_core::current_identity::try_get_scoped_identity()
+        // Fail closed: a present-but-malformed ambient identity must error, not
+        // silently degrade a permissioned collection to public (unregistered).
+        let creator = match defra_core::current_identity::try_get_scoped_identity()
             .or_else(defra_core::current_identity::get_current_identity)
-            .and_then(|did| Did::new(did).ok());
+        {
+            Some(raw) => {
+                Some(Did::new(raw).map_err(|e| format!("malformed ambient identity: {}", e))?)
+            }
+            None => None,
+        };
         let created_versions = if let Some(document_acp) = &self.document_acp {
             self.database
                 .create_collections_atomic_with_acp_registration(

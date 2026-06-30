@@ -27,17 +27,28 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
         }
     }
 
-    fn current_identity() -> Option<Did> {
-        defra_core::current_identity::try_get_scoped_identity()
+    /// Resolve the ambient identity into a creator DID. Returns `Ok(None)` when
+    /// no identity is present (collection stays public), but fails closed when an
+    /// identity string is present yet malformed, so a permissioned collection is
+    /// never silently created unregistered.
+    fn current_identity() -> anyhow::Result<Option<Did>> {
+        match defra_core::current_identity::try_get_scoped_identity()
             .or_else(defra_core::current_identity::get_current_identity)
-            .and_then(|did| Did::new(did).ok())
+        {
+            Some(raw) => {
+                Ok(Some(Did::new(raw).map_err(|e| {
+                    anyhow::anyhow!("malformed ambient identity: {}", e)
+                })?))
+            }
+            None => Ok(None),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
     async fn add_schema(&self, sdl: &str) -> anyhow::Result<()> {
-        let creator = Self::current_identity();
+        let creator = Self::current_identity()?;
         self.database
             .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
             .await
@@ -109,7 +120,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
             }
         }
 
-        let creator = Self::current_identity();
+        let creator = Self::current_identity()?;
         self.database
             .create_collections_atomic_with_acp_registration(
                 collections,
