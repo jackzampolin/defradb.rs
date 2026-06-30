@@ -76,12 +76,17 @@ The mobile-oriented entry points are:
 - `defra_mobile_execute(node, request_json)`
 - `defra_mobile_peer_info(node)`
 - `defra_mobile_connect(node, addr)`
+- `defra_mobile_disconnect(node, addr)`
 - `defra_mobile_sync_collection(node, request_json)`
 - `defra_mobile_add_replicator(node, request_json)`
 - `register_remote_identity(...)`
 - `register_remote_identity_bytes(...)`
 - `bind_identity_bearer_token(did, bearer_token)`
 - `node_set_default_identity(node, did)`
+
+Rebuild the XCFramework after updating the FFI crate so the generated header
+includes newly added symbols such as `defra_mobile_add_replicator` and
+`defra_mobile_disconnect`.
 
 `defra_mobile_open_node` accepts a JSON blob so Swift can avoid hand-building
 `NodeInitOptions`. Example:
@@ -110,8 +115,7 @@ The mobile-oriented entry points are:
 ```
 
 `defra_mobile_add_replicator` accepts a single peer address, collection names,
-and optional per-collection filters. Rebuild the XCFramework after updating the
-FFI crate so the generated header includes the new symbol.
+and optional per-collection filters.
 
 ```json
 {
