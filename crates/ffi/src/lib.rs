@@ -255,7 +255,7 @@ pub use index::{create_index, delete_index, get_indexes, list_all_indexes};
 pub use lens::{lens_add, lens_add_in_txn, lens_list, lens_list_in_txn};
 pub use mobile::{
     defra_mobile_add_replicator, defra_mobile_close_node, defra_mobile_connect,
-    defra_mobile_ensure_schema, defra_mobile_execute, defra_mobile_init,
+    defra_mobile_disconnect, defra_mobile_ensure_schema, defra_mobile_execute, defra_mobile_init,
     defra_mobile_notify_network_change, defra_mobile_open_node, defra_mobile_peer_info,
     defra_mobile_sync_collection,
 };
@@ -263,9 +263,9 @@ pub use node::{new_node, node_close};
 pub use p2p::{
     new_node_with_p2p, p2p_active_peers, p2p_add_collections, p2p_add_documents,
     p2p_add_replicator, p2p_add_replicator_with_filter, p2p_connect, p2p_delete_collections,
-    p2p_delete_documents, p2p_delete_replicator, p2p_list_collections, p2p_list_documents,
-    p2p_list_replicators, p2p_notify_network_change, p2p_peer_info, p2p_sync_branchable_collection,
-    p2p_sync_collection_versions, p2p_sync_documents,
+    p2p_delete_documents, p2p_delete_replicator, p2p_disconnect, p2p_list_collections,
+    p2p_list_documents, p2p_list_replicators, p2p_notify_network_change, p2p_peer_info,
+    p2p_sync_branchable_collection, p2p_sync_collection_versions, p2p_sync_documents,
 };
 pub use query::exec_request;
 pub use schema::{add_schema, add_schema_in_txn, get_collections, get_collections_in_txn};

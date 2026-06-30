@@ -19,7 +19,9 @@ mod version_sync;
 pub use collections::{p2p_add_collections, p2p_delete_collections, p2p_list_collections};
 pub use documents::{p2p_add_documents, p2p_delete_documents, p2p_list_documents};
 pub use node::new_node_with_p2p;
-pub use peer::{p2p_active_peers, p2p_connect, p2p_notify_network_change, p2p_peer_info};
+pub use peer::{
+    p2p_active_peers, p2p_connect, p2p_disconnect, p2p_notify_network_change, p2p_peer_info,
+};
 pub use push::p2p_retry_replicators;
 pub use replicator::{
     p2p_add_replicator, p2p_add_replicator_with_filter, p2p_delete_replicator, p2p_list_replicators,
