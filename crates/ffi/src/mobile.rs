@@ -14,9 +14,9 @@ use crate::mobile_config::{
 use crate::nac_check::check_nac_for_node;
 use crate::node::{new_node, node_close};
 use crate::p2p::{
-    new_node_with_p2p, p2p_add_replicator_with_filter, p2p_connect, p2p_notify_network_change,
-    p2p_peer_info, p2p_sync_branchable_collection, p2p_sync_collection_versions,
-    p2p_sync_documents,
+    new_node_with_p2p, p2p_add_replicator_with_filter, p2p_connect, p2p_disconnect,
+    p2p_notify_network_change, p2p_peer_info, p2p_sync_branchable_collection,
+    p2p_sync_collection_versions, p2p_sync_documents,
 };
 use crate::query::exec_request;
 use crate::schema::validate_collection_policy;
@@ -518,6 +518,19 @@ pub extern "C" fn defra_mobile_connect(node_ptr: usize, addr: *const c_char) -> 
     }
 }
 
+/// Disconnect the node from a peer address.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn defra_mobile_disconnect(node_ptr: usize, addr: *const c_char) -> FfiResult {
+    ffi_entry! {
+        let identity = match default_identity_cstring(node_ptr) {
+            Ok(value) => value,
+            Err(error) => return FfiResult::error(error),
+        };
+        unsafe { p2p_disconnect(node_ptr, c_string_ptr(&identity), addr) }
+    }
+}
+
 /// Notify the embedded iroh transport that network conditions may have changed.
 #[no_mangle]
 pub extern "C" fn defra_mobile_notify_network_change(node_ptr: usize) -> FfiResult {
@@ -716,6 +729,12 @@ mod tests {
         let json = r#"{"collections":["Posts"],"address":"/ip4/127.0.0.1/tcp/9000"}"#;
         let request: MobileAddReplicatorRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.peer_addr, "/ip4/127.0.0.1/tcp/9000");
+    }
+
+    #[test]
+    fn defra_mobile_disconnect_exports_connect_style_ffi_signature() {
+        let symbol: extern "C" fn(usize, *const c_char) -> FfiResult = defra_mobile_disconnect;
+        let _ = symbol;
     }
 
     #[test]
