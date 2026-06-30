@@ -41,7 +41,7 @@ section is the **diff**: what is proven vs. the accepted gap.
 | CID content-addressing determinism + Block canonicalization | Lean | defra-core |
 | Deferred-ACP overlay consistency | TLA+ | query-plan |
 | Order-preserving key encoding | Lean | storage |
-| Index-maintenance consistency | Lean | db-index |
+| Index-maintenance consistency | Lean + TLA+ | db-index, db-merge |
 
 ### Backlog — want to model: **none**
 **The medium-and-up correctness surface is fully modeled.** All 2 high + 11 medium backlog
@@ -120,7 +120,7 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 | Document materialization status convergence | Behavioral | `partition::convergence_delete_update_race_preserves_tombstone`; `MC_DocumentMaterialization_{Red_Overwrite,Green}`; `DefraConvergence.DocumentMaterialization` |
 | Deferred-ACP overlay | Behavioral | `deferred_acp.rs` (txn-local gating) |
 | CID determinism | Behavioral | `cid.rs` |
-| Index-maintenance | Behavioral | `index.rs` |
+| Index-maintenance | Behavioral | `index.rs` (single-node create/update/delete + indexed LWW restart/merge reconciliation); `MC_IndexReconciliation_{Red_SaveOnly,Green}` |
 | KMS key distribution | Behavioral | `kms.rs` (node0 denies the DEK to unauthorized node1) |
 | CRDT merge laws | Contract | `MergeResult` vocab; `DefraConvergence.MixedField` product proof; `MixedFieldMaterialization.tla` |
 | Multi-instance claim | Boundary | defra-agent substrate, not this binary |

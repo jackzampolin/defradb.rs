@@ -1760,10 +1760,11 @@ struct P2PSetupResult {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, LazyLock};
 
     use defra_core::signing::{RemoteSigner, SigningConfig, SigningKeyType};
     use query::{QueryRequest, QueryResponseError};
+    use tokio::sync::Mutex;
 
     use super::{EmbeddedNode, ExecuteRetryPolicy};
 
@@ -1772,6 +1773,8 @@ mod tests {
 
     #[cfg(feature = "http")]
     use super::HttpConfig;
+
+    static SIGNING_STORE_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[cfg(feature = "http")]
     #[test]
@@ -1884,6 +1887,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_identity_did_requires_registered_signer() {
+        let _serial = SIGNING_STORE_GUARD.lock().await;
         defra_core::signing::clear_identity_store();
 
         let error = match EmbeddedNode::builder()
@@ -1905,6 +1909,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_identity_did_accepts_registered_remote_signer() {
+        let _serial = SIGNING_STORE_GUARD.lock().await;
         defra_core::signing::clear_identity_store();
 
         let did = "did:key:zRegisteredRemote";
