@@ -223,6 +223,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_filters_accepts_predicate_alias() {
+        use super::parse_filters_json;
+
+        let json = r#"{"Users": {"predicate": {"agent_did": {"_eq": "did:key:z6"}}}}"#;
+        let filters = parse_filters_json(json).unwrap();
+        assert_eq!(filters.len(), 1);
+        assert!(filters["Users"].conditions.is_some());
+    }
+
+    #[test]
     fn parse_filters_null_or_empty_yields_empty_map() {
         use super::parse_filters_json;
 

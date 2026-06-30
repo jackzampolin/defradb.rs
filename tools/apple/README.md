@@ -77,6 +77,7 @@ The mobile-oriented entry points are:
 - `defra_mobile_peer_info(node)`
 - `defra_mobile_connect(node, addr)`
 - `defra_mobile_sync_collection(node, request_json)`
+- `defra_mobile_add_replicator(node, request_json)`
 - `register_remote_identity(...)`
 - `register_remote_identity_bytes(...)`
 - `bind_identity_bearer_token(did, bearer_token)`
@@ -105,6 +106,31 @@ The mobile-oriented entry points are:
 {
   "identityDid": "did:key:z...",
   "query": "mutation { add_Book(input: {name: \"Dune\"}) { _docID } }"
+}
+```
+
+`defra_mobile_add_replicator` accepts a single peer address, collection names,
+and optional per-collection filters. Rebuild the XCFramework after updating the
+FFI crate so the generated header includes the new symbol.
+
+```json
+{
+  "identityDid": "did:key:z...",
+  "collections": ["Users"],
+  "peerAddr": "/ip4/1.2.3.4/tcp/9000/p2p/12D3Koo...",
+  "filters": {
+    "Users": {"predicate": {"agent_did": {"_eq": "did:key:z..."}}}
+  }
+}
+```
+
+The `filters` field may be omitted or set to `null` for unfiltered replication.
+It also accepts the HTTP `Conditions` form and the legacy scalar form:
+
+```json
+{
+  "Users": {"Conditions": {"agent_did": {"_eq": "did:key:z..."}}},
+  "Posts": {"Field": "agent_did", "Value": "did:key:z..."}
 }
 ```
 

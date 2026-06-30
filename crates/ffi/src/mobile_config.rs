@@ -88,8 +88,7 @@ pub(crate) struct MobileAddReplicatorRequest {
     pub collections: Vec<String>,
     #[serde(alias = "address")]
     pub peer_addr: String,
-    #[serde(default)]
-    pub filters: defra_http::router::ReplicationFilters,
+    pub filters: Option<defra_http::router::ReplicationFilters>,
 }
 
 pub(crate) fn maybe_cstring(
