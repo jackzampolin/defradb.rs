@@ -49,26 +49,14 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
         schema::definition_validation::validate_new_collections(&collections)
             .map_err(|e| anyhow::anyhow!("schema validation error: {}", e))?;
 
-        for collection in collections {
-            let collection_name = collection.name.clone();
-            db::DB::create_collection(&self.database, collection)
-                .await
-                .map_err(|e| anyhow::anyhow!("create collection error: {}", e))?;
-            let finalized = self
-                .database
-                .get_collection(&collection_name)
-                .map_err(anyhow::Error::new)?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("created collection '{}' was not cached", collection_name)
-                })?;
-            db::register_collection_if_needed(
-                self.document_acp.as_ref(),
-                creator.as_ref(),
-                finalized.schema(),
+        self.database
+            .create_collections_atomic_with_acp_registration(
+                collections,
+                self.document_acp.clone(),
+                creator,
             )
             .await
-            .map_err(anyhow::Error::new)?;
-        }
+            .map_err(|e| anyhow::anyhow!("create collection error: {}", e))?;
         Ok(())
     }
 
@@ -121,22 +109,15 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
             }
         }
 
-        let finalized = self
-            .database
-            .create_collections_atomic(collections)
-            .await
-            .map_err(|e| anyhow::anyhow!("create view collection error: {}", e))?;
-
         let creator = Self::current_identity();
-        for collection in &finalized {
-            db::register_collection_if_needed(
-                self.document_acp.as_ref(),
-                creator.as_ref(),
-                collection,
+        self.database
+            .create_collections_atomic_with_acp_registration(
+                collections,
+                self.document_acp.clone(),
+                creator,
             )
             .await
-            .map_err(anyhow::Error::new)?;
-        }
+            .map_err(|e| anyhow::anyhow!("create view collection error: {}", e))?;
 
         if !materialized_names.is_empty() {
             self.database

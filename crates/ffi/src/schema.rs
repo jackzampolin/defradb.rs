@@ -17,6 +17,22 @@ use crate::state::{PolicyStore, NODES};
 use crate::types::FfiResult;
 use crate::{ffi_async, try_ffi, ERR_INVALID_NODE_HANDLE};
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub(crate) fn parse_optional_identity_did(
+    identity_did: *const c_char,
+) -> Result<(Option<String>, Option<Did>), FfiResult> {
+    // SAFETY: `identity_did` is either null or a valid C string from the FFI caller.
+    let identity_str =
+        unsafe { crate::types::c_str_to_string(identity_did) }.filter(|s| !s.is_empty());
+    let creator = match identity_str.as_deref() {
+        Some(did) => Some(
+            Did::new(did).map_err(|e| FfiResult::error(format!("invalid identity DID: {}", e)))?,
+        ),
+        None => None,
+    };
+    Ok((identity_str, creator))
+}
+
 /// Add a schema to the database.
 ///
 /// The schema should be a GraphQL SDL string defining types.
@@ -51,7 +67,6 @@ pub unsafe extern "C" fn add_schema(
         ));
         let schema_str = try_ffi!(require_c_str(schema_sdl, "schema_sdl"));
 
-        // Validate node handle and get database, policy store, and document ACP
         let (database, policy_store, document_acp) = match NODES.get(node_ptr, |state| {
             (
                 state.database.clone(),
@@ -62,8 +77,7 @@ pub unsafe extern "C" fn add_schema(
             Some(tuple) => tuple,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
-        let identity_str = crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty());
-        let creator = identity_str.as_ref().and_then(|did| Did::new(did).ok());
+        let (identity_str, creator) = try_ffi!(parse_optional_identity_did(identity_did));
 
         // Bind the caller's identity into the ambient context so the DB-layer NAC
         // gate on create_collection resolves the actual caller instead of the
@@ -95,27 +109,14 @@ pub unsafe extern "C" fn add_schema(
                 }
             }
 
-            // Create each collection
-            let mut created_versions = Vec::new();
-            for schema in collections {
-                let collection_name = schema.name.clone();
-                database
-                    .create_collection(schema)
-                    .await
-                    .map_err(|e| format!("failed to create collection: {}", e))?;
-                let finalized = database
-                    .get_collection(&collection_name)
-                    .map_err(|e| format!("failed to load created collection: {}", e))?
-                    .ok_or_else(|| format!("created collection '{}' was not cached", collection_name))?;
-                db::register_collection_if_needed(
-                    document_acp.as_ref(),
-                    creator.as_ref(),
-                    finalized.schema(),
+            let created_versions = database
+                .create_collections_atomic_with_acp_registration(
+                    collections,
+                    document_acp.clone(),
+                    creator,
                 )
                 .await
-                .map_err(|e| format!("failed to register collection with ACP: {}", e))?;
-                created_versions.push(finalized.schema().clone());
-            }
+                .map_err(|e| format!("failed to create collection: {}", e))?;
 
             // Return JSON array of created collection versions
             let json = serde_json::to_string(&created_versions)
@@ -161,8 +162,7 @@ pub unsafe extern "C" fn add_schema_in_txn(
             Some(tuple) => tuple,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
-        let identity_str = crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty());
-        let creator = identity_str.as_ref().and_then(|did| Did::new(did).ok());
+        let (identity_str, creator) = try_ffi!(parse_optional_identity_did(identity_did));
 
         // Bind the caller's identity into the ambient context so the registry-layer
         // NAC gate on add_schema_in_txn resolves the actual caller instead of the

@@ -264,12 +264,45 @@ impl<S: Store> crate::database::DB<S> {
     /// and updates the process-wide cache.
     #[instrument(skip(self, schema), fields(collection = %schema.name), name = "db.create_collection_auto")]
     pub async fn create_collection(&self, schema: CollectionVersion) -> Result<()> {
+        self.create_collection_inner(schema, None, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// Create a new collection, registering branchable ACP before commit.
+    ///
+    /// If collection ACP registration fails, the DB transaction is discarded so
+    /// the protected collection is not persisted without its ACP object.
+    pub async fn create_collection_with_acp_registration(
+        &self,
+        schema: CollectionVersion,
+        document_acp: std::sync::Arc<dyn acp::DocumentACP>,
+        creator: Option<identity::Did>,
+    ) -> Result<CollectionVersion> {
+        self.create_collection_inner(schema, Some(document_acp), creator)
+            .await
+    }
+
+    async fn create_collection_inner(
+        &self,
+        schema: CollectionVersion,
+        document_acp: Option<std::sync::Arc<dyn acp::DocumentACP>>,
+        creator: Option<identity::Did>,
+    ) -> Result<CollectionVersion> {
         self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
             .await?;
         let name = schema.name.clone();
         let mut txn = self.new_txn(false).await?;
 
         let finalized_schema = self.create_collection_with_txn(&mut txn, schema).await?;
+
+        if let (Some(document_acp), Some(creator)) = (document_acp, creator) {
+            txn.stage_collection_acp_registration(
+                document_acp,
+                creator,
+                vec![finalized_schema.clone()],
+            );
+        }
 
         txn.commit().await?;
         self.unforbid_collection_id(finalized_schema.collection_id.as_str())?;
@@ -279,9 +312,9 @@ impl<S: Store> crate::database::DB<S> {
             tracing::error!(error = ?e, collection_name = %name, "Collection cache lock poisoned after create");
             Error::CacheUpdateFailedAfterCommit(name.clone())
         })?;
-        cache.insert(name, Collection::new(finalized_schema));
+        cache.insert(name, Collection::new(finalized_schema.clone()));
 
-        Ok(())
+        Ok(finalized_schema)
     }
 
     /// Create multiple collections atomically in a single transaction.
@@ -291,6 +324,30 @@ impl<S: Store> crate::database::DB<S> {
     pub async fn create_collections_atomic(
         &self,
         schemas: Vec<CollectionVersion>,
+    ) -> Result<Vec<CollectionVersion>> {
+        self.create_collections_atomic_inner(schemas, None, None)
+            .await
+    }
+
+    /// Create multiple collections atomically, registering branchable ACP before commit.
+    ///
+    /// If any collection ACP registration fails, the DB transaction is discarded
+    /// and none of the collections are persisted.
+    pub async fn create_collections_atomic_with_acp_registration(
+        &self,
+        schemas: Vec<CollectionVersion>,
+        document_acp: std::sync::Arc<dyn acp::DocumentACP>,
+        creator: Option<identity::Did>,
+    ) -> Result<Vec<CollectionVersion>> {
+        self.create_collections_atomic_inner(schemas, Some(document_acp), creator)
+            .await
+    }
+
+    async fn create_collections_atomic_inner(
+        &self,
+        schemas: Vec<CollectionVersion>,
+        document_acp: Option<std::sync::Arc<dyn acp::DocumentACP>>,
+        creator: Option<identity::Did>,
     ) -> Result<Vec<CollectionVersion>> {
         self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
             .await?;
@@ -374,6 +431,10 @@ impl<S: Store> crate::database::DB<S> {
                         .map_err(Error::Storage)?;
                 }
             }
+        }
+
+        if let (Some(document_acp), Some(creator)) = (document_acp, creator) {
+            txn.stage_collection_acp_registration(document_acp, creator, finalized_schemas.clone());
         }
 
         txn.commit().await?;

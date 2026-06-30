@@ -116,31 +116,18 @@ impl<S: Store + 'static> SchemaAdapter<S> {
             }
         }
 
-        let mut created = Vec::new();
-        for collection in collections {
-            let collection_name = collection.name.clone();
+        let created = if let Some(document_acp) = &self.document_acp {
             self.database
-                .create_collection(collection)
-                .await
-                .map_err(|e| format!("failed to create collection: {}", e))?;
-            let finalized = self
-                .database
-                .get_collection(&collection_name)
-                .map_err(|e| format!("failed to load created collection: {}", e))?
-                .ok_or_else(|| {
-                    format!("created collection '{}' was not cached", collection_name)
-                })?;
-            if let Some(document_acp) = &self.document_acp {
-                db::register_collection_if_needed(
-                    document_acp.as_ref(),
-                    creator.as_ref(),
-                    finalized.schema(),
+                .create_collections_atomic_with_acp_registration(
+                    collections,
+                    document_acp.clone(),
+                    creator,
                 )
                 .await
-                .map_err(|e| format!("failed to register collection with ACP: {}", e))?;
-            }
-            created.push(finalized.schema().clone());
+        } else {
+            self.database.create_collections_atomic(collections).await
         }
+        .map_err(|e| format!("failed to create collection: {}", e))?;
 
         Ok(created)
     }
