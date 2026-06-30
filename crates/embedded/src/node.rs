@@ -674,6 +674,7 @@ where
             .unwrap_or_else(|| Arc::new(db::AutoCommitMutator::new(database.clone()))),
     )
     .with_acp(document_acp.clone())
+    .with_node_did(database.node_did())
     .with_lens_store(database.lens_store().clone())
     .with_query_limits(config.query_limits);
 

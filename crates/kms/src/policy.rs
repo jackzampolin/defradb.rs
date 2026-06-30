@@ -65,6 +65,8 @@ pub struct DocCollectionInfo {
     pub policy_id: String,
     /// Resource name within the policy.
     pub resource_name: String,
+    /// Whether the collection is branchable.
+    pub is_branchable: bool,
 }
 
 #[cfg(test)]

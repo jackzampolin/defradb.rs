@@ -133,7 +133,8 @@ These were gaps in the first draft, surfaced by spec review; they are explicit r
 5. **Replicator passthrough:** requesting peer is a registered replicator for the block's collection
    → **allow, no per-doc check.**
 6. Otherwise: resolve `pid → identity` (cache or identity-protocol round-trip, token-verified), then
-   per-doc `CheckDocReadAccess` (a block may have several owners; access to any one suffices).
+   per-doc `CheckDocReadAccess` (the serving CID is used to resolve block ownership; a block may
+   have several owners, and access to any one suffices).
 
 So **"full Go parity at the serve boundary" = preserve replicator passthrough (step 5, which Rust
 already implements) + add the non-replicator per-doc `check_doc_read_access` gate (step 6, new) +
@@ -152,8 +153,8 @@ Verified by enumerating every `CheckDocReadAccess*` / serve call in v1.0.0.
 |---|---------|---------|-----------|--------------------|--------|
 | 1 | Commits query (A2) | `planner/commit.go:325,348` | `query/src/runner/commits.rs::execute_commits_query` | `docID None => continue` — **collection-level DAG ungated**; doc commits filtered per-doc only | Gate collection-level commits on the collection object; route doc commits through `check_doc_read_access` (overlay backend, with `node_did`) so branchable public docs also require collection access |
 | 2 | Signature verify (A2) | `internal/db/verify.go:115` | `db/src/block_verify.rs:110` | gates only when `delta.doc_id()` is `Some` — **collection blocks bypass** | Resolve `version_id → CollectionVersion`; use `check_doc_read_access`; gate collection-level blocks on the collection object |
-| 3 | P2P serve — Bitswap (A3) | `p2p.go:197` `SetBlockAccessFunc(hasAccess)` | `p2p/src/bitswap/filter.rs::check_access` (libp2p) | replicator-membership gate only; no identity/ACP context (`filter.rs:45` gets only `PeerId`+`Cid`) | Keep replicator passthrough; for non-replicator peers, resolve DID via `get_peer_identity` (fail-closed) and apply per-block `check_doc_read_access`. Inject DB/ACP/identity-resolver into the filter |
-| 4 | P2P serve — CAR fetch (A3) | (same `hasAccess`, recursive + selective DAG) | `p2p/src/sync/coordinator/event_handler/car.rs::check_car_fetch_access` | checks only **root collection** access, then serves the whole DAG (`collect_dag_blocks` / `collect_exact_blocks`) | Filter CAR **response blocks per block** through `check_doc_read_access` for both recursive and exact (`collect_exact_blocks`) fetches; preserve replicator passthrough |
+| 3 | P2P serve — Bitswap (A3) | `p2p.go:197` `SetBlockAccessFunc(hasAccess)` | `p2p/src/bitswap/filter.rs::check_access` (libp2p) | replicator-membership gate only; no identity/ACP context (`filter.rs:45` gets only `PeerId`+`Cid`) | Keep replicator passthrough; for non-replicator peers, resolve DID via `get_peer_identity` (fail-closed) and apply per-block `check_doc_read_access`. Inject DB/ACP/identity-resolver into the filter, and preserve the requested CID for CID-keyed block-owner lookup |
+| 4 | P2P serve — CAR fetch (A3) | (same `hasAccess`, recursive + selective DAG) | `p2p/src/sync/coordinator/event_handler/car.rs::check_car_fetch_access` | checks only **root collection** access, then serves the whole DAG (`collect_dag_blocks` / `collect_exact_blocks`) | Filter CAR **response blocks per block** through `check_doc_read_access` for both recursive and exact (`collect_exact_blocks`) fetches; preserve replicator passthrough and the block CID for owner lookup |
 | 5 | KMS key gate (A3) | `internal/kms/pubsub.go:577` | `crates/kms` (`doesIdentityHaveDocPermission` analog) | per-doc read check; `DocCollectionInfo` lacks `is_branchable` (`policy.rs:61`) | Add `is_branchable` to `DocCollectionInfo` + its `DocCollectionLookup` producer; switch the gate to `check_doc_read_access` |
 
 ### Already implemented — regression coverage only (finding #5)
@@ -210,9 +211,11 @@ Unit tests:
 - Serve-filter per-block decision (bitswap + CAR): replicator passthrough; non-replicator with no
   resolvable DID → treated as Anonymous (denied registered/private objects, **allowed** for
   public/unregistered — Go parity); non-replicator without collection access → deny; signature /
-  lens / definition blocks → allow.
+  lens / definition blocks → allow; shared-field blocks use CID-keyed owner lookup and allow if ANY
+  owner grants.
 - KMS gate honors `is_branchable`.
-- CID-mismatch rejection regression (bitswap/CAR/pushlog).
+- CID-mismatch rejection regression (bitswap/CAR/pushlog), including serve classifier
+  CID/data mismatch → deny.
 
 ## Scope decisions (record)
 
@@ -238,7 +241,8 @@ Unit tests:
   transports and the pull/pushlog paths.
 - **Two-transport drift.** libp2p (bitswap) and Iroh (CAR/coordinator) serve paths must apply
   identical decisions and share peer-DID resolution; mitigated by routing both through the same
-  `check_doc_read_access` and the same injected `PeerIdentityResolver` + a shared test.
+  CID-aware block classifier, `check_doc_read_access`, and injected `PeerIdentityResolver` + a
+  shared test.
 - **Overlay vs direct backend drift.** Commits-query (overlay) and serve/verify/KMS (direct) must not
   diverge on the rule; mitigated by the single shared algorithm over `ObjectAccessChecker`.
 - **Hot-path performance.** Per-block serve checks add ACP lookups; the rule short-circuits for

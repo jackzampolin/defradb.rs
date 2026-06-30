@@ -1,13 +1,13 @@
 //! CAR fetch event handling for the sync coordinator.
 
 use blockstore::{verify_block_cid, Blockstore};
+use bytes::Bytes;
 use cid::Cid;
 
-use super::super::authorizer::AccessAuthorizer;
-use crate::error::{Error, Result};
+use crate::bitswap::BlockClass;
+use crate::error::Result;
 use crate::message::CarFetchRequest;
 use crate::sync::car::{collect_dag_blocks, collect_exact_blocks, decode_car, encode_car};
-use crate::sync::coordinator::dag_context::block_context_from_data;
 use crate::sync::coordinator::SyncCoordinator;
 use crate::transport::{P2PTransport, PeerId};
 
@@ -16,70 +16,6 @@ fn sample_cids(cids: &[Cid]) -> Vec<String> {
 }
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
-    async fn check_car_fetch_access(
-        &self,
-        peer_id: &PeerId,
-        request: &CarFetchRequest,
-    ) -> Result<()> {
-        if self.access.access_mode.is_open() {
-            return Ok(());
-        }
-        if self.access.peer_state.is_connected(peer_id.as_str()) {
-            return Ok(());
-        }
-
-        let mut checked_collection = false;
-        for cid in request.response_roots() {
-            let block_data = match self.manager.blockstore().get(&cid).await {
-                Ok(Some(data)) => data,
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::debug!(
-                        cid = %cid,
-                        peer_id = %peer_id,
-                        error = %error,
-                        "CAR handler: failed to read requested block for collection access check"
-                    );
-                    continue;
-                }
-            };
-
-            let Some(collection_id) = block_context_from_data(&block_data).collection_id else {
-                continue;
-            };
-
-            checked_collection = true;
-            let is_collection_replicator = self
-                .authorizer
-                .peer_authorized_for_collection(peer_id.as_str(), &collection_id)
-                .await;
-            let is_collection_subscriber = self
-                .access
-                .peer_state
-                .peer_subscribed_to_collection(peer_id.as_str(), &collection_id);
-
-            if !is_collection_replicator && !is_collection_subscriber {
-                tracing::warn!(
-                    peer_id = %peer_id,
-                    collection_id = %collection_id,
-                    is_collection_replicator,
-                    is_collection_subscriber,
-                    "Access denied: peer cannot fetch CAR blocks for this collection"
-                );
-                return Err(Error::AccessDenied {
-                    peer_id: peer_id.to_string(),
-                    collection_id,
-                });
-            }
-        }
-
-        if checked_collection {
-            Ok(())
-        } else {
-            self.check_peer_is_replicator(peer_id).await
-        }
-    }
-
     /// Handle an inbound CAR fetch request: collect the DAG and send CARv1 response.
     pub(crate) async fn handle_car_fetch_request(
         &self,
@@ -100,21 +36,6 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
         };
 
-        if let Err(error) = self.check_car_fetch_access(&peer_id, &request).await {
-            tracing::warn!(
-                root_cid = %request.root_cid,
-                peer_id = %peer_id,
-                recursive = request.recursive,
-                requested_count = request.wanted_cids.len(),
-                root_present = ?root_present,
-                connected = self.access.peer_state.is_connected(peer_id.as_str()),
-                registered_any = self.access.replicators.is_any_replicator(peer_id.as_str()),
-                error = %error,
-                "CAR handler rejected request"
-            );
-            return Err(error);
-        }
-
         tracing::debug!(
             root_cid = %request.root_cid,
             peer_id = %peer_id,
@@ -130,7 +51,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             collect_exact_blocks(self.manager.blockstore().as_ref(), &request.wanted_cids).await?
         };
         let truncated = collected.truncated();
-        let blocks = collected.blocks;
+        let blocks = self
+            .filter_car_response_blocks(&peer_id, collected.blocks)
+            .await;
 
         if blocks.is_empty() {
             self.manager.diagnostics.record_car_no_blocks_served();
@@ -213,6 +136,70 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 .await?;
         }
         Ok(())
+    }
+
+    async fn filter_car_response_blocks(
+        &self,
+        peer_id: &PeerId,
+        blocks: Vec<(Cid, Bytes)>,
+    ) -> Vec<(Cid, Bytes)> {
+        if self.access.access_mode.is_open() {
+            return blocks;
+        }
+
+        let peer_str = peer_id.to_string();
+        let serve = self.serve_acp.get();
+        let mut identity: Option<acp::Identity> = None;
+        let mut kept = Vec::with_capacity(blocks.len());
+
+        for (cid, data) in blocks {
+            match self.classifier.classify(&cid, &data).await {
+                BlockClass::Allow => kept.push((cid, data)),
+                BlockClass::Deny => {
+                    tracing::debug!(
+                        cid = %cid,
+                        peer_id = %peer_id,
+                        "CAR handler: dropping block denied by classifier"
+                    );
+                }
+                BlockClass::Data(meta) => {
+                    if self
+                        .access
+                        .replicators
+                        .is_filtered_replicator(&meta.collection_id, &peer_str)
+                    {
+                        continue;
+                    }
+                    if self
+                        .access
+                        .replicators
+                        .is_replicator(&meta.collection_id, &peer_str)
+                    {
+                        kept.push((cid, data));
+                        continue;
+                    }
+
+                    let Some(serve) = serve else {
+                        continue;
+                    };
+                    if identity.is_none() {
+                        identity = Some(match serve.resolver.resolve(peer_id).await {
+                            Some(did) => acp::Identity::Authenticated(did),
+                            None => acp::Identity::Anonymous,
+                        });
+                    }
+                    if serve
+                        .gate
+                        .may_read(identity.as_ref().expect("identity set"), &meta)
+                        .await
+                    {
+                        kept.push((cid, data));
+                    }
+                }
+            }
+        }
+
+        kept
     }
 
     /// Handle an inbound CAR fetch response: decode and store blocks.

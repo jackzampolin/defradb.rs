@@ -165,6 +165,8 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
             head_provider,
         },
         authorizer,
+        classifier: Arc::new(crate::bitswap::DefaultBlockClassifier),
+        serve_acp: Arc::new(crate::bitswap::LateBoundServeAcp::new()),
         document_acp: std::sync::OnceLock::new(),
         kms_transport: std::sync::OnceLock::new(),
         pubsub_services: None,

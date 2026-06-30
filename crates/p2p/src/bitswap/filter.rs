@@ -12,30 +12,22 @@
 //!
 //! 1. `AccessMode::Open` → allow all.
 //! 2. Block not in store → deny (prevents existence leaks too).
-//! 3. Block decodes as a `Signature` → allow (signature blocks carry no
-//!    collection data and are required to verify sibling blocks).
-//! 4. Block decodes as a CRDT `Block` with a definition delta → allow
-//!    (schema/collection definitions are broadcast to all replicators).
-//! 5. Block decodes as a CRDT `Block` with a data delta → allow iff the
-//!    requesting peer is registered as a replicator for the block's
-//!    collection.
-//! 6. Block decodes as a lens IPLD shape (config / module / WASM /
-//!    chunk) → allow. Schema-migration artifacts carry no user data
-//!    and mirror Go's `hasAccess` passthrough at `internal/db/p2p/
-//!    p2p.go:335-348`.
-//! 7. Anything else (decode errors on all known shapes) → deny.
+//! 3. Classifier allows signature / definition / lens blocks.
+//! 4. Data blocks get metadata from the classifier.
+//! 5. Replicators for the block's stable collection id bypass ACP.
+//! 6. Non-replicators resolve identity and run the late-bound ACP read gate.
+//! 7. Unknown blocks or ACP errors deny.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use cid::Cid;
-use defra_core::{is_lens_block, Block as DefraBlock, Signature};
 use iroh_bitswap::Store;
 use libp2p::PeerId;
 use tracing::debug;
 
-use super::{AccessMode, ReplicatorRegistry};
+use super::{AccessMode, BlockClass, BlockClassifier, LateBoundServeAcp, ReplicatorRegistry};
 
 /// Build a filter closure that satisfies iroh-bitswap's
 /// `PeerBlockRequestFilter` trait.
@@ -46,6 +38,8 @@ pub fn make_peer_block_access_filter<S>(
     mode: AccessMode,
     registry: Arc<ReplicatorRegistry>,
     store: S,
+    classifier: Arc<dyn BlockClassifier>,
+    serve_acp: Arc<LateBoundServeAcp>,
 ) -> impl Fn(&PeerId, &Cid) -> Pin<Box<dyn Future<Output = bool> + Send + 'static>> + Send + Sync + 'static
 where
     S: Store + Clone + Send + Sync + 'static,
@@ -54,8 +48,21 @@ where
         let peer_id = *peer_id;
         let cid = *cid;
         let registry = Arc::clone(&registry);
+        let classifier = Arc::clone(&classifier);
+        let serve_acp = Arc::clone(&serve_acp);
         let store = store.clone();
-        Box::pin(async move { check_access(mode, &registry, &store, &peer_id, &cid).await })
+        Box::pin(async move {
+            check_access(
+                mode,
+                &registry,
+                &store,
+                classifier.as_ref(),
+                serve_acp.as_ref(),
+                &peer_id,
+                &cid,
+            )
+            .await
+        })
     }
 }
 
@@ -63,6 +70,8 @@ async fn check_access<S: Store>(
     mode: AccessMode,
     registry: &ReplicatorRegistry,
     store: &S,
+    classifier: &dyn BlockClassifier,
+    serve_acp: &LateBoundServeAcp,
     peer_id: &PeerId,
     cid: &Cid,
 ) -> bool {
@@ -87,57 +96,50 @@ async fn check_access<S: Store>(
     };
     let data = block.data();
 
-    // Signature blocks are required for peers to verify data they already
-    // have, and carry no authored data themselves. Always serve.
-    if Signature::from_dag_cbor(data).is_ok() {
-        return true;
-    }
-
-    match DefraBlock::from_dag_cbor(data) {
-        Ok(defra_block) => {
-            if defra_block.delta.is_definition() {
-                return true;
-            }
-            let Some(collection_id) = defra_block.delta.schema_version_id() else {
-                debug!(
-                    cid = %cid,
-                    peer = %peer_id,
-                    "bitswap request denied: data delta missing collection id"
-                );
-                return false;
-            };
+    match classifier.classify(cid, data).await {
+        BlockClass::Allow => true,
+        BlockClass::Deny => {
+            debug!(cid = %cid, peer = %peer_id, "bitswap request denied by block classifier");
+            false
+        }
+        BlockClass::Data(meta) => {
             let peer_str = peer_id.to_string();
-            if registry.is_filtered_replicator(collection_id, &peer_str) {
+            if registry.is_filtered_replicator(&meta.collection_id, &peer_str) {
                 debug!(
                     cid = %cid,
                     peer = %peer_id,
-                    collection = %collection_id,
+                    collection = %meta.collection_id,
                     "bitswap request denied: filtered replicator data-block access uses direct push"
                 );
                 return false;
             }
-            if registry.is_replicator(collection_id, &peer_str) {
+            if registry.is_replicator(&meta.collection_id, &peer_str) {
+                return true;
+            }
+
+            let Some(serve) = serve_acp.get() else {
+                debug!(
+                    cid = %cid,
+                    peer = %peer_id,
+                    collection = %meta.collection_id,
+                    "bitswap request denied: serve ACP gate not installed"
+                );
+                return false;
+            };
+            let transport_peer_id = crate::transport::PeerId::from(peer_id);
+            let identity = match serve.resolver.resolve(&transport_peer_id).await {
+                Some(did) => acp::Identity::Authenticated(did),
+                None => acp::Identity::Anonymous,
+            };
+            if serve.gate.may_read(&identity, &meta).await {
                 return true;
             }
             debug!(
                 cid = %cid,
                 peer = %peer_id,
-                collection = %collection_id,
-                "bitswap request denied: peer not a replicator for collection"
-            );
-            false
-        }
-        Err(_) => {
-            // Not a CRDT block. Go's hasAccess lets lens IPLD artifacts
-            // (config / module / WASM / chunks) through unconditionally —
-            // they carry no user data. Match that or deny.
-            if is_lens_block(data) {
-                return true;
-            }
-            debug!(
-                cid = %cid,
-                peer = %peer_id,
-                "bitswap request denied: block is neither CRDT, signature, nor lens"
+                collection = %meta.collection_id,
+                identity = %identity,
+                "bitswap request denied: ACP read gate denied"
             );
             false
         }
@@ -147,8 +149,13 @@ async fn check_access<S: Store>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bitswap::{
+        AllowAllBlockReadGate, BlockAcpMeta, DefaultBlockClassifier, LateBoundServeAcp, ServeAcp,
+    };
+    use crate::peer_identity::AnonymousResolver;
     use crate::replicator::{ReplicationFilter, ReplicationFilters, ReplicatorInfo};
     use async_trait::async_trait;
+    use defra_core::Block as DefraBlock;
     use iroh_bitswap::{Block, Store};
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -195,6 +202,36 @@ mod tests {
         defra_core::block::generate_cid_from_bytes(data).unwrap()
     }
 
+    async fn check_access_with_defaults<S: Store>(
+        mode: AccessMode,
+        registry: &ReplicatorRegistry,
+        store: &S,
+        peer_id: &PeerId,
+        cid: &Cid,
+    ) -> bool {
+        let classifier = DefaultBlockClassifier;
+        let serve_acp = LateBoundServeAcp::new();
+        check_access(mode, registry, store, &classifier, &serve_acp, peer_id, cid).await
+    }
+
+    async fn check_access_with_data_classifier<S: Store>(
+        mode: AccessMode,
+        registry: &ReplicatorRegistry,
+        store: &S,
+        peer_id: &PeerId,
+        cid: &Cid,
+        collection_id: &str,
+    ) -> bool {
+        let classifier = StaticClassifier(BlockClass::Data(BlockAcpMeta {
+            collection_id: collection_id.to_string(),
+            is_branchable: false,
+            policy: None,
+            doc_ids: vec!["doc1".to_string()],
+        }));
+        let serve_acp = LateBoundServeAcp::new();
+        check_access(mode, registry, store, &classifier, &serve_acp, peer_id, cid).await
+    }
+
     fn make_data_block(collection_id: &str) -> (Cid, Vec<u8>) {
         use defra_core::{CompositeDeltaPayload, CrdtDelta};
 
@@ -219,7 +256,8 @@ mod tests {
         store.put(cid, bytes);
 
         let peer = PeerId::random();
-        let allowed = check_access(AccessMode::Open, &registry, &store, &peer, &cid).await;
+        let allowed =
+            check_access_with_defaults(AccessMode::Open, &registry, &store, &peer, &cid).await;
         assert!(allowed);
     }
 
@@ -231,7 +269,9 @@ mod tests {
         store.put(cid, bytes);
 
         let peer = PeerId::random();
-        let allowed = check_access(AccessMode::Controlled, &registry, &store, &peer, &cid).await;
+        let allowed =
+            check_access_with_defaults(AccessMode::Controlled, &registry, &store, &peer, &cid)
+                .await;
         assert!(!allowed, "unknown peer must be denied in Controlled mode");
     }
 
@@ -245,7 +285,15 @@ mod tests {
         let peer = PeerId::random();
         registry.add_replicator("users", &peer.to_string());
 
-        let allowed = check_access(AccessMode::Controlled, &registry, &store, &peer, &cid).await;
+        let allowed = check_access_with_data_classifier(
+            AccessMode::Controlled,
+            &registry,
+            &store,
+            &peer,
+            &cid,
+            "users",
+        )
+        .await;
         assert!(allowed, "registered replicator must be served");
     }
 
@@ -269,7 +317,15 @@ mod tests {
             filters,
         ));
 
-        let allowed = check_access(AccessMode::Controlled, &registry, &store, &peer, &cid).await;
+        let allowed = check_access_with_data_classifier(
+            AccessMode::Controlled,
+            &registry,
+            &store,
+            &peer,
+            &cid,
+            "users",
+        )
+        .await;
         assert!(
             !allowed,
             "filtered replicators receive matching full DAGs by direct push, not collection-wide Bitswap"
@@ -287,7 +343,15 @@ mod tests {
         // Peer is a replicator for a different collection.
         registry.add_replicator("posts", &peer.to_string());
 
-        let allowed = check_access(AccessMode::Controlled, &registry, &store, &peer, &cid).await;
+        let allowed = check_access_with_data_classifier(
+            AccessMode::Controlled,
+            &registry,
+            &store,
+            &peer,
+            &cid,
+            "users",
+        )
+        .await;
         assert!(
             !allowed,
             "replicator for a different collection must not fetch this one"
@@ -304,7 +368,8 @@ mod tests {
         registry.add_replicator("users", &peer.to_string());
 
         let allowed =
-            check_access(AccessMode::Controlled, &registry, &store, &peer, &missing).await;
+            check_access_with_defaults(AccessMode::Controlled, &registry, &store, &peer, &missing)
+                .await;
         assert!(!allowed, "missing block must be denied");
     }
 
@@ -321,7 +386,9 @@ mod tests {
         store.put(cid, bytes);
 
         let peer = PeerId::random();
-        let allowed = check_access(AccessMode::Controlled, &registry, &store, &peer, &cid).await;
+        let allowed =
+            check_access_with_defaults(AccessMode::Controlled, &registry, &store, &peer, &cid)
+                .await;
         assert!(
             allowed,
             "signature blocks must be served even in Controlled mode"
@@ -349,7 +416,9 @@ mod tests {
         store.put(cid, bytes);
 
         let peer = PeerId::random();
-        let allowed = check_access(AccessMode::Controlled, &registry, &store, &peer, &cid).await;
+        let allowed =
+            check_access_with_defaults(AccessMode::Controlled, &registry, &store, &peer, &cid)
+                .await;
         assert!(
             allowed,
             "definition deltas must be served even to non-replicator peers"
@@ -376,11 +445,90 @@ mod tests {
 
         let peer = PeerId::random();
         for (cid, _) in &blocks {
-            let allowed = check_access(AccessMode::Controlled, &registry, &store, &peer, cid).await;
+            let allowed =
+                check_access_with_defaults(AccessMode::Controlled, &registry, &store, &peer, cid)
+                    .await;
             assert!(
                 allowed,
                 "lens block at {cid} must be served without replicator trust"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn controlled_mode_uses_late_bound_gate_for_non_replicator() {
+        let registry = Arc::new(ReplicatorRegistry::new());
+        let store = InMemoryStore::default();
+        let cid = cid_for(b"opaque-data-block");
+        store.put(cid, b"opaque-data-block".to_vec());
+        let classifier = StaticClassifier(BlockClass::Data(BlockAcpMeta {
+            collection_id: "users".to_string(),
+            is_branchable: true,
+            policy: Some(("policy1".to_string(), "user".to_string())),
+            doc_ids: vec!["doc1".to_string()],
+        }));
+        let serve_acp = LateBoundServeAcp::new();
+        serve_acp.set(ServeAcp {
+            resolver: Arc::new(AnonymousResolver),
+            gate: Arc::new(AllowAllBlockReadGate),
+        });
+
+        let peer = PeerId::random();
+        let allowed = check_access(
+            AccessMode::Controlled,
+            &registry,
+            &store,
+            &classifier,
+            &serve_acp,
+            &peer,
+            &cid,
+        )
+        .await;
+        assert!(
+            allowed,
+            "non-replicator data blocks must be served when the late-bound gate grants read"
+        );
+    }
+
+    #[tokio::test]
+    async fn controlled_mode_replicator_bypasses_uninstalled_gate() {
+        let registry = Arc::new(ReplicatorRegistry::new());
+        let store = InMemoryStore::default();
+        let cid = cid_for(b"opaque-data-block");
+        store.put(cid, b"opaque-data-block".to_vec());
+        let classifier = StaticClassifier(BlockClass::Data(BlockAcpMeta {
+            collection_id: "users".to_string(),
+            is_branchable: true,
+            policy: Some(("policy1".to_string(), "user".to_string())),
+            doc_ids: vec!["doc1".to_string()],
+        }));
+        let serve_acp = LateBoundServeAcp::new();
+
+        let peer = PeerId::random();
+        registry.add_replicator("users", &peer.to_string());
+        let allowed = check_access(
+            AccessMode::Controlled,
+            &registry,
+            &store,
+            &classifier,
+            &serve_acp,
+            &peer,
+            &cid,
+        )
+        .await;
+        assert!(
+            allowed,
+            "replicator passthrough must not depend on serve ACP initialization"
+        );
+    }
+
+    #[derive(Clone)]
+    struct StaticClassifier(BlockClass);
+
+    #[async_trait]
+    impl BlockClassifier for StaticClassifier {
+        async fn classify(&self, _cid: &Cid, _data: &[u8]) -> BlockClass {
+            self.0.clone()
         }
     }
 }

@@ -725,15 +725,17 @@ pub struct BlockAcpMeta {
     pub collection_id: String,                 // stable id (for replicator passthrough + ACP object)
     pub is_branchable: bool,
     pub policy: Option<(String, String)>,      // (policy_id, resource_name); None => unpermissioned
-    pub doc_ids: Vec<String>,                  // empty => collection-level commit
+    pub doc_ids: Vec<String>,                  // resolved from serving CID; empty => collection-level commit
 }
 pub enum BlockClass { Allow, Data(BlockAcpMeta), Deny }
 
 /// DB/SCHEMA-backed (get_collection_by_version_id + collection cache), NOT the P2P subscription
-/// store. Decodes the raw block once and classifies it. Available before P2P (DB exists first).
+/// store. Decodes the raw block once and classifies it. The serving CID is explicit because
+/// doc-owner lookup and genesis fallback are CID-keyed (Go parity). CID/data mismatch => Deny.
+/// Available before P2P (DB exists first).
 #[async_trait]
 pub trait BlockClassifier: Send + Sync {
-    async fn classify(&self, data: &[u8]) -> BlockClass;
+    async fn classify(&self, cid: &Cid, data: &[u8]) -> BlockClass;
 }
 
 /// ACP evaluation only. Late-bound. Never consulted for replicators. policy comes from the meta;
@@ -777,7 +779,7 @@ Expected: FAIL.
 Replace the in-filter signature/definition/lens/data classification (`filter.rs:88-144`) with a call to the classifier; gate only the `Data` class:
 
 ```rust
-match classifier.classify(data).await {
+match classifier.classify(cid, data).await {
     BlockClass::Allow => return true,   // signature / definition / lens — no user data
     BlockClass::Deny  => return false,  // undecodable / unknown shape — no existence leak
     BlockClass::Data(meta) => {
@@ -796,11 +798,11 @@ match classifier.classify(data).await {
 }
 ```
 
-Thread `classifier: Arc<dyn BlockClassifier>` and `serve_acp: Arc<LateBoundServeAcp>` through `make_peer_block_access_filter` + the closure (and through `P2PHostConfig` → `with_keypair_and_config_and_identity` → `DefraBehaviour::new`, per the Plumbing note above). The `store.get(cid)` for the raw bytes stays; `classify` takes those bytes.
+Thread `classifier: Arc<dyn BlockClassifier>` and `serve_acp: Arc<LateBoundServeAcp>` through `make_peer_block_access_filter` + the closure (and through `P2PHostConfig` → `with_keypair_and_config_and_identity` → `DefraBehaviour::new`, per the Plumbing note above). The `store.get(cid)` for the raw bytes stays; `classify` takes both the requested/serving CID and those bytes.
 
 - [ ] **Step 4: Implement the classifier + gate, install `ServeAcp` via `wire_document_acp`**
 
-`BlockClassifier` impl (db/embedded layer, up-front, DB-backed): `Signature::from_dag_cbor(data).is_ok()` → `Allow`; else `DefraBlock::from_dag_cbor(data)`: `delta.is_definition()` → `Allow`, else (data delta) read `schema_version_id`, resolve `→ CollectionVersion` via `get_collection_by_version_id`, return `Data(BlockAcpMeta { collection_id, is_branchable, policy: collection.policy.map(|p| (p.id, p.resource_name)), doc_ids })` (collection-level => empty `doc_ids`); on decode error, `is_lens_block(data)` → `Allow` else `Deny`. `BlockReadGate` impl: `may_read` — if `meta.policy` is `None` return `true` (unpermissioned = public); else run `acp::read_access::check_doc_read_access(DirectChecker{ acp, identity, node_did }, &policy.0, &policy.1, &meta.collection_id, meta.is_branchable, doc)` per doc id (empty list => one check with `""`), true if ANY grants. Install `ServeAcp { resolver, gate }` into the shared `LateBoundServeAcp` inside the `wire_document_acp` closure at `node.rs:557` (handle exists here): `resolver` = `HandlePeerIdentityResolver(handle)` for libp2p or `AnonymousResolver` for Iroh; `gate` = the `BlockReadGate` impl. (+ defra-node equivalent.)
+`BlockClassifier` impl (db/embedded layer, up-front, DB-backed): first verify the raw bytes match the serving CID (mismatch → `Deny`). `Signature::from_dag_cbor(data).is_ok()` → `Allow`; else `DefraBlock::from_dag_cbor(data)`: `delta.is_definition()` → `Allow`, else (data delta) read `schema_version_id`, resolve `→ CollectionVersion` via `get_collection_by_version_id`, derive `doc_ids` with Go-parity CID semantics, and return `Data(BlockAcpMeta { collection_id, is_branchable, policy: collection.policy.map(|p| (p.id, p.resource_name)), doc_ids })`. `doc_ids` derivation: collection-level commit → empty list; otherwise look up owners by the serving CID in the block-owner/system metadata; if owner metadata is empty for a composite genesis/no-heads block, use the CID-derived genesis doc id fallback; unknown/unresolvable owner metadata → `Deny` (no existence leak). On decode error, `is_lens_block(data)` → `Allow` else `Deny`. `BlockReadGate` impl: `may_read` — if `meta.policy` is `None` return `true` (unpermissioned = public); else run `acp::read_access::check_doc_read_access(DirectChecker{ acp, identity, node_did }, &policy.0, &policy.1, &meta.collection_id, meta.is_branchable, doc)` per doc id (empty list => one check with `""`), true if ANY grants. Install `ServeAcp { resolver, gate }` into the shared `LateBoundServeAcp` inside the `wire_document_acp` closure at `node.rs:557` (handle exists here): `resolver` = `HandlePeerIdentityResolver(handle)` for libp2p or `AnonymousResolver` for Iroh; `gate` = the `BlockReadGate` impl. (+ defra-node equivalent.)
 
 - [ ] **Step 5: Verify**
 
@@ -845,7 +847,7 @@ let serve = self.serve_acp.get();           // late-bound; absent => only passth
 let mut identity: Option<acp::Identity> = None; // resolved lazily on first non-replicator Data block
 let mut kept = Vec::with_capacity(blocks.len());
 for (cid, data) in blocks {
-    match self.classifier.classify(&data).await {
+    match self.classifier.classify(&cid, &data).await {
         BlockClass::Allow => kept.push((cid, data)),     // signature / definition / lens
         BlockClass::Deny  => {}                           // undecodable / unknown => drop
         BlockClass::Data(meta) => {
@@ -968,7 +970,7 @@ Change the PR description from "A1 registration" to the full A1–A3 security fe
 
 ## Self-Review
 
-**Spec coverage:** rule once in `acp` (Tasks 1,3 — direct + overlay checkers) ✔; node_did (Tasks 2,4) ✔; version→collection_id at every site (Tasks 5,6,9,10) ✔; commits (5) ✔; verify (6) ✔; KMS is_branchable + corrected semantics (7) ✔; peer-DID resolver, libp2p + Iroh-native (8) ✔; bitswap late-bound serve gate + stable-collection passthrough (9) ✔; CAR serve filter, no is_any_replicator (10) ✔; unresolved-DID→Anonymous (9,10) ✔; pushlog CID already-done (11) ✔; cross-impl (12) ✔; regression gate + adversarial audit (13) ✔.
+**Spec coverage:** rule once in `acp` (Tasks 1,3 — direct + overlay checkers) ✔; node_did (Tasks 2,4) ✔; version→collection_id at every site (Tasks 5,6,9,10) ✔; commits (5) ✔; verify (6) ✔; KMS is_branchable + corrected semantics (7) ✔; peer-DID resolver with active libp2p token exchange + Iroh Anonymous narrowing (8) ✔; bitswap late-bound serve gate + stable-collection passthrough (9) ✔; CAR serve filter, no is_any_replicator (10) ✔; unresolved-DID→Anonymous (9,10) ✔; pushlog CID already-done (11) ✔; cross-impl (12) ✔; regression gate + adversarial audit (13) ✔.
 
 **Review findings closed (round 5 — A3 wiring detail):** #1 CAR resolves identity **lazily** inside the non-replicator branch, never before replicator passthrough (Task 10 snippet) ✔; #2 CAR uses the shared `BlockClassifier` whitelist (signature/definition/lens allow, unknown deny) instead of keeping any undecodable block (Tasks 9,10) ✔; #3 explicit plumbing — node assembly builds the DB-backed classifier + `serve_acp` Arc and threads them through `P2PHostConfig` → `with_keypair_and_config_and_identity` → `DefraBehaviour::new` → filter, capturing the same Arc in `wire_document_acp` (Task 9 Plumbing note + Files) ✔; #4 `BlockClassifier` returns `policy` in `BlockAcpMeta`, so the gate has `policy_id`/`resource_name` (Task 9 interfaces + step 4) ✔; #5 stale self-review claims cleaned (below) ✔.
 
@@ -980,4 +982,4 @@ Change the PR description from "A1 registration" to the full A1–A3 security fe
 
 **Placeholders:** none — every code step shows real code; the `BlockReadGate`/`DocCollectionLookup` producer impls reference the existing block→docID and version→collection resolution rather than re-deriving, which is concrete guidance.
 
-**Type consistency:** `check_doc_read_access(checker, policy_id, resource_name, collection_id, is_branchable, doc_id)` used identically in Tasks 1,5,6,7; `ObjectAccessChecker::object_access(policy_id, resource_name, object_id) -> DocAccess` consistent across `DirectChecker` (1) and `OverlayChecker` (3); `DocAccess { has_access, explicit }` consistent; `PeerIdentityResolver::resolve -> Option<Did>` consistent (8,9,10); `BlockReadGate::evaluate -> Option<(String, bool)>` consistent (9,10); `DocCollectionInfo.is_branchable` added once (7).
+**Type consistency:** `check_doc_read_access(checker, policy_id, resource_name, collection_id, is_branchable, doc_id)` used identically in Tasks 1,5,6,7; `ObjectAccessChecker::object_access(policy_id, resource_name, object_id) -> DocAccess` consistent across `DirectChecker` (1) and `OverlayChecker` (3); `DocAccess { has_access, explicit }` consistent; `PeerIdentityResolver::resolve -> Option<Did>` consistent (8,9,10); `BlockReadGate::may_read(identity, meta) -> bool` consistent (9,10); `DocCollectionInfo.is_branchable` added once (7).

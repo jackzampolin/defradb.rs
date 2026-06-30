@@ -68,6 +68,7 @@ pub mod host;
 pub mod kms;
 pub mod manage_correlator;
 pub mod message;
+pub mod peer_identity;
 pub mod protocol;
 #[cfg(feature = "libp2p-transport")]
 pub mod pubsub_rpc;
@@ -108,6 +109,9 @@ pub use host::{
     P2PHostHandle, ResponseChannel,
 };
 pub use message::{Message, MetaData, PushLogBroadcast, PushLogReply, PushLogRequest};
+#[cfg(feature = "libp2p-transport")]
+pub use peer_identity::HandlePeerIdentityResolver;
+pub use peer_identity::{AnonymousResolver, PeerIdentityResolver};
 pub use protocol::{
     BASE_PROTOCOL_ID, CODE, MESSAGE_VERSION, NAME, PROTOCOL_BASE, REP_REQUEST_PROTOCOL,
     REP_RESPONSE_PROTOCOL, VERSION,

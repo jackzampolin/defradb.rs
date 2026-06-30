@@ -13,12 +13,13 @@
 use std::sync::Arc;
 
 use acp::{
+    check_doc_read_access,
     policy_yaml::{build_policy, parse_policy_yaml},
-    DocumentACP, DocumentPermission, Identity, MemoryZanzibarStore, Subject, ZanzibarDocumentACP,
-    ZanzibarStore,
+    DocumentACP, DocumentPermission, Identity, LocalDocumentACP, MemoryAcpStore,
+    MemoryZanzibarStore, Subject, ZanzibarDocumentACP, ZanzibarStore, READER_RELATION,
 };
 use identity::Did;
-use query_plan::txn::check_doc_access_with_overlay;
+use query_plan::txn::{check_doc_access_with_overlay, OverlayChecker};
 
 const FS_POLICY: &str = r#"
 name: filesystem
@@ -67,6 +68,7 @@ async fn gate_allows(
         policy_id,
         resource,
         doc,
+        None,
     )
     .await
     .unwrap()
@@ -130,4 +132,54 @@ async fn query_gate_honours_cross_object_read_inheritance() {
 
     // bob has no grant -> still denied through the cone.
     assert!(!gate_allows(&acp, &policy_id, &bob, "file", "report").await);
+}
+
+#[tokio::test]
+async fn overlay_checker_applies_branchable_collection_fallback() {
+    let owner = did("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
+    let alice = did("did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH");
+    let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
+    let identity = Identity::Authenticated(alice.clone());
+
+    acp.register_doc_object(&owner, "policy1", "users", "col1")
+        .await
+        .unwrap();
+    let checker = OverlayChecker {
+        acp: &acp,
+        identity: &identity,
+        node_did: None,
+    };
+
+    let public_doc_allowed =
+        check_doc_read_access(&checker, "policy1", "users", "col1", true, "public-doc")
+            .await
+            .unwrap();
+    assert!(
+        !public_doc_allowed,
+        "public doc in a protected branchable collection must fall back to the collection object"
+    );
+
+    acp.register_doc_object(&owner, "policy1", "users", "shared-doc")
+        .await
+        .unwrap();
+    acp.add_actor_relationship(
+        &owner,
+        &alice,
+        "policy1",
+        "users",
+        "shared-doc",
+        READER_RELATION,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let shared_doc_allowed =
+        check_doc_read_access(&checker, "policy1", "users", "col1", true, "shared-doc")
+            .await
+            .unwrap();
+    assert!(
+        shared_doc_allowed,
+        "explicit document grants must win before checking the collection object"
+    );
 }

@@ -5,8 +5,10 @@
 //! issues Bitswap WANTs from the consumer for both allowed and denied
 //! block/peer pairs.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use defra_core::{Block as DefraBlock, CompositeDeltaPayload, CrdtDelta};
 use p2p::testutil::MockBitswapStore;
 use p2p::{bitswap::AccessMode, HostEvent, P2PHost, P2PHostConfig};
@@ -52,6 +54,57 @@ fn controlled_config() -> P2PHostConfig {
     }
 }
 
+struct SyntheticBlockClassifier;
+
+#[async_trait]
+impl p2p::bitswap::BlockClassifier for SyntheticBlockClassifier {
+    async fn classify(&self, cid: &cid::Cid, data: &[u8]) -> p2p::bitswap::BlockClass {
+        match defra_core::block::generate_cid_from_bytes(data) {
+            Ok(actual) if &actual == cid => {}
+            _ => return p2p::bitswap::BlockClass::Deny,
+        }
+
+        let Ok(block) = DefraBlock::from_dag_cbor(data) else {
+            return p2p::bitswap::BlockClass::Deny;
+        };
+        let Some(collection_id) = block.delta.schema_version_id() else {
+            return p2p::bitswap::BlockClass::Deny;
+        };
+        let doc_ids = block
+            .delta
+            .doc_id()
+            .map(|bytes| vec![String::from_utf8_lossy(bytes).to_string()])
+            .unwrap_or_default();
+
+        p2p::bitswap::BlockClass::Data(p2p::bitswap::BlockAcpMeta {
+            collection_id: collection_id.to_string(),
+            is_branchable: false,
+            policy: None,
+            doc_ids,
+        })
+    }
+}
+
+async fn controlled_host_with_synthetic_classifier(
+    store: MockBitswapStore,
+) -> (
+    P2PHost<MockBitswapStore>,
+    p2p::P2PHostHandle,
+    tokio::sync::mpsc::Receiver<HostEvent>,
+    Arc<p2p::bitswap::ReplicatorRegistry>,
+) {
+    P2PHost::with_keypair_and_config_and_identity_and_serve_gate(
+        p2p::Keypair::generate_ed25519(),
+        store,
+        controlled_config(),
+        None,
+        Arc::new(SyntheticBlockClassifier),
+        Arc::new(p2p::bitswap::LateBoundServeAcp::new()),
+    )
+    .await
+    .unwrap()
+}
+
 async fn drain_until_complete(
     events: &mut tokio::sync::mpsc::Receiver<HostEvent>,
     query: p2p::QueryId,
@@ -88,9 +141,7 @@ async fn controlled_mode_denies_unregistered_bitswap_peer() {
     let consumer_store = MockBitswapStore::new();
 
     let (producer, producer_handle, _producer_events, producer_replicators) =
-        P2PHost::with_config(producer_store, controlled_config())
-            .await
-            .unwrap();
+        controlled_host_with_synthetic_classifier(producer_store).await;
     let (consumer, consumer_handle, mut consumer_events, _consumer_replicators) =
         P2PHost::with_config(consumer_store, controlled_config())
             .await
@@ -149,9 +200,7 @@ async fn controlled_mode_serves_registered_replicator() {
     let consumer_store = MockBitswapStore::new();
 
     let (producer, producer_handle, _producer_events, producer_replicators) =
-        P2PHost::with_config(producer_store, controlled_config())
-            .await
-            .unwrap();
+        controlled_host_with_synthetic_classifier(producer_store).await;
     let (consumer, consumer_handle, mut consumer_events, _consumer_replicators) =
         P2PHost::with_config(consumer_store, controlled_config())
             .await
@@ -203,9 +252,7 @@ async fn controlled_mode_denies_replicator_for_other_collection() {
     let consumer_store = MockBitswapStore::new();
 
     let (producer, producer_handle, _producer_events, producer_replicators) =
-        P2PHost::with_config(producer_store, controlled_config())
-            .await
-            .unwrap();
+        controlled_host_with_synthetic_classifier(producer_store).await;
     let (consumer, consumer_handle, mut consumer_events, _consumer_replicators) =
         P2PHost::with_config(consumer_store, controlled_config())
             .await

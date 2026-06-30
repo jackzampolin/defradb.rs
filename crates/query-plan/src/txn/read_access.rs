@@ -1,0 +1,57 @@
+//! Txn-overlay ACP checker for the shared read-access rule.
+
+use acp::read_access::{DocAccess, ObjectAccessChecker};
+use acp::{DocumentACP, DocumentPermission, Identity};
+use async_trait::async_trait;
+use identity::Did;
+
+use super::context::{check_doc_access_with_overlay, is_doc_registered_with_overlay};
+
+pub struct OverlayChecker<'a> {
+    pub acp: &'a dyn DocumentACP,
+    pub identity: &'a Identity,
+    pub node_did: Option<&'a Did>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl ObjectAccessChecker for OverlayChecker<'_> {
+    async fn object_access(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        object_id: &str,
+    ) -> acp::Result<DocAccess> {
+        if let (Some(node), Identity::Authenticated(requester)) = (self.node_did, self.identity) {
+            if node == requester {
+                return Ok(DocAccess {
+                    has_access: true,
+                    explicit: true,
+                });
+            }
+        }
+
+        if !is_doc_registered_with_overlay(self.acp, policy_id, resource_name, object_id).await? {
+            return Ok(DocAccess {
+                has_access: true,
+                explicit: false,
+            });
+        }
+
+        let has_access = check_doc_access_with_overlay(
+            self.acp,
+            self.identity,
+            DocumentPermission::Read,
+            policy_id,
+            resource_name,
+            object_id,
+            self.node_did,
+        )
+        .await?;
+
+        Ok(DocAccess {
+            has_access,
+            explicit: true,
+        })
+    }
+}

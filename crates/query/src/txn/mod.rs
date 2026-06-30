@@ -15,7 +15,8 @@ mod guard;
 pub use query_plan::txn::{
     check_doc_access_with_overlay, current_deferred_acp_mutations, is_doc_registered_with_overlay,
     scope_deferred_acp_mutations, DeferredAcpMutations, GetTransactionResult,
-    NoOpTransactionRegistry, TransactionContext, TransactionHandle, TransactionRegistry,
+    NoOpTransactionRegistry, OverlayChecker, TransactionContext, TransactionHandle,
+    TransactionRegistry,
 };
 
 pub use guard::TransactionGuard;

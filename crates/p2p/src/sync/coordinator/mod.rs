@@ -320,6 +320,12 @@ pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
     /// the same decision for the same peer state.
     pub(super) authorizer: Arc<authorizer::RuntimeAuthorizer<T>>,
 
+    /// CID-aware block classifier shared by Bitswap and CAR serve paths.
+    pub(super) classifier: Arc<dyn crate::bitswap::BlockClassifier>,
+
+    /// Late-bound ACP resolver/gate shared by Bitswap and CAR serve paths.
+    pub(super) serve_acp: Arc<crate::bitswap::LateBoundServeAcp>,
+
     /// Optional document ACP used for local ACP relationship snapshot replay.
     pub(super) document_acp: std::sync::OnceLock<Arc<dyn DocumentACP>>,
 

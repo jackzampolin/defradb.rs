@@ -10,6 +10,7 @@
 
 mod context;
 mod handle;
+mod read_access;
 mod registry;
 mod result;
 
@@ -19,6 +20,7 @@ pub use context::{
     scope_deferred_acp_mutations, DeferredAcpMutations, TransactionContext,
 };
 pub use handle::TransactionHandle;
+pub use read_access::OverlayChecker;
 pub use registry::{NoOpTransactionRegistry, TransactionRegistry};
 pub use result::GetTransactionResult;
 

@@ -178,6 +178,8 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     /// Used when a request doesn't include an explicit identity (e.g., no bearer token).
     /// Typically set from the `--identity` CLI flag.
     pub(crate) default_identity: Option<Did>,
+    /// Local node DID for Go-parity ACP node-identity shortcuts.
+    pub(crate) node_did: Option<Did>,
     /// Optional lens transform store for view queries with transforms
     pub(crate) lens_store: Option<Arc<dyn lens::TransformStore>>,
     /// NAC checker for query-level enforcement.
@@ -209,6 +211,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             mutator: None,
             acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
+            node_did: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
@@ -229,6 +232,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             mutator: None,
             acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
+            node_did: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
@@ -251,6 +255,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutator: None,
             acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
+            node_did: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
@@ -276,6 +281,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutator: None,
             acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
+            node_did: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
@@ -300,6 +306,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutator: None,
             acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
+            node_did: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
@@ -361,6 +368,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     pub fn with_default_identity(mut self, identity: Did) -> Self {
         self.default_identity = Some(identity);
         self
+    }
+
+    /// Set the local node DID for ACP node-identity shortcuts.
+    pub fn with_node_did(mut self, node_did: Option<Did>) -> Self {
+        self.node_did = node_did;
+        self
+    }
+
+    pub(crate) fn node_did(&self) -> Option<&Did> {
+        self.node_did.as_ref()
     }
 
     /// Set query execution timeout in seconds (0 = no timeout).

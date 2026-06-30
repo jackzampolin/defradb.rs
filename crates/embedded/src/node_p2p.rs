@@ -98,12 +98,16 @@ where
         }
     };
 
+    let classifier = defra_p2p_adapter::DbBlockClassifier::new_arc(database.clone());
+    let serve_acp = Arc::new(p2p::bitswap::LateBoundServeAcp::new());
     let (host, handle, event_rx, replicator_registry) =
-        p2p::P2PHost::with_keypair_and_config_and_identity(
+        p2p::P2PHost::with_keypair_and_config_and_identity_and_serve_gate(
             p2p_keypair,
             bitswap_store,
             p2p::P2PHostConfig::default(),
             database.node_identity(),
+            classifier.clone(),
+            serve_acp.clone(),
         )
         .await
         .map_err(|error| anyhow!("failed to create P2P host: {error}"))?;
@@ -134,18 +138,21 @@ where
         Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
     let head_provider: Arc<dyn DocumentHeadProvider> =
         Arc::new(db_merge::create_head_provider(database.clone()));
-    let (mut coordinator, sync_events_rx) = p2p::sync::SyncCoordinator::with_head_provider(
-        p2p::Libp2pTransport::new(handle.clone()),
-        blockstore.clone(),
-        sync_config,
-        p2p::bitswap::AccessMode::Controlled,
-        replicator_registry,
-        collection_store,
-        head_provider,
-        std::sync::Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
-    )
-    .await
-    .map_err(|error| anyhow!("failed to create sync coordinator: {error}"))?;
+    let (mut coordinator, sync_events_rx) =
+        p2p::sync::SyncCoordinator::with_head_provider_and_serve_gate(
+            p2p::Libp2pTransport::new(handle.clone()),
+            blockstore.clone(),
+            sync_config,
+            p2p::bitswap::AccessMode::Controlled,
+            replicator_registry,
+            collection_store,
+            head_provider,
+            std::sync::Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
+            classifier,
+            serve_acp.clone(),
+        )
+        .await
+        .map_err(|error| anyhow!("failed to create sync coordinator: {error}"))?;
 
     let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
     let coordinator = Arc::new(coordinator);
@@ -243,6 +250,9 @@ where
     .with_replicator_push_options_state(replicator_push_options.clone());
     adapter.set_initial_tracked_documents(restored_doc_ids);
     let coordinator_for_acp = coordinator.clone();
+    let serve_acp_for_acp = serve_acp.clone();
+    let handle_for_acp = handle.clone();
+    let database_for_acp = database.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
     // Lazy SE-key handle: teed by the callback below (runtime provisioning),
@@ -319,6 +329,13 @@ where
             merge_handler_inner_for_kms.set_kms(kms);
         })),
         wire_document_acp: Some(Box::new(move |acp| {
+            serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
+                resolver: Arc::new(p2p::HandlePeerIdentityResolver::new(handle_for_acp)),
+                gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
+                    acp.clone(),
+                    database_for_acp.node_did(),
+                ),
+            });
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());
             broadcast_mutator_for_acp.set_document_acp(acp);
@@ -389,22 +406,27 @@ where
 
     let transport = p2p::iroh::IrohTransport::new(command_tx, secret_key);
     let blockstore = Arc::new(EmbeddedBlockstore::new(store.clone(), true));
+    let classifier = defra_p2p_adapter::DbBlockClassifier::new_arc(database.clone());
+    let serve_acp = Arc::new(p2p::bitswap::LateBoundServeAcp::new());
     let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
         Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
     let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
         Arc::new(db_merge::create_head_provider(database.clone()));
-    let (mut coordinator, sync_events_rx) = p2p::sync::SyncCoordinator::with_head_provider(
-        transport.clone(),
-        blockstore.clone(),
-        sync_config,
-        p2p::bitswap::AccessMode::Controlled,
-        replicator_registry,
-        collection_store,
-        head_provider,
-        std::sync::Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
-    )
-    .await
-    .map_err(|error| anyhow!("failed to create iroh sync coordinator: {error}"))?;
+    let (mut coordinator, sync_events_rx) =
+        p2p::sync::SyncCoordinator::with_head_provider_and_serve_gate(
+            transport.clone(),
+            blockstore.clone(),
+            sync_config,
+            p2p::bitswap::AccessMode::Controlled,
+            replicator_registry,
+            collection_store,
+            head_provider,
+            std::sync::Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
+            classifier,
+            serve_acp.clone(),
+        )
+        .await
+        .map_err(|error| anyhow!("failed to create iroh sync coordinator: {error}"))?;
 
     let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
     let coordinator = Arc::new(coordinator);
@@ -488,6 +510,8 @@ where
     .with_replicator_push_options_state(replicator_push_options.clone());
     adapter.set_initial_tracked_documents(restored_doc_ids);
     let coordinator_for_acp = coordinator.clone();
+    let serve_acp_for_acp = serve_acp.clone();
+    let database_for_acp = database.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let broadcast_mutator_for_se = replication.broadcast_mutator.clone();
     let se_key_handle = db_merge::empty_se_key_handle();
@@ -555,6 +579,13 @@ where
             merge_handler_inner_for_kms.set_kms(kms);
         })),
         wire_document_acp: Some(Box::new(move |acp| {
+            serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
+                resolver: Arc::new(p2p::AnonymousResolver),
+                gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
+                    acp.clone(),
+                    database_for_acp.node_did(),
+                ),
+            });
             coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());
             broadcast_mutator_for_acp.set_document_acp(acp);

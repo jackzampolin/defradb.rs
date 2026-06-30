@@ -34,6 +34,7 @@ pub mod nac;
 mod permission;
 mod persistent;
 pub mod policy_yaml;
+pub mod read_access;
 mod relation;
 mod store;
 mod target_subject;
@@ -47,6 +48,7 @@ pub use identity::Identity;
 pub use local::{LocalDocumentACP, MemoryAcpStore};
 pub use permission::DocumentPermission;
 pub use persistent::PersistentAcpStore;
+pub use read_access::{check_doc_read_access, DirectChecker, DocAccess, ObjectAccessChecker};
 pub use relation::{
     RelationTuple, DELETER_RELATION, OWNER_RELATION, READER_RELATION, UPDATER_RELATION,
 };
