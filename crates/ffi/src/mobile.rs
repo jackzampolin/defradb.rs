@@ -669,7 +669,7 @@ pub extern "C" fn defra_mobile_add_replicator(
             Ok(value) => value,
             Err(_) => return FfiResult::error("peerAddr contains an embedded null byte"),
         };
-        let filters = match CString::new(serde_json::to_string(&request.filters).unwrap_or_default()) {
+        let filters = match CString::new(serde_json::to_string(&request.filters).unwrap_or_else(|_| "null".to_string())) {
             Ok(value) => value,
             Err(_) => return FfiResult::error("filters contains an embedded null byte"),
         };
@@ -701,8 +701,9 @@ mod tests {
         let request: MobileAddReplicatorRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.collections, vec!["Users".to_string()]);
         assert_eq!(request.peer_addr, "/ip4/1.2.3.4/tcp/9000/p2p/12D3");
-        assert!(request.filters.contains_key("Users"));
-        assert!(request.filters["Users"].conditions.is_some());
+        let filters = request.filters.as_ref().unwrap();
+        assert!(filters.contains_key("Users"));
+        assert!(filters["Users"].conditions.is_some());
         assert!(request.identity_did.is_none());
     }
 
@@ -712,7 +713,15 @@ mod tests {
         let request: MobileAddReplicatorRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.collections, vec!["Posts".to_string()]);
         assert_eq!(request.peer_addr, "/ip4/127.0.0.1/tcp/9000");
-        assert!(request.filters.is_empty());
+        assert!(request.filters.is_none());
+    }
+
+    #[test]
+    fn test_mobile_add_replicator_request_accepts_null_filters() {
+        let json =
+            r#"{"collections":["Posts"],"peerAddr":"/ip4/127.0.0.1/tcp/9000","filters":null}"#;
+        let request: MobileAddReplicatorRequest = serde_json::from_str(json).unwrap();
+        assert!(request.filters.is_none());
     }
 
     #[test]

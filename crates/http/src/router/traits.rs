@@ -8,7 +8,8 @@ pub type ReplicationFilters = std::collections::BTreeMap<String, ReplicationFilt
 ///
 /// Supports two forms:
 /// - Legacy scalar equality: `{"Field": "f", "Value": <scalar>}`
-/// - Rich predicate (any DefraDB query-filter conditions object): `{"Conditions": {"f": {"_in": [...]}}}`
+/// - Rich predicate (any DefraDB query-filter conditions object):
+///   `{"Conditions": {"f": {"_in": [...]}}}` or `{"predicate": {"f": {"_in": [...]}}}`
 ///
 /// When `conditions` is present it takes precedence over `field`/`value`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -25,6 +26,7 @@ pub struct ReplicationFilter {
     /// When present, `field`/`value` are ignored during conversion.
     #[serde(
         rename = "Conditions",
+        alias = "predicate",
         default,
         skip_serializing_if = "Option::is_none"
     )]
