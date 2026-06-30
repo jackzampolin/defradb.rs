@@ -57,9 +57,45 @@ where
         .collect()
 }
 
+/// Overlay persisted peer metadata onto live replicator authorization state.
+///
+/// The live registry/transport is authoritative for which peers and collections
+/// are currently replicators. Peerstore rows are persisted metadata and may lag
+/// live authorization changes, so they must not introduce peers or collections.
+pub fn merge_live_replicators_with_persisted_metadata(
+    live: Vec<p2p::ReplicatorInfo>,
+    persisted: Option<Vec<p2p::ReplicatorInfo>>,
+) -> Vec<p2p::ReplicatorInfo> {
+    let Some(persisted) = persisted else {
+        return live;
+    };
+
+    let persisted_by_peer: std::collections::BTreeMap<String, p2p::ReplicatorInfo> = persisted
+        .into_iter()
+        .map(|info| (info.peer_id_str().to_string(), info))
+        .collect();
+
+    live.into_iter()
+        .map(|mut info| {
+            let Some(persisted_info) = persisted_by_peer.get(info.peer_id_str()) else {
+                return info;
+            };
+
+            for address in &persisted_info.addresses {
+                if !info.addresses.iter().any(|existing| existing == address) {
+                    info.addresses.push(address.clone());
+                }
+            }
+            info.status = persisted_info.status;
+            info.last_status_change = persisted_info.last_status_change;
+            info
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod resolve_remove_collections_tests {
-    use super::resolve_remove_collections;
+    use super::{merge_live_replicators_with_persisted_metadata, resolve_remove_collections};
     use std::collections::HashMap;
 
     fn resolver(map: HashMap<&'static str, &'static str>) -> impl Fn(&str) -> Option<String> {
@@ -85,6 +121,44 @@ mod resolve_remove_collections_tests {
         let map = HashMap::from([("AgentDoc", "bafyCID")]);
         let out = resolve_remove_collections(Vec::new(), resolver(map));
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn live_replicator_state_is_authoritative_over_persisted_collections() {
+        let peer = "peer-1".to_string();
+        let live = vec![p2p::ReplicatorInfo::from_raw(
+            peer.clone(),
+            vec!["allowed".to_string()],
+            vec!["live-addr".to_string()],
+        )];
+
+        let mut persisted = p2p::ReplicatorInfo::from_raw(
+            peer.clone(),
+            vec!["allowed".to_string(), "revoked".to_string()],
+            vec!["persisted-addr".to_string()],
+        );
+        persisted.set_status_if_changed_now(p2p::ReplicatorStatus::Inactive);
+
+        let persisted_only = p2p::ReplicatorInfo::from_raw(
+            "stale-peer".to_string(),
+            vec!["stale".to_string()],
+            vec!["stale-addr".to_string()],
+        );
+
+        let merged = merge_live_replicators_with_persisted_metadata(
+            live,
+            Some(vec![persisted.clone(), persisted_only]),
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].peer_id_str(), peer);
+        assert_eq!(merged[0].collections, vec!["allowed".to_string()]);
+        assert_eq!(
+            merged[0].addresses,
+            vec!["live-addr".to_string(), "persisted-addr".to_string()]
+        );
+        assert_eq!(merged[0].status, p2p::ReplicatorStatus::Inactive);
+        assert_eq!(merged[0].last_status_change, persisted.last_status_change);
     }
 }
 

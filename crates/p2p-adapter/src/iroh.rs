@@ -325,20 +325,24 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         self.check_nac(acp::nac::NodePermission::P2pReplicatorList)
             .await?;
 
-        let p2p_infos = if let Some(ref pusher) = self.doc_pusher {
-            match pusher.load_persisted_replicators().await? {
-                Some(infos) => infos,
-                None => self
-                    .transport
-                    .list_replicators()
-                    .await
-                    .map_err(|error| P2PError::transport(error.to_string()))?,
-            }
+        let p2p_infos = if let Some(ref coordinator) = self.sync_coordinator {
+            coordinator
+                .list_replicators()
+                .await
+                .map_err(|error| P2PError::transport(error.to_string()))?
         } else {
             self.transport
                 .list_replicators()
                 .await
                 .map_err(|error| P2PError::transport(error.to_string()))?
+        };
+        let p2p_infos = if let Some(ref pusher) = self.doc_pusher {
+            crate::merge_live_replicators_with_persisted_metadata(
+                p2p_infos,
+                pusher.load_persisted_replicators().await?,
+            )
+        } else {
+            p2p_infos
         };
 
         Ok(p2p_infos
