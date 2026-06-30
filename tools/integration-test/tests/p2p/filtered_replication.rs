@@ -3396,14 +3396,20 @@ async fn rust_filtered_replication_partial_delete_keeps_remaining() {
     .await;
 }
 
-/// #1074 reporting contract: `getall` reports the LIVE registry membership (peer
-/// identity + collections) while overlaying persisted peerstore metadata
-/// (`Addresses` + `Status`). This drives the four-adapter live-read + merge wiring
-/// through the real HTTP surface — coverage the pure-function merge unit test
-/// (`merge_live_replicators_with_persisted_metadata`) cannot provide, since it
-/// never proves the `get_replicators` call sites actually read live and overlay.
+/// HTTP lifecycle/wiring smoke test for `getall` (`GET /api/v0/p2p/replicators`):
+/// adding a replicator surfaces its peer id, collections, `Addresses`, and
+/// `Status` over the real adapter+HTTP path, and fully deleting it removes the
+/// peer from the listing.
+///
+/// Note on scope: `add`/`delete` mutate the live registry and the peerstore
+/// together, so this does NOT distinguish live-authoritative reporting from a
+/// peerstore read — those divergence semantics (live wins, persisted-only peers
+/// dropped, metadata overlay) are locked by the unit test
+/// `live_replicator_state_is_authoritative_over_persisted_collections`. This test
+/// only locks that the `get_replicators` call sites are wired and the wire shape
+/// is correct end to end.
 #[tokio::test]
-async fn rust_replicator_getall_reports_live_membership_and_persisted_metadata() {
+async fn rust_replicator_getall_reports_replicator_lifecycle() {
     let cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
@@ -3443,11 +3449,11 @@ async fn rust_replicator_getall_reports_live_membership_and_persisted_metadata()
         .cloned()
         .unwrap_or_else(|| panic!("expected exactly one replicator listed, got: {listed}"));
 
-    // Live registry is authoritative for identity + collection membership.
+    // Identity + collection membership are reported.
     assert_eq!(
         entry["ID"].as_str(),
         Some(peer_id.as_str()),
-        "getall must report the live peer id, got: {entry}"
+        "getall must report the peer id, got: {entry}"
     );
     let cols: Vec<&str> = entry["CollectionIDs"]
         .as_array()
@@ -3456,11 +3462,12 @@ async fn rust_replicator_getall_reports_live_membership_and_persisted_metadata()
     assert_eq!(
         cols.len(),
         1,
-        "getall must report exactly the live collection membership, got: {entry}"
+        "getall must report exactly the replicator's collection membership, got: {entry}"
     );
 
-    // Persisted peerstore metadata is overlaid: the address survives the merge and
-    // a numeric Status (0=Active / 1=Inactive) is surfaced rather than dropped.
+    // The address and a numeric Status (0=Active / 1=Inactive) are present in the
+    // wire shape. (Both come from the peerstore record written by `add`, so this
+    // checks the HTTP shape, not the live-vs-persisted overlay.)
     assert!(
         entry["Addresses"]
             .as_array()
@@ -3472,10 +3479,10 @@ async fn rust_replicator_getall_reports_live_membership_and_persisted_metadata()
         "getall must surface the persisted status field, got: {entry}"
     );
 
-    // #1074 reporting contract: a live auth change must be reflected in getall so
-    // a reconciler can observe drift. Fully removing the replicator's only
-    // collection drops it from the live registry; getall must then no longer list
-    // the peer (it is not resurrected from persisted-only state).
+    // Lifecycle: fully removing the replicator's only collection deletes the peer
+    // from both the live registry and the peerstore, so getall must no longer list
+    // it. (This exercises the delete->report path; it does not isolate live from
+    // persisted, since the delete clears both.)
     node0
         .p2p_replicator_delete(&["AgentDoc"], Some(&addr1))
         .or_else(|_| node0.p2p_replicator_delete(&["AgentDoc"], Some(&peer_id)))
@@ -3491,6 +3498,6 @@ async fn rust_replicator_getall_reports_live_membership_and_persisted_metadata()
         .unwrap_or(false);
     assert!(
         !still_listed,
-        "getall must reflect the live removal of the replicator, got: {after_delete}"
+        "getall must reflect the deleted replicator's removal, got: {after_delete}"
     );
 }
