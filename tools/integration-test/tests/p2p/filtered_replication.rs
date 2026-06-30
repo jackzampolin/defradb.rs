@@ -3203,9 +3203,13 @@ async fn list_replicators_http(cluster: &TestCluster, node: usize) -> serde_json
 async fn rust_filtered_replication_partial_delete_keeps_remaining() {
     const OTHER_SCHEMA: &str = "type OtherDoc { body: String }";
 
-    let cluster = TestCluster::builder()
+    // Keyring => stable peer identity across restart; redb => persistent peerstore
+    // so the survivor's re-persisted row must actually be reloaded after restart.
+    let mut cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
+        .with_keyring()
+        .with_store("redb")
         .build()
         .await
         .unwrap();
@@ -3326,5 +3330,174 @@ async fn rust_filtered_replication_partial_delete_keeps_remaining() {
     assert!(
         !agent_ids.contains(&removed_id.as_str()),
         "a doc in the removed collection must NOT replicate after partial delete, found: {agent_ids:?}"
+    );
+
+    // #1077 regression guard. `getall` now reports the LIVE in-memory registry, so
+    // a partial-delete that wiped the whole peerstore row would be MASKED here (the
+    // survivor stays in the registry until the process exits). Restart node0 so the
+    // registry is rebuilt from the peerstore: if the row had been clobbered, the
+    // survivor now vanishes from `getall` and stops replicating.
+    cluster.nodes[0].process.kill();
+    cluster
+        .restart_node(0, Duration::from_secs(60))
+        .await
+        .expect("restart node0 after partial delete");
+    cluster
+        .wait_for_log(0, "p2p_listening", P2P_TIMEOUT)
+        .await
+        .expect("node0 P2P after restart");
+
+    let after_restart = list_replicators_http(&cluster, 0).await;
+    let after_restart_arr = after_restart.as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        after_restart_arr.len(),
+        1,
+        "survivor must persist as a replicator across restart (peerstore not wiped), got: {after_restart}"
+    );
+    assert_eq!(
+        after_restart_arr[0]["CollectionIDs"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0),
+        1,
+        "exactly the survivor collection must persist across restart, got: {after_restart}"
+    );
+
+    // Ephemeral transport state is lost on restart; reconnect so the reloaded
+    // replicator has a live channel, then prove the survivor still replicates.
+    let addr1_after = extract_p2p_addr(&cluster, 1);
+    cluster
+        .client(0)
+        .p2p_connect(&[&addr1_after])
+        .expect("reconnect 0->1 after restart");
+
+    let node0_after = cluster.client(0);
+    let survivor_after = node0_after
+        .query(r#"mutation { add_OtherDoc(input: {body: "survivor-after-restart"}) { _docID } }"#)
+        .expect("create OtherDoc after restart");
+    let survivor_after_id = extract_doc_id(&survivor_after, "add_OtherDoc");
+
+    let node1_after = cluster.client(1);
+    let survivor_after_poll = survivor_after_id.clone();
+    poll_until(
+        || {
+            let result = node1_after
+                .query("query { OtherDoc { _docID } }")
+                .unwrap_or_default();
+            result["OtherDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r["_docID"].as_str() == Some(survivor_after_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT + Duration::from_secs(30),
+        P2P_POLL_INTERVAL,
+        "survivor (OtherDoc) did not replicate after source restart",
+    )
+    .await;
+}
+
+/// HTTP lifecycle/wiring smoke test for `getall` (`GET /api/v0/p2p/replicators`):
+/// adding a replicator surfaces its peer id, collections, `Addresses`, and
+/// `Status` over the real adapter+HTTP path, and fully deleting it removes the
+/// peer from the listing.
+///
+/// Note on scope: `add`/`delete` mutate the live registry and the peerstore
+/// together, so this does NOT distinguish live-authoritative reporting from a
+/// peerstore read — those divergence semantics (live wins, persisted-only peers
+/// dropped, metadata overlay) are locked by the unit test
+/// `live_replicator_state_is_authoritative_over_persisted_collections`. This test
+/// only locks that the `get_replicators` call sites are wired and the wire shape
+/// is correct end to end.
+#[tokio::test]
+async fn rust_replicator_getall_reports_replicator_lifecycle() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0
+        .schema_add(AGENT_SCHEMA)
+        .expect("AgentDoc schema node0");
+    node1
+        .schema_add(AGENT_SCHEMA)
+        .expect("AgentDoc schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    let peer_id = addr1.rsplit("/p2p/").next().unwrap_or(&addr1).to_string();
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe 0 to AgentDoc");
+
+    let out = run_replicator_add_plain(&cluster, 0, &["AgentDoc"], &addr1);
+    assert!(
+        out.status.success(),
+        "replicator add failed: status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let listed = list_replicators_http(&cluster, 0).await;
+    let entry = listed
+        .as_array()
+        .and_then(|arr| arr.first())
+        .cloned()
+        .unwrap_or_else(|| panic!("expected exactly one replicator listed, got: {listed}"));
+
+    // Identity + collection membership are reported.
+    assert_eq!(
+        entry["ID"].as_str(),
+        Some(peer_id.as_str()),
+        "getall must report the peer id, got: {entry}"
+    );
+    let cols: Vec<&str> = entry["CollectionIDs"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|c| c.as_str()).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        cols.len(),
+        1,
+        "getall must report exactly the replicator's collection membership, got: {entry}"
+    );
+
+    // The address and a numeric Status (0=Active / 1=Inactive) are present in the
+    // wire shape. (Both come from the peerstore record written by `add`, so this
+    // checks the HTTP shape, not the live-vs-persisted overlay.)
+    assert!(
+        entry["Addresses"]
+            .as_array()
+            .is_some_and(|addrs| !addrs.is_empty()),
+        "getall must surface the persisted replicator address, got: {entry}"
+    );
+    assert!(
+        entry["Status"].is_u64(),
+        "getall must surface the persisted status field, got: {entry}"
+    );
+
+    // Lifecycle: fully removing the replicator's only collection deletes the peer
+    // from both the live registry and the peerstore, so getall must no longer list
+    // it. (This exercises the delete->report path; it does not isolate live from
+    // persisted, since the delete clears both.)
+    node0
+        .p2p_replicator_delete(&["AgentDoc"], Some(&addr1))
+        .or_else(|_| node0.p2p_replicator_delete(&["AgentDoc"], Some(&peer_id)))
+        .expect("full p2p_replicator_delete");
+
+    let after_delete = list_replicators_http(&cluster, 0).await;
+    let still_listed = after_delete
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .any(|r| r["ID"].as_str() == Some(peer_id.as_str()))
+        })
+        .unwrap_or(false);
+    assert!(
+        !still_listed,
+        "getall must reflect the deleted replicator's removal, got: {after_delete}"
     );
 }

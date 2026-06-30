@@ -360,21 +360,30 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         self.check_nac(acp::nac::NodePermission::P2pReplicatorList)
             .await?;
 
-        let p2p_infos = if let Some(ref pusher) = self.doc_pusher {
-            match pusher.load_persisted_replicators().await {
-                Ok(Some(infos)) => infos,
-                Ok(None) => self
-                    .handle
-                    .list_replicators()
-                    .await
-                    .map_err(|e| P2PError::Transport(e.to_string()))?,
-                Err(e) => return Err(P2PError::Internal(e)),
-            }
+        // #1074: report the LIVE replicator registry, not the persisted peerstore,
+        // so a reconciler can observe authorization drift. The coordinator and the
+        // raw handle read the same shared registry (the coordinator delegates to the
+        // same transport), so both branches are equally live-authoritative; persisted
+        // rows only overlay address/status metadata below.
+        let p2p_infos = if let Some(ref coordinator) = self.sync_coordinator {
+            coordinator
+                .list_replicators()
+                .await
+                .map_err(|e| P2PError::Transport(e.to_string()))?
         } else {
             self.handle
                 .list_replicators()
                 .await
                 .map_err(|e| P2PError::Transport(e.to_string()))?
+        };
+        let p2p_infos = if let Some(ref pusher) = self.doc_pusher {
+            let persisted = pusher
+                .load_persisted_replicators()
+                .await
+                .map_err(P2PError::Internal)?;
+            defra_p2p_adapter::merge_live_replicators_with_persisted_metadata(p2p_infos, persisted)
+        } else {
+            p2p_infos
         };
 
         let http_infos: Vec<ReplicatorInfo> = p2p_infos
