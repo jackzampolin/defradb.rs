@@ -325,6 +325,11 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         self.check_nac(acp::nac::NodePermission::P2pReplicatorList)
             .await?;
 
+        // #1074: report the LIVE replicator registry, not the persisted peerstore,
+        // so a reconciler can observe authorization drift. The coordinator and the
+        // raw transport read the same shared registry (the coordinator delegates to
+        // the same transport), so both branches are equally live-authoritative;
+        // persisted rows only overlay address/status metadata below.
         let p2p_infos = if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
                 .list_replicators()
