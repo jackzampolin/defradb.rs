@@ -1,4 +1,6 @@
-use integration_test::{for_each_runtime, generate_identity, TestCluster};
+use integration_test::{
+    for_each_runtime, for_each_runtime_go_ignored, generate_identity, TestCluster,
+};
 use serde_json::Value;
 
 // Mirrors the multi-CID vector cases added in Go PR #4794. Document CID tests
@@ -357,17 +359,24 @@ async fn multi_cid_commits_filters_unreadable_cid_test(cluster: TestCluster) {
     );
 }
 
-for_each_runtime!(
+// These assert hardcoded commit-CID vectors. Go v1.0.0 derives DocIDs from the
+// genesis composite CID (Go #4838), which the Rust port has not yet ported, so a
+// Go node computes different CIDs and the `go_` variants cannot match the baked
+// vectors. Tracked in defradb.rs#1080; the `rust_` variants still run.
+for_each_runtime_go_ignored!(
     multi_cid_simple_multiple_cids,
-    multi_cid_simple_multiple_cids_test
+    multi_cid_simple_multiple_cids_test,
+    "blocked on porting Go #4838 (DocID from genesis CID) to Rust; see defradb.rs#1080"
 );
-for_each_runtime!(
+for_each_runtime_go_ignored!(
     multi_cid_simple_duplicate_cids_for_same_doc,
-    multi_cid_simple_duplicate_cids_for_same_doc_test
+    multi_cid_simple_duplicate_cids_for_same_doc_test,
+    "blocked on porting Go #4838 (DocID from genesis CID) to Rust; see defradb.rs#1080"
 );
-for_each_runtime!(
+for_each_runtime_go_ignored!(
     multi_cid_simple_multiple_cids_for_same_doc,
-    multi_cid_simple_multiple_cids_for_same_doc_test
+    multi_cid_simple_multiple_cids_for_same_doc_test,
+    "blocked on porting Go #4838 (DocID from genesis CID) to Rust; see defradb.rs#1080"
 );
 for_each_runtime!(
     multi_cid_commits_different_docs,

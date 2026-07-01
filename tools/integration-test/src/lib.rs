@@ -105,6 +105,34 @@ macro_rules! for_each_runtime {
     };
 }
 
+/// Like `for_each_runtime!` but marks only the `go_<name>` variant `#[ignore]`d
+/// with a reason; the `rust_<name>` variant still runs. Use when a test asserts
+/// hardcoded DocID/CID vectors that diverge between the Rust port and the Go
+/// binary — e.g. Go #4838 (DocID derived from the genesis composite CID) is not
+/// yet ported to Rust, so a Go v1.0.0 node computes different identities. See
+/// defradb.rs#1080.
+#[macro_export]
+macro_rules! for_each_runtime_go_ignored {
+    ($name:ident, $inner:ident, $reason:literal) => {
+        ::paste::paste! {
+            #[tokio::test]
+            async fn [<rust_ $name>]() {
+                let _root = $crate::workspace_root();
+                let cluster = $crate::TestCluster::builder().rust_nodes(1).build().await.unwrap();
+                $inner(cluster).await;
+            }
+
+            #[tokio::test]
+            #[ignore = $reason]
+            async fn [<go_ $name>]() {
+                let _root = $crate::workspace_root();
+                let cluster = $crate::TestCluster::builder().go_nodes(1).build().await.unwrap();
+                $inner(cluster).await;
+            }
+        }
+    };
+}
+
 /// Generate `rust_rust_<name>`, `go_go_<name>`, and `go_rust_<name>` test wrappers
 /// for a multi-node P2P test.
 ///
