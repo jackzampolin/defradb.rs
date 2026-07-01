@@ -17,6 +17,19 @@ pub trait CollectionProvider: MaybeSendSync {
 
     /// List all collection names.
     async fn list_collections(&self) -> Result<Vec<String>>;
+
+    /// Resolve a collection by its (schema) version id, **including inactive
+    /// versions**. This is required by ACP-gated paths (e.g. `_commits`) that
+    /// must resolve the collection a historical block was authored under — after
+    /// a schema migration, older blocks carry a now-inactive version id. The
+    /// default returns `None`; callers must fail closed on `None`.
+    async fn get_collection_by_version_id(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<Arc<CollectionVersion>>> {
+        let _ = version_id;
+        Ok(None)
+    }
 }
 
 /// Static collection provider for tests and backward compatibility.
@@ -49,5 +62,16 @@ impl CollectionProvider for StaticCollectionProvider {
 
     async fn list_collections(&self) -> Result<Vec<String>> {
         Ok(self.collections.keys().cloned().collect())
+    }
+
+    async fn get_collection_by_version_id(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<Arc<CollectionVersion>>> {
+        Ok(self
+            .collections
+            .values()
+            .find(|c| c.version_id == version_id)
+            .cloned())
     }
 }

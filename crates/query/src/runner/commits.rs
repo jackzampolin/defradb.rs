@@ -743,6 +743,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let identity = Identity::from(caller_identity.clone());
             let node_did = self.node_did().cloned();
 
+            // Active-version fast path. Historical commits authored under a
+            // now-inactive version (after a schema migration) are NOT in this
+            // map and are resolved on demand below — never left ungated.
             let collections = self.collections_map().await?;
             let by_version: std::collections::HashMap<
                 String,
@@ -751,14 +754,42 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .values()
                 .map(|c| (c.version_id.clone(), c.clone()))
                 .collect();
+            let provider = self.effective_provider();
+            let mut resolved_versions: std::collections::HashMap<
+                String,
+                Option<std::sync::Arc<schema::CollectionVersion>>,
+            > = std::collections::HashMap::new();
 
             let mut keep = Vec::with_capacity(commits.len());
             for commit in &commits {
                 let version_id = commit.get("collectionVersionId").and_then(|v| v.as_str());
                 let doc_id = commit.get("docID").and_then(|v| v.as_str()).unwrap_or("");
 
-                let allowed = match version_id.and_then(|v| by_version.get(v)) {
-                    None => true,
+                // Resolve the commit's collection by its version id, INCLUDING
+                // inactive versions. Mirrors Go's dagScanNode (GetInactive=true)
+                // + fail-closed on an unresolvable version.
+                let collection = match version_id {
+                    None => None,
+                    Some(vid) => match by_version.get(vid) {
+                        Some(c) => Some(c.clone()),
+                        None => {
+                            if !resolved_versions.contains_key(vid) {
+                                let looked_up = provider
+                                    .get_collection_by_version_id(vid)
+                                    .await
+                                    .unwrap_or(None);
+                                resolved_versions.insert(vid.to_string(), looked_up);
+                            }
+                            resolved_versions.get(vid).and_then(|c| c.clone())
+                        }
+                    },
+                };
+
+                let allowed = match collection {
+                    // Fail closed: a commit whose collection version cannot be
+                    // resolved is denied (Go errors the query here). Never allow
+                    // an unresolved version through unchecked.
+                    None => false,
                     Some(collection) => match &collection.policy {
                         None => true,
                         Some(policy) => {
