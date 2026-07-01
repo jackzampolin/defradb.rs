@@ -395,17 +395,17 @@ mod tests {
         );
     }
 
-    /// Schema/collection definitions are broadcast to every replicator
-    /// regardless of per-collection registration. A peer that has no
-    /// entry in the registry must still be able to fetch them.
+    /// Schema/collection definitions are broadcast to every peer regardless of
+    /// per-collection registration (they carry no user data and must propagate
+    /// for schema convergence). A peer with no registry entry can fetch them.
     #[tokio::test]
     async fn definition_delta_is_served_without_registry_check() {
-        use defra_core::{CollectionSetDeltaPayload, CrdtDelta};
+        use defra_core::{CollectionDefinitionDeltaPayload, CrdtDelta};
 
-        let delta = CrdtDelta::CollectionSet(CollectionSetDeltaPayload::new(1));
+        let delta = CrdtDelta::CollectionDefinition(CollectionDefinitionDeltaPayload::new(1));
         assert!(
             delta.is_definition(),
-            "test precondition: CollectionSet is a definition delta"
+            "test precondition: CollectionDefinition is a definition delta"
         );
         let block = DefraBlock::new(delta, Vec::new(), Vec::new());
         let bytes = block.to_dag_cbor().unwrap();
@@ -422,6 +422,37 @@ mod tests {
         assert!(
             allowed,
             "definition deltas must be served even to non-replicator peers"
+        );
+    }
+
+    /// Go parity: a `CollectionSet` block (circular-relation group root) is NOT
+    /// a definition — it has no collection-version id, cannot be ACP-scoped, and
+    /// is never transferred over P2P (circular-relation groups converge by local
+    /// reconstruction). A non-replicator, unauthorized peer must be DENIED.
+    #[tokio::test]
+    async fn collection_set_block_is_denied_to_non_replicator() {
+        use defra_core::{CollectionSetDeltaPayload, CrdtDelta};
+
+        let delta = CrdtDelta::CollectionSet(CollectionSetDeltaPayload::new(1));
+        assert!(
+            !delta.is_definition(),
+            "CollectionSet must not be classified as a servable definition"
+        );
+        let block = DefraBlock::new(delta, Vec::new(), Vec::new());
+        let bytes = block.to_dag_cbor().unwrap();
+        let cid = cid_for(&bytes);
+
+        let registry = Arc::new(ReplicatorRegistry::new());
+        let store = InMemoryStore::default();
+        store.put(cid, bytes);
+
+        let peer = PeerId::random();
+        let allowed =
+            check_access_with_defaults(AccessMode::Controlled, &registry, &store, &peer, &cid)
+                .await;
+        assert!(
+            !allowed,
+            "CollectionSet blocks must not be served to a non-replicator peer"
         );
     }
 
