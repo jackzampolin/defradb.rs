@@ -13,10 +13,10 @@ use datastore::BasicTxn;
 pub use db_search::EmbeddingClientConfig;
 use events::Bus;
 use identity::{Identity, RawIdentity};
-#[cfg(not(feature = "native"))]
+#[cfg(not(feature = "wasmtime-runtime"))]
 use lens::MemoryTransformStore;
 use lens::TransformStore;
-#[cfg(feature = "native")]
+#[cfg(feature = "wasmtime-runtime")]
 use lens::WasmTransformStore;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -473,7 +473,7 @@ impl<S: Store> DB<S> {
     }
 
     /// Create the appropriate lens transform store for the current platform.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "wasmtime-runtime")]
     fn create_lens_store() -> Result<Arc<dyn TransformStore>> {
         let store = WasmTransformStore::with_sandbox(Some(lens::WasmSandboxConfig::restrictive()))
             .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))?;
@@ -481,7 +481,7 @@ impl<S: Store> DB<S> {
     }
 
     /// Create the appropriate lens transform store for the current platform.
-    #[cfg(not(feature = "native"))]
+    #[cfg(not(feature = "wasmtime-runtime"))]
     fn create_lens_store() -> Result<Arc<dyn TransformStore>> {
         Ok(Arc::new(MemoryTransformStore::new()))
     }

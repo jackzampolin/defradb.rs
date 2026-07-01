@@ -9,7 +9,8 @@ HEADER_PATH="$OUT_DIR/include/defra.h"
 MODULEMAP_PATH="$OUT_DIR/include/module.modulemap"
 FRAMEWORK_NAME="${FRAMEWORK_NAME:-DefraFFI}"
 LIB_NAME="${LIB_NAME:-ffi}"
-FEATURES="${FEATURES:-iroh}"
+FEATURES="${FEATURES:-redb,iroh,native}"
+NO_DEFAULT_FEATURES="${NO_DEFAULT_FEATURES:-1}"
 DEVICE_TARGET="${DEVICE_TARGET:-aarch64-apple-ios}"
 SIM_TARGETS="${SIM_TARGETS:-aarch64-apple-ios-sim x86_64-apple-ios}"
 SWIFT_PACKAGE_DIR="$OUT_DIR/swift"
@@ -41,8 +42,11 @@ rm -rf "$OUT_DIR/include" "$OUT_DIR/lib" "$OUT_DIR/xcframework" "$SWIFT_PACKAGE_
 mkdir -p "$OUT_DIR/include" "$OUT_DIR/lib" "$OUT_DIR/xcframework" "$SWIFT_PACKAGE_DIR"
 
 feature_args=()
+if [[ "$NO_DEFAULT_FEATURES" == "1" || "$NO_DEFAULT_FEATURES" == "true" ]]; then
+    feature_args+=(--no-default-features)
+fi
 if [[ -n "$FEATURES" ]]; then
-    feature_args=(--features "$FEATURES")
+    feature_args+=(--features "$FEATURES")
 fi
 
 write_modulemap() {

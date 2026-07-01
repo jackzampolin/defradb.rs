@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 description = "P2P merge handler, broadcast mutator, and document pushing for DefraDB"
 
+[features]
+default = ["native", "wasmtime-runtime"]
+native = ["db/native"]
+wasmtime-runtime = ["db/wasmtime-runtime"]
+
 [dependencies]
 # Async
 async-trait.workspace = true
@@ -44,7 +49,7 @@ parking_lot.workspace = true
 libp2p.workspace = true
 
 # Internal crates
-db = { path = "../db" }
+db = { path = "../db", default-features = false }
 db-blocks = { path = "../db-blocks" }
 storage = { path = "../storage" }
 datastore = { path = "../datastore" }

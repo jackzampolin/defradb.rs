@@ -12,12 +12,20 @@ description = "FFI bindings for DefraDB Rust implementation"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["lark", "redb", "rocksdb"]
-lark = ["storage/lark"]
-redb = ["storage/redb"]
+default = ["native", "wasmtime-runtime", "lark", "redb", "rocksdb"]
+lark = ["embedded/lark", "storage/lark"]
+native = ["db/native", "db-backup/native", "db-merge/native", "embedded/native"]
+redb = ["db/redb", "embedded/redb", "storage/redb"]
 fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
 iroh = ["embedded/iroh", "p2p/iroh-transport"]
+wasmtime-runtime = [
+    "db/wasmtime-runtime",
+    "db-backup/wasmtime-runtime",
+    "db-merge/wasmtime-runtime",
+    "embedded/wasmtime-runtime",
+    "lens/wasmtime-runtime",
+]
 profiling = ["dep:tracing-chrome", "dep:tracing-subscriber"]
 
 [dependencies]
@@ -52,9 +60,9 @@ hex.workspace = true
 
 # Internal crates
 crypto = { path = "../crypto" }
-db = { path = "../db" }
-db-backup = { path = "../db-backup" }
-db-merge = { path = "../db-merge" }
+db = { path = "../db", default-features = false }
+db-backup = { path = "../db-backup", default-features = false }
+db-merge = { path = "../db-merge", default-features = false }
 defra-core = { path = "../defra-core" }
 defra-http = { path = "../http" }
 document = { path = "../document" }
@@ -65,10 +73,10 @@ schema = { path = "../schema" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
 sourcehub = { path = "../sourcehub" }
-lens = { path = "../lens" }
+lens = { path = "../lens", default-features = false }
 p2p = { path = "../p2p", features = ["libp2p-transport"] }
 blockstore = { path = "../blockstore" }
-embedded = { path = "../embedded" }
+embedded = { path = "../embedded", default-features = false }
 
 # IPLD
 cid.workspace = true

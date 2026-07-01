@@ -21,19 +21,25 @@
 tools/apple/build-ffi.sh
 ```
 
-The script defaults to an iroh-capable build by setting `FEATURES=iroh`.
+The script defaults to an iroh-capable Redb build by setting
+`FEATURES=redb,iroh,native` and `NO_DEFAULT_FEATURES=1`.
 It also defaults to `APPLE_DEPLOYMENT_TARGET=15.0` so Rust and native dependencies
 are linked against a modern iOS target instead of Rust's legacy iOS 10 default.
+The default iOS feature set avoids desktop-only FFI defaults such as RocksDB,
+Lark, and the Wasmtime lens runtime.
 
 Override the defaults with environment variables when needed:
 
 ```bash
 APPLE_DEPLOYMENT_TARGET=16.0 \
-FEATURES="iroh rocksdb" \
+FEATURES="redb,iroh,native" \
 OUT_DIR="$PWD/dist/apple" \
 FRAMEWORK_NAME="DefraMobile" \
 tools/apple/build-ffi.sh
 ```
+
+Set `NO_DEFAULT_FEATURES=0` only for a desktop-style experiment where the full
+FFI default feature set is intentionally desired.
 
 `CARGO_TARGET_DIR` can also be overridden when you want the Apple build cache
 somewhere other than `target/apple-cargo/<deployment-target>`.

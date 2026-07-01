@@ -8,9 +8,14 @@ license.workspace = true
 repository.workspace = true
 description = "Database export/import (backup) for DefraDB"
 
+[features]
+default = ["native", "wasmtime-runtime"]
+native = ["db/native"]
+wasmtime-runtime = ["db/wasmtime-runtime"]
+
 [dependencies]
 # Internal crates
-db = { path = "../db" }
+db = { path = "../db", default-features = false }
 document = { path = "../document" }
 query = { path = "../query" }
 schema = { path = "../schema" }

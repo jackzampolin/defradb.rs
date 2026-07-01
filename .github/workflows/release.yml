@@ -361,7 +361,8 @@ jobs:
 
       - name: Build Apple FFI
         env:
-          FEATURES: iroh
+          FEATURES: redb,iroh,native
+          NO_DEFAULT_FEATURES: "1"
           OUT_DIR: ${{ github.workspace }}/target/apple-ffi
         run: |
           if command -v protoc >/dev/null 2>&1; then

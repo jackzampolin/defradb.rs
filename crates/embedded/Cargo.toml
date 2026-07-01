@@ -12,8 +12,8 @@ description = "Reusable embedded/mobile DefraDB node assembly"
 acp = { path = "../acp" }
 blockstore = { path = "../blockstore" }
 crypto = { path = "../crypto" }
-db = { path = "../db" }
-db-merge = { path = "../db-merge" }
+db = { path = "../db", default-features = false }
+db-merge = { path = "../db-merge", default-features = false }
 defra-core = { path = "../defra-core" }
 defra-http = { path = "../http" }
 defra-p2p-adapter = { workspace = true, default-features = false, features = ["libp2p"] }
@@ -21,7 +21,7 @@ document = { path = "../document" }
 events = { path = "../events" }
 identity = { path = "../identity" }
 kms = { path = "../kms" }
-lens = { path = "../lens" }
+lens = { path = "../lens", default-features = false }
 p2p = { path = "../p2p", features = ["libp2p-transport"] }
 query = { path = "../query" }
 replication-filter = { path = "../replication-filter" }
@@ -44,9 +44,16 @@ tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing.workspace = true
 
 [features]
-default = ["lark", "redb"]
+default = ["native", "wasmtime-runtime", "lark", "redb"]
+native = ["db/native", "db-merge/native", "defra-p2p-adapter/native"]
+wasmtime-runtime = [
+    "db/wasmtime-runtime",
+    "db-merge/wasmtime-runtime",
+    "defra-p2p-adapter/wasmtime-runtime",
+    "lens/wasmtime-runtime",
+]
 lark = ["storage/lark"]
-redb = ["storage/redb"]
+redb = ["db/redb", "storage/redb"]
 iroh = ["p2p/iroh-transport", "defra-p2p-adapter/iroh"]
 
 [dev-dependencies]

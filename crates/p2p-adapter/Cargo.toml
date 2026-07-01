@@ -11,14 +11,14 @@ description = "DefraDB P2P adapters for HTTP-facing operations"
 [dependencies]
 acp = { path = "../acp" }
 blockstore = { path = "../blockstore" }
-db = { path = "../db" }
-db-merge = { path = "../db-merge" }
+db = { path = "../db", default-features = false }
+db-merge = { path = "../db-merge", default-features = false }
 defra-core = { path = "../defra-core" }
 defra-http = { path = "../http" }
 document = { path = "../document" }
 events = { path = "../events" }
 identity = { path = "../identity" }
-lens = { path = "../lens" }
+lens = { path = "../lens", default-features = false }
 p2p = { path = "../p2p", default-features = false }
 replication-filter = { path = "../replication-filter" }
 schema = { path = "../schema" }
@@ -43,7 +43,9 @@ crypto = { path = "../crypto" }
 db-nac = { path = "../db-nac" }
 
 [features]
-default = ["iroh", "libp2p"]
+default = ["native", "wasmtime-runtime", "iroh", "libp2p"]
+native = ["db/native", "db-merge/native"]
+wasmtime-runtime = ["db/wasmtime-runtime", "db-merge/wasmtime-runtime", "lens/wasmtime-runtime"]
 iroh = ["p2p/iroh-transport"]
 libp2p = ["dep:libp2p", "p2p/libp2p-transport"]
 

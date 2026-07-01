@@ -2,13 +2,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-#[cfg(not(feature = "native"))]
+#[cfg(not(feature = "wasmtime-runtime"))]
 use lens::MemoryTransformStore;
-#[cfg(feature = "native")]
+#[cfg(feature = "wasmtime-runtime")]
 use lens::WasmTransformStore;
 use lens::{LensConfig, LensDocResultStream, LensDocStream, TransformId, TransformStore};
 
-use crate::{Error, Result};
+#[cfg(feature = "wasmtime-runtime")]
+use crate::Error;
+use crate::Result;
 
 /// Transaction-local transform store overlay.
 ///
@@ -27,14 +29,14 @@ impl TxnLensStore {
         })
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "wasmtime-runtime")]
     fn create_local_store() -> Result<Arc<dyn TransformStore>> {
         let store = WasmTransformStore::with_sandbox(Some(lens::WasmSandboxConfig::restrictive()))
             .map_err(|e| Error::Lens(format!("failed to create transaction lens store: {}", e)))?;
         Ok(Arc::new(store))
     }
 
-    #[cfg(not(feature = "native"))]
+    #[cfg(not(feature = "wasmtime-runtime"))]
     fn create_local_store() -> Result<Arc<dyn TransformStore>> {
         Ok(Arc::new(MemoryTransformStore::new()))
     }

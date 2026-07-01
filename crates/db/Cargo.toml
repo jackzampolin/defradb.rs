@@ -9,10 +9,11 @@ repository.workspace = true
 description = "DefraDB database and collection management"
 
 [features]
-default = ["p2p", "native"]
+default = ["p2p", "native", "wasmtime-runtime"]
 p2p = ["dep:p2p", "dep:libp2p", "p2p/libp2p-transport"]
-native = ["dep:tokio", "lens/wasmtime-runtime", "events/channel", "acp/native"]
+native = ["dep:tokio", "events/channel", "acp/native"]
 redb = ["storage/redb", "acp/redb", "db-nac/redb"]
+wasmtime-runtime = ["lens/wasmtime-runtime"]
 
 [dependencies]
 # Async runtime
