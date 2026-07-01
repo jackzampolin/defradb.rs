@@ -33,7 +33,7 @@ impl<S: Store + 'static> DbBlockClassifier<S> {
             return Some(doc_ids);
         }
 
-        let no_heads = block.heads.as_ref().map_or(true, Vec::is_empty);
+        let no_heads = block.heads.as_ref().is_none_or(Vec::is_empty);
         if matches!(block.delta, defra_core::CrdtDelta::Composite(_))
             && block.delta.priority() == 1
             && no_heads
