@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use identity::Did;
 use lens::{LensConfig, TransformId};
 use schema::CollectionVersion;
 
@@ -10,13 +11,36 @@ use crate::SchemaOps;
 pub(crate) struct DbSchemaOps<S: storage::corekv::Store + 'static> {
     database: Arc<db::DB<S>>,
     query_limits: query::QueryLimits,
+    document_acp: Arc<dyn acp::DocumentACP>,
 }
 
 impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
-    pub(crate) fn new(database: Arc<db::DB<S>>, query_limits: query::QueryLimits) -> Self {
+    pub(crate) fn new(
+        database: Arc<db::DB<S>>,
+        query_limits: query::QueryLimits,
+        document_acp: Arc<dyn acp::DocumentACP>,
+    ) -> Self {
         Self {
             database,
             query_limits,
+            document_acp,
+        }
+    }
+
+    /// Resolve the ambient identity into a creator DID. Returns `Ok(None)` when
+    /// no identity is present (collection stays public), but fails closed when an
+    /// identity string is present yet malformed, so a permissioned collection is
+    /// never silently created unregistered.
+    fn current_identity() -> anyhow::Result<Option<Did>> {
+        match defra_core::current_identity::try_get_scoped_identity()
+            .or_else(defra_core::current_identity::get_current_identity)
+        {
+            Some(raw) => {
+                Ok(Some(Did::new(raw).map_err(|e| {
+                    anyhow::anyhow!("malformed ambient identity: {}", e)
+                })?))
+            }
+            None => Ok(None),
         }
     }
 }
@@ -24,6 +48,7 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
 #[async_trait::async_trait]
 impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
     async fn add_schema(&self, sdl: &str) -> anyhow::Result<()> {
+        let creator = Self::current_identity()?;
         self.database
             .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
             .await
@@ -35,11 +60,14 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
         schema::definition_validation::validate_new_collections(&collections)
             .map_err(|e| anyhow::anyhow!("schema validation error: {}", e))?;
 
-        for collection in collections {
-            db::DB::create_collection(&self.database, collection)
-                .await
-                .map_err(|e| anyhow::anyhow!("create collection error: {}", e))?;
-        }
+        self.database
+            .create_collections_atomic_with_acp_registration(
+                collections,
+                self.document_acp.clone(),
+                creator,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("create collection error: {}", e))?;
         Ok(())
     }
 
@@ -92,8 +120,13 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
             }
         }
 
+        let creator = Self::current_identity()?;
         self.database
-            .create_collections_atomic(collections)
+            .create_collections_atomic_with_acp_registration(
+                collections,
+                self.document_acp.clone(),
+                creator,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("create view collection error: {}", e))?;
 

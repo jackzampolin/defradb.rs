@@ -332,13 +332,19 @@ impl CrdtDelta {
         }
     }
 
-    /// Check if this is a schema definition delta
+    /// Check if this is a schema definition delta.
+    ///
+    /// Mirrors Go's `IsDefinition()` (collection + field definitions only). This
+    /// gates the P2P serve whitelist: definition blocks carry no user data and
+    /// are served to any peer. `CollectionSet` is deliberately excluded — it has
+    /// no collection-version id, cannot be ACP-scoped, and (unlike Go, which
+    /// stores but denies serving it) is never transferred over P2P at all:
+    /// circular-relation groups converge by local deterministic reconstruction
+    /// (`schema/cid.rs`), so it must not be unconditionally served.
     pub fn is_definition(&self) -> bool {
         matches!(
             self,
-            CrdtDelta::FieldDefinition(_)
-                | CrdtDelta::CollectionDefinition(_)
-                | CrdtDelta::CollectionSet(_)
+            CrdtDelta::FieldDefinition(_) | CrdtDelta::CollectionDefinition(_)
         )
     }
 }

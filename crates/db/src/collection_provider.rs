@@ -56,6 +56,17 @@ impl<S: Store + 'static> CollectionProvider for DbCollectionProvider<S> {
             .list_collections()
             .map_err(|e| QueryError::execution(e.to_string()))
     }
+
+    async fn get_collection_by_version_id(
+        &self,
+        version_id: &str,
+    ) -> QueryResult<Option<Arc<CollectionVersion>>> {
+        match self.db.get_collection_by_version_id_full(version_id).await {
+            Ok(Some(coll)) => Ok(Some(Arc::new(coll.schema().clone()))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(QueryError::execution(e.to_string())),
+        }
+    }
 }
 
 /// Transaction-aware collection provider.
@@ -169,5 +180,18 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
         }
 
         Ok(names.into_iter().collect())
+    }
+
+    async fn get_collection_by_version_id(
+        &self,
+        version_id: &str,
+    ) -> QueryResult<Option<Arc<CollectionVersion>>> {
+        // Committed history (active + inactive) is sufficient for the ACP-gated
+        // `_commits` path; the DB full lookup scans all stored versions.
+        match self.db.get_collection_by_version_id_full(version_id).await {
+            Ok(Some(coll)) => Ok(Some(Arc::new(coll.schema().clone()))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(QueryError::execution(e.to_string())),
+        }
     }
 }

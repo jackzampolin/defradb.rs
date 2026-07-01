@@ -306,6 +306,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 &policy.id,
                                 &policy.resource_name,
                                 doc_id,
+                                None,
                             )
                             .await
                             .unwrap_or(false);
@@ -323,6 +324,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 &policy.id,
                                 &policy.resource_name,
                                 doc_id,
+                                None,
                             )
                             .await
                             .map_err(|e| QueryError::acp_check_failed("update", doc_id, e))?;
@@ -350,6 +352,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 &policy.id,
                                 &policy.resource_name,
                                 doc_id,
+                                None,
                             )
                             .await
                             .unwrap_or(false);
@@ -367,6 +370,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 &policy.id,
                                 &policy.resource_name,
                                 doc_id,
+                                None,
                             )
                             .await
                             .map_err(|e| QueryError::acp_check_failed("delete", doc_id, e))?;

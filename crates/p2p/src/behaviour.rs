@@ -42,7 +42,10 @@ use libp2p_stream as stream;
 
 use libp2p::identity::Keypair;
 
-use crate::bitswap::{make_peer_block_access_filter, AccessMode, ReplicatorRegistry};
+use crate::bitswap::{
+    make_peer_block_access_filter, AccessMode, BlockClassifier, LateBoundServeAcp,
+    ReplicatorRegistry,
+};
 use crate::codec::PushLogCodec;
 use crate::message::{PushLogReply, PushLogRequest};
 
@@ -234,6 +237,8 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
         bitswap_store: S,
         access_mode: AccessMode,
         replicators: Arc<ReplicatorRegistry>,
+        classifier: Arc<dyn BlockClassifier>,
+        serve_acp: Arc<LateBoundServeAcp>,
         enable_pubsub: bool,
         config: &super::P2PHostConfig,
         resource_manager_system_memory_budget_bytes: usize,
@@ -293,6 +298,8 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
             access_mode,
             Arc::clone(&replicators),
             bitswap_store.clone(),
+            classifier,
+            serve_acp,
         );
         let mut bitswap_config = BitswapConfig::default();
         if let Some(server_cfg) = bitswap_config.server.as_mut() {
@@ -536,6 +543,8 @@ mod tests {
             store,
             AccessMode::Open,
             registry,
+            Arc::new(crate::bitswap::DefaultBlockClassifier),
+            Arc::new(crate::bitswap::LateBoundServeAcp::new()),
             true,
             &config,
             usize::MAX,
@@ -600,6 +609,8 @@ mod tests {
             store,
             AccessMode::Open,
             registry,
+            Arc::new(crate::bitswap::DefaultBlockClassifier),
+            Arc::new(crate::bitswap::LateBoundServeAcp::new()),
             false,
             &config,
             usize::MAX,

@@ -377,11 +377,25 @@ pub extern "C" fn defra_mobile_ensure_schema(
             NodePermission::CollectionPatch
         ));
 
-        let (database, policy_store, node_identity_did) = match NODES.get(node_ptr, |state| {
-            (state.database.clone(), state.policy_store.clone(), state.node_identity_did.clone())
+        let (database, policy_store, document_acp, node_identity_did) = match NODES.get(node_ptr, |state| {
+            (
+                state.database.clone(),
+                state.policy_store.clone(),
+                state.document_acp.clone(),
+                state.node_identity_did.clone(),
+            )
         }) {
             Some(value) => value,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
+        let creator = match node_identity_did.as_deref() {
+            Some(did) => match identity::Did::new(did) {
+                Ok(did) => Some(did),
+                Err(error) => {
+                    return FfiResult::error(format!("invalid node identity DID: {}", error));
+                }
+            },
+            None => None,
         };
 
         // Bind the node's own identity into the ambient context so the DB-layer
@@ -411,17 +425,23 @@ pub extern "C" fn defra_mobile_ensure_schema(
             schema::definition_validation::validate_new_collections(&to_create)
                 .map_err(|error| format!("failed to validate schema: {}", error))?;
 
-            let mut created = Vec::new();
-            for collection in to_create {
+            for collection in &to_create {
                 if let Some(ref policy) = collection.policy {
                     validate_collection_policy(policy, &policy_store)?;
                 }
-                created.push(collection.name.clone());
-                database
-                    .create_collection(collection)
-                    .await
-                    .map_err(|error| format!("failed to create collection: {}", error))?;
             }
+            let created = to_create
+                .iter()
+                .map(|collection| collection.name.clone())
+                .collect::<Vec<_>>();
+            database
+                .create_collections_atomic_with_acp_registration(
+                    to_create,
+                    document_acp.clone(),
+                    creator,
+                )
+                .await
+                .map_err(|error| format!("failed to create collection: {}", error))?;
 
             Ok(serde_json::json!({
                 "created": created,

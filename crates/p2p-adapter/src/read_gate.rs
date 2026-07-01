@@ -1,0 +1,309 @@
+//! DB-backed serve-gate adapters shared by libp2p Bitswap and CAR.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use cid::Cid;
+use defra_core::{is_lens_block, Block as DefraBlock, Signature};
+use p2p::bitswap::{BlockAcpMeta, BlockClass, BlockClassifier, BlockReadGate};
+use storage::corekv::{IterOptions, Store};
+
+pub struct DbBlockClassifier<S: Store + 'static> {
+    db: Arc<db::DB<S>>,
+}
+
+impl<S: Store + 'static> DbBlockClassifier<S> {
+    pub fn new(db: Arc<db::DB<S>>) -> Self {
+        Self { db }
+    }
+
+    pub fn new_arc(db: Arc<db::DB<S>>) -> Arc<dyn BlockClassifier> {
+        Arc::new(Self::new(db))
+    }
+
+    async fn doc_ids_for_block(&self, cid: &Cid, block: &DefraBlock) -> Option<Vec<String>> {
+        let Some(doc_id_bytes) = block.delta.doc_id() else {
+            return Some(Vec::new());
+        };
+
+        let mut doc_ids = self.doc_ids_for_cid_from_headstore(cid).await?;
+        if !doc_ids.is_empty() {
+            doc_ids.sort();
+            doc_ids.dedup();
+            return Some(doc_ids);
+        }
+
+        let no_heads = block.heads.as_ref().is_none_or(Vec::is_empty);
+        if matches!(block.delta, defra_core::CrdtDelta::Composite(_))
+            && block.delta.priority() == 1
+            && no_heads
+        {
+            return Some(vec![String::from_utf8_lossy(doc_id_bytes).to_string()]);
+        }
+
+        None
+    }
+
+    async fn doc_ids_for_cid_from_headstore(&self, cid: &Cid) -> Option<Vec<String>> {
+        let txn = self.db.new_txn(true).await.ok()?;
+        let headstore = match txn.headstore() {
+            Ok(headstore) => headstore,
+            Err(_) => {
+                let _ = txn.discard();
+                return None;
+            }
+        };
+        let mut iter = match headstore
+            .iterator(IterOptions::new().with_prefix(b"/p/".to_vec()))
+            .await
+        {
+            Ok(iter) => iter,
+            Err(_) => {
+                let _ = txn.discard();
+                return None;
+            }
+        };
+
+        let target = cid.to_bytes();
+        let mut doc_ids = Vec::new();
+        loop {
+            let pair = match iter.next().await {
+                Ok(Some(pair)) => pair,
+                Ok(None) => break,
+                Err(_) => {
+                    let _ = iter.close().await;
+                    let _ = txn.discard();
+                    return None;
+                }
+            };
+
+            if !pair.key.ends_with(&target) {
+                continue;
+            }
+            if let Some(doc_id) = parse_priority_doc_id(&pair.key) {
+                doc_ids.push(doc_id);
+            }
+        }
+
+        let _ = iter.close().await;
+        let _ = txn.discard();
+        Some(doc_ids)
+    }
+}
+
+fn parse_priority_doc_id(key: &[u8]) -> Option<String> {
+    let rest = key.strip_prefix(b"/p/")?;
+    let doc_end = rest.iter().position(|b| *b == b'/')?;
+    let doc_id = std::str::from_utf8(&rest[..doc_end]).ok()?;
+    Some(doc_id.to_string())
+}
+
+#[async_trait]
+impl<S: Store + 'static> BlockClassifier for DbBlockClassifier<S> {
+    async fn classify(&self, cid: &Cid, data: &[u8]) -> BlockClass {
+        match defra_core::block::generate_cid_from_bytes(data) {
+            Ok(actual) if &actual == cid => {}
+            _ => return BlockClass::Deny,
+        }
+
+        if Signature::from_dag_cbor(data).is_ok() {
+            return BlockClass::Allow;
+        }
+
+        match DefraBlock::from_dag_cbor(data) {
+            Ok(block) => {
+                if block.delta.is_definition() {
+                    return BlockClass::Allow;
+                }
+
+                let Some(schema_version_id) = block.delta.schema_version_id() else {
+                    return BlockClass::Deny;
+                };
+                let collection = match self
+                    .db
+                    .get_collection_by_version_id_full(schema_version_id)
+                    .await
+                {
+                    Ok(Some(collection)) => collection,
+                    Ok(None) | Err(_) => return BlockClass::Deny,
+                };
+                let collection = collection.schema();
+                let policy = collection
+                    .policy
+                    .as_ref()
+                    .map(|p| (p.id.clone(), p.resource_name.clone()));
+                let Some(doc_ids) = self.doc_ids_for_block(cid, &block).await else {
+                    return BlockClass::Deny;
+                };
+
+                BlockClass::Data(BlockAcpMeta {
+                    collection_id: collection.collection_id.clone(),
+                    is_branchable: collection.is_branchable,
+                    policy,
+                    doc_ids,
+                })
+            }
+            Err(_) if is_lens_block(data) => BlockClass::Allow,
+            Err(_) => BlockClass::Deny,
+        }
+    }
+}
+
+pub struct DbBlockReadGate {
+    acp: Arc<dyn acp::DocumentACP>,
+    node_did: Option<identity::Did>,
+}
+
+impl DbBlockReadGate {
+    pub fn new(acp: Arc<dyn acp::DocumentACP>, node_did: Option<identity::Did>) -> Self {
+        Self { acp, node_did }
+    }
+
+    pub fn new_arc(
+        acp: Arc<dyn acp::DocumentACP>,
+        node_did: Option<identity::Did>,
+    ) -> Arc<dyn BlockReadGate> {
+        Arc::new(Self::new(acp, node_did))
+    }
+}
+
+#[async_trait]
+impl BlockReadGate for DbBlockReadGate {
+    async fn may_read(&self, identity: &acp::Identity, meta: &BlockAcpMeta) -> bool {
+        let Some((policy_id, resource_name)) = meta.policy.as_ref() else {
+            return true;
+        };
+
+        let checker = acp::read_access::DirectChecker {
+            acp: self.acp.as_ref(),
+            identity,
+            node_did: self.node_did.as_ref(),
+        };
+
+        if meta.doc_ids.is_empty() {
+            return acp::read_access::check_doc_read_access(
+                &checker,
+                policy_id,
+                resource_name,
+                &meta.collection_id,
+                meta.is_branchable,
+                "",
+            )
+            .await
+            .unwrap_or(false);
+        }
+
+        for doc_id in &meta.doc_ids {
+            if acp::read_access::check_doc_read_access(
+                &checker,
+                policy_id,
+                resource_name,
+                &meta.collection_id,
+                meta.is_branchable,
+                doc_id,
+            )
+            .await
+            .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{parse_priority_doc_id, DbBlockClassifier};
+    use p2p::bitswap::{BlockClass, BlockClassifier};
+    use schema::{CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
+    use storage::backends::MemoryStore;
+    use storage::corekv::Key;
+
+    #[test]
+    fn parses_doc_id_from_priority_headstore_key() {
+        let cid = defra_core::block::generate_cid_from_bytes(b"block").unwrap();
+        let key = storage::keys::HeadstorePriorityKey::new("doc-1", 42, cid).bytes();
+
+        assert_eq!(parse_priority_doc_id(&key).as_deref(), Some("doc-1"));
+    }
+
+    fn test_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "User",
+            "version-1",
+            "collection-1",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+            ],
+        )
+        .with_policy(PolicyDescription::new("policy1", "users"))
+        .as_branchable()
+    }
+
+    fn data_block(doc_id: &str) -> (cid::Cid, Vec<u8>) {
+        let block = defra_core::Block::new(
+            defra_core::CrdtDelta::Lww(defra_core::LwwDeltaPayload {
+                doc_id: doc_id.as_bytes().to_vec(),
+                field_name: "name".to_string(),
+                priority: 1,
+                schema_version_id: "version-1".to_string(),
+                data: b"Alice".to_vec(),
+            }),
+            vec![],
+            vec![],
+        );
+        let bytes = block.to_dag_cbor().unwrap();
+        let cid = defra_core::block::generate_cid_from_bytes(&bytes).unwrap();
+        (cid, bytes)
+    }
+
+    #[tokio::test]
+    async fn classifier_uses_serving_cid_owner_metadata() {
+        let db = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+        db.create_collection(test_collection()).await.unwrap();
+        let (cid, bytes) = data_block("doc-from-delta");
+
+        let txn = db.new_txn(false).await.unwrap();
+        txn.headstore()
+            .unwrap()
+            .set(
+                &storage::keys::HeadstorePriorityKey::new("doc-from-index", 1, cid).bytes(),
+                &[],
+            )
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        let classifier = DbBlockClassifier::new(db);
+        let class = classifier.classify(&cid, &bytes).await;
+
+        match class {
+            BlockClass::Data(meta) => {
+                assert_eq!(meta.collection_id, "collection-1");
+                assert!(meta.is_branchable);
+                assert_eq!(
+                    meta.policy,
+                    Some(("policy1".to_string(), "users".to_string()))
+                );
+                assert_eq!(meta.doc_ids, vec!["doc-from-index"]);
+            }
+            other => panic!("expected data block, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn classifier_denies_field_block_without_owner_metadata() {
+        let db = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+        db.create_collection(test_collection()).await.unwrap();
+        let (cid, bytes) = data_block("doc-from-delta");
+
+        let classifier = DbBlockClassifier::new(db);
+
+        assert_eq!(classifier.classify(&cid, &bytes).await, BlockClass::Deny);
+    }
+}

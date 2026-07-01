@@ -189,27 +189,28 @@ async fn acp_p2p_subscribe_add_get_single_with_permissioned_collection_test(clus
         vec!["John".to_string()]
     );
 
-    let owner_key = owner.private_key_hex.clone();
-    poll_until(
-        || {
-            query_user_names(&node1, Some(&owner_key))
-                .iter()
-                .any(|name| name == "John")
-        },
-        Duration::from_secs(15),
-        Duration::from_millis(200),
-        "subscription-based sync did not materialize the protected document on node1",
-    )
-    .await;
+    // Go parity (acp/dac/p2p subscribe_test.go): a permissioned document does
+    // NOT sync to a NON-replicator subscriber. Subscription delivers the head
+    // via pubsub, but node1 must PULL the doc's blocks back from node0, and
+    // node0's serve-side ACP gate denies that pull — node1 is a subscriber (not
+    // a replicator, so the replicator bypass does not fire) and holds no reader
+    // grant, so it resolves to an unauthorized/anonymous actor for a registered
+    // private doc. Allow a settle window well beyond the replicator variant's
+    // normal sync latency, then assert node1 never received the doc.
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // node0 is the creating node: the doc's owner is registered there, so Local ACP
-    // gates it and anonymous sees nothing.
+    assert!(
+        query_user_names(&node1, Some(&owner.private_key_hex)).is_empty(),
+        "permissioned doc must NOT reach a non-replicator subscriber, even under the owner identity on node1"
+    );
+    assert!(
+        query_user_names(&node1, None).is_empty(),
+        "permissioned doc must NOT be visible to anonymous on the subscriber node"
+    );
+
+    // node0 is the creating node: the doc's owner is registered there, so Local
+    // ACP gates it and anonymous sees nothing.
     assert!(query_user_names(&node0, None).is_empty());
-    // Local ACP is node-local; the replicated doc is public on the peer (matches Go).
-    // node1 never registered the owner, so anonymous sees the replicated "John".
-    assert!(query_user_names(&node1, None)
-        .iter()
-        .any(|name| name == "John"));
 }
 
 async fn acp_p2p_one_to_one_replicator_with_permissioned_collection_test(cluster: TestCluster) {

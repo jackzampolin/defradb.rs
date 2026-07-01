@@ -170,11 +170,15 @@ impl Node {
 
         let blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
         let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
+        let classifier = defra_p2p_adapter::DbBlockClassifier::new_arc(database.clone());
+        let serve_acp = Arc::new(p2p::bitswap::LateBoundServeAcp::new());
         let (handle, mut events, replicator_registry, host_task) = Self::start_p2p(
             config,
             bitswap_store,
             peer_keypair,
             config.net.pubsub_enabled,
+            classifier.clone(),
+            serve_acp.clone(),
         )
         .await?;
 
@@ -200,22 +204,28 @@ impl Node {
         let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
             Arc::new(db_merge::create_head_provider(database.clone()));
 
-        let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_head_provider(
-            p2p::Libp2pTransport::new(handle.clone()),
-            sync_blockstore,
-            Self::sync_config(config),
-            Self::access_mode(config),
-            replicator_registry,
-            collection_store,
-            head_provider,
-            std::sync::Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
-        )
-        .await
-        .map_err(Error::P2P)?;
+        let (mut coordinator, sync_events) =
+            p2p::sync::SyncCoordinator::with_head_provider_and_serve_gate(
+                p2p::Libp2pTransport::new(handle.clone()),
+                sync_blockstore,
+                Self::sync_config(config),
+                Self::access_mode(config),
+                replicator_registry,
+                collection_store,
+                head_provider,
+                std::sync::Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
+                classifier,
+                serve_acp.clone(),
+            )
+            .await
+            .map_err(Error::P2P)?;
 
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         let coordinator_for_acp = coordinator.clone();
+        let serve_acp_for_acp = serve_acp.clone();
+        let handle_for_acp = handle.clone();
+        let database_for_acp = database.clone();
 
         // Build the KMS pubsub transport and install it on the coordinator so
         // raw gossip on the encryption topic is routed to it (mirrors
@@ -691,6 +701,13 @@ impl Node {
             mutator: broadcast_mutator,
             http_adapter: Some(manage_controller.clone()),
             wire_merge_acp: Some(Box::new(move |acp| {
+                serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
+                    resolver: Arc::new(p2p::HandlePeerIdentityResolver::new(handle_for_acp)),
+                    gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
+                        acp.clone(),
+                        database_for_acp.node_did(),
+                    ),
+                });
                 coordinator_for_acp.set_document_acp(acp.clone());
                 // Wire the document ACP into the broadcast mutator so newly
                 // created ACP-protected docs are registered *before* their
@@ -768,23 +785,30 @@ impl Node {
         let manage_query_correlator = p2p::ManageQueryCorrelator::new();
         let manage_hooks = defra_p2p_adapter::manage::hooks::new_manage_hooks_cell();
         let manage_hooks_for_events = manage_hooks.clone();
+        let classifier = defra_p2p_adapter::DbBlockClassifier::new_arc(database.clone());
+        let serve_acp = Arc::new(p2p::bitswap::LateBoundServeAcp::new());
 
-        let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_head_provider(
-            transport.clone(),
-            sync_blockstore,
-            Self::sync_config(config),
-            Self::access_mode(config),
-            replicator_registry,
-            collection_store,
-            head_provider,
-            std::sync::Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
-        )
-        .await
-        .map_err(Error::P2P)?;
+        let (mut coordinator, sync_events) =
+            p2p::sync::SyncCoordinator::with_head_provider_and_serve_gate(
+                transport.clone(),
+                sync_blockstore,
+                Self::sync_config(config),
+                Self::access_mode(config),
+                replicator_registry,
+                collection_store,
+                head_provider,
+                std::sync::Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
+                classifier,
+                serve_acp.clone(),
+            )
+            .await
+            .map_err(Error::P2P)?;
 
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         let coordinator_for_acp = coordinator.clone();
+        let serve_acp_for_acp = serve_acp.clone();
+        let database_for_acp = database.clone();
 
         // Build the KMS pubsub transport and install it on the coordinator so
         // raw gossip on the encryption topic is routed to it (mirrors
@@ -1201,6 +1225,13 @@ impl Node {
             http_adapter: Some(manage_controller.clone()),
             txn_broadcaster: Some(txn_broadcaster),
             wire_merge_acp: Some(Box::new(move |acp| {
+                serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
+                    resolver: Arc::new(p2p::AnonymousResolver),
+                    gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
+                        acp.clone(),
+                        database_for_acp.node_did(),
+                    ),
+                });
                 coordinator_for_acp.set_document_acp(acp.clone());
                 // Wire the document ACP into the broadcast mutator so newly
                 // created ACP-protected docs are registered *before* their

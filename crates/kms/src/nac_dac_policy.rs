@@ -90,19 +90,22 @@ impl AccessPolicy for NacDacPolicy {
                     return Ok(PolicyDecision::Allow);
                 };
 
-                // DAC permission check runs as the actor.
                 let actor_id: acp::Identity = actor.into();
-                let allowed = self
-                    .doc_acp
-                    .check_doc_access(
-                        &actor_id,
-                        acp::DocumentPermission::Read,
-                        &info.policy_id,
-                        &info.resource_name,
-                        doc_id,
-                    )
-                    .await
-                    .map_err(classify_acp_error)?;
+                let checker = acp::read_access::DirectChecker {
+                    acp: self.doc_acp.as_ref(),
+                    identity: &actor_id,
+                    node_did: None,
+                };
+                let allowed = acp::read_access::check_doc_read_access(
+                    &checker,
+                    &info.policy_id,
+                    &info.resource_name,
+                    &info.collection_id,
+                    info.is_branchable,
+                    doc_id,
+                )
+                .await
+                .map_err(classify_acp_error)?;
                 Ok(if allowed {
                     PolicyDecision::Allow
                 } else {
@@ -205,6 +208,63 @@ mod tests {
         }
     }
 
+    struct BranchableDac {
+        doc_registered: bool,
+        doc_granted: bool,
+    }
+    #[async_trait::async_trait]
+    impl acp::DocumentACP for BranchableDac {
+        async fn register_doc_object(
+            &self,
+            _: &identity::Did,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> acp::Result<()> {
+            Ok(())
+        }
+        async fn is_doc_registered(&self, _: &str, _: &str, object_id: &str) -> acp::Result<bool> {
+            Ok(object_id == "col-1" || (object_id == "d1" && self.doc_registered))
+        }
+        async fn check_doc_access(
+            &self,
+            _: &acp::Identity,
+            _: acp::DocumentPermission,
+            _: &str,
+            _: &str,
+            object_id: &str,
+        ) -> acp::Result<bool> {
+            Ok(object_id == "d1" && self.doc_granted)
+        }
+        async fn add_actor_relationship(
+            &self,
+            _: &identity::Did,
+            _: &identity::Did,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+        ) -> acp::Result<bool> {
+            Ok(true)
+        }
+        async fn delete_actor_relationship(
+            &self,
+            _: &identity::Did,
+            _: &identity::Did,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+        ) -> acp::Result<bool> {
+            Ok(true)
+        }
+        async fn unregister_doc_object(&self, _: &str, _: &str, _: &str) -> acp::Result<()> {
+            Ok(())
+        }
+    }
+
     struct FakeNac {
         allow: bool,
     }
@@ -223,6 +283,20 @@ mod tests {
                 collection_id: "col-1".into(),
                 policy_id: "policy-1".into(),
                 resource_name: "doc".into(),
+                is_branchable: false,
+            }))
+        }
+    }
+
+    struct BranchableLookup;
+    #[async_trait::async_trait]
+    impl DocCollectionLookup for BranchableLookup {
+        async fn collection_for_doc(&self, _: &str) -> crate::Result<Option<DocCollectionInfo>> {
+            Ok(Some(DocCollectionInfo {
+                collection_id: "col-1".into(),
+                policy_id: "policy-1".into(),
+                resource_name: "doc".into(),
+                is_branchable: true,
             }))
         }
     }
@@ -359,6 +433,54 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(result, PolicyDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn branchable_public_doc_denies_when_collection_denies() {
+        let policy = NacDacPolicy::new(
+            Arc::new(BranchableDac {
+                doc_registered: false,
+                doc_granted: false,
+            }),
+            Arc::new(BranchableLookup),
+        );
+
+        let result = policy
+            .check_release(
+                Some(&did("did:key:zalice")),
+                &KeyScope::Document {
+                    doc_id: "d1".into(),
+                    field: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result, PolicyDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn branchable_explicit_doc_grant_allows_despite_collection_denial() {
+        let policy = NacDacPolicy::new(
+            Arc::new(BranchableDac {
+                doc_registered: true,
+                doc_granted: true,
+            }),
+            Arc::new(BranchableLookup),
+        );
+
+        let result = policy
+            .check_release(
+                Some(&did("did:key:zalice")),
+                &KeyScope::Document {
+                    doc_id: "d1".into(),
+                    field: None,
+                },
+            )
+            .await
+            .unwrap();
+
         assert_eq!(result, PolicyDecision::Allow);
     }
 }

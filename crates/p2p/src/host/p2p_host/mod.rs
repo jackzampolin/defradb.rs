@@ -26,7 +26,9 @@ use tokio::{
 use tracing::{debug, info, warn};
 
 use crate::behaviour::DefraBehaviour;
-use crate::bitswap::{AccessMode, ReplicatorRegistry};
+use crate::bitswap::{
+    AccessMode, BlockClassifier, DefaultBlockClassifier, LateBoundServeAcp, ReplicatorRegistry,
+};
 use crate::error::{Error, Result};
 use crate::message::PushLogReply;
 use crate::two_stream::{TwoStreamHandler, TwoStreamRunner};
@@ -371,6 +373,32 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
         mpsc::Receiver<HostEvent>,
         Arc<ReplicatorRegistry>,
     )> {
+        Self::with_keypair_and_config_and_identity_and_serve_gate(
+            keypair,
+            bitswap_store,
+            config,
+            node_identity,
+            Arc::new(DefaultBlockClassifier),
+            Arc::new(LateBoundServeAcp::new()),
+        )
+        .await
+    }
+
+    /// Create a new P2P host with explicit serve-gate metadata and ACP wiring.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn with_keypair_and_config_and_identity_and_serve_gate(
+        keypair: Keypair,
+        bitswap_store: S,
+        config: P2PHostConfig,
+        node_identity: Option<Arc<identity::RawIdentity>>,
+        classifier: Arc<dyn BlockClassifier>,
+        serve_acp: Arc<LateBoundServeAcp>,
+    ) -> Result<(
+        Self,
+        P2PHostHandle,
+        mpsc::Receiver<HostEvent>,
+        Arc<ReplicatorRegistry>,
+    )> {
         let local_peer_id = keypair.public().to_peer_id();
         let local_public_key = keypair.public();
 
@@ -401,6 +429,8 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
             bitswap_store,
             config.access_mode,
             Arc::clone(&replicators),
+            classifier,
+            serve_acp,
             config.enable_pubsub,
             &config,
             resource_limits.system_memory_budget_usize(),

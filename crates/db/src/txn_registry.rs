@@ -517,6 +517,19 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         txn_id: &str,
         sdl: &str,
     ) -> Result<Vec<schema::CollectionVersion>> {
+        self.add_schema_in_txn_with_acp(txn_id, sdl, None, None)
+            .await
+    }
+
+    /// Add a schema within an existing transaction, optionally registering
+    /// branchable collection ACP objects before the storage commit.
+    pub async fn add_schema_in_txn_with_acp(
+        &self,
+        txn_id: &str,
+        sdl: &str,
+        document_acp: Option<Arc<dyn acp::DocumentACP>>,
+        creator: Option<identity::Did>,
+    ) -> Result<Vec<schema::CollectionVersion>> {
         let ctx = self
             .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
@@ -547,6 +560,10 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         for collection in collections {
             let schema = self.db.create_collection_with_txn(txn, collection).await?;
             finalized.push(schema);
+        }
+
+        if let (Some(document_acp), Some(creator)) = (document_acp, creator) {
+            txn.stage_collection_acp_registration(document_acp, creator, finalized.clone());
         }
 
         // Register on_success callback to update the process-wide cache after commit

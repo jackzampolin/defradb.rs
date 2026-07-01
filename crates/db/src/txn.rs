@@ -11,6 +11,7 @@ use async_lock::MutexGuardArc;
 use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
 use schema::CollectionVersion;
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
@@ -42,6 +43,46 @@ pub struct PendingCounterOp {
     pub base: Option<document::NormalValue>,
     /// Whether this op was recorded on a CREATE (seed) vs an UPDATE (delta RMW).
     pub is_create: bool,
+}
+
+struct PendingCollectionAcpRegistration {
+    acp: Arc<dyn acp::DocumentACP>,
+    creator: identity::Did,
+    request_bearer_token: Option<String>,
+    schemas: Vec<CollectionVersion>,
+}
+
+impl PendingCollectionAcpRegistration {
+    async fn run(self) -> Result<()> {
+        let previous_token = self.request_bearer_token.as_ref().map(|token| {
+            let previous = defra_core::signing::get_request_bearer_token(self.creator.as_str());
+            defra_core::signing::set_request_bearer_token(self.creator.as_str(), token.clone());
+            previous
+        });
+
+        let result: acp::Result<()> = async {
+            for schema in &self.schemas {
+                crate::collection_acp::register_collection_if_needed(
+                    self.acp.as_ref(),
+                    Some(&self.creator),
+                    schema,
+                )
+                .await?;
+            }
+            Ok(())
+        }
+        .await;
+
+        if self.request_bearer_token.is_some() {
+            if let Some(Some(previous)) = previous_token {
+                defra_core::signing::set_request_bearer_token(self.creator.as_str(), previous);
+            } else {
+                defra_core::signing::clear_request_bearer_token(self.creator.as_str());
+            }
+        }
+
+        result.map_err(Error::from)
+    }
 }
 
 /// Database transaction wrapper.
@@ -87,6 +128,10 @@ pub struct DbTxn<S: Store> {
     /// yet applied to the authoritative CRDT accumulation store. Drained and
     /// RMW'd at the commit-time finalize under per-doc guards (#1044).
     pending_counter_ops: Vec<PendingCounterOp>,
+    /// Branchable collection ACP registrations that must succeed before the
+    /// storage commit, otherwise a protected collection could be persisted
+    /// without its collection-level ACP object.
+    pending_collection_acp_registrations: Vec<PendingCollectionAcpRegistration>,
     /// Phantom data for the store type.
     _marker: std::marker::PhantomData<S>,
 }
@@ -101,6 +146,7 @@ impl<S: Store> DbTxn<S> {
             locally_created_collection_ids: HashSet::new(),
             doc_guards: BTreeMap::new(),
             pending_counter_ops: Vec::new(),
+            pending_collection_acp_registrations: Vec::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -114,6 +160,7 @@ impl<S: Store> DbTxn<S> {
             locally_created_collection_ids: HashSet::new(),
             doc_guards: BTreeMap::new(),
             pending_counter_ops: Vec::new(),
+            pending_collection_acp_registrations: Vec::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -561,6 +608,33 @@ impl<S: Store> DbTxn<S> {
         !self.pending_counter_ops.is_empty()
     }
 
+    /// Stage branchable collection ACP registration to run before commit.
+    pub(crate) fn stage_collection_acp_registration(
+        &mut self,
+        acp: Arc<dyn acp::DocumentACP>,
+        creator: identity::Did,
+        schemas: Vec<CollectionVersion>,
+    ) {
+        if schemas.is_empty() {
+            return;
+        }
+        let request_bearer_token = defra_core::signing::get_request_bearer_token(creator.as_str());
+        self.pending_collection_acp_registrations
+            .push(PendingCollectionAcpRegistration {
+                acp,
+                creator,
+                request_bearer_token,
+                schemas,
+            });
+    }
+
+    async fn run_pending_collection_acp_registrations(&mut self) -> Result<()> {
+        for registration in std::mem::take(&mut self.pending_collection_acp_registrations) {
+            registration.run().await?;
+        }
+        Ok(())
+    }
+
     // =========================================================================
     // Transaction Lifecycle Methods
     // =========================================================================
@@ -575,6 +649,16 @@ impl<S: Store> DbTxn<S> {
         }
         if !self.pending_counter_ops.is_empty() {
             return Err(Error::UnfinalizedCounterOps);
+        }
+
+        if let Err(error) = self.run_pending_collection_acp_registrations().await {
+            if let Err(discard_error) = self.discard_active_txn() {
+                tracing::warn!(
+                    error = %discard_error,
+                    "failed to discard transaction after collection ACP registration error"
+                );
+            }
+            return Err(error);
         }
 
         match self.txn.take() {
@@ -616,6 +700,15 @@ impl<S: Store> DbTxn<S> {
         if !self.pending_counter_ops.is_empty() {
             return Err(Error::UnfinalizedCounterOps);
         }
+        if let Err(error) = self.run_pending_collection_acp_registrations().await {
+            if let Err(discard_error) = self.discard_active_txn() {
+                tracing::warn!(
+                    error = %discard_error,
+                    "failed to discard transaction after collection ACP registration error"
+                );
+            }
+            return Err(error);
+        }
         match self.txn.take() {
             Some(txn) => {
                 txn.commit().await.map_err(Error::Datastore)?;
@@ -648,5 +741,16 @@ impl<S: Store> DbTxn<S> {
     /// releasing here makes the release point unambiguous.
     fn release_doc_guards(&mut self) {
         self.doc_guards.clear();
+    }
+
+    fn discard_active_txn(&mut self) -> Result<()> {
+        match self.txn.take() {
+            Some(txn) => {
+                let result = txn.discard().map_err(Error::Datastore);
+                self.release_doc_guards();
+                result
+            }
+            None => Err(Error::TxnNotActive),
+        }
     }
 }

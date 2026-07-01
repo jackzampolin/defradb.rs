@@ -332,7 +332,14 @@ pub async fn check_doc_access_with_overlay(
     policy_id: &str,
     resource_name: &str,
     doc_id: &str,
+    node_did: Option<&Did>,
 ) -> AcpResult<bool> {
+    if let (Some(node), Identity::Authenticated(requester)) = (node_did, identity) {
+        if node == requester {
+            return Ok(true);
+        }
+    }
+
     if let Some(mutations) = current_deferred_acp_mutations() {
         if let Some(projected) =
             mutations.projected_registration(policy_id, resource_name, doc_id)?
@@ -452,6 +459,7 @@ mod tests {
                 "policy",
                 "User",
                 "doc-1",
+                None,
             ),
         )
         .await
@@ -467,6 +475,7 @@ mod tests {
                 "policy",
                 "User",
                 "doc-1",
+                None,
             ),
         )
         .await
@@ -495,6 +504,7 @@ mod tests {
                 "policy",
                 "User",
                 "doc-1",
+                None,
             ),
         )
         .await

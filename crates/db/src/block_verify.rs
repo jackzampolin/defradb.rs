@@ -13,7 +13,7 @@ use crate::txn::DbTxn;
 /// public key.
 ///
 /// Also checks document-level ACP permission (Read) if the block has a delta
-/// with doc_id and schema_version_id.
+/// with schema_version_id.
 pub async fn verify_block_signature<S: Store>(
     database: &Arc<DB<S>>,
     document_acp: &dyn acp::DocumentACP,
@@ -107,30 +107,40 @@ async fn verify_block_signature_with_blockstore<S: Store>(
         (block, signature)
     };
 
-    // Check document-level ACP permission (Read) if block has delta with doc_id
-    if let (Some(doc_id_bytes), Some(schema_version_id)) =
-        (block.delta.doc_id(), block.delta.schema_version_id())
-    {
-        let doc_id = String::from_utf8_lossy(doc_id_bytes).to_string();
-
+    // Check document/collection-level ACP permission (Read) if the block has
+    // collection metadata.
+    if let Some(schema_version_id) = block.delta.schema_version_id() {
         if let Some(collection) = database
             .get_collection_by_version_id(schema_version_id)
             .map_err(|e| format!("failed to get collection: {}", e))?
         {
-            let node_did = database.node_did();
-            let has_permission = crate::check_doc_permission(
-                document_acp,
-                caller_identity,
-                acp::DocumentPermission::Read,
-                collection.schema(),
-                &doc_id,
-                node_did.as_ref(),
-            )
-            .await
-            .map_err(|e| format!("ACP check failed: {}", e))?;
+            let collection = collection.schema();
+            if let Some(policy) = &collection.policy {
+                let doc_id = block
+                    .delta
+                    .doc_id()
+                    .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+                    .unwrap_or_default();
+                let node_did = database.node_did();
+                let checker = acp::read_access::DirectChecker {
+                    acp: document_acp,
+                    identity: caller_identity,
+                    node_did: node_did.as_ref(),
+                };
+                let has_permission = acp::read_access::check_doc_read_access(
+                    &checker,
+                    &policy.id,
+                    &policy.resource_name,
+                    &collection.collection_id,
+                    collection.is_branchable,
+                    &doc_id,
+                )
+                .await
+                .map_err(|e| format!("ACP check failed: {}", e))?;
 
-            if !has_permission {
-                return Err("missing permission".to_string());
+                if !has_permission {
+                    return Err("missing permission".to_string());
+                }
             }
         }
     }

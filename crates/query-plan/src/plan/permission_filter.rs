@@ -98,6 +98,7 @@ impl PermissionFilterNode {
             &self.policy_id,
             &self.resource_name,
             doc_id,
+            None,
         )
         .await
         .unwrap_or_else(|e| {

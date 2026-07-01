@@ -1288,7 +1288,8 @@ impl NodeBuilder {
         let query_runner =
             query::QueryRunner::with_arc_registry_and_provider(fetcher, provider, registry)
                 .with_mutator(mutator)
-                .with_acp(document_acp)
+                .with_acp(document_acp.clone())
+                .with_node_did(database.node_did())
                 .with_lens_store(database.lens_store().clone())
                 .with_query_limits(query_limits);
         let query_runner = if let Some(timeout) = query_timeout {
@@ -1298,8 +1299,11 @@ impl NodeBuilder {
         };
 
         let runner: Arc<dyn QueryExecutor> = Arc::new(query_runner);
-        let schema_ops: Arc<dyn SchemaOps> =
-            Arc::new(db_impls::DbSchemaOps::new(database.clone(), query_limits));
+        let schema_ops: Arc<dyn SchemaOps> = Arc::new(db_impls::DbSchemaOps::new(
+            database.clone(),
+            query_limits,
+            document_acp,
+        ));
 
         #[cfg(feature = "p2p")]
         let (p2p_ops, p2p_lifecycle) = match p2p_result {
@@ -1353,6 +1357,8 @@ impl NodeBuilder {
 
         // 5. Blockstore for sync coordinator + merge handler
         let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
+        let classifier = defra_p2p_adapter::DbBlockClassifier::new_arc(database.clone());
+        let serve_acp = Arc::new(p2p::bitswap::LateBoundServeAcp::new());
 
         // 6. Collection store (persists subscriptions)
         let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
@@ -1367,17 +1373,20 @@ impl NodeBuilder {
             rate_limit_rate: config.rate_limit_rate,
             ..Default::default()
         };
-        let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_access_control(
-            transport.clone(),
-            sync_blockstore.clone(),
-            sync_config,
-            p2p::AccessMode::Controlled,
-            replicator_registry,
-            collection_store,
-            Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("SyncCoordinator creation failed: {}", e))?;
+        let (mut coordinator, sync_events) =
+            p2p::sync::SyncCoordinator::with_access_control_and_serve_gate(
+                transport.clone(),
+                sync_blockstore.clone(),
+                sync_config,
+                p2p::AccessMode::Controlled,
+                replicator_registry,
+                collection_store,
+                Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
+                classifier,
+                serve_acp.clone(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("SyncCoordinator creation failed: {}", e))?;
 
         // Failure channel (required by replication loop)
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
@@ -1402,6 +1411,8 @@ impl NodeBuilder {
         let merge_handler_for_loop = replication.merge_handler.clone();
         let broadcast_mutator = replication.broadcast_mutator.clone();
         let merge_handler_for_acp = replication.merge_handler.clone();
+        let serve_acp_for_acp = serve_acp.clone();
+        let database_for_acp = database.clone();
 
         // 9. Replication loop (transport-generic)
         let coord_for_repl = coordinator.clone();
@@ -1469,6 +1480,13 @@ impl NodeBuilder {
             })),
             mutator,
             wire_document_acp: Some(Box::new(move |acp, strict| {
+                serve_acp_for_acp.set(p2p::bitswap::ServeAcp {
+                    resolver: Arc::new(p2p::AnonymousResolver),
+                    gate: defra_p2p_adapter::DbBlockReadGate::new_arc(
+                        acp.clone(),
+                        database_for_acp.node_did(),
+                    ),
+                });
                 merge_handler_for_acp.set_document_acp(acp.clone());
                 merge_handler_for_acp.set_strict_replicated_doc_access(strict);
                 doc_pusher_for_acp.set_document_acp(acp.clone());

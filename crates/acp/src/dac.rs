@@ -39,7 +39,22 @@ pub trait DocumentACP: MaybeSendSync {
         doc_id: &str,
     ) -> Result<()>;
 
-    /// Check if document is registered with ACP.
+    /// Register an ACP object with creator as owner.
+    ///
+    /// Documents use `id = docID`; branchable collections use
+    /// `id = collectionID` to gate their collection-level commit DAG.
+    async fn register_object(
+        &self,
+        identity: &Did,
+        policy_id: &str,
+        resource_name: &str,
+        object_id: &str,
+    ) -> Result<()> {
+        self.register_doc_object(identity, policy_id, resource_name, object_id)
+            .await
+    }
+
+    /// Check if document/object is registered with ACP.
     ///
     /// Documents created without identity are unregistered (public).
     /// Documents created with identity are registered.

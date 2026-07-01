@@ -93,6 +93,8 @@ impl Node {
         bitswap_store: S,
         keypair: Option<p2p::Keypair>,
         enable_pubsub: bool,
+        classifier: std::sync::Arc<dyn p2p::bitswap::BlockClassifier>,
+        serve_acp: std::sync::Arc<p2p::bitswap::LateBoundServeAcp>,
     ) -> Result<(
         p2p::P2PHostHandle,
         tokio::sync::mpsc::Receiver<p2p::HostEvent>,
@@ -119,14 +121,18 @@ impl Node {
             max_connections_per_peer: config.net.max_connections_per_peer,
             access_mode,
         };
-        let (host, handle, events, replicators) = match keypair {
-            Some(kp) => p2p::P2PHost::with_keypair_and_config(kp, bitswap_store, p2p_config)
-                .await
-                .map_err(Error::P2P)?,
-            None => p2p::P2PHost::with_config(bitswap_store, p2p_config)
-                .await
-                .map_err(Error::P2P)?,
-        };
+        let keypair = keypair.unwrap_or_else(p2p::Keypair::generate_ed25519);
+        let (host, handle, events, replicators) =
+            p2p::P2PHost::with_keypair_and_config_and_identity_and_serve_gate(
+                keypair,
+                bitswap_store,
+                p2p_config,
+                None,
+                classifier,
+                serve_acp,
+            )
+            .await
+            .map_err(Error::P2P)?;
 
         // Spawn the host event loop FIRST - it must be running to process commands
         // Track the task handle for graceful shutdown

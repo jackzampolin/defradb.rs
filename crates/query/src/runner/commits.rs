@@ -734,108 +734,97 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             commits = self.fetcher.get_commits(&base_options).await?;
         }
 
-        // ACP filtering: check read permission for each commit's document.
-        // _commits must enforce the same ACP rules as regular document queries.
+        // ACP filtering: check read permission for each commit's document or
+        // collection-level DAG. _commits must enforce the same ACP rules as
+        // regular document queries.
         {
-            use acp::{DocumentPermission, Identity};
+            use acp::Identity;
 
             let identity = Identity::from(caller_identity.clone());
+            let node_did = self.node_did().cloned();
 
-            // Build a versionID -> policy map so each commit is checked against
-            // the collection version that produced it. Go routes _commits access
-            // checks by commit collection version; checking every policy leaks
-            // documents whose docID is simply unregistered on another protected
-            // collection.
+            // Active-version fast path. Historical commits authored under a
+            // now-inactive version (after a schema migration) are NOT in this
+            // map and are resolved on demand below — never left ungated.
             let collections = self.collections_map().await?;
-            let policies_by_version: std::collections::HashMap<String, Option<(String, String)>> =
-                collections
-                    .values()
-                    .map(|c| {
-                        (
-                            c.version_id.clone(),
-                            c.policy
-                                .as_ref()
-                                .map(|p| (p.id.clone(), p.resource_name.clone())),
-                        )
-                    })
-                    .collect();
-            let has_protected_collections = policies_by_version.values().any(Option::is_some);
+            let by_version: std::collections::HashMap<
+                String,
+                std::sync::Arc<schema::CollectionVersion>,
+            > = collections
+                .values()
+                .map(|c| (c.version_id.clone(), c.clone()))
+                .collect();
+            let provider = self.effective_provider();
+            let mut resolved_versions: std::collections::HashMap<
+                String,
+                Option<std::sync::Arc<schema::CollectionVersion>>,
+            > = std::collections::HashMap::new();
 
-            if has_protected_collections {
-                // Collect the set of doc_ids that the caller is allowed to read.
-                let mut denied_commits: std::collections::HashSet<(String, Option<String>)> =
-                    std::collections::HashSet::new();
-                let mut checked_commits: std::collections::HashSet<(String, Option<String>)> =
-                    std::collections::HashSet::new();
+            let mut keep = Vec::with_capacity(commits.len());
+            for commit in &commits {
+                let version_id = commit.get("collectionVersionId").and_then(|v| v.as_str());
+                let doc_id = commit.get("docID").and_then(|v| v.as_str()).unwrap_or("");
 
-                for commit in &commits {
-                    let doc_id = match commit.get("docID").and_then(|v| v.as_str()) {
-                        Some(id) => id.to_string(),
-                        None => continue,
-                    };
-                    let version_id = commit
-                        .get("collectionVersionId")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string);
-                    let commit_key = (doc_id.clone(), version_id.clone());
-                    if checked_commits.contains(&commit_key) {
-                        continue;
-                    }
-                    checked_commits.insert(commit_key.clone());
+                // Resolve the commit's collection by its version id, INCLUDING
+                // inactive versions. Mirrors Go's dagScanNode (GetInactive=true)
+                // + fail-closed on an unresolvable version.
+                let collection = match version_id {
+                    None => None,
+                    Some(vid) => match by_version.get(vid) {
+                        Some(c) => Some(c.clone()),
+                        None => {
+                            if !resolved_versions.contains_key(vid) {
+                                let looked_up = provider
+                                    .get_collection_by_version_id(vid)
+                                    .await
+                                    .unwrap_or(None);
+                                resolved_versions.insert(vid.to_string(), looked_up);
+                            }
+                            resolved_versions.get(vid).and_then(|c| c.clone())
+                        }
+                    },
+                };
 
-                    let allowed = match version_id
-                        .as_ref()
-                        .and_then(|id| policies_by_version.get(id))
-                    {
-                        Some(None) => true,
-                        Some(Some((policy_id, resource_name))) => {
-                            match crate::txn::check_doc_access_with_overlay(
-                                self.acp.as_ref(),
-                                &identity,
-                                DocumentPermission::Read,
-                                policy_id,
-                                resource_name,
-                                &doc_id,
+                let allowed = match collection {
+                    // Fail closed: a commit whose collection version cannot be
+                    // resolved is denied (Go errors the query here). Never allow
+                    // an unresolved version through unchecked.
+                    None => false,
+                    Some(collection) => match &collection.policy {
+                        None => true,
+                        Some(policy) => {
+                            let checker = crate::txn::OverlayChecker {
+                                acp: self.acp.as_ref(),
+                                identity: &identity,
+                                node_did: node_did.as_ref(),
+                            };
+                            acp::read_access::check_doc_read_access(
+                                &checker,
+                                &policy.id,
+                                &policy.resource_name,
+                                &collection.collection_id,
+                                collection.is_branchable,
+                                doc_id,
                             )
                             .await
-                            {
-                                Ok(granted) => granted,
-                                Err(e) => {
-                                    tracing::debug!(
-                                        target: "acp::audit",
-                                        event = "commits_acp_check_error",
-                                        doc_id = %doc_id,
-                                        error = %e,
-                                        "ACP check error during _commits query, denying access"
-                                    );
-                                    false
-                                }
-                            }
+                            .unwrap_or_else(|e| {
+                                tracing::debug!(
+                                    target: "acp::audit",
+                                    event = "commits_acp_check_error",
+                                    doc_id = %doc_id,
+                                    collection_version_id = ?version_id,
+                                    error = %e,
+                                    "ACP check error during _commits query, denying access"
+                                );
+                                false
+                            })
                         }
-                        None => false,
-                    };
-
-                    if !allowed {
-                        denied_commits.insert(commit_key);
-                    }
-                }
-
-                if !denied_commits.is_empty() {
-                    commits.retain(|commit| {
-                        let doc_id = commit
-                            .get("docID")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                        let version_id = commit
-                            .get("collectionVersionId")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                        doc_id
-                            .map(|id| !denied_commits.contains(&(id, version_id)))
-                            .unwrap_or(true)
-                    });
-                }
+                    },
+                };
+                keep.push(allowed);
             }
+            let mut keep = keep.into_iter();
+            commits.retain(|_| keep.next().unwrap_or(false));
         }
 
         // Build a mapping for commit fields (needed for filter evaluation)

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use defra_http::router::{AcpOperations, SchemaOperations};
+use identity::Did;
 use schema::CollectionVersion;
 use storage::corekv::Store;
 
@@ -20,6 +21,8 @@ pub struct SchemaAdapter<S: Store> {
     /// permissions. When `None` (legacy / tests without ACP wired in),
     /// the validator is skipped.
     acp: Option<Arc<dyn AcpOperations>>,
+    /// Optional document ACP handle for branchable collection object registration.
+    document_acp: Option<Arc<dyn acp::DocumentACP>>,
 }
 
 impl<S: Store + 'static> SchemaAdapter<S> {
@@ -28,14 +31,20 @@ impl<S: Store + 'static> SchemaAdapter<S> {
         Self {
             database,
             acp: None,
+            document_acp: None,
         }
     }
 
     /// Create a new adapter with ACP wired in for schema-time DRI validation.
-    pub fn new_with_acp(database: Arc<db::DB<S>>, acp: Arc<dyn AcpOperations>) -> Self {
+    pub fn new_with_acp(
+        database: Arc<db::DB<S>>,
+        acp: Arc<dyn AcpOperations>,
+        document_acp: Arc<dyn acp::DocumentACP>,
+    ) -> Self {
         Self {
             database,
             acp: Some(acp),
+            document_acp: Some(document_acp),
         }
     }
 
@@ -49,8 +58,9 @@ impl<S: Store + 'static> SchemaAdapter<S> {
     pub fn new_arc_with_acp(
         database: Arc<db::DB<S>>,
         acp: Arc<dyn AcpOperations>,
+        document_acp: Arc<dyn acp::DocumentACP>,
     ) -> Arc<dyn SchemaOperations> {
-        Arc::new(Self::new_with_acp(database, acp))
+        Arc::new(Self::new_with_acp(database, acp, document_acp))
     }
 
     /// Create an Arc-wrapped adapter for PG wire protocol schema operations.
@@ -69,11 +79,22 @@ impl<S: Store + 'static> SchemaAdapter<S> {
     pub fn new_pg_arc_with_acp(
         database: Arc<db::DB<S>>,
         acp: Arc<dyn AcpOperations>,
+        document_acp: Arc<dyn acp::DocumentACP>,
     ) -> Arc<dyn pg_compat::SchemaManager> {
-        Arc::new(Self::new_with_acp(database, acp))
+        Arc::new(Self::new_with_acp(database, acp, document_acp))
     }
 
     async fn add_schema_inner(&self, sdl: &str) -> Result<Vec<CollectionVersion>, String> {
+        // Fail closed: a present-but-malformed ambient identity must error, not
+        // silently degrade a permissioned collection to public (unregistered).
+        let creator = match defra_core::current_identity::try_get_scoped_identity()
+            .or_else(defra_core::current_identity::get_current_identity)
+        {
+            Some(raw) => {
+                Some(Did::new(raw).map_err(|e| format!("malformed ambient identity: {}", e))?)
+            }
+            None => None,
+        };
         let known_types: std::collections::HashSet<String> = self
             .database
             .list_collections()
@@ -102,15 +123,18 @@ impl<S: Store + 'static> SchemaAdapter<S> {
             }
         }
 
-        let mut created = Vec::new();
-        for collection in collections {
-            let col_clone = collection.clone();
+        let created = if let Some(document_acp) = &self.document_acp {
             self.database
-                .create_collection(collection)
+                .create_collections_atomic_with_acp_registration(
+                    collections,
+                    document_acp.clone(),
+                    creator,
+                )
                 .await
-                .map_err(|e| format!("failed to create collection: {}", e))?;
-            created.push(col_clone);
+        } else {
+            self.database.create_collections_atomic(collections).await
         }
+        .map_err(|e| format!("failed to create collection: {}", e))?;
 
         Ok(created)
     }

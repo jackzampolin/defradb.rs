@@ -7,9 +7,9 @@ use ipld_core::ipld::Ipld;
 
 use super::traversal::{collect_block_links, extract_links, walk_ipld, IpldVisitor};
 use crate::block::{
-    Block, CollectionDefinitionDeltaPayload, CollectionDeltaPayload, CompositeDeltaPayload,
-    CounterDeltaPayload, CrdtDelta, DAGLink, Encryption, FieldDefinitionDeltaPayload,
-    LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
+    Block, CollectionDefinitionDeltaPayload, CollectionDeltaPayload, CollectionSetDeltaPayload,
+    CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink, Encryption,
+    FieldDefinitionDeltaPayload, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
 };
 
 fn test_cid() -> cid::Cid {
@@ -657,6 +657,13 @@ fn test_crdt_delta_is_definition() {
 
     let col_def = CrdtDelta::CollectionDefinition(CollectionDefinitionDeltaPayload::new(1));
     assert!(col_def.is_definition());
+
+    // CollectionSet is NOT a definition (matches Go's IsDefinition). It has no
+    // collection-version id and is never served over P2P — circular-relation
+    // groups converge by local reconstruction, so the serve whitelist must
+    // exclude it.
+    let col_set = CrdtDelta::CollectionSet(CollectionSetDeltaPayload::new(1));
+    assert!(!col_set.is_definition());
 }
 
 #[test]

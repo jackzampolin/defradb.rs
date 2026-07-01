@@ -107,6 +107,70 @@ pub async fn register_doc_if_needed(
         .await
 }
 
+/// Register a branchable collection as an ACP object after creation.
+///
+/// Only registers if:
+/// 1. Collection is branchable
+/// 2. Collection has a policy
+/// 3. Identity is provided
+///
+/// The ACP object id is the stable collection ID. Re-registering an existing
+/// collection object owned by the same identity is a no-op: the same collection
+/// can be defined on multiple nodes backed by a shared ACP store. A
+/// registration that finds the object already owned by a *different* identity
+/// fails closed (mirrors Go's `bridgeDocumentACP.RegisterDocObject`, which
+/// no-ops only when the existing owner equals the caller and otherwise errors).
+pub async fn register_collection_if_needed(
+    acp: &dyn DocumentACP,
+    identity: Option<&Did>,
+    collection: &CollectionVersion,
+) -> acp::Result<()> {
+    if !collection.is_branchable {
+        return Ok(());
+    }
+
+    let (policy, did) = match (&collection.policy, identity) {
+        (Some(p), Some(id)) => (p, id),
+        _ => return Ok(()),
+    };
+
+    if acp
+        .is_doc_registered(&policy.id, &policy.resource_name, &collection.collection_id)
+        .await?
+    {
+        // Already registered (e.g. the same collection defined on another node
+        // of a shared ACP store). The local/zanzibar backends error on ANY
+        // pre-existing object, so the owner check must live here rather than in
+        // `register_object`. Same-owner => idempotent no-op; different or
+        // unknown owner => fail closed so the collection is not persisted under
+        // someone else's ACP ownership.
+        let existing_owner = acp
+            .get_doc_owner(&policy.id, &policy.resource_name, &collection.collection_id)
+            .await?;
+        if existing_owner.as_ref() == Some(did) {
+            return Ok(());
+        }
+        return Err(acp::Error::DocumentAlreadyRegistered(format!(
+            "collection object '{}' under resource '{}' is already registered to a different owner (expected {}, found {})",
+            collection.collection_id,
+            policy.resource_name,
+            did,
+            existing_owner
+                .as_ref()
+                .map(|o| o.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string()),
+        )));
+    }
+
+    acp.register_object(
+        did,
+        &policy.id,
+        &policy.resource_name,
+        &collection.collection_id,
+    )
+    .await
+}
+
 /// Clean up ACP relations when deleting a document.
 ///
 /// This should be called when deleting a document to remove all
@@ -199,6 +263,11 @@ impl AcpContext {
         doc_id: &str,
     ) -> acp::Result<()> {
         register_doc_if_needed(self.acp.as_ref(), self.identity.did(), collection, doc_id).await
+    }
+
+    /// Register a branchable collection after creation.
+    pub async fn register_collection(&self, collection: &CollectionVersion) -> acp::Result<()> {
+        register_collection_if_needed(self.acp.as_ref(), self.identity.did(), collection).await
     }
 }
 

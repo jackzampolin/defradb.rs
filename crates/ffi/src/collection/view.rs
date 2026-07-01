@@ -4,6 +4,7 @@ use acp::nac::NodePermission;
 
 use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
+use crate::schema::parse_optional_identity_did;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, ffi_entry, try_ffi};
@@ -63,20 +64,23 @@ pub unsafe extern "C" fn add_view(
         let query_str = try_ffi!(require_c_str(gql_query, "gql_query"));
         let sdl_str = try_ffi!(require_c_str(sdl, "sdl"));
         let transform_opt = c_str_to_string(transform);
-        let (database, query_limits) = match NODES.get(node_ptr, |state| {
-            (state.database.clone(), state.query_limits)
+        let (database, query_limits, document_acp) = match NODES.get(node_ptr, |state| {
+            (
+                state.database.clone(),
+                state.query_limits,
+                state.document_acp.clone(),
+            )
         }) {
             Some(state) => state,
             None => return FfiResult::error(crate::ERR_INVALID_NODE_HANDLE),
         };
+        let (identity_str, creator) = try_ffi!(parse_optional_identity_did(identity_did));
 
         // Bind the caller's identity into the ambient context so the DB-layer NAC
         // gate on create_collections_atomic resolves the actual caller instead of
         // the wildcard. The body runs on this thread via `block_on`, so the
         // thread-local is visible throughout it; the guard restores on drop.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(identity_str);
 
         ffi_async!(rt, {
             // Get existing collection names so the SDL parser can resolve external type references
@@ -144,7 +148,11 @@ pub unsafe extern "C" fn add_view(
 
             // Create all view collections atomically (all-or-nothing)
             let created_versions = database
-                .create_collections_atomic(view_collections)
+                .create_collections_atomic_with_acp_registration(
+                    view_collections,
+                    document_acp.clone(),
+                    creator,
+                )
                 .await
                 .map_err(|e| format!("failed to create view collection: {}", e))?;
 

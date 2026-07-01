@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use defra_http::router::ViewOperations;
+use identity::Did;
 use schema::CollectionVersion;
 use storage::corekv::Store;
 
@@ -12,6 +13,7 @@ use storage::corekv::Store;
 pub struct ViewAdapter<S: Store> {
     database: Arc<db::DB<S>>,
     query_limits: query::QueryLimits,
+    document_acp: Option<Arc<dyn acp::DocumentACP>>,
 }
 
 impl<S: Store + 'static> ViewAdapter<S> {
@@ -20,6 +22,20 @@ impl<S: Store + 'static> ViewAdapter<S> {
         Self {
             database,
             query_limits,
+            document_acp: None,
+        }
+    }
+
+    /// Create a new adapter with document ACP registration support.
+    pub fn new_with_acp(
+        database: Arc<db::DB<S>>,
+        query_limits: query::QueryLimits,
+        document_acp: Arc<dyn acp::DocumentACP>,
+    ) -> Self {
+        Self {
+            database,
+            query_limits,
+            document_acp: Some(document_acp),
         }
     }
 
@@ -29,6 +45,15 @@ impl<S: Store + 'static> ViewAdapter<S> {
         query_limits: query::QueryLimits,
     ) -> Arc<dyn ViewOperations> {
         Arc::new(Self::new(database, query_limits))
+    }
+
+    /// Create an Arc-wrapped adapter with document ACP registration support.
+    pub fn new_arc_with_acp(
+        database: Arc<db::DB<S>>,
+        query_limits: query::QueryLimits,
+        document_acp: Arc<dyn acp::DocumentACP>,
+    ) -> Arc<dyn ViewOperations> {
+        Arc::new(Self::new_with_acp(database, query_limits, document_acp))
     }
 }
 
@@ -101,11 +126,30 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
             }
         }
 
-        let created_versions = self
-            .database
-            .create_collections_atomic(view_collections)
-            .await
-            .map_err(|e| format!("failed to create view collection: {}", e))?;
+        // Fail closed: a present-but-malformed ambient identity must error, not
+        // silently degrade a permissioned collection to public (unregistered).
+        let creator = match defra_core::current_identity::try_get_scoped_identity()
+            .or_else(defra_core::current_identity::get_current_identity)
+        {
+            Some(raw) => {
+                Some(Did::new(raw).map_err(|e| format!("malformed ambient identity: {}", e))?)
+            }
+            None => None,
+        };
+        let created_versions = if let Some(document_acp) = &self.document_acp {
+            self.database
+                .create_collections_atomic_with_acp_registration(
+                    view_collections,
+                    document_acp.clone(),
+                    creator,
+                )
+                .await
+        } else {
+            self.database
+                .create_collections_atomic(view_collections)
+                .await
+        }
+        .map_err(|e| format!("failed to create view collection: {}", e))?;
 
         let materialized_names: Vec<String> = created_versions
             .iter()

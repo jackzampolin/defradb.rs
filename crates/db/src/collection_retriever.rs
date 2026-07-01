@@ -26,6 +26,8 @@ pub struct DocCollectionInfo {
     pub policy_id: String,
     /// Resource name within the policy.
     pub resource_name: String,
+    /// Whether the collection is branchable.
+    pub is_branchable: bool,
 }
 
 /// Resolve the collection metadata for a given document.
@@ -124,6 +126,7 @@ pub async fn resolve_collection_from_doc_id<S: Store>(
             collection_id: collection.collection_id.clone(),
             policy_id: policy.id,
             resource_name: policy.resource_name,
+            is_branchable: collection.is_branchable,
         }),
         Ok(None) => None,
         Err(e) => {

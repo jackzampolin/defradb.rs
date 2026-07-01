@@ -5,10 +5,12 @@ use std::sync::Arc;
 use acp::{DocumentACP, DocumentPermission, Identity, LocalDocumentACP, MemoryAcpStore};
 use db::collection_acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
-    register_doc_if_needed, warn_on_unsafe_policy_transition, AcpContext,
+    register_collection_if_needed, register_doc_if_needed, warn_on_unsafe_policy_transition,
+    AcpContext,
 };
 use identity::Did;
 use schema::{CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
+use storage::backends::MemoryStore;
 
 fn test_did() -> Did {
     Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap()
@@ -42,6 +44,97 @@ fn collection_with_policy() -> CollectionVersion {
     );
     col.policy = Some(PolicyDescription::new("policy1", "users"));
     col
+}
+
+fn branchable_collection_with_policy() -> CollectionVersion {
+    let mut col = collection_with_policy();
+    col.is_branchable = true;
+    col
+}
+
+fn branchable_collection_without_policy() -> CollectionVersion {
+    let mut col = collection_without_policy();
+    col.is_branchable = true;
+    col
+}
+
+struct FailingDocumentAcp;
+
+#[async_trait::async_trait]
+impl DocumentACP for FailingDocumentAcp {
+    async fn register_doc_object(
+        &self,
+        _identity: &Did,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<()> {
+        Err(acp::Error::Storage("registration failed".into()))
+    }
+
+    async fn is_doc_registered(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<bool> {
+        Ok(false)
+    }
+
+    async fn get_doc_owner(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<Option<Did>> {
+        Ok(None)
+    }
+
+    async fn check_doc_access(
+        &self,
+        _identity: &Identity,
+        _permission: DocumentPermission,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<bool> {
+        Ok(true)
+    }
+
+    async fn add_actor_relationship(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+        _policy_id: &str,
+        _collection_id: &str,
+        _doc_id: &str,
+        _relation: &str,
+        _managing_relations: &[String],
+    ) -> acp::Result<bool> {
+        Ok(false)
+    }
+
+    async fn delete_actor_relationship(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+        _policy_id: &str,
+        _collection_id: &str,
+        _doc_id: &str,
+        _relation: &str,
+        _managing_relations: &[String],
+    ) -> acp::Result<bool> {
+        Ok(false)
+    }
+
+    async fn unregister_doc_object(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<()> {
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -103,6 +196,168 @@ async fn test_no_register_without_identity() {
         .await
         .unwrap();
     assert!(!is_registered);
+}
+
+#[tokio::test]
+async fn branchable_permissioned_with_identity_registers_collection_object_owned_by_creator() {
+    let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
+    let collection = branchable_collection_with_policy();
+    let owner = test_did();
+
+    register_collection_if_needed(&acp, Some(&owner), &collection)
+        .await
+        .unwrap();
+
+    let policy = collection.policy.as_ref().unwrap();
+    assert!(acp
+        .is_doc_registered(&policy.id, &policy.resource_name, &collection.collection_id)
+        .await
+        .unwrap());
+    assert_eq!(
+        acp.get_doc_owner(&policy.id, &policy.resource_name, &collection.collection_id)
+            .await
+            .unwrap(),
+        Some(owner)
+    );
+}
+
+#[tokio::test]
+async fn branchable_permissioned_no_identity_registers_nothing_public() {
+    let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
+    let collection = branchable_collection_with_policy();
+
+    register_collection_if_needed(&acp, None, &collection)
+        .await
+        .unwrap();
+
+    let policy = collection.policy.as_ref().unwrap();
+    assert!(!acp
+        .is_doc_registered(&policy.id, &policy.resource_name, &collection.collection_id)
+        .await
+        .unwrap());
+    assert!(acp
+        .check_doc_access(
+            &Identity::Anonymous,
+            DocumentPermission::Read,
+            &policy.id,
+            &policy.resource_name,
+            &collection.collection_id,
+        )
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn non_branchable_registers_no_collection_object() {
+    let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
+    let collection = collection_with_policy();
+    let owner = test_did();
+
+    register_collection_if_needed(&acp, Some(&owner), &collection)
+        .await
+        .unwrap();
+
+    let policy = collection.policy.as_ref().unwrap();
+    assert!(!acp
+        .is_doc_registered(&policy.id, &policy.resource_name, &collection.collection_id)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn unpermissioned_branchable_is_fully_public() {
+    let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
+    let collection = branchable_collection_without_policy();
+    let owner = test_did();
+
+    register_collection_if_needed(&acp, Some(&owner), &collection)
+        .await
+        .unwrap();
+
+    assert!(check_doc_permission(
+        &acp,
+        &Identity::Anonymous,
+        DocumentPermission::Read,
+        &collection,
+        &collection.collection_id,
+        None,
+    )
+    .await
+    .unwrap());
+}
+
+#[tokio::test]
+async fn double_collection_registration_is_idempotent() {
+    let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
+    let collection = branchable_collection_with_policy();
+    let owner = test_did();
+
+    register_collection_if_needed(&acp, Some(&owner), &collection)
+        .await
+        .unwrap();
+    register_collection_if_needed(&acp, Some(&owner), &collection)
+        .await
+        .unwrap();
+
+    let policy = collection.policy.as_ref().unwrap();
+    assert_eq!(
+        acp.get_doc_owner(&policy.id, &policy.resource_name, &collection.collection_id)
+            .await
+            .unwrap(),
+        Some(owner)
+    );
+}
+
+#[tokio::test]
+async fn different_owner_collection_registration_fails_closed() {
+    // Mirrors Go's bridgeDocumentACP.RegisterDocObject: a re-registration that
+    // finds the collection object already owned by a different identity must
+    // error (not silently no-op), so a node cannot persist a protected
+    // collection whose ACP object is owned by someone else.
+    let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
+    let collection = branchable_collection_with_policy();
+    let owner_a = test_did();
+    let owner_b = test_did2();
+
+    register_collection_if_needed(&acp, Some(&owner_a), &collection)
+        .await
+        .unwrap();
+
+    let err = register_collection_if_needed(&acp, Some(&owner_b), &collection)
+        .await
+        .expect_err("different-owner re-registration must fail closed");
+    assert!(
+        err.to_string().contains("different owner"),
+        "error should describe the owner mismatch, got: {err}"
+    );
+
+    // The original owner is unchanged.
+    let policy = collection.policy.as_ref().unwrap();
+    assert_eq!(
+        acp.get_doc_owner(&policy.id, &policy.resource_name, &collection.collection_id)
+            .await
+            .unwrap(),
+        Some(owner_a)
+    );
+}
+
+#[tokio::test]
+async fn branchable_permissioned_create_fails_closed_if_collection_acp_registration_fails() {
+    let db = db::DB::new(MemoryStore::new()).unwrap();
+    let acp = Arc::new(FailingDocumentAcp);
+    let owner = test_did();
+
+    let err = db
+        .create_collection_with_acp_registration(
+            branchable_collection_with_policy(),
+            acp,
+            Some(owner),
+        )
+        .await
+        .expect_err("ACP registration failure must abort collection create");
+
+    assert!(err.to_string().contains("registration failed"));
+    assert!(db.get_collection("users").unwrap().is_none());
 }
 
 #[tokio::test]

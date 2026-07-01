@@ -48,6 +48,26 @@ mod tests {
         node_close(node);
     }
 
+    #[test]
+    fn add_schema_malformed_identity_did_returns_error() {
+        init();
+        let node = new_in_memory_node();
+
+        let identity = CString::new("not-a-did").unwrap();
+        let sdl = CString::new("type User { name: String }").unwrap();
+        let result = unsafe { add_schema(node, identity.as_ptr(), sdl.as_ptr()) };
+
+        assert_eq!(result.status, 1, "malformed identity DID must be an error");
+        assert!(!result.error.is_null());
+        let msg = unsafe { CStr::from_ptr(result.error).to_string_lossy() };
+        assert!(
+            msg.contains("invalid identity DID"),
+            "error should describe the invalid identity DID, got: {msg}"
+        );
+        unsafe { defra_free_string(result.error) };
+        node_close(node);
+    }
+
     /// exec_request with a NULL query must return an error, not crash.
     #[test]
     fn exec_request_null_query_returns_error() {

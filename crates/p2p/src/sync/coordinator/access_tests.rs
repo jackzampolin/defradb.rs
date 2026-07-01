@@ -165,6 +165,8 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
             head_provider,
         },
         authorizer,
+        classifier: Arc::new(crate::bitswap::DefaultBlockClassifier),
+        serve_acp: Arc::new(crate::bitswap::LateBoundServeAcp::new()),
         document_acp: std::sync::OnceLock::new(),
         kms_transport: std::sync::OnceLock::new(),
         pubsub_services: None,
@@ -269,6 +271,7 @@ struct NoopTransport {
     replicators: Arc<RwLock<std::collections::HashMap<String, Vec<String>>>>,
     connected_peers: Arc<RwLock<Vec<PeerId>>>,
     doc_sync_replies: Arc<RwLock<Vec<DocSyncReply>>>,
+    car_responses: Arc<RwLock<Vec<Vec<u8>>>>,
 }
 
 impl NoopTransport {
@@ -279,6 +282,7 @@ impl NoopTransport {
             replicators: Arc::new(RwLock::new(std::collections::HashMap::new())),
             connected_peers: Arc::new(RwLock::new(Vec::new())),
             doc_sync_replies: Arc::new(RwLock::new(Vec::new())),
+            car_responses: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -288,6 +292,12 @@ impl NoopTransport {
 
     fn doc_sync_replies(&self) -> Vec<DocSyncReply> {
         self.doc_sync_replies.read().clone()
+    }
+
+    /// CARv1 payloads the coordinator sent, in order (used to assert which
+    /// blocks were actually served after per-block serve filtering).
+    fn car_responses(&self) -> Vec<Vec<u8>> {
+        self.car_responses.read().clone()
     }
 }
 
@@ -420,15 +430,17 @@ impl P2PTransport for NoopTransport {
         Ok(())
     }
 
-    async fn send_car_response(&self, _peer_id: &PeerId, _car_data: Vec<u8>) -> crate::Result<()> {
+    async fn send_car_response(&self, _peer_id: &PeerId, car_data: Vec<u8>) -> crate::Result<()> {
+        self.car_responses.write().push(car_data);
         Ok(())
     }
 
     async fn send_car_response_token(
         &self,
         _token: Self::ResponseToken,
-        _car_data: Vec<u8>,
+        car_data: Vec<u8>,
     ) -> crate::Result<()> {
+        self.car_responses.write().push(car_data);
         Ok(())
     }
 
@@ -846,8 +858,16 @@ async fn doc_sync_filters_heads_outside_replicator_collection() {
     );
 }
 
+// Go parity: the CAR serve path no longer returns a coarse AccessDenied for a
+// wrong-collection root (that Rust-only gate also waved permissioned blocks
+// through to any connected peer / subscriber with no ACP check). It now filters
+// PER BLOCK, matching Go's `hasAccess`: a replicator-for-the-block's-collection
+// or an ACP-authorized identity is served; everyone else is dropped and a
+// well-formed (here header-only) CAR is returned. The test coordinator's
+// DefaultBlockClassifier classifies a Composite/data block as Deny, so the block
+// is filtered out and no data is served.
 #[tokio::test]
-async fn car_fetch_controlled_mode_rejects_wrong_collection_root() {
+async fn car_fetch_controlled_mode_filters_unauthorized_data_block() {
     use defra_core::{Block, CompositeDeltaPayload, CrdtDelta};
 
     let replicators = Arc::new(ReplicatorRegistry::new());
@@ -857,6 +877,7 @@ async fn car_fetch_controlled_mode_rejects_wrong_collection_root() {
     replicators.add_replicator("collection_a", peer.as_str());
 
     let transport = NoopTransport::new();
+    let transport_handle = transport.clone();
     let local_peer_id = transport.local_peer_id().to_string();
     let broadcaster = Broadcaster::new(transport.clone());
     let store = Arc::new(MemoryStore::new());
@@ -891,10 +912,15 @@ async fn car_fetch_controlled_mode_rejects_wrong_collection_root() {
         .handle_transport_event(car_fetch_event(peer, cid))
         .await;
 
+    assert!(result.is_ok(), "CAR serve must not error, got {:?}", result);
+
+    let cars = transport_handle.car_responses();
+    assert_eq!(cars.len(), 1, "handler must send exactly one CAR response");
+    let (_roots, served) = crate::sync::car::decode_car(&cars[0]).unwrap();
     assert!(
-        matches!(result, Err(Error::AccessDenied { .. })),
-        "CAR root access must be collection-scoped in Controlled mode, got {:?}",
-        result
+        served.is_empty(),
+        "no data blocks may be served for a classifier-denied block, got {}",
+        served.len()
     );
 }
 

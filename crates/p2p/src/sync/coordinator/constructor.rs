@@ -12,7 +12,9 @@ use super::authorizer::RuntimeAuthorizer;
 use super::{
     DagFetchLimiter, SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState,
 };
-use crate::bitswap::{AccessMode, ReplicatorRegistry};
+use crate::bitswap::{
+    AccessMode, BlockClassifier, DefaultBlockClassifier, LateBoundServeAcp, ReplicatorRegistry,
+};
 use crate::error::Result;
 use crate::replicator::{EqOnlyFilterMatcher, ReplicationFilterMatcher};
 use crate::sync::broadcaster::Broadcaster;
@@ -82,7 +84,34 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         collection_store: Arc<dyn P2PCollectionStorage>,
         filter_matcher: Arc<dyn ReplicationFilterMatcher>,
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
-        Self::with_head_provider(
+        Self::with_access_control_and_serve_gate(
+            transport,
+            blockstore,
+            config,
+            access_mode,
+            replicators,
+            collection_store,
+            filter_matcher,
+            Arc::new(DefaultBlockClassifier),
+            Arc::new(LateBoundServeAcp::new()),
+        )
+        .await
+    }
+
+    /// Create a new sync coordinator with access control and explicit serve gate.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn with_access_control_and_serve_gate(
+        transport: T,
+        blockstore: Arc<B>,
+        config: SyncConfig,
+        access_mode: AccessMode,
+        replicators: Arc<ReplicatorRegistry>,
+        collection_store: Arc<dyn P2PCollectionStorage>,
+        filter_matcher: Arc<dyn ReplicationFilterMatcher>,
+        classifier: Arc<dyn BlockClassifier>,
+        serve_acp: Arc<LateBoundServeAcp>,
+    ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
+        Self::with_head_provider_and_serve_gate(
             transport,
             blockstore,
             config,
@@ -91,6 +120,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             collection_store,
             Arc::new(NoOpHeadProvider),
             filter_matcher,
+            classifier,
+            serve_acp,
         )
         .await
     }
@@ -108,6 +139,35 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         collection_store: Arc<dyn P2PCollectionStorage>,
         head_provider: Arc<dyn DocumentHeadProvider>,
         filter_matcher: Arc<dyn ReplicationFilterMatcher>,
+    ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
+        Self::with_head_provider_and_serve_gate(
+            transport,
+            blockstore,
+            config,
+            access_mode,
+            replicators,
+            collection_store,
+            head_provider,
+            filter_matcher,
+            Arc::new(DefaultBlockClassifier),
+            Arc::new(LateBoundServeAcp::new()),
+        )
+        .await
+    }
+
+    /// Create a new sync coordinator with a document head provider and explicit serve gate.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn with_head_provider_and_serve_gate(
+        transport: T,
+        blockstore: Arc<B>,
+        config: SyncConfig,
+        access_mode: AccessMode,
+        replicators: Arc<ReplicatorRegistry>,
+        collection_store: Arc<dyn P2PCollectionStorage>,
+        head_provider: Arc<dyn DocumentHeadProvider>,
+        filter_matcher: Arc<dyn ReplicationFilterMatcher>,
+        classifier: Arc<dyn BlockClassifier>,
+        serve_acp: Arc<LateBoundServeAcp>,
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
         let local_peer_id = transport.local_peer_id().to_string();
         let broadcaster = Broadcaster::new(transport.clone());
@@ -172,6 +232,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     head_provider,
                 },
                 authorizer,
+                classifier,
+                serve_acp,
                 document_acp: std::sync::OnceLock::new(),
                 #[cfg(feature = "libp2p-transport")]
                 kms_transport: std::sync::OnceLock::new(),
