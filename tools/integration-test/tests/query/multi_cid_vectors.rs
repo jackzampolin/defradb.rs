@@ -1,6 +1,4 @@
-use integration_test::{
-    for_each_runtime, for_each_runtime_go_ignored, generate_identity, TestCluster,
-};
+use integration_test::{for_each_runtime, generate_identity, TestCluster};
 use serde_json::Value;
 
 // Mirrors the multi-CID vector cases added in Go PR #4794. Document CID tests
@@ -359,24 +357,24 @@ async fn multi_cid_commits_filters_unreadable_cid_test(cluster: TestCluster) {
     );
 }
 
-// These assert hardcoded commit-CID vectors. Go v1.0.0 derives DocIDs from the
-// genesis composite CID (Go #4838), which the Rust port has not yet ported, so a
-// Go node computes different CIDs and the `go_` variants cannot match the baked
-// vectors. Tracked in defradb.rs#1080; the `rust_` variants still run.
-for_each_runtime_go_ignored!(
+// NOTE: the `go_` variants below FAIL ON PURPOSE against a Go v1.0.0 node and are
+// left failing as a visible parity signal (not `#[ignore]`d). They assert
+// hardcoded commit-CID vectors, but Go v1.0.0 derives DocIDs from the genesis
+// composite CID (Go #4838), which the Rust port has not yet ported — so Go and
+// Rust compute different document identities and the baked vectors cannot match.
+// They go green once Rust ports #4838 and the vectors are refreshed. Tracked in
+// defradb.rs#1080. The `rust_` variants pass today.
+for_each_runtime!(
     multi_cid_simple_multiple_cids,
-    multi_cid_simple_multiple_cids_test,
-    "blocked on porting Go #4838 (DocID from genesis CID) to Rust; see defradb.rs#1080"
+    multi_cid_simple_multiple_cids_test
 );
-for_each_runtime_go_ignored!(
+for_each_runtime!(
     multi_cid_simple_duplicate_cids_for_same_doc,
-    multi_cid_simple_duplicate_cids_for_same_doc_test,
-    "blocked on porting Go #4838 (DocID from genesis CID) to Rust; see defradb.rs#1080"
+    multi_cid_simple_duplicate_cids_for_same_doc_test
 );
-for_each_runtime_go_ignored!(
+for_each_runtime!(
     multi_cid_simple_multiple_cids_for_same_doc,
-    multi_cid_simple_multiple_cids_for_same_doc_test,
-    "blocked on porting Go #4838 (DocID from genesis CID) to Rust; see defradb.rs#1080"
+    multi_cid_simple_multiple_cids_for_same_doc_test
 );
 for_each_runtime!(
     multi_cid_commits_different_docs,
