@@ -357,13 +357,6 @@ async fn multi_cid_commits_filters_unreadable_cid_test(cluster: TestCluster) {
     );
 }
 
-// NOTE: the `go_` variants below FAIL ON PURPOSE against a Go v1.0.0 node and are
-// left failing as a visible parity signal (not `#[ignore]`d). They assert
-// hardcoded commit-CID vectors, but Go v1.0.0 derives DocIDs from the genesis
-// composite CID (Go #4838), which the Rust port has not yet ported — so Go and
-// Rust compute different document identities and the baked vectors cannot match.
-// They go green once Rust ports #4838 and the vectors are refreshed. Tracked in
-// defradb.rs#1080. The `rust_` variants pass today.
 for_each_runtime!(
     multi_cid_simple_multiple_cids,
     multi_cid_simple_multiple_cids_test
