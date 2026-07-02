@@ -448,8 +448,8 @@ jobs:
       # The workflow-level PROTOC points at a macOS Homebrew path; override it
       # with the apt-installed protoc for this Linux job.
       PROTOC: /usr/bin/protoc
-      DEFRA_RUST_BINARY: ${{ github.workspace }}/target/debug/defra
-      DEFRA_IROH_BINARY: ${{ github.workspace }}/target/debug/defra
+      DEFRA_RUST_BINARY: ${{ github.workspace }}/target/ci/defra
+      DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
       DEFRA_WORKSPACE_ROOT: ${{ github.workspace }}
       # The harness waits on INFO-level p2p_listening / readiness log lines; pin
       # the child filter so an inherited RUST_LOG=warn can't hide readiness.
@@ -474,10 +474,19 @@ jobs:
         # cmake: librocksdb-sys. libdbus-1-dev: keyring secret-service backend.
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler clang libclang-dev cmake pkg-config libssl-dev libdbus-1-dev
 
-      - name: Build defra binary
+      # Build both the standard and iroh-enabled binaries — the p2p suite's
+      # `rust_*_iroh` filtered-replication tests spawn iroh-transport nodes via
+      # DEFRA_IROH_BINARY, which must be built with `--features iroh`. Mirrors the
+      # macOS build/integration jobs' target/ci/{defra,defra-iroh} layout.
+      - name: Build defra binaries
         run: |
+          mkdir -p target/ci
           cargo build -p cli
+          cp target/debug/defra target/ci/defra
+          cargo build -p cli --features iroh
+          cp target/debug/defra target/ci/defra-iroh
           "$DEFRA_RUST_BINARY" version --format json
+          "$DEFRA_IROH_BINARY" version --format json
 
       # Same selection as the macOS rust leg: pure-Rust P2P topologies only
       # (`--skip ::go_` drops the go_go_/go_rust_ variants). Serialized because
@@ -494,7 +503,7 @@ jobs:
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- .
           git clean -fd
-          pkill -f "target/debug/defra" || true
+          pkill -f "target/(debug|ci)/defra" || true
 
   artifacts:
     name: Release Artifacts
