@@ -1,7 +1,8 @@
 //! Swarm event handling.
 
 use iroh_bitswap::Store;
-use libp2p::swarm::SwarmEvent;
+use libp2p::swarm::{ConnectionId, SwarmEvent};
+use libp2p::PeerId;
 use tracing::{debug, error, info, warn};
 
 use crate::behaviour::DefraEvent;
@@ -100,19 +101,8 @@ impl<S: Store> P2PHost<S> {
                 num_established,
                 ..
             } => {
-                info!(peer_id = %peer_id, "Peer disconnected");
-                self.connection_manager.on_closed(connection_id);
-                if num_established == 0 {
-                    self.peer_addrs.remove(&peer_id);
-                }
-                if self
-                    .event_tx
-                    .send(HostEvent::PeerDisconnected(peer_id))
-                    .await
-                    .is_err()
-                {
-                    warn!(peer_id = %peer_id, "Failed to send PeerDisconnected event - receiver dropped");
-                }
+                self.handle_connection_closed(peer_id, connection_id, num_established)
+                    .await;
                 false
             }
 
@@ -254,5 +244,100 @@ impl<S: Store> P2PHost<S> {
                 false
             }
         }
+    }
+
+    /// Handle a closed connection.
+    ///
+    /// `num_established` is the number of connections to `peer_id` that remain
+    /// open *after* this one closed. We only treat the peer as disconnected —
+    /// dropping its cached address and surfacing `PeerDisconnected` to the sync
+    /// layer — once the last connection closes. Emitting `PeerDisconnected` while
+    /// another connection is still live flips the peer's `connected` gate off,
+    /// which stalls provider selection, subscription targeting and ingress
+    /// authorization even though the peer is still reachable, leaving blocks
+    /// unreconciled until a brand-new connection forms. Duplicate connections
+    /// (e.g. a simultaneous dial-dial between two peers) form far more readily
+    /// under Linux's multi-core socket scheduling than on macOS loopback, so the
+    /// previous unconditional emit surfaced as Linux-only P2P sync stalls. The
+    /// iroh transport already refcounts connections per peer; this matches it.
+    pub(super) async fn handle_connection_closed(
+        &mut self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        num_established: u32,
+    ) {
+        self.connection_manager.on_closed(connection_id);
+
+        if num_established > 0 {
+            debug!(
+                peer_id = %peer_id,
+                remaining_connections = num_established,
+                "Connection closed but peer still reachable; not emitting PeerDisconnected"
+            );
+            return;
+        }
+
+        info!(peer_id = %peer_id, "Peer disconnected");
+        self.peer_addrs.remove(&peer_id);
+        if self
+            .event_tx
+            .send(HostEvent::PeerDisconnected(peer_id))
+            .await
+            .is_err()
+        {
+            warn!(peer_id = %peer_id, "Failed to send PeerDisconnected event - receiver dropped");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use libp2p::swarm::ConnectionId;
+    use libp2p::PeerId;
+
+    use crate::host::event::HostEvent;
+    use crate::host::P2PHost;
+    use crate::testutil::MockBitswapStore;
+
+    fn drain(rx: &mut tokio::sync::mpsc::Receiver<HostEvent>) -> Vec<HostEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    fn saw_disconnect(events: &[HostEvent], peer: PeerId) -> bool {
+        events
+            .iter()
+            .any(|event| matches!(event, HostEvent::PeerDisconnected(p) if *p == peer))
+    }
+
+    /// Closing one of several connections to a peer must NOT report the peer as
+    /// disconnected; only the last connection closing does. Before the fix,
+    /// `ConnectionClosed` emitted `PeerDisconnected` unconditionally, so tearing
+    /// down a duplicate connection (common under Linux socket scheduling) flipped
+    /// the peer's `connected` gate off and stalled block reconciliation.
+    #[tokio::test]
+    async fn peer_disconnect_only_on_last_connection_close() {
+        let store = MockBitswapStore::new();
+        let (mut host, _handle, mut events, _registry) = P2PHost::new(store).await.unwrap();
+        let peer = PeerId::random();
+
+        // One of two connections closes; one remains (num_established == 1).
+        host.handle_connection_closed(peer, ConnectionId::new_unchecked(1), 1)
+            .await;
+        assert!(
+            !saw_disconnect(&drain(&mut events), peer),
+            "PeerDisconnected must not fire while the peer still has a live connection"
+        );
+
+        // The last connection closes (num_established == 0).
+        host.handle_connection_closed(peer, ConnectionId::new_unchecked(2), 0)
+            .await;
+        assert!(
+            saw_disconnect(&drain(&mut events), peer),
+            "PeerDisconnected must fire once the last connection closes"
+        );
     }
 }

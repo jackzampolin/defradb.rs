@@ -434,6 +434,68 @@ jobs:
           git clean -fd
           pkill -f "target/(debug|ci)/defra" || true
 
+  p2p-linux:
+    # The macOS `integration` matrix above only runs the P2P suite on the studio
+    # host. Several P2P sync races are exposed only by Linux's socket/thread
+    # scheduling (e.g. duplicate connections that form under multi-core
+    # kqueue-vs-epoll timing), so mirror the pure-Rust P2P leg on the self-hosted
+    # Linux runner. Builds its own binary — the `build` job caches Mach-O
+    # binaries that cannot run here.
+    name: P2P Integration (Linux)
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    env:
+      # The workflow-level PROTOC points at a macOS Homebrew path; override it
+      # with the apt-installed protoc for this Linux job.
+      PROTOC: /usr/bin/protoc
+      DEFRA_RUST_BINARY: ${{ github.workspace }}/target/debug/defra
+      DEFRA_IROH_BINARY: ${{ github.workspace }}/target/debug/defra
+      DEFRA_WORKSPACE_ROOT: ${{ github.workspace }}
+      # The harness waits on INFO-level p2p_listening / readiness log lines; pin
+      # the child filter so an inherited RUST_LOG=warn can't hide readiness.
+      RUST_LOG: info
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-ci"
+          shared-key: "p2p-linux"
+
+      - name: Install system dependencies
+        # protobuf-compiler: prost-build. clang/libclang-dev: bindgen (rocksdb).
+        # cmake: librocksdb-sys. libdbus-1-dev: keyring secret-service backend.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler clang libclang-dev cmake pkg-config libssl-dev libdbus-1-dev
+
+      - name: Build defra binary
+        run: |
+          cargo build -p cli
+          "$DEFRA_RUST_BINARY" version --format json
+
+      # Same selection as the macOS rust leg: pure-Rust P2P topologies only
+      # (`--skip ::go_` drops the go_go_/go_rust_ variants). Serialized because
+      # the harness port allocator has a TOCTOU bind race under parallelism.
+      - name: Run rust P2P integration tests
+        run: >-
+          cargo test -p integration-test
+          --test p2p
+          -- --test-threads=1 --skip ::go_
+
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git checkout -- .
+          git clean -fd
+          pkill -f "target/debug/defra" || true
+
   artifacts:
     name: Release Artifacts
     runs-on: [self-hosted, macOS, ARM64, studio]
