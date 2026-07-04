@@ -273,6 +273,19 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
 
         let (peer_id, direct_addrs) = parse_public_peer_addr(addr)
             .map_err(|error| P2PError::invalid_input(error.to_string()))?;
+        let already_connected = self
+            .transport
+            .connected_peers()
+            .await
+            .map(|peers| peers.contains(&peer_id))
+            .unwrap_or(false);
+        if already_connected {
+            if let Ok(mut addrs) = self.peer_addresses.write() {
+                addrs.insert(peer_id.to_string(), addr.to_string());
+            }
+            return Ok(());
+        }
+
         let dial_timeout = if direct_addrs.is_empty() {
             std::time::Duration::from_secs(10)
         } else {
