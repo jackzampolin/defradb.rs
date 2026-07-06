@@ -87,17 +87,18 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
     }
 
-    /// Consume one rate-limiter token for `peer_id`, returning the synthetic
-    /// rate-limit error when the peer is over budget.
+    /// Consume one token from `limiter` for `peer_id`, returning the
+    /// synthetic rate-limit error when the peer is over budget.
     ///
-    /// Gossip events are simply dropped on rejection (no reply channel), while
-    /// request events (#1088 W4, re-landing #592's intake scope removed by
-    /// fa4a84f7) additionally send a `RATE_LIMITED_MESSAGE` nack via the
-    /// `reject_rate_limited_*` helpers so the pusher's retry/backoff engages.
+    /// Two limiters exist on purpose and must stay separate: gossip has no
+    /// reply channel, so refusals are silent drops governed by the long abuse
+    /// ladder; request events are nacked with `RATE_LIMITED_MESSAGE` (via the
+    /// `reject_rate_limited_*` helpers) and use the paced limiter, whose
+    /// retry horizon is ~one token refill — a long lockout here wedges any
+    /// full-DAG push deeper than the burst (see `p2p_deep_catchup`).
     /// Nack-on-overload is the Go-aligned behavior: Go's direct replicator
-    /// channel drives its retryInterval ladder off error replies
-    /// (`replicator.go`); overload replies are orthogonal to the trust/ACP
-    /// bypasses fa4a84f7 aligned with Go.
+    /// channel drives its retry ladder off error replies; overload replies
+    /// are orthogonal to its trust/ACP bypasses.
     fn check_rate_limit(
         &self,
         limiter: &crate::sync::rate_limiter::PeerRateLimiter,
@@ -129,11 +130,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         error: Error,
     ) -> Error {
         let reply = PushLogReply::error(message_id, RATE_LIMITED_MESSAGE);
-        let _ = self
+        // Best-effort: if the nack cannot be sent, the pusher times out and
+        // lands in the same retry path; no state was discarded.
+        if let Err(send_err) = self
             .runtime
             .transport
             .send_pushlog_response(token, reply)
-            .await;
+            .await
+        {
+            tracing::debug!(error = %send_err, "Failed to send PushLog backpressure nack");
+        }
         error
     }
 
@@ -145,7 +151,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         error: Error,
     ) -> Error {
         let mut reply = PushLogReply::error(message_id, RATE_LIMITED_MESSAGE);
-        let _ = sign_with_transport(&self.runtime.transport, &mut reply);
+        // Best-effort: send_two_stream_reply logs its own failures; an unsent
+        // nack degrades to a pusher-side timeout on the same retry path.
+        if let Err(sign_err) = sign_with_transport(&self.runtime.transport, &mut reply) {
+            tracing::debug!(error = %sign_err, "Failed to sign two-stream backpressure nack");
+        }
         self.send_two_stream_reply(peer_id, reply, token).await;
         error
     }
@@ -158,8 +168,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         error: Error,
     ) -> Error {
         let mut reply = DocSyncReply::error(message_id, RATE_LIMITED_MESSAGE);
-        let _ = sign_with_transport(&self.runtime.transport, &mut reply);
-        let _ = if let Some(token) = token {
+        if let Err(sign_err) = sign_with_transport(&self.runtime.transport, &mut reply) {
+            tracing::debug!(error = %sign_err, "Failed to sign DocSync backpressure nack");
+        }
+        let send_result = if let Some(token) = token {
             self.runtime
                 .transport
                 .send_doc_sync_response_token(token, reply)
@@ -170,6 +182,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 .send_doc_sync_response(peer_id, reply)
                 .await
         };
+        if let Err(send_err) = send_result {
+            tracing::debug!(error = %send_err, "Failed to send DocSync backpressure nack");
+        }
         error
     }
 
@@ -182,8 +197,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         error: Error,
     ) -> Error {
         let mut reply = BranchableSyncReply::error(message_id, collection_id, RATE_LIMITED_MESSAGE);
-        let _ = sign_with_transport(&self.runtime.transport, &mut reply);
-        let _ = if let Some(token) = token {
+        if let Err(sign_err) = sign_with_transport(&self.runtime.transport, &mut reply) {
+            tracing::debug!(error = %sign_err, "Failed to sign BranchableSync backpressure nack");
+        }
+        let send_result = if let Some(token) = token {
             self.runtime
                 .transport
                 .send_branchable_sync_response_token(token, reply)
@@ -194,6 +211,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 .send_branchable_sync_response(peer_id, reply)
                 .await
         };
+        if let Err(send_err) = send_result {
+            tracing::debug!(error = %send_err, "Failed to send BranchableSync backpressure nack");
+        }
         error
     }
 
@@ -205,7 +225,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     ) -> Error {
         // CAR has no error reply type — send an empty response so the sender
         // sees an explicit (parseable) rejection rather than a hung stream.
-        let _ = if let Some(token) = token {
+        let send_result = if let Some(token) = token {
             self.runtime
                 .transport
                 .send_car_response_token(token, Vec::new())
@@ -216,6 +236,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 .send_car_response(peer_id, Vec::new())
                 .await
         };
+        if let Err(send_err) = send_result {
+            tracing::debug!(error = %send_err, "Failed to send CAR backpressure rejection");
+        }
         error
     }
 

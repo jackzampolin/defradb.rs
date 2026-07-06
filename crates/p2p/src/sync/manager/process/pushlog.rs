@@ -376,10 +376,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     },
                 );
                 if !inserted {
-                    // #1088 M1: the block is stored but its DAG completion is no
-                    // longer tracked. Returning Ok here made the reply seams ack
-                    // success, which deletes the pusher's retry record and loses
-                    // the document silently. The typed error becomes a
+                    // The block is stored but its DAG completion is not
+                    // tracked. This must surface as an error: a success reply
+                    // deletes the pusher's retry record, silently losing the
+                    // document. The reply seams map this typed error to the
                     // RATE_LIMITED_MESSAGE nack so the pusher re-pushes later.
                     tracing::warn!(
                         cid = %cid,
