@@ -40,7 +40,9 @@ zeroize = "1"
 
 [dev-dependencies]
 crypto = { path = "../crypto" }
+data-encoding = "2"
 db-nac = { path = "../db-nac" }
+iroh.workspace = true
 
 [features]
 default = ["native", "wasmtime-runtime", "iroh", "libp2p"]
