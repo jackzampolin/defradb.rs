@@ -1106,7 +1106,10 @@ mod tests {
 
         // Establish the connection through the adapter's normal dial path.
         let dial_addr = dialable_ticket(&transport_b).await;
-        adapter.connect_peer(&dial_addr).await.expect("initial dial");
+        adapter
+            .connect_peer(&dial_addr)
+            .await
+            .expect("initial dial");
 
         let hex_id = transport_b.local_peer_id().to_string();
         adapter
@@ -1163,7 +1166,10 @@ mod tests {
         let adapter = IrohP2PAdapter::<NoopBlockstore>::for_tests(transport_a);
 
         let dial_addr = dialable_ticket(&transport_b).await;
-        adapter.connect_peer(&dial_addr).await.expect("initial dial");
+        adapter
+            .connect_peer(&dial_addr)
+            .await
+            .expect("initial dial");
 
         // Undialable address for the connected peer: with no doc pusher the
         // provided collection tokens are used as-is, and with no coordinator
