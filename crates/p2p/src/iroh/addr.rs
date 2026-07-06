@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
 
-use iroh::{EndpointAddr, RelayUrl};
+use iroh::{EndpointAddr, EndpointId, RelayUrl};
 use iroh_tickets::endpoint::EndpointTicket;
 
 use crate::error::{Error, Result};
@@ -68,6 +68,22 @@ pub fn parse_public_peer_addr(addr: &str) -> Result<(PeerId, Vec<PeerAddr>)> {
     }
 
     Ok((PeerId::new(normalize_endpoint_id(trimmed)), Vec::new()))
+}
+
+/// Canonicalize a peer-id string to the lowercase-hex form iroh uses to
+/// display an `EndpointId`, when it parses as one.
+///
+/// `EndpointId` parsing accepts both lowercase-hex and base32 spellings, so
+/// two strings can name the same endpoint without being string-equal.
+/// Membership checks against transport peer lists (which carry canonical hex,
+/// via `EndpointId::to_string`) must therefore compare canonical forms, not
+/// raw strings. A string that does not parse as an `EndpointId` is returned
+/// unchanged, so comparisons degrade to plain string equality.
+pub fn canonical_peer_id(peer_id: &PeerId) -> PeerId {
+    match peer_id.as_str().parse::<EndpointId>() {
+        Ok(id) => PeerId::new(id.to_string()),
+        Err(_) => peer_id.clone(),
+    }
 }
 
 /// Render raw iroh endpoint listen addresses into stable, connectable public strings.
@@ -202,6 +218,35 @@ mod tests {
         "ae58ff8833241ac82d6ff7611046ed67b5072d142c588d0063e942d9a75502b6"
             .parse()
             .unwrap()
+    }
+
+    /// The hex and base32 spellings of the same key must canonicalize to the
+    /// same `PeerId`, so connected-peer membership checks cannot be defeated
+    /// by an alternate spelling. The base32 string is the BASE32_NOPAD
+    /// (lowercase) encoding of the same 32 bytes as `endpoint_id()`.
+    #[test]
+    fn canonical_peer_id_unifies_hex_and_base32_spellings() {
+        let hex = endpoint_id().to_string();
+        let base32 = "vzmp7cbteqnmqllp65qrarxnm62qoliufrmi2add5fbntj2vak3a";
+
+        assert_eq!(
+            canonical_peer_id(&PeerId::new(base32.to_string())).as_str(),
+            hex,
+            "base32 spelling canonicalizes to hex"
+        );
+        assert_eq!(
+            canonical_peer_id(&PeerId::new(hex.clone())).as_str(),
+            hex,
+            "hex spelling is already canonical"
+        );
+    }
+
+    /// A string that is not an `EndpointId` passes through unchanged, so
+    /// canonicalized comparison degrades to plain string equality.
+    #[test]
+    fn canonical_peer_id_keeps_unparseable_ids_unchanged() {
+        let raw = PeerId::new("not-an-endpoint-id".to_string());
+        assert_eq!(canonical_peer_id(&raw), raw);
     }
 
     #[test]

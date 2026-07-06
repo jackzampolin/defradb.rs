@@ -23,8 +23,8 @@ mod secret_key;
 mod transport;
 
 pub use addr::{
-    best_shareable_public_addr, endpoint_addr_from_parts, endpoint_ticket_string,
-    format_public_listen_addrs, is_ticket_string, parse_public_peer_addr,
+    best_shareable_public_addr, canonical_peer_id, endpoint_addr_from_parts,
+    endpoint_ticket_string, format_public_listen_addrs, is_ticket_string, parse_public_peer_addr,
 };
 pub use config::{IrohDiscoveryConfig, IrohRelayModeConfig};
 pub use endpoint::spawn_endpoint;

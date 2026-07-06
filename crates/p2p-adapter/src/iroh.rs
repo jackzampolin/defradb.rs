@@ -13,7 +13,8 @@ use crate::{
 };
 
 use p2p::iroh::{
-    best_shareable_public_addr, format_public_listen_addrs, parse_public_peer_addr, IrohTransport,
+    best_shareable_public_addr, canonical_peer_id, format_public_listen_addrs,
+    parse_public_peer_addr, IrohTransport,
 };
 use p2p::sync::IrohSyncCoordinator;
 use p2p::topics::DefraTopic;
@@ -43,6 +44,25 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
                 .map_err(|error| P2PError::internal(error.to_string()))?;
         }
         Ok(())
+    }
+
+    /// True when the transport already holds a live connection to `peer_id`.
+    ///
+    /// Comparison is in canonical id form (`canonical_peer_id`), so a base32
+    /// spelling of the peer id still matches the transport's canonical-hex
+    /// entries. A failed read degrades to `false`, so callers fall back to
+    /// dialing exactly as they did before this check existed.
+    async fn is_transport_connected(&self, peer_id: &p2p::transport::PeerId) -> bool {
+        let canonical_id = canonical_peer_id(peer_id);
+        self.transport
+            .connected_peers()
+            .await
+            .map(|peers| {
+                peers
+                    .iter()
+                    .any(|peer| canonical_peer_id(peer) == canonical_id)
+            })
+            .unwrap_or(false)
     }
 
     async fn resubscribe_tracked_document_topics(&self) {
@@ -166,6 +186,24 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
         }
     }
 
+    /// Transport-only adapter for tests: no coordinator, pusher, event bus, or
+    /// NAC. Enough surface to exercise the connection-management paths
+    /// (`connect_peer`, `add_replicator` registration) against real endpoints.
+    #[cfg(test)]
+    fn for_tests(transport: IrohTransport) -> Self {
+        Self {
+            transport,
+            sync_coordinator: None,
+            doc_pusher: None,
+            event_bus: None,
+            version_syncer: None,
+            replicator_push_options: ReplicatorPushOptionsState::default(),
+            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            nac_checker: None,
+        }
+    }
+
     async fn send_doc_sync_requests_concurrently(
         &self,
         peers: &[p2p::transport::PeerId],
@@ -273,6 +311,18 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
 
         let (peer_id, direct_addrs) = parse_public_peer_addr(addr)
             .map_err(|error| P2PError::invalid_input(error.to_string()))?;
+        // Connecting to an already-connected peer is a no-op (matching Go
+        // DefraDB, where libp2p `Connect` returns immediately when connected):
+        // a redundant dial is not just wasted work — on Linux it can time out
+        // against a healthy connection and fail the caller. Refresh the
+        // address book and return.
+        if self.is_transport_connected(&peer_id).await {
+            if let Ok(mut addrs) = self.peer_addresses.write() {
+                addrs.insert(peer_id.to_string(), addr.to_string());
+            }
+            return Ok(());
+        }
+
         let dial_timeout = if direct_addrs.is_empty() {
             std::time::Duration::from_secs(10)
         } else {
@@ -443,12 +493,19 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             HashSet::new()
         };
 
-        self.transport
-            .dial(&peer_id, direct_addrs)
-            .await
-            .map_err(|error| {
-                P2PError::transport(format!("failed to connect to replicator peer: {error}"))
-            })?;
+        // Same rationale as `connect_peer`: in the common pairing flow the
+        // replicator is installed over an already-live connection, and a
+        // redundant dial can spuriously time out (Linux). The registration and
+        // initial replay below ride the existing connection; the address book
+        // entry is still refreshed either way.
+        if !self.is_transport_connected(&peer_id).await {
+            self.transport
+                .dial(&peer_id, direct_addrs)
+                .await
+                .map_err(|error| {
+                    P2PError::transport(format!("failed to connect to replicator peer: {error}"))
+                })?;
+        }
 
         if let Ok(mut addrs) = self.peer_addresses.write() {
             addrs.insert(peer_id.to_string(), addr_str.to_string());
@@ -936,5 +993,205 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use bytes::Bytes;
+    use cid::Cid;
+    use p2p::iroh::{
+        is_ticket_string, load_or_generate_secret_key, spawn_endpoint, IrohDiscoveryConfig,
+        IrohEndpointConfig, IrohRelayModeConfig,
+    };
+    use p2p::P2PTransport;
+
+    use super::*;
+
+    /// The adapters under test carry no sync coordinator, so the blockstore
+    /// generic is never exercised; a do-nothing implementation satisfies it.
+    struct NoopBlockstore;
+
+    #[async_trait]
+    impl Blockstore for NoopBlockstore {
+        async fn get(&self, _cid: &Cid) -> blockstore::Result<Option<Bytes>> {
+            Ok(None)
+        }
+        async fn put(&self, _cid: &Cid, _data: &[u8]) -> blockstore::Result<()> {
+            Ok(())
+        }
+        async fn put_many(&self, _blocks: &[(&Cid, &[u8])]) -> blockstore::Result<()> {
+            Ok(())
+        }
+        async fn has(&self, _cid: &Cid) -> blockstore::Result<bool> {
+            Ok(false)
+        }
+        async fn delete(&self, _cid: &Cid) -> blockstore::Result<()> {
+            Ok(())
+        }
+        async fn get_size(&self, _cid: &Cid) -> blockstore::Result<Option<usize>> {
+            Ok(None)
+        }
+        async fn all_cids(&self) -> blockstore::Result<Vec<Cid>> {
+            Ok(Vec::new())
+        }
+        fn hash_on_read(&self, _enabled: bool) {}
+        async fn is_merged(&self, _cid: &Cid) -> blockstore::Result<bool> {
+            Ok(false)
+        }
+        async fn mark_as_merged(&self, _cid: &Cid) -> blockstore::Result<()> {
+            Ok(())
+        }
+        async fn get_unmerged(&self) -> blockstore::Result<Vec<Cid>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn test_endpoint_config(secret_key: iroh::SecretKey) -> IrohEndpointConfig {
+        IrohEndpointConfig {
+            secret_key,
+            relay_mode: IrohRelayModeConfig::Disabled,
+            discovery: IrohDiscoveryConfig::Disabled,
+            bind_port: None,
+            bind_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        }
+    }
+
+    /// The endpoint ticket among a transport's listen addresses — the same
+    /// self-contained dialable form production peers exchange.
+    async fn dialable_ticket(transport: &IrohTransport) -> String {
+        transport
+            .listen_addresses()
+            .await
+            .expect("listen addrs")
+            .iter()
+            .map(|addr| addr.as_str())
+            .find(|addr| is_ticket_string(addr))
+            .expect("endpoint ticket in listen addresses")
+            .to_string()
+    }
+
+    /// Base32 spelling of a canonical-hex endpoint id (iroh accepts both).
+    fn base32_spelling(hex_id: &str) -> String {
+        let bytes = data_encoding::HEXLOWER
+            .decode(hex_id.as_bytes())
+            .expect("valid hex endpoint id");
+        data_encoding::BASE32_NOPAD.encode(&bytes).to_lowercase()
+    }
+
+    /// Regression for the Linux demo `pair` hang: connecting to an
+    /// already-connected peer must be a no-op, not a redial. Both reconnect
+    /// attempts below carry an undialable direct address (a port nothing
+    /// listens on) for the connected peer — pre-fix, `connect_peer` dialed it
+    /// and failed; post-fix, the live connection short-circuits the dial. The
+    /// base32 spelling exercises the canonical-form comparison
+    /// (`canonical_peer_id`) rather than raw string equality.
+    #[tokio::test]
+    async fn connect_peer_is_noop_when_already_connected() {
+        let key_a = load_or_generate_secret_key(None).await.expect("key a");
+        let key_b = load_or_generate_secret_key(None).await.expect("key b");
+        let (command_tx_a, _events_a, _replicators_a, _task_a) =
+            spawn_endpoint(test_endpoint_config(key_a.clone()))
+                .await
+                .expect("endpoint a");
+        let (command_tx_b, _events_b, _replicators_b, _task_b) =
+            spawn_endpoint(test_endpoint_config(key_b.clone()))
+                .await
+                .expect("endpoint b");
+        let transport_a = IrohTransport::new(command_tx_a, key_a);
+        let transport_b = IrohTransport::new(command_tx_b, key_b);
+        let adapter = IrohP2PAdapter::<NoopBlockstore>::for_tests(transport_a);
+
+        // Establish the connection through the adapter's normal dial path.
+        let dial_addr = dialable_ticket(&transport_b).await;
+        adapter
+            .connect_peer(&dial_addr)
+            .await
+            .expect("initial dial");
+
+        let hex_id = transport_b.local_peer_id().to_string();
+        adapter
+            .connect_peer(&format!("{hex_id}@127.0.0.1:1"))
+            .await
+            .expect("reconnect to a connected peer (hex id) must be a no-op");
+        adapter
+            .connect_peer(&format!("{}@127.0.0.1:1", base32_spelling(&hex_id)))
+            .await
+            .expect("reconnect to a connected peer (base32 id) must be a no-op");
+    }
+
+    /// Negative control: the already-connected check must not blanket-accept.
+    /// With no connection to the target, an undialable address still fails.
+    #[tokio::test]
+    async fn connect_peer_still_dials_when_not_connected() {
+        let key_a = load_or_generate_secret_key(None).await.expect("key a");
+        let (command_tx_a, _events_a, _replicators_a, _task_a) =
+            spawn_endpoint(test_endpoint_config(key_a.clone()))
+                .await
+                .expect("endpoint a");
+        let transport_a = IrohTransport::new(command_tx_a, key_a);
+        let adapter = IrohP2PAdapter::<NoopBlockstore>::for_tests(transport_a);
+
+        let phantom = load_or_generate_secret_key(None)
+            .await
+            .expect("phantom key")
+            .public()
+            .to_string();
+        adapter
+            .connect_peer(&format!("{phantom}@127.0.0.1:1"))
+            .await
+            .expect_err("dial to an unconnected, undialable peer must fail");
+    }
+
+    /// `add_replicator` shares the rationale: installing a replicator over an
+    /// already-live connection must not redial. The undialable address proves
+    /// the internal `transport.dial` is skipped; registration still succeeds
+    /// and the replicator is listed.
+    #[tokio::test]
+    async fn add_replicator_skips_dial_when_already_connected() {
+        let key_a = load_or_generate_secret_key(None).await.expect("key a");
+        let key_b = load_or_generate_secret_key(None).await.expect("key b");
+        let (command_tx_a, _events_a, _replicators_a, _task_a) =
+            spawn_endpoint(test_endpoint_config(key_a.clone()))
+                .await
+                .expect("endpoint a");
+        let (command_tx_b, _events_b, _replicators_b, _task_b) =
+            spawn_endpoint(test_endpoint_config(key_b.clone()))
+                .await
+                .expect("endpoint b");
+        let transport_a = IrohTransport::new(command_tx_a, key_a);
+        let transport_b = IrohTransport::new(command_tx_b, key_b);
+        let adapter = IrohP2PAdapter::<NoopBlockstore>::for_tests(transport_a);
+
+        let dial_addr = dialable_ticket(&transport_b).await;
+        adapter
+            .connect_peer(&dial_addr)
+            .await
+            .expect("initial dial");
+
+        // Undialable address for the connected peer: with no doc pusher the
+        // provided collection tokens are used as-is, and with no coordinator
+        // the replicator registers at the transport.
+        let undialable = format!("{}@127.0.0.1:1", transport_b.local_peer_id());
+        adapter
+            .add_replicator(
+                vec!["Collection1".to_string()],
+                Some(&undialable),
+                ReplicationFilters::new(),
+                Vec::new(),
+                None,
+            )
+            .await
+            .expect("add_replicator over a live connection must not redial");
+
+        let replicators = adapter.get_replicators().await.expect("list replicators");
+        assert!(
+            replicators
+                .iter()
+                .any(|r| r.id.as_deref() == Some(transport_b.local_peer_id().as_str())),
+            "replicator registered without a redial: {replicators:?}"
+        );
     }
 }
