@@ -63,6 +63,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         tracing::debug!(peer_id = %peer_id, "Peer disconnected");
         self.access.peer_state.peer_disconnected(peer_id.as_str());
         self.runtime.rate_limiter.remove_peer(&peer_id);
+        self.runtime.request_rate_limiter.remove_peer(&peer_id);
     }
 
     fn handle_peer_subscribed(&self, peer_id: PeerId, topic: String) {
@@ -97,8 +98,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// channel drives its retryInterval ladder off error replies
     /// (`replicator.go`); overload replies are orthogonal to the trust/ACP
     /// bypasses fa4a84f7 aligned with Go.
-    fn check_rate_limit(&self, peer_id: &PeerId, event_kind: &'static str) -> Result<()> {
-        match self.runtime.rate_limiter.check(peer_id) {
+    fn check_rate_limit(
+        &self,
+        limiter: &crate::sync::rate_limiter::PeerRateLimiter,
+        peer_id: &PeerId,
+        event_kind: &'static str,
+    ) -> Result<()> {
+        match limiter.check(peer_id) {
             RateLimitDecision::Allowed => Ok(()),
             RateLimitDecision::Limited {
                 retry_after,
@@ -244,7 +250,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 topic,
                 ..
             } => {
-                self.check_rate_limit(&propagation_source, "GossipMessage")?;
+                self.check_rate_limit(
+                    &self.runtime.rate_limiter,
+                    &propagation_source,
+                    "GossipMessage",
+                )?;
                 self.handle_gossip_message(propagation_source, message, topic)
                     .await?;
             }
@@ -254,7 +264,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 data,
                 ..
             } => {
-                self.check_rate_limit(&propagation_source, "GossipRawMessage")?;
+                self.check_rate_limit(
+                    &self.runtime.rate_limiter,
+                    &propagation_source,
+                    "GossipRawMessage",
+                )?;
                 self.handle_gossip_raw_message(propagation_source, topic, data)
                     .await?;
             }
@@ -263,7 +277,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 request,
                 token,
             } => {
-                if let Err(error) = self.check_rate_limit(&peer_id, "PushLogRequest") {
+                if let Err(error) = self.check_rate_limit(
+                    &self.runtime.request_rate_limiter,
+                    &peer_id,
+                    "PushLogRequest",
+                ) {
                     return Err(self
                         .reject_rate_limited_pushlog(&request.message_id, token, error)
                         .await);
@@ -277,7 +295,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 is_explicit_replicator,
                 explicit_replay_authorization,
             } => {
-                if let Err(error) = self.check_rate_limit(&peer_id, "TwoStreamRequest") {
+                if let Err(error) = self.check_rate_limit(
+                    &self.runtime.request_rate_limiter,
+                    &peer_id,
+                    "TwoStreamRequest",
+                ) {
                     return Err(self
                         .reject_rate_limited_two_stream(&peer_id, &request.message_id, token, error)
                         .await);
@@ -314,7 +336,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 request,
                 token,
             } => {
-                if let Err(error) = self.check_rate_limit(&peer_id, "DocSyncRequest") {
+                if let Err(error) = self.check_rate_limit(
+                    &self.runtime.request_rate_limiter,
+                    &peer_id,
+                    "DocSyncRequest",
+                ) {
                     return Err(self
                         .reject_rate_limited_doc_sync(&peer_id, &request.message_id, token, error)
                         .await);
@@ -330,7 +356,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 request,
                 token,
             } => {
-                if let Err(error) = self.check_rate_limit(&peer_id, "BranchableSyncRequest") {
+                if let Err(error) = self.check_rate_limit(
+                    &self.runtime.request_rate_limiter,
+                    &peer_id,
+                    "BranchableSyncRequest",
+                ) {
                     return Err(self
                         .reject_rate_limited_branchable_sync(
                             &peer_id,
@@ -352,7 +382,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 request,
                 token,
             } => {
-                if let Err(error) = self.check_rate_limit(&peer_id, "CarFetchRequest") {
+                if let Err(error) = self.check_rate_limit(
+                    &self.runtime.request_rate_limiter,
+                    &peer_id,
+                    "CarFetchRequest",
+                ) {
                     return Err(self
                         .reject_rate_limited_car_fetch(&peer_id, token, error)
                         .await);

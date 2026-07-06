@@ -206,11 +206,11 @@ pub struct StartArgs {
     pub query_max_filter_depth: Option<usize>,
 
     /// Per-peer rate limit burst capacity (max tokens). Default: 500.
-    #[arg(long)]
+    #[arg(long, env = "DEFRA_P2P_RATE_LIMIT_BURST")]
     pub p2p_rate_limit_burst: Option<u32>,
 
     /// Per-peer rate limit refill rate (tokens per second). Default: 50.
-    #[arg(long)]
+    #[arg(long, env = "DEFRA_P2P_RATE_LIMIT_RATE")]
     pub p2p_rate_limit_rate: Option<f64>,
 
     /// Max document IDs accepted in one DocSync request. Default: 1000.

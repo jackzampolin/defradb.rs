@@ -105,6 +105,50 @@ fn create_test_coordinator_with_options(
     SyncCoordinator<TestBlockstore, NoopTransport>,
     tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
 ) {
+    // Most limiter tests exercise one path at a time; share the injected
+    // limiter across gossip and request intake so either path sees it.
+    let request_rate_limiter = rate_limiter.clone();
+    create_test_coordinator_full(
+        access_mode,
+        replicators,
+        peer_state,
+        rate_limiter,
+        request_rate_limiter,
+        sync_config,
+    )
+}
+
+fn create_test_coordinator_with_split_limiters(
+    access_mode: AccessMode,
+    replicators: Arc<ReplicatorRegistry>,
+    peer_state: Arc<PeerStateTracker>,
+    rate_limiter: Arc<PeerRateLimiter>,
+    request_rate_limiter: Arc<PeerRateLimiter>,
+) -> (
+    SyncCoordinator<TestBlockstore, NoopTransport>,
+    tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
+) {
+    create_test_coordinator_full(
+        access_mode,
+        replicators,
+        peer_state,
+        rate_limiter,
+        request_rate_limiter,
+        SyncConfig::default(),
+    )
+}
+
+fn create_test_coordinator_full(
+    access_mode: AccessMode,
+    replicators: Arc<ReplicatorRegistry>,
+    peer_state: Arc<PeerStateTracker>,
+    rate_limiter: Arc<PeerRateLimiter>,
+    request_rate_limiter: Arc<PeerRateLimiter>,
+    sync_config: SyncConfig,
+) -> (
+    SyncCoordinator<TestBlockstore, NoopTransport>,
+    tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
+) {
     let transport = NoopTransport::new();
     let local_peer_id = transport.local_peer_id().to_string();
     let broadcaster = Broadcaster::new(transport.clone());
@@ -112,6 +156,7 @@ fn create_test_coordinator_with_options(
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     create_test_coordinator_with_blockstore(TestCoordinatorParams {
         sync_config,
+        request_rate_limiter,
         access_mode,
         replicators,
         peer_state,
@@ -128,6 +173,7 @@ fn create_test_coordinator_with_options(
 /// without hiding the list of inputs behind a builder pattern.
 struct TestCoordinatorParams<B: Blockstore + 'static> {
     sync_config: SyncConfig,
+    request_rate_limiter: Arc<PeerRateLimiter>,
     access_mode: AccessMode,
     replicators: Arc<ReplicatorRegistry>,
     peer_state: Arc<PeerStateTracker>,
@@ -156,6 +202,7 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
 ) {
     let TestCoordinatorParams {
         sync_config,
+        request_rate_limiter,
         access_mode,
         replicators,
         peer_state,
@@ -185,6 +232,7 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
                 DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
             )),
             rate_limiter,
+            request_rate_limiter,
             push_send_timeout: DEFAULT_PUSH_SEND_TIMEOUT,
             max_doc_sync_request_doc_ids: DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
             shutdown: SyncShutdownHandle::new(),
@@ -896,6 +944,7 @@ async fn doc_sync_filters_heads_outside_replicator_collection() {
     let (coordinator, _events) = create_test_coordinator_with_blockstore_and_head_provider(
         TestCoordinatorParams {
             sync_config: SyncConfig::default(),
+            request_rate_limiter: Arc::new(PeerRateLimiter::default()),
             access_mode: AccessMode::Controlled,
             replicators,
             peer_state,
@@ -962,6 +1011,7 @@ async fn car_fetch_controlled_mode_filters_unauthorized_data_block() {
 
     let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
         sync_config: SyncConfig::default(),
+        request_rate_limiter: Arc::new(PeerRateLimiter::default()),
         access_mode: AccessMode::Controlled,
         replicators,
         peer_state,
@@ -1223,6 +1273,7 @@ async fn branchable_sync_reply_remerges_locally_complete_unmerged_head() {
     let (coordinator, mut events) =
         create_test_coordinator_with_blockstore(TestCoordinatorParams {
             sync_config: SyncConfig::default(),
+            request_rate_limiter: Arc::new(PeerRateLimiter::default()),
             access_mode: AccessMode::Open,
             replicators,
             peer_state,
@@ -1705,6 +1756,7 @@ async fn gossip_ignores_transport_replicator_state_for_directionality() {
 
     let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
         sync_config: SyncConfig::default(),
+        request_rate_limiter: Arc::new(PeerRateLimiter::default()),
         access_mode: AccessMode::Controlled,
         replicators: replicators.clone(),
         peer_state,
@@ -1750,6 +1802,7 @@ async fn delete_replicator_removes_gossip_access_without_subscription() {
 
     let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
         sync_config: SyncConfig::default(),
+        request_rate_limiter: Arc::new(PeerRateLimiter::default()),
         access_mode: AccessMode::Controlled,
         replicators,
         peer_state,
@@ -1792,6 +1845,7 @@ async fn create_replicator_update_keeps_outbound_targets_from_gossip_sources() {
 
     let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
         sync_config: SyncConfig::default(),
+        request_rate_limiter: Arc::new(PeerRateLimiter::default()),
         access_mode: AccessMode::Controlled,
         replicators,
         peer_state,
@@ -1904,6 +1958,7 @@ async fn pushlog_retries_transient_transaction_conflicts_without_sync_error() {
     let (coordinator, mut events) =
         create_test_coordinator_with_blockstore(TestCoordinatorParams {
             sync_config: SyncConfig::default(),
+            request_rate_limiter: Arc::new(PeerRateLimiter::default()),
             access_mode: AccessMode::Open,
             replicators,
             peer_state,
@@ -1941,6 +1996,7 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
     let (coordinator, mut events) =
         create_test_coordinator_with_blockstore(TestCoordinatorParams {
             sync_config: SyncConfig::default(),
+            request_rate_limiter: Arc::new(PeerRateLimiter::default()),
             access_mode: AccessMode::Open,
             replicators,
             peer_state,
@@ -2348,5 +2404,91 @@ async fn fan_in_pushes_keep_pending_depth_bounded_and_account_every_reply() {
     assert_eq!(
         diagnostics.missing_link_retries, 0,
         "capacity overflow must not cause retry walks"
+    );
+}
+
+/// An error DocSyncReply (e.g. a RATE_LIMITED_MESSAGE nack from #1088 W4)
+/// carries no results; it must surface as an error, not be consumed as an
+/// empty successful sync.
+#[tokio::test]
+async fn doc_sync_error_reply_is_not_consumed_as_empty_success() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
+    let peer = random_peer_id();
+
+    let result = coordinator
+        .handle_transport_event(TransportEvent::DocSyncReply {
+            peer_id: peer.clone(),
+            reply: DocSyncReply::error("doc-sync-1", crate::error::RATE_LIMITED_MESSAGE),
+        })
+        .await;
+
+    assert!(
+        result.is_err(),
+        "an error reply must not be treated as an empty successful sync, got {:?}",
+        result
+    );
+}
+
+/// Same for BranchableSync: an error reply has empty heads and must not be
+/// mistaken for "peer has no heads for collection".
+#[tokio::test]
+async fn branchable_sync_error_reply_is_not_consumed_as_no_heads() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
+    let peer = random_peer_id();
+
+    let result = coordinator
+        .handle_transport_event(TransportEvent::BranchableSyncReply {
+            peer_id: peer.clone(),
+            reply: BranchableSyncReply::error(
+                "branchable-1",
+                "collection1",
+                crate::error::RATE_LIMITED_MESSAGE,
+            ),
+        })
+        .await;
+
+    assert!(
+        result.is_err(),
+        "an error reply must not be treated as \"peer has no heads\", got {:?}",
+        result
+    );
+}
+
+/// The gossip limiter (abuse ladder) and the request-intake limiter (pacing)
+/// are separate: an exhausted gossip bucket must not block replicator pushes,
+/// which have their own paced bucket.
+#[tokio::test]
+async fn request_intake_uses_paced_limiter_separate_from_gossip_ladder() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator_with_split_limiters(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        always_limited_rate_limiter(),
+        Arc::new(PeerRateLimiter::default()),
+    );
+    let peer = random_peer_id();
+
+    let gossip_result = coordinator
+        .handle_transport_event(gossip_event(peer.clone(), "collection1"))
+        .await;
+    assert!(
+        matches!(&gossip_result, Err(e) if e.is_rate_limited()),
+        "gossip must still be governed by the ladder limiter, got {:?}",
+        gossip_result
+    );
+
+    let push_result = coordinator
+        .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
+        .await;
+    assert!(
+        push_result.is_ok(),
+        "request intake must use its own paced limiter, got {:?}",
+        push_result
     );
 }

@@ -86,6 +86,8 @@ pub struct SyncConfig {
 
     /// Maximum number of pending-DAG registrations held while Bitswap
     /// completes missing links. Overflow is rejected with a backpressure nack.
+    /// Values below 1 are normalized to 1 (a zero cap would reject every
+    /// missing-link push forever).
     pub max_pending_dags: usize,
 }
 

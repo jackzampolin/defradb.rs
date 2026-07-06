@@ -93,6 +93,16 @@ fn backoff_for_failure(backoff_steps: &[Duration], consecutive_failures: u32) ->
         .unwrap_or_else(|| Duration::from_secs(1))
 }
 
+/// One-token refill horizon for request-intake pacing, clamped to [5ms, 1s].
+fn request_pacing_backoff(refill_rate: f64) -> Vec<Duration> {
+    let rate = if refill_rate.is_finite() && refill_rate > 0.0 {
+        refill_rate
+    } else {
+        1.0
+    };
+    vec![Duration::from_secs_f64((1.0 / rate).clamp(0.005, 1.0))]
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RateLimitDecision {
     Allowed,
@@ -128,6 +138,21 @@ impl PeerRateLimiter {
     /// * `refill_rate` – Tokens added per second per peer.
     pub fn new(capacity: u32, refill_rate: f64) -> Self {
         Self::with_backoff_steps(capacity, refill_rate, default_rate_limit_backoff())
+    }
+
+    /// Create a request-intake limiter: same bucket parameters, but the retry
+    /// horizon after a refusal is ~one token refill instead of the abuse
+    /// ladder.
+    ///
+    /// Request paths (PushLog, TwoStream, DocSync, ...) have a reply channel
+    /// and a well-behaved retry protocol, so the bucket itself is the flow
+    /// control: a legitimate deep full-DAG push that exhausts the burst must
+    /// resume at the refill rate. The 30s..12h ladder would wedge any DAG
+    /// deeper than the burst - each ladder-spaced re-push restarts from block
+    /// one and re-burns the burst on already-sent blocks before reaching new
+    /// ones. Gossip keeps the ladder (drop-only, no reply channel).
+    pub fn new_request_paced(capacity: u32, refill_rate: f64) -> Self {
+        Self::with_backoff_steps(capacity, refill_rate, request_pacing_backoff(refill_rate))
     }
 
     /// Create a new limiter with explicit rate-limit backoff steps.
@@ -215,6 +240,31 @@ mod tests {
         std::thread::sleep(Duration::from_millis(3));
         let (_, failures) = limited(limiter.check(&peer));
         assert_eq!(failures, 3);
+    }
+
+    #[test]
+    fn request_paced_limiter_recovers_at_refill_horizon_not_ladder() {
+        // #1088 W4 follow-up: request-intake limiting is flow control, not
+        // abuse control. A deep full-DAG push that exhausts the bucket must be
+        // able to resume at the token-refill rate; the 30s..12h abuse ladder
+        // would wedge any DAG deeper than the burst (each ladder re-push
+        // restarts from block 1 and re-burns the burst on already-sent blocks).
+        let limiter = PeerRateLimiter::new_request_paced(1, 200.0);
+        let peer = PeerId::new("peer-1".to_string());
+
+        assert_eq!(limiter.check(&peer), RateLimitDecision::Allowed);
+        let (retry_after, _) = limited(limiter.check(&peer));
+        assert!(
+            retry_after <= Duration::from_millis(50),
+            "retry horizon must be ~one token refill, not the abuse ladder: {retry_after:?}"
+        );
+
+        std::thread::sleep(retry_after + Duration::from_millis(20));
+        assert_eq!(
+            limiter.check(&peer),
+            RateLimitDecision::Allowed,
+            "must recover as soon as a token refills"
+        );
     }
 
     #[test]

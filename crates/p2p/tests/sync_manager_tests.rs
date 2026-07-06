@@ -691,3 +691,30 @@ async fn test_process_pushlog_pending_capacity_returns_typed_error() {
     // The block itself is kept (a later retry can complete without re-sending it).
     assert!(blockstore.has(&comp_b_cid).await.unwrap());
 }
+
+#[tokio::test]
+async fn test_max_pending_dags_zero_is_normalized_to_one() {
+    // A zero cap would reject every missing-link push forever (permanent
+    // admission outage); the manager normalizes it to a 1-slot map.
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let config = SyncConfig {
+        max_pending_dags: 0,
+        ..SyncConfig::default()
+    };
+    let (manager, mut events) = SyncManager::new(blockstore, test_peer_state(), config);
+
+    let (field_cid, _) = create_lww_block("field_a");
+    let (comp_cid, comp_block) = create_composite_block(vec![DAGLink::new("field_a", field_cid)]);
+    manager
+        .process_pushlog(
+            &broadcast_for(&comp_cid, "docA", comp_block),
+            Some("peer-1"),
+            false,
+            None,
+        )
+        .await
+        .expect("a single pending registration must be admitted even with cap 0");
+    let _ = events.try_recv().expect("DagNeedsFetch for composite");
+    assert_eq!(manager.pending_dag_count(), 1);
+}

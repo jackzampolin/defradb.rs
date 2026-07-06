@@ -114,7 +114,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             pending_dags: Arc::new(RwLock::new(HashMap::new())),
             query_to_root: Arc::new(RwLock::new(HashMap::new())),
             diagnostics: Arc::new(SyncDiagnostics::default()),
-            max_pending_dags: config.max_pending_dags,
+            // A zero cap would reject every missing-link push forever
+            // (permanent admission outage); normalize to a 1-slot map.
+            max_pending_dags: config.max_pending_dags.max(1),
         };
 
         (manager, event_rx)
