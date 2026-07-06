@@ -203,6 +203,16 @@ pub enum Error {
         collection_id: String,
     },
 
+    /// The pending-DAG map is at capacity, so an incoming push with missing
+    /// links could not be registered. Reply seams map this to the byte-exact
+    /// `RATE_LIMITED_MESSAGE` nack so the pusher retries instead of treating
+    /// the push as landed (#1088 W1).
+    #[error("pending DAG registrations at capacity ({max}), retry later")]
+    PendingDagCapacity {
+        /// The configured `SyncConfig::max_pending_dags` in effect.
+        max: usize,
+    },
+
     /// Request rejected because the caller is not authorized.
     #[error("unauthorized: {0}")]
     Unauthorized(String),
@@ -348,6 +358,17 @@ impl Error {
             } if collection_id == "rate-limited"
         )
     }
+
+    /// Reply text for hub-side backpressure rejections (rate limit or
+    /// pending-DAG capacity overflow), or `None` for every other error.
+    ///
+    /// The pusher matches replies byte-exactly against `RATE_LIMITED_MESSAGE`
+    /// (`is_rate_limited_message`) to drive its retry/backoff, so all
+    /// backpressure shapes must collapse onto that one sentinel.
+    pub fn backpressure_reply_message(&self) -> Option<&'static str> {
+        (self.is_rate_limited() || matches!(self, Error::PendingDagCapacity { .. }))
+            .then_some(RATE_LIMITED_MESSAGE)
+    }
 }
 
 /// Returns true when a peer reply carries the coordinator's explicit rate-limit signal.
@@ -400,7 +421,7 @@ impl From<libp2p::multiaddr::Error> for Error {
 
 #[cfg(test)]
 mod tests {
-    use super::Error;
+    use super::{is_rate_limited_message, Error, RATE_LIMITED_MESSAGE};
 
     #[test]
     fn txn_conflict_detection_matches_wrapped_storage_messages() {
@@ -455,6 +476,36 @@ mod tests {
 
         assert!(rate_limited.is_rate_limited());
         assert!(!ordinary_denial.is_rate_limited());
+    }
+
+    #[test]
+    fn backpressure_errors_map_to_the_exact_rate_limited_reply() {
+        // #1088 W1: the pusher matches replies with `message == RATE_LIMITED_MESSAGE`
+        // (is_rate_limited_message), so both backpressure shapes must map to the
+        // byte-exact sentinel and everything else must not.
+        let capacity = Error::PendingDagCapacity { max: 1000 };
+        assert_eq!(
+            capacity.backpressure_reply_message(),
+            Some(RATE_LIMITED_MESSAGE)
+        );
+        assert!(is_rate_limited_message(
+            capacity.backpressure_reply_message().unwrap()
+        ));
+
+        let rate_limited = Error::AccessDenied {
+            peer_id: "peer-1".into(),
+            collection_id: "rate-limited".into(),
+        };
+        assert_eq!(
+            rate_limited.backpressure_reply_message(),
+            Some(RATE_LIMITED_MESSAGE)
+        );
+
+        let ordinary_denial = Error::AccessDenied {
+            peer_id: "peer-1".into(),
+            collection_id: "users".into(),
+        };
+        assert_eq!(ordinary_denial.backpressure_reply_message(), None);
     }
 
     #[test]

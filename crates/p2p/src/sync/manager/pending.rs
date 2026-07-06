@@ -7,12 +7,6 @@ use cid::Cid;
 
 use crate::ExplicitReplayAuthorization;
 
-/// Maximum number of entries in the pending DAGs map.
-///
-/// Prevents unbounded memory growth when many DAGs arrive faster than they
-/// can be resolved via Bitswap.
-pub const MAX_PENDING_DAGS: usize = 1000;
-
 /// Time-to-live for a pending DAG entry.
 ///
 /// Entries older than this are evicted during insertion to prevent

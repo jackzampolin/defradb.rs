@@ -33,6 +33,13 @@ pub const DEFAULT_RATE_LIMIT_BACKOFF_SECS: &[u64] = &[
 /// Default timeout for one outbound PushLog send to a replicator peer.
 pub const DEFAULT_PUSH_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Default maximum number of entries in the pending DAGs map.
+///
+/// Prevents unbounded memory growth when many DAGs arrive faster than they
+/// can be resolved via Bitswap. Overflow is nacked back to the pusher with
+/// `RATE_LIMITED_MESSAGE` (#1088 W1) so its retry ladder keeps the doc queued.
+pub const DEFAULT_MAX_PENDING_DAGS: usize = 1000;
+
 /// Default rate-limit backoff ladder as durations.
 pub fn default_rate_limit_backoff() -> Vec<Duration> {
     DEFAULT_RATE_LIMIT_BACKOFF_SECS
@@ -76,6 +83,10 @@ pub struct SyncConfig {
 
     /// Timeout for one outbound PushLog send to a replicator peer.
     pub push_send_timeout: Duration,
+
+    /// Maximum number of pending-DAG registrations held while Bitswap
+    /// completes missing links. Overflow is rejected with a backpressure nack.
+    pub max_pending_dags: usize,
 }
 
 impl Default for SyncConfig {
@@ -89,6 +100,7 @@ impl Default for SyncConfig {
             rate_limit_rate: DEFAULT_RATE_LIMIT_RATE,
             rate_limit_backoff: default_rate_limit_backoff(),
             push_send_timeout: DEFAULT_PUSH_SEND_TIMEOUT,
+            max_pending_dags: DEFAULT_MAX_PENDING_DAGS,
         }
     }
 }

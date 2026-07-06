@@ -81,6 +81,8 @@ RUNS=(
   "MC_InteractiveTxnCounter_Green.cfg MC_InteractiveTxnCounter_Common.tla GREEN" # #1044: gate On + commit-only finalize -> deadlock-free + gate never held across idle
   "MC_InteractiveTxnCounter_Red_NoGate.cfg MC_InteractiveTxnCounter_Common.tla RED" # gate Off -> arbitrary-order batch vs finalize circular-wait DEADLOCK (gate is load-bearing)
   "MC_InteractiveTxnCounter_Red_AcrossLifetime.cfg MC_InteractiveTxnCounter_Common.tla RED" # #1041 old path: gate held across user-controlled idle lifetime (INV_GateBoundedHold)
+  "MC_PushLogAdmission_Green.cfg MC_PushLogAdmission_Common.tla GREEN" # #1088 W1: capacity overflow nacks -> success implies registered-or-merged + all docs merge
+  "MC_PushLogAdmission_Red_SuccessOnFull.cfg MC_PushLogAdmission_Common.tla RED" # fa4a84f7 regression: overflow drops registration but acks success (INV_SuccessImpliesRegisteredOrMerged)
   "MC_Jwt_Green.cfg                MC_Jwt_Green.tla                GREEN" # token->DID binds genuine signer DID
   "MC_Jwt_Red_NoAlgBinding.cfg     MC_Jwt_Red_NoAlgBinding.tla     RED"   # alg-confusion: header alg not bound to key type
   "MC_Jwt_Red_NoIssBinding.cfg     MC_Jwt_Red_NoIssBinding.tla     RED"   # iss not bound to did(pubkey)

@@ -84,6 +84,9 @@ pub struct SyncManager<B: Blockstore> {
 
     /// Observability counters (see `SyncDiagnostics`).
     pub(crate) diagnostics: Arc<SyncDiagnostics>,
+
+    /// Capacity of `pending_dags`; overflow is rejected with a backpressure nack.
+    pub(super) max_pending_dags: usize,
 }
 
 impl<B: Blockstore + 'static> SyncManager<B> {
@@ -111,6 +114,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             pending_dags: Arc::new(RwLock::new(HashMap::new())),
             query_to_root: Arc::new(RwLock::new(HashMap::new())),
             diagnostics: Arc::new(SyncDiagnostics::default()),
+            max_pending_dags: config.max_pending_dags,
         };
 
         (manager, event_rx)

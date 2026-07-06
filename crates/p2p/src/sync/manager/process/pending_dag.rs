@@ -10,7 +10,7 @@ use blockstore::Blockstore;
 use crate::error::{Error, Result};
 use crate::sync::manager::events::SyncEvent;
 use crate::sync::manager::links::find_all_missing_links;
-use crate::sync::manager::pending::{PendingDag, MAX_PENDING_DAGS, PENDING_DAG_TTL};
+use crate::sync::manager::pending::{PendingDag, PENDING_DAG_TTL};
 
 use super::SyncManager;
 
@@ -134,13 +134,14 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Insert a pending DAG entry, enforcing TTL eviction and capacity limits.
     ///
     /// Expired entries (older than `PENDING_DAG_TTL`) are removed before checking
-    /// the capacity. If the map is still at `MAX_PENDING_DAGS` after eviction the
-    /// new entry is silently dropped and `false` is returned so callers can log.
+    /// the capacity. If the map is still at `max_pending_dags` after eviction the
+    /// new entry is dropped and `false` is returned so callers can reject with a
+    /// backpressure nack (#1088 W1) instead of acking a discarded registration.
     pub(super) fn insert_pending_dag(&self, root_cid: Cid, dag: PendingDag) -> bool {
         let mut pending = self.pending_dags.write();
         evict_expired_pending_dags(&mut pending, Instant::now());
 
-        if pending.len() >= MAX_PENDING_DAGS && !pending.contains_key(&root_cid) {
+        if pending.len() >= self.max_pending_dags && !pending.contains_key(&root_cid) {
             return false;
         }
 
@@ -223,7 +224,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 cid = %root_cid,
                 doc_id = %doc_id,
                 source_peer = %source_peer,
-                max = MAX_PENDING_DAGS,
+                max = self.max_pending_dags,
                 "Pending DAGs at capacity, dropping DocSync registration"
             );
         }
@@ -266,7 +267,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 cid = %root_cid,
                 collection_id = %collection_id,
                 source_peer = %source_peer,
-                max = MAX_PENDING_DAGS,
+                max = self.max_pending_dags,
                 "Pending DAGs at capacity, dropping branchable DAG registration"
             );
         }
@@ -445,6 +446,7 @@ mod tests {
     use multihash_codetable::{Code, MultihashDigest};
     use storage::backends::MemoryStore;
 
+    use crate::sync::manager::DEFAULT_MAX_PENDING_DAGS;
     use crate::sync::{PeerStateTracker, SyncConfig};
 
     fn test_cid(label: usize) -> Cid {
@@ -484,16 +486,16 @@ mod tests {
         let root = test_cid(0);
 
         assert!(manager.insert_pending_dag(root, pending_dag("original", Instant::now())));
-        for idx in 1..MAX_PENDING_DAGS {
+        for idx in 1..DEFAULT_MAX_PENDING_DAGS {
             assert!(manager.insert_pending_dag(
                 test_cid(idx),
                 pending_dag(&format!("doc-{idx}"), Instant::now()),
             ));
         }
-        assert_eq!(manager.pending_dag_count(), MAX_PENDING_DAGS);
+        assert_eq!(manager.pending_dag_count(), DEFAULT_MAX_PENDING_DAGS);
 
         assert!(manager.insert_pending_dag(root, pending_dag("replacement", Instant::now())));
-        assert_eq!(manager.pending_dag_count(), MAX_PENDING_DAGS);
+        assert_eq!(manager.pending_dag_count(), DEFAULT_MAX_PENDING_DAGS);
         assert_eq!(
             manager
                 .pending_dags
@@ -542,6 +544,6 @@ mod tests {
             handle.join().expect("insert worker should not panic");
         }
 
-        assert!(manager.pending_dag_count() <= MAX_PENDING_DAGS);
+        assert!(manager.pending_dag_count() <= DEFAULT_MAX_PENDING_DAGS);
     }
 }

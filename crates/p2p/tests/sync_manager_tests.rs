@@ -627,3 +627,67 @@ async fn test_blockstore_accessor() {
     manager.blockstore().put(&cid, BLOCK_DATA).await.unwrap();
     assert!(blockstore.has(&cid).await.unwrap());
 }
+
+// --- #1088 W1: pending-DAG capacity must surface as a typed error ---
+
+fn broadcast_for(cid: &Cid, doc_id: &str, block: Vec<u8>) -> PushLogBroadcast {
+    PushLogBroadcast::new(
+        doc_id.to_string(),
+        Bytes::from(cid.to_bytes()),
+        "collection1".to_string(),
+        "creator1".to_string(),
+        Bytes::from(block),
+    )
+}
+
+#[tokio::test]
+async fn test_process_pushlog_pending_capacity_returns_typed_error() {
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let config = SyncConfig {
+        max_pending_dags: 1,
+        ..SyncConfig::default()
+    };
+    let (manager, mut events) = SyncManager::new(blockstore.clone(), test_peer_state(), config);
+
+    // Composite A links to a field block that is never stored -> registers pending.
+    let (field_a_cid, _) = create_lww_block("field_a");
+    let (comp_a_cid, comp_a_block) =
+        create_composite_block(vec![DAGLink::new("field_a", field_a_cid)]);
+    manager
+        .process_pushlog(
+            &broadcast_for(&comp_a_cid, "docA", comp_a_block),
+            Some("peer-1"),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    let _ = events.try_recv().expect("DagNeedsFetch for composite A");
+    assert_eq!(manager.pending_dag_count(), 1);
+
+    // Composite B overflows the single-slot pending map: the registration is
+    // dropped, and the caller MUST see a typed capacity error so the reply
+    // seams can nack instead of acking success (#1088 M1 invariant:
+    // success reply => merged or registered as pending).
+    let (field_b_cid, _) = create_lww_block("field_b");
+    let (comp_b_cid, comp_b_block) =
+        create_composite_block(vec![DAGLink::new("field_b", field_b_cid)]);
+    let result = manager
+        .process_pushlog(
+            &broadcast_for(&comp_b_cid, "docB", comp_b_block),
+            Some("peer-2"),
+            false,
+            None,
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(Error::PendingDagCapacity { .. })),
+        "capacity drop must be a typed error, got {:?}",
+        result
+    );
+    assert_eq!(manager.pending_dag_count(), 1, "registration was dropped");
+    // The block itself is kept (a later retry can complete without re-sending it).
+    assert!(blockstore.has(&comp_b_cid).await.unwrap());
+}
