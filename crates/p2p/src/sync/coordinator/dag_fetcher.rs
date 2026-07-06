@@ -18,6 +18,18 @@ use crate::transport::{P2PTransport, PeerId};
 
 const SELECTIVE_FETCH_BATCH_SIZE: usize = 2048;
 
+/// Defensive ceiling on selective-fetch DAG-walk iterations.
+///
+/// Each iteration reveals and fetches the next frontier of missing blocks
+/// (`find_all_missing_links` can only traverse into blocks already present), so
+/// the walk runs roughly once per layer of the missing sub-DAG. The real loop
+/// terminator is the `!made_progress` break — this ceiling only guards against a
+/// peer that dribbles blocks indefinitely. It must stay well above any realistic
+/// DAG depth: the previous fixed cap of 20 stranded any document with a longer
+/// unreplicated update history unmerged, even while the walk was still making
+/// progress every iteration.
+const MAX_DAG_WALK_ITERATIONS: usize = 100_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FetchBatchOutcome {
     Complete,
@@ -96,8 +108,10 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
         return;
     }
 
-    // Walk DAG, fetching missing blocks level by level
-    for iteration in 0..20 {
+    // Walk DAG, fetching missing blocks level by level. The walk stops as soon
+    // as an iteration makes no progress (`!made_progress` below); the iteration
+    // ceiling is only a defensive backstop, not a functional depth limit.
+    for iteration in 0..MAX_DAG_WALK_ITERATIONS {
         let root_data = match blockstore.get(&root_cid).await {
             Ok(Some(data)) => data,
             _ => {
@@ -783,5 +797,76 @@ mod tests {
             batches[1].iter().copied().collect::<HashSet<_>>(),
             HashSet::from([leaf_one_cid, leaf_two_cid])
         );
+    }
+
+    /// A linear DAG deeper than the old fixed 20-iteration cap must still fully
+    /// reconcile. Each selective-fetch iteration reveals one deeper layer, so a
+    /// 25-deep chain needs 24 selective iterations; the previous `0..20` cap
+    /// abandoned it unmerged (no `DagReady`) even though every iteration was
+    /// still making progress.
+    #[tokio::test]
+    async fn poll_fetch_dag_completes_dag_deeper_than_legacy_iteration_cap() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+        const DEPTH: usize = 25;
+
+        // Build a linear chain nodes[0] (leaf) -> ... -> nodes[DEPTH-1] (root),
+        // each node linking its single child by CID.
+        let mut nodes: Vec<(Cid, Vec<u8>)> = Vec::with_capacity(DEPTH);
+        let mut child: Option<Cid> = None;
+        for i in 0..DEPTH {
+            let data = match child {
+                Some(c) => encode_ipld(ipld!({ "i": i as i64, "child": c })),
+                None => encode_ipld(ipld!({ "i": i as i64 })),
+            };
+            let cid = make_cid(&data);
+            child = Some(cid);
+            nodes.push((cid, data));
+        }
+        let (root_cid, root_data) = nodes.last().unwrap().clone();
+
+        // Root arrives via CAR; every ancestor is fetched one layer per iteration.
+        let selective_blocks: HashMap<Cid, Vec<u8>> = nodes[..DEPTH - 1]
+            .iter()
+            .map(|(cid, data)| (*cid, data.clone()))
+            .collect();
+        let transport = TestTransport::new(
+            blockstore.clone(),
+            root_cid,
+            root_data,
+            HashMap::new(),
+            selective_blocks,
+        );
+
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let source_peer = PeerId::new("remote-peer".to_string());
+
+        poll_fetch_dag(
+            transport.clone(),
+            blockstore.clone(),
+            event_tx,
+            root_cid,
+            DagFetchContext::new(
+                "doc-id".to_string(),
+                "collection-id".to_string(),
+                "creator-id".to_string(),
+                source_peer,
+            ),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                event_rx.recv().await,
+                Some(SyncEvent::DagReady { root_cid: ready_cid, .. }) if ready_cid == root_cid
+            ),
+            "a DAG deeper than the legacy 20-iteration cap must fully reconcile and emit DagReady"
+        );
+        for (cid, _) in &nodes {
+            assert!(matches!(blockstore.has(cid).await, Ok(true)));
+        }
+        // One selective iteration per ancestor: DEPTH - 1 batches.
+        assert_eq!(transport.sync_batches().len(), DEPTH - 1);
     }
 }
