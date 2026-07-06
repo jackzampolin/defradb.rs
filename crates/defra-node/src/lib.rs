@@ -1371,6 +1371,7 @@ impl NodeBuilder {
             max_doc_sync_request_doc_ids: config.max_doc_sync_request_doc_ids,
             rate_limit_burst: config.rate_limit_burst,
             rate_limit_rate: config.rate_limit_rate,
+            max_pending_dags: config.max_pending_dags,
             ..Default::default()
         };
         let (mut coordinator, sync_events) =

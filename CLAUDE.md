@@ -149,6 +149,7 @@ Rust node via CLI + HTTP API. Each area is a `[[test]]` binary with submodules:
 | P2P Iroh ACP | `--test p2p_iroh` | acp, dac, nac, trust_boundary |
 | NAC | `--test nac` | document_acp, operations, core_operations, p2p_management, relation_admin, cross_compartment_isolation, policy_evolution |
 | P2P | `--test p2p` | document, sync, management, trust_boundary, replication, replication_advanced, stubs |
+| P2P Admission | `--test p2p_admission` | fan-in backpressure (own binary: injects `DEFRA_P2P_MAX_PENDING_DAGS`) |
 | FTS | `--test fts` | basic, edge_cases, lifecycle, scoring |
 | Encryption | `--test encryption` | index, acp, block_verify, stubs |
 | Identity | `--test identity` | lifecycle, types, negative, node_identity, keyring_lifecycle |

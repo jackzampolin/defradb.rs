@@ -2118,7 +2118,10 @@ async fn two_stream_at_pending_capacity_replies_rate_limited_nack() {
         result
     );
 
-    let reply = transport.two_stream_replies().pop().expect("overflow reply");
+    let reply = transport
+        .two_stream_replies()
+        .pop()
+        .expect("overflow reply");
     assert_eq!(
         reply.err_message.as_deref(),
         Some(crate::error::RATE_LIMITED_MESSAGE),
@@ -2273,4 +2276,77 @@ async fn car_fetch_rate_limited_replies_empty_response() {
     // CAR has no error reply type - an explicit empty response beats a hung stream.
     let responses = transport.car_responses();
     assert_eq!(responses.last().map(Vec::len), Some(0));
+}
+
+/// #1088 W5 (in-process half): 8 pushers × 6 docs fan into a hub whose pending
+/// map holds 2 slots. Nothing drains (no Bitswap in NoopTransport), so exactly
+/// `cap` pushes can be admitted; every other push must be nacked — never
+/// success-acked (M1) — and the pending depth must never exceed the cap.
+#[tokio::test]
+async fn fan_in_pushes_keep_pending_depth_bounded_and_account_every_reply() {
+    const CAP: usize = 2;
+    const FAN_IN_PUSHERS: usize = 8;
+    const DOCS_PER_PUSHER: usize = 6;
+
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator_with_sync_config(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        SyncConfig {
+            max_pending_dags: CAP,
+            ..SyncConfig::default()
+        },
+    );
+    let transport = coordinator.runtime.transport.clone();
+
+    for pusher in 0..FAN_IN_PUSHERS {
+        let peer = random_peer_id();
+        for doc in 0..DOCS_PER_PUSHER {
+            let _ = coordinator
+                .handle_transport_event(TransportEvent::TwoStreamRequest {
+                    peer_id: peer.clone(),
+                    request: pushlog_request_with_missing_link(
+                        "collection1",
+                        &format!("p{pusher}-d{doc}"),
+                    ),
+                    token: None,
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
+                })
+                .await;
+            assert!(
+                coordinator.manager.pending_dag_count() <= CAP,
+                "pending depth exceeded the configured cap"
+            );
+        }
+    }
+
+    let replies = transport.two_stream_replies();
+    let total = FAN_IN_PUSHERS * DOCS_PER_PUSHER;
+    assert_eq!(replies.len(), total, "every push must receive a reply");
+
+    let successes = replies.iter().filter(|r| r.err_message.is_none()).count();
+    let nacks = replies
+        .iter()
+        .filter(|r| r.err_message.as_deref() == Some(crate::error::RATE_LIMITED_MESSAGE))
+        .count();
+    assert_eq!(
+        successes, CAP,
+        "only registered pushes may be success-acked (M1: success => registered-or-merged)"
+    );
+    assert_eq!(
+        nacks,
+        total - CAP,
+        "every dropped registration must be nacked with the backpressure sentinel"
+    );
+
+    // No completed DAGs and no arriving link blocks here, so admission overflow
+    // must not trigger any pending-DAG re-walks (the M4 CPU burn shape).
+    let diagnostics = coordinator.manager.diagnostics().snapshot();
+    assert_eq!(
+        diagnostics.missing_link_retries, 0,
+        "capacity overflow must not cause retry walks"
+    );
 }

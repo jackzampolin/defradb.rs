@@ -43,6 +43,7 @@ fn test_p2p_config() -> P2PConfig {
         max_doc_sync_request_doc_ids: p2p::sync::DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
         rate_limit_burst: p2p::sync::DEFAULT_RATE_LIMIT_BURST,
         rate_limit_rate: p2p::sync::DEFAULT_RATE_LIMIT_RATE,
+        max_pending_dags: p2p::sync::DEFAULT_MAX_PENDING_DAGS,
     }
 }
 

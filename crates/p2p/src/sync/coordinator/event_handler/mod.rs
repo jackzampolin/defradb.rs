@@ -279,12 +279,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             } => {
                 if let Err(error) = self.check_rate_limit(&peer_id, "TwoStreamRequest") {
                     return Err(self
-                        .reject_rate_limited_two_stream(
-                            &peer_id,
-                            &request.message_id,
-                            token,
-                            error,
-                        )
+                        .reject_rate_limited_two_stream(&peer_id, &request.message_id, token, error)
                         .await);
                 }
                 self.handle_two_stream_request(
