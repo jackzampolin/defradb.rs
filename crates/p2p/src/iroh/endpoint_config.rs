@@ -4,6 +4,7 @@ use iroh::endpoint::BindOpts;
 use iroh::SecretKey;
 
 use super::config::{IrohDiscoveryConfig, IrohRelayModeConfig};
+use super::gossip_heal::GossipHealConfig;
 
 /// Configuration for creating an `IrohEndpoint`.
 pub struct IrohEndpointConfig {
@@ -18,6 +19,8 @@ pub struct IrohEndpointConfig {
     /// interface — prevents advertising unreachable LAN addresses to peers
     /// on different networks. None = 0.0.0.0 (all interfaces).
     pub bind_addr: Option<std::net::IpAddr>,
+    /// Gossip send-path healing (#1092).
+    pub gossip_heal: GossipHealConfig,
 }
 
 impl Default for IrohEndpointConfig {
@@ -28,6 +31,7 @@ impl Default for IrohEndpointConfig {
             discovery: IrohDiscoveryConfig::default(),
             bind_port: None,
             bind_addr: None,
+            gossip_heal: GossipHealConfig::default(),
         }
     }
 }

@@ -4,7 +4,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use iroh::Endpoint;
 use iroh_gossip::net::Gossip;
 use iroh_gossip::proto::TopicId;
 use tokio::sync::mpsc;
@@ -19,14 +18,14 @@ use crate::QueryId;
 use super::addr::{endpoint_addr_from_parts, endpoint_ticket_string};
 use super::command::IrohCommand;
 use super::endpoint::{
-    join_peer_to_subscription_senders, peer_direct_addr, snapshot_subscription_senders, track_task,
-    ActiveSync, SpawnedTasks, SubscriptionSenders, TopicSubscription,
+    peer_direct_addr, snapshot_subscription_senders, track_task, ActiveSync, EndpointResources,
+    SpawnedTasks, SubscriptionSenders, TopicSubscription,
 };
 use super::endpoint_rpc::{
-    close_cached_connections, handle_block_sync, handle_car_request_response,
-    handle_fire_and_forget, handle_request_response, handle_send_only, BlockSyncResources,
-    ConnectionCache,
+    close_peer_connections, handle_block_sync, handle_car_request_response, handle_fire_and_forget,
+    handle_request_response, handle_send_only, BlockSyncResources,
 };
+use super::gossip_heal;
 use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
 use super::protocols;
 
@@ -36,21 +35,23 @@ use super::protocols;
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_command(
     cmd: IrohCommand,
-    endpoint: &Endpoint,
-    gossip: &Gossip,
-    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    resources: &EndpointResources,
     pending_pushlog_replies: &Arc<
         parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
     >,
-    connection_cache: &ConnectionCache,
     subscriptions: &mut HashMap<String, TopicSubscription>,
     raw_topics: &Arc<parking_lot::Mutex<HashSet<String>>>,
     replicators: &Arc<ReplicatorRegistry>,
     active_syncs: &mut HashMap<u64, ActiveSync>,
-    spawned_tasks: &SpawnedTasks,
     next_query_id: &mut u64,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> bool {
+    let endpoint = &resources.endpoint;
+    let gossip = &resources.gossip;
+    let peer_map = &resources.peer_map;
+    let connection_cache = &resources.connection_cache;
+    let spawned_tasks = &resources.spawned_tasks;
+
     active_syncs.retain(|_, sync| !sync.abort_handle.is_finished());
 
     match cmd {
@@ -67,11 +68,9 @@ pub(super) async fn handle_command(
             // deadlock. The reply is delivered from the spawned task, so callers
             // still get their result.
             let ctx = DialContext {
-                endpoint: endpoint.clone(),
-                peer_map: Arc::clone(peer_map),
+                resources: resources.clone(),
                 pending_pushlog_replies: Arc::clone(pending_pushlog_replies),
                 subscription_senders: snapshot_subscription_senders(subscriptions),
-                spawned_tasks: Arc::clone(spawned_tasks),
                 event_tx: event_tx.clone(),
             };
             let task = tokio::spawn(async move {
@@ -81,7 +80,7 @@ pub(super) async fn handle_command(
             track_task(spawned_tasks, task);
         }
         IrohCommand::Disconnect { peer_id, reply } => {
-            let result = handle_disconnect(peer_id, peer_map, connection_cache);
+            let result = handle_disconnect(peer_id, resources);
             let _ = reply.send(result);
         }
         IrohCommand::Listen { addr: _, reply } => {
@@ -691,12 +690,10 @@ pub(super) async fn handle_command(
 /// the loop free to accept. `subscriptions` is captured as an owned senders
 /// snapshot (the only previously-borrowed field).
 struct DialContext {
-    endpoint: Endpoint,
-    peer_map: Arc<parking_lot::Mutex<PeerMap>>,
+    resources: EndpointResources,
     pending_pushlog_replies:
         Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>>,
     subscription_senders: SubscriptionSenders,
-    spawned_tasks: SpawnedTasks,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 }
 
@@ -722,7 +719,7 @@ async fn handle_dial(
     // edge dial back over the path the peer opened to us, instead of failing
     // "Address Lookup failed" under no-relay/no-discovery.
     if endpoint_addr.ip_addrs().next().is_none() {
-        if let Some(observed) = peer_direct_addr(&ctx.peer_map, peer_id) {
+        if let Some(observed) = peer_direct_addr(&ctx.resources.peer_map, peer_id) {
             endpoint_addr = endpoint_addr.with_ip_addr(observed);
         }
     }
@@ -730,6 +727,7 @@ async fn handle_dial(
     let direct_addresses: Vec<std::net::SocketAddr> = endpoint_addr.ip_addrs().copied().collect();
 
     let connection = ctx
+        .resources
         .endpoint
         .connect(endpoint_addr, protocols::ALPN_PUSHLOG)
         .await
@@ -737,7 +735,7 @@ async fn handle_dial(
 
     let conn_alpn = connection.alpn().to_vec();
 
-    let is_new = ctx.peer_map.lock().increment_connections(
+    let is_new = ctx.resources.peer_map.lock().increment_connections(
         endpoint_id,
         direct_addresses.first().copied(),
         connection.clone(),
@@ -754,14 +752,18 @@ async fn handle_dial(
     }
 
     if is_new {
-        join_peer_to_subscription_senders(&ctx.subscription_senders, endpoint_id).await;
+        gossip_heal::spawn_peer_connected_heal(
+            &ctx.resources,
+            &ctx.subscription_senders,
+            endpoint_id,
+        );
     }
 
     // Keep connection alive by spawning a handler for incoming streams.
     let event_tx = ctx.event_tx.clone();
-    let peer_map = Arc::clone(&ctx.peer_map);
+    let peer_map = Arc::clone(&ctx.resources.peer_map);
     let pending_pushlog_replies = Arc::clone(&ctx.pending_pushlog_replies);
-    let spawned_tasks_for_connection = Arc::clone(&ctx.spawned_tasks);
+    let spawned_tasks_for_connection = Arc::clone(&ctx.resources.spawned_tasks);
     let task = tokio::spawn(async move {
         super::endpoint_streams::handle_connection_streams_from_dial(
             connection,
@@ -774,30 +776,31 @@ async fn handle_dial(
         )
         .await;
     });
-    track_task(&ctx.spawned_tasks, task);
+    track_task(&ctx.resources.spawned_tasks, task);
 
     Ok(())
 }
 
 /// Hang up the live connection to a peer.
 ///
-/// Closes both the connection handle retained in `peer_map` (covering dial- and
-/// accept-initiated connections) and any cached outbound-send connections.
-/// iroh `Connection` clones share the underlying QUIC connection, so closing
-/// any handle tears down the connection; the stream task then observes the
-/// `accept_bi` error, decrements the count, and emits `PeerDisconnected`.
+/// Closes the connection handle retained in `peer_map` (covering dial- and
+/// accept-initiated connections), any cached outbound-send connections, and
+/// any gossip connection injected by the heal path. iroh `Connection` clones
+/// share the underlying QUIC connection, so closing any handle tears down the
+/// connection; the stream task then observes the `accept_bi` error, decrements
+/// the count, and emits `PeerDisconnected`.
 ///
 /// Idempotent: disconnecting an already-absent peer returns `Ok(())`.
-fn handle_disconnect(
-    peer_id: PeerId,
-    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
-    connection_cache: &ConnectionCache,
-) -> crate::error::Result<()> {
+fn handle_disconnect(peer_id: PeerId, resources: &EndpointResources) -> crate::error::Result<()> {
     let endpoint_id = parse_endpoint_id(&peer_id)?;
-    if let Some(connection) = peer_map.lock().take_connection(&endpoint_id) {
+    close_peer_connections(
+        &resources.peer_map,
+        &resources.connection_cache,
+        &endpoint_id,
+    );
+    if let Some(connection) = resources.healer.take_conn(&endpoint_id) {
         connection.close(0u32.into(), b"disconnect");
     }
-    close_cached_connections(connection_cache, &endpoint_id);
     Ok(())
 }
 

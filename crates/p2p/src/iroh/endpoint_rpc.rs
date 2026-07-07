@@ -224,6 +224,21 @@ pub(super) fn close_cached_connections(cache: &ConnectionCache, endpoint_id: &ir
     }
 }
 
+/// Hang up every connection we hold to a peer: the handle retained in
+/// `peer_map` (covering dial- and accept-initiated connections) and any cached
+/// outbound-send connections. The stream task then observes the `accept_bi`
+/// error, decrements the count, and emits `PeerDisconnected`. Idempotent.
+pub(super) fn close_peer_connections(
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    cache: &ConnectionCache,
+    endpoint_id: &iroh::EndpointId,
+) {
+    if let Some(connection) = peer_map.lock().take_connection(endpoint_id) {
+        connection.close(DISCONNECT_ERROR_CODE.into(), b"disconnect");
+    }
+    close_cached_connections(cache, endpoint_id);
+}
+
 async fn connect_with_cache(
     endpoint: &Endpoint,
     peer_id: &PeerId,
@@ -241,7 +256,7 @@ async fn connect_with_cache(
     Ok(connection)
 }
 
-async fn connect_with_direct_addr_fallback(
+pub(super) async fn connect_with_direct_addr_fallback(
     endpoint: &Endpoint,
     peer_id: &PeerId,
     alpn: &[u8],

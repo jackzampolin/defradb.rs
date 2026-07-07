@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use iroh::endpoint::Connection;
 use iroh::EndpointId;
-use iroh_gossip::net::Gossip;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
@@ -14,22 +13,19 @@ use crate::error::Error;
 use crate::message::{Message, PushLogReply};
 use crate::transport::{PeerId, TransportEvent};
 
-use super::endpoint::{
-    join_peer_to_subscription_senders, track_task, SpawnedTasks, SubscriptionSenders,
-};
+use super::endpoint::{track_task, EndpointResources, SpawnedTasks, SubscriptionSenders};
+use super::gossip_heal;
 use super::peer_map::{endpoint_id_to_peer_id, PeerMap};
 use super::protocols;
 
 /// Handle an incoming QUIC connection.
 pub(super) async fn handle_incoming(
     incoming: iroh::endpoint::Incoming,
-    gossip: &Gossip,
-    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    resources: &EndpointResources,
     pending_pushlog_replies: &Arc<
         parking_lot::Mutex<HashMap<String, oneshot::Sender<PushLogReply>>>,
     >,
     subscription_senders: &SubscriptionSenders,
-    spawned_tasks: &SpawnedTasks,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
     let remote_addr = match incoming.remote_addr() {
@@ -69,7 +65,7 @@ pub(super) async fn handle_incoming(
 
     // If it's a gossip ALPN, hand off to the gossip layer
     if conn_alpn == iroh_gossip::net::GOSSIP_ALPN {
-        if let Err(e) = gossip.handle_connection(connection).await {
+        if let Err(e) = resources.gossip.handle_connection(connection).await {
             debug!("Gossip handle_connection error: {}", e);
         }
         return;
@@ -77,9 +73,11 @@ pub(super) async fn handle_incoming(
 
     let remote_id = connection.remote_id();
 
-    let is_new = peer_map
-        .lock()
-        .increment_connections(remote_id, remote_addr, connection.clone());
+    let is_new =
+        resources
+            .peer_map
+            .lock()
+            .increment_connections(remote_id, remote_addr, connection.clone());
 
     if is_new
         && event_tx
@@ -93,14 +91,14 @@ pub(super) async fn handle_incoming(
     }
 
     if is_new {
-        join_peer_to_subscription_senders(subscription_senders, remote_id).await;
+        gossip_heal::spawn_peer_connected_heal(resources, subscription_senders, remote_id);
     }
 
     // Spawn handler for this connection's streams
     let event_tx = event_tx.clone();
-    let peer_map = Arc::clone(peer_map);
+    let peer_map = Arc::clone(&resources.peer_map);
     let pending_pushlog_replies = Arc::clone(pending_pushlog_replies);
-    let spawned_tasks_for_connection = Arc::clone(spawned_tasks);
+    let spawned_tasks_for_connection = Arc::clone(&resources.spawned_tasks);
     let task = tokio::spawn(async move {
         handle_connection_streams(
             connection,
@@ -113,7 +111,7 @@ pub(super) async fn handle_incoming(
         )
         .await;
     });
-    track_task(spawned_tasks, task);
+    track_task(&resources.spawned_tasks, task);
 }
 
 /// Process streams on an accepted connection, dispatching by ALPN.
