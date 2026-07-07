@@ -2,6 +2,8 @@
 //!
 //! Tries CAR fetch first (single round-trip for entire DAG), then falls back
 //! to batched selective block fetch + blockstore polling for any remaining blocks.
+//! Stalled batches rotate across the context's providers, and incomplete
+//! fetches are retried with backoff before the failure is escalated (#1093).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,9 +11,11 @@ use std::time::Duration;
 use blockstore::Blockstore;
 use cid::Cid;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tokio::time::Instant;
+use tracing::{debug, error, info, warn};
 
 use super::dag_context::DagFetchContext;
+use super::dag_retry::{retry_backoff, ProviderRotation, MAX_FETCH_ATTEMPTS};
 use crate::sync::manager::links::find_all_missing_links;
 use crate::sync::manager::SyncEvent;
 use crate::transport::{P2PTransport, PeerId};
@@ -37,10 +41,18 @@ enum FetchBatchOutcome {
     NoProgress,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchAttemptOutcome {
+    Complete,
+    Incomplete { remaining: usize },
+}
+
 /// Fetch an entire DAG rooted at `root_cid`.
 ///
 /// Strategy: try CAR fetch first (one round-trip), then selective block fetch
-/// for any missing blocks.
+/// for any missing blocks, rotating providers on stalls. Incomplete attempts
+/// are retried with backoff; terminal failure is logged at ERROR because the
+/// document cannot converge until the root is announced again.
 pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
     transport: T,
     blockstore: Arc<B>,
@@ -48,15 +60,67 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
     root_cid: Cid,
     context: DagFetchContext,
 ) {
+    let mut providers = ProviderRotation::new(context.providers());
     debug!(
         root_cid = %root_cid,
         doc_id = %context.doc_id,
         collection_id = %context.collection_id,
         source_peer = %context.source_peer,
+        provider_count = providers.len(),
         is_explicit_replicator = context.is_explicit_replicator,
         "Starting DAG fetch (CAR-first, selective block fallback)"
     );
 
+    let mut remaining_count = 0usize;
+    for attempt in 1..=MAX_FETCH_ATTEMPTS {
+        if attempt > 1 {
+            let backoff = retry_backoff(attempt);
+            warn!(
+                root_cid = %root_cid,
+                doc_id = %context.doc_id,
+                attempt = attempt,
+                remaining_count = remaining_count,
+                backoff_ms = backoff.as_millis() as u64,
+                "DAG fetch incomplete, retrying after backoff"
+            );
+            tokio::time::sleep(backoff).await;
+        }
+
+        match fetch_dag_attempt(
+            &transport,
+            &blockstore,
+            &event_tx,
+            root_cid,
+            &context,
+            &mut providers,
+        )
+        .await
+        {
+            FetchAttemptOutcome::Complete => return,
+            FetchAttemptOutcome::Incomplete { remaining } => remaining_count = remaining,
+        }
+    }
+
+    error!(
+        root_cid = %root_cid,
+        doc_id = %context.doc_id,
+        collection_id = %context.collection_id,
+        remaining_count = remaining_count,
+        attempts = MAX_FETCH_ATTEMPTS,
+        providers = ?providers.peers(),
+        "DAG fetch failed after exhausting retries and providers; document will not converge until the root is re-announced"
+    );
+}
+
+/// One full CAR-first + selective-walk attempt over the current provider set.
+async fn fetch_dag_attempt<B: Blockstore + 'static, T: P2PTransport>(
+    transport: &T,
+    blockstore: &Arc<B>,
+    event_tx: &mpsc::Sender<SyncEvent>,
+    root_cid: Cid,
+    context: &DagFetchContext,
+    providers: &mut ProviderRotation,
+) -> FetchAttemptOutcome {
     let car_missing_watch = match blockstore.get(&root_cid).await {
         Ok(Some(root_data)) => find_all_missing_links(blockstore.as_ref(), &root_data)
             .await
@@ -67,10 +131,10 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
 
     // Try CAR fetch first
     if try_car_fetch(
-        &transport,
-        &blockstore,
+        transport,
+        blockstore,
         &root_cid,
-        &context.source_peer,
+        providers.current(),
         car_missing_watch.as_deref(),
     )
     .await
@@ -81,8 +145,8 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
                 .unwrap_or_default();
             if missing.is_empty() {
                 info!(root_cid = %root_cid, doc_id = %context.doc_id, "DAG fetch complete via CAR");
-                emit_dag_ready(&event_tx, root_cid, &context, &root_data).await;
-                return;
+                emit_dag_ready(event_tx, root_cid, context, &root_data).await;
+                return FetchAttemptOutcome::Complete;
             }
             debug!(
                 root_cid = %root_cid,
@@ -94,18 +158,18 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
 
     // Fallback fetch: fetch the root block first so we can enumerate missing links.
     if !matches!(
-        poll_fetch_blocks(
+        poll_fetch_blocks_rotating(
             &root_cid,
             std::slice::from_ref(&root_cid),
-            &transport,
-            &blockstore,
-            &context.source_peer,
+            transport,
+            blockstore,
+            providers,
         )
         .await,
         FetchBatchOutcome::Complete
     ) {
         warn!(root_cid = %root_cid, "Failed to fetch root block");
-        return;
+        return FetchAttemptOutcome::Incomplete { remaining: 1 };
     }
 
     // Walk DAG, fetching missing blocks level by level. The walk stops as soon
@@ -116,7 +180,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
             Ok(Some(data)) => data,
             _ => {
                 warn!(root_cid = %root_cid, "Root block disappeared from blockstore");
-                return;
+                return FetchAttemptOutcome::Incomplete { remaining: 1 };
             }
         };
 
@@ -124,7 +188,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
             Ok(m) => m,
             Err(e) => {
                 warn!(root_cid = %root_cid, error = %e, "find_all_missing_links failed");
-                return;
+                return FetchAttemptOutcome::Incomplete { remaining: 0 };
             }
         };
 
@@ -141,14 +205,8 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
 
         let mut made_progress = false;
         for batch in missing.chunks(SELECTIVE_FETCH_BATCH_SIZE) {
-            match poll_fetch_blocks(
-                &root_cid,
-                batch,
-                &transport,
-                &blockstore,
-                &context.source_peer,
-            )
-            .await
+            match poll_fetch_blocks_rotating(&root_cid, batch, transport, blockstore, providers)
+                .await
             {
                 FetchBatchOutcome::Complete => {
                     made_progress = true;
@@ -165,7 +223,8 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
                     warn!(
                         root_cid = %root_cid,
                         requested_count = batch.len(),
-                        "Timeout fetching selective block batch (30s)"
+                        providers_tried = providers.len(),
+                        "Timeout fetching selective block batch (30s per provider)"
                     );
                 }
             }
@@ -178,7 +237,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
     // Verify DAG is complete
     let root_data = match blockstore.get(&root_cid).await {
         Ok(Some(data)) => data,
-        _ => return,
+        _ => return FetchAttemptOutcome::Incomplete { remaining: 1 },
     };
     let remaining = find_all_missing_links(blockstore.as_ref(), &root_data)
         .await
@@ -186,14 +245,12 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
 
     if remaining.is_empty() {
         info!(root_cid = %root_cid, doc_id = %context.doc_id, "DAG fetch complete");
-        emit_dag_ready(&event_tx, root_cid, &context, &root_data).await;
+        emit_dag_ready(event_tx, root_cid, context, &root_data).await;
+        FetchAttemptOutcome::Complete
     } else {
-        warn!(
-            root_cid = %root_cid,
-            doc_id = %context.doc_id,
-            remaining_count = remaining.len(),
-            "DAG fetch incomplete"
-        );
+        FetchAttemptOutcome::Incomplete {
+            remaining: remaining.len(),
+        }
     }
 }
 
@@ -231,7 +288,7 @@ async fn try_car_fetch<B: Blockstore, T: P2PTransport>(
     }
 
     let timeout = Duration::from_secs(10);
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     while start.elapsed() < timeout {
         if let Some(missing) = watch_missing {
             let mut remaining = 0usize;
@@ -251,6 +308,35 @@ async fn try_car_fetch<B: Blockstore, T: P2PTransport>(
 
     debug!(root_cid = %root_cid, "CAR fetch timed out (10s), falling back to selective block fetch");
     false
+}
+
+/// Fetch one batch of exact blocks, rotating to the next provider whenever
+/// the current one yields nothing within the fetch window.
+async fn poll_fetch_blocks_rotating<B: Blockstore, T: P2PTransport>(
+    root_cid: &Cid,
+    cids: &[Cid],
+    transport: &T,
+    blockstore: &Arc<B>,
+    providers: &mut ProviderRotation,
+) -> FetchBatchOutcome {
+    for _ in 0..providers.len() {
+        let provider = providers.current().clone();
+        match poll_fetch_blocks(root_cid, cids, transport, blockstore, &provider).await {
+            FetchBatchOutcome::NoProgress => {
+                providers.advance();
+                if providers.len() > 1 {
+                    warn!(
+                        root_cid = %root_cid,
+                        provider = %provider,
+                        requested_count = cids.len(),
+                        "No blocks from provider within fetch window, rotating to next provider"
+                    );
+                }
+            }
+            outcome => return outcome,
+        }
+    }
+    FetchBatchOutcome::NoProgress
 }
 
 /// Fetch one batch of exact blocks via the transport's block-sync path.
@@ -287,7 +373,7 @@ async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
     }
 
     let timeout = Duration::from_secs(30);
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     while start.elapsed() < timeout {
         let mut remaining = 0usize;
         for cid in &missing {
@@ -351,6 +437,9 @@ mod tests {
         selective_blocks: Arc<HashMap<Cid, Vec<u8>>>,
         car_requests: Arc<AtomicUsize>,
         sync_batches: Arc<Mutex<Vec<Vec<Cid>>>>,
+        sync_providers: Arc<Mutex<Vec<String>>>,
+        dead_providers: Arc<Mutex<HashSet<String>>>,
+        skip_serving_syncs: Arc<AtomicUsize>,
     }
 
     impl TestTransport {
@@ -371,6 +460,9 @@ mod tests {
                 selective_blocks: Arc::new(selective_blocks),
                 car_requests: Arc::new(AtomicUsize::new(0)),
                 sync_batches: Arc::new(Mutex::new(Vec::new())),
+                sync_providers: Arc::new(Mutex::new(Vec::new())),
+                dead_providers: Arc::new(Mutex::new(HashSet::new())),
+                skip_serving_syncs: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -380,6 +472,18 @@ mod tests {
 
         fn sync_batches(&self) -> Vec<Vec<Cid>> {
             self.sync_batches.lock().unwrap().clone()
+        }
+
+        fn sync_providers(&self) -> Vec<String> {
+            self.sync_providers.lock().unwrap().clone()
+        }
+
+        fn mark_provider_dead(&self, peer: &str) {
+            self.dead_providers.lock().unwrap().insert(peer.to_string());
+        }
+
+        fn set_skip_serving_syncs(&self, count: usize) {
+            self.skip_serving_syncs.store(count, Ordering::SeqCst);
         }
     }
 
@@ -562,10 +666,28 @@ mod tests {
         async fn sync_blocks(
             &self,
             _root: Cid,
-            _providers: Vec<PeerId>,
+            providers: Vec<PeerId>,
             missing: Vec<Cid>,
         ) -> P2PResult<QueryId> {
-            self.sync_batches.lock().unwrap().push(missing.clone());
+            let call_index = {
+                let mut batches = self.sync_batches.lock().unwrap();
+                batches.push(missing.clone());
+                batches.len() - 1
+            };
+            self.sync_providers
+                .lock()
+                .unwrap()
+                .extend(providers.iter().map(|peer| peer.to_string()));
+            if call_index < self.skip_serving_syncs.load(Ordering::SeqCst) {
+                return Ok(QueryId(1));
+            }
+            let all_dead = {
+                let dead = self.dead_providers.lock().unwrap();
+                providers.iter().all(|peer| dead.contains(peer.as_str()))
+            };
+            if all_dead {
+                return Ok(QueryId(1));
+            }
             for cid in missing {
                 if let Some(data) = self.selective_blocks.get(&cid) {
                     self.blockstore
@@ -868,5 +990,142 @@ mod tests {
         }
         // One selective iteration per ancestor: DEPTH - 1 batches.
         assert_eq!(transport.sync_batches().len(), DEPTH - 1);
+    }
+
+    fn single_child_dag() -> (Cid, Vec<u8>, Cid, Vec<u8>) {
+        let child_data = encode_ipld(ipld!({ "value": 1 }));
+        let child_cid = make_cid(&child_data);
+        let root_data = encode_ipld(ipld!({ "child": child_cid }));
+        let root_cid = make_cid(&root_data);
+        (root_cid, root_data, child_cid, child_data)
+    }
+
+    /// A dead source peer must not fail the walk: the batch rotates to the
+    /// alternate provider and the fetch completes on the first attempt.
+    #[tokio::test(start_paused = true)]
+    async fn poll_fetch_dag_rotates_to_alternate_provider_on_no_progress() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (root_cid, root_data, child_cid, child_data) = single_child_dag();
+
+        let transport = TestTransport::new(
+            blockstore.clone(),
+            root_cid,
+            root_data,
+            HashMap::new(),
+            HashMap::from([(child_cid, child_data)]),
+        );
+        transport.mark_provider_dead("dead-peer");
+
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        poll_fetch_dag(
+            transport.clone(),
+            blockstore.clone(),
+            event_tx,
+            root_cid,
+            DagFetchContext::new(
+                "doc-id".to_string(),
+                "collection-id".to_string(),
+                "creator-id".to_string(),
+                PeerId::new("dead-peer".to_string()),
+            )
+            .with_alternate_providers(vec![PeerId::new("alt-peer".to_string())]),
+        )
+        .await;
+
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(SyncEvent::DagReady { root_cid: ready_cid, .. }) if ready_cid == root_cid
+        ));
+        assert!(matches!(blockstore.has(&child_cid).await, Ok(true)));
+        assert_eq!(transport.car_request_count(), 1);
+        assert_eq!(
+            transport.sync_providers(),
+            vec!["dead-peer".to_string(), "alt-peer".to_string()]
+        );
+    }
+
+    /// An attempt that stalls (no blocks served) must be retried after
+    /// backoff and succeed once the provider starts serving.
+    #[tokio::test(start_paused = true)]
+    async fn poll_fetch_dag_retries_incomplete_fetch_and_succeeds() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (root_cid, root_data, child_cid, child_data) = single_child_dag();
+
+        let transport = TestTransport::new(
+            blockstore.clone(),
+            root_cid,
+            root_data,
+            HashMap::new(),
+            HashMap::from([(child_cid, child_data)]),
+        );
+        transport.set_skip_serving_syncs(1);
+
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        poll_fetch_dag(
+            transport.clone(),
+            blockstore.clone(),
+            event_tx,
+            root_cid,
+            DagFetchContext::new(
+                "doc-id".to_string(),
+                "collection-id".to_string(),
+                "creator-id".to_string(),
+                PeerId::new("remote-peer".to_string()),
+            ),
+        )
+        .await;
+
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(SyncEvent::DagReady { root_cid: ready_cid, .. }) if ready_cid == root_cid
+        ));
+        assert!(matches!(blockstore.has(&child_cid).await, Ok(true)));
+        // One CAR try and one selective batch per attempt; success on attempt 2.
+        assert_eq!(transport.car_request_count(), 2);
+        assert_eq!(transport.sync_batches().len(), 2);
+    }
+
+    /// When every attempt stalls against every provider the fetcher stops
+    /// after MAX_FETCH_ATTEMPTS without emitting DagReady (terminal failure).
+    #[tokio::test(start_paused = true)]
+    async fn poll_fetch_dag_exhausted_retries_do_not_emit_dag_ready() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (root_cid, root_data, child_cid, child_data) = single_child_dag();
+
+        let transport = TestTransport::new(
+            blockstore.clone(),
+            root_cid,
+            root_data,
+            HashMap::new(),
+            HashMap::from([(child_cid, child_data)]),
+        );
+        transport.mark_provider_dead("dead-peer");
+
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        poll_fetch_dag(
+            transport.clone(),
+            blockstore.clone(),
+            event_tx,
+            root_cid,
+            DagFetchContext::new(
+                "doc-id".to_string(),
+                "collection-id".to_string(),
+                "creator-id".to_string(),
+                PeerId::new("dead-peer".to_string()),
+            ),
+        )
+        .await;
+
+        assert!(
+            event_rx.recv().await.is_none(),
+            "terminal failure must not emit DagReady"
+        );
+        assert!(matches!(blockstore.has(&child_cid).await, Ok(false)));
+        // One CAR try and one selective batch per attempt, all exhausted.
+        assert_eq!(transport.car_request_count(), MAX_FETCH_ATTEMPTS as usize);
+        assert_eq!(transport.sync_batches().len(), MAX_FETCH_ATTEMPTS as usize);
     }
 }

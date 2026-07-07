@@ -126,7 +126,12 @@ where
         let limiter = coordinator.dag_fetch_limiter();
         let source_peer = crate::transport::PeerId::new(source_peer);
         let permit_peer = source_peer.clone();
+        let alternate_providers: Vec<crate::transport::PeerId> = providers
+            .into_iter()
+            .map(crate::transport::PeerId::new)
+            .collect();
         let context = DagFetchContext::new(doc_id, collection_id, creator, source_peer)
+            .with_alternate_providers(alternate_providers)
             .with_explicit_replicator(is_explicit_replicator)
             .with_explicit_replay_authorization(explicit_replay_authorization);
 

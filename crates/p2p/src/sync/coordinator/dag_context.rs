@@ -27,12 +27,18 @@ pub(crate) fn block_context_from_data(block_data: &[u8]) -> BlockContext {
     }
 }
 
+/// Ceiling on alternate providers kept per fetch, so a stalled batch never
+/// rotates through an unbounded peer list (each dead provider costs a full
+/// 30s selective-fetch timeout).
+const MAX_ALTERNATE_PROVIDERS: usize = 3;
+
 #[derive(Debug, Clone)]
 pub(crate) struct DagFetchContext {
     pub(crate) doc_id: String,
     pub(crate) collection_id: String,
     pub(crate) creator: String,
     pub(crate) source_peer: PeerId,
+    alternate_providers: Vec<PeerId>,
     pub(crate) is_explicit_replicator: bool,
     explicit_replicator_collections: Option<Vec<String>>,
     pub(crate) explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
@@ -50,10 +56,32 @@ impl DagFetchContext {
             collection_id,
             creator,
             source_peer,
+            alternate_providers: Vec::new(),
             is_explicit_replicator: false,
             explicit_replicator_collections: None,
             explicit_replay_authorization: None,
         }
+    }
+
+    pub(crate) fn with_alternate_providers(mut self, providers: Vec<PeerId>) -> Self {
+        self.alternate_providers.clear();
+        for peer in providers {
+            if peer != self.source_peer && !self.alternate_providers.contains(&peer) {
+                self.alternate_providers.push(peer);
+            }
+            if self.alternate_providers.len() == MAX_ALTERNATE_PROVIDERS {
+                break;
+            }
+        }
+        self
+    }
+
+    /// Ordered fetch providers: the announcing peer first, then alternates.
+    pub(crate) fn providers(&self) -> Vec<PeerId> {
+        let mut providers = Vec::with_capacity(1 + self.alternate_providers.len());
+        providers.push(self.source_peer.clone());
+        providers.extend(self.alternate_providers.iter().cloned());
+        providers
     }
 
     pub(crate) fn with_explicit_replicator(mut self, is_explicit_replicator: bool) -> Self {

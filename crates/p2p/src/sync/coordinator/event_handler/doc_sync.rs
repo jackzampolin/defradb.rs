@@ -402,12 +402,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     let Some(_permits) = limiter.acquire(&source_peer).await else {
                         return;
                     };
+                    let alternate_providers = transport.connected_peers().await.unwrap_or_default();
                     super::super::dag_fetcher::poll_fetch_dag(
                         transport,
                         blockstore,
                         event_tx,
                         root_cid,
                         DagFetchContext::new(doc_id, String::new(), String::new(), source_peer)
+                            .with_alternate_providers(alternate_providers)
                             .with_explicit_replicator_collections(explicit_replicator_collections),
                     )
                     .await;
