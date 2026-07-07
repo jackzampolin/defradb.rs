@@ -12,7 +12,9 @@ use blockstore::Blockstore;
 use std::time::Duration;
 
 use super::SyncCoordinator;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, RATE_LIMITED_MESSAGE};
+use crate::message::{BranchableSyncReply, DocSyncReply, PushLogReply};
+use crate::signing::sign_with_transport;
 use crate::sync::rate_limiter::RateLimitDecision;
 use crate::transport::{P2PTransport, PeerId, TransportEvent};
 
@@ -61,6 +63,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         tracing::debug!(peer_id = %peer_id, "Peer disconnected");
         self.access.peer_state.peer_disconnected(peer_id.as_str());
         self.runtime.rate_limiter.remove_peer(&peer_id);
+        self.runtime.request_rate_limiter.remove_peer(&peer_id);
     }
 
     fn handle_peer_subscribed(&self, peer_id: PeerId, topic: String) {
@@ -77,8 +80,32 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .peer_unsubscribed(peer_id.as_str(), &topic);
     }
 
-    fn enforce_gossip_rate_limit(&self, peer_id: &PeerId, event_kind: &'static str) -> Result<()> {
-        match self.runtime.rate_limiter.check(peer_id) {
+    fn rate_limited_error(peer_id: &PeerId) -> Error {
+        Error::AccessDenied {
+            peer_id: peer_id.to_string(),
+            collection_id: "rate-limited".into(),
+        }
+    }
+
+    /// Consume one token from `limiter` for `peer_id`, returning the
+    /// synthetic rate-limit error when the peer is over budget.
+    ///
+    /// Two limiters exist on purpose and must stay separate: gossip has no
+    /// reply channel, so refusals are silent drops governed by the long abuse
+    /// ladder; request events are nacked with `RATE_LIMITED_MESSAGE` (via the
+    /// `reject_rate_limited_*` helpers) and use the paced limiter, whose
+    /// retry horizon is ~one token refill — a long lockout here wedges any
+    /// full-DAG push deeper than the burst (see `p2p_deep_catchup`).
+    /// Nack-on-overload is the Go-aligned behavior: Go's direct replicator
+    /// channel drives its retry ladder off error replies; overload replies
+    /// are orthogonal to its trust/ACP bypasses.
+    fn check_rate_limit(
+        &self,
+        limiter: &crate::sync::rate_limiter::PeerRateLimiter,
+        peer_id: &PeerId,
+        event_kind: &'static str,
+    ) -> Result<()> {
+        match limiter.check(peer_id) {
             RateLimitDecision::Allowed => Ok(()),
             RateLimitDecision::Limited {
                 retry_after,
@@ -89,14 +116,130 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     event_kind,
                     retry_after_ms = retry_after.as_millis(),
                     consecutive_failures,
-                    "Rate limit exceeded for gossip event, dropping"
+                    "Rate limit exceeded, rejecting event"
                 );
-                Err(Error::AccessDenied {
-                    peer_id: peer_id.to_string(),
-                    collection_id: "rate-limited".into(),
-                })
+                Err(Self::rate_limited_error(peer_id))
             }
         }
+    }
+
+    async fn reject_rate_limited_pushlog(
+        &self,
+        message_id: &str,
+        token: T::ResponseToken,
+        error: Error,
+    ) -> Error {
+        let reply = PushLogReply::error(message_id, RATE_LIMITED_MESSAGE);
+        // Best-effort: if the nack cannot be sent, the pusher times out and
+        // lands in the same retry path; no state was discarded.
+        if let Err(send_err) = self
+            .runtime
+            .transport
+            .send_pushlog_response(token, reply)
+            .await
+        {
+            tracing::debug!(error = %send_err, "Failed to send PushLog backpressure nack");
+        }
+        error
+    }
+
+    async fn reject_rate_limited_two_stream(
+        &self,
+        peer_id: &PeerId,
+        message_id: &str,
+        token: Option<T::ResponseToken>,
+        error: Error,
+    ) -> Error {
+        let mut reply = PushLogReply::error(message_id, RATE_LIMITED_MESSAGE);
+        // Best-effort: send_two_stream_reply logs its own failures; an unsent
+        // nack degrades to a pusher-side timeout on the same retry path.
+        if let Err(sign_err) = sign_with_transport(&self.runtime.transport, &mut reply) {
+            tracing::debug!(error = %sign_err, "Failed to sign two-stream backpressure nack");
+        }
+        self.send_two_stream_reply(peer_id, reply, token).await;
+        error
+    }
+
+    async fn reject_rate_limited_doc_sync(
+        &self,
+        peer_id: &PeerId,
+        message_id: &str,
+        token: Option<T::ResponseToken>,
+        error: Error,
+    ) -> Error {
+        let mut reply = DocSyncReply::error(message_id, RATE_LIMITED_MESSAGE);
+        if let Err(sign_err) = sign_with_transport(&self.runtime.transport, &mut reply) {
+            tracing::debug!(error = %sign_err, "Failed to sign DocSync backpressure nack");
+        }
+        let send_result = if let Some(token) = token {
+            self.runtime
+                .transport
+                .send_doc_sync_response_token(token, reply)
+                .await
+        } else {
+            self.runtime
+                .transport
+                .send_doc_sync_response(peer_id, reply)
+                .await
+        };
+        if let Err(send_err) = send_result {
+            tracing::debug!(error = %send_err, "Failed to send DocSync backpressure nack");
+        }
+        error
+    }
+
+    async fn reject_rate_limited_branchable_sync(
+        &self,
+        peer_id: &PeerId,
+        message_id: &str,
+        collection_id: &str,
+        token: Option<T::ResponseToken>,
+        error: Error,
+    ) -> Error {
+        let mut reply = BranchableSyncReply::error(message_id, collection_id, RATE_LIMITED_MESSAGE);
+        if let Err(sign_err) = sign_with_transport(&self.runtime.transport, &mut reply) {
+            tracing::debug!(error = %sign_err, "Failed to sign BranchableSync backpressure nack");
+        }
+        let send_result = if let Some(token) = token {
+            self.runtime
+                .transport
+                .send_branchable_sync_response_token(token, reply)
+                .await
+        } else {
+            self.runtime
+                .transport
+                .send_branchable_sync_response(peer_id, reply)
+                .await
+        };
+        if let Err(send_err) = send_result {
+            tracing::debug!(error = %send_err, "Failed to send BranchableSync backpressure nack");
+        }
+        error
+    }
+
+    async fn reject_rate_limited_car_fetch(
+        &self,
+        peer_id: &PeerId,
+        token: Option<T::ResponseToken>,
+        error: Error,
+    ) -> Error {
+        // CAR has no error reply type — send an empty response so the sender
+        // sees an explicit (parseable) rejection rather than a hung stream.
+        let send_result = if let Some(token) = token {
+            self.runtime
+                .transport
+                .send_car_response_token(token, Vec::new())
+                .await
+        } else {
+            self.runtime
+                .transport
+                .send_car_response(peer_id, Vec::new())
+                .await
+        };
+        if let Err(send_err) = send_result {
+            tracing::debug!(error = %send_err, "Failed to send CAR backpressure rejection");
+        }
+        error
     }
 
     /// Handle an event from the transport layer.
@@ -130,7 +273,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 topic,
                 ..
             } => {
-                self.enforce_gossip_rate_limit(&propagation_source, "GossipMessage")?;
+                self.check_rate_limit(
+                    &self.runtime.rate_limiter,
+                    &propagation_source,
+                    "GossipMessage",
+                )?;
                 self.handle_gossip_message(propagation_source, message, topic)
                     .await?;
             }
@@ -140,7 +287,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 data,
                 ..
             } => {
-                self.enforce_gossip_rate_limit(&propagation_source, "GossipRawMessage")?;
+                self.check_rate_limit(
+                    &self.runtime.rate_limiter,
+                    &propagation_source,
+                    "GossipRawMessage",
+                )?;
                 self.handle_gossip_raw_message(propagation_source, topic, data)
                     .await?;
             }
@@ -149,6 +300,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 request,
                 token,
             } => {
+                if let Err(error) = self.check_rate_limit(
+                    &self.runtime.request_rate_limiter,
+                    &peer_id,
+                    "PushLogRequest",
+                ) {
+                    return Err(self
+                        .reject_rate_limited_pushlog(&request.message_id, token, error)
+                        .await);
+                }
                 self.handle_pushlog_request(peer_id, request, token).await?;
             }
             TransportEvent::TwoStreamRequest {
@@ -158,6 +318,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 is_explicit_replicator,
                 explicit_replay_authorization,
             } => {
+                if let Err(error) = self.check_rate_limit(
+                    &self.runtime.request_rate_limiter,
+                    &peer_id,
+                    "TwoStreamRequest",
+                ) {
+                    return Err(self
+                        .reject_rate_limited_two_stream(&peer_id, &request.message_id, token, error)
+                        .await);
+                }
                 self.handle_two_stream_request(
                     peer_id,
                     request,
@@ -190,6 +359,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 request,
                 token,
             } => {
+                if let Err(error) = self.check_rate_limit(
+                    &self.runtime.request_rate_limiter,
+                    &peer_id,
+                    "DocSyncRequest",
+                ) {
+                    return Err(self
+                        .reject_rate_limited_doc_sync(&peer_id, &request.message_id, token, error)
+                        .await);
+                }
                 self.handle_doc_sync_request(peer_id, request, token)
                     .await?;
             }
@@ -201,6 +379,21 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 request,
                 token,
             } => {
+                if let Err(error) = self.check_rate_limit(
+                    &self.runtime.request_rate_limiter,
+                    &peer_id,
+                    "BranchableSyncRequest",
+                ) {
+                    return Err(self
+                        .reject_rate_limited_branchable_sync(
+                            &peer_id,
+                            &request.message_id,
+                            &request.collection_id,
+                            token,
+                            error,
+                        )
+                        .await);
+                }
                 self.handle_branchable_sync_request(peer_id, request, token)
                     .await?;
             }
@@ -212,6 +405,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 request,
                 token,
             } => {
+                if let Err(error) = self.check_rate_limit(
+                    &self.runtime.request_rate_limiter,
+                    &peer_id,
+                    "CarFetchRequest",
+                ) {
+                    return Err(self
+                        .reject_rate_limited_car_fetch(&peer_id, token, error)
+                        .await);
+                }
                 self.handle_car_fetch_request(peer_id, request, token)
                     .await?;
             }

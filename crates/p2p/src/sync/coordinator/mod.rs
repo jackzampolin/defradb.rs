@@ -255,8 +255,12 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
     /// Semaphore limiting concurrent push tasks (configurable via SyncConfig).
     pub(super) push_semaphore: Arc<tokio::sync::Semaphore>,
 
-    /// Per-peer rate limiter applied at event dispatch to throttle abusive peers.
+    /// Per-peer rate limiter for gossip dispatch (abuse ladder; drop-only).
     pub(super) rate_limiter: Arc<PeerRateLimiter>,
+
+    /// Per-peer rate limiter for request intake (pacing backoff; refusals are
+    /// nacked with `RATE_LIMITED_MESSAGE` so pushers retry at the refill rate).
+    pub(super) request_rate_limiter: Arc<PeerRateLimiter>,
 
     /// Timeout for one outbound PushLog send to a replicator peer.
     pub(super) push_send_timeout: Duration,

@@ -93,6 +93,23 @@ fn backoff_for_failure(backoff_steps: &[Duration], consecutive_failures: u32) ->
         .unwrap_or_else(|| Duration::from_secs(1))
 }
 
+/// Minimum effective refill rate for the request-intake limiter (tokens/s).
+///
+/// One token per second keeps the refill horizon well inside the deployed
+/// pusher's bounded in-batch retry budget (~3.3s of backoff sleeps before it
+/// abandons an ordered push and later restarts it from block one).
+pub const MIN_REQUEST_REFILL_RATE: f64 = 1.0;
+
+/// One-token refill horizon for request-intake pacing, clamped to [5ms, 1s].
+fn request_pacing_backoff(refill_rate: f64) -> Vec<Duration> {
+    let rate = if refill_rate.is_finite() && refill_rate > 0.0 {
+        refill_rate
+    } else {
+        1.0
+    };
+    vec![Duration::from_secs_f64((1.0 / rate).clamp(0.005, 1.0))]
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RateLimitDecision {
     Allowed,
@@ -128,6 +145,33 @@ impl PeerRateLimiter {
     /// * `refill_rate` – Tokens added per second per peer.
     pub fn new(capacity: u32, refill_rate: f64) -> Self {
         Self::with_backoff_steps(capacity, refill_rate, default_rate_limit_backoff())
+    }
+
+    /// Create a request-intake limiter: same bucket parameters, but the retry
+    /// horizon after a refusal is ~one token refill instead of the abuse
+    /// ladder.
+    ///
+    /// Request paths (PushLog, TwoStream, DocSync, ...) have a reply channel
+    /// and a well-behaved retry protocol, so the bucket itself is the flow
+    /// control: a legitimate deep full-DAG push that exhausts the burst must
+    /// resume at the refill rate. A long lockout would wedge any DAG deeper
+    /// than the burst - each spaced-out re-push restarts from block one and
+    /// re-burns the burst on already-sent blocks before reaching new ones
+    /// (fenced by the `p2p_deep_catchup` integration test). Gossip keeps the
+    /// abuse ladder (drop-only, no reply channel).
+    ///
+    /// The effective refill rate is floored at
+    /// [`MIN_REQUEST_REFILL_RATE`]: deployed pushers retry a nacked block
+    /// in-batch for only ~3.3s before giving up and re-pushing from block one
+    /// later, so a token must arrive within that budget or deep pushes wedge
+    /// exactly as above.
+    pub fn new_request_paced(capacity: u32, refill_rate: f64) -> Self {
+        let rate = if refill_rate.is_finite() && refill_rate > MIN_REQUEST_REFILL_RATE {
+            refill_rate
+        } else {
+            MIN_REQUEST_REFILL_RATE
+        };
+        Self::with_backoff_steps(capacity, rate, request_pacing_backoff(rate))
     }
 
     /// Create a new limiter with explicit rate-limit backoff steps.
@@ -215,6 +259,56 @@ mod tests {
         std::thread::sleep(Duration::from_millis(3));
         let (_, failures) = limited(limiter.check(&peer));
         assert_eq!(failures, 3);
+    }
+
+    #[test]
+    fn request_paced_limiter_recovers_at_refill_horizon_not_ladder() {
+        // #1088 W4 follow-up: request-intake limiting is flow control, not
+        // abuse control. A deep full-DAG push that exhausts the bucket must be
+        // able to resume at the token-refill rate; the 30s..12h abuse ladder
+        // would wedge any DAG deeper than the burst (each ladder re-push
+        // restarts from block 1 and re-burns the burst on already-sent blocks).
+        let limiter = PeerRateLimiter::new_request_paced(1, 200.0);
+        let peer = PeerId::new("peer-1".to_string());
+
+        assert_eq!(limiter.check(&peer), RateLimitDecision::Allowed);
+        let (retry_after, _) = limited(limiter.check(&peer));
+        assert!(
+            retry_after <= Duration::from_millis(50),
+            "retry horizon must be ~one token refill, not the abuse ladder: {retry_after:?}"
+        );
+
+        std::thread::sleep(retry_after + Duration::from_millis(20));
+        assert_eq!(
+            limiter.check(&peer),
+            RateLimitDecision::Allowed,
+            "must recover as soon as a token refills"
+        );
+    }
+
+    #[test]
+    fn request_paced_limiter_floors_pathological_refill_rates() {
+        // A configured rate of 0.1 tokens/s refills one token per 10s, but the
+        // deployed pusher's in-batch retry budget is ~3.3s and every persisted
+        // re-push restarts from block one — so any DAG deeper than the burst
+        // would wedge forever. The request limiter floors the refill rate so a
+        // token always arrives within the pusher's retry budget.
+        let limiter = PeerRateLimiter::new_request_paced(1, 0.1);
+        let peer = PeerId::new("peer-1".to_string());
+
+        assert_eq!(limiter.check(&peer), RateLimitDecision::Allowed);
+        let (retry_after, _) = limited(limiter.check(&peer));
+        assert!(
+            retry_after <= Duration::from_secs(1),
+            "retry horizon must stay within the pusher's in-batch budget: {retry_after:?}"
+        );
+
+        std::thread::sleep(retry_after + Duration::from_millis(120));
+        assert_eq!(
+            limiter.check(&peer),
+            RateLimitDecision::Allowed,
+            "a token must actually refill within the advertised horizon, not at the raw 0.1/s rate"
+        );
     }
 
     #[test]

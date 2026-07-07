@@ -1007,6 +1007,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordered_pushlogs_back_off_on_capacity_nack_reply() {
+        // #1088 W1: the hub maps Error::PendingDagCapacity to the same byte-exact
+        // backpressure sentinel, so the pusher's retry/backoff engages unchanged.
+        let capacity_nack = crate::error::Error::PendingDagCapacity { max: 1 }
+            .backpressure_reply_message()
+            .expect("capacity error maps to the backpressure sentinel");
+        let transport = TestTransport::new(vec![
+            PushLogReply::error("first", capacity_nack),
+            PushLogReply::success("first"),
+            PushLogReply::success("second"),
+        ]);
+        let peer_id = PeerId::new("remote-peer".to_string());
+        let cid1 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-1"));
+        let cid2 = Cid::new_v1(0x55, Code::Sha2_256.digest(b"cid-2"));
+        let requests = vec![
+            (
+                cid1,
+                PushLogRequest::new(
+                    "doc-1".to_string(),
+                    Bytes::from(cid1.to_bytes()),
+                    "collection".to_string(),
+                    "creator".to_string(),
+                    Bytes::from_static(b"block-1"),
+                ),
+            ),
+            (
+                cid2,
+                PushLogRequest::new(
+                    "doc-1".to_string(),
+                    Bytes::from(cid2.to_bytes()),
+                    "collection".to_string(),
+                    "creator".to_string(),
+                    Bytes::from_static(b"block-2"),
+                ),
+            ),
+        ];
+
+        let any_failed = SyncCoordinator::<
+            blockstore::DefraBlockstore<storage::backends::MemoryStore>,
+            TestTransport,
+        >::send_ordered_pushlogs_via_transport(
+            &transport,
+            &peer_id,
+            requests,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(!any_failed);
+        assert_eq!(
+            transport.sent_cids(),
+            vec![cid1.to_bytes(), cid1.to_bytes(), cid2.to_bytes()]
+        );
+    }
+
+    #[tokio::test]
     async fn ordered_pushlogs_stop_after_bounded_rate_limit_retries() {
         let transport = TestTransport::new(
             std::iter::repeat_with(|| PushLogReply::error("first", RATE_LIMITED_MESSAGE))

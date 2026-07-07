@@ -321,6 +321,10 @@ pub struct NetConfig {
     /// Max document IDs accepted in one DocSync request. Default: 1000.
     #[serde(default = "default_max_doc_sync_request_doc_ids")]
     pub p2p_max_doc_sync_request_doc_ids: usize,
+    /// Max pending-DAG registrations held while Bitswap completes missing
+    /// links; overflow is nacked back to the pusher. Default: 1000.
+    #[serde(default = "default_max_pending_dags")]
+    pub p2p_max_pending_dags: usize,
 }
 
 fn default_max_msg_size() -> u64 {
@@ -356,6 +360,9 @@ fn default_rate_limit_rate() -> f64 {
 fn default_max_doc_sync_request_doc_ids() -> usize {
     p2p::sync::DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS
 }
+fn default_max_pending_dags() -> usize {
+    p2p::sync::DEFAULT_MAX_PENDING_DAGS
+}
 fn default_true() -> bool {
     true
 }
@@ -388,6 +395,7 @@ impl Default for NetConfig {
             p2p_rate_limit_burst: default_rate_limit_burst(),
             p2p_rate_limit_rate: default_rate_limit_rate(),
             p2p_max_doc_sync_request_doc_ids: default_max_doc_sync_request_doc_ids(),
+            p2p_max_pending_dags: default_max_pending_dags(),
         }
     }
 }

@@ -10,6 +10,26 @@ use crate::signing::sign_with_transport;
 use crate::transport::{P2PTransport, PeerId};
 use crate::ExplicitReplayAuthorization;
 
+/// Build the PushLogReply for a `process_pushlog` outcome.
+///
+/// Invariant (#1088 M1): a success reply implies the block is either merged or
+/// registered as pending — no path may ack success after discarding state.
+/// Backpressure failures (pending-DAG capacity, rate limit) reply the
+/// byte-exact `RATE_LIMITED_MESSAGE` the pusher matches to drive its
+/// retry/backoff. Nack-on-overload is the Go-aligned behavior: Go's direct
+/// replicator channel drives its retryInterval ladder off error replies
+/// (`replicator.go`), so these overload nacks are orthogonal to the trust/ACP
+/// bypasses fa4a84f7 aligned with Go when it removed the #592 nacks.
+fn build_pushlog_reply(message_id: &str, process_result: &Result<()>) -> PushLogReply {
+    match process_result {
+        Ok(()) => PushLogReply::success(message_id),
+        Err(e) => match e.backpressure_reply_message() {
+            Some(nack) => PushLogReply::error(message_id, nack),
+            None => PushLogReply::error(message_id, &e.to_string()),
+        },
+    }
+}
+
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub(super) async fn handle_pushlog_request(
         &self,
@@ -114,10 +134,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             );
         }
 
-        let reply = match &process_result {
-            Ok(()) => PushLogReply::success(&request.message_id),
-            Err(e) => PushLogReply::error(&request.message_id, &e.to_string()),
-        };
+        let reply = build_pushlog_reply(&request.message_id, &process_result);
 
         if let Err(e) = self
             .runtime
@@ -200,10 +217,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             )
             .await;
 
-        let mut reply = match &process_result {
-            Ok(()) => PushLogReply::success(&request.message_id),
-            Err(e) => PushLogReply::error(&request.message_id, &e.to_string()),
-        };
+        let mut reply = build_pushlog_reply(&request.message_id, &process_result);
 
         if let Err(e) = sign_with_transport(&self.runtime.transport, &mut reply) {
             tracing::error!(

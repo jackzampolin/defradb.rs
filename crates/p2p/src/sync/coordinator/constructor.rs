@@ -214,6 +214,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         rate_limit_rate,
                         rate_limit_backoff,
                     )),
+                    request_rate_limiter: Arc::new(PeerRateLimiter::new_request_paced(
+                        rate_limit_burst,
+                        rate_limit_rate,
+                    )),
                     push_send_timeout,
                     max_doc_sync_request_doc_ids,
                     shutdown: super::SyncShutdownHandle::new(),

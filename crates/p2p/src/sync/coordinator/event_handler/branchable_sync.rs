@@ -114,6 +114,30 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             "Received BranchableSync reply"
         );
 
+        // Error replies carry empty heads; without this branch a backpressure
+        // nack or access denial would read as "peer has no heads". Like
+        // DocSync, this is a pull — surfacing the error is the correct
+        // terminal handling; the next sync trigger re-requests.
+        if let Some(err) = reply.err_message.as_deref() {
+            if crate::error::is_rate_limited_message(err) {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    collection_id = %reply.collection_id,
+                    "Peer rate-limited our BranchableSync request; will re-request on the next sync trigger"
+                );
+            } else {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    collection_id = %reply.collection_id,
+                    error = %err,
+                    "BranchableSync request rejected by peer"
+                );
+            }
+            return Err(crate::error::Error::Transport(format!(
+                "BranchableSync request rejected by peer {peer_id}: {err}"
+            )));
+        }
+
         if reply.heads.is_empty() {
             tracing::debug!(
                 collection_id = %reply.collection_id,

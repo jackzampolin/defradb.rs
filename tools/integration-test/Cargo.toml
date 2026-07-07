@@ -27,6 +27,14 @@ name = "p2p"
 path = "tests/p2p.rs"
 
 [[test]]
+name = "p2p_admission"
+path = "tests/p2p_admission.rs"
+
+[[test]]
+name = "p2p_deep_catchup"
+path = "tests/p2p_deep_catchup.rs"
+
+[[test]]
 name = "encryption"
 path = "tests/encryption.rs"
 

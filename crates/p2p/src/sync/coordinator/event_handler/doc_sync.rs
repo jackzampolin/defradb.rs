@@ -215,6 +215,32 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         peer_id: PeerId,
         reply: DocSyncReply,
     ) -> Result<()> {
+        // Error replies (backpressure nacks, access denials) carry no results;
+        // without this branch they would read as an empty successful sync.
+        // DocSync is a pull — the peer discarded no state on rejection — so
+        // surfacing the error is the correct terminal handling here: the next
+        // sync trigger (subscription event, reconnect) re-requests. A
+        // puller-side backoff ladder is #1088 follow-up scope.
+        if let Some(err) = reply.err_message.as_deref() {
+            if crate::error::is_rate_limited_message(err) {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    message_id = %reply.message_id,
+                    "Peer rate-limited our DocSync request; will re-request on the next sync trigger"
+                );
+            } else {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    message_id = %reply.message_id,
+                    error = %err,
+                    "DocSync request rejected by peer"
+                );
+            }
+            return Err(Error::Transport(format!(
+                "DocSync request rejected by peer {peer_id}: {err}"
+            )));
+        }
+
         tracing::info!(
             peer_id = %peer_id,
             message_id = %reply.message_id,

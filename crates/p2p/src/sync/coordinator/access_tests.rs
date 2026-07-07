@@ -68,12 +68,95 @@ fn create_test_coordinator_with_rate_limiter(
     SyncCoordinator<TestBlockstore, NoopTransport>,
     tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
 ) {
+    create_test_coordinator_with_options(
+        access_mode,
+        replicators,
+        peer_state,
+        rate_limiter,
+        SyncConfig::default(),
+    )
+}
+
+fn create_test_coordinator_with_sync_config(
+    access_mode: AccessMode,
+    replicators: Arc<ReplicatorRegistry>,
+    peer_state: Arc<PeerStateTracker>,
+    sync_config: SyncConfig,
+) -> (
+    SyncCoordinator<TestBlockstore, NoopTransport>,
+    tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
+) {
+    create_test_coordinator_with_options(
+        access_mode,
+        replicators,
+        peer_state,
+        Arc::new(PeerRateLimiter::default()),
+        sync_config,
+    )
+}
+
+fn create_test_coordinator_with_options(
+    access_mode: AccessMode,
+    replicators: Arc<ReplicatorRegistry>,
+    peer_state: Arc<PeerStateTracker>,
+    rate_limiter: Arc<PeerRateLimiter>,
+    sync_config: SyncConfig,
+) -> (
+    SyncCoordinator<TestBlockstore, NoopTransport>,
+    tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
+) {
+    // Most limiter tests exercise one path at a time; share the injected
+    // limiter across gossip and request intake so either path sees it.
+    let request_rate_limiter = rate_limiter.clone();
+    create_test_coordinator_full(
+        access_mode,
+        replicators,
+        peer_state,
+        rate_limiter,
+        request_rate_limiter,
+        sync_config,
+    )
+}
+
+fn create_test_coordinator_with_split_limiters(
+    access_mode: AccessMode,
+    replicators: Arc<ReplicatorRegistry>,
+    peer_state: Arc<PeerStateTracker>,
+    rate_limiter: Arc<PeerRateLimiter>,
+    request_rate_limiter: Arc<PeerRateLimiter>,
+) -> (
+    SyncCoordinator<TestBlockstore, NoopTransport>,
+    tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
+) {
+    create_test_coordinator_full(
+        access_mode,
+        replicators,
+        peer_state,
+        rate_limiter,
+        request_rate_limiter,
+        SyncConfig::default(),
+    )
+}
+
+fn create_test_coordinator_full(
+    access_mode: AccessMode,
+    replicators: Arc<ReplicatorRegistry>,
+    peer_state: Arc<PeerStateTracker>,
+    rate_limiter: Arc<PeerRateLimiter>,
+    request_rate_limiter: Arc<PeerRateLimiter>,
+    sync_config: SyncConfig,
+) -> (
+    SyncCoordinator<TestBlockstore, NoopTransport>,
+    tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
+) {
     let transport = NoopTransport::new();
     let local_peer_id = transport.local_peer_id().to_string();
     let broadcaster = Broadcaster::new(transport.clone());
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        sync_config,
+        request_rate_limiter,
         access_mode,
         replicators,
         peer_state,
@@ -89,6 +172,8 @@ fn create_test_coordinator_with_rate_limiter(
 /// Grouped so the test helper stays under clippy's `too_many_arguments` budget
 /// without hiding the list of inputs behind a builder pattern.
 struct TestCoordinatorParams<B: Blockstore + 'static> {
+    sync_config: SyncConfig,
+    request_rate_limiter: Arc<PeerRateLimiter>,
     access_mode: AccessMode,
     replicators: Arc<ReplicatorRegistry>,
     peer_state: Arc<PeerStateTracker>,
@@ -116,6 +201,8 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
     tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
 ) {
     let TestCoordinatorParams {
+        sync_config,
+        request_rate_limiter,
         access_mode,
         replicators,
         peer_state,
@@ -126,7 +213,7 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
         rate_limiter,
     } = params;
 
-    let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), SyncConfig::default());
+    let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), sync_config);
 
     let authorizer = Arc::new(RuntimeAuthorizer::new(
         transport.clone(),
@@ -145,6 +232,7 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
                 DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
             )),
             rate_limiter,
+            request_rate_limiter,
             push_send_timeout: DEFAULT_PUSH_SEND_TIMEOUT,
             max_doc_sync_request_doc_ids: DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
             shutdown: SyncShutdownHandle::new(),
@@ -272,6 +360,9 @@ struct NoopTransport {
     connected_peers: Arc<RwLock<Vec<PeerId>>>,
     doc_sync_replies: Arc<RwLock<Vec<DocSyncReply>>>,
     car_responses: Arc<RwLock<Vec<Vec<u8>>>>,
+    pushlog_replies: Arc<RwLock<Vec<crate::message::PushLogReply>>>,
+    two_stream_replies: Arc<RwLock<Vec<crate::message::PushLogReply>>>,
+    branchable_replies: Arc<RwLock<Vec<BranchableSyncReply>>>,
 }
 
 impl NoopTransport {
@@ -283,6 +374,9 @@ impl NoopTransport {
             connected_peers: Arc::new(RwLock::new(Vec::new())),
             doc_sync_replies: Arc::new(RwLock::new(Vec::new())),
             car_responses: Arc::new(RwLock::new(Vec::new())),
+            pushlog_replies: Arc::new(RwLock::new(Vec::new())),
+            two_stream_replies: Arc::new(RwLock::new(Vec::new())),
+            branchable_replies: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -292,6 +386,18 @@ impl NoopTransport {
 
     fn doc_sync_replies(&self) -> Vec<DocSyncReply> {
         self.doc_sync_replies.read().clone()
+    }
+
+    fn pushlog_replies(&self) -> Vec<crate::message::PushLogReply> {
+        self.pushlog_replies.read().clone()
+    }
+
+    fn two_stream_replies(&self) -> Vec<crate::message::PushLogReply> {
+        self.two_stream_replies.read().clone()
+    }
+
+    fn branchable_replies(&self) -> Vec<BranchableSyncReply> {
+        self.branchable_replies.read().clone()
     }
 
     /// CARv1 payloads the coordinator sent, in order (used to assert which
@@ -372,8 +478,9 @@ impl P2PTransport for NoopTransport {
     async fn send_pushlog_response(
         &self,
         _token: Self::ResponseToken,
-        _reply: crate::message::PushLogReply,
+        reply: crate::message::PushLogReply,
     ) -> crate::Result<()> {
+        self.pushlog_replies.write().push(reply);
         Ok(())
     }
 
@@ -388,8 +495,9 @@ impl P2PTransport for NoopTransport {
     async fn send_two_stream_response(
         &self,
         _peer_id: &PeerId,
-        _reply: crate::message::PushLogReply,
+        reply: crate::message::PushLogReply,
     ) -> crate::Result<()> {
+        self.two_stream_replies.write().push(reply);
         Ok(())
     }
 
@@ -421,8 +529,9 @@ impl P2PTransport for NoopTransport {
     async fn send_branchable_sync_response(
         &self,
         _peer_id: &PeerId,
-        _reply: crate::message::BranchableSyncReply,
+        reply: crate::message::BranchableSyncReply,
     ) -> crate::Result<()> {
+        self.branchable_replies.write().push(reply);
         Ok(())
     }
 
@@ -456,8 +565,9 @@ impl P2PTransport for NoopTransport {
     async fn send_branchable_sync_response_token(
         &self,
         _token: Self::ResponseToken,
-        _reply: crate::message::BranchableSyncReply,
+        reply: crate::message::BranchableSyncReply,
     ) -> crate::Result<()> {
+        self.branchable_replies.write().push(reply);
         Ok(())
     }
 
@@ -833,6 +943,8 @@ async fn doc_sync_filters_heads_outside_replicator_collection() {
 
     let (coordinator, _events) = create_test_coordinator_with_blockstore_and_head_provider(
         TestCoordinatorParams {
+            sync_config: SyncConfig::default(),
+            request_rate_limiter: Arc::new(PeerRateLimiter::default()),
             access_mode: AccessMode::Controlled,
             replicators,
             peer_state,
@@ -898,6 +1010,8 @@ async fn car_fetch_controlled_mode_filters_unauthorized_data_block() {
     blockstore.put(&cid, &block_data).await.unwrap();
 
     let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        sync_config: SyncConfig::default(),
+        request_rate_limiter: Arc::new(PeerRateLimiter::default()),
         access_mode: AccessMode::Controlled,
         replicators,
         peer_state,
@@ -1158,6 +1272,8 @@ async fn branchable_sync_reply_remerges_locally_complete_unmerged_head() {
 
     let (coordinator, mut events) =
         create_test_coordinator_with_blockstore(TestCoordinatorParams {
+            sync_config: SyncConfig::default(),
+            request_rate_limiter: Arc::new(PeerRateLimiter::default()),
             access_mode: AccessMode::Open,
             replicators,
             peer_state,
@@ -1639,6 +1755,8 @@ async fn gossip_ignores_transport_replicator_state_for_directionality() {
         .unwrap();
 
     let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        sync_config: SyncConfig::default(),
+        request_rate_limiter: Arc::new(PeerRateLimiter::default()),
         access_mode: AccessMode::Controlled,
         replicators: replicators.clone(),
         peer_state,
@@ -1683,6 +1801,8 @@ async fn delete_replicator_removes_gossip_access_without_subscription() {
     transport.set_connected_peers(vec![peer.clone()]);
 
     let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        sync_config: SyncConfig::default(),
+        request_rate_limiter: Arc::new(PeerRateLimiter::default()),
         access_mode: AccessMode::Controlled,
         replicators,
         peer_state,
@@ -1724,6 +1844,8 @@ async fn create_replicator_update_keeps_outbound_targets_from_gossip_sources() {
     transport.set_connected_peers(vec![peer.clone()]);
 
     let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        sync_config: SyncConfig::default(),
+        request_rate_limiter: Arc::new(PeerRateLimiter::default()),
         access_mode: AccessMode::Controlled,
         replicators,
         peer_state,
@@ -1793,30 +1915,13 @@ async fn two_stream_authenticated_explicit_replicator_is_marked_explicit_replica
     }
 }
 
-#[tokio::test]
-async fn two_stream_bypasses_gossip_rate_limiter_for_authenticated_sync() {
-    let replicators = Arc::new(ReplicatorRegistry::new());
-    let peer_state = Arc::new(PeerStateTracker::new());
-    let (coordinator, mut events) = create_test_coordinator_with_rate_limiter(
-        AccessMode::Open,
-        replicators,
-        peer_state,
-        Arc::new(PeerRateLimiter::new(0, 0.0)),
-    );
-
-    let peer = random_peer_id();
-    coordinator
-        .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
-        .await
-        .unwrap();
-
-    match recv_block_received(&mut events).await {
-        SyncEvent::BlockReceived { sender_peer, .. } => {
-            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
-        }
-        other => panic!("expected BlockReceived, got {:?}", other),
-    }
-}
+// fa4a84f7's `two_stream_bypasses_gossip_rate_limiter_for_authenticated_sync`
+// asserted that authenticated two-stream pushes skip the rate limiter entirely.
+// #1088 W4 re-lands #592's intake admission: the concern that test protected —
+// authenticated sync must never be SILENTLY dropped like gossip — is preserved
+// and strengthened by `two_stream_rate_limited_replies_backpressure_nack` below:
+// over-budget pushes now get an explicit RATE_LIMITED_MESSAGE nack that the
+// pusher's backoff consumer (#843) turns into a retry, never a lost document.
 
 #[tokio::test]
 async fn gossip_remains_rate_limited_when_bucket_is_empty() {
@@ -1852,6 +1957,8 @@ async fn pushlog_retries_transient_transaction_conflicts_without_sync_error() {
 
     let (coordinator, mut events) =
         create_test_coordinator_with_blockstore(TestCoordinatorParams {
+            sync_config: SyncConfig::default(),
+            request_rate_limiter: Arc::new(PeerRateLimiter::default()),
             access_mode: AccessMode::Open,
             replicators,
             peer_state,
@@ -1888,6 +1995,8 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
 
     let (coordinator, mut events) =
         create_test_coordinator_with_blockstore(TestCoordinatorParams {
+            sync_config: SyncConfig::default(),
+            request_rate_limiter: Arc::new(PeerRateLimiter::default()),
             access_mode: AccessMode::Open,
             replicators,
             peer_state,
@@ -1911,4 +2020,475 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
         }
         other => panic!("expected BlockReceived after gossip retry, got {:?}", other),
     }
+}
+
+// --- #1088 W1/W4: intake backpressure nacks (re-land #592, regressed by fa4a84f7) ---
+//
+// The M1 invariant: a success PushLogReply implies the pushed block is either
+// merged or registered as pending on the hub. Capacity overflow and rate-limit
+// rejections must reply the byte-exact RATE_LIMITED_MESSAGE so the pusher's
+// backoff consumer (send_ordered_pushlogs_via_transport) and persisted retry
+// ladder keep the doc queued instead of laundering the failure as success.
+
+/// A PushLog request whose composite block links to a field block that is never
+/// stored, so `process_pushlog` must register a pending DAG to track it.
+fn pushlog_request_with_missing_link(collection_id: &str, doc_id: &str) -> PushLogRequest {
+    let field_block = defra_core::Block::new(
+        defra_core::CrdtDelta::Lww(defra_core::LwwDeltaPayload {
+            doc_id: doc_id.as_bytes().to_vec(),
+            field_name: "field".to_string(),
+            priority: 1,
+            schema_version_id: "schema1".to_string(),
+            data: b"value".to_vec(),
+        }),
+        vec![],
+        vec![],
+    );
+    let field_cid = field_block.generate_cid().expect("field cid");
+
+    let composite = defra_core::Block::new(
+        defra_core::CrdtDelta::Composite(defra_core::CompositeDeltaPayload {
+            doc_id: doc_id.as_bytes().to_vec(),
+            schema_version_id: "schema1".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![defra_core::DAGLink::new("field", field_cid)],
+    );
+    let composite_bytes = composite.to_dag_cbor().expect("encode composite");
+    let composite_cid = composite.generate_cid().expect("composite cid");
+
+    PushLogRequest::new(
+        doc_id.to_string(),
+        bytes::Bytes::from(composite_cid.to_bytes()),
+        collection_id.to_string(),
+        "creator1".to_string(),
+        bytes::Bytes::from(composite_bytes),
+    )
+}
+
+fn always_limited_rate_limiter() -> Arc<PeerRateLimiter> {
+    Arc::new(PeerRateLimiter::with_backoff_steps(
+        0,
+        0.0,
+        vec![Duration::from_secs(60)],
+    ))
+}
+
+#[tokio::test]
+async fn pushlog_request_at_pending_capacity_replies_rate_limited_nack() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator_with_sync_config(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        SyncConfig {
+            max_pending_dags: 1,
+            ..SyncConfig::default()
+        },
+    );
+    let transport = coordinator.runtime.transport.clone();
+    let peer = random_peer_id();
+
+    coordinator
+        .handle_transport_event(TransportEvent::PushLogRequest {
+            peer_id: peer.clone(),
+            request: pushlog_request_with_missing_link("collection1", "docA"),
+            token: (),
+        })
+        .await
+        .unwrap();
+    let first = transport.pushlog_replies().pop().expect("first reply");
+    assert_eq!(
+        first.err_message, None,
+        "registered pending DAG must ack success"
+    );
+
+    let result = coordinator
+        .handle_transport_event(TransportEvent::PushLogRequest {
+            peer_id: peer.clone(),
+            request: pushlog_request_with_missing_link("collection1", "docB"),
+            token: (),
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "capacity drop must surface as an error, got {:?}",
+        result
+    );
+
+    let reply = transport.pushlog_replies().pop().expect("overflow reply");
+    assert_eq!(
+        reply.err_message.as_deref(),
+        Some(crate::error::RATE_LIMITED_MESSAGE),
+        "capacity overflow must nack with the byte-exact backpressure sentinel, never success"
+    );
+}
+
+#[tokio::test]
+async fn two_stream_at_pending_capacity_replies_rate_limited_nack() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator_with_sync_config(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        SyncConfig {
+            max_pending_dags: 1,
+            ..SyncConfig::default()
+        },
+    );
+    let transport = coordinator.runtime.transport.clone();
+    let peer = random_peer_id();
+
+    coordinator
+        .handle_transport_event(TransportEvent::TwoStreamRequest {
+            peer_id: peer.clone(),
+            request: pushlog_request_with_missing_link("collection1", "docA"),
+            token: None,
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+        })
+        .await
+        .unwrap();
+    let first = transport.two_stream_replies().pop().expect("first reply");
+    assert_eq!(
+        first.err_message, None,
+        "registered pending DAG must ack success"
+    );
+
+    let result = coordinator
+        .handle_transport_event(TransportEvent::TwoStreamRequest {
+            peer_id: peer.clone(),
+            request: pushlog_request_with_missing_link("collection1", "docB"),
+            token: None,
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "capacity drop must surface as an error, got {:?}",
+        result
+    );
+
+    let reply = transport
+        .two_stream_replies()
+        .pop()
+        .expect("overflow reply");
+    assert_eq!(
+        reply.err_message.as_deref(),
+        Some(crate::error::RATE_LIMITED_MESSAGE),
+        "capacity overflow must nack with the byte-exact backpressure sentinel, never success"
+    );
+}
+
+#[tokio::test]
+async fn pushlog_request_rate_limited_replies_backpressure_nack() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator_with_rate_limiter(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        always_limited_rate_limiter(),
+    );
+    let transport = coordinator.runtime.transport.clone();
+    let peer = random_peer_id();
+
+    let result = coordinator
+        .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
+        .await;
+    assert!(
+        matches!(&result, Err(e) if e.is_rate_limited()),
+        "expected rate-limited rejection, got {:?}",
+        result
+    );
+
+    let reply = transport.pushlog_replies().pop().expect("nack reply sent");
+    assert_eq!(
+        reply.err_message.as_deref(),
+        Some(crate::error::RATE_LIMITED_MESSAGE)
+    );
+}
+
+#[tokio::test]
+async fn two_stream_rate_limited_replies_backpressure_nack() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator_with_rate_limiter(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        always_limited_rate_limiter(),
+    );
+    let transport = coordinator.runtime.transport.clone();
+    let peer = random_peer_id();
+
+    let result = coordinator
+        .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
+        .await;
+    assert!(
+        matches!(&result, Err(e) if e.is_rate_limited()),
+        "expected rate-limited rejection, got {:?}",
+        result
+    );
+
+    let reply = transport
+        .two_stream_replies()
+        .pop()
+        .expect("nack reply sent");
+    assert_eq!(
+        reply.err_message.as_deref(),
+        Some(crate::error::RATE_LIMITED_MESSAGE)
+    );
+}
+
+#[tokio::test]
+async fn doc_sync_rate_limited_replies_backpressure_nack() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator_with_rate_limiter(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        always_limited_rate_limiter(),
+    );
+    let transport = coordinator.runtime.transport.clone();
+    let peer = random_peer_id();
+
+    let result = coordinator
+        .handle_transport_event(doc_sync_event(peer.clone()))
+        .await;
+    assert!(
+        matches!(&result, Err(e) if e.is_rate_limited()),
+        "expected rate-limited rejection, got {:?}",
+        result
+    );
+
+    let reply = transport.doc_sync_replies().pop().expect("nack reply sent");
+    assert_eq!(
+        reply.err_message.as_deref(),
+        Some(crate::error::RATE_LIMITED_MESSAGE)
+    );
+}
+
+#[tokio::test]
+async fn branchable_sync_rate_limited_replies_backpressure_nack() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator_with_rate_limiter(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        always_limited_rate_limiter(),
+    );
+    let transport = coordinator.runtime.transport.clone();
+    let peer = random_peer_id();
+
+    let result = coordinator
+        .handle_transport_event(branchable_sync_event(peer.clone(), "collection1"))
+        .await;
+    assert!(
+        matches!(&result, Err(e) if e.is_rate_limited()),
+        "expected rate-limited rejection, got {:?}",
+        result
+    );
+
+    let reply = transport
+        .branchable_replies()
+        .pop()
+        .expect("nack reply sent");
+    assert_eq!(
+        reply.err_message.as_deref(),
+        Some(crate::error::RATE_LIMITED_MESSAGE)
+    );
+}
+
+#[tokio::test]
+async fn car_fetch_rate_limited_replies_empty_response() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator_with_rate_limiter(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        always_limited_rate_limiter(),
+    );
+    let transport = coordinator.runtime.transport.clone();
+    let peer = random_peer_id();
+
+    let result = coordinator
+        .handle_transport_event(car_fetch_event(peer.clone(), cid_for(BLOCK_DATA)))
+        .await;
+    assert!(
+        matches!(&result, Err(e) if e.is_rate_limited()),
+        "expected rate-limited rejection, got {:?}",
+        result
+    );
+
+    // CAR has no error reply type - an explicit empty response beats a hung stream.
+    let responses = transport.car_responses();
+    assert_eq!(responses.last().map(Vec::len), Some(0));
+}
+
+/// #1088 W5 (in-process half): 8 pushers × 6 docs fan into a hub whose pending
+/// map holds 2 slots. Nothing drains (no Bitswap in NoopTransport), so exactly
+/// `cap` pushes can be admitted; every other push must be nacked — never
+/// success-acked (M1) — and the pending depth must never exceed the cap.
+#[tokio::test]
+async fn fan_in_pushes_keep_pending_depth_bounded_and_account_every_reply() {
+    const CAP: usize = 2;
+    const FAN_IN_PUSHERS: usize = 8;
+    const DOCS_PER_PUSHER: usize = 6;
+
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator_with_sync_config(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        SyncConfig {
+            max_pending_dags: CAP,
+            ..SyncConfig::default()
+        },
+    );
+    let transport = coordinator.runtime.transport.clone();
+
+    for pusher in 0..FAN_IN_PUSHERS {
+        let peer = random_peer_id();
+        for doc in 0..DOCS_PER_PUSHER {
+            let _ = coordinator
+                .handle_transport_event(TransportEvent::TwoStreamRequest {
+                    peer_id: peer.clone(),
+                    request: pushlog_request_with_missing_link(
+                        "collection1",
+                        &format!("p{pusher}-d{doc}"),
+                    ),
+                    token: None,
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
+                })
+                .await;
+            assert!(
+                coordinator.manager.pending_dag_count() <= CAP,
+                "pending depth exceeded the configured cap"
+            );
+        }
+    }
+
+    let replies = transport.two_stream_replies();
+    let total = FAN_IN_PUSHERS * DOCS_PER_PUSHER;
+    assert_eq!(replies.len(), total, "every push must receive a reply");
+
+    let successes = replies.iter().filter(|r| r.err_message.is_none()).count();
+    let nacks = replies
+        .iter()
+        .filter(|r| r.err_message.as_deref() == Some(crate::error::RATE_LIMITED_MESSAGE))
+        .count();
+    assert_eq!(
+        successes, CAP,
+        "only registered pushes may be success-acked (M1: success => registered-or-merged)"
+    );
+    assert_eq!(
+        nacks,
+        total - CAP,
+        "every dropped registration must be nacked with the backpressure sentinel"
+    );
+
+    // No completed DAGs and no arriving link blocks here, so admission overflow
+    // must not trigger any pending-DAG re-walks (the M4 CPU burn shape).
+    let diagnostics = coordinator.manager.diagnostics().snapshot();
+    assert_eq!(
+        diagnostics.missing_link_retries, 0,
+        "capacity overflow must not cause retry walks"
+    );
+}
+
+/// An error DocSyncReply (e.g. a RATE_LIMITED_MESSAGE nack from #1088 W4)
+/// carries no results; it must surface as an error, not be consumed as an
+/// empty successful sync.
+#[tokio::test]
+async fn doc_sync_error_reply_is_not_consumed_as_empty_success() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
+    let peer = random_peer_id();
+
+    let result = coordinator
+        .handle_transport_event(TransportEvent::DocSyncReply {
+            peer_id: peer.clone(),
+            reply: DocSyncReply::error("doc-sync-1", crate::error::RATE_LIMITED_MESSAGE),
+        })
+        .await;
+
+    assert!(
+        result.is_err(),
+        "an error reply must not be treated as an empty successful sync, got {:?}",
+        result
+    );
+}
+
+/// Same for BranchableSync: an error reply has empty heads and must not be
+/// mistaken for "peer has no heads for collection".
+#[tokio::test]
+async fn branchable_sync_error_reply_is_not_consumed_as_no_heads() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
+    let peer = random_peer_id();
+
+    let result = coordinator
+        .handle_transport_event(TransportEvent::BranchableSyncReply {
+            peer_id: peer.clone(),
+            reply: BranchableSyncReply::error(
+                "branchable-1",
+                "collection1",
+                crate::error::RATE_LIMITED_MESSAGE,
+            ),
+        })
+        .await;
+
+    assert!(
+        result.is_err(),
+        "an error reply must not be treated as \"peer has no heads\", got {:?}",
+        result
+    );
+}
+
+/// The gossip limiter (abuse ladder) and the request-intake limiter (pacing)
+/// are separate: an exhausted gossip bucket must not block replicator pushes,
+/// which have their own paced bucket.
+#[tokio::test]
+async fn request_intake_uses_paced_limiter_separate_from_gossip_ladder() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator_with_split_limiters(
+        AccessMode::Open,
+        replicators,
+        peer_state,
+        always_limited_rate_limiter(),
+        Arc::new(PeerRateLimiter::default()),
+    );
+    let peer = random_peer_id();
+
+    let gossip_result = coordinator
+        .handle_transport_event(gossip_event(peer.clone(), "collection1"))
+        .await;
+    assert!(
+        matches!(&gossip_result, Err(e) if e.is_rate_limited()),
+        "gossip must still be governed by the ladder limiter, got {:?}",
+        gossip_result
+    );
+
+    let push_result = coordinator
+        .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
+        .await;
+    assert!(
+        push_result.is_ok(),
+        "request intake must use its own paced limiter, got {:?}",
+        push_result
+    );
 }

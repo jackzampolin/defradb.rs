@@ -44,6 +44,7 @@ fn default_start_args() -> StartArgs {
         p2p_rate_limit_burst: None,
         p2p_rate_limit_rate: None,
         p2p_max_doc_sync_request_doc_ids: None,
+        p2p_max_pending_dags: None,
         max_merge_depth: None,
         query_timeout: None,
         transaction_idle_timeout: None,
@@ -152,6 +153,7 @@ fn test_apply_to_config_all_flags() {
         p2p_rate_limit_burst: Some(32),
         p2p_rate_limit_rate: Some(4.5),
         p2p_max_doc_sync_request_doc_ids: Some(64),
+        p2p_max_pending_dags: Some(7),
         max_merge_depth: Some(2048),
         query_timeout: Some(45),
         transaction_idle_timeout: Some(900),
@@ -185,6 +187,7 @@ fn test_apply_to_config_all_flags() {
     assert_eq!(config.net.p2p_rate_limit_burst, 32);
     assert_eq!(config.net.p2p_rate_limit_rate, 4.5);
     assert_eq!(config.net.p2p_max_doc_sync_request_doc_ids, 64);
+    assert_eq!(config.net.p2p_max_pending_dags, 7);
     assert_eq!(config.datastore.max_merge_depth, 2048);
     assert_eq!(config.api.max_body_size, 1024);
     assert_eq!(config.api.max_schema_size, 2048);

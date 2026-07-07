@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::message::PushLogBroadcast;
 use crate::sync::manager::events::SyncEvent;
 use crate::sync::manager::links::find_all_missing_links;
-use crate::sync::manager::pending::{PendingDag, MAX_PENDING_DAGS};
+use crate::sync::manager::pending::PendingDag;
 use crate::ExplicitReplayAuthorization;
 
 use super::SyncManager;
@@ -376,16 +376,23 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     },
                 );
                 if !inserted {
+                    // The block is stored but its DAG completion is not
+                    // tracked. This must surface as an error: a success reply
+                    // deletes the pusher's retry record, silently losing the
+                    // document. The reply seams map this typed error to the
+                    // RATE_LIMITED_MESSAGE nack so the pusher re-pushes later.
                     tracing::warn!(
                         cid = %cid,
                         doc_id = %msg.doc_id,
                         collection_id = %msg.collection_id,
                         source_peer = ?sender_peer,
                         missing_count = missing.len(),
-                        max = MAX_PENDING_DAGS,
-                        "Pending DAGs at capacity, dropping PushLog DAG registration"
+                        max = self.max_pending_dags,
+                        "Pending DAGs at capacity, rejecting PushLog DAG registration"
                     );
-                    return Ok(());
+                    return Err(Error::PendingDagCapacity {
+                        max: self.max_pending_dags,
+                    });
                 }
             }
 
