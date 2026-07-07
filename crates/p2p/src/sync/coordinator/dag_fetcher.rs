@@ -16,6 +16,7 @@ use tracing::{debug, error, info, warn};
 
 use super::dag_context::DagFetchContext;
 use super::dag_retry::{retry_backoff, ProviderRotation, MAX_FETCH_ATTEMPTS};
+use super::DagFetchLimiter;
 use crate::sync::manager::links::find_all_missing_links;
 use crate::sync::manager::SyncEvent;
 use crate::transport::{P2PTransport, PeerId};
@@ -53,12 +54,17 @@ enum FetchAttemptOutcome {
 /// for any missing blocks, rotating providers on stalls. Incomplete attempts
 /// are retried with backoff; terminal failure is logged at ERROR because the
 /// document cannot converge until the root is announced again.
+///
+/// A limiter permit is held only for the duration of each attempt — it is
+/// released during backoff sleeps so a fetch stuck on dead providers does not
+/// starve other roots under fan-in pressure.
 pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
     transport: T,
     blockstore: Arc<B>,
     event_tx: mpsc::Sender<SyncEvent>,
     root_cid: Cid,
     context: DagFetchContext,
+    limiter: DagFetchLimiter,
 ) {
     let mut providers = ProviderRotation::new(context.providers());
     debug!(
@@ -85,6 +91,16 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
             );
             tokio::time::sleep(backoff).await;
         }
+
+        let Some(_permits) = limiter.acquire(&context.source_peer).await else {
+            debug!(
+                root_cid = %root_cid,
+                doc_id = %context.doc_id,
+                attempt = attempt,
+                "DAG fetch limiter closed, abandoning fetch"
+            );
+            return;
+        };
 
         match fetch_dag_attempt(
             &transport,
@@ -775,6 +791,7 @@ mod tests {
                 source_peer.clone(),
             )
             .with_explicit_replicator(true),
+            DagFetchLimiter::new(2),
         )
         .await;
 
@@ -843,6 +860,7 @@ mod tests {
                 "creator-id".to_string(),
                 source_peer,
             ),
+            DagFetchLimiter::new(2),
         )
         .await;
 
@@ -901,6 +919,7 @@ mod tests {
                 "creator-id".to_string(),
                 source_peer,
             ),
+            DagFetchLimiter::new(2),
         )
         .await;
 
@@ -975,6 +994,7 @@ mod tests {
                 "creator-id".to_string(),
                 source_peer,
             ),
+            DagFetchLimiter::new(2),
         )
         .await;
 
@@ -1030,6 +1050,7 @@ mod tests {
                 PeerId::new("dead-peer".to_string()),
             )
             .with_alternate_providers(vec![PeerId::new("alt-peer".to_string())]),
+            DagFetchLimiter::new(2),
         )
         .await;
 
@@ -1074,6 +1095,7 @@ mod tests {
                 "creator-id".to_string(),
                 PeerId::new("remote-peer".to_string()),
             ),
+            DagFetchLimiter::new(2),
         )
         .await;
 
@@ -1116,6 +1138,7 @@ mod tests {
                 "creator-id".to_string(),
                 PeerId::new("dead-peer".to_string()),
             ),
+            DagFetchLimiter::new(2),
         )
         .await;
 
@@ -1126,6 +1149,66 @@ mod tests {
         assert!(matches!(blockstore.has(&child_cid).await, Ok(false)));
         // One CAR try and one selective batch per attempt, all exhausted.
         assert_eq!(transport.car_request_count(), MAX_FETCH_ATTEMPTS as usize);
+        assert_eq!(transport.sync_batches().len(), MAX_FETCH_ATTEMPTS as usize);
+    }
+
+    /// The limiter permit must be released during retry backoff: a second
+    /// waiter acquires the single permit while the first fetch is sleeping
+    /// between attempts, not after all of its retries complete.
+    #[tokio::test(start_paused = true)]
+    async fn poll_fetch_dag_releases_limiter_permit_during_backoff() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (root_cid, root_data, child_cid, child_data) = single_child_dag();
+
+        let transport = TestTransport::new(
+            blockstore.clone(),
+            root_cid,
+            root_data,
+            HashMap::new(),
+            HashMap::from([(child_cid, child_data)]),
+        );
+        transport.mark_provider_dead("dead-peer");
+
+        let limiter = DagFetchLimiter::new(1);
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let fetch = tokio::spawn(poll_fetch_dag(
+            transport.clone(),
+            blockstore.clone(),
+            event_tx,
+            root_cid,
+            DagFetchContext::new(
+                "doc-id".to_string(),
+                "collection-id".to_string(),
+                "creator-id".to_string(),
+                PeerId::new("dead-peer".to_string()),
+            ),
+            limiter.clone(),
+        ));
+
+        // Let attempt 1 start (and therefore hold the only permit) before
+        // competing for it.
+        while transport.sync_batches().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Resolves as soon as attempt 1's permit drops (start of backoff);
+        // if the permit spanned all attempts this would only resolve after
+        // the fetch task finished.
+        let permits = limiter
+            .acquire(&PeerId::new("other-peer".to_string()))
+            .await
+            .expect("limiter must grant a permit while the fetch is backing off");
+        assert!(
+            !fetch.is_finished(),
+            "fetch must still be mid-retry while another waiter holds the permit"
+        );
+        assert_eq!(transport.sync_batches().len(), 1);
+
+        drop(permits);
+        fetch.await.unwrap();
+
+        assert!(event_rx.recv().await.is_none());
         assert_eq!(transport.sync_batches().len(), MAX_FETCH_ATTEMPTS as usize);
     }
 }

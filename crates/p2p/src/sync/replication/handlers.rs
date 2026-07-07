@@ -125,7 +125,6 @@ where
         let event_tx = coordinator.manager().event_sender();
         let limiter = coordinator.dag_fetch_limiter();
         let source_peer = crate::transport::PeerId::new(source_peer);
-        let permit_peer = source_peer.clone();
         let alternate_providers: Vec<crate::transport::PeerId> = providers
             .into_iter()
             .map(crate::transport::PeerId::new)
@@ -136,11 +135,8 @@ where
             .with_explicit_replay_authorization(explicit_replay_authorization);
 
         coordinator.spawn_background_task("pushlog_fetch_dag", async move {
-            let Some(_permits) = limiter.acquire(&permit_peer).await else {
-                return;
-            };
             crate::sync::coordinator::dag_fetcher::poll_fetch_dag(
-                transport, blockstore, event_tx, root_cid, context,
+                transport, blockstore, event_tx, root_cid, context, limiter,
             )
             .await;
         });
