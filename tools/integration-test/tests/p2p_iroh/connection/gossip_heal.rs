@@ -198,6 +198,7 @@ async fn sweep_refresh_preserves_gossip_delivery() {
         backoff_cap: Duration::from_secs(2),
         max_attempts: 5,
         superseded_close_grace: Duration::from_millis(750),
+        refresh_probe: None,
     };
     let config0 = test_config(fast_heal.clone()).await;
     let config1 = test_config(fast_heal).await;
@@ -294,9 +295,19 @@ async fn sweep_refresh_covers_publish_only_node() {
         backoff_cap: Duration::from_secs(2),
         max_attempts: 5,
         superseded_close_grace: Duration::from_millis(750),
+        refresh_probe: None,
     };
+    // A healthy mesh delivers even if node 1 never refreshes (node 0's
+    // healing and gossip's own dialing both suffice), so delivery alone
+    // cannot regress on the empty-subscription guard. The probe asserts that
+    // the publish-only node itself performed refreshes.
+    let publish_only_refreshes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let config0 = test_config(fast_heal.clone()).await;
-    let config1 = test_config(fast_heal).await;
+    let config1 = test_config(GossipHealConfig {
+        refresh_probe: Some(publish_only_refreshes.clone()),
+        ..fast_heal
+    })
+    .await;
     let key0 = config0.secret_key.clone();
     let key1 = config1.secret_key.clone();
 
@@ -336,6 +347,16 @@ async fn sweep_refresh_covers_publish_only_node() {
     // pass on both sides, with node 1's schedule driven purely by the
     // empty-subscription path.
     tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // >= 2 requires at least one sweep-driven refresh on top of the single
+    // connect-time (0->1) refresh, so a regression in either empty-
+    // subscription path fails here.
+    let refreshes = publish_only_refreshes.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        refreshes >= 2,
+        "publish-only node performed {refreshes} gossip path refresh(es); \
+         expected the connect-time refresh plus sweep-driven refreshes"
+    );
 
     assert_raw_delivery(
         &transport1,

@@ -56,6 +56,12 @@ pub struct GossipHealConfig {
     /// must close eventually: iroh keep-alives prevent idle cleanup, so
     /// unclosed superseded connections leak one per refresh.
     pub superseded_close_grace: Duration,
+    /// Test seam: incremented on every successful gossip path refresh this
+    /// node performs. A healthy mesh delivers regardless of who injected the
+    /// refresh (and the half-dead state cannot be induced from outside
+    /// iroh-gossip), so tests need this to assert that a specific node's
+    /// refresh path actually ran. `None` in production.
+    pub refresh_probe: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl Default for GossipHealConfig {
@@ -66,6 +72,7 @@ impl Default for GossipHealConfig {
             backoff_cap: Duration::from_secs(60),
             max_attempts: 5,
             superseded_close_grace: Duration::from_secs(10),
+            refresh_probe: None,
         }
     }
 }
@@ -335,6 +342,9 @@ async fn refresh_peer(
         Ok(()) => {
             join_peer_to_subscription_senders(senders, endpoint_id).await;
             res.healer.record_success(endpoint_id, Instant::now());
+            if let Some(probe) = &res.healer.config().refresh_probe {
+                probe.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             debug!(peer = %endpoint_id, "gossip path refreshed");
         }
         Err(error) => {
