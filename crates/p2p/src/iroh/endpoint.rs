@@ -60,7 +60,11 @@ pub(super) struct ActiveSync {
 pub(super) type SpawnedTasks = Arc<parking_lot::Mutex<Vec<JoinHandle<()>>>>;
 
 pub(super) fn track_task(spawned_tasks: &SpawnedTasks, task: JoinHandle<()>) {
-    spawned_tasks.lock().push(task);
+    let mut tasks = spawned_tasks.lock();
+    // The heal sweep (#1092) pushes tasks on a timer, so finished handles must
+    // be dropped here or the vec grows without bound over a node's lifetime.
+    tasks.retain(|task| !task.is_finished());
+    tasks.push(task);
 }
 
 async fn shutdown_tracked_tasks(spawned_tasks: SpawnedTasks) {
