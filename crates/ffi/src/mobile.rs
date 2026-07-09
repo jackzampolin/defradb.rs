@@ -15,8 +15,8 @@ use crate::nac_check::check_nac_for_node;
 use crate::node::{new_node, node_close};
 use crate::p2p::{
     new_node_with_p2p, p2p_add_replicator_with_filter, p2p_connect, p2p_disconnect,
-    p2p_notify_network_change, p2p_peer_info, p2p_sync_branchable_collection,
-    p2p_sync_collection_versions, p2p_sync_documents,
+    p2p_notify_network_change, p2p_peer_info, p2p_shareable_address,
+    p2p_sync_branchable_collection, p2p_sync_collection_versions, p2p_sync_documents,
 };
 use crate::query::exec_request;
 use crate::schema::validate_collection_policy;
@@ -525,6 +525,19 @@ pub extern "C" fn defra_mobile_peer_info(node_ptr: usize) -> FfiResult {
     }
 }
 
+/// Return the node's best shareable P2P address (JSON string, or JSON null
+/// when the transport has no dialable shareable address yet).
+#[no_mangle]
+pub extern "C" fn defra_mobile_shareable_address(node_ptr: usize) -> FfiResult {
+    ffi_entry! {
+        let identity = match default_identity_cstring(node_ptr) {
+            Ok(value) => value,
+            Err(error) => return FfiResult::error(error),
+        };
+        unsafe { p2p_shareable_address(node_ptr, c_string_ptr(&identity)) }
+    }
+}
+
 /// Connect the node to a peer address.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
@@ -710,6 +723,12 @@ pub extern "C" fn defra_mobile_add_replicator(
 mod tests {
     use super::*;
     use std::ffi::CStr;
+
+    #[test]
+    fn mobile_shareable_address_exports_node_only_ffi_signature() {
+        let symbol: extern "C" fn(usize) -> FfiResult = defra_mobile_shareable_address;
+        let _ = symbol;
+    }
 
     #[test]
     fn test_mobile_add_replicator_request_parse() {
