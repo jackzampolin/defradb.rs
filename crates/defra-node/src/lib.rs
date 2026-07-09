@@ -1394,6 +1394,8 @@ impl NodeBuilder {
         let failure_recorder_task = spawn_failure_recorder(store.clone(), failure_rx);
 
         let coordinator = Arc::new(coordinator);
+        coordinator
+            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())));
 
         if config.load_persisted_collections {
             db_merge::load_persisted_collections(&coordinator)
@@ -1425,6 +1427,14 @@ impl NodeBuilder {
                 p2p::sync::ReplicationConfig::default(),
             )
             .await;
+        });
+
+        // Re-drive pending-DAG registrations persisted before the last
+        // shutdown/crash (#1099). Spawned so the sync-event channel already
+        // has its consumer above.
+        let coord_for_restore = coordinator.clone();
+        tokio::spawn(async move {
+            coord_for_restore.restore_pending_dags().await;
         });
 
         // 10. IROH event handler (events are already TransportEvent -- no conversion needed)

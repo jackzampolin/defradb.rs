@@ -261,6 +261,14 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
 
 #[async_trait]
 impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
+    async fn sync_status(&self) -> P2PResult<serde_json::Value> {
+        match self.sync_coordinator.as_ref() {
+            Some(coordinator) => serde_json::to_value(coordinator.sync_status())
+                .map_err(|error| P2PError::transport(error.to_string())),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
     async fn local_peer_id(&self) -> P2PResult<String> {
         Ok(self.transport.local_peer_id().to_string())
     }

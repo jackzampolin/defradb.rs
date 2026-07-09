@@ -116,6 +116,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
     // P2P routes
     let p2p_routes = Router::new()
         .route("/info", get(handlers::p2p::get_info))
+        .route("/sync/status", get(handlers::p2p::sync_status))
         .route(
             "/shareable-address",
             get(handlers::p2p::get_shareable_address),

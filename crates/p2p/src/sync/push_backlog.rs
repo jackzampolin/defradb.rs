@@ -117,7 +117,7 @@ struct Inner {
 /// Live per-peer occupancy so slot starvation is visible to operators
 /// (defra-agent#630: a dead peer monopolizing the slots was invisible in
 /// connection-level diagnostics).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PeerBacklogSnapshot {
     pub peer_id: String,
     pub queued_items: usize,
@@ -128,7 +128,7 @@ pub struct PeerBacklogSnapshot {
 }
 
 /// Point-in-time view of the backlog for diagnostics and conformance tests.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PushBacklogSnapshot {
     pub queue_item_capacity: usize,
     pub queue_byte_capacity: usize,

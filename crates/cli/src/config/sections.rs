@@ -325,6 +325,16 @@ pub struct NetConfig {
     /// links; overflow is nacked back to the pusher. Default: 1000.
     #[serde(default = "default_max_pending_dags")]
     pub p2p_max_pending_dags: usize,
+    /// Max queued outbound push jobs; overflow defers to the persisted retry
+    /// ladder. Default: 1024.
+    #[serde(default = "default_push_queue_capacity")]
+    pub p2p_push_queue_capacity: usize,
+    /// Max resident bytes across queued outbound push jobs. Default: 32 MiB.
+    #[serde(default = "default_push_queue_byte_capacity")]
+    pub p2p_push_queue_byte_capacity: usize,
+    /// Max outbound push jobs concurrently in flight to one peer. Default: 4.
+    #[serde(default = "default_max_active_pushes_per_peer")]
+    pub p2p_max_active_pushes_per_peer: usize,
 }
 
 fn default_max_msg_size() -> u64 {
@@ -363,6 +373,15 @@ fn default_max_doc_sync_request_doc_ids() -> usize {
 fn default_max_pending_dags() -> usize {
     p2p::sync::DEFAULT_MAX_PENDING_DAGS
 }
+fn default_push_queue_capacity() -> usize {
+    p2p::sync::DEFAULT_PUSH_QUEUE_CAPACITY
+}
+fn default_push_queue_byte_capacity() -> usize {
+    p2p::sync::DEFAULT_PUSH_QUEUE_BYTE_CAPACITY
+}
+fn default_max_active_pushes_per_peer() -> usize {
+    p2p::sync::DEFAULT_MAX_ACTIVE_PUSHES_PER_PEER
+}
 fn default_true() -> bool {
     true
 }
@@ -396,6 +415,9 @@ impl Default for NetConfig {
             p2p_rate_limit_rate: default_rate_limit_rate(),
             p2p_max_doc_sync_request_doc_ids: default_max_doc_sync_request_doc_ids(),
             p2p_max_pending_dags: default_max_pending_dags(),
+            p2p_push_queue_capacity: default_push_queue_capacity(),
+            p2p_push_queue_byte_capacity: default_push_queue_byte_capacity(),
+            p2p_max_active_pushes_per_peer: default_max_active_pushes_per_peer(),
         }
     }
 }

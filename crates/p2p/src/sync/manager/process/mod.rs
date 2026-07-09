@@ -181,6 +181,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         Arc::clone(&self.diagnostics)
     }
 
+    /// Effective pending-DAG capacity.
+    pub fn max_pending_dags(&self) -> usize {
+        self.max_pending_dags
+    }
+
     /// Install the durable pending-DAG store. First-call-wins (OnceLock
     /// semantics); subsequent calls are silently discarded.
     pub fn install_pending_dag_store(

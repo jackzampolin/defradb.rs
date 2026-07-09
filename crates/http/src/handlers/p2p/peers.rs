@@ -70,6 +70,26 @@ pub async fn get_info(
     Ok(Json(full_addrs))
 }
 
+/// Live sync resource diagnostics (#1099).
+///
+/// GET /api/v0/p2p/sync/status
+///
+/// Returns the `p2p::sync::SyncStatus` snapshot: push-backlog occupancy
+/// (queued items/bytes, active workers, per-peer backlog and cooldowns,
+/// overload counters), pending-DAG depth, and retained task handles.
+///
+/// Requires `P2pPeerInfo` permission when NAC is enabled.
+pub async fn sync_status(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pPeerInfo).await?;
+
+    let p2p = state.require_p2p()?;
+    let status = p2p.sync_status().await.map_err(map_p2p_internal)?;
+    Ok(Json(status))
+}
+
 /// Get the single best shareable P2P address, if available.
 ///
 /// GET /api/v0/p2p/shareable-address

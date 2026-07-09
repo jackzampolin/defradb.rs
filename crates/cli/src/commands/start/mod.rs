@@ -222,6 +222,19 @@ pub struct StartArgs {
     #[arg(long, env = "DEFRA_P2P_MAX_PENDING_DAGS")]
     pub p2p_max_pending_dags: Option<usize>,
 
+    /// Max queued outbound push jobs; overflow defers to the persisted retry
+    /// ladder. Default: 1024.
+    #[arg(long, env = "DEFRA_P2P_PUSH_QUEUE_CAPACITY")]
+    pub p2p_push_queue_capacity: Option<usize>,
+
+    /// Max resident bytes across queued outbound push jobs. Default: 32 MiB.
+    #[arg(long, env = "DEFRA_P2P_PUSH_QUEUE_BYTES")]
+    pub p2p_push_queue_byte_capacity: Option<usize>,
+
+    /// Max outbound push jobs concurrently in flight to one peer. Default: 4.
+    #[arg(long, env = "DEFRA_P2P_MAX_ACTIVE_PUSHES_PER_PEER")]
+    pub p2p_max_active_pushes_per_peer: Option<usize>,
+
     /// P2P transport backend: "libp2p" (default) or "iroh"
     #[arg(long)]
     pub p2p_transport: Option<String>,
@@ -450,6 +463,15 @@ impl StartArgs {
         }
         if let Some(max) = self.p2p_max_pending_dags {
             config.net.p2p_max_pending_dags = max;
+        }
+        if let Some(capacity) = self.p2p_push_queue_capacity {
+            config.net.p2p_push_queue_capacity = capacity;
+        }
+        if let Some(capacity) = self.p2p_push_queue_byte_capacity {
+            config.net.p2p_push_queue_byte_capacity = capacity;
+        }
+        if let Some(cap) = self.p2p_max_active_pushes_per_peer {
+            config.net.p2p_max_active_pushes_per_peer = cap;
         }
         if let Some(ref transport) = self.p2p_transport {
             config.net.transport = transport.parse()?;

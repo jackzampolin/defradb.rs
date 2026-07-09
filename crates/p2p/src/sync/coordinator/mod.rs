@@ -98,6 +98,23 @@ pub struct PushFailure {
     pub collection_id: String,
 }
 
+/// Stable diagnostic snapshot of P2P-owned sync resources (#1099).
+///
+/// Exposed over the P2P operations surface so downstream runtimes can
+/// conformance-test and alert on the effective (not just configured) state:
+/// live queue occupancy, per-peer backlog, worker slots, pending-DAG depth,
+/// retained task handles, and overload counters.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncStatus {
+    pub push_backlog: crate::sync::push_backlog::PushBacklogSnapshot,
+    pub pending_dags: usize,
+    pub pending_dag_capacity: usize,
+    pub retained_background_tasks: usize,
+    pub missing_link_retries: u64,
+    pub pending_dag_resolved: u64,
+    pub pending_dag_expired: u64,
+}
+
 struct SyncShutdownState {
     is_shutting_down: AtomicBool,
     background_tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -363,6 +380,20 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     #[cfg(feature = "libp2p-transport")]
     pub fn install_kms_transport(&self, transport: Arc<crate::kms::PubsubKeyTransport<T>>) {
         let _ = self.kms_transport.set(transport);
+    }
+
+    /// Point-in-time snapshot of sync resource state for diagnostics (#1099).
+    pub fn sync_status(&self) -> SyncStatus {
+        let diagnostics = self.manager.diagnostics().snapshot();
+        SyncStatus {
+            push_backlog: self.runtime.push_backlog.snapshot(),
+            pending_dags: self.manager.pending_dag_count(),
+            pending_dag_capacity: self.manager.max_pending_dags(),
+            retained_background_tasks: self.runtime.shutdown.retained_task_count(),
+            missing_link_retries: diagnostics.missing_link_retries,
+            pending_dag_resolved: diagnostics.pending_dag_resolved,
+            pending_dag_expired: diagnostics.pending_dag_expired,
+        }
     }
 
     /// Install the durable pending-DAG store (#1099). First-call-wins.

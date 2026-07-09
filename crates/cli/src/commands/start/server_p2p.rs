@@ -222,6 +222,12 @@ impl Node {
 
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
+        coordinator
+            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())));
+        let coordinator_for_restore = coordinator.clone();
+        tokio::spawn(async move {
+            coordinator_for_restore.restore_pending_dags().await;
+        });
         let coordinator_for_acp = coordinator.clone();
         let serve_acp_for_acp = serve_acp.clone();
         let handle_for_acp = handle.clone();
@@ -806,6 +812,12 @@ impl Node {
 
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
+        coordinator
+            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())));
+        let coordinator_for_restore = coordinator.clone();
+        tokio::spawn(async move {
+            coordinator_for_restore.restore_pending_dags().await;
+        });
         let coordinator_for_acp = coordinator.clone();
         let serve_acp_for_acp = serve_acp.clone();
         let database_for_acp = database.clone();
@@ -1273,6 +1285,9 @@ impl Node {
             rate_limit_rate: config.net.p2p_rate_limit_rate,
             max_doc_sync_request_doc_ids: config.net.p2p_max_doc_sync_request_doc_ids,
             max_pending_dags: config.net.p2p_max_pending_dags,
+            push_queue_capacity: config.net.p2p_push_queue_capacity,
+            push_queue_byte_capacity: config.net.p2p_push_queue_byte_capacity,
+            max_active_pushes_per_peer: config.net.p2p_max_active_pushes_per_peer,
             ..Default::default()
         }
     }

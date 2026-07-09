@@ -132,6 +132,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // P2P
         // =====================================================================
         "/api/v0/p2p/info" => RoutePermission::Required(NodePermission::P2pPeerInfo),
+        "/api/v0/p2p/sync/status" => RoutePermission::Required(NodePermission::P2pPeerInfo),
         "/api/v0/p2p/shareable-address" => RoutePermission::Required(NodePermission::P2pPeerInfo),
         "/api/v0/p2p/active-peers" => RoutePermission::Required(NodePermission::P2pPeerActive),
         "/api/v0/p2p/connect" => RoutePermission::Required(NodePermission::P2pPeerConnect),
@@ -433,6 +434,11 @@ mod tests {
             // P2P
             (
                 "/api/v0/p2p/info",
+                Method::GET,
+                RoutePermission::Required(NodePermission::P2pPeerInfo),
+            ),
+            (
+                "/api/v0/p2p/sync/status",
                 Method::GET,
                 RoutePermission::Required(NodePermission::P2pPeerInfo),
             ),

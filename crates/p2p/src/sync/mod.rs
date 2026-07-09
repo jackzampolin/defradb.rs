@@ -29,7 +29,8 @@ pub use coordinator::IrohSyncCoordinator;
 #[cfg(feature = "libp2p-transport")]
 pub use coordinator::Libp2pSyncCoordinator;
 pub use coordinator::{
-    CreateReplicatorResult, LoadReplicatorsResult, PushFailure, SyncCoordinator, SyncShutdownHandle,
+    CreateReplicatorResult, LoadReplicatorsResult, PushFailure, SyncCoordinator,
+    SyncShutdownHandle, SyncStatus,
 };
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, SyncPlan};
 pub use head_provider::{DocumentHeadProvider, NoOpHeadProvider};
