@@ -6,10 +6,12 @@ use crate::transport::PeerId;
 
 /// Total fetch attempts per root before the failure is escalated to ERROR.
 ///
-/// Each attempt already spends up to 10s on the CAR try plus 30s per stalled
-/// selective batch per provider, so three attempts bound the worst-case task
-/// lifetime while still surviving a transiently overloaded or reconnecting
-/// provider set.
+/// Each attempt spends up to 10s on the CAR try plus a stall budget of one
+/// full provider rotation (providers × 30s) on stalled selective windows, so
+/// three attempts bound the worst-case dead-provider task lifetime at roughly
+/// 6.5 minutes at the 4-provider cap — independent of how many batches the
+/// missing frontier spans — while still surviving a transiently overloaded or
+/// reconnecting provider set.
 pub(super) const MAX_FETCH_ATTEMPTS: u32 = 3;
 
 /// Base backoff between attempts; doubles per retry (2s, then 4s).

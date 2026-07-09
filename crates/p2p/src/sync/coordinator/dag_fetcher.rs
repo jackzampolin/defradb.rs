@@ -2,8 +2,10 @@
 //!
 //! Tries CAR fetch first (single round-trip for entire DAG), then falls back
 //! to batched selective block fetch + blockstore polling for any remaining blocks.
-//! Stalled batches rotate across the context's providers, and incomplete
-//! fetches are retried with backoff before the failure is escalated (#1093).
+//! Stalled batches rotate across the context's providers under a per-attempt
+//! stall budget, timed-out transport queries are cancelled at the end of their
+//! poll window, and incomplete fetches are retried with backoff before the
+//! failure is escalated (#1093).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,6 +44,18 @@ enum FetchBatchOutcome {
     NoProgress,
 }
 
+/// Outcome of one provider's poll window, as seen by the rotation loop.
+///
+/// `Stalled` (a full window with zero blocks) consumes attempt stall budget;
+/// `SendFailed` (the query never left) costs a rotation slot but no time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderWindowOutcome {
+    Complete,
+    Partial,
+    Stalled,
+    SendFailed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FetchAttemptOutcome {
     Complete,
@@ -57,7 +71,9 @@ enum FetchAttemptOutcome {
 ///
 /// A limiter permit is held only for the duration of each attempt — it is
 /// released during backoff sleeps so a fetch stuck on dead providers does not
-/// starve other roots under fan-in pressure.
+/// starve other roots under fan-in pressure. Every issued transport query is
+/// reaped via `cancel_sync` at the end of its poll window, so releasing the
+/// permit never leaves stalled fetch work running in the transport.
 pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
     transport: T,
     blockstore: Arc<B>,
@@ -160,6 +176,13 @@ async fn fetch_dag_attempt<B: Blockstore + 'static, T: P2PTransport>(
     context: &DagFetchContext,
     providers: &mut ProviderRotation,
 ) -> FetchAttemptOutcome {
+    // One full rotation's worth of stalled 30s windows per attempt. Productive
+    // windows (any block arrived) never consume it, so a large DAG that is
+    // actually transferring is unbounded, while a dead provider set costs at
+    // most providers × 30s of stalled waiting per attempt regardless of how
+    // many batches the missing frontier spans.
+    let mut stall_budget = providers.len();
+
     let car_missing_watch = match blockstore.get(&root_cid).await {
         Ok(Some(root_data)) => find_all_missing_links(blockstore.as_ref(), &root_data)
             .await
@@ -203,6 +226,7 @@ async fn fetch_dag_attempt<B: Blockstore + 'static, T: P2PTransport>(
             transport,
             blockstore,
             providers,
+            &mut stall_budget,
         )
         .await,
         FetchBatchOutcome::Complete
@@ -244,8 +268,15 @@ async fn fetch_dag_attempt<B: Blockstore + 'static, T: P2PTransport>(
 
         let mut made_progress = false;
         for batch in missing.chunks(SELECTIVE_FETCH_BATCH_SIZE) {
-            match poll_fetch_blocks_rotating(&root_cid, batch, transport, blockstore, providers)
-                .await
+            match poll_fetch_blocks_rotating(
+                &root_cid,
+                batch,
+                transport,
+                blockstore,
+                providers,
+                &mut stall_budget,
+            )
+            .await
             {
                 FetchBatchOutcome::Complete => {
                     made_progress = true;
@@ -351,17 +382,33 @@ async fn try_car_fetch<B: Blockstore, T: P2PTransport>(
 
 /// Fetch one batch of exact blocks, rotating to the next provider whenever
 /// the current one yields nothing within the fetch window.
+///
+/// `stall_budget` caps the stalled (timed-out) provider windows one attempt
+/// may burn across all of its batches; once it reaches zero, stalled batches
+/// fail fast without issuing further transport queries.
 async fn poll_fetch_blocks_rotating<B: Blockstore, T: P2PTransport>(
     root_cid: &Cid,
     cids: &[Cid],
     transport: &T,
     blockstore: &Arc<B>,
     providers: &mut ProviderRotation,
+    stall_budget: &mut usize,
 ) -> FetchBatchOutcome {
     for _ in 0..providers.len() {
+        if *stall_budget == 0 {
+            debug!(
+                root_cid = %root_cid,
+                requested_count = cids.len(),
+                "Attempt stall budget exhausted, failing batch without fetching"
+            );
+            return FetchBatchOutcome::NoProgress;
+        }
         let provider = providers.current().clone();
         match poll_fetch_blocks(root_cid, cids, transport, blockstore, &provider).await {
-            FetchBatchOutcome::NoProgress => {
+            ProviderWindowOutcome::Complete => return FetchBatchOutcome::Complete,
+            ProviderWindowOutcome::Partial => return FetchBatchOutcome::Partial,
+            ProviderWindowOutcome::Stalled => {
+                *stall_budget -= 1;
                 providers.advance();
                 if providers.len() > 1 {
                     warn!(
@@ -372,20 +419,26 @@ async fn poll_fetch_blocks_rotating<B: Blockstore, T: P2PTransport>(
                     );
                 }
             }
-            outcome => return outcome,
+            ProviderWindowOutcome::SendFailed => providers.advance(),
         }
     }
     FetchBatchOutcome::NoProgress
 }
 
 /// Fetch one batch of exact blocks via the transport's block-sync path.
+///
+/// The issued transport query is always reaped via `cancel_sync` before this
+/// returns, so no query outlives its poll window: a stalled provider's
+/// transport work cannot pile up behind rotation, keep consuming connections
+/// after the fetch's limiter permit is released, or deliver blocks after the
+/// fetch has terminally failed.
 async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
     root_cid: &Cid,
     cids: &[Cid],
     transport: &T,
     blockstore: &Arc<B>,
     source_peer: &PeerId,
-) -> FetchBatchOutcome {
+) -> ProviderWindowOutcome {
     let mut missing = Vec::new();
     for cid in cids {
         if matches!(blockstore.has(cid).await, Ok(true)) {
@@ -395,24 +448,28 @@ async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
     }
 
     if missing.is_empty() {
-        return FetchBatchOutcome::Complete;
+        return ProviderWindowOutcome::Complete;
     }
 
-    if let Err(e) = transport
+    let query_id = match transport
         .sync_blocks(*root_cid, vec![source_peer.clone()], missing.clone())
         .await
     {
-        warn!(
-            root_cid = %root_cid,
-            requested_count = missing.len(),
-            error = %e,
-            "selective block fetch failed"
-        );
-        return FetchBatchOutcome::NoProgress;
-    }
+        Ok(query_id) => query_id,
+        Err(e) => {
+            warn!(
+                root_cid = %root_cid,
+                requested_count = missing.len(),
+                error = %e,
+                "selective block fetch failed"
+            );
+            return ProviderWindowOutcome::SendFailed;
+        }
+    };
 
     let timeout = Duration::from_secs(30);
     let start = Instant::now();
+    let mut outcome = ProviderWindowOutcome::Stalled;
     while start.elapsed() < timeout {
         let mut remaining = 0usize;
         for cid in &missing {
@@ -421,15 +478,25 @@ async fn poll_fetch_blocks<B: Blockstore, T: P2PTransport>(
             }
         }
         if remaining == 0 {
-            return FetchBatchOutcome::Complete;
+            outcome = ProviderWindowOutcome::Complete;
+            break;
         }
         if remaining < missing.len() {
-            return FetchBatchOutcome::Partial;
+            outcome = ProviderWindowOutcome::Partial;
+            break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    FetchBatchOutcome::NoProgress
+    if let Err(e) = transport.cancel_sync(query_id).await {
+        debug!(
+            root_cid = %root_cid,
+            query_id = query_id.0,
+            error = %e,
+            "Failed to cancel block-sync query after poll window"
+        );
+    }
+    outcome
 }
 
 #[cfg(test)]
@@ -480,6 +547,7 @@ mod tests {
         dead_providers: Arc<Mutex<HashSet<String>>>,
         skip_serving_syncs: Arc<AtomicUsize>,
         fail_connected_peers: Arc<AtomicBool>,
+        cancelled_queries: Arc<Mutex<Vec<u64>>>,
     }
 
     impl TestTransport {
@@ -504,6 +572,7 @@ mod tests {
                 dead_providers: Arc::new(Mutex::new(HashSet::new())),
                 skip_serving_syncs: Arc::new(AtomicUsize::new(0)),
                 fail_connected_peers: Arc::new(AtomicBool::new(false)),
+                cancelled_queries: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -529,6 +598,10 @@ mod tests {
 
         fn set_fail_connected_peers(&self) {
             self.fail_connected_peers.store(true, Ordering::SeqCst);
+        }
+
+        fn cancelled_queries(&self) -> Vec<u64> {
+            self.cancelled_queries.lock().unwrap().clone()
         }
     }
 
@@ -728,15 +801,16 @@ mod tests {
                 .lock()
                 .unwrap()
                 .extend(providers.iter().map(|peer| peer.to_string()));
+            let query_id = QueryId(call_index as u64 + 1);
             if call_index < self.skip_serving_syncs.load(Ordering::SeqCst) {
-                return Ok(QueryId(1));
+                return Ok(query_id);
             }
             let all_dead = {
                 let dead = self.dead_providers.lock().unwrap();
                 providers.iter().all(|peer| dead.contains(peer.as_str()))
             };
             if all_dead {
-                return Ok(QueryId(1));
+                return Ok(query_id);
             }
             for cid in missing {
                 if let Some(data) = self.selective_blocks.get(&cid) {
@@ -746,10 +820,11 @@ mod tests {
                         .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
                 }
             }
-            Ok(QueryId(1))
+            Ok(query_id)
         }
 
-        async fn cancel_sync(&self, _query_id: QueryId) -> P2PResult<bool> {
+        async fn cancel_sync(&self, query_id: QueryId) -> P2PResult<bool> {
+            self.cancelled_queries.lock().unwrap().push(query_id.0);
             Ok(true)
         }
 
@@ -1184,6 +1259,110 @@ mod tests {
         // One CAR try and one selective batch per attempt, all exhausted.
         assert_eq!(transport.car_request_count(), MAX_FETCH_ATTEMPTS as usize);
         assert_eq!(transport.sync_batches().len(), MAX_FETCH_ATTEMPTS as usize);
+    }
+
+    /// Every issued block-sync query must be reaped via `cancel_sync` at the
+    /// end of its poll window: a stalled provider's transport-side work must
+    /// not outlive rotation, the limiter permit, or terminal failure.
+    #[tokio::test(start_paused = true)]
+    async fn poll_fetch_dag_cancels_every_issued_query() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (root_cid, root_data, child_cid, child_data) = single_child_dag();
+
+        let transport = TestTransport::new(
+            blockstore.clone(),
+            root_cid,
+            root_data,
+            HashMap::new(),
+            HashMap::from([(child_cid, child_data)]),
+        );
+        transport.mark_provider_dead("dead-peer");
+
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        poll_fetch_dag(
+            transport.clone(),
+            blockstore.clone(),
+            event_tx,
+            root_cid,
+            DagFetchContext::new(
+                "doc-id".to_string(),
+                "collection-id".to_string(),
+                "creator-id".to_string(),
+                PeerId::new("dead-peer".to_string()),
+            ),
+            DagFetchLimiter::new(2),
+        )
+        .await;
+
+        assert!(event_rx.recv().await.is_none());
+        let issued: Vec<u64> = (1..=transport.sync_batches().len() as u64).collect();
+        assert_eq!(
+            transport.cancelled_queries(),
+            issued,
+            "every stalled query must be cancelled, in issue order"
+        );
+    }
+
+    /// The per-attempt stall budget must cap stalled-batch work: once every
+    /// provider has burned a full window, remaining batches in the attempt
+    /// fail fast without issuing transport queries, so dead-provider attempt
+    /// time does not scale with the width of the missing frontier.
+    #[tokio::test(start_paused = true)]
+    async fn poll_fetch_dag_stall_budget_caps_stalled_batches_per_attempt() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+        let width = SELECTIVE_FETCH_BATCH_SIZE + 1;
+        let mut children = Vec::with_capacity(width);
+        for i in 0..width {
+            let data = encode_ipld(ipld!({ "value": i as i64 }));
+            children.push(make_cid(&data));
+        }
+        let root_data = encode_ipld(Ipld::List(
+            children.iter().map(|cid| Ipld::Link(*cid)).collect(),
+        ));
+        let root_cid = make_cid(&root_data);
+        blockstore.put(&root_cid, &root_data).await.unwrap();
+
+        let transport = TestTransport::new(
+            blockstore.clone(),
+            root_cid,
+            root_data,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        transport.mark_provider_dead("dead-peer");
+
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        poll_fetch_dag(
+            transport.clone(),
+            blockstore.clone(),
+            event_tx,
+            root_cid,
+            DagFetchContext::new(
+                "doc-id".to_string(),
+                "collection-id".to_string(),
+                "creator-id".to_string(),
+                PeerId::new("dead-peer".to_string()),
+            ),
+            DagFetchLimiter::new(2),
+        )
+        .await;
+
+        assert!(event_rx.recv().await.is_none());
+        // Two batches per attempt are missing, but the single provider's stall
+        // budget is spent on the first, so the second issues no query: one
+        // stalled (and cancelled) query per attempt, not two.
+        let batches = transport.sync_batches();
+        assert_eq!(batches.len(), MAX_FETCH_ATTEMPTS as usize);
+        for batch in &batches {
+            assert_eq!(batch.len(), SELECTIVE_FETCH_BATCH_SIZE);
+        }
+        assert_eq!(
+            transport.cancelled_queries(),
+            (1..=MAX_FETCH_ATTEMPTS as u64).collect::<Vec<_>>()
+        );
     }
 
     /// A `connected_peers()` failure must degrade to an empty alternates list
