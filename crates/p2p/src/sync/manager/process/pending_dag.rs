@@ -51,6 +51,22 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         self.pending_dags.read().keys().copied().collect()
     }
 
+    /// Pending DAGs worth re-driving when `peer` (re)connects: entries the
+    /// peer originally provided plus entries whose fetches exhausted their
+    /// providers (covers restored registrations whose providers were not yet
+    /// reconnected at restore time, #1099).
+    pub fn pending_dags_needing_redrive(&self, peer: &str) -> Vec<(Cid, PendingDag)> {
+        self.pending_dags
+            .read()
+            .iter()
+            .filter(|(_, dag)| {
+                !dag.missing.is_empty()
+                    && (dag.source_peer.as_deref() == Some(peer) || dag.fetch_failures > 0)
+            })
+            .map(|(cid, dag)| (*cid, dag.clone()))
+            .collect()
+    }
+
     /// Get missing CIDs for a pending DAG.
     pub fn pending_dag_missing(&self, root_cid: &Cid) -> Vec<Cid> {
         self.pending_dags

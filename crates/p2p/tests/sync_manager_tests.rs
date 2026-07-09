@@ -891,6 +891,36 @@ mod pending_persistence {
             .is_empty());
     }
 
+    /// Peer-connect re-drive targeting (#1099): a reconnecting peer re-drives
+    /// its own prior pushes and provider-exhausted entries, nothing else.
+    #[tokio::test]
+    async fn redrive_selection_targets_source_peer_and_exhausted_fetches() {
+        let store = Arc::new(MemoryStore::new());
+        let (manager, mut _events, _pending_store) = manager_with_store(store);
+
+        let (comp_cid, comp_bytes, _f, _fb) = composite_with_missing_field();
+        manager
+            .process_pushlog(
+                &pushlog_for(&comp_cid, &comp_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("registers pending");
+
+        let from_source = manager.pending_dags_needing_redrive("peer-1");
+        assert_eq!(from_source.len(), 1);
+        assert_eq!(from_source[0].0, comp_cid);
+
+        // A different peer does not re-drive someone else's healthy entry...
+        assert!(manager.pending_dags_needing_redrive("peer-2").is_empty());
+
+        // ...unless the entry's fetches already exhausted providers.
+        manager.record_pending_dag_fetch_failure(&comp_cid, "no providers");
+        assert_eq!(manager.pending_dags_needing_redrive("peer-2").len(), 1);
+    }
+
     struct FailingStore;
 
     #[async_trait]
