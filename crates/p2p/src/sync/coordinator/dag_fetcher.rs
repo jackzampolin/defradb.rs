@@ -128,6 +128,29 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
     );
 }
 
+/// Connected peers to offer as alternate providers for a DAG fetch.
+///
+/// A transport lookup failure costs only rotation capability, not the fetch
+/// itself, so it degrades to source-peer-only fetching — with a WARN trace,
+/// because a silently empty alternates list is indistinguishable from a
+/// healthy but sparsely connected node.
+pub(crate) async fn connected_alternate_providers<T: P2PTransport>(
+    transport: &T,
+    root_cid: &Cid,
+) -> Vec<PeerId> {
+    match transport.connected_peers().await {
+        Ok(peers) => peers,
+        Err(e) => {
+            warn!(
+                root_cid = %root_cid,
+                error = %e,
+                "Failed to list connected peers for DAG fetch alternates; fetching from source peer only"
+            );
+            Vec::new()
+        }
+    }
+}
+
 /// One full CAR-first + selective-walk attempt over the current provider set.
 async fn fetch_dag_attempt<B: Blockstore + 'static, T: P2PTransport>(
     transport: &T,
@@ -427,7 +450,7 @@ mod tests {
     use multihash_codetable::{Code, MultihashDigest};
     use serde_ipld_dagcbor::codec::DagCborCodec;
     use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use storage::backends::MemoryStore;
@@ -456,6 +479,7 @@ mod tests {
         sync_providers: Arc<Mutex<Vec<String>>>,
         dead_providers: Arc<Mutex<HashSet<String>>>,
         skip_serving_syncs: Arc<AtomicUsize>,
+        fail_connected_peers: Arc<AtomicBool>,
     }
 
     impl TestTransport {
@@ -479,6 +503,7 @@ mod tests {
                 sync_providers: Arc::new(Mutex::new(Vec::new())),
                 dead_providers: Arc::new(Mutex::new(HashSet::new())),
                 skip_serving_syncs: Arc::new(AtomicUsize::new(0)),
+                fail_connected_peers: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -500,6 +525,10 @@ mod tests {
 
         fn set_skip_serving_syncs(&self, count: usize) {
             self.skip_serving_syncs.store(count, Ordering::SeqCst);
+        }
+
+        fn set_fail_connected_peers(&self) {
+            self.fail_connected_peers.store(true, Ordering::SeqCst);
         }
     }
 
@@ -532,6 +561,11 @@ mod tests {
         }
 
         async fn connected_peers(&self) -> P2PResult<Vec<PeerId>> {
+            if self.fail_connected_peers.load(Ordering::SeqCst) {
+                return Err(crate::error::Error::Transport(
+                    "peer listing unavailable".to_string(),
+                ));
+            }
             Ok(Vec::new())
         }
 
@@ -1150,6 +1184,56 @@ mod tests {
         // One CAR try and one selective batch per attempt, all exhausted.
         assert_eq!(transport.car_request_count(), MAX_FETCH_ATTEMPTS as usize);
         assert_eq!(transport.sync_batches().len(), MAX_FETCH_ATTEMPTS as usize);
+    }
+
+    /// A `connected_peers()` failure must degrade to an empty alternates list
+    /// (source-peer-only rotation), not abort the fetch: composed exactly as
+    /// the event-handler call sites do, the fetch still completes from the
+    /// source peer.
+    #[tokio::test(start_paused = true)]
+    async fn poll_fetch_dag_completes_from_source_when_peer_listing_fails() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (root_cid, root_data, child_cid, child_data) = single_child_dag();
+
+        let transport = TestTransport::new(
+            blockstore.clone(),
+            root_cid,
+            root_data,
+            HashMap::new(),
+            HashMap::from([(child_cid, child_data)]),
+        );
+        transport.set_fail_connected_peers();
+
+        let alternate_providers = connected_alternate_providers(&transport, &root_cid).await;
+        assert!(
+            alternate_providers.is_empty(),
+            "transport failure must degrade to no alternates"
+        );
+
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        poll_fetch_dag(
+            transport.clone(),
+            blockstore.clone(),
+            event_tx,
+            root_cid,
+            DagFetchContext::new(
+                "doc-id".to_string(),
+                "collection-id".to_string(),
+                "creator-id".to_string(),
+                PeerId::new("remote-peer".to_string()),
+            )
+            .with_alternate_providers(alternate_providers),
+            DagFetchLimiter::new(2),
+        )
+        .await;
+
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(SyncEvent::DagReady { root_cid: ready_cid, .. }) if ready_cid == root_cid
+        ));
+        assert!(matches!(blockstore.has(&child_cid).await, Ok(true)));
+        assert_eq!(transport.sync_providers(), vec!["remote-peer".to_string()]);
     }
 
     /// The limiter permit must be released during retry backoff: a second

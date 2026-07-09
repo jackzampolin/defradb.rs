@@ -147,11 +147,17 @@ where
     // Convert string peer IDs to transport PeerIds.
     // If the provider list is empty, fall back to all connected transport peers.
     let transport_providers: Vec<crate::transport::PeerId> = if providers.is_empty() {
-        coordinator
-            .transport()
-            .connected_peers()
-            .await
-            .unwrap_or_default()
+        match coordinator.transport().connected_peers().await {
+            Ok(peers) => peers,
+            Err(e) => {
+                tracing::warn!(
+                    cid = %root_cid,
+                    error = %e,
+                    "Failed to list connected peers as Bitswap fetch providers"
+                );
+                Vec::new()
+            }
+        }
     } else {
         providers
             .into_iter()

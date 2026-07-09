@@ -399,7 +399,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     self.access.replicators.get_collections(peer_id.as_str());
 
                 self.spawn_background_task("doc_sync_reply_fetch_dag", async move {
-                    let alternate_providers = transport.connected_peers().await.unwrap_or_default();
+                    let alternate_providers =
+                        super::super::dag_fetcher::connected_alternate_providers(
+                            &transport, &root_cid,
+                        )
+                        .await;
                     super::super::dag_fetcher::poll_fetch_dag(
                         transport,
                         blockstore,
