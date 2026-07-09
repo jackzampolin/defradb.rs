@@ -344,6 +344,18 @@ async fn emit_dag_ready(
     }
 }
 
+/// Ceiling on the CAR request round-trip itself.
+///
+/// On iroh, `send_car_request` resolves only after the full connect /
+/// stream-open / response-read cycle (up to ~50s against a half-open peer),
+/// which would silently extend the attempt's CAR phase well past its intended
+/// 10s budget while the limiter permit is held. CAR requests have no
+/// cancellation handle, so on timeout the transport-side task is left to
+/// self-terminate within its own bounded internal timeouts (at most one per
+/// attempt); any late response still lands in the blockstore, where the
+/// selective phase or a later attempt picks it up.
+const CAR_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Try to fetch an entire DAG via a single CAR request.
 async fn try_car_fetch<B: Blockstore, T: P2PTransport>(
     transport: &T,
@@ -352,9 +364,25 @@ async fn try_car_fetch<B: Blockstore, T: P2PTransport>(
     source_peer: &PeerId,
     watch_missing: Option<&[Cid]>,
 ) -> bool {
-    if let Err(e) = transport.send_car_request(source_peer, *root_cid).await {
-        debug!(root_cid = %root_cid, error = %e, "CAR request failed, will use selective block fetch");
-        return false;
+    match tokio::time::timeout(
+        CAR_REQUEST_TIMEOUT,
+        transport.send_car_request(source_peer, *root_cid),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            debug!(root_cid = %root_cid, error = %e, "CAR request failed, will use selective block fetch");
+            return false;
+        }
+        Err(_) => {
+            debug!(
+                root_cid = %root_cid,
+                timeout_secs = CAR_REQUEST_TIMEOUT.as_secs(),
+                "CAR request did not resolve within budget, falling back to selective block fetch"
+            );
+            return false;
+        }
     }
 
     let timeout = Duration::from_secs(10);
@@ -548,6 +576,7 @@ mod tests {
         skip_serving_syncs: Arc<AtomicUsize>,
         fail_connected_peers: Arc<AtomicBool>,
         cancelled_queries: Arc<Mutex<Vec<u64>>>,
+        hang_car_requests: Arc<AtomicBool>,
     }
 
     impl TestTransport {
@@ -573,6 +602,7 @@ mod tests {
                 skip_serving_syncs: Arc::new(AtomicUsize::new(0)),
                 fail_connected_peers: Arc::new(AtomicBool::new(false)),
                 cancelled_queries: Arc::new(Mutex::new(Vec::new())),
+                hang_car_requests: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -602,6 +632,10 @@ mod tests {
 
         fn cancelled_queries(&self) -> Vec<u64> {
             self.cancelled_queries.lock().unwrap().clone()
+        }
+
+        fn set_hang_car_requests(&self) {
+            self.hang_car_requests.store(true, Ordering::SeqCst);
         }
     }
 
@@ -737,6 +771,10 @@ mod tests {
         async fn send_car_request(&self, _peer_id: &PeerId, root_cid: Cid) -> P2PResult<()> {
             assert_eq!(root_cid, self.root_cid);
             self.car_requests.fetch_add(1, Ordering::SeqCst);
+            if self.hang_car_requests.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_secs(600)).await;
+                return Ok(());
+            }
             self.blockstore
                 .put(&self.root_cid, &self.root_data)
                 .await
@@ -1362,6 +1400,55 @@ mod tests {
         assert_eq!(
             transport.cancelled_queries(),
             (1..=MAX_FETCH_ATTEMPTS as u64).collect::<Vec<_>>()
+        );
+    }
+
+    /// A CAR request that never resolves (half-open peer: connected but
+    /// unresponsive) must not stall the attempt beyond the CAR budget — the
+    /// fetch falls back to the selective path and completes, instead of
+    /// waiting out the transport's full internal timeout chain.
+    #[tokio::test(start_paused = true)]
+    async fn poll_fetch_dag_bounds_hung_car_request() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (root_cid, root_data, child_cid, child_data) = single_child_dag();
+
+        let transport = TestTransport::new(
+            blockstore.clone(),
+            root_cid,
+            root_data.clone(),
+            HashMap::new(),
+            HashMap::from([(root_cid, root_data), (child_cid, child_data)]),
+        );
+        transport.set_hang_car_requests();
+
+        let started = Instant::now();
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        poll_fetch_dag(
+            transport.clone(),
+            blockstore.clone(),
+            event_tx,
+            root_cid,
+            DagFetchContext::new(
+                "doc-id".to_string(),
+                "collection-id".to_string(),
+                "creator-id".to_string(),
+                PeerId::new("remote-peer".to_string()),
+            ),
+            DagFetchLimiter::new(2),
+        )
+        .await;
+
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(SyncEvent::DagReady { root_cid: ready_cid, .. }) if ready_cid == root_cid
+        ));
+        assert!(matches!(blockstore.has(&child_cid).await, Ok(true)));
+        assert_eq!(transport.car_request_count(), 1);
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "hung CAR request must be cut at its budget, not awaited to transport timeouts; elapsed: {:?}",
+            started.elapsed()
         );
     }
 
