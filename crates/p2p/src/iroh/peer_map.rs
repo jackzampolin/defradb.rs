@@ -26,10 +26,13 @@ pub fn endpoint_id_to_peer_id(id: &EndpointId) -> PeerId {
 pub struct ConnectionInfo {
     pub remote_addr: Option<SocketAddr>,
     pub active_connections: u32,
-    /// A handle to the underlying QUIC connection, used to hang up on
-    /// `disconnect`. iroh `Connection` clones share the same QUIC connection,
-    /// so closing this handle closes the connection for the peer.
-    connection: Option<Connection>,
+    /// Handles to every live QUIC connection, used to hang up on
+    /// `disconnect`. A peer can hold several concurrent connections (one per
+    /// ALPN, dial + accept); all must be closed or the count never reaches
+    /// zero and `PeerDisconnected` never fires. iroh `Connection` clones
+    /// share the underlying QUIC connection, so closing a handle closes that
+    /// connection.
+    handles: Vec<Connection>,
 }
 
 /// Tracks connected peers and their connection info.
@@ -59,7 +62,10 @@ impl PeerMap {
             if let Some(addr) = remote_addr {
                 info.remote_addr = Some(addr);
             }
-            info.connection = Some(connection);
+            // Already-closed handles would otherwise accumulate for a
+            // long-lived peer whose connections churn.
+            info.handles.retain(|conn| conn.close_reason().is_none());
+            info.handles.push(connection);
             false
         } else {
             self.connections.insert(
@@ -67,21 +73,23 @@ impl PeerMap {
                 ConnectionInfo {
                     remote_addr,
                     active_connections: 1,
-                    connection: Some(connection),
+                    handles: vec![connection],
                 },
             );
             true
         }
     }
 
-    /// Take the retained connection handle for a peer without removing the
-    /// connection-count entry. Returns `None` if the peer is unknown or no
-    /// handle was retained. Used by `disconnect` to close the live connection;
-    /// the count entry is then cleared by the stream task on `accept_bi` error.
-    pub fn take_connection(&mut self, id: &EndpointId) -> Option<Connection> {
+    /// Take every retained connection handle for a peer without removing the
+    /// connection-count entry. Returns an empty vec if the peer is unknown or
+    /// no handles were retained. Used by `disconnect` to close the live
+    /// connections; the count entry is then cleared by the stream tasks on
+    /// `accept_bi` error.
+    pub fn take_connections(&mut self, id: &EndpointId) -> Vec<Connection> {
         self.connections
             .get_mut(id)
-            .and_then(|info| info.connection.take())
+            .map(|info| std::mem::take(&mut info.handles))
+            .unwrap_or_default()
     }
 
     /// Decrement connection count for a peer. Returns `true` if the count

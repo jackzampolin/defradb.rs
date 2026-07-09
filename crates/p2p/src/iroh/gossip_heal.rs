@@ -49,6 +49,13 @@ pub struct GossipHealConfig {
     pub backoff_cap: Duration,
     /// Consecutive failed attempts before giving up on the peer.
     pub max_attempts: u32,
+    /// How long a superseded refresh connection is kept open before we close
+    /// it. Both sides must have adopted the replacement as their active
+    /// gossip connection first; closing the still-active one would make
+    /// gossip interpret it as a peer disconnect and churn the topic mesh. We
+    /// must close eventually: iroh keep-alives prevent idle cleanup, so
+    /// unclosed superseded connections leak one per refresh.
+    pub superseded_close_grace: Duration,
 }
 
 impl Default for GossipHealConfig {
@@ -58,6 +65,7 @@ impl Default for GossipHealConfig {
             backoff_base: Duration::from_secs(2),
             backoff_cap: Duration::from_secs(60),
             max_attempts: 5,
+            superseded_close_grace: Duration::from_secs(10),
         }
     }
 }
@@ -85,22 +93,17 @@ impl GossipHealConfig {
         if !self.enabled() {
             return Duration::from_secs(3600);
         }
+        let floor = Duration::from_millis(100);
+        // max(floor) keeps the clamp bounds ordered for refresh intervals
+        // under the floor, which would otherwise panic.
         self.backoff_base
-            .clamp(Duration::from_millis(100), self.refresh_interval)
+            .clamp(floor, self.refresh_interval.max(floor))
     }
 }
 
 /// Treat an in-flight refresh as lost after this long (dial timeouts bound a
 /// refresh to well under this), so a stuck flag cannot block healing forever.
 const IN_FLIGHT_STALE: Duration = Duration::from_secs(60);
-
-/// How long a superseded refresh connection is kept open before we close it.
-/// Both sides must have adopted the replacement as their active gossip
-/// connection first; closing the still-active one would make gossip interpret
-/// it as a peer disconnect and churn the topic mesh. We must close eventually:
-/// iroh keep-alives prevent idle cleanup, so unclosed superseded connections
-/// leak one per refresh.
-const SUPERSEDED_CLOSE_GRACE: Duration = Duration::from_secs(10);
 
 struct PeerHeal {
     attempts: u32,
@@ -276,11 +279,11 @@ pub(super) fn spawn_peer_connected_heal(
     senders: &SubscriptionSenders,
     endpoint_id: EndpointId,
 ) {
-    if senders.is_empty() {
-        return;
-    }
     let spawned_tasks = res.spawned_tasks.clone();
     if !res.healer.config().enabled() {
+        if senders.is_empty() {
+            return;
+        }
         let senders = senders.clone();
         let task = tokio::spawn(async move {
             join_peer_to_subscription_senders(&senders, endpoint_id).await;
@@ -288,6 +291,10 @@ pub(super) fn spawn_peer_connected_heal(
         track_task(&spawned_tasks, task);
         return;
     }
+    // Refresh even with no persistent subscriptions: ephemeral publishers
+    // (publish/publish_raw without subscribe) ride the same per-peer gossip
+    // send path, which can be equally dead. The topic rejoin below is then a
+    // no-op.
     res.healer.note_connected(endpoint_id, Instant::now());
     let res = res.clone();
     let senders = senders.clone();
@@ -305,10 +312,9 @@ pub(super) fn sweep(res: &EndpointResources, subscriptions: &HashMap<String, Top
         conn.close(0u32.into(), b"gossip-heal");
     }
 
+    // Sweep even with no persistent subscriptions — ephemeral publishers use
+    // the same per-peer gossip send path (see spawn_peer_connected_heal).
     let senders = snapshot_subscription_senders(subscriptions);
-    if senders.is_empty() {
-        return;
-    }
     for endpoint_id in res.healer.due_peers(&connected, Instant::now()) {
         let task_res = res.clone();
         let senders = senders.clone();
@@ -396,8 +402,9 @@ async fn dial_and_inject(
         .map_err(|e| crate::error::Error::Transport(format!("gossip handle_connection: {}", e)))?;
 
     if let Some(previous) = res.healer.store_conn(endpoint_id, conn) {
+        let grace = res.healer.config().superseded_close_grace;
         let task = tokio::spawn(async move {
-            tokio::time::sleep(SUPERSEDED_CLOSE_GRACE).await;
+            tokio::time::sleep(grace).await;
             previous.close(0u32.into(), b"gossip-refresh");
         });
         track_task(&res.spawned_tasks, task);
@@ -419,6 +426,7 @@ mod tests {
             backoff_base: Duration::from_secs(2),
             backoff_cap: Duration::from_secs(30),
             max_attempts: 3,
+            ..Default::default()
         })
     }
 
@@ -558,5 +566,16 @@ mod tests {
         let enabled = GossipHealConfig::default();
         assert!(enabled.enabled());
         assert_eq!(enabled.tick_period(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn sub_floor_refresh_interval_does_not_panic() {
+        let config = GossipHealConfig {
+            refresh_interval: Duration::from_millis(50),
+            backoff_base: Duration::from_millis(10),
+            ..Default::default()
+        };
+        assert!(config.enabled());
+        assert_eq!(config.tick_period(), Duration::from_millis(100));
     }
 }

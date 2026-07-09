@@ -185,8 +185,11 @@ async fn remesh_after_peer_restart() {
 }
 
 /// The periodic heal sweep unconditionally re-dials the gossip path and swaps
-/// the active gossip connection. Run several sweep cycles on a healthy mesh
-/// and assert gossip delivery still works in both directions afterwards.
+/// the active gossip connection; each superseded connection is closed after a
+/// grace period. Run several sweep cycles on a healthy mesh — long enough
+/// that multiple superseded-connection closes fire while the mesh is live —
+/// and assert the closes cause no neighbor churn (no PeerUnsubscribed) and
+/// gossip delivery still works in both directions afterwards.
 #[tokio::test]
 async fn sweep_refresh_preserves_gossip_delivery() {
     let fast_heal = GossipHealConfig {
@@ -194,6 +197,7 @@ async fn sweep_refresh_preserves_gossip_delivery() {
         backoff_base: Duration::from_millis(200),
         backoff_cap: Duration::from_secs(2),
         max_attempts: 5,
+        superseded_close_grace: Duration::from_millis(750),
     };
     let config0 = test_config(fast_heal.clone()).await;
     let config1 = test_config(fast_heal).await;
@@ -240,8 +244,22 @@ async fn sweep_refresh_preserves_gossip_delivery() {
     wait_peer_subscribed(&mut events0, ENCRYPTION_TOPIC, "initial mesh, node 0").await;
     wait_peer_subscribed(&mut events1, ENCRYPTION_TOPIC, "initial mesh, node 1").await;
 
-    // Let several sweep cycles refresh the gossip path on both sides.
+    // Let several sweep cycles refresh the gossip path on both sides, long
+    // enough (4× the 750ms grace) that superseded-connection closes fire
+    // while the mesh is live — the delayed close must not read as a peer
+    // disconnect.
     tokio::time::sleep(Duration::from_secs(3)).await;
+
+    for (events, node) in [(&mut events0, "node 0"), (&mut events1, "node 1")] {
+        while let Ok(event) = events.try_recv() {
+            if let TransportEvent::PeerUnsubscribed { topic, .. } = &event {
+                assert_ne!(
+                    topic, ENCRYPTION_TOPIC,
+                    "superseded-connection close churned the gossip mesh on {node}"
+                );
+            }
+        }
+    }
 
     assert_raw_delivery(
         &transport0,
@@ -255,6 +273,75 @@ async fn sweep_refresh_preserves_gossip_delivery() {
         &mut events0,
         vec![0xBB, 0x02],
         "1→0 after sweeps",
+    )
+    .await;
+
+    transport0.shutdown().await.expect("shutdown 0");
+    transport1.shutdown().await.expect("shutdown 1");
+    task0.await.expect("endpoint task 0");
+    task1.await.expect("endpoint task 1");
+}
+
+/// A publish-only node (publish_raw without any persistent subscription — the
+/// KMS `_response` responder shape) rides the same per-peer gossip send path,
+/// so the heal sweep must refresh it too, and the refresh must not disrupt
+/// ephemeral publishing.
+#[tokio::test]
+async fn sweep_refresh_covers_publish_only_node() {
+    let fast_heal = GossipHealConfig {
+        refresh_interval: Duration::from_millis(500),
+        backoff_base: Duration::from_millis(200),
+        backoff_cap: Duration::from_secs(2),
+        max_attempts: 5,
+        superseded_close_grace: Duration::from_millis(750),
+    };
+    let config0 = test_config(fast_heal.clone()).await;
+    let config1 = test_config(fast_heal).await;
+    let key0 = config0.secret_key.clone();
+    let key1 = config1.secret_key.clone();
+
+    let (tx0, mut events0, _r0, task0) = spawn_endpoint(config0).await.expect("spawn endpoint 0");
+    let (tx1, _events1, _r1, task1) = spawn_endpoint(config1).await.expect("spawn endpoint 1");
+    let transport0 = IrohTransport::new(tx0, key0);
+    let transport1 = IrohTransport::new(tx1, key1);
+
+    transport0
+        .dial(
+            transport1.local_peer_id(),
+            transport1.listen_addresses().await.expect("addrs 1"),
+        )
+        .await
+        .expect("dial 0→1");
+    transport0
+        .poll_until_connected(transport1.local_peer_id(), Duration::from_secs(5))
+        .await
+        .expect("0 sees 1");
+    transport1
+        .poll_until_connected(transport0.local_peer_id(), Duration::from_secs(5))
+        .await
+        .expect("1 sees 0");
+
+    // Only node 0 subscribes; node 1 never does (publish-only).
+    transport0
+        .subscribe(DefraTopic::Encryption)
+        .await
+        .expect("subscribe 0");
+    transport0
+        .register_pubsub_rpc_topic(ENCRYPTION_TOPIC.to_string())
+        .await
+        .expect("raw topic 0");
+
+    // No PeerSubscribed to wait for: node 1 only joins the topic ephemerally
+    // at publish time. Several sweep cycles and superseded-connection closes
+    // pass on both sides, with node 1's schedule driven purely by the
+    // empty-subscription path.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    assert_raw_delivery(
+        &transport1,
+        &mut events0,
+        vec![0xEE, 0x03],
+        "publish-only 1→0 after sweeps",
     )
     .await;
 
