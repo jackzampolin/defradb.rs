@@ -19,10 +19,19 @@
 //! Coalescing replaces a queued job only for the identical `(peer, cid)`:
 //! coalescing by document would drop distinct head blocks, and non-counter
 //! field blocks must reach the receiver as heads (#1043 KMS DEK trigger).
+//!
+//! After a failed job a peer enters an escalating cooldown (reset on success):
+//! its queued jobs park and workers serve other peers, so a dead peer costs
+//! one timed-out probe per cooldown window instead of a full send timeout per
+//! ring rotation. This keeps `max_concurrent_push_tasks = 1` deployments live
+//! for healthy peers (Amy v0.6.7 canary, defra-agent#630).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use bytes::Bytes;
 use cid::Cid;
@@ -33,6 +42,12 @@ use crate::transport::PeerId;
 
 /// Fixed per-job accounting overhead added to the payload/identifier bytes.
 const PUSH_JOB_FIXED_OVERHEAD_BYTES: usize = 128;
+
+/// First cooldown after a failed job; doubles per consecutive failure.
+pub const DEFAULT_PUSH_FAILURE_COOLDOWN_BASE: Duration = Duration::from_secs(1);
+
+/// Cooldown escalation cap: base << PUSH_FAILURE_COOLDOWN_MAX_SHIFT.
+const PUSH_FAILURE_COOLDOWN_MAX_SHIFT: u32 = 6;
 
 /// Compact description of one outbound push to one peer.
 #[derive(Debug, Clone)]
@@ -77,6 +92,12 @@ impl EnqueueOutcome {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PeerCooldown {
+    until: Instant,
+    consecutive_failures: u32,
+}
+
 #[derive(Default)]
 struct Inner {
     /// Per-peer FIFO of queued jobs. A peer key is present in `ready` iff its
@@ -84,10 +105,26 @@ struct Inner {
     queues: HashMap<String, VecDeque<PushJobSpec>>,
     ready: VecDeque<String>,
     active: HashMap<String, usize>,
+    /// Peers backing off after failed jobs. Cleared on the peer's next
+    /// success; expired idle entries are pruned during scheduling.
+    cooldowns: HashMap<String, PeerCooldown>,
     queued_items: usize,
     queued_bytes: usize,
     active_jobs: usize,
     closed: bool,
+}
+
+/// Live per-peer occupancy so slot starvation is visible to operators
+/// (defra-agent#630: a dead peer monopolizing the slots was invisible in
+/// connection-level diagnostics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerBacklogSnapshot {
+    pub peer_id: String,
+    pub queued_items: usize,
+    pub queued_bytes: usize,
+    pub active_jobs: usize,
+    pub consecutive_failures: u32,
+    pub cooldown_remaining_ms: u64,
 }
 
 /// Point-in-time view of the backlog for diagnostics and conformance tests.
@@ -106,6 +143,7 @@ pub struct PushBacklogSnapshot {
     pub rejected_bytes_total: u64,
     pub completed_total: u64,
     pub failed_total: u64,
+    pub per_peer: Vec<PeerBacklogSnapshot>,
 }
 
 /// Bounded admission queue drained by a fixed worker pool.
@@ -116,6 +154,7 @@ pub struct PushBacklog {
     byte_capacity: usize,
     per_peer_active_cap: usize,
     worker_count: usize,
+    failure_cooldown_base: Duration,
     enqueued_total: AtomicU64,
     coalesced_total: AtomicU64,
     rejected_items_total: AtomicU64,
@@ -131,6 +170,22 @@ impl PushBacklog {
         per_peer_active_cap: usize,
         worker_count: usize,
     ) -> Arc<Self> {
+        Self::with_failure_cooldown_base(
+            item_capacity,
+            byte_capacity,
+            per_peer_active_cap,
+            worker_count,
+            DEFAULT_PUSH_FAILURE_COOLDOWN_BASE,
+        )
+    }
+
+    pub fn with_failure_cooldown_base(
+        item_capacity: usize,
+        byte_capacity: usize,
+        per_peer_active_cap: usize,
+        worker_count: usize,
+        failure_cooldown_base: Duration,
+    ) -> Arc<Self> {
         let worker_count = worker_count.max(1);
         Arc::new(Self {
             inner: Mutex::new(Inner::default()),
@@ -139,6 +194,7 @@ impl PushBacklog {
             byte_capacity: byte_capacity.max(1),
             per_peer_active_cap: per_peer_active_cap.max(1).min(worker_count),
             worker_count,
+            failure_cooldown_base,
             enqueued_total: AtomicU64::new(0),
             coalesced_total: AtomicU64::new(0),
             rejected_items_total: AtomicU64::new(0),
@@ -208,8 +264,9 @@ impl PushBacklog {
         EnqueueOutcome::Enqueued
     }
 
-    /// Next job whose peer is below its active cap, round-robin across ready
-    /// peers. Parks until one is eligible; `None` once the backlog is closed.
+    /// Next job whose peer is below its active cap and not cooling down,
+    /// round-robin across ready peers. Parks until one is eligible (waking at
+    /// the earliest cooldown expiry); `None` once the backlog is closed.
     pub async fn next_job(&self) -> Option<PushJobSpec> {
         loop {
             let notified = self.notify.notified();
@@ -217,22 +274,40 @@ impl PushBacklog {
             // Register the waiter before re-checking so a notify_waiters that
             // races the check below is not lost.
             notified.as_mut().enable();
-            {
+            let next_wake = {
                 let mut inner = self.inner.lock();
                 if inner.closed {
                     return None;
                 }
-                if let Some(job) = Self::pop_eligible(&mut inner, self.per_peer_active_cap) {
-                    return Some(job);
+                match Self::pop_eligible(&mut inner, self.per_peer_active_cap, Instant::now()) {
+                    Ok(job) => return Some(job),
+                    Err(next_wake) => next_wake,
                 }
+            };
+            match next_wake {
+                Some(wake_at) => {
+                    tokio::select! {
+                        _ = notified => {}
+                        _ = tokio::time::sleep_until(wake_at) => {}
+                    }
+                }
+                None => notified.await,
             }
-            notified.await;
         }
     }
 
-    fn pop_eligible(inner: &mut Inner, per_peer_active_cap: usize) -> Option<PushJobSpec> {
+    /// Pop the next eligible job, or return the earliest cooldown expiry among
+    /// peers that were skipped only because they are cooling down.
+    fn pop_eligible(
+        inner: &mut Inner,
+        per_peer_active_cap: usize,
+        now: Instant,
+    ) -> std::result::Result<PushJobSpec, Option<Instant>> {
+        let mut next_wake: Option<Instant> = None;
         for _ in 0..inner.ready.len() {
-            let peer_key = inner.ready.pop_front()?;
+            let Some(peer_key) = inner.ready.pop_front() else {
+                break;
+            };
             let at_cap = inner
                 .active
                 .get(&peer_key)
@@ -240,6 +315,16 @@ impl PushBacklog {
             if at_cap {
                 inner.ready.push_back(peer_key);
                 continue;
+            }
+            if let Some(cooldown) = inner.cooldowns.get(&peer_key) {
+                if cooldown.until > now {
+                    next_wake = Some(match next_wake {
+                        Some(wake_at) => wake_at.min(cooldown.until),
+                        None => cooldown.until,
+                    });
+                    inner.ready.push_back(peer_key);
+                    continue;
+                }
             }
 
             let queue = inner
@@ -256,12 +341,13 @@ impl PushBacklog {
             inner.queued_bytes -= job.resident_bytes();
             *inner.active.entry(peer_key).or_insert(0) += 1;
             inner.active_jobs += 1;
-            return Some(job);
+            return Ok(job);
         }
-        None
+        Err(next_wake)
     }
 
-    /// Release the peer slot taken by `next_job`.
+    /// Release the peer slot taken by `next_job`. A failure starts (or
+    /// escalates) the peer's cooldown; a success clears it.
     pub fn job_done(&self, peer_id: &PeerId, succeeded: bool) {
         let peer_key = peer_id.to_string();
         {
@@ -273,6 +359,33 @@ impl PushBacklog {
                 }
             }
             inner.active_jobs = inner.active_jobs.saturating_sub(1);
+            if succeeded {
+                inner.cooldowns.remove(&peer_key);
+            } else {
+                let consecutive_failures = inner
+                    .cooldowns
+                    .get(&peer_key)
+                    .map(|cooldown| cooldown.consecutive_failures)
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                let shift = (consecutive_failures - 1).min(PUSH_FAILURE_COOLDOWN_MAX_SHIFT);
+                let cooldown = self.failure_cooldown_base.saturating_mul(1 << shift);
+                inner.cooldowns.insert(
+                    peer_key,
+                    PeerCooldown {
+                        until: Instant::now() + cooldown,
+                        consecutive_failures,
+                    },
+                );
+            }
+            // Prune idle expired cooldowns so departed peers do not linger.
+            let now = Instant::now();
+            let inner = &mut *inner;
+            let queues = &inner.queues;
+            let active = &inner.active;
+            inner.cooldowns.retain(|peer, cooldown| {
+                cooldown.until > now || queues.contains_key(peer) || active.contains_key(peer)
+            });
         }
         if succeeded {
             self.completed_total.fetch_add(1, Ordering::Relaxed);
@@ -299,6 +412,34 @@ impl PushBacklog {
 
     pub fn snapshot(&self) -> PushBacklogSnapshot {
         let inner = self.inner.lock();
+        let now = Instant::now();
+        let mut peers: std::collections::HashSet<&String> = inner.queues.keys().collect();
+        peers.extend(inner.active.keys());
+        peers.extend(inner.cooldowns.keys());
+        let mut per_peer: Vec<PeerBacklogSnapshot> = peers
+            .into_iter()
+            .map(|peer| {
+                let queued = inner.queues.get(peer);
+                let cooldown = inner.cooldowns.get(peer);
+                PeerBacklogSnapshot {
+                    peer_id: peer.clone(),
+                    queued_items: queued.map(|jobs| jobs.len()).unwrap_or(0),
+                    queued_bytes: queued
+                        .map(|jobs| jobs.iter().map(PushJobSpec::resident_bytes).sum())
+                        .unwrap_or(0),
+                    active_jobs: inner.active.get(peer).copied().unwrap_or(0),
+                    consecutive_failures: cooldown
+                        .map(|cooldown| cooldown.consecutive_failures)
+                        .unwrap_or(0),
+                    cooldown_remaining_ms: cooldown
+                        .map(|cooldown| {
+                            cooldown.until.saturating_duration_since(now).as_millis() as u64
+                        })
+                        .unwrap_or(0),
+                }
+            })
+            .collect();
+        per_peer.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
         PushBacklogSnapshot {
             queue_item_capacity: self.item_capacity,
             queue_byte_capacity: self.byte_capacity,
@@ -313,6 +454,7 @@ impl PushBacklog {
             rejected_bytes_total: self.rejected_bytes_total.load(Ordering::Relaxed),
             completed_total: self.completed_total.load(Ordering::Relaxed),
             failed_total: self.failed_total.load(Ordering::Relaxed),
+            per_peer,
         }
     }
 }
@@ -509,6 +651,99 @@ mod tests {
         assert_eq!(snap.failed_total, 1);
         assert_eq!(snap.queued_items, 0);
         assert_eq!(snap.queued_bytes, 0);
+    }
+
+    /// Amy canary req 3 (defra-agent#630): a failing peer must back off so
+    /// its jobs stop re-occupying workers every rotation, while healthy peers
+    /// keep flowing during the cooldown.
+    #[tokio::test]
+    async fn failed_peer_cools_down_while_healthy_peers_flow() {
+        let backlog = PushBacklog::with_failure_cooldown_base(
+            1024,
+            usize::MAX,
+            4,
+            4,
+            Duration::from_millis(80),
+        );
+        backlog.try_enqueue(job("dead", b"d1"));
+        let dead_job = backlog.next_job().await.unwrap();
+        backlog.job_done(&dead_job.peer_id, false);
+
+        backlog.try_enqueue(job("dead", b"d2"));
+        backlog.try_enqueue(job("healthy", b"h1"));
+
+        // The healthy peer's job is served immediately even though the dead
+        // peer's job was queued first.
+        let first = backlog.next_job().await.unwrap();
+        assert_eq!(first.peer_id.to_string(), "healthy");
+
+        // The dead peer's job is withheld until its cooldown expires...
+        let parked = tokio::time::timeout(Duration::from_millis(20), backlog.next_job()).await;
+        assert!(parked.is_err(), "cooling peer must not be served");
+
+        // ...then released without any further enqueue/notify.
+        let released = tokio::time::timeout(Duration::from_millis(400), backlog.next_job())
+            .await
+            .expect("cooldown expiry must wake a parked worker")
+            .unwrap();
+        assert_eq!(released.peer_id.to_string(), "dead");
+    }
+
+    #[tokio::test]
+    async fn cooldown_escalates_on_consecutive_failures_and_resets_on_success() {
+        let backlog = PushBacklog::with_failure_cooldown_base(
+            1024,
+            usize::MAX,
+            4,
+            4,
+            Duration::from_millis(10),
+        );
+        let peer = PeerId::new("flaky".to_string());
+        backlog.try_enqueue(job("flaky", b"1"));
+        let popped = backlog.next_job().await.unwrap();
+        backlog.job_done(&popped.peer_id, false);
+        backlog.job_done(&peer, false);
+
+        let snap = backlog.snapshot();
+        let entry = snap
+            .per_peer
+            .iter()
+            .find(|entry| entry.peer_id == "flaky")
+            .expect("cooling peer appears in per-peer snapshot");
+        assert_eq!(entry.consecutive_failures, 2);
+        assert!(entry.cooldown_remaining_ms > 0);
+
+        backlog.job_done(&peer, true);
+        let snap = backlog.snapshot();
+        assert!(
+            !snap.per_peer.iter().any(|entry| entry.peer_id == "flaky"),
+            "success must clear the cooldown"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_per_peer_backlog_occupancy() {
+        let backlog = PushBacklog::new(1024, usize::MAX, 4, 4);
+        backlog.try_enqueue(job("a", b"1"));
+        backlog.try_enqueue(job("a", b"2"));
+        backlog.try_enqueue(job("b", b"3"));
+        let active = backlog.next_job().await.unwrap();
+
+        let snap = backlog.snapshot();
+        let a = snap
+            .per_peer
+            .iter()
+            .find(|entry| entry.peer_id == "a")
+            .expect("peer a present");
+        assert_eq!(a.queued_items + a.active_jobs, 2);
+        assert!(a.queued_bytes > 0);
+        let b = snap
+            .per_peer
+            .iter()
+            .find(|entry| entry.peer_id == "b")
+            .expect("peer b present");
+        assert_eq!(b.queued_items, 1);
+        backlog.job_done(&active.peer_id, true);
     }
 
     #[test]

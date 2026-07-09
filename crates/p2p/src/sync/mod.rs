@@ -16,6 +16,7 @@ mod head_provider;
 mod manager;
 mod merge;
 mod peer_state;
+pub mod pending_store;
 mod push_backlog;
 mod queue;
 pub(crate) mod rate_limiter;
@@ -45,6 +46,12 @@ pub use manager::{
 };
 pub use merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome, RecoveredBlockMetadata};
 pub use peer_state::{PeerStateTracker, PeerStats};
-pub use push_backlog::{EnqueueOutcome, PushBacklog, PushBacklogSnapshot, PushJobSpec};
+pub use pending_store::{
+    PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedReplayAuthorization,
+};
+pub use push_backlog::{
+    EnqueueOutcome, PeerBacklogSnapshot, PushBacklog, PushBacklogSnapshot, PushJobSpec,
+    DEFAULT_PUSH_FAILURE_COOLDOWN_BASE,
+};
 pub use queue::ProcessQueue;
 pub use replication::{recover_unmerged, ReplicationConfig, ReplicationLoop, ReplicationResult};

@@ -64,6 +64,7 @@ pub use peerstore::{
 pub use systemstore::{
     CollectionID, CollectionIDSequenceKey, CollectionKey, CollectionNameKey, CollectionVersionKey,
     FieldID, FieldIDSequenceKey, IndexIDSequenceKey, NodeACPKey, P2PCollectionKey, P2PDocumentKey,
+    P2PPendingDagKey,
 };
 pub use utils::{InstanceType, SEPARATOR};
 

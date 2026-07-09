@@ -365,6 +365,22 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let _ = self.kms_transport.set(transport);
     }
 
+    /// Install the durable pending-DAG store (#1099). First-call-wins.
+    pub fn install_pending_dag_store(
+        &self,
+        store: Arc<dyn crate::sync::pending_store::PendingDagStorage>,
+    ) {
+        self.manager.install_pending_dag_store(store);
+    }
+
+    /// Restore persisted pending-DAG registrations after restart and re-drive
+    /// them through the normal fetch path. Emits `DagNeedsFetch` sync events,
+    /// so run it only once a sync-event consumer is live (or from a spawned
+    /// task) to avoid filling the event channel. Returns the restored count.
+    pub async fn restore_pending_dags(&self) -> usize {
+        self.manager.restore_persisted_pending_dags().await
+    }
+
     pub fn shutdown_handle(&self) -> SyncShutdownHandle {
         self.runtime.shutdown.clone()
     }

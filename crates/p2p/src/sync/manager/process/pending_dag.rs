@@ -138,15 +138,21 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// new entry is dropped and `false` is returned so callers can reject with a
     /// backpressure nack (#1088 W1) instead of acking a discarded registration.
     pub(super) fn insert_pending_dag(&self, root_cid: Cid, dag: PendingDag) -> bool {
-        let mut pending = self.pending_dags.write();
-        evict_expired_pending_dags(&mut pending, Instant::now());
+        let inserted = {
+            let mut pending = self.pending_dags.write();
+            let expired = evict_expired_pending_dags(&mut pending, Instant::now());
+            self.schedule_persisted_pending_removal(
+                expired.into_iter().map(|(cid, _)| cid).collect(),
+            );
 
-        if pending.len() >= self.max_pending_dags && !pending.contains_key(&root_cid) {
-            return false;
-        }
+            if pending.len() >= self.max_pending_dags && !pending.contains_key(&root_cid) {
+                return false;
+            }
 
-        pending.insert(root_cid, dag);
-        true
+            pending.insert(root_cid, dag);
+            true
+        };
+        inserted
     }
 
     fn update_pending_dag_missing_if_current(
@@ -180,7 +186,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
     /// Remove a pending DAG entry once another fetch path has completed it.
     pub fn clear_pending_dag(&self, root_cid: &Cid) -> bool {
-        self.pending_dags.write().remove(root_cid).is_some()
+        let removed = self.pending_dags.write().remove(root_cid).is_some();
+        if removed {
+            self.schedule_persisted_pending_removal(vec![*root_cid]);
+        }
+        removed
     }
 
     /// Register a pending DAG for DocSync.
@@ -289,6 +299,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         let pending_info = {
             let mut pending = self.pending_dags.write();
             let expired = evict_expired_pending_dags(&mut pending, Instant::now());
+            self.schedule_persisted_pending_removal(expired.iter().map(|(cid, _)| *cid).collect());
             if let Some((_, dag)) = expired.into_iter().find(|(cid, _)| cid == root_cid) {
                 Some(PendingDagRetryEntry::Expired(dag))
             } else {
@@ -432,8 +443,120 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             return Err(Error::ChannelSend);
         }
 
+        self.remove_persisted_pending(root_cid).await;
         self.diagnostics.record_pending_dag_resolved();
         Ok(true)
+    }
+
+    /// Restore persisted push-originated pending registrations after restart
+    /// and re-drive them through the normal fetch path (#1099).
+    ///
+    /// Already-merged roots just drop their durable record. Complete-but-
+    /// unmerged roots resolve immediately through `retry_pending_dag`. Roots
+    /// that no longer fit under `max_pending_dags` keep their record for the
+    /// next restart. Returns the number of registrations re-driven.
+    pub async fn restore_persisted_pending_dags(&self) -> usize {
+        let Some(store) = self.pending_store() else {
+            return 0;
+        };
+        let records = match store.load_all().await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to load persisted pending DAG records");
+                return 0;
+            }
+        };
+        if records.is_empty() {
+            return 0;
+        }
+
+        let mut restored = 0usize;
+        for (root_cid, record) in records {
+            if matches!(self.is_merged(&root_cid).await, Ok(true)) {
+                self.remove_persisted_pending(&root_cid).await;
+                continue;
+            }
+
+            let missing: Vec<Cid> = match self.blockstore.get(&root_cid).await {
+                Ok(Some(data)) => {
+                    match find_all_missing_links(self.blockstore.as_ref(), &data).await {
+                        Ok(missing) => missing,
+                        Err(_) => vec![root_cid],
+                    }
+                }
+                _ => vec![root_cid],
+            };
+
+            let dag = PendingDag {
+                doc_id: record.doc_id.clone(),
+                collection_id: record.collection_id.clone(),
+                creator: record.creator.clone(),
+                missing: missing.iter().copied().collect(),
+                source_peer: record.source_peer.clone(),
+                is_explicit_replicator: record.is_explicit_replicator,
+                explicit_replay_authorization: record
+                    .explicit_replay_authorization
+                    .clone()
+                    .map(Into::into),
+                inserted_at: Instant::now(),
+                attempts: 0,
+                fetch_failures: 0,
+                last_fetch_error: None,
+            };
+
+            if !self.insert_pending_dag(root_cid, dag.clone()) {
+                tracing::warn!(
+                    root_cid = %root_cid,
+                    doc_id = %record.doc_id,
+                    max = self.max_pending_dags,
+                    "Pending DAGs at capacity during restore; record kept for next restart"
+                );
+                continue;
+            }
+
+            if missing.is_empty() {
+                if let Err(error) = self.retry_pending_dag(&root_cid).await {
+                    tracing::warn!(
+                        root_cid = %root_cid,
+                        error = %error,
+                        "Failed to resolve complete restored pending DAG"
+                    );
+                }
+            } else {
+                let mut providers = self.get_providers_for_cids(&missing);
+                if let Some(source_peer) = record.source_peer.clone() {
+                    if !providers.contains(&source_peer) {
+                        providers.push(source_peer);
+                    }
+                }
+                if self
+                    .event_tx
+                    .send(SyncEvent::DagNeedsFetch {
+                        root_cid,
+                        missing,
+                        providers,
+                        doc_id: record.doc_id.clone(),
+                        collection_id: record.collection_id.clone(),
+                        creator: record.creator.clone(),
+                        sender_peer: record.source_peer.clone(),
+                        is_explicit_replicator: record.is_explicit_replicator,
+                        explicit_replay_authorization: dag.explicit_replay_authorization.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        root_cid = %root_cid,
+                        "Failed to emit DagNeedsFetch for restored pending DAG"
+                    );
+                    continue;
+                }
+            }
+            restored += 1;
+        }
+
+        tracing::info!(restored, "restored persisted pending DAG registrations");
+        restored
     }
 }
 

@@ -396,6 +396,35 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 }
             }
 
+            // Persist the registration before the caller acks success: the
+            // ack destroys the pusher's retry record, so an unpersisted
+            // registration must fail closed as an error reply instead
+            // (#1099; proofs/tla/PendingDagRestart.tla INV_AckBacked).
+            if let Some(store) = self.pending_store() {
+                let record = crate::sync::pending_store::PersistedPendingDag {
+                    doc_id: msg.doc_id.clone(),
+                    collection_id: msg.collection_id.clone(),
+                    creator: msg.creator.clone(),
+                    source_peer: sender_peer.map(str::to_owned),
+                    is_explicit_replicator,
+                    explicit_replay_authorization: explicit_replay_authorization
+                        .as_ref()
+                        .map(Into::into),
+                };
+                if let Err(error) = store.put(cid, &record).await {
+                    self.pending_dags.write().remove(cid);
+                    tracing::warn!(
+                        cid = %cid,
+                        doc_id = %msg.doc_id,
+                        error = %error,
+                        "Failed to persist pending DAG registration; nacking push"
+                    );
+                    return Err(Error::Storage(format!(
+                        "failed to persist pending DAG registration: {error}"
+                    )));
+                }
+            }
+
             // Get providers for the missing blocks
             let providers = self.get_providers_for_cids(&missing);
 
@@ -422,6 +451,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 );
                 // Clean up pending dag since we can't request fetch
                 self.pending_dags.write().remove(cid);
+                self.remove_persisted_pending(cid).await;
                 return Err(Error::ChannelSend);
             }
         }

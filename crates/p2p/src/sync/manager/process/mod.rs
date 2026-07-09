@@ -87,6 +87,12 @@ pub struct SyncManager<B: Blockstore> {
 
     /// Capacity of `pending_dags`; overflow is rejected with a backpressure nack.
     pub(super) max_pending_dags: usize,
+
+    /// Durable backing for push-originated pending registrations (#1099).
+    /// Empty until the embedding layer installs a store; process-local
+    /// semantics apply while empty.
+    pub(super) pending_store:
+        std::sync::OnceLock<Arc<dyn crate::sync::pending_store::PendingDagStorage>>,
 }
 
 impl<B: Blockstore + 'static> SyncManager<B> {
@@ -117,6 +123,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // A zero cap would reject every missing-link push forever
             // (permanent admission outage); normalize to a 1-slot map.
             max_pending_dags: config.max_pending_dags.max(1),
+            pending_store: std::sync::OnceLock::new(),
         };
 
         (manager, event_rx)
@@ -172,5 +179,55 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Shared reference to the sync diagnostics counters.
     pub fn diagnostics(&self) -> Arc<SyncDiagnostics> {
         Arc::clone(&self.diagnostics)
+    }
+
+    /// Install the durable pending-DAG store. First-call-wins (OnceLock
+    /// semantics); subsequent calls are silently discarded.
+    pub fn install_pending_dag_store(
+        &self,
+        store: Arc<dyn crate::sync::pending_store::PendingDagStorage>,
+    ) {
+        let _ = self.pending_store.set(store);
+    }
+
+    pub(super) fn pending_store(
+        &self,
+    ) -> Option<Arc<dyn crate::sync::pending_store::PendingDagStorage>> {
+        self.pending_store.get().cloned()
+    }
+
+    /// Best-effort deletion of persisted registrations from sync call sites.
+    /// A late (or lost) delete is safe: restore re-checks merge state and the
+    /// TTL expiry path deletes stale records.
+    pub(super) fn schedule_persisted_pending_removal(&self, roots: Vec<Cid>) {
+        let Some(store) = self.pending_store() else {
+            return;
+        };
+        if roots.is_empty() {
+            return;
+        }
+        tokio::spawn(async move {
+            for root_cid in roots {
+                if let Err(error) = store.remove(&root_cid).await {
+                    tracing::warn!(
+                        root_cid = %root_cid,
+                        error = %error,
+                        "Failed to delete persisted pending DAG record"
+                    );
+                }
+            }
+        });
+    }
+
+    pub(super) async fn remove_persisted_pending(&self, root_cid: &Cid) {
+        if let Some(store) = self.pending_store() {
+            if let Err(error) = store.remove(root_cid).await {
+                tracing::warn!(
+                    root_cid = %root_cid,
+                    error = %error,
+                    "Failed to delete persisted pending DAG record"
+                );
+            }
+        }
     }
 }

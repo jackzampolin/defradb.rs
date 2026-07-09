@@ -718,3 +718,219 @@ async fn test_max_pending_dags_zero_is_normalized_to_one() {
     let _ = events.try_recv().expect("DagNeedsFetch for composite");
     assert_eq!(manager.pending_dag_count(), 1);
 }
+
+mod pending_persistence {
+    //! #1099: success-acked pending registrations must be restart-recoverable
+    //! once a `PendingDagStorage` is installed (proofs/tla/PendingDagRestart.tla).
+
+    use super::*;
+    use async_trait::async_trait;
+    use p2p::sync::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
+
+    fn manager_with_store(
+        store: Arc<MemoryStore>,
+    ) -> (
+        SyncManager<DefraBlockstore<MemoryStore>>,
+        tokio::sync::mpsc::Receiver<SyncEvent>,
+        Arc<PendingDagStore<MemoryStore>>,
+    ) {
+        let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
+        let (manager, events) =
+            SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
+        let pending_store = Arc::new(PendingDagStore::new(store));
+        manager.install_pending_dag_store(pending_store.clone());
+        (manager, events, pending_store)
+    }
+
+    fn composite_with_missing_field() -> (Cid, Vec<u8>, Cid, Vec<u8>) {
+        let (field_cid, field_bytes) = create_lww_block("field_a");
+        let (comp_cid, comp_bytes) =
+            create_composite_block(vec![DAGLink::new("field_a", field_cid)]);
+        (comp_cid, comp_bytes, field_cid, field_bytes)
+    }
+
+    fn pushlog_for(cid: &Cid, bytes: &[u8]) -> PushLogBroadcast {
+        PushLogBroadcast::new(
+            "doc123".to_string(),
+            Bytes::from(cid.to_bytes()),
+            "collection1".to_string(),
+            "creator1".to_string(),
+            Bytes::from(bytes.to_vec()),
+        )
+    }
+
+    #[tokio::test]
+    async fn pending_registration_persists_and_clears_on_resolve() {
+        let store = Arc::new(MemoryStore::new());
+        let (manager, mut events, pending_store) = manager_with_store(store);
+        let (comp_cid, comp_bytes, _field_cid, field_bytes) = composite_with_missing_field();
+
+        manager
+            .process_pushlog(
+                &pushlog_for(&comp_cid, &comp_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("composite with missing link registers pending");
+        assert_eq!(manager.pending_dag_count(), 1);
+
+        let persisted = pending_store.load_all().await.expect("load persisted");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].0, comp_cid);
+        assert_eq!(persisted[0].1.doc_id, "doc123");
+        assert_eq!(persisted[0].1.source_peer.as_deref(), Some("peer-1"));
+        assert!(persisted[0].1.is_explicit_replicator);
+
+        // Drain the DagNeedsFetch event so the channel stays open.
+        let _ = tokio::time::timeout(Duration::from_secs(1), events.recv()).await;
+
+        // The missing field arrives: the DAG resolves and the durable record
+        // is deleted.
+        let (field_cid, _) = create_lww_block("field_a");
+        manager
+            .process_pushlog(
+                &pushlog_for(&field_cid, &field_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("field block completes the pending DAG");
+        assert_eq!(manager.pending_dag_count(), 0);
+        assert!(pending_store
+            .load_all()
+            .await
+            .expect("load persisted")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn restore_re_registers_and_re_drives_fetch() {
+        let store = Arc::new(MemoryStore::new());
+        let comp_cid = {
+            let (manager, mut events, _pending_store) = manager_with_store(store.clone());
+            let (comp_cid, comp_bytes, _field_cid, _field_bytes) = composite_with_missing_field();
+            manager
+                .process_pushlog(
+                    &pushlog_for(&comp_cid, &comp_bytes),
+                    Some("peer-1"),
+                    true,
+                    None,
+                )
+                .await
+                .expect("composite with missing link registers pending");
+            let _ = tokio::time::timeout(Duration::from_secs(1), events.recv()).await;
+            comp_cid
+            // manager dropped here: simulates the crash after the success ack
+        };
+
+        // "Restarted" manager over the same physical store.
+        let (manager, mut events, _pending_store) = manager_with_store(store);
+        assert_eq!(manager.pending_dag_count(), 0);
+
+        let restored = manager.restore_persisted_pending_dags().await;
+        assert_eq!(restored, 1);
+        assert_eq!(manager.pending_dag_count(), 1);
+
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("restore must emit a fetch event")
+            .expect("event channel open");
+        match event {
+            SyncEvent::DagNeedsFetch {
+                root_cid,
+                missing,
+                providers,
+                doc_id,
+                is_explicit_replicator,
+                ..
+            } => {
+                assert_eq!(root_cid, comp_cid);
+                assert!(!missing.is_empty());
+                assert_eq!(doc_id, "doc123");
+                assert!(is_explicit_replicator);
+                assert!(
+                    providers.contains(&"peer-1".to_string()),
+                    "persisted source peer must be offered as a provider"
+                );
+            }
+            other => panic!("expected DagNeedsFetch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_skips_and_deletes_merged_roots() {
+        let store = Arc::new(MemoryStore::new());
+        let (manager, mut _events, pending_store) = manager_with_store(store.clone());
+        let (comp_cid, comp_bytes, _field_cid, _field_bytes) = composite_with_missing_field();
+
+        manager
+            .process_pushlog(
+                &pushlog_for(&comp_cid, &comp_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("composite registers pending");
+        manager
+            .mark_as_merged(&comp_cid)
+            .await
+            .expect("mark merged");
+
+        let (manager, _events2, _) = manager_with_store(store);
+        let restored = manager.restore_persisted_pending_dags().await;
+        assert_eq!(restored, 0);
+        assert_eq!(manager.pending_dag_count(), 0);
+        assert!(pending_store
+            .load_all()
+            .await
+            .expect("load persisted")
+            .is_empty());
+    }
+
+    struct FailingStore;
+
+    #[async_trait]
+    impl PendingDagStorage for FailingStore {
+        async fn put(
+            &self,
+            _root_cid: &Cid,
+            _record: &PersistedPendingDag,
+        ) -> p2p::error::Result<()> {
+            Err(Error::Storage("disk full".to_string()))
+        }
+        async fn remove(&self, _root_cid: &Cid) -> p2p::error::Result<()> {
+            Ok(())
+        }
+        async fn load_all(&self) -> p2p::error::Result<Vec<(Cid, PersistedPendingDag)>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Fail closed: if the registration cannot be made durable the push must
+    /// be nacked (pusher keeps its retry record), not success-acked.
+    #[tokio::test]
+    async fn persist_failure_nacks_the_push_and_keeps_nothing_registered() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (manager, _events) =
+            SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
+        manager.install_pending_dag_store(Arc::new(FailingStore));
+
+        let (comp_cid, comp_bytes, _field_cid, _field_bytes) = composite_with_missing_field();
+        let result = manager
+            .process_pushlog(
+                &pushlog_for(&comp_cid, &comp_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await;
+
+        assert!(result.is_err(), "unpersistable registration must nack");
+        assert_eq!(manager.pending_dag_count(), 0);
+    }
+}
