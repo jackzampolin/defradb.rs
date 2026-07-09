@@ -1724,22 +1724,28 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                 };
                 let mut all_succeeded = true;
                 for (doc_id, collection_id) in &docs {
-                    match db_merge::retry_doc_via_transport(
-                        &transport,
-                        database.as_ref(),
-                        None,
-                        &peer_id,
-                        doc_id,
-                        collection_id,
-                        &retry_filters,
-                        &replication_filter::QueryReplicationFilterMatcher::new(),
+                    // Bound each send and stop this peer's pass on the first
+                    // failure so a nonresponsive peer cannot stall healthy
+                    // peers' retries behind it (#1099).
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(15),
+                        db_merge::retry_doc_via_transport(
+                            &transport,
+                            database.as_ref(),
+                            None,
+                            &peer_id,
+                            doc_id,
+                            collection_id,
+                            &retry_filters,
+                            &replication_filter::QueryReplicationFilterMatcher::new(),
+                        ),
                     )
                     .await
                     {
-                        Ok(()) => {
+                        Ok(Ok(())) => {
                             let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
                         }
-                        Err(error) => {
+                        Ok(Err(error)) => {
                             tracing::warn!(
                                 doc_id = %doc_id,
                                 peer_id = %peer_id,
@@ -1747,6 +1753,16 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                                 "retry push failed"
                             );
                             all_succeeded = false;
+                            break;
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                doc_id = %doc_id,
+                                peer_id = %peer_id,
+                                "retry push timed out"
+                            );
+                            all_succeeded = false;
+                            break;
                         }
                     }
                 }

@@ -514,11 +514,16 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
 
         let mut all_succeeded = true;
         for (doc_id, collection_id) in &docs {
-            match doc_pusher
-                .retry_doc(handle, peer_id, doc_id, collection_id)
-                .await
+            // Bound each send and stop this peer's pass on the first failure
+            // so a nonresponsive peer cannot stall healthy peers' retries
+            // behind it (#1099).
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                doc_pusher.retry_doc(handle, peer_id, doc_id, collection_id),
+            )
+            .await
             {
-                Ok(()) => {
+                Ok(Ok(())) => {
                     // Doc block re-push succeeded; regenerate and re-push
                     // SE artifacts for this doc too. Go re-pushes the
                     // artifact (not just the doc) on reconnect; replicators
@@ -528,9 +533,15 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
                         .await;
                     let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     tracing::warn!(doc_id = %doc_id, peer_id = %peer_id, error = %error, "retry push failed");
                     all_succeeded = false;
+                    break;
+                }
+                Err(_) => {
+                    tracing::warn!(doc_id = %doc_id, peer_id = %peer_id, "retry push timed out");
+                    all_succeeded = false;
+                    break;
                 }
             }
         }
@@ -620,16 +631,30 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
 
         let mut all_succeeded = true;
         for (doc_id, collection_id) in &docs {
-            match doc_pusher.retry_doc(&peer_id, doc_id, collection_id).await {
-                Ok(()) => {
+            // Bound each send and stop this peer's pass on the first failure
+            // so a nonresponsive peer cannot stall healthy peers' retries
+            // behind it (#1099).
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                doc_pusher.retry_doc(&peer_id, doc_id, collection_id),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
                     se_repusher
                         .regenerate_and_push_se_artifacts(collection_id, doc_id)
                         .await;
                     let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     tracing::warn!(doc_id = %doc_id, peer_id = %peer_id, error = %error, "retry push failed");
                     all_succeeded = false;
+                    break;
+                }
+                Err(_) => {
+                    tracing::warn!(doc_id = %doc_id, peer_id = %peer_id, "retry push timed out");
+                    all_succeeded = false;
+                    break;
                 }
             }
         }

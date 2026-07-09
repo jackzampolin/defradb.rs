@@ -592,15 +592,21 @@ impl Node {
                     }
                     let mut all_succeeded = true;
                     for (doc_id, collection_id) in &docs {
-                        match retry_pusher
-                            .retry_doc(&retry_handle, peer_id, doc_id, collection_id)
-                            .await
+                        // Bound each send and stop this peer's pass on the
+                        // first failure so a nonresponsive peer cannot stall
+                        // healthy peers' retries behind it (#1099).
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(15),
+                            retry_pusher.retry_doc(&retry_handle, peer_id, doc_id, collection_id),
+                        )
+                        .await
                         {
-                            Ok(()) => {
+                            Ok(Ok(())) => {
                                 let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
                             }
-                            Err(_) => {
+                            Ok(Err(_)) | Err(_) => {
                                 all_succeeded = false;
+                                break;
                             }
                         }
                     }
@@ -1124,15 +1130,21 @@ impl Node {
                     }
                     let mut all_succeeded = true;
                     for (doc_id, collection_id) in &docs {
-                        match retry_pusher
-                            .retry_doc(&peer_id, doc_id, collection_id)
-                            .await
+                        // Bound each send and stop this peer's pass on the
+                        // first failure so a nonresponsive peer cannot stall
+                        // healthy peers' retries behind it (#1099).
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(15),
+                            retry_pusher.retry_doc(&peer_id, doc_id, collection_id),
+                        )
+                        .await
                         {
-                            Ok(()) => {
+                            Ok(Ok(())) => {
                                 let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
                             }
-                            Err(_) => {
+                            Ok(Err(_)) | Err(_) => {
                                 all_succeeded = false;
+                                break;
                             }
                         }
                     }

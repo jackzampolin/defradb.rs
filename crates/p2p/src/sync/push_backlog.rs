@@ -238,6 +238,18 @@ impl PushBacklog {
             self.rejected_items_total.fetch_add(1, Ordering::Relaxed);
             return EnqueueOutcome::RejectedItems;
         }
+        // One peer may hold at most a quarter of the item budget, so a dead
+        // peer's parked jobs cannot squat the whole queue and starve healthy
+        // peers' admissions (defra-agent#630 req 1).
+        let peer_quota = (self.item_capacity / 4).max(1);
+        if inner
+            .queues
+            .get(&peer_key)
+            .is_some_and(|queue| queue.len() >= peer_quota)
+        {
+            self.rejected_items_total.fetch_add(1, Ordering::Relaxed);
+            return EnqueueOutcome::RejectedItems;
+        }
         if inner.queued_items > 0 && inner.queued_bytes + cost > self.byte_capacity {
             self.rejected_bytes_total.fetch_add(1, Ordering::Relaxed);
             return EnqueueOutcome::RejectedBytes;
@@ -487,11 +499,11 @@ mod tests {
             EnqueueOutcome::Enqueued
         );
         assert_eq!(
-            backlog.try_enqueue(job("a", b"2")),
+            backlog.try_enqueue(job("b", b"2")),
             EnqueueOutcome::Enqueued
         );
         assert_eq!(
-            backlog.try_enqueue(job("b", b"3")),
+            backlog.try_enqueue(job("c", b"3")),
             EnqueueOutcome::RejectedItems
         );
 
@@ -651,6 +663,25 @@ mod tests {
         assert_eq!(snap.failed_total, 1);
         assert_eq!(snap.queued_items, 0);
         assert_eq!(snap.queued_bytes, 0);
+    }
+
+    /// Amy canary req 1 (defra-agent#630): one peer's backlog must not squat
+    /// the whole global item budget.
+    #[test]
+    fn one_peer_cannot_fill_the_whole_queue() {
+        let backlog = PushBacklog::new(8, usize::MAX, 4, 4);
+        let mut dead_enqueued = 0;
+        for index in 0..8u8 {
+            if backlog.try_enqueue(job("dead", &[index])) == EnqueueOutcome::Enqueued {
+                dead_enqueued += 1;
+            }
+        }
+        assert_eq!(dead_enqueued, 2, "peer quota is a quarter of the item cap");
+        assert_eq!(
+            backlog.try_enqueue(job("healthy", b"h1")),
+            EnqueueOutcome::Enqueued,
+            "healthy peer must still be admitted"
+        );
     }
 
     /// Amy canary req 3 (defra-agent#630): a failing peer must back off so
