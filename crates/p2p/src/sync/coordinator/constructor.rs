@@ -174,6 +174,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let peer_state = Arc::new(PeerStateTracker::new());
         let max_dag_fetches = config.max_concurrent_dag_fetches.max(1);
         let max_push_tasks = config.max_concurrent_push_tasks.max(1);
+        let push_backlog = crate::sync::push_backlog::PushBacklog::new(
+            config.push_queue_capacity,
+            config.push_queue_byte_capacity,
+            config.max_active_pushes_per_peer,
+            max_push_tasks,
+        );
         let rate_limit_burst = config.rate_limit_burst;
         let rate_limit_rate = config.rate_limit_rate;
         let rate_limit_backoff = config.rate_limit_backoff.clone();
@@ -186,7 +192,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         };
         let subscribed_collections =
             Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
-        let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), config);
+        let (manager, events) =
+            SyncManager::new(Arc::clone(&blockstore), peer_state.clone(), config);
 
         let authorizer = Arc::new(RuntimeAuthorizer::new(
             transport.clone(),
@@ -201,14 +208,28 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             Arc::clone(&authorizer) as Arc<dyn AccessAuthorizer>,
         );
 
+        let failure_tx: Arc<parking_lot::Mutex<Option<mpsc::Sender<super::PushFailure>>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+        let shutdown = super::SyncShutdownHandle::new();
+        super::push_worker::spawn_push_workers(
+            Arc::new(super::push_worker::PushWorkerContext {
+                transport: transport.clone(),
+                blockstore,
+                backlog: Arc::clone(&push_backlog),
+                failure_tx: Arc::clone(&failure_tx),
+                send_timeout: push_send_timeout,
+            }),
+            &shutdown,
+        );
+
         Ok((
             Self {
                 runtime: SyncRuntime {
                     transport,
                     broadcaster,
-                    failure_tx: None,
+                    failure_tx,
                     dag_fetch_limiter: DagFetchLimiter::new(max_dag_fetches),
-                    push_semaphore: Arc::new(tokio::sync::Semaphore::new(max_push_tasks)),
+                    push_backlog,
                     rate_limiter: Arc::new(PeerRateLimiter::with_backoff_steps(
                         rate_limit_burst,
                         rate_limit_rate,
@@ -218,9 +239,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         rate_limit_burst,
                         rate_limit_rate,
                     )),
-                    push_send_timeout,
                     max_doc_sync_request_doc_ids,
-                    shutdown: super::SyncShutdownHandle::new(),
+                    shutdown,
                     filter_matcher,
                 },
                 manager,
@@ -250,7 +270,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     /// Set the failure channel for reporting push failures to the FFI layer.
     pub fn set_failure_channel(&mut self, tx: tokio::sync::mpsc::Sender<super::PushFailure>) {
-        self.runtime.failure_tx = Some(tx);
+        *self.runtime.failure_tx.lock() = Some(tx);
     }
 }
 

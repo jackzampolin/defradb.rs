@@ -52,6 +52,7 @@ mod event_handler;
 mod pubsub_client;
 #[cfg(feature = "libp2p-transport")]
 mod pubsub_services;
+mod push_worker;
 mod replicators;
 mod result_types;
 mod subscriptions;
@@ -197,11 +198,19 @@ impl SyncShutdownHandle {
 
     fn register_task(&self, handle: JoinHandle<()>) {
         let mut tasks = self.inner.background_tasks.lock();
+        // Retire completed handles on every registration so retained handles
+        // track live tasks instead of total spawn count (#1099).
+        tasks.retain(|task| !task.is_finished());
         if self.is_shutting_down() {
             handle.abort();
         } else {
             tasks.push(handle);
         }
+    }
+
+    /// Number of currently retained background task handles.
+    pub fn retained_task_count(&self) -> usize {
+        self.inner.background_tasks.lock().len()
     }
 
     async fn drain_background_tasks(&self, timeout: Duration) {
@@ -247,13 +256,16 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
     pub(super) broadcaster: Broadcaster<T>,
 
     /// Channel for reporting push failures to the FFI layer for retry tracking.
-    pub(super) failure_tx: Option<tokio::sync::mpsc::Sender<PushFailure>>,
+    /// Behind a shared slot so the fixed push workers observe a channel that
+    /// is installed after construction (`set_failure_channel`).
+    pub(super) failure_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<PushFailure>>>>,
 
     /// Limiter for concurrent DAG fetch tasks (configurable via SyncConfig).
     pub(super) dag_fetch_limiter: DagFetchLimiter,
 
-    /// Semaphore limiting concurrent push tasks (configurable via SyncConfig).
-    pub(super) push_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Bounded admission queue for outbound replicator pushes, drained by the
+    /// fixed worker pool spawned at construction (#1099).
+    pub(super) push_backlog: Arc<super::push_backlog::PushBacklog>,
 
     /// Per-peer rate limiter for gossip dispatch (abuse ladder; drop-only).
     pub(super) rate_limiter: Arc<PeerRateLimiter>,
@@ -261,9 +273,6 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
     /// Per-peer rate limiter for request intake (pacing backoff; refusals are
     /// nacked with `RATE_LIMITED_MESSAGE` so pushers retry at the refill rate).
     pub(super) request_rate_limiter: Arc<PeerRateLimiter>,
-
-    /// Timeout for one outbound PushLog send to a replicator peer.
-    pub(super) push_send_timeout: Duration,
 
     /// Maximum document IDs accepted in a single DocSync request.
     pub(super) max_doc_sync_request_doc_ids: usize,
@@ -373,7 +382,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
         }
         self.runtime.dag_fetch_limiter.close();
-        self.runtime.push_semaphore.close();
+        self.runtime.push_backlog.close();
         self.runtime.shutdown.shutdown().await;
     }
 
@@ -467,6 +476,35 @@ mod shutdown_tests {
             completed.load(Ordering::SeqCst),
             "shutdown should allow in-flight background tasks to finish"
         );
+    }
+
+    /// #1099: completed handles must not accumulate for the process lifetime.
+    #[tokio::test]
+    async fn register_task_prunes_finished_handles() {
+        let shutdown = SyncShutdownHandle::new();
+        let mut handles = Vec::new();
+        for _ in 0..50 {
+            let handle = tokio::spawn(async {});
+            handles.push(handle.abort_handle());
+            shutdown.register_task(handle);
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while handles.iter().any(|handle| !handle.is_finished()) {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        shutdown.register_task(tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }));
+
+        assert!(
+            shutdown.retained_task_count() <= 2,
+            "finished handles must be pruned on registration, retained {}",
+            shutdown.retained_task_count()
+        );
+        shutdown.shutdown().await;
     }
 
     #[tokio::test]
