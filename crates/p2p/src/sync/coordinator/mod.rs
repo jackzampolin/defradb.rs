@@ -47,6 +47,7 @@ mod broadcast;
 mod constructor;
 pub(crate) mod dag_context;
 pub(crate) mod dag_fetcher;
+pub(crate) mod dag_retry;
 mod event_handler;
 #[cfg(feature = "libp2p-transport")]
 mod pubsub_client;

@@ -292,9 +292,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     self.is_registered_replicator(peer_id.as_str(), &collection_id);
 
                 self.spawn_background_task("branchable_sync_reply_fetch_dag", async move {
-                    let Some(_permits) = limiter.acquire(&source_peer).await else {
-                        return;
-                    };
+                    let alternate_providers =
+                        super::super::dag_fetcher::connected_alternate_providers(
+                            &transport, &root_cid,
+                        )
+                        .await;
                     super::super::dag_fetcher::poll_fetch_dag(
                         transport,
                         blockstore,
@@ -306,7 +308,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                             String::new(),
                             source_peer,
                         )
+                        .with_alternate_providers(alternate_providers)
                         .with_explicit_replicator(is_explicit_replicator),
+                        limiter,
                     )
                     .await;
                 });
