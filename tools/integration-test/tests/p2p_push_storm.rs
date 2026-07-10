@@ -11,6 +11,9 @@
 //! fleet shape. `DEFRA_PUSH_STORM_MIN_CPU_RATIO=10` turns the current-main CPU
 //! observation into a red regression assertion; after #1102,
 //! `DEFRA_PUSH_STORM_MAX_CPU_RATIO=3` is the bounded-CPU acceptance assertion.
+//! CPU gates use the update-storm window and automatically extend the idle
+//! baseline to 10 seconds; the later stalled-transport window is reported
+//! separately so its timeout wait does not dilute the gate.
 //! `DEFRA_PUSH_STORM_REQUIRE_CONVERGENCE=1` gates every healthy peer on the
 //! latest heads once #1101 makes successful selective CAR replies possible.
 //!
@@ -20,13 +23,18 @@
 //! cargo build --profile profile -p cli && DEFRA_RUST_BINARY="$PWD/target/profile/defra" DEFRA_PUSH_STORM_HUB_STORE=rocksdb DEFRA_PUSH_STORM_SAMPLE_OUTPUT="$PWD/push-storm.sample.txt" cargo test -p integration-test --test p2p_push_storm -- --ignored --nocapture
 //! ```
 //!
-//! The sample targets the hub child process rather than the test runner. Turn
-//! it into an SVG with `inferno-collapse-sample < push-storm.sample.txt |
-//! inferno-flamegraph > push-storm.svg`.
+//! The sample targets the hub child process rather than the test runner. Keep
+//! its compact stacks with `inferno-collapse-sample < push-storm.sample.txt >
+//! push-storm.folded`; render them locally with `inferno-flamegraph <
+//! push-storm.folded > push-storm.svg`.
 
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
+#[cfg(target_os = "macos")]
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -39,9 +47,17 @@ const DEFAULT_DOCS: usize = 13;
 const DEFAULT_UPDATES: usize = 16;
 const DEFAULT_STALLED_PEERS: usize = 2;
 const DEFAULT_IDLE_SECS: u64 = 3;
+const DEFAULT_GATED_IDLE_SECS: u64 = 10;
+const DEFAULT_STORM_SETTLE_MILLIS: u64 = 1_000;
 const DEFAULT_OBSERVE_SECS: u64 = 60;
+#[cfg(target_os = "macos")]
 const DEFAULT_SAMPLE_SECS: u64 = 10;
 const DEFAULT_CONVERGENCE_SECS: u64 = 15;
+const MIN_TRUSTED_IDLE_CORES: f64 = 0.001;
+const PUSH_TIMEOUT_LOG: &str = "PushLog to replicator timed out";
+const PUSH_UNAVAILABLE_LOG: &str =
+    "PushLog to replicator failed because the connection became unavailable";
+const PUSH_DEFERRAL_LOG: &str = "Outbound push backlog full; deferring push to persisted retry";
 
 #[derive(Debug)]
 struct StormConfig {
@@ -50,7 +66,10 @@ struct StormConfig {
     updates: usize,
     stalled_peers: usize,
     idle: Duration,
+    storm_settle: Duration,
     observe: Duration,
+    minimum_cpu_ratio: Option<f64>,
+    maximum_cpu_ratio: Option<f64>,
 }
 
 impl StormConfig {
@@ -65,17 +84,30 @@ impl StormConfig {
             stalled_peers > 0 && stalled_peers < peers,
             "the storm needs at least one stalled and one healthy peer"
         );
+        let minimum_cpu_ratio = env_f64("DEFRA_PUSH_STORM_MIN_CPU_RATIO");
+        let maximum_cpu_ratio = env_f64("DEFRA_PUSH_STORM_MAX_CPU_RATIO");
+        let default_idle_secs = if minimum_cpu_ratio.is_some() || maximum_cpu_ratio.is_some() {
+            DEFAULT_GATED_IDLE_SECS
+        } else {
+            DEFAULT_IDLE_SECS
+        };
 
         Self {
             peers,
             docs: env_usize("DEFRA_PUSH_STORM_DOCS", DEFAULT_DOCS),
             updates: env_usize("DEFRA_PUSH_STORM_UPDATES", DEFAULT_UPDATES),
             stalled_peers,
-            idle: Duration::from_secs(env_u64("DEFRA_PUSH_STORM_IDLE_SECS", DEFAULT_IDLE_SECS)),
+            idle: Duration::from_secs(env_u64("DEFRA_PUSH_STORM_IDLE_SECS", default_idle_secs)),
+            storm_settle: Duration::from_millis(env_u64(
+                "DEFRA_PUSH_STORM_STORM_SETTLE_MS",
+                DEFAULT_STORM_SETTLE_MILLIS,
+            )),
             observe: Duration::from_secs(env_u64(
                 "DEFRA_PUSH_STORM_OBSERVE_SECS",
                 DEFAULT_OBSERVE_SECS,
             )),
+            minimum_cpu_ratio,
+            maximum_cpu_ratio,
         }
     }
 }
@@ -100,12 +132,15 @@ fn env_f64(name: &str) -> Option<f64> {
         .map(|value| value.parse().unwrap_or_else(|_| panic!("invalid {name}")))
 }
 
-fn signal(pid: u32, signal: &str) {
-    let status = Command::new("kill")
+fn send_signal(pid: u32, signal: &str) -> std::io::Result<std::process::ExitStatus> {
+    Command::new("kill")
         .arg(signal)
         .arg(pid.to_string())
         .status()
-        .expect("spawn kill");
+}
+
+fn require_signal(pid: u32, signal: &str) {
+    let status = send_signal(pid, signal).expect("spawn kill");
     assert!(status.success(), "kill {signal} {pid} failed");
 }
 
@@ -114,7 +149,11 @@ struct StalledPeers(Vec<u32>);
 impl Drop for StalledPeers {
     fn drop(&mut self) {
         for pid in &self.0 {
-            signal(*pid, "-CONT");
+            match send_signal(*pid, "-CONT") {
+                Ok(status) if status.success() => {}
+                Ok(status) => eprintln!("kill -CONT {pid} failed: {status}"),
+                Err(error) => eprintln!("could not spawn kill -CONT {pid}: {error}"),
+            }
         }
     }
 }
@@ -136,11 +175,82 @@ fn hub_log(cluster: &TestCluster) -> PathBuf {
         .join("logs/stdout.log")
 }
 
-fn log_occurrences(path: &Path, needle: &str) -> u64 {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .matches(needle)
-        .count() as u64
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LogCounts {
+    timeouts: u64,
+    connection_unavailable: u64,
+    deferrals: u64,
+}
+
+struct LogCursor {
+    file: File,
+    offset: u64,
+    pending: Vec<u8>,
+    counts: LogCounts,
+}
+
+impl LogCursor {
+    fn open(path: &Path) -> Self {
+        Self {
+            file: File::open(path)
+                .unwrap_or_else(|error| panic!("open hub log {}: {error}", path.display())),
+            offset: 0,
+            pending: Vec::new(),
+            counts: LogCounts::default(),
+        }
+    }
+
+    fn scan(&mut self) -> LogCounts {
+        let mut appended = Vec::new();
+        self.file
+            .seek(SeekFrom::Start(self.offset))
+            .expect("seek hub log");
+        self.file.read_to_end(&mut appended).expect("read hub log");
+        self.offset += appended.len() as u64;
+        self.pending.extend(appended);
+        let Some(complete_len) = self.pending.iter().rposition(|byte| *byte == b'\n') else {
+            return self.counts;
+        };
+        let complete_len = complete_len + 1;
+        let complete = String::from_utf8_lossy(&self.pending[..complete_len]);
+        self.counts.timeouts += complete.matches(PUSH_TIMEOUT_LOG).count() as u64;
+        self.counts.connection_unavailable += complete.matches(PUSH_UNAVAILABLE_LOG).count() as u64;
+        self.counts.deferrals += complete.matches(PUSH_DEFERRAL_LOG).count() as u64;
+        self.pending.drain(..complete_len);
+        self.counts
+    }
+}
+
+#[test]
+fn log_cursor_counts_only_complete_appended_lines() {
+    use std::io::Write;
+
+    let mut log = tempfile::NamedTempFile::new().expect("create test log");
+    let mut cursor = LogCursor::open(log.path());
+
+    write!(log, "PushLog to replicator ").expect("write partial log");
+    log.flush().expect("flush partial log");
+    assert_eq!(cursor.scan(), LogCounts::default());
+
+    writeln!(log, "timed out").expect("complete timeout log");
+    writeln!(log, "{PUSH_DEFERRAL_LOG}").expect("write deferral log");
+    log.flush().expect("flush complete logs");
+    assert_eq!(
+        cursor.scan(),
+        LogCounts {
+            timeouts: 1,
+            connection_unavailable: 0,
+            deferrals: 1,
+        }
+    );
+    assert_eq!(
+        cursor.scan(),
+        LogCounts {
+            timeouts: 1,
+            connection_unavailable: 0,
+            deferrals: 1,
+        }
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -211,6 +321,7 @@ fn start_rss_monitor(pid: u32) -> (Arc<AtomicBool>, Arc<AtomicU64>, std::thread:
     (running, peak, handle)
 }
 
+#[cfg(target_os = "macos")]
 fn start_symbolized_sample(pid: u32) -> Option<Child> {
     let output = std::env::var("DEFRA_PUSH_STORM_SAMPLE_OUTPUT").ok()?;
     let duration = env_u64("DEFRA_PUSH_STORM_SAMPLE_SECS", DEFAULT_SAMPLE_SECS);
@@ -230,6 +341,25 @@ fn start_symbolized_sample(pid: u32) -> Option<Child> {
     std::thread::sleep(Duration::from_millis(250));
     Some(child)
 }
+
+#[cfg(not(target_os = "macos"))]
+fn start_symbolized_sample(_pid: u32) -> Option<()> {
+    if std::env::var_os("DEFRA_PUSH_STORM_SAMPLE_OUTPUT").is_some() {
+        eprintln!("DEFRA_PUSH_STORM_SAMPLE_OUTPUT is ignored outside macOS");
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn finish_symbolized_sample(mut sample: Option<Child>) {
+    if let Some(child) = sample.as_mut() {
+        let status = child.wait().expect("wait for macOS sample profiler");
+        assert!(status.success(), "macOS sample profiler failed: {status}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn finish_symbolized_sample(_sample: Option<()>) {}
 
 async fn wait_for_backlog_idle(api_url: &str) {
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -278,17 +408,59 @@ async fn wait_for_stalled_push(
     }
 }
 
-async fn wait_for_timeout_log(path: &Path, baseline: u64, timeout: Duration) {
+#[derive(Debug)]
+struct StalledOutcome {
+    timeout_observed: bool,
+    connection_unavailable_observed: bool,
+    stalled_peer_failure_observed: bool,
+}
+
+fn stalled_peer_failed(status: &serde_json::Value, stalled_peer_ids: &HashSet<String>) -> bool {
+    status["push_backlog"]["per_peer"]
+        .as_array()
+        .is_some_and(|peers| {
+            peers.iter().any(|peer| {
+                peer["consecutive_failures"].as_u64().unwrap_or(0) > 0
+                    && peer["peer_id"]
+                        .as_str()
+                        .is_some_and(|id| stalled_peer_ids.contains(id))
+            })
+        })
+}
+
+async fn wait_for_stalled_outcome(
+    api_url: &str,
+    stalled_peer_ids: &HashSet<String>,
+    log_cursor: &mut LogCursor,
+    baseline_logs: LogCounts,
+    baseline_failed_jobs: u64,
+    timeout: Duration,
+) -> StalledOutcome {
     let deadline = Instant::now() + timeout;
     loop {
-        if log_occurrences(path, "PushLog to replicator timed out") > baseline {
-            return;
+        let logs = log_cursor.scan();
+        let status = sync_status(api_url).await;
+        let timeout_observed = logs.timeouts > baseline_logs.timeouts;
+        let connection_unavailable_observed =
+            logs.connection_unavailable > baseline_logs.connection_unavailable;
+        let stalled_peer_failure_observed = stalled_peer_failed(&status, stalled_peer_ids);
+        let failed_jobs = status["push_backlog"]["failed_total"].as_u64().unwrap_or(0);
+        if timeout_observed
+            || (failed_jobs > baseline_failed_jobs
+                && (stalled_peer_failure_observed || connection_unavailable_observed))
+        {
+            return StalledOutcome {
+                timeout_observed,
+                connection_unavailable_observed,
+                stalled_peer_failure_observed,
+            };
         }
         assert!(
             Instant::now() < deadline,
-            "an active stalled push did not reach its transport timeout within {timeout:?}"
+            "an active stalled push produced neither a timeout nor a failed-job outcome within \
+             {timeout:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -348,7 +520,7 @@ fn optional_counter(status: &serde_json::Value, pointers: &[&str]) -> Option<u64
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "manual stress/profile harness; takes at least one 30s push timeout"]
+#[ignore = "manual stress/profile harness; waits for a stalled transport outcome"]
 async fn outbound_push_storm_matches_fleet_shape() {
     let config = StormConfig::from_env();
     assert!(config.docs > 0, "DEFRA_PUSH_STORM_DOCS must be positive");
@@ -373,7 +545,7 @@ async fn outbound_push_storm_matches_fleet_shape() {
 
     let hub = cluster.client(0);
     hub.schema_add(SCHEMA).expect("hub schema");
-    let mut peers_by_dispatch_order = Vec::with_capacity(config.peers);
+    let mut peers_sorted_for_stall_selection = Vec::with_capacity(config.peers);
     for peer in 1..=config.peers {
         let client = cluster.client(peer);
         client.schema_add(SCHEMA).expect("peer schema");
@@ -392,9 +564,9 @@ async fn outbound_push_storm_matches_fleet_shape() {
         hub.p2p_connect(&[&addr]).expect("connect hub to peer");
         hub.p2p_replicator_set(&["StormDoc"], &addr)
             .expect("set hub to peer replicator");
-        peers_by_dispatch_order.push((peer_id, peer));
+        peers_sorted_for_stall_selection.push((peer_id, peer));
     }
-    peers_by_dispatch_order.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    peers_sorted_for_stall_selection.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
     let mut doc_ids = Vec::with_capacity(config.docs);
     for doc in 0..config.docs {
@@ -414,6 +586,8 @@ async fn outbound_push_storm_matches_fleet_shape() {
     wait_for_backlog_idle(&hub_api).await;
     let hub_pid = cluster.nodes[0].process.id().expect("hub pid");
     let hub_log = hub_log(&cluster);
+    let mut log_cursor = LogCursor::open(&hub_log);
+    let baseline_logs = log_cursor.scan();
     let baseline_status = sync_status(&hub_api).await;
     assert_eq!(
         baseline_status["push_backlog"]["worker_count"].as_u64(),
@@ -426,18 +600,16 @@ async fn outbound_push_storm_matches_fleet_shape() {
         + baseline_status["push_backlog"]["rejected_bytes_total"]
             .as_u64()
             .unwrap_or(0);
-    let baseline_timeout_logs = log_occurrences(&hub_log, "PushLog to replicator timed out");
-    let baseline_deferral_logs = log_occurrences(
-        &hub_log,
-        "Outbound push backlog full; deferring push to persisted retry",
-    );
+    let baseline_failed_jobs = baseline_status["push_backlog"]["failed_total"]
+        .as_u64()
+        .unwrap_or(0);
 
-    let stalled_indices: HashSet<usize> = peers_by_dispatch_order
+    let stalled_indices: HashSet<usize> = peers_sorted_for_stall_selection
         .iter()
         .take(config.stalled_peers)
         .map(|(_, peer)| *peer)
         .collect();
-    let stalled_peer_ids: HashSet<String> = peers_by_dispatch_order
+    let stalled_peer_ids: HashSet<String> = peers_sorted_for_stall_selection
         .iter()
         .take(config.stalled_peers)
         .map(|(peer_id, _)| peer_id.clone())
@@ -450,7 +622,7 @@ async fn outbound_push_storm_matches_fleet_shape() {
         .map(|peer| cluster.nodes[*peer].process.id().expect("stalled peer pid"))
         .collect();
     for pid in &stalled_pids {
-        signal(*pid, "-STOP");
+        require_signal(*pid, "-STOP");
     }
     let _stalled = StalledPeers(stalled_pids);
 
@@ -461,11 +633,11 @@ async fn outbound_push_storm_matches_fleet_shape() {
     let idle_wall = idle_started.elapsed().as_secs_f64();
     let idle_cores = idle_cpu / idle_wall;
 
-    let active_started = Instant::now();
-    let active_cpu_started = process_cpu_seconds(hub_pid).expect("read active hub CPU time");
     let rss_started = process_rss_kib(hub_pid).unwrap_or(0);
     let (rss_running, peak_rss, rss_thread) = start_rss_monitor(hub_pid);
-    let mut sample = start_symbolized_sample(hub_pid);
+    let sample = start_symbolized_sample(hub_pid);
+    let storm_started = Instant::now();
+    let storm_cpu_started = process_cpu_seconds(hub_pid).expect("read storm hub CPU time");
 
     std::thread::scope(|scope| {
         for doc_id in doc_ids.iter().cloned() {
@@ -473,21 +645,34 @@ async fn outbound_push_storm_matches_fleet_shape() {
             scope.spawn(move || run_update_storm(client, doc_id, config.updates));
         }
     });
+    tokio::time::sleep(config.storm_settle).await;
+    let storm_cpu =
+        process_cpu_seconds(hub_pid).expect("read post-storm hub CPU time") - storm_cpu_started;
+    let storm_wall = storm_started.elapsed().as_secs_f64();
+    let storm_cores = storm_cpu / storm_wall;
+    let storm_cpu_ratio = storm_cores / idle_cores.max(MIN_TRUSTED_IDLE_CORES);
 
+    let stall_started = Instant::now();
+    let stall_cpu_started = process_cpu_seconds(hub_pid).expect("read stalled hub CPU time");
     wait_for_stalled_push(&hub_api, &stalled_peer_ids).await;
-    wait_for_timeout_log(&hub_log, baseline_timeout_logs, config.observe).await;
-    let active_cpu =
-        process_cpu_seconds(hub_pid).expect("read final hub CPU time") - active_cpu_started;
-    let active_wall = active_started.elapsed().as_secs_f64();
-    let active_cores = active_cpu / active_wall;
-    let cpu_ratio = active_cores / idle_cores.max(0.001);
+    let stalled_outcome = wait_for_stalled_outcome(
+        &hub_api,
+        &stalled_peer_ids,
+        &mut log_cursor,
+        baseline_logs,
+        baseline_failed_jobs,
+        config.observe,
+    )
+    .await;
+    let stall_cpu =
+        process_cpu_seconds(hub_pid).expect("read post-stall hub CPU time") - stall_cpu_started;
+    let stall_wall = stall_started.elapsed().as_secs_f64();
+    let stall_cores = stall_cpu / stall_wall;
+    let stall_cpu_ratio = stall_cores / idle_cores.max(MIN_TRUSTED_IDLE_CORES);
 
     rss_running.store(false, Ordering::Relaxed);
     rss_thread.join().expect("RSS monitor panicked");
-    if let Some(child) = sample.as_mut() {
-        let status = child.wait().expect("wait for macOS sample profiler");
-        assert!(status.success(), "macOS sample profiler failed: {status}");
-    }
+    finish_symbolized_sample(sample);
 
     let status = sync_status(&hub_api).await;
     let deferrals = status["push_backlog"]["rejected_items_total"]
@@ -497,16 +682,23 @@ async fn outbound_push_storm_matches_fleet_shape() {
             .as_u64()
             .unwrap_or(0)
         - baseline_deferrals;
-    let timeout_logs =
-        log_occurrences(&hub_log, "PushLog to replicator timed out") - baseline_timeout_logs;
-    let deferral_logs = log_occurrences(
-        &hub_log,
-        "Outbound push backlog full; deferring push to persisted retry",
-    ) - baseline_deferral_logs;
+    let logs = log_cursor.scan();
+    let timeout_logs = logs.timeouts.saturating_sub(baseline_logs.timeouts);
+    let connection_unavailable_logs = logs
+        .connection_unavailable
+        .saturating_sub(baseline_logs.connection_unavailable);
+    let deferral_logs = logs.deferrals.saturating_sub(baseline_logs.deferrals);
+    let failed_jobs = status["push_backlog"]["failed_total"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_sub(baseline_failed_jobs);
 
     assert!(
-        timeout_logs > 0,
-        "the stalled peers produced no PushLog timeout"
+        timeout_logs > 0
+            || (failed_jobs > 0
+                && (stalled_outcome.stalled_peer_failure_observed
+                    || connection_unavailable_logs > 0)),
+        "the stalled peers produced neither a timeout nor a failed-job outcome"
     );
     assert!(deferrals > 0, "the workload produced no backlog deferral");
 
@@ -524,13 +716,22 @@ async fn outbound_push_storm_matches_fleet_shape() {
         "idle_cpu_seconds": idle_cpu,
         "idle_wall_seconds": idle_wall,
         "idle_cpu_cores": idle_cores,
-        "active_cpu_seconds": active_cpu,
-        "active_wall_seconds": active_wall,
-        "active_cpu_cores": active_cores,
-        "active_to_idle_cpu_ratio": cpu_ratio,
+        "storm_cpu_seconds": storm_cpu,
+        "storm_wall_seconds": storm_wall,
+        "storm_cpu_cores": storm_cores,
+        "storm_to_idle_cpu_ratio": storm_cpu_ratio,
+        "stall_cpu_seconds": stall_cpu,
+        "stall_wall_seconds": stall_wall,
+        "stall_cpu_cores": stall_cores,
+        "stall_to_idle_cpu_ratio": stall_cpu_ratio,
         "rss_start_kib": rss_started,
         "rss_peak_kib": peak_rss.load(Ordering::Relaxed),
         "pushlog_timeouts": timeout_logs,
+        "pushlog_connection_unavailable": connection_unavailable_logs,
+        "pushlog_failed_jobs": failed_jobs,
+        "stalled_timeout_observed": stalled_outcome.timeout_observed,
+        "stalled_connection_unavailable_observed": stalled_outcome.connection_unavailable_observed,
+        "stalled_peer_failure_observed": stalled_outcome.stalled_peer_failure_observed,
         "pushlog_deferrals": deferrals,
         "pushlog_deferral_logs": deferral_logs,
         "stale_head_retirements": optional_counter(&status, &[
@@ -551,16 +752,23 @@ async fn outbound_push_storm_matches_fleet_shape() {
         serde_json::to_string_pretty(&result).unwrap()
     );
 
-    if let Some(minimum) = env_f64("DEFRA_PUSH_STORM_MIN_CPU_RATIO") {
+    if config.minimum_cpu_ratio.is_some() || config.maximum_cpu_ratio.is_some() {
         assert!(
-            cpu_ratio >= minimum,
-            "push-storm CPU ratio {cpu_ratio:.2} was below {minimum:.2}"
+            idle_cores >= MIN_TRUSTED_IDLE_CORES,
+            "idle CPU {idle_cores:.6} cores is below the trusted ratio floor; increase \
+             DEFRA_PUSH_STORM_IDLE_SECS"
         );
     }
-    if let Some(maximum) = env_f64("DEFRA_PUSH_STORM_MAX_CPU_RATIO") {
+    if let Some(minimum) = config.minimum_cpu_ratio {
         assert!(
-            cpu_ratio <= maximum,
-            "push-storm CPU ratio {cpu_ratio:.2} exceeded {maximum:.2}"
+            storm_cpu_ratio >= minimum,
+            "push-storm CPU ratio {storm_cpu_ratio:.2} was below {minimum:.2}"
+        );
+    }
+    if let Some(maximum) = config.maximum_cpu_ratio {
+        assert!(
+            storm_cpu_ratio <= maximum,
+            "push-storm CPU ratio {storm_cpu_ratio:.2} exceeded {maximum:.2}"
         );
     }
     if std::env::var_os("DEFRA_PUSH_STORM_REQUIRE_CONVERGENCE").is_some() {
