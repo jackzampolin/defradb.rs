@@ -234,6 +234,13 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
                 crate::sync::DEFAULT_MAX_ACTIVE_PUSHES_PER_PEER,
                 DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
             ),
+            push_encode_cache: Arc::new(crate::sync::push_encode_cache::PushEncodeCache::default()),
+            broadcast_coalescer: Arc::new(
+                crate::sync::broadcast_coalescer::BroadcastCoalescer::default(),
+            ),
+            push_fanout_coalescer: Arc::new(
+                crate::sync::push_fanout_coalescer::PushFanoutCoalescer::default(),
+            ),
             rate_limiter,
             request_rate_limiter,
             max_doc_sync_request_doc_ids: DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,

@@ -25,7 +25,7 @@ pub use datastore::{Datastore, CHUNK_SIZE};
 pub use headstore::Headstore;
 pub use multistore::Multistore;
 pub use peerstore::Peerstore;
-pub use retry_info::RetryInfo;
+pub use retry_info::{PersistedPushRetry, RetryInfo};
 pub use rootstore::RootStore;
 pub use systemstore::Systemstore;
 

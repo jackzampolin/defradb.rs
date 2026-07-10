@@ -17,7 +17,8 @@ use parking_lot::Mutex;
 use super::{PushFailure, SyncShutdownHandle};
 use crate::message::PushLogRequest;
 use crate::signing::sign_with_transport;
-use crate::sync::push_backlog::{PushBacklog, PushJobSpec};
+use crate::sync::push_backlog::{JobCompletion, PushBacklog, PushJobSpec};
+use crate::sync::push_encode_cache::PushPayload;
 use crate::transport::P2PTransport;
 
 pub(super) struct PushWorkerContext<B, T> {
@@ -38,6 +39,46 @@ pub(super) async fn report_push_failure(
     peer_id: &crate::transport::PeerId,
     doc_id: String,
     collection_id: String,
+    cid: Option<Cid>,
+    head_priority: u64,
+) {
+    report_push_event(
+        failure_tx,
+        peer_id,
+        doc_id,
+        collection_id,
+        cid,
+        head_priority,
+        true,
+    )
+    .await;
+}
+
+pub(super) async fn report_observed_head(
+    failure_tx: &Arc<Mutex<Option<tokio::sync::mpsc::Sender<PushFailure>>>>,
+    job: &PushJobSpec,
+) {
+    report_push_event(
+        failure_tx,
+        &job.peer_id,
+        job.doc_id.clone(),
+        job.collection_id.clone(),
+        Some(job.root_cid),
+        job.head_priority(),
+        false,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn report_push_event(
+    failure_tx: &Arc<Mutex<Option<tokio::sync::mpsc::Sender<PushFailure>>>>,
+    peer_id: &crate::transport::PeerId,
+    doc_id: String,
+    collection_id: String,
+    cid: Option<Cid>,
+    head_priority: u64,
+    create_retry: bool,
 ) {
     let tx = failure_tx.lock().clone();
     if let Some(tx) = tx {
@@ -45,6 +86,9 @@ pub(super) async fn report_push_failure(
             peer_id: peer_id.to_string(),
             doc_id,
             collection_id,
+            cid: cid.map(|cid| cid.to_string()).unwrap_or_default(),
+            head_priority,
+            create_retry,
         };
         // reserve() is cancel-safe, so waiting in a loop lets sustained
         // recorder backpressure surface in the logs instead of silently
@@ -86,46 +130,68 @@ pub(super) fn spawn_push_workers<B, T>(
         let context = Arc::clone(&context);
         let handle = tokio::spawn(async move {
             while let Some(job) = context.backlog.next_job().await {
-                let peer_id = job.peer_id.clone();
-                let succeeded = run_push_job(&context, job).await;
-                context.backlog.job_done(&peer_id, succeeded);
+                let completion = run_push_job(&context, &job).await;
+                context.backlog.job_done(&job, completion);
             }
         });
         shutdown.register_task(handle);
     }
 }
 
-async fn run_push_job<B, T>(context: &PushWorkerContext<B, T>, job: PushJobSpec) -> bool
+async fn run_push_job<B, T>(context: &PushWorkerContext<B, T>, job: &PushJobSpec) -> JobCompletion
 where
     B: Blockstore + 'static,
     T: P2PTransport,
 {
-    let blocks: Vec<(Cid, Bytes)> = if job.expand_dag {
-        load_ordered_dag_blocks(
-            context.blockstore.as_ref(),
-            job.root_cid,
-            job.head_block.clone(),
-        )
-        .await
-    } else {
-        vec![(job.root_cid, job.head_block.clone())]
-    };
+    if !context.backlog.is_current(job) {
+        return JobCompletion::Retired;
+    }
 
-    let mut requests: Vec<(Cid, PushLogRequest)> = Vec::with_capacity(blocks.len());
-    for (block_cid, block_data) in blocks {
-        let mut request = PushLogRequest::new(
-            job.doc_id.clone(),
-            Bytes::from(block_cid.to_bytes()),
-            job.collection_id.clone(),
-            job.creator.clone(),
-            block_data,
-        );
-        match sign_with_transport(&context.transport, &mut request) {
-            Ok(()) => requests.push((block_cid, request)),
-            Err(error) => {
-                tracing::debug!(cid = %block_cid, error = %error, "Failed to sign PushLog request");
-            }
-        }
+    let payload = job
+        .encoded_payload
+        .clone()
+        .unwrap_or_else(|| Arc::new(PushPayload::from_job(job)));
+    let root_request = payload
+        .root_request
+        .get_or_init(|| async {
+            build_request(
+                &context.transport,
+                &payload,
+                job.root_cid,
+                job.head_block.clone(),
+            )
+        })
+        .await
+        .clone();
+    let dependencies = if job.expand_dag {
+        payload
+            .dependency_requests
+            .get_or_init(|| async {
+                let blocks = load_ordered_dag_blocks(
+                    context.blockstore.as_ref(),
+                    job.root_cid,
+                    job.head_block.clone(),
+                )
+                .await;
+                Arc::new(
+                    blocks
+                        .into_iter()
+                        .filter(|(cid, _)| *cid != job.root_cid)
+                        .filter_map(|(cid, block)| {
+                            build_request(&context.transport, &payload, cid, block)
+                        })
+                        .collect(),
+                )
+            })
+            .await
+            .clone()
+    } else {
+        Arc::new(Vec::new())
+    };
+    let mut requests = Vec::with_capacity(dependencies.len() + usize::from(root_request.is_some()));
+    requests.extend(dependencies.iter().cloned());
+    if let Some(root_request) = root_request {
+        requests.push(root_request);
     }
 
     let any_failed = if requests.is_empty() {
@@ -142,16 +208,44 @@ where
         .await
     };
 
-    if any_failed {
+    if any_failed && context.backlog.is_current(job) {
         report_push_failure(
             &context.failure_tx,
             &job.peer_id,
-            job.doc_id,
-            job.collection_id,
+            job.doc_id.clone(),
+            job.collection_id.clone(),
+            Some(job.root_cid),
+            job.head_priority(),
         )
         .await;
+        JobCompletion::Failed
+    } else if context.backlog.is_current(job) {
+        JobCompletion::Succeeded
+    } else {
+        JobCompletion::Retired
     }
-    !any_failed
+}
+
+fn build_request<T: P2PTransport>(
+    transport: &T,
+    payload: &PushPayload,
+    block_cid: Cid,
+    block_data: Bytes,
+) -> Option<(Cid, PushLogRequest)> {
+    let mut request = PushLogRequest::new(
+        payload.doc_id.clone(),
+        Bytes::from(block_cid.to_bytes()),
+        payload.collection_id.clone(),
+        payload.creator.clone(),
+        block_data,
+    );
+    match sign_with_transport(transport, &mut request) {
+        Ok(()) => Some((block_cid, request)),
+        Err(error) => {
+            tracing::debug!(cid = %block_cid, error = %error, "Failed to sign PushLog request");
+            None
+        }
+    }
 }
 
 /// Load every transitive block in a document DAG, with dependencies first.
@@ -344,12 +438,42 @@ mod tests {
     fn job(peer: &str, cid_seed: &[u8]) -> PushJobSpec {
         PushJobSpec {
             peer_id: PeerId::new(peer.to_string()),
-            doc_id: format!("doc-{peer}"),
+            doc_id: format!("doc-{peer}-{}", hex::encode(cid_seed)),
             collection_id: "collection".to_string(),
             creator: "creator".to_string(),
             root_cid: Cid::new_v1(0x55, Code::Sha2_256.digest(cid_seed)),
             head_block: Bytes::from_static(b"head-block"),
             expand_dag: false,
+            encoded_payload: None,
+        }
+    }
+
+    fn versioned_job(peer: &str, priority: u64) -> PushJobSpec {
+        use defra_core::{Block, CompositeDeltaPayload, CrdtDelta};
+
+        let doc_id = "doc-versioned";
+        let block = Block::new_with_options(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                doc_id: doc_id.as_bytes().to_vec(),
+                schema_version_id: "schema".to_string(),
+                priority,
+                status: 1,
+            }),
+            vec![],
+            vec![],
+            None,
+            None,
+        );
+        let head_block = Bytes::from(block.to_dag_cbor().unwrap());
+        PushJobSpec {
+            peer_id: PeerId::new(peer.to_string()),
+            doc_id: doc_id.to_string(),
+            collection_id: "collection".to_string(),
+            creator: "creator".to_string(),
+            root_cid: defra_core::block::generate_cid_from_bytes(&head_block).unwrap(),
+            head_block,
+            expand_dag: false,
+            encoded_payload: None,
         }
     }
 
@@ -413,7 +537,7 @@ mod tests {
             .expect("timed-out push must report a failure")
             .expect("failure channel open");
         assert_eq!(failure.peer_id, "slow");
-        assert_eq!(failure.doc_id, "doc-slow");
+        assert_eq!(failure.doc_id, "doc-slow-736c6f772d31");
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while backlog.snapshot().failed_total == 0 {
@@ -421,6 +545,72 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(backlog.snapshot().active_jobs, 0);
+        backlog.close();
+    }
+
+    #[tokio::test]
+    async fn fanout_signs_one_payload_once_for_all_peers() {
+        let backlog = PushBacklog::new(1024, usize::MAX, 1, 2);
+        let transport = TestTransport::new(Vec::new());
+        let (context, _failure_rx) = test_context(
+            transport.clone(),
+            Arc::clone(&backlog),
+            Duration::from_secs(1),
+        );
+        let cache = crate::sync::push_encode_cache::PushEncodeCache::default();
+        let mut first = job("a", b"shared");
+        first.doc_id = "doc-shared".to_string();
+        first.encoded_payload = Some(cache.acquire(&first));
+        let mut second = first.clone();
+        second.peer_id = PeerId::new("b".to_string());
+        second.encoded_payload = Some(cache.acquire(&second));
+
+        let shutdown = SyncShutdownHandle::new();
+        spawn_push_workers(context, &shutdown);
+        backlog.try_enqueue(first);
+        backlog.try_enqueue(second);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while backlog.snapshot().completed_total < 2 {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(transport.sign_count(), 1);
+        assert_eq!(cache.hits(), 1);
+        backlog.close();
+    }
+
+    #[tokio::test]
+    async fn superseded_active_failure_never_enters_persisted_retry() {
+        let backlog = PushBacklog::new(1024, usize::MAX, 1, 1);
+        let transport = TestTransport::new(vec![
+            crate::message::PushLogReply::error("old", "rejected"),
+            crate::message::PushLogReply::success("new"),
+        ])
+        .with_send_delay(Duration::from_millis(50));
+        let (context, mut failure_rx) = test_context(
+            transport.clone(),
+            Arc::clone(&backlog),
+            Duration::from_secs(1),
+        );
+        let shutdown = SyncShutdownHandle::new();
+        spawn_push_workers(context, &shutdown);
+
+        backlog.try_enqueue(versioned_job("peer", 1));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while transport.sent().is_empty() {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        backlog.try_enqueue(versioned_job("peer", 2));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while backlog.snapshot().completed_total < 1 {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(failure_rx.try_recv().is_err());
+        assert_eq!(backlog.snapshot().stale_head_retirements_total, 1);
         backlog.close();
     }
 
@@ -433,6 +623,9 @@ mod tests {
             peer_id: "occupant".to_string(),
             doc_id: "occupant-doc".to_string(),
             collection_id: "collection".to_string(),
+            cid: Cid::new_v1(0x55, Code::Sha2_256.digest(b"occupant")).to_string(),
+            head_priority: 0,
+            create_retry: true,
         })
         .await
         .unwrap();
@@ -447,6 +640,8 @@ mod tests {
                     &peer,
                     "doc-slow".to_string(),
                     "collection".to_string(),
+                    Some(Cid::new_v1(0x55, Code::Sha2_256.digest(b"slow"))),
+                    0,
                 )
                 .await;
             })

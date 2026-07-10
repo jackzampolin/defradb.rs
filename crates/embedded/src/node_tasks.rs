@@ -421,25 +421,40 @@ pub(crate) fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
     tokio::spawn(async move {
         while let Some(failure) = failure_rx.recv().await {
             let peerstore = storage::stores::Peerstore::new(store.clone());
-            let retry_info = storage::stores::RetryInfo::new_initial();
-            let info_bytes = match retry_info.to_bytes() {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    tracing::warn!(error = %error, "failed to serialize retry info");
-                    continue;
-                }
+            let result = if failure.create_retry {
+                let info_bytes = match storage::stores::RetryInfo::new_initial().to_bytes() {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "failed to serialize retry info");
+                        continue;
+                    }
+                };
+                peerstore
+                    .record_push_failure(
+                        &failure.peer_id,
+                        &failure.doc_id,
+                        &failure.collection_id,
+                        &failure.cid,
+                        failure.head_priority,
+                        &info_bytes,
+                    )
+                    .await
+            } else {
+                peerstore
+                    .observe_push_head(
+                        &failure.peer_id,
+                        &failure.doc_id,
+                        &failure.collection_id,
+                        &failure.cid,
+                        failure.head_priority,
+                    )
+                    .await
             };
-
-            if let Err(error) = peerstore
-                .record_push_failure(
-                    &failure.peer_id.to_string(),
-                    &failure.doc_id,
-                    &failure.collection_id,
-                    &info_bytes,
-                )
-                .await
-            {
+            if let Err(error) = result {
                 tracing::warn!(error = %error, "failed to record push failure");
+                continue;
+            }
+            if !failure.create_retry {
                 continue;
             }
             if let Err(error) = defra_p2p_adapter::set_persisted_replicator_status(
@@ -473,17 +488,13 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
     };
 
     for (peer_id_str, info_bytes) in peers {
-        let mut retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
+        let _legacy_retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
             Ok(info) => info,
             Err(error) => {
                 tracing::warn!(peer_id = %peer_id_str, error = %error, "invalid retry info");
                 continue;
             }
         };
-        if !force && !retry_info.is_due() {
-            continue;
-        }
-
         let peer_id: libp2p::PeerId = match peer_id_str.parse() {
             Ok(peer_id) => peer_id,
             Err(error) => {
@@ -497,7 +508,7 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
             continue;
         }
 
-        let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+        let mut docs = match peerstore.get_retry_documents(&peer_id_str).await {
             Ok(docs) => docs,
             Err(_) => continue,
         };
@@ -512,18 +523,11 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
             continue;
         }
 
-        if docs.len() > 1 {
-            // Rotate the starting document by the peer's own persisted retry
-            // count: the store iterates in stable key order, and a global
-            // cursor aliases when it advances by the number of due peers per
-            // sweep, so per-peer state is required for every document to
-            // eventually lead a pass (#1099 review).
-            let rotate_by = retry_info.num_retries as usize % docs.len();
-            docs.rotate_left(rotate_by);
-        }
-        let mut all_succeeded = true;
         let mut fast_failures = 0usize;
-        for (doc_id, collection_id) in &docs {
+        for retry in &mut docs {
+            if !force && !retry.retry_info.is_due() {
+                continue;
+            }
             // Bound each send so a nonresponsive peer cannot stall healthy
             // peers' retries behind it (#1099). A timeout ends the pass (the
             // peer is unreachable); a fast rejection only consumes a bounded
@@ -531,7 +535,7 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
             // order cannot starve the rest forever.
             match tokio::time::timeout(
                 std::time::Duration::from_secs(15),
-                doc_pusher.retry_doc(handle, peer_id, doc_id, collection_id),
+                doc_pusher.retry_doc(handle, peer_id, &retry.doc_id, &retry.collection_id),
             )
             .await
             {
@@ -541,27 +545,37 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
                     // artifact (not just the doc) on reconnect; replicators
                     // only answer SE queries from pushed artifacts.
                     se_repusher
-                        .regenerate_and_push_se_artifacts(collection_id, doc_id)
+                        .regenerate_and_push_se_artifacts(&retry.collection_id, &retry.doc_id)
                         .await;
-                    let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
+                    let _ = peerstore.complete_retry_document(&peer_id_str, retry).await;
                 }
                 Ok(Err(error)) => {
-                    tracing::warn!(doc_id = %doc_id, peer_id = %peer_id, error = %error, "retry push failed");
-                    all_succeeded = false;
+                    tracing::warn!(doc_id = %retry.doc_id, peer_id = %peer_id, error = %error, "retry push failed");
+                    retry
+                        .retry_info
+                        .bump_for(&format!("{peer_id_str}:{}", retry.cid));
+                    let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                     fast_failures += 1;
                     if fast_failures >= 3 {
                         break;
                     }
                 }
                 Err(_) => {
-                    tracing::warn!(doc_id = %doc_id, peer_id = %peer_id, "retry push timed out");
-                    all_succeeded = false;
+                    tracing::warn!(doc_id = %retry.doc_id, peer_id = %peer_id, "retry push timed out");
+                    retry
+                        .retry_info
+                        .bump_for(&format!("{peer_id_str}:{}", retry.cid));
+                    let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                     break;
                 }
             }
         }
 
-        if all_succeeded {
+        let remaining = peerstore
+            .get_retry_documents(&peer_id_str)
+            .await
+            .unwrap_or_default();
+        if remaining.is_empty() {
             let _ = peerstore.clear_retry_peer(&peer_id_str).await;
             let _ = defra_p2p_adapter::set_persisted_replicator_status(
                 &peerstore,
@@ -576,10 +590,6 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
                 p2p::ReplicatorStatus::Inactive,
             )
             .await;
-            retry_info.bump();
-            if let Ok(bytes) = retry_info.to_bytes() {
-                let _ = peerstore.update_retry_info(&peer_id_str, &bytes).await;
-            }
         }
     }
 }
@@ -613,23 +623,19 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
     };
 
     for (peer_id_str, info_bytes) in peers {
-        let mut retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
+        let _legacy_retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
             Ok(info) => info,
             Err(error) => {
                 tracing::warn!(peer_id = %peer_id_str, error = %error, "invalid retry info");
                 continue;
             }
         };
-        if !force && !retry_info.is_due() {
-            continue;
-        }
-
         let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
         // Iroh request-response reconnects on demand. The peer-map-backed
         // connected_peers snapshot is not authoritative enough to gate
         // retries here, so let the transport attempt the replay.
 
-        let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+        let mut docs = match peerstore.get_retry_documents(&peer_id_str).await {
             Ok(docs) => docs,
             Err(_) => continue,
         };
@@ -644,18 +650,11 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
             continue;
         }
 
-        if docs.len() > 1 {
-            // Rotate the starting document by the peer's own persisted retry
-            // count: the store iterates in stable key order, and a global
-            // cursor aliases when it advances by the number of due peers per
-            // sweep, so per-peer state is required for every document to
-            // eventually lead a pass (#1099 review).
-            let rotate_by = retry_info.num_retries as usize % docs.len();
-            docs.rotate_left(rotate_by);
-        }
-        let mut all_succeeded = true;
         let mut fast_failures = 0usize;
-        for (doc_id, collection_id) in &docs {
+        for retry in &mut docs {
+            if !force && !retry.retry_info.is_due() {
+                continue;
+            }
             // Bound each send so a nonresponsive peer cannot stall healthy
             // peers' retries behind it (#1099). A timeout ends the pass (the
             // peer is unreachable); a fast rejection only consumes a bounded
@@ -663,33 +662,43 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
             // order cannot starve the rest forever.
             match tokio::time::timeout(
                 std::time::Duration::from_secs(15),
-                doc_pusher.retry_doc(&peer_id, doc_id, collection_id),
+                doc_pusher.retry_doc(&peer_id, &retry.doc_id, &retry.collection_id),
             )
             .await
             {
                 Ok(Ok(())) => {
                     se_repusher
-                        .regenerate_and_push_se_artifacts(collection_id, doc_id)
+                        .regenerate_and_push_se_artifacts(&retry.collection_id, &retry.doc_id)
                         .await;
-                    let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
+                    let _ = peerstore.complete_retry_document(&peer_id_str, retry).await;
                 }
                 Ok(Err(error)) => {
-                    tracing::warn!(doc_id = %doc_id, peer_id = %peer_id, error = %error, "retry push failed");
-                    all_succeeded = false;
+                    tracing::warn!(doc_id = %retry.doc_id, peer_id = %peer_id, error = %error, "retry push failed");
+                    retry
+                        .retry_info
+                        .bump_for(&format!("{peer_id_str}:{}", retry.cid));
+                    let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                     fast_failures += 1;
                     if fast_failures >= 3 {
                         break;
                     }
                 }
                 Err(_) => {
-                    tracing::warn!(doc_id = %doc_id, peer_id = %peer_id, "retry push timed out");
-                    all_succeeded = false;
+                    tracing::warn!(doc_id = %retry.doc_id, peer_id = %peer_id, "retry push timed out");
+                    retry
+                        .retry_info
+                        .bump_for(&format!("{peer_id_str}:{}", retry.cid));
+                    let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                     break;
                 }
             }
         }
 
-        if all_succeeded {
+        let remaining = peerstore
+            .get_retry_documents(&peer_id_str)
+            .await
+            .unwrap_or_default();
+        if remaining.is_empty() {
             let _ = peerstore.clear_retry_peer(&peer_id_str).await;
             let _ = defra_p2p_adapter::set_persisted_replicator_status(
                 &peerstore,
@@ -704,10 +713,6 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
                 p2p::ReplicatorStatus::Inactive,
             )
             .await;
-            retry_info.bump();
-            if let Ok(bytes) = retry_info.to_bytes() {
-                let _ = peerstore.update_retry_info(&peer_id_str, &bytes).await;
-            }
         }
     }
 }

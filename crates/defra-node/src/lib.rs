@@ -1626,33 +1626,50 @@ fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(failure) = failure_rx.recv().await {
-            tracing::warn!(
-                peer_id = %failure.peer_id,
-                doc_id = %failure.doc_id,
-                collection_id = %failure.collection_id,
-                "P2P push to replicator failed"
-            );
+            if failure.create_retry {
+                tracing::warn!(
+                    peer_id = %failure.peer_id,
+                    doc_id = %failure.doc_id,
+                    collection_id = %failure.collection_id,
+                    "P2P push to replicator failed"
+                );
+            }
 
             let peerstore = storage::stores::Peerstore::new(store.clone());
-            let retry_info = storage::stores::RetryInfo::new_initial();
-            let info_bytes = match retry_info.to_bytes() {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    tracing::warn!(error = %error, "failed to serialize retry info");
-                    continue;
-                }
+            let result = if failure.create_retry {
+                let info_bytes = match storage::stores::RetryInfo::new_initial().to_bytes() {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "failed to serialize retry info");
+                        continue;
+                    }
+                };
+                peerstore
+                    .record_push_failure(
+                        &failure.peer_id,
+                        &failure.doc_id,
+                        &failure.collection_id,
+                        &failure.cid,
+                        failure.head_priority,
+                        &info_bytes,
+                    )
+                    .await
+            } else {
+                peerstore
+                    .observe_push_head(
+                        &failure.peer_id,
+                        &failure.doc_id,
+                        &failure.collection_id,
+                        &failure.cid,
+                        failure.head_priority,
+                    )
+                    .await
             };
-
-            if let Err(error) = peerstore
-                .record_push_failure(
-                    &failure.peer_id.to_string(),
-                    &failure.doc_id,
-                    &failure.collection_id,
-                    &info_bytes,
-                )
-                .await
-            {
+            if let Err(error) = result {
                 tracing::warn!(error = %error, "failed to record push failure");
+                continue;
+            }
+            if !failure.create_retry {
                 continue;
             }
             if let Err(error) = defra_p2p_adapter::set_persisted_replicator_status(
@@ -1687,23 +1704,19 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
             };
 
             for (peer_id_str, info_bytes) in peers {
-                let mut retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
+                let _legacy_retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
                     Ok(info) => info,
                     Err(error) => {
                         tracing::warn!(peer_id = %peer_id_str, error = %error, "invalid retry info");
                         continue;
                     }
                 };
-                if !retry_info.is_due() {
-                    continue;
-                }
-
                 let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
                 // Iroh request-response can reconnect on demand, so don't
                 // suppress retries based on the peer-map's current
                 // connected_peers snapshot.
 
-                let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                let mut docs = match peerstore.get_retry_documents(&peer_id_str).await {
                     Ok(docs) => docs,
                     Err(error) => {
                         tracing::debug!(peer_id = %peer_id_str, error = %error, "failed to load retry docs");
@@ -1727,19 +1740,11 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                         .unwrap_or_default(),
                     _ => p2p::ReplicationFilters::new(),
                 };
-                if docs.len() > 1 {
-                    // Rotate the starting document by the peer's own
-                    // persisted retry count: the store iterates in stable key
-                    // order, and a global cursor aliases when it advances by
-                    // the number of due peers per sweep, so per-peer state is
-                    // required for every document to eventually lead a pass
-                    // (#1099 review).
-                    let rotate_by = retry_info.num_retries as usize % docs.len();
-                    docs.rotate_left(rotate_by);
-                }
-                let mut all_succeeded = true;
                 let mut fast_failures = 0usize;
-                for (doc_id, collection_id) in &docs {
+                for retry in &mut docs {
+                    if !retry.retry_info.is_due() {
+                        continue;
+                    }
                     // Bound each send so a nonresponsive peer cannot stall
                     // healthy peers' retries behind it (#1099). A timeout
                     // ends the pass (the peer is unreachable); a fast
@@ -1753,8 +1758,8 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                             database.as_ref(),
                             None,
                             &peer_id,
-                            doc_id,
-                            collection_id,
+                            &retry.doc_id,
+                            &retry.collection_id,
                             &retry_filters,
                             &replication_filter::QueryReplicationFilterMatcher::new(),
                         ),
@@ -1762,16 +1767,19 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                     .await
                     {
                         Ok(Ok(())) => {
-                            let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
+                            let _ = peerstore.complete_retry_document(&peer_id_str, retry).await;
                         }
                         Ok(Err(error)) => {
                             tracing::warn!(
-                                doc_id = %doc_id,
+                                doc_id = %retry.doc_id,
                                 peer_id = %peer_id,
                                 error = %error,
                                 "retry push failed"
                             );
-                            all_succeeded = false;
+                            retry
+                                .retry_info
+                                .bump_for(&format!("{peer_id_str}:{}", retry.cid));
+                            let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                             fast_failures += 1;
                             if fast_failures >= 3 {
                                 break;
@@ -1779,17 +1787,25 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                         }
                         Err(_) => {
                             tracing::warn!(
-                                doc_id = %doc_id,
+                                doc_id = %retry.doc_id,
                                 peer_id = %peer_id,
                                 "retry push timed out"
                             );
-                            all_succeeded = false;
+                            retry
+                                .retry_info
+                                .bump_for(&format!("{peer_id_str}:{}", retry.cid));
+                            let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                             break;
                         }
                     }
                 }
 
-                if all_succeeded {
+                if peerstore
+                    .get_retry_documents(&peer_id_str)
+                    .await
+                    .unwrap_or_default()
+                    .is_empty()
+                {
                     let _ = peerstore.clear_retry_peer(&peer_id_str).await;
                     let _ = defra_p2p_adapter::set_persisted_replicator_status(
                         &peerstore,
@@ -1804,10 +1820,6 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                         p2p::ReplicatorStatus::Inactive,
                     )
                     .await;
-                    retry_info.bump();
-                    if let Ok(bytes) = retry_info.to_bytes() {
-                        let _ = peerstore.update_retry_info(&peer_id_str, &bytes).await;
-                    }
                 }
             }
         }

@@ -3,6 +3,7 @@
 /// Tracks the number of retries and the next retry time using exponential
 /// backoff intervals matching Go DefraDB's replicator retry behavior.
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{hash::Hash, hash::Hasher};
 
 /// Exponential backoff intervals in seconds, matching Go's seconds-to-hours retry ladder.
 pub const RETRY_INTERVALS_SECS: &[u64] = &[
@@ -13,6 +14,62 @@ pub const RETRY_INTERVALS_SECS: &[u64] = &[
 pub struct RetryInfo {
     pub num_retries: u32,
     pub next_retry_unix: u64,
+}
+
+/// Durable newest-head state for one `(peer, document, CID)` pair. It is either
+/// a dormant ordering watermark for an active live send or a pending retry.
+/// `doc_id` is encoded with the value as a self-contained migration-safe record
+/// even though it is also present in the store key.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedPushRetry {
+    pub doc_id: String,
+    pub collection_id: String,
+    pub cid: String,
+    pub priority: u64,
+    /// Whether this head is eligible for the retry loop. A newer live enqueue
+    /// stores a dormant watermark first so an older in-flight failure cannot
+    /// recreate stale retry work or race the active send.
+    #[serde(default = "default_pending")]
+    pub pending: bool,
+    pub retry_info: RetryInfo,
+}
+
+impl PersistedPushRetry {
+    pub fn new_observed(
+        doc_id: impl Into<String>,
+        collection_id: impl Into<String>,
+        cid: impl Into<String>,
+        priority: u64,
+    ) -> Self {
+        Self {
+            doc_id: doc_id.into(),
+            collection_id: collection_id.into(),
+            cid: cid.into(),
+            priority,
+            pending: false,
+            retry_info: RetryInfo::new_initial(),
+        }
+    }
+
+    pub fn activate(&mut self, retry_key: &str) {
+        self.pending = true;
+        self.retry_info = RetryInfo::new_initial();
+        self.retry_info.bump_for(retry_key);
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        serde_cbor::to_vec(self)
+            .map_err(|error| format!("failed to serialize persisted push retry: {error}"))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        serde_cbor::from_slice(bytes)
+            .map_err(|error| format!("failed to deserialize persisted push retry: {error}"))
+    }
+}
+
+fn default_pending() -> bool {
+    true
 }
 
 impl RetryInfo {
@@ -38,12 +95,25 @@ impl RetryInfo {
 
     /// Bump the retry counter and schedule the next retry with exponential backoff.
     pub fn bump(&mut self) {
+        self.bump_for("");
+    }
+
+    /// Advance with deterministic bounded jitter derived from the exact
+    /// `(peer, CID)` key and attempt. This preserves the exponential cap while
+    /// preventing a fan-out failure from retrying every peer in lockstep.
+    pub fn bump_for(&mut self, retry_key: &str) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         let idx = (self.num_retries as usize).min(RETRY_INTERVALS_SECS.len() - 1);
-        self.next_retry_unix = now + RETRY_INTERVALS_SECS[idx];
+        let cap = RETRY_INTERVALS_SECS[idx];
+        let floor = (cap / 2).max(1);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        retry_key.hash(&mut hasher);
+        self.num_retries.hash(&mut hasher);
+        let delay = floor + hasher.finish() % (cap - floor + 1);
+        self.next_retry_unix = now + delay;
         self.num_retries += 1;
     }
 

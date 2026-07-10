@@ -1,0 +1,245 @@
+//! Short-window coalescing before replicator peer fan-out (#1102).
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::Bytes;
+use cid::Cid;
+use parking_lot::Mutex;
+use serde_json::Value as JsonValue;
+use tokio::sync::Notify;
+
+use super::broadcast_coalescer::DEFAULT_BROADCAST_COALESCING_WINDOW;
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingPush {
+    pub(crate) cid: Cid,
+    pub(crate) block: Bytes,
+    pub(crate) doc_id: String,
+    pub(crate) collection_id: String,
+    pub(crate) creator: String,
+    /// Whether unfiltered replicators need the complete DAG instead of only
+    /// the head block.
+    pub(crate) expand_unfiltered_dag: bool,
+    /// Filter material also represents an obligation to send the complete DAG
+    /// to matching filtered replicators.
+    pub(crate) document: Option<JsonValue>,
+}
+
+impl PendingPush {
+    fn version(&self) -> (u64, Vec<u8>) {
+        let priority = defra_core::Block::from_dag_cbor(&self.block)
+            .map(|block| block.delta.priority())
+            .unwrap_or(0);
+        (priority, self.cid.to_bytes())
+    }
+
+    fn merge_same_version(&mut self, incoming: PendingPush) {
+        self.expand_unfiltered_dag |= incoming.expand_unfiltered_dag;
+        if incoming.document.is_some() {
+            self.document = incoming.document;
+        }
+    }
+}
+
+struct Window {
+    push: Mutex<PendingPush>,
+    last_update: Mutex<tokio::time::Instant>,
+    done: Mutex<bool>,
+    notify: Notify,
+}
+
+pub(crate) struct PushFanoutCoalescer {
+    pending: Mutex<HashMap<(String, String), Arc<Window>>>,
+    coalesced: AtomicU64,
+    window: Duration,
+}
+
+impl Default for PushFanoutCoalescer {
+    fn default() -> Self {
+        Self::with_window(DEFAULT_BROADCAST_COALESCING_WINDOW)
+    }
+}
+
+impl PushFanoutCoalescer {
+    fn with_window(window: Duration) -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+            coalesced: AtomicU64::new(0),
+            window,
+        }
+    }
+
+    pub(crate) fn coalesced(&self) -> u64 {
+        self.coalesced.load(Ordering::Relaxed)
+    }
+
+    pub(crate) async fn run<F, Fut>(&self, push: PendingPush, send: F)
+    where
+        F: FnOnce(PendingPush) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        if push.doc_id.is_empty() {
+            send(push).await;
+            return;
+        }
+        let key = (push.collection_id.clone(), push.doc_id.clone());
+        let (window, leader) = {
+            let mut pending = self.pending.lock();
+            if let Some(window) = pending.get(&key) {
+                let mut current = window.push.lock();
+                match push.version().cmp(&current.version()) {
+                    std::cmp::Ordering::Greater => *current = push,
+                    std::cmp::Ordering::Equal => current.merge_same_version(push),
+                    std::cmp::Ordering::Less => {}
+                }
+                *window.last_update.lock() = tokio::time::Instant::now();
+                self.coalesced.fetch_add(1, Ordering::Relaxed);
+                (Arc::clone(window), false)
+            } else {
+                let window = Arc::new(Window {
+                    push: Mutex::new(push),
+                    last_update: Mutex::new(tokio::time::Instant::now()),
+                    done: Mutex::new(false),
+                    notify: Notify::new(),
+                });
+                pending.insert(key.clone(), Arc::clone(&window));
+                (window, true)
+            }
+        };
+
+        if leader {
+            super::broadcast_coalescer::wait_for_quiet(&window.last_update, self.window).await;
+            {
+                let mut pending = self.pending.lock();
+                if pending
+                    .get(&key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &window))
+                {
+                    pending.remove(&key);
+                }
+            }
+            let latest = window.push.lock().clone();
+            send(latest).await;
+            *window.done.lock() = true;
+            window.notify.notify_waiters();
+            return;
+        }
+
+        loop {
+            let notified = window.notify.notified();
+            if *window.done.lock() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use multihash_codetable::{Code, MultihashDigest};
+
+    use super::*;
+
+    fn push(seed: &[u8]) -> PendingPush {
+        PendingPush {
+            cid: Cid::new_v1(0x55, Code::Sha2_256.digest(seed)),
+            block: Bytes::copy_from_slice(seed),
+            doc_id: "doc".to_string(),
+            collection_id: "collection".to_string(),
+            creator: "creator".to_string(),
+            expand_unfiltered_dag: false,
+            document: Some(JsonValue::Null),
+        }
+    }
+
+    #[test]
+    fn same_version_merges_unfiltered_and_filtered_dag_obligations() {
+        let mut combined = push(b"same");
+        combined.document = None;
+        combined.expand_unfiltered_dag = true;
+
+        combined.merge_same_version(push(b"same"));
+
+        assert!(combined.expand_unfiltered_dag);
+        assert!(combined.document.is_some());
+    }
+
+    #[tokio::test]
+    async fn rapid_updates_create_one_peer_fanout() {
+        let coalescer = Arc::new(PushFanoutCoalescer::with_window(Duration::from_millis(10)));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let sent_cid = Arc::new(Mutex::new(None));
+        let updates: Vec<_> = [b"1".as_slice(), b"2".as_slice(), b"3".as_slice()]
+            .into_iter()
+            .map(push)
+            .collect();
+        let expected_cid = updates
+            .iter()
+            .max_by_key(|update| update.version())
+            .unwrap()
+            .cid;
+        let mut tasks = Vec::new();
+        for update in updates {
+            let coalescer = Arc::clone(&coalescer);
+            let sends = Arc::clone(&sends);
+            let sent_cid = Arc::clone(&sent_cid);
+            tasks.push(tokio::spawn(async move {
+                coalescer
+                    .run(update, move |latest| async move {
+                        sends.fetch_add(1, Ordering::Relaxed);
+                        *sent_cid.lock() = Some(latest.cid);
+                    })
+                    .await;
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+        assert_eq!(*sent_cid.lock(), Some(expected_cid));
+        assert_eq!(coalescer.coalesced(), 2);
+    }
+
+    #[tokio::test]
+    async fn sequential_update_resets_the_quiet_window() {
+        let window = Duration::from_millis(40);
+        let coalescer = Arc::new(PushFanoutCoalescer::with_window(window));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let leader = {
+            let coalescer = Arc::clone(&coalescer);
+            let sends = Arc::clone(&sends);
+            tokio::spawn(async move {
+                coalescer
+                    .run(push(b"first"), move |_| async move {
+                        sends.fetch_add(1, Ordering::Relaxed);
+                    })
+                    .await;
+            })
+        };
+        tokio::time::sleep(window / 2).await;
+        let follower = {
+            let coalescer = Arc::clone(&coalescer);
+            let sends = Arc::clone(&sends);
+            tokio::spawn(async move {
+                coalescer
+                    .run(push(b"second"), move |_| async move {
+                        sends.fetch_add(1, Ordering::Relaxed);
+                    })
+                    .await;
+            })
+        };
+
+        tokio::time::sleep(window * 3 / 4).await;
+        assert_eq!(sends.load(Ordering::Relaxed), 0);
+        leader.await.unwrap();
+        follower.await.unwrap();
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+    }
+}
