@@ -2,7 +2,7 @@ use super::*;
 use schema::{ScalarArrayKind, ScalarKind};
 
 impl<S: Store> crate::database::DB<S> {
-    /// Validate a Kind value in a patch field addition.
+    /// Validate a Kind value in a patch field addition or replacement.
     /// Returns error if the Kind is numeric or an unknown string.
     pub(crate) fn validate_patch_field_kind(
         kind_val: &serde_json::Value,
@@ -14,12 +14,12 @@ impl<S: Store> crate::database::DB<S> {
                 let canonical = n.as_u64().and_then(Self::canonical_patch_field_kind_name);
                 let hint = canonical.map_or_else(
                     || {
-                        "Use a canonical string for the intended type, such as \"Int\" or \"[Int!]\"."
+                        "Use the intended type's canonical string, such as \"Int\" or \"[Int!]\"."
                             .to_string()
                     },
                     |name| {
                         format!(
-                            "It maps to \"{}\"; use a canonical string for the intended type, such as \"Int\" or \"[Int!]\".",
+                            "It maps to \"{}\"; use that string only if that type is intended, otherwise use the intended type's canonical string.",
                             name
                         )
                     },

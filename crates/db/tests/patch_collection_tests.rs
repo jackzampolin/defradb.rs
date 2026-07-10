@@ -2,6 +2,21 @@ use db::database::DB;
 use schema::FieldKind;
 use storage::backends::MemoryStore;
 
+async fn agent_response_db() -> DB<MemoryStore> {
+    let store = MemoryStore::new();
+    let db = DB::new(store).unwrap();
+    let collections = query::parse_sdl(
+        r#"
+        type AgentResponse {
+            message: String
+        }
+        "#,
+    )
+    .unwrap();
+    db.create_collections_atomic(collections).await.unwrap();
+    db
+}
+
 #[tokio::test]
 async fn patch_collection_preserves_runtime_root_id() {
     let store = MemoryStore::new();
@@ -48,18 +63,7 @@ async fn patch_collection_preserves_runtime_root_id() {
 
 #[tokio::test]
 async fn patch_collection_rejects_numeric_kind_before_it_decodes_as_int_array() {
-    let store = MemoryStore::new();
-    let db = DB::new(store).unwrap();
-
-    let collections = query::parse_sdl(
-        r#"
-        type AgentResponse {
-            message: String
-        }
-        "#,
-    )
-    .unwrap();
-    db.create_collections_atomic(collections).await.unwrap();
+    let db = agent_response_db().await;
 
     let err = db
         .patch_collection(
@@ -78,7 +82,7 @@ async fn patch_collection_rejects_numeric_kind_before_it_decodes_as_int_array() 
 
     assert_eq!(
         err.to_string(),
-        "invalid patch: numeric Kind values are not supported in schema patches. Field: reasoning_progress_seq, Kind: 5. It maps to \"[Int!]\"; use a canonical string for the intended type, such as \"Int\" or \"[Int!]\"."
+        "invalid patch: numeric Kind values are not supported in schema patches. Field: reasoning_progress_seq, Kind: 5. It maps to \"[Int!]\"; use that string only if that type is intended, otherwise use the intended type's canonical string."
     );
 
     let patched = db
@@ -102,6 +106,67 @@ async fn patch_collection_rejects_numeric_kind_before_it_decodes_as_int_array() 
         .find(|field| field.name == "reasoning_progress_seq")
         .unwrap();
     assert_eq!(reasoning_progress_seq.kind, FieldKind::int());
+}
+
+#[tokio::test]
+async fn patch_collection_rejects_numeric_kind_in_whole_fields_replacement() {
+    let db = agent_response_db().await;
+    let collection = db.get_collection("AgentResponse").unwrap().unwrap();
+    let mut fields = serde_json::to_value(&collection.schema().fields).unwrap();
+
+    for field in fields.as_array_mut().unwrap() {
+        let map = field.as_object_mut().unwrap();
+        let canonical = match map.get("Name").and_then(|name| name.as_str()).unwrap() {
+            "_docID" => "ID",
+            "message" => "String",
+            name => panic!("unexpected field: {name}"),
+        };
+        map.insert("Kind".to_string(), serde_json::json!(canonical));
+    }
+    fields.as_array_mut().unwrap().push(serde_json::json!({
+        "FieldID": "9",
+        "Name": "reasoning_progress_seq",
+        "Kind": 5
+    }));
+
+    let patch = serde_json::json!([{
+        "op": "replace",
+        "path": "/AgentResponse/Fields",
+        "value": fields
+    }]);
+    let err = db
+        .patch_collection("AgentResponse", &patch.to_string(), None)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid patch: numeric Kind values are not supported in schema patches. Field: reasoning_progress_seq, Kind: 5. It maps to \"[Int!]\"; use that string only if that type is intended, otherwise use the intended type's canonical string."
+    );
+}
+
+#[tokio::test]
+async fn patch_collection_rejects_numeric_kind_in_direct_kind_replacement() {
+    let db = agent_response_db().await;
+    let err = db
+        .patch_collection(
+            "AgentResponse",
+            r#"
+            [{
+                "op": "replace",
+                "path": "/AgentResponse/Fields/message/Kind",
+                "value": 3
+            }]
+            "#,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid patch: numeric Kind values are not supported in schema patches. Field: message, Kind: 3. It maps to \"[Boolean!]\"; use that string only if that type is intended, otherwise use the intended type's canonical string."
+    );
 }
 
 #[tokio::test]

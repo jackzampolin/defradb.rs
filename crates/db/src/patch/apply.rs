@@ -145,6 +145,24 @@ impl<S: Store> crate::database::DB<S> {
                             )?;
                         }
 
+                        if path == "/Fields" {
+                            if let serde_json::Value::Array(fields) = &value {
+                                for field in fields {
+                                    if let serde_json::Value::Object(map) = field {
+                                        if let Some(kind_val) = map.get("Kind") {
+                                            Self::validate_patch_field_kind(
+                                                kind_val,
+                                                map.get("Name")
+                                                    .and_then(|name| name.as_str())
+                                                    .unwrap_or(""),
+                                                known_collection_names,
+                                            )?;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Go compatibility: validate and auto-generate FieldID when adding new fields
                         // If path ends with /Fields/- or /Fields/<n> and value has Name but no FieldID
                         if path.contains("/Fields/") {
