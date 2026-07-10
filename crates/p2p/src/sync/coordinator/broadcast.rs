@@ -74,7 +74,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Admit one replicator push into the bounded backlog. Overflow is an
     /// explicit outcome: it is counted, logged, and handed to the persisted
     /// retry ladder — never a silent drop and never another waiting task.
-    fn enqueue_replicator_push(&self, job: PushJobSpec) {
+    async fn enqueue_replicator_push(&self, job: PushJobSpec) {
         let peer_id = job.peer_id.clone();
         let doc_id = job.doc_id.clone();
         let collection_id = job.collection_id.clone();
@@ -89,7 +89,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     outcome = ?outcome,
                     "Outbound push backlog full; deferring push to persisted retry"
                 );
-                report_push_failure(&self.runtime.failure_tx, &peer_id, doc_id, collection_id);
+                report_push_failure(&self.runtime.failure_tx, &peer_id, doc_id, collection_id)
+                    .await;
             }
             EnqueueOutcome::Closed => {
                 tracing::debug!(
@@ -207,7 +208,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 root_cid: *cid,
                 head_block: head_block.clone(),
                 expand_dag: true,
-            });
+            })
+            .await;
         }
     }
 
@@ -258,7 +260,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 root_cid: *cid,
                 head_block: head_block.clone(),
                 expand_dag: false,
-            });
+            })
+            .await;
         }
     }
 
@@ -314,7 +317,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 root_cid: *cid,
                 head_block: head_block.clone(),
                 expand_dag: use_full_dag,
-            });
+            })
+            .await;
         }
     }
 
@@ -371,7 +375,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         &peer_id,
                         doc_id,
                         collection_id.to_string(),
-                    );
+                    )
+                    .await;
                 }
             }
         }
@@ -430,7 +435,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         &peer_id,
                         doc_id,
                         collection_id.to_string(),
-                    );
+                    )
+                    .await;
                 }
             }
         }

@@ -760,7 +760,7 @@ mod pending_persistence {
     }
 
     #[tokio::test]
-    async fn pending_registration_persists_and_clears_on_resolve() {
+    async fn pending_registration_persists_until_marked_merged() {
         let store = Arc::new(MemoryStore::new());
         let (manager, mut events, pending_store) = manager_with_store(store);
         let (comp_cid, comp_bytes, _field_cid, field_bytes) = composite_with_missing_field();
@@ -786,8 +786,9 @@ mod pending_persistence {
         // Drain the DagNeedsFetch event so the channel stays open.
         let _ = tokio::time::timeout(Duration::from_secs(1), events.recv()).await;
 
-        // The missing field arrives: the DAG resolves and the durable record
-        // is deleted.
+        // The missing field arrives: the DAG resolves (DagReady emitted) but
+        // the durable record must survive — DagReady only queues the merge,
+        // and a crash before the merge lands would otherwise lose the doc.
         let (field_cid, _) = create_lww_block("field_a");
         manager
             .process_pushlog(
@@ -799,6 +800,21 @@ mod pending_persistence {
             .await
             .expect("field block completes the pending DAG");
         assert_eq!(manager.pending_dag_count(), 0);
+        assert_eq!(
+            pending_store
+                .load_all()
+                .await
+                .expect("load persisted")
+                .len(),
+            1,
+            "record must survive DagReady: the merge has not landed yet"
+        );
+
+        // Only the successful terminal merge discharges the obligation.
+        manager
+            .mark_as_merged(&comp_cid)
+            .await
+            .expect("mark merged");
         assert!(pending_store
             .load_all()
             .await
@@ -830,7 +846,7 @@ mod pending_persistence {
         let (manager, mut events, _pending_store) = manager_with_store(store);
         assert_eq!(manager.pending_dag_count(), 0);
 
-        let restored = manager.restore_persisted_pending_dags().await;
+        let restored = manager.resync_persisted_pending_dags().await;
         assert_eq!(restored, 1);
         assert_eq!(manager.pending_dag_count(), 1);
 
@@ -881,7 +897,7 @@ mod pending_persistence {
             .expect("mark merged");
 
         let (manager, _events2, _) = manager_with_store(store);
-        let restored = manager.restore_persisted_pending_dags().await;
+        let restored = manager.resync_persisted_pending_dags().await;
         assert_eq!(restored, 0);
         assert_eq!(manager.pending_dag_count(), 0);
         assert!(pending_store
@@ -919,6 +935,142 @@ mod pending_persistence {
         // ...unless the entry's fetches already exhausted providers.
         manager.record_pending_dag_fetch_failure(&comp_cid, "no providers");
         assert_eq!(manager.pending_dags_needing_redrive("peer-2").len(), 1);
+    }
+
+    fn composite_with_missing_named_field(field: &str) -> (Cid, Vec<u8>) {
+        let (field_cid, _field_bytes) = create_lww_block(field);
+        create_composite_block(vec![DAGLink::new(field, field_cid)])
+    }
+
+    /// Clearing the in-memory entry (another fetch path completed the DAG,
+    /// or TTL eviction) must not discharge the durable obligation: only a
+    /// successful merge may.
+    #[tokio::test]
+    async fn clear_keeps_durable_record_until_merge() {
+        let store = Arc::new(MemoryStore::new());
+        let (manager, mut _events, pending_store) = manager_with_store(store);
+        let (comp_cid, comp_bytes, _f, _fb) = composite_with_missing_field();
+
+        manager
+            .process_pushlog(
+                &pushlog_for(&comp_cid, &comp_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("registers pending");
+        assert!(manager.clear_pending_dag(&comp_cid));
+        assert_eq!(
+            pending_store
+                .load_all()
+                .await
+                .expect("load persisted")
+                .len(),
+            1,
+            "clear must not delete the durable record"
+        );
+
+        manager
+            .mark_as_merged(&comp_cid)
+            .await
+            .expect("mark merged");
+        assert!(pending_store
+            .load_all()
+            .await
+            .expect("load persisted")
+            .is_empty());
+    }
+
+    /// In-process recovery for records whose in-memory entry is gone (TTL
+    /// eviction / clear): the resync sweep re-registers and re-drives them
+    /// without a restart.
+    #[tokio::test]
+    async fn resync_re_registers_cleared_records() {
+        let store = Arc::new(MemoryStore::new());
+        let (manager, mut events, _pending_store) = manager_with_store(store);
+        let (comp_cid, comp_bytes, _f, _fb) = composite_with_missing_field();
+
+        manager
+            .process_pushlog(
+                &pushlog_for(&comp_cid, &comp_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await
+            .expect("registers pending");
+        let _ = tokio::time::timeout(Duration::from_secs(1), events.recv()).await;
+        assert!(manager.clear_pending_dag(&comp_cid));
+        assert_eq!(manager.pending_dag_count(), 0);
+
+        let resynced = manager.resync_persisted_pending_dags().await;
+        assert_eq!(resynced, 1);
+        assert_eq!(manager.pending_dag_count(), 1);
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("resync must emit a fetch event")
+            .expect("event channel open");
+        assert!(matches!(
+            event,
+            SyncEvent::DagNeedsFetch { root_cid, .. } if root_cid == comp_cid
+        ));
+
+        // With the entry live in memory again, the sweep is a no-op.
+        assert_eq!(manager.resync_persisted_pending_dags().await, 0);
+    }
+
+    /// Durable registrations outlive the in-memory map, so they carry their
+    /// own cap; at the cap the obligation is refused with a backpressure
+    /// nack instead of being accepted and later dropped.
+    #[tokio::test]
+    async fn durable_cap_nacks_new_registrations() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
+        let (manager, mut _events) = SyncManager::new(
+            blockstore,
+            test_peer_state(),
+            SyncConfig {
+                max_pending_dags: 1,
+                ..SyncConfig::default()
+            },
+        );
+        let pending_store = Arc::new(PendingDagStore::new(store));
+        manager.install_pending_dag_store(pending_store.clone());
+
+        // Durable cap = max_pending_dags * 4. Fill it by registering and then
+        // clearing the (1-slot) in-memory entry so only records accumulate.
+        for index in 0..4 {
+            let (comp_cid, comp_bytes) =
+                composite_with_missing_named_field(&format!("field_{index}"));
+            manager
+                .process_pushlog(
+                    &pushlog_for(&comp_cid, &comp_bytes),
+                    Some("peer-1"),
+                    true,
+                    None,
+                )
+                .await
+                .expect("registration under the durable cap");
+            manager.clear_pending_dag(&comp_cid);
+        }
+        assert_eq!(pending_store.load_all().await.expect("load").len(), 4);
+
+        let (comp_cid, comp_bytes) = composite_with_missing_named_field("field_overflow");
+        let result = manager
+            .process_pushlog(
+                &pushlog_for(&comp_cid, &comp_bytes),
+                Some("peer-1"),
+                true,
+                None,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(Error::PendingDagCapacity { max: 4 })),
+            "over-cap registration must be refused, got {result:?}"
+        );
+        assert_eq!(manager.pending_dag_count(), 0);
+        assert_eq!(pending_store.load_all().await.expect("load").len(), 4);
     }
 
     struct FailingStore;

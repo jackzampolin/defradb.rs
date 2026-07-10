@@ -60,7 +60,12 @@ what the ack promised.
 ## Conformance fence
 
 The Rust-side fence for the same invariant is the restart integration test
-`tools/integration-test/tests/p2p_admission.rs`
+`tools/integration-test/tests/p2p_admission_restart.rs`
 (`hub_restart_recovers_success_acked_pending_dags`) — kill and restart the hub after it
 success-acks a missing-links push, then assert the doc still merges — plus the
-`crates/p2p` unit tests around pending-DAG persistence and restore.
+`crates/p2p` unit tests around pending-DAG persistence
+(`sync_manager_tests.rs::pending_persistence`). Note the record-lifetime
+refinement the model's atomic `Resolve` glosses over: in Rust the durable
+record is deleted only when the root is **successfully marked merged** —
+never at DagReady emission, TTL eviction, or `clear_pending_dag` — so the
+crash window between queueing and completing the merge stays covered.

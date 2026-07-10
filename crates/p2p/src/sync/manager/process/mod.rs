@@ -93,7 +93,22 @@ pub struct SyncManager<B: Blockstore> {
     /// semantics apply while empty.
     pub(super) pending_store:
         std::sync::OnceLock<Arc<dyn crate::sync::pending_store::PendingDagStorage>>,
+
+    /// Roots with a durable registration. Superset guard so the merge path
+    /// only pays a delete transaction for roots that actually have records,
+    /// and admission can bound durable growth without hitting storage.
+    pub(super) persisted_roots: Arc<RwLock<std::collections::HashSet<Cid>>>,
+
+    /// Single-flight guard for the durable resync sweep.
+    pub(super) pending_resync_in_flight: std::sync::atomic::AtomicBool,
 }
+
+/// Durable registrations may outlive their in-memory pending entries (TTL
+/// eviction frees the map slot but not the recovery obligation), so the
+/// durable set gets its own, larger cap. At the cap new registrations are
+/// nacked — the hub refuses the obligation while the pusher still owns its
+/// retry state, rather than accepting and later dropping it.
+pub(super) const PERSISTED_PENDING_CAP_FACTOR: usize = 4;
 
 impl<B: Blockstore + 'static> SyncManager<B> {
     /// Create a new SyncManager.
@@ -124,6 +139,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // (permanent admission outage); normalize to a 1-slot map.
             max_pending_dags: config.max_pending_dags.max(1),
             pending_store: std::sync::OnceLock::new(),
+            persisted_roots: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            pending_resync_in_flight: std::sync::atomic::AtomicBool::new(false),
         };
 
         (manager, event_rx)
@@ -138,11 +155,20 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     }
 
     /// Mark a block as merged (called by database layer after CRDT merge).
+    ///
+    /// A successful terminal merge is the point where a durable pending
+    /// registration has discharged its recovery obligation (#1099): only
+    /// here (and never at DagReady emission, TTL eviction, or clear) is the
+    /// persisted record deleted.
     pub async fn mark_as_merged(&self, cid: &Cid) -> crate::error::Result<()> {
         self.blockstore
             .mark_as_merged(cid)
             .await
-            .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))
+            .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
+        if self.persisted_roots.read().contains(cid) {
+            self.remove_persisted_pending(cid).await;
+        }
+        Ok(())
     }
 
     /// Mark multiple blocks as merged in a single transaction.
@@ -150,7 +176,18 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         self.blockstore
             .mark_batch_as_merged(cids)
             .await
-            .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))
+            .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
+        let persisted: Vec<Cid> = {
+            let roots = self.persisted_roots.read();
+            cids.iter()
+                .filter(|cid| roots.contains(cid))
+                .copied()
+                .collect()
+        };
+        for cid in &persisted {
+            self.remove_persisted_pending(cid).await;
+        }
+        Ok(())
     }
 
     /// Get the process queue used to serialize work for the same CID.
@@ -201,37 +238,19 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         self.pending_store.get().cloned()
     }
 
-    /// Best-effort deletion of persisted registrations from sync call sites.
-    /// A late (or lost) delete is safe: restore re-checks merge state and the
-    /// TTL expiry path deletes stale records.
-    pub(super) fn schedule_persisted_pending_removal(&self, roots: Vec<Cid>) {
-        let Some(store) = self.pending_store() else {
-            return;
-        };
-        if roots.is_empty() {
-            return;
-        }
-        tokio::spawn(async move {
-            for root_cid in roots {
-                if let Err(error) = store.remove(&root_cid).await {
+    pub(super) async fn remove_persisted_pending(&self, root_cid: &Cid) {
+        if let Some(store) = self.pending_store() {
+            match store.remove(root_cid).await {
+                Ok(()) => {
+                    self.persisted_roots.write().remove(root_cid);
+                }
+                Err(error) => {
                     tracing::warn!(
                         root_cid = %root_cid,
                         error = %error,
                         "Failed to delete persisted pending DAG record"
                     );
                 }
-            }
-        });
-    }
-
-    pub(super) async fn remove_persisted_pending(&self, root_cid: &Cid) {
-        if let Some(store) = self.pending_store() {
-            if let Err(error) = store.remove(root_cid).await {
-                tracing::warn!(
-                    root_cid = %root_cid,
-                    error = %error,
-                    "Failed to delete persisted pending DAG record"
-                );
             }
         }
     }

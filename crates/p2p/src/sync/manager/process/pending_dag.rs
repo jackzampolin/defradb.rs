@@ -1,6 +1,7 @@
 //! Pending DAG registration and retry logic.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 use cid::Cid;
@@ -153,22 +154,20 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// the capacity. If the map is still at `max_pending_dags` after eviction the
     /// new entry is dropped and `false` is returned so callers can reject with a
     /// backpressure nack (#1088 W1) instead of acking a discarded registration.
+    /// TTL eviction frees the in-memory slot only: a push-originated entry's
+    /// durable record survives (the recovery obligation is discharged solely
+    /// by a successful merge) and is re-driven by restart or the durable
+    /// resync sweep.
     pub(super) fn insert_pending_dag(&self, root_cid: Cid, dag: PendingDag) -> bool {
-        let inserted = {
-            let mut pending = self.pending_dags.write();
-            let expired = evict_expired_pending_dags(&mut pending, Instant::now());
-            self.schedule_persisted_pending_removal(
-                expired.into_iter().map(|(cid, _)| cid).collect(),
-            );
+        let mut pending = self.pending_dags.write();
+        evict_expired_pending_dags(&mut pending, Instant::now());
 
-            if pending.len() >= self.max_pending_dags && !pending.contains_key(&root_cid) {
-                return false;
-            }
+        if pending.len() >= self.max_pending_dags && !pending.contains_key(&root_cid) {
+            return false;
+        }
 
-            pending.insert(root_cid, dag);
-            true
-        };
-        inserted
+        pending.insert(root_cid, dag);
+        true
     }
 
     fn update_pending_dag_missing_if_current(
@@ -202,11 +201,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
     /// Remove a pending DAG entry once another fetch path has completed it.
     pub fn clear_pending_dag(&self, root_cid: &Cid) -> bool {
-        let removed = self.pending_dags.write().remove(root_cid).is_some();
-        if removed {
-            self.schedule_persisted_pending_removal(vec![*root_cid]);
-        }
-        removed
+        self.pending_dags.write().remove(root_cid).is_some()
     }
 
     /// Register a pending DAG for DocSync.
@@ -315,7 +310,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         let pending_info = {
             let mut pending = self.pending_dags.write();
             let expired = evict_expired_pending_dags(&mut pending, Instant::now());
-            self.schedule_persisted_pending_removal(expired.iter().map(|(cid, _)| *cid).collect());
             if let Some((_, dag)) = expired.into_iter().find(|(cid, _)| cid == root_cid) {
                 Some(PendingDagRetryEntry::Expired(dag))
             } else {
@@ -459,22 +453,46 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             return Err(Error::ChannelSend);
         }
 
-        self.remove_persisted_pending(root_cid).await;
         self.diagnostics.record_pending_dag_resolved();
         Ok(true)
     }
 
-    /// Restore persisted push-originated pending registrations after restart
-    /// and re-drive them through the normal fetch path (#1099).
-    ///
-    /// Already-merged roots just drop their durable record. Complete-but-
-    /// unmerged roots resolve immediately through `retry_pending_dag`. Roots
-    /// that no longer fit under `max_pending_dags` keep their record for the
-    /// next restart. Returns the number of registrations re-driven.
-    pub async fn restore_persisted_pending_dags(&self) -> usize {
+    /// Reconcile the in-memory pending map against the durable registrations
+    /// (#1099): drop records whose roots merged, and re-register + re-drive
+    /// every unmerged record with no live in-memory entry. Runs at startup
+    /// (restore) and as the single-flight sweep behind peer connects, so a
+    /// registration whose in-memory entry was TTL-evicted is recovered
+    /// without a restart. Roots that no longer fit under `max_pending_dags`
+    /// keep their record for the next sweep. Returns the count re-driven.
+    pub async fn resync_persisted_pending_dags(&self) -> usize {
         let Some(store) = self.pending_store() else {
             return 0;
         };
+        // Cheap steady-state exit: nothing to reconcile while every durable
+        // root still has a live in-memory entry.
+        {
+            let roots = self.persisted_roots.read();
+            let pending = self.pending_dags.read();
+            if !roots.is_empty() && roots.iter().all(|root| pending.contains_key(root)) {
+                return 0;
+            }
+        }
+        if self
+            .pending_resync_in_flight
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return 0;
+        }
+        let resynced = self.resync_persisted_pending_dags_inner(store).await;
+        self.pending_resync_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+        resynced
+    }
+
+    async fn resync_persisted_pending_dags_inner(
+        &self,
+        store: Arc<dyn crate::sync::pending_store::PendingDagStorage>,
+    ) -> usize {
         let records = match store.load_all().await {
             Ok(records) => records,
             Err(error) => {
@@ -482,12 +500,21 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 return 0;
             }
         };
+        // Union, not replace: a registration persisted between load_all and
+        // this update must stay eligible for merge-time deletion. Stale set
+        // entries only cost a harmless delete attempt.
+        self.persisted_roots
+            .write()
+            .extend(records.iter().map(|(cid, _)| *cid));
         if records.is_empty() {
             return 0;
         }
 
         let mut restored = 0usize;
         for (root_cid, record) in records {
+            if self.pending_dags.read().contains_key(&root_cid) {
+                continue;
+            }
             if matches!(self.is_merged(&root_cid).await, Ok(true)) {
                 self.remove_persisted_pending(&root_cid).await;
                 continue;
@@ -525,7 +552,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     root_cid = %root_cid,
                     doc_id = %record.doc_id,
                     max = self.max_pending_dags,
-                    "Pending DAGs at capacity during restore; record kept for next restart"
+                    "Pending DAGs at capacity during resync; record kept for the next sweep"
                 );
                 continue;
             }
@@ -571,7 +598,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             restored += 1;
         }
 
-        tracing::info!(restored, "restored persisted pending DAG registrations");
+        if restored > 0 {
+            tracing::info!(restored, "restored persisted pending DAG registrations");
+        }
         restored
     }
 }

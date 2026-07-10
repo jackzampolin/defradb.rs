@@ -28,18 +28,31 @@ pub(super) struct PushWorkerContext<B, T> {
     pub(super) send_timeout: Duration,
 }
 
-pub(super) fn report_push_failure(
+/// Hand a failed/rejected push to the persisted retry ladder. Losslessly:
+/// a full channel applies backpressure to the reporter instead of dropping
+/// the retry record — dropping here would silently lose the exact overflow
+/// this queue exists to make durable. Only a closed channel (recorder gone,
+/// process shutting down) is logged and released.
+pub(super) async fn report_push_failure(
     failure_tx: &Arc<Mutex<Option<tokio::sync::mpsc::Sender<PushFailure>>>>,
     peer_id: &crate::transport::PeerId,
     doc_id: String,
     collection_id: String,
 ) {
-    if let Some(tx) = failure_tx.lock().as_ref() {
-        let _ = tx.try_send(PushFailure {
+    let tx = failure_tx.lock().clone();
+    if let Some(tx) = tx {
+        let failure = PushFailure {
             peer_id: peer_id.to_string(),
             doc_id,
             collection_id,
-        });
+        };
+        if let Err(error) = tx.send(failure).await {
+            tracing::warn!(
+                peer_id = %peer_id,
+                doc_id = %error.0.doc_id,
+                "Push failure recorder is gone; dropping retry record"
+            );
+        }
     }
 }
 
@@ -116,7 +129,8 @@ where
             &job.peer_id,
             job.doc_id,
             job.collection_id,
-        );
+        )
+        .await;
     }
     !any_failed
 }
@@ -389,6 +403,50 @@ mod tests {
         }
         assert_eq!(backlog.snapshot().active_jobs, 0);
         backlog.close();
+    }
+
+    /// The rejection-to-retry handoff must be lossless: a full failure
+    /// channel applies backpressure instead of dropping the retry record.
+    #[tokio::test]
+    async fn report_push_failure_backpressures_instead_of_dropping() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PushFailure>(1);
+        tx.send(PushFailure {
+            peer_id: "occupant".to_string(),
+            doc_id: "occupant-doc".to_string(),
+            collection_id: "collection".to_string(),
+        })
+        .await
+        .unwrap();
+        let slot = Arc::new(Mutex::new(Some(tx)));
+
+        let peer = PeerId::new("slow".to_string());
+        let reporter = {
+            let slot = Arc::clone(&slot);
+            tokio::spawn(async move {
+                report_push_failure(
+                    &slot,
+                    &peer,
+                    "doc-slow".to_string(),
+                    "collection".to_string(),
+                )
+                .await;
+            })
+        };
+
+        // Channel full: the reporter must wait, not drop.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !reporter.is_finished(),
+            "reporter must block on a full channel"
+        );
+
+        assert_eq!(rx.recv().await.unwrap().doc_id, "occupant-doc");
+        let delivered = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("failure must be delivered once capacity frees")
+            .unwrap();
+        assert_eq!(delivered.doc_id, "doc-slow");
+        reporter.await.unwrap();
     }
 
     /// Workers exit promptly when the backlog closes; the worker handles are

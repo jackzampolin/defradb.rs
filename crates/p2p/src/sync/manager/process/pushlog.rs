@@ -400,7 +400,27 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // ack destroys the pusher's retry record, so an unpersisted
             // registration must fail closed as an error reply instead
             // (#1099; proofs/tla/PendingDagRestart.tla INV_AckBacked).
+            // Durable records outlive TTL-evicted map entries, so they carry
+            // their own larger cap; at the cap the obligation is refused
+            // (backpressure nack) while the pusher still owns retry state.
             if let Some(store) = self.pending_store() {
+                let durable_cap = self
+                    .max_pending_dags
+                    .saturating_mul(super::PERSISTED_PENDING_CAP_FACTOR);
+                let over_durable_cap = {
+                    let roots = self.persisted_roots.read();
+                    roots.len() >= durable_cap && !roots.contains(cid)
+                };
+                if over_durable_cap {
+                    self.pending_dags.write().remove(cid);
+                    tracing::warn!(
+                        cid = %cid,
+                        doc_id = %msg.doc_id,
+                        durable_cap,
+                        "Durable pending DAG registrations at capacity, rejecting PushLog DAG registration"
+                    );
+                    return Err(Error::PendingDagCapacity { max: durable_cap });
+                }
                 let record = crate::sync::pending_store::PersistedPendingDag {
                     doc_id: msg.doc_id.clone(),
                     collection_id: msg.collection_id.clone(),
@@ -423,6 +443,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         "failed to persist pending DAG registration: {error}"
                     )));
                 }
+                self.persisted_roots.write().insert(*cid);
             }
 
             // Get providers for the missing blocks
@@ -449,9 +470,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     ?cid,
                     "Failed to send DagNeedsFetch event - receiver dropped"
                 );
-                // Clean up pending dag since we can't request fetch
+                // Clean up the in-memory entry since we can't request the
+                // fetch; the durable record stays and is re-driven by the
+                // resync sweep (the pusher was nacked, so it also retries).
                 self.pending_dags.write().remove(cid);
-                self.remove_persisted_pending(cid).await;
                 return Err(Error::ChannelSend);
             }
         }

@@ -54,10 +54,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
     }
 
-    fn handle_peer_connected(&self, peer_id: PeerId) {
+    async fn handle_peer_connected(&self, peer_id: PeerId) {
         tracing::debug!(peer_id = %peer_id, "Peer connected");
         self.access.peer_state.peer_connected(peer_id.as_str());
         self.redrive_pending_dags_for_peer(&peer_id);
+        // Durable registrations whose in-memory entries were TTL-evicted can
+        // only complete once a provider is reachable again: reconcile them
+        // now (single-flight; a no-op while another sweep runs).
+        self.manager.resync_persisted_pending_dags().await;
     }
 
     /// Re-drive pending DAGs a newly connected peer can complete: its own
@@ -302,7 +306,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
         match event {
             TransportEvent::PeerConnected(peer_id) => {
-                self.handle_peer_connected(peer_id);
+                self.handle_peer_connected(peer_id).await;
             }
             TransportEvent::PeerDisconnected(peer_id) => {
                 self.handle_peer_disconnected(peer_id);

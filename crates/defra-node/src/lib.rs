@@ -1723,10 +1723,14 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                     _ => p2p::ReplicationFilters::new(),
                 };
                 let mut all_succeeded = true;
+                let mut fast_failures = 0usize;
                 for (doc_id, collection_id) in &docs {
-                    // Bound each send and stop this peer's pass on the first
-                    // failure so a nonresponsive peer cannot stall healthy
-                    // peers' retries behind it (#1099).
+                    // Bound each send so a nonresponsive peer cannot stall
+                    // healthy peers' retries behind it (#1099). A timeout
+                    // ends the pass (the peer is unreachable); a fast
+                    // rejection only consumes a bounded budget so one
+                    // permanently rejected doc at the head of the key order
+                    // cannot starve the rest forever.
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(15),
                         db_merge::retry_doc_via_transport(
@@ -1753,7 +1757,10 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                                 "retry push failed"
                             );
                             all_succeeded = false;
-                            break;
+                            fast_failures += 1;
+                            if fast_failures >= 3 {
+                                break;
+                            }
                         }
                         Err(_) => {
                             tracing::warn!(

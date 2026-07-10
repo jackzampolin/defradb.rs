@@ -591,10 +591,14 @@ impl Node {
                         continue;
                     }
                     let mut all_succeeded = true;
+                    let mut fast_failures = 0usize;
                     for (doc_id, collection_id) in &docs {
-                        // Bound each send and stop this peer's pass on the
-                        // first failure so a nonresponsive peer cannot stall
-                        // healthy peers' retries behind it (#1099).
+                        // Bound each send so a nonresponsive peer cannot
+                        // stall healthy peers' retries behind it (#1099). A
+                        // timeout ends the pass (the peer is unreachable); a
+                        // fast rejection only consumes a bounded budget so
+                        // one permanently rejected doc at the head of the
+                        // key order cannot starve the rest forever.
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(15),
                             retry_pusher.retry_doc(&retry_handle, peer_id, doc_id, collection_id),
@@ -604,7 +608,14 @@ impl Node {
                             Ok(Ok(())) => {
                                 let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
                             }
-                            Ok(Err(_)) | Err(_) => {
+                            Ok(Err(_)) => {
+                                all_succeeded = false;
+                                fast_failures += 1;
+                                if fast_failures >= 3 {
+                                    break;
+                                }
+                            }
+                            Err(_) => {
                                 all_succeeded = false;
                                 break;
                             }
@@ -1129,10 +1140,14 @@ impl Node {
                         continue;
                     }
                     let mut all_succeeded = true;
+                    let mut fast_failures = 0usize;
                     for (doc_id, collection_id) in &docs {
-                        // Bound each send and stop this peer's pass on the
-                        // first failure so a nonresponsive peer cannot stall
-                        // healthy peers' retries behind it (#1099).
+                        // Bound each send so a nonresponsive peer cannot
+                        // stall healthy peers' retries behind it (#1099). A
+                        // timeout ends the pass (the peer is unreachable); a
+                        // fast rejection only consumes a bounded budget so
+                        // one permanently rejected doc at the head of the
+                        // key order cannot starve the rest forever.
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(15),
                             retry_pusher.retry_doc(&peer_id, doc_id, collection_id),
@@ -1142,7 +1157,14 @@ impl Node {
                             Ok(Ok(())) => {
                                 let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
                             }
-                            Ok(Err(_)) | Err(_) => {
+                            Ok(Err(_)) => {
+                                all_succeeded = false;
+                                fast_failures += 1;
+                                if fast_failures >= 3 {
+                                    break;
+                                }
+                            }
+                            Err(_) => {
                                 all_succeeded = false;
                                 break;
                             }
