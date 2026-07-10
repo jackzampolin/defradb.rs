@@ -46,12 +46,31 @@ pub(super) async fn report_push_failure(
             doc_id,
             collection_id,
         };
-        if let Err(error) = tx.send(failure).await {
-            tracing::warn!(
-                peer_id = %peer_id,
-                doc_id = %error.0.doc_id,
-                "Push failure recorder is gone; dropping retry record"
-            );
+        // reserve() is cancel-safe, so waiting in a loop lets sustained
+        // recorder backpressure surface in the logs instead of silently
+        // stalling the push pool.
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), tx.reserve()).await {
+                Ok(Ok(permit)) => {
+                    permit.send(failure);
+                    return;
+                }
+                Ok(Err(_closed)) => {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        doc_id = %failure.doc_id,
+                        "Push failure recorder is gone; dropping retry record"
+                    );
+                    return;
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        doc_id = %failure.doc_id,
+                        "Push failure recorder is backlogged; still waiting to hand off retry record"
+                    );
+                }
+            }
         }
     }
 }

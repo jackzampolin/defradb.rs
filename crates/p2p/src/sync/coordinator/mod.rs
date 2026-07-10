@@ -230,9 +230,13 @@ impl SyncShutdownHandle {
         }
     }
 
-    /// Number of currently retained background task handles.
+    /// Number of live retained background task handles. Prunes finished
+    /// handles first so a burst of completed tasks does not overstate live
+    /// work between registrations.
     pub fn retained_task_count(&self) -> usize {
-        self.inner.background_tasks.lock().len()
+        let mut tasks = self.inner.background_tasks.lock();
+        tasks.retain(|task| !task.is_finished());
+        tasks.len()
     }
 
     async fn drain_background_tasks(&self, timeout: Duration) {

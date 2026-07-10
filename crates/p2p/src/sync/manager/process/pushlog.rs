@@ -407,11 +407,27 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 let durable_cap = self
                     .max_pending_dags
                     .saturating_mul(super::PERSISTED_PENDING_CAP_FACTOR);
-                let over_durable_cap = {
-                    let roots = self.persisted_roots.read();
-                    roots.len() >= durable_cap && !roots.contains(cid)
+                // Check-and-reserve atomically under the write lock so the
+                // cap is hard under concurrent PushLogs; a failed put below
+                // releases the reservation. `newly_reserved` is false when
+                // the root already holds a record (re-push refresh).
+                enum DurableAdmission {
+                    Reserved,
+                    AlreadyPresent,
+                    AtCapacity,
+                }
+                let admission = {
+                    let mut roots = self.persisted_roots.write();
+                    if roots.contains(cid) {
+                        DurableAdmission::AlreadyPresent
+                    } else if roots.len() >= durable_cap {
+                        DurableAdmission::AtCapacity
+                    } else {
+                        roots.insert(*cid);
+                        DurableAdmission::Reserved
+                    }
                 };
-                if over_durable_cap {
+                if matches!(admission, DurableAdmission::AtCapacity) {
                     self.pending_dags.write().remove(cid);
                     tracing::warn!(
                         cid = %cid,
@@ -421,6 +437,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     );
                     return Err(Error::PendingDagCapacity { max: durable_cap });
                 }
+                let newly_reserved = matches!(admission, DurableAdmission::Reserved);
                 let record = crate::sync::pending_store::PersistedPendingDag {
                     doc_id: msg.doc_id.clone(),
                     collection_id: msg.collection_id.clone(),
@@ -432,6 +449,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         .map(Into::into),
                 };
                 if let Err(error) = store.put(cid, &record).await {
+                    if newly_reserved {
+                        self.persisted_roots.write().remove(cid);
+                    }
                     self.pending_dags.write().remove(cid);
                     tracing::warn!(
                         cid = %cid,
@@ -443,7 +463,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         "failed to persist pending DAG registration: {error}"
                     )));
                 }
-                self.persisted_roots.write().insert(*cid);
             }
 
             // Get providers for the missing blocks

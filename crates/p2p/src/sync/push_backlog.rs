@@ -360,15 +360,25 @@ impl PushBacklog {
 
     /// Release the peer slot taken by `next_job`. A failure starts (or
     /// escalates) the peer's cooldown; a success clears it.
+    ///
+    /// Must be called exactly once per job returned by `next_job`. A call
+    /// with no active slot for the peer is a caller bug and is ignored so it
+    /// cannot desync the accounting or double-charge the cooldown.
     pub fn job_done(&self, peer_id: &PeerId, succeeded: bool) {
         let peer_key = peer_id.to_string();
         {
             let mut inner = self.inner.lock();
-            if let Some(count) = inner.active.get_mut(&peer_key) {
-                *count -= 1;
-                if *count == 0 {
-                    inner.active.remove(&peer_key);
-                }
+            let Some(count) = inner.active.get_mut(&peer_key) else {
+                debug_assert!(false, "job_done without an active job for {peer_key}");
+                tracing::debug!(
+                    peer_id = %peer_key,
+                    "job_done called without an active job; ignoring"
+                );
+                return;
+            };
+            *count -= 1;
+            if *count == 0 {
+                inner.active.remove(&peer_key);
             }
             inner.active_jobs = inner.active_jobs.saturating_sub(1);
             if succeeded {
@@ -729,11 +739,15 @@ mod tests {
             4,
             Duration::from_millis(10),
         );
-        let peer = PeerId::new("flaky".to_string());
-        backlog.try_enqueue(job("flaky", b"1"));
-        let popped = backlog.next_job().await.unwrap();
-        backlog.job_done(&popped.peer_id, false);
-        backlog.job_done(&peer, false);
+
+        for _ in 0..2 {
+            backlog.try_enqueue(job("flaky", b"1"));
+            let popped = tokio::time::timeout(Duration::from_secs(2), backlog.next_job())
+                .await
+                .expect("job available once any cooldown expires")
+                .unwrap();
+            backlog.job_done(&popped.peer_id, false);
+        }
 
         let snap = backlog.snapshot();
         let entry = snap
@@ -744,12 +758,41 @@ mod tests {
         assert_eq!(entry.consecutive_failures, 2);
         assert!(entry.cooldown_remaining_ms > 0);
 
-        backlog.job_done(&peer, true);
+        backlog.try_enqueue(job("flaky", b"1"));
+        let popped = tokio::time::timeout(Duration::from_secs(2), backlog.next_job())
+            .await
+            .expect("job available once the cooldown expires")
+            .unwrap();
+        backlog.job_done(&popped.peer_id, true);
         let snap = backlog.snapshot();
         assert!(
             !snap.per_peer.iter().any(|entry| entry.peer_id == "flaky"),
             "success must clear the cooldown"
         );
+    }
+
+    /// A `job_done` with no matching active job (caller bug) must not desync
+    /// the accounting or charge a cooldown.
+    #[tokio::test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "job_done without an active job")
+    )]
+    async fn spurious_job_done_is_ignored() {
+        let backlog = PushBacklog::new(1024, usize::MAX, 4, 4);
+        backlog.try_enqueue(job("a", b"1"));
+        let popped = backlog.next_job().await.unwrap();
+        backlog.job_done(&popped.peer_id, true);
+        assert_eq!(backlog.snapshot().active_jobs, 0);
+
+        backlog.job_done(&popped.peer_id, false);
+        let snap = backlog.snapshot();
+        assert_eq!(snap.active_jobs, 0);
+        assert_eq!(
+            snap.failed_total, 0,
+            "spurious call must not count a failure"
+        );
+        assert!(!snap.per_peer.iter().any(|entry| entry.peer_id == "a"));
     }
 
     #[tokio::test]
