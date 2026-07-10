@@ -368,6 +368,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         fetcher: &dyn DocFetcher,
         doc_id: &str,
         version_select: &Select,
+        collection_id: &str,
         target_cid: Option<&str>,
     ) -> Result<JsonValue> {
         use crate::fetcher::CommitsQueryOptions;
@@ -396,7 +397,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // and render the requested fields
         let mut version_results: Vec<JsonValue> = Vec::new();
 
-        for commit in commits {
+        for mut commit in commits {
             // Filter to composite commits
             let field_name = commit
                 .get("fieldName")
@@ -406,6 +407,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 continue;
             }
 
+            commit.set("collectionID", collection_id.to_string());
             let commit_json = self.render_commit(&commit, version_select)?;
             version_results.push(commit_json);
         }
@@ -761,7 +763,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             > = std::collections::HashMap::new();
 
             let mut keep = Vec::with_capacity(commits.len());
-            for commit in &commits {
+            for commit in &mut commits {
                 let version_id = commit.get("collectionVersionId").and_then(|v| v.as_str());
                 let doc_id = commit.get("docID").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -785,7 +787,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     },
                 };
 
-                let allowed = match collection {
+                let allowed = match &collection {
                     // Fail closed: a commit whose collection version cannot be
                     // resolved is denied (Go errors the query here). Never allow
                     // an unresolved version through unchecked.
@@ -821,6 +823,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         }
                     },
                 };
+                if let Some(collection) = collection {
+                    commit.set("collectionID", collection.collection_id.clone());
+                }
                 keep.push(allowed);
             }
             let mut keep = keep.into_iter();

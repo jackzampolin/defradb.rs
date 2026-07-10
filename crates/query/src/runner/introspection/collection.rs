@@ -287,6 +287,7 @@ pub(super) fn build_commit_type() -> Object {
             )),
         )
         .field(null_field!("cid", TypeRef::named("String")))
+        .field(null_field!("collectionID", TypeRef::named("String")))
         .field(null_field!("collectionVersionId", TypeRef::named("String")))
         .field(null_field!("delta", TypeRef::named("String")))
         .field(null_field!("docID", TypeRef::named("String")))
