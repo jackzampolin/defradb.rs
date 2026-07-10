@@ -90,14 +90,20 @@ pub(crate) use super::manager::{
     DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
 };
 
-/// A push failure notification sent when a PushLog to a replicator peer fails.
+/// A durable retry update emitted by outbound PushLog admission/workers.
 ///
-/// The FFI layer consumes these to record failures in the Peerstore for retry.
+/// The runtime consumes failures to create retry records and newer-head
+/// observations to retire an existing persisted predecessor.
 #[derive(Debug, Clone)]
 pub struct PushFailure {
     pub peer_id: String,
     pub doc_id: String,
     pub collection_id: String,
+    pub cid: String,
+    pub head_priority: u64,
+    /// False for a newer-head observation that must only retire an existing
+    /// persisted predecessor, never create a new retry obligation.
+    pub create_retry: bool,
 }
 
 /// Stable diagnostic snapshot of P2P-owned sync resources (#1099).
@@ -108,7 +114,16 @@ pub struct PushFailure {
 /// retained task handles, and overload counters.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SyncStatus {
+    /// Live queue occupancy and retry/retirement counters.
     pub push_backlog: crate::sync::push_backlog::PushBacklogSnapshot,
+    /// CID cache acquisitions that reused an existing fan-out payload.
+    pub encode_cache_hits_total: u64,
+    /// Entries still owned by at least one queued or active peer job.
+    pub encode_cache_entries: usize,
+    /// Gossip updates folded into a newer update during the short window.
+    pub broadcast_coalesced_total: u64,
+    /// Replicator fan-outs folded before enumerating peers.
+    pub push_updates_coalesced_total: u64,
     pub pending_dags: usize,
     pub pending_dag_capacity: usize,
     /// Durable pending-DAG registrations (may exceed `pending_dags`: records
@@ -283,7 +298,7 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
     /// Broadcaster for publishing updates.
     pub(super) broadcaster: Broadcaster<T>,
 
-    /// Channel for reporting push failures to the FFI layer for retry tracking.
+    /// Channel for reporting durable retry updates to the host runtime.
     /// Behind a shared slot so the fixed push workers observe a channel that
     /// is installed after construction (`set_failure_channel`).
     pub(super) failure_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<PushFailure>>>>,
@@ -294,6 +309,14 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
     /// Bounded admission queue for outbound replicator pushes, drained by the
     /// fixed worker pool spawned at construction (#1099).
     pub(super) push_backlog: Arc<super::push_backlog::PushBacklog>,
+
+    /// CID-keyed weak cache shared by every peer in one fan-out. Strong
+    /// lifetime is owned by queued/active jobs.
+    pub(super) push_encode_cache: Arc<super::push_encode_cache::PushEncodeCache>,
+
+    pub(super) broadcast_coalescer: Arc<super::broadcast_coalescer::BroadcastCoalescer>,
+
+    pub(super) push_fanout_coalescer: Arc<super::push_fanout_coalescer::PushFanoutCoalescer>,
 
     /// Temporary per-peer CAR grants scoped to DAGs in active outbound pushes.
     pub(super) selective_car_access: Arc<selective_car_access::SelectiveCarAccess>,
@@ -401,6 +424,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let diagnostics = self.manager.diagnostics().snapshot();
         SyncStatus {
             push_backlog: self.runtime.push_backlog.snapshot(),
+            encode_cache_hits_total: self.runtime.push_encode_cache.hits(),
+            encode_cache_entries: self.runtime.push_encode_cache.live_entries(),
+            broadcast_coalesced_total: self.runtime.broadcast_coalescer.coalesced(),
+            push_updates_coalesced_total: self.runtime.push_fanout_coalescer.coalesced(),
             pending_dags: self.manager.pending_dag_count(),
             pending_dag_capacity: self.manager.max_pending_dags(),
             persisted_pending_dags: self.manager.persisted_pending_count(),

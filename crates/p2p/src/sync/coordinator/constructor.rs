@@ -180,6 +180,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             config.max_active_pushes_per_peer,
             max_push_tasks,
         );
+        let push_encode_cache =
+            Arc::new(crate::sync::push_encode_cache::PushEncodeCache::default());
+        let broadcast_coalescer =
+            Arc::new(crate::sync::broadcast_coalescer::BroadcastCoalescer::default());
+        let push_fanout_coalescer =
+            Arc::new(crate::sync::push_fanout_coalescer::PushFanoutCoalescer::default());
         let selective_car_access =
             Arc::new(super::selective_car_access::SelectiveCarAccess::default());
         let rate_limit_burst = config.rate_limit_burst;
@@ -233,6 +239,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     failure_tx,
                     dag_fetch_limiter: DagFetchLimiter::new(max_dag_fetches),
                     push_backlog,
+                    push_encode_cache,
+                    broadcast_coalescer,
+                    push_fanout_coalescer,
                     selective_car_access,
                     rate_limiter: Arc::new(PeerRateLimiter::with_backoff_steps(
                         rate_limit_burst,

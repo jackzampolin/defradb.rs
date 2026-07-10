@@ -7,6 +7,7 @@
 //! - Applying CRDT merges to integrate remote changes
 //! - Broadcasting local changes to the network
 
+mod broadcast_coalescer;
 mod broadcaster;
 pub(crate) mod car;
 mod collection_store;
@@ -18,6 +19,8 @@ mod merge;
 mod peer_state;
 pub mod pending_store;
 mod push_backlog;
+pub(crate) mod push_encode_cache;
+pub(crate) mod push_fanout_coalescer;
 mod queue;
 pub(crate) mod rate_limiter;
 mod replication;
@@ -51,8 +54,8 @@ pub use pending_store::{
     PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedReplayAuthorization,
 };
 pub use push_backlog::{
-    EnqueueOutcome, PeerBacklogSnapshot, PushBacklog, PushBacklogSnapshot, PushJobSpec,
-    DEFAULT_PUSH_FAILURE_COOLDOWN_BASE,
+    CidRetrySnapshot, EnqueueOutcome, PeerBacklogSnapshot, PushBacklog, PushBacklogSnapshot,
+    PushJobSpec, DEFAULT_PUSH_FAILURE_COOLDOWN_BASE,
 };
 pub use queue::ProcessQueue;
 pub use replication::{recover_unmerged, ReplicationConfig, ReplicationLoop, ReplicationResult};

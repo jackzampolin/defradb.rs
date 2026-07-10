@@ -277,6 +277,13 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
                 crate::sync::DEFAULT_MAX_ACTIVE_PUSHES_PER_PEER,
                 DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
             ),
+            push_encode_cache: Arc::new(crate::sync::push_encode_cache::PushEncodeCache::default()),
+            broadcast_coalescer: Arc::new(
+                crate::sync::broadcast_coalescer::BroadcastCoalescer::default(),
+            ),
+            push_fanout_coalescer: Arc::new(
+                crate::sync::push_fanout_coalescer::PushFanoutCoalescer::default(),
+            ),
             selective_car_access: Arc::new(
                 super::selective_car_access::SelectiveCarAccess::default(),
             ),

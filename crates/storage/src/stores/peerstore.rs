@@ -6,8 +6,44 @@ use crate::corekv::{IterOptions, Key, Reader, Result, Store, Txn, Writer};
 use crate::keys::peerstore::{ReplicatorKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
+use cid::Cid;
+use std::cmp::Ordering;
+use std::future::Future;
 use std::sync::Arc;
 use tracing;
+
+const PUSH_RETRY_TXN_MAX_ATTEMPTS: usize = 4;
+
+async fn retry_push_txn_conflicts<T, F, Fut>(mut operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    for attempt in 1..=PUSH_RETRY_TXN_MAX_ATTEMPTS {
+        match operation().await {
+            Err(error) if error.is_retriable() && attempt < PUSH_RETRY_TXN_MAX_ATTEMPTS => {
+                tracing::debug!(attempt, "retrying push-ledger transaction conflict");
+            }
+            result => return result,
+        }
+    }
+    unreachable!("bounded transaction retry loop always returns")
+}
+
+fn compare_push_versions(
+    left_priority: u64,
+    left_cid: &str,
+    right_priority: u64,
+    right_cid: &str,
+) -> Ordering {
+    left_priority.cmp(&right_priority).then_with(|| {
+        match (Cid::try_from(left_cid), Cid::try_from(right_cid)) {
+            (Ok(left), Ok(right)) => left.cmp(&right),
+            // Legacy or corrupt values still need a deterministic order.
+            _ => left_cid.as_bytes().cmp(right_cid.as_bytes()),
+        }
+    })
+}
 
 /// Peerstore provides storage for peer and replication metadata
 pub struct Peerstore<S: Store> {
@@ -148,13 +184,43 @@ impl<S: Store> Peerstore<S> {
 
     /// Record a push failure for a specific peer/doc pair.
     ///
-    /// Writes the retry info at `/rep/retry/id/{peer}` and the collection_id
-    /// at `/rep/retry/doc/{peer}/{doc}`.
+    /// Writes the peer marker at `/rep/retry/id/{peer}` and a versioned,
+    /// independently scheduled record at `/rep/retry/doc/{peer}/{doc}`.
     pub async fn record_push_failure(
         &self,
         peer_id: &str,
         doc_id: &str,
         collection_id: &str,
+        cid: &str,
+        priority: u64,
+        retry_info_bytes: &[u8],
+    ) -> Result<()> {
+        // Collection commits are CID-scoped live obligations. The document
+        // retry loop cannot service an empty document ID, so persisting one
+        // would create a permanent peer marker with no runnable work.
+        if doc_id.is_empty() {
+            return Ok(());
+        }
+        retry_push_txn_conflicts(|| {
+            self.record_push_failure_once(
+                peer_id,
+                doc_id,
+                collection_id,
+                cid,
+                priority,
+                retry_info_bytes,
+            )
+        })
+        .await
+    }
+
+    async fn record_push_failure_once(
+        &self,
+        peer_id: &str,
+        doc_id: &str,
+        collection_id: &str,
+        cid: &str,
+        priority: u64,
         retry_info_bytes: &[u8],
     ) -> Result<()> {
         let mut txn = self.store.new_txn(false).await?;
@@ -164,7 +230,280 @@ impl<S: Store> Peerstore<S> {
             txn.set(&id_key.bytes(), retry_info_bytes).await?;
         }
         let doc_key = ReplicatorRetryDocIDKey::new(peer_id, doc_id);
-        txn.set(&doc_key.bytes(), collection_id.as_bytes()).await?;
+        let existing = txn.get(&doc_key.bytes()).await?;
+        let current = existing
+            .as_deref()
+            .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
+        let retry = match current {
+            // SE-artifact failures are versionless (`cid == ""`). They must
+            // activate the current dormant head instead of comparing as an
+            // older priority-0 document failure and disappearing. The retry
+            // pass re-reads current document heads before regenerating SE
+            // artifacts, so retaining the watermark's version is correct.
+            Some(mut retry) if cid.is_empty() => {
+                if !retry.pending {
+                    retry.activate(&format!("{peer_id}:{}", retry.cid));
+                }
+                retry
+            }
+            Some(retry)
+                if compare_push_versions(retry.priority, &retry.cid, priority, cid).is_gt() =>
+            {
+                retry
+            }
+            Some(retry) if retry.cid == cid && retry.pending => retry,
+            Some(mut retry) if retry.cid == cid => {
+                retry.activate(&format!("{peer_id}:{cid}"));
+                retry
+            }
+            _ => {
+                let mut retry =
+                    super::PersistedPushRetry::new_observed(doc_id, collection_id, cid, priority);
+                retry.activate(&format!("{peer_id}:{cid}"));
+                retry
+            }
+        };
+        let bytes = retry.to_bytes().map_err(crate::corekv::Error::Other)?;
+        txn.set(&doc_key.bytes(), &bytes).await?;
+        txn.commit().await
+    }
+
+    /// Replace an existing persisted retry with a dormant newer-head watermark
+    /// without creating state for healthy `(document, peer)` pairs. A later
+    /// failure of this exact head activates its independently jittered retry.
+    pub async fn observe_push_head(
+        &self,
+        peer_id: &str,
+        doc_id: &str,
+        collection_id: &str,
+        cid: &str,
+        priority: u64,
+    ) -> Result<()> {
+        if doc_id.is_empty() {
+            return Ok(());
+        }
+        retry_push_txn_conflicts(|| {
+            self.observe_push_head_once(peer_id, doc_id, collection_id, cid, priority)
+        })
+        .await
+    }
+
+    async fn observe_push_head_once(
+        &self,
+        peer_id: &str,
+        doc_id: &str,
+        collection_id: &str,
+        cid: &str,
+        priority: u64,
+    ) -> Result<()> {
+        let key = ReplicatorRetryDocIDKey::new(peer_id, doc_id);
+        let mut txn = self.store.new_txn(false).await?;
+        let Some(bytes) = txn.get(&key.bytes()).await? else {
+            return txn.commit().await;
+        };
+        let current = super::PersistedPushRetry::from_bytes(&bytes).ok();
+        if let Some(retry) = current.as_ref() {
+            if compare_push_versions(retry.priority, &retry.cid, priority, cid).is_gt()
+                || (retry.cid == cid && retry.pending)
+            {
+                return txn.commit().await;
+            }
+        }
+        let retry = super::PersistedPushRetry::new_observed(doc_id, collection_id, cid, priority);
+        let bytes = retry.to_bytes().map_err(crate::corekv::Error::Other)?;
+        txn.set(&key.bytes(), &bytes).await?;
+        txn.commit().await
+    }
+
+    /// Get each pending independently scheduled retry for a peer. Dormant
+    /// newest-head watermarks are omitted. Legacy raw collection-ID values
+    /// inherit the old peer-level schedule and are rewritten on their next
+    /// failure/update.
+    pub async fn get_retry_documents(
+        &self,
+        peer_id: &str,
+    ) -> Result<Vec<super::PersistedPushRetry>> {
+        let fallback = self
+            .get_retry_info(peer_id)
+            .await?
+            .and_then(|bytes| super::RetryInfo::from_bytes(&bytes).ok())
+            .unwrap_or_else(super::RetryInfo::new_initial);
+        let prefix = ReplicatorRetryDocIDKey::peer_prefix(peer_id);
+        let txn = self.store.new_txn(true).await?;
+        let opts = IterOptions::new().with_prefix(prefix);
+        let mut iter = txn.iterator(opts).await?;
+        let expected_prefix = format!("/rep/retry/doc/{peer_id}/");
+        let mut results = Vec::new();
+        while let Some(pair) = iter.next().await? {
+            let key = String::from_utf8_lossy(&pair.key);
+            let Some(doc_id) = key.strip_prefix(&expected_prefix) else {
+                continue;
+            };
+            if doc_id.is_empty() {
+                continue;
+            }
+            let retry = super::PersistedPushRetry::from_bytes(&pair.value).unwrap_or_else(|_| {
+                super::PersistedPushRetry {
+                    doc_id: doc_id.to_string(),
+                    collection_id: String::from_utf8_lossy(&pair.value).to_string(),
+                    cid: String::new(),
+                    priority: 0,
+                    pending: true,
+                    retry_info: fallback.clone(),
+                }
+            });
+            if retry.pending {
+                results.push(retry);
+            }
+        }
+        Ok(results)
+    }
+
+    /// Promote dormant live-send watermarks after process startup. A dormant
+    /// record means the previous process was betting on volatile in-memory
+    /// work; after a restart that work no longer exists, so the exact newest
+    /// head must become an immediately due durable retry.
+    pub async fn activate_dormant_push_retries(&self) -> Result<usize> {
+        let txn = self.store.new_txn(true).await?;
+        let mut iter = txn
+            .iterator(IterOptions::new().with_prefix(ReplicatorRetryDocIDKey::retry_doc_prefix()))
+            .await?;
+        let expected_prefix = "/rep/retry/doc/";
+        let mut dormant = Vec::new();
+        while let Some(pair) = iter.next().await? {
+            let key = String::from_utf8_lossy(&pair.key);
+            let Some((peer_id, key_doc_id)) = key
+                .strip_prefix(expected_prefix)
+                .and_then(|suffix| suffix.split_once('/'))
+            else {
+                continue;
+            };
+            let Ok(retry) = super::PersistedPushRetry::from_bytes(&pair.value) else {
+                continue;
+            };
+            if !retry.pending {
+                dormant.push((peer_id.to_string(), key_doc_id.to_string(), retry));
+            }
+        }
+        drop(iter);
+        drop(txn);
+
+        let mut activated = 0;
+        for (peer_id, key_doc_id, retry) in dormant {
+            match retry_push_txn_conflicts(|| {
+                self.activate_dormant_push_retry_once(&peer_id, &key_doc_id, &retry)
+            })
+            .await
+            {
+                Ok(true) => activated += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        peer_id,
+                        doc_id = key_doc_id,
+                        %error,
+                        "failed to activate dormant push retry; continuing startup scan"
+                    );
+                }
+            }
+        }
+        Ok(activated)
+    }
+
+    async fn activate_dormant_push_retry_once(
+        &self,
+        peer_id: &str,
+        key_doc_id: &str,
+        retry: &super::PersistedPushRetry,
+    ) -> Result<bool> {
+        let key = ReplicatorRetryDocIDKey::new(peer_id, key_doc_id);
+        let mut txn = self.store.new_txn(false).await?;
+        let current_bytes = txn.get(&key.bytes()).await?;
+        let current = current_bytes
+            .as_deref()
+            .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
+        let is_same_dormant = current.as_ref().is_some_and(|current| {
+            !current.pending && current.priority == retry.priority && current.cid == retry.cid
+        });
+        if is_same_dormant {
+            let mut activated_retry = retry.clone();
+            activated_retry.pending = true;
+            activated_retry.retry_info = super::RetryInfo::new_initial();
+            let bytes = activated_retry
+                .to_bytes()
+                .map_err(crate::corekv::Error::Other)?;
+            txn.set(&key.bytes(), &bytes).await?;
+            let id_key = ReplicatorRetryIDKey::new(peer_id);
+            if !txn.has(&id_key.bytes()).await? {
+                let info = super::RetryInfo::new_initial()
+                    .to_bytes()
+                    .map_err(crate::corekv::Error::Other)?;
+                txn.set(&id_key.bytes(), &info).await?;
+            }
+        }
+        txn.commit().await?;
+        Ok(is_same_dormant)
+    }
+
+    pub async fn update_retry_document(
+        &self,
+        peer_id: &str,
+        retry: &super::PersistedPushRetry,
+    ) -> Result<()> {
+        retry_push_txn_conflicts(|| self.update_retry_document_once(peer_id, retry)).await
+    }
+
+    async fn update_retry_document_once(
+        &self,
+        peer_id: &str,
+        retry: &super::PersistedPushRetry,
+    ) -> Result<()> {
+        let key = ReplicatorRetryDocIDKey::new(peer_id, &retry.doc_id);
+        let mut txn = self.store.new_txn(false).await?;
+        let current = txn.get(&key.bytes()).await?;
+        let current_retry = current
+            .as_deref()
+            .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
+        let is_current =
+            current_retry.as_ref().is_some_and(|current| {
+                current.pending && current.priority == retry.priority && current.cid == retry.cid
+            }) || (current.is_some() && current_retry.is_none() && retry.cid.is_empty());
+        if !is_current {
+            return txn.commit().await;
+        }
+        let bytes = retry.to_bytes().map_err(crate::corekv::Error::Other)?;
+        txn.set(&key.bytes(), &bytes).await?;
+        txn.commit().await
+    }
+
+    /// Complete a retry only if the stored version still matches the attempt.
+    /// A concurrent newer-head observation must survive an old attempt's ack.
+    pub async fn complete_retry_document(
+        &self,
+        peer_id: &str,
+        retry: &super::PersistedPushRetry,
+    ) -> Result<()> {
+        retry_push_txn_conflicts(|| self.complete_retry_document_once(peer_id, retry)).await
+    }
+
+    async fn complete_retry_document_once(
+        &self,
+        peer_id: &str,
+        retry: &super::PersistedPushRetry,
+    ) -> Result<()> {
+        let key = ReplicatorRetryDocIDKey::new(peer_id, &retry.doc_id);
+        let mut txn = self.store.new_txn(false).await?;
+        let current = txn.get(&key.bytes()).await?;
+        let current_retry = current
+            .as_deref()
+            .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
+        let is_current =
+            current_retry.as_ref().is_some_and(|current| {
+                current.pending && current.priority == retry.priority && current.cid == retry.cid
+            }) || (current.is_some() && current_retry.is_none() && retry.cid.is_empty());
+        if is_current {
+            txn.delete(&key.bytes()).await?;
+        }
         txn.commit().await
     }
 
@@ -200,46 +539,58 @@ impl<S: Store> Peerstore<S> {
     ///
     /// Returns `(doc_id, collection_id)` pairs.
     pub async fn get_retry_doc_ids(&self, peer_id: &str) -> Result<Vec<(String, String)>> {
-        let prefix = ReplicatorRetryDocIDKey::peer_prefix(peer_id);
-        let txn = self.store.new_txn(true).await?;
-        let opts = IterOptions::new().with_prefix(prefix);
-        let mut iter = txn.iterator(opts).await?;
+        Ok(self
+            .get_retry_documents(peer_id)
+            .await?
+            .into_iter()
+            .map(|retry| (retry.doc_id, retry.collection_id))
+            .collect())
+    }
 
-        let expected_prefix = format!("/rep/retry/doc/{}/", peer_id);
-        let mut results = Vec::new();
+    /// Stop sweeping a peer once no retry is pending. Dormant newest-head
+    /// watermarks deliberately survive: they cover volatile live work and
+    /// are promoted by `activate_dormant_push_retries` after a restart.
+    pub async fn clear_retry_peer(&self, peer_id: &str) -> Result<()> {
+        retry_push_txn_conflicts(|| self.clear_retry_peer_once(peer_id)).await
+    }
+
+    async fn clear_retry_peer_once(&self, peer_id: &str) -> Result<()> {
+        let mut txn = self.store.new_txn(false).await?;
+        let prefix = ReplicatorRetryDocIDKey::peer_prefix(peer_id);
+        let mut iter = txn.iterator(IterOptions::new().with_prefix(prefix)).await?;
+        let expected_prefix = format!("/rep/retry/doc/{peer_id}/");
+        let mut empty_doc_keys = Vec::new();
+        let mut has_pending = false;
         while let Some(pair) = iter.next().await? {
-            let key_str = String::from_utf8_lossy(&pair.key);
-            if let Some(doc_id) = key_str.strip_prefix(&expected_prefix) {
-                if !doc_id.is_empty() {
-                    let collection_id = String::from_utf8_lossy(&pair.value).to_string();
-                    results.push((doc_id.to_string(), collection_id));
+            let key = String::from_utf8_lossy(&pair.key);
+            if key
+                .strip_prefix(&expected_prefix)
+                .is_some_and(str::is_empty)
+            {
+                // Clean up the unserviceable shape produced by earlier
+                // revisions without letting it wedge this peer forever.
+                empty_doc_keys.push(pair.key);
+                continue;
+            }
+            match super::PersistedPushRetry::from_bytes(&pair.value) {
+                Ok(retry) if !retry.pending => {}
+                // A pending or legacy record raced the caller's empty check;
+                // preserve it and its peer marker for the retry loop.
+                _ => {
+                    has_pending = true;
+                    break;
                 }
             }
         }
-        Ok(results)
-    }
-
-    /// Remove a single doc retry entry for a peer.
-    pub async fn remove_retry_doc(&self, peer_id: &str, doc_id: &str) -> Result<()> {
-        let key = ReplicatorRetryDocIDKey::new(peer_id, doc_id);
-        let mut txn = self.store.new_txn(false).await?;
-        txn.delete(&key.bytes()).await?;
-        txn.commit().await
-    }
-
-    /// Clear retry info for a peer (called when all docs succeed).
-    pub async fn clear_retry_peer(&self, peer_id: &str) -> Result<()> {
-        let key = ReplicatorRetryIDKey::new(peer_id);
-        let mut txn = self.store.new_txn(false).await?;
-        txn.delete(&key.bytes()).await?;
-        txn.commit().await
-    }
-
-    /// Update the retry info for a peer (after a failed retry attempt).
-    pub async fn update_retry_info(&self, peer_id: &str, bytes: &[u8]) -> Result<()> {
-        let key = ReplicatorRetryIDKey::new(peer_id);
-        let mut txn = self.store.new_txn(false).await?;
-        txn.set(&key.bytes(), bytes).await?;
+        drop(iter);
+        if has_pending {
+            return txn.commit().await;
+        }
+        for doc_key in empty_doc_keys {
+            txn.delete(&doc_key).await?;
+        }
+        txn.delete(&ReplicatorRetryIDKey::new(peer_id).bytes())
+            .await?;
         txn.commit().await
     }
 }
@@ -260,10 +611,68 @@ impl<S: Store> Store for Peerstore<S> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
     use super::*;
     use crate::backends::MemoryStore;
     use crate::corekv::Key;
     use crate::keys::peerstore::ReplicatorKey;
+
+    #[tokio::test]
+    async fn push_transaction_conflicts_retry_to_success() {
+        let attempts = AtomicUsize::new(0);
+
+        retry_push_txn_conflicts(|| async {
+            if attempts.fetch_add(1, AtomicOrdering::Relaxed) < 2 {
+                Err(crate::corekv::Error::TxnConflict)
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(attempts.load(AtomicOrdering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn push_transaction_conflicts_stop_at_bound() {
+        let attempts = AtomicUsize::new(0);
+
+        let error = retry_push_txn_conflicts(|| async {
+            attempts.fetch_add(1, AtomicOrdering::Relaxed);
+            Err::<(), _>(crate::corekv::Error::TxnConflict)
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error.is_txn_conflict());
+        assert_eq!(
+            attempts.load(AtomicOrdering::Relaxed),
+            PUSH_RETRY_TXN_MAX_ATTEMPTS
+        );
+    }
+
+    #[test]
+    fn push_version_tie_break_uses_cid_bytes_not_base32_text() {
+        let cids: Vec<_> = (0_u8..=255)
+            .map(|seed| {
+                let digest = [seed; 32];
+                let hash = cid::multihash::Multihash::<64>::wrap(0x12, &digest).unwrap();
+                Cid::new_v1(0x55, hash)
+            })
+            .collect();
+        let (left, right) = cids
+            .iter()
+            .flat_map(|left| cids.iter().map(move |right| (left, right)))
+            .find(|(left, right)| left.cmp(right) != left.to_string().cmp(&right.to_string()))
+            .expect("test corpus must contain a base32/CID ordering disagreement");
+
+        assert_eq!(
+            compare_push_versions(1, &left.to_string(), 1, &right.to_string()),
+            left.cmp(right)
+        );
+    }
 
     #[tokio::test]
     async fn test_peerstore_basic() {
@@ -389,5 +798,266 @@ mod tests {
         // Still only one replicator
         let all = peerstore.list_replicators().await.unwrap();
         assert_eq!(all.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_record_keeps_only_newest_cid_and_its_own_backoff() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+        peerstore
+            .record_push_failure("peer", "doc", "collection", "cid-1", 1, &initial)
+            .await
+            .unwrap();
+        let mut retry = peerstore
+            .get_retry_documents("peer")
+            .await
+            .unwrap()
+            .remove(0);
+        retry.retry_info.bump();
+        peerstore
+            .update_retry_document("peer", &retry)
+            .await
+            .unwrap();
+
+        peerstore
+            .observe_push_head("peer", "doc", "collection", "cid-2", 2)
+            .await
+            .unwrap();
+        assert!(peerstore
+            .get_retry_documents("peer")
+            .await
+            .unwrap()
+            .is_empty());
+        peerstore
+            .record_push_failure("peer", "doc", "collection", "cid-1", 1, &initial)
+            .await
+            .unwrap();
+        assert!(peerstore
+            .get_retry_documents("peer")
+            .await
+            .unwrap()
+            .is_empty());
+        peerstore
+            .record_push_failure("peer", "doc", "collection", "cid-2", 2, &initial)
+            .await
+            .unwrap();
+
+        let retries = peerstore.get_retry_documents("peer").await.unwrap();
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].cid, "cid-2");
+        assert_eq!(retries[0].priority, 2);
+        assert_eq!(retries[0].retry_info.num_retries, 1);
+
+        let stale_attempt = retries[0].clone();
+        peerstore
+            .observe_push_head("peer", "doc", "collection", "cid-3", 3)
+            .await
+            .unwrap();
+        peerstore
+            .complete_retry_document("peer", &stale_attempt)
+            .await
+            .unwrap();
+        peerstore
+            .update_retry_document("peer", &stale_attempt)
+            .await
+            .unwrap();
+        peerstore
+            .record_push_failure("peer", "doc", "collection", "cid-2", 2, &initial)
+            .await
+            .unwrap();
+        assert!(peerstore
+            .get_retry_documents("peer")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn observing_an_equal_pending_head_does_not_deactivate_its_retry() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+        peerstore
+            .record_push_failure("peer", "doc", "collection", "cid", 1, &initial)
+            .await
+            .unwrap();
+        peerstore
+            .observe_push_head("peer", "doc", "collection", "cid", 1)
+            .await
+            .unwrap();
+
+        let retries = peerstore.get_retry_documents("peer").await.unwrap();
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].cid, "cid");
+        assert!(retries[0].pending);
+    }
+
+    #[tokio::test]
+    async fn versionless_se_failure_activates_current_dormant_head() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+        peerstore
+            .record_push_failure("peer", "doc", "collection", "old", 1, &initial)
+            .await
+            .unwrap();
+        peerstore
+            .observe_push_head("peer", "doc", "collection", "new", 2)
+            .await
+            .unwrap();
+        assert!(peerstore
+            .get_retry_documents("peer")
+            .await
+            .unwrap()
+            .is_empty());
+
+        peerstore
+            .record_push_failure("peer", "doc", "collection", "", 0, &initial)
+            .await
+            .unwrap();
+
+        let retries = peerstore.get_retry_documents("peer").await.unwrap();
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].cid, "new");
+        assert_eq!(retries[0].priority, 2);
+        assert!(retries[0].pending);
+    }
+
+    #[tokio::test]
+    async fn sweep_clear_preserves_dormant_watermark_for_restart_promotion() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+        peerstore
+            .record_push_failure("peer", "doc", "collection", "old", 1, &initial)
+            .await
+            .unwrap();
+        peerstore
+            .observe_push_head("peer", "doc", "collection", "new", 2)
+            .await
+            .unwrap();
+        assert!(peerstore
+            .get_retry_documents("peer")
+            .await
+            .unwrap()
+            .is_empty());
+
+        // The live sweep stops revisiting this peer but must preserve the
+        // dormant crash-recovery obligation.
+        peerstore.clear_retry_peer("peer").await.unwrap();
+        assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
+        assert_eq!(peerstore.activate_dormant_push_retries().await.unwrap(), 1);
+        let retries = peerstore.get_retry_documents("peer").await.unwrap();
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].cid, "new");
+        assert!(retries[0].retry_info.is_due());
+
+        // A clear racing pending work must preserve it.
+        peerstore.clear_retry_peer("peer").await.unwrap();
+        assert_eq!(
+            peerstore.get_retry_documents("peer").await.unwrap().len(),
+            1
+        );
+        peerstore
+            .complete_retry_document("peer", &retries[0])
+            .await
+            .unwrap();
+        peerstore.clear_retry_peer("peer").await.unwrap();
+        assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
+        assert_eq!(peerstore.activate_dormant_push_retries().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_document_push_failure_creates_no_retry_state() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+        peerstore
+            .record_push_failure("peer", "", "collection", "collection-cid", 1, &initial)
+            .await
+            .unwrap();
+        peerstore
+            .observe_push_head("peer", "", "collection", "collection-cid", 1)
+            .await
+            .unwrap();
+
+        assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
+        assert!(peerstore
+            .get_retry_documents("peer")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_raw_collection_retry_reads_and_migrates_on_failure() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+        let mut txn = peerstore.store.new_txn(false).await.unwrap();
+        txn.set(&ReplicatorRetryIDKey::new("peer").bytes(), &initial)
+            .await
+            .unwrap();
+        txn.set(
+            &ReplicatorRetryDocIDKey::new("peer", "doc").bytes(),
+            b"collection",
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        let legacy = peerstore.get_retry_documents("peer").await.unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].doc_id, "doc");
+        assert_eq!(legacy[0].collection_id, "collection");
+        assert!(legacy[0].cid.is_empty());
+
+        peerstore
+            .record_push_failure("peer", "doc", "collection", "cid", 1, &initial)
+            .await
+            .unwrap();
+        let migrated = peerstore.get_retry_documents("peer").await.unwrap();
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0].cid, "cid");
+        assert_eq!(migrated[0].priority, 1);
+    }
+
+    #[tokio::test]
+    async fn sweep_clear_removes_preexisting_empty_document_retry() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let mut retry =
+            super::super::PersistedPushRetry::new_observed("", "collection", "collection-cid", 1);
+        retry.activate("peer:collection-cid");
+        let mut txn = peerstore.store.new_txn(false).await.unwrap();
+        txn.set(
+            &ReplicatorRetryIDKey::new("peer").bytes(),
+            &super::super::RetryInfo::new_initial().to_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
+        txn.set(
+            &ReplicatorRetryDocIDKey::new("peer", "").bytes(),
+            &retry.to_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        peerstore.clear_retry_peer("peer").await.unwrap();
+
+        assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
+        let txn = peerstore.store.new_txn(true).await.unwrap();
+        assert!(txn
+            .get(&ReplicatorRetryDocIDKey::new("peer", "").bytes())
+            .await
+            .unwrap()
+            .is_none());
     }
 }

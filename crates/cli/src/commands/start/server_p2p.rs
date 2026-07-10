@@ -520,24 +520,40 @@ impl Node {
             let mut rx = failure_rx;
             while let Some(failure) = rx.recv().await {
                 let peerstore = storage::stores::Peerstore::new(recorder_store.clone());
-                let retry_info = storage::stores::RetryInfo::new_initial();
-                let info_bytes = match retry_info.to_bytes() {
-                    Ok(b) => b,
-                    Err(e) => {
-                        warn!(error = %e, "Failed to serialize RetryInfo");
-                        continue;
-                    }
+                let result = if failure.create_retry {
+                    let info_bytes = match storage::stores::RetryInfo::new_initial().to_bytes() {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            warn!(error = %error, "Failed to serialize RetryInfo");
+                            continue;
+                        }
+                    };
+                    peerstore
+                        .record_push_failure(
+                            &failure.peer_id,
+                            &failure.doc_id,
+                            &failure.collection_id,
+                            &failure.cid,
+                            failure.head_priority,
+                            &info_bytes,
+                        )
+                        .await
+                } else {
+                    peerstore
+                        .observe_push_head(
+                            &failure.peer_id,
+                            &failure.doc_id,
+                            &failure.collection_id,
+                            &failure.cid,
+                            failure.head_priority,
+                        )
+                        .await
                 };
-                if let Err(e) = peerstore
-                    .record_push_failure(
-                        &failure.peer_id.to_string(),
-                        &failure.doc_id,
-                        &failure.collection_id,
-                        &info_bytes,
-                    )
-                    .await
-                {
+                if let Err(e) = result {
                     warn!(error = %e, "Failed to record push failure");
+                    continue;
+                }
+                if !failure.create_retry {
                     continue;
                 }
                 if let Err(e) = set_persisted_replicator_status(
@@ -556,6 +572,10 @@ impl Node {
         let retry_handle = handle.clone();
         let retry_pusher = doc_pusher.clone();
         let retry_loop_task = tokio::spawn(async move {
+            let peerstore = storage::stores::Peerstore::new(retry_store.clone());
+            if let Err(error) = peerstore.activate_dormant_push_retries().await {
+                warn!(error = %error, "Failed to reactivate push retries after restart");
+            }
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let peerstore = storage::stores::Peerstore::new(retry_store.clone());
@@ -564,13 +584,11 @@ impl Node {
                     Err(_) => continue,
                 };
                 for (peer_id_str, info_bytes) in peers {
-                    let mut retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
-                        Ok(i) => i,
-                        Err(_) => continue,
-                    };
-                    if !retry_info.is_due() {
-                        continue;
-                    }
+                    let _legacy_retry_info =
+                        match storage::stores::RetryInfo::from_bytes(&info_bytes) {
+                            Ok(i) => i,
+                            Err(_) => continue,
+                        };
                     let peer_id = match peer_id_str.parse::<libp2p::PeerId>() {
                         Ok(p) => p,
                         Err(_) => continue,
@@ -579,7 +597,7 @@ impl Node {
                     if !connected.contains(&peer_id) {
                         continue;
                     }
-                    let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                    let mut docs = match peerstore.get_retry_documents(&peer_id_str).await {
                         Ok(d) => d,
                         Err(_) => continue,
                     };
@@ -593,19 +611,11 @@ impl Node {
                         .await;
                         continue;
                     }
-                    if docs.len() > 1 {
-                        // Rotate the starting document by the peer's own
-                        // persisted retry count: the store iterates in stable
-                        // key order, and a global cursor aliases when it
-                        // advances by the number of due peers per sweep, so
-                        // per-peer state is required for every document to
-                        // eventually lead a pass (#1099 review).
-                        let rotate_by = retry_info.num_retries as usize % docs.len();
-                        docs.rotate_left(rotate_by);
-                    }
-                    let mut all_succeeded = true;
                     let mut fast_failures = 0usize;
-                    for (doc_id, collection_id) in &docs {
+                    for retry in &mut docs {
+                        if !retry.retry_info.is_due() {
+                            continue;
+                        }
                         // Bound each send so a nonresponsive peer cannot
                         // stall healthy peers' retries behind it (#1099). A
                         // timeout ends the pass (the peer is unreachable); a
@@ -614,27 +624,44 @@ impl Node {
                         // key order cannot starve the rest forever.
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(15),
-                            retry_pusher.retry_doc(&retry_handle, peer_id, doc_id, collection_id),
+                            retry_pusher.retry_doc(
+                                &retry_handle,
+                                peer_id,
+                                &retry.doc_id,
+                                &retry.collection_id,
+                            ),
                         )
                         .await
                         {
                             Ok(Ok(())) => {
-                                let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
+                                let _ =
+                                    peerstore.complete_retry_document(&peer_id_str, retry).await;
                             }
                             Ok(Err(_)) => {
-                                all_succeeded = false;
+                                retry
+                                    .retry_info
+                                    .bump_for(&format!("{peer_id_str}:{}", retry.cid));
+                                let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                                 fast_failures += 1;
                                 if fast_failures >= 3 {
                                     break;
                                 }
                             }
                             Err(_) => {
-                                all_succeeded = false;
+                                retry
+                                    .retry_info
+                                    .bump_for(&format!("{peer_id_str}:{}", retry.cid));
+                                let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                                 break;
                             }
                         }
                     }
-                    if all_succeeded {
+                    if peerstore
+                        .get_retry_documents(&peer_id_str)
+                        .await
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
                         let _ = peerstore.clear_retry_peer(&peer_id_str).await;
                         let _ = set_persisted_replicator_status(
                             &peerstore,
@@ -649,10 +676,6 @@ impl Node {
                             p2p::ReplicatorStatus::Inactive,
                         )
                         .await;
-                        retry_info.bump();
-                        if let Ok(bytes) = retry_info.to_bytes() {
-                            let _ = peerstore.update_retry_info(&peer_id_str, &bytes).await;
-                        }
                     }
                 }
             }
@@ -1089,24 +1112,40 @@ impl Node {
             let mut rx = failure_rx;
             while let Some(failure) = rx.recv().await {
                 let peerstore = storage::stores::Peerstore::new(recorder_store.clone());
-                let retry_info = storage::stores::RetryInfo::new_initial();
-                let info_bytes = match retry_info.to_bytes() {
-                    Ok(b) => b,
-                    Err(e) => {
-                        warn!(error = %e, "Failed to serialize RetryInfo");
-                        continue;
-                    }
+                let result = if failure.create_retry {
+                    let info_bytes = match storage::stores::RetryInfo::new_initial().to_bytes() {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            warn!(error = %error, "Failed to serialize RetryInfo");
+                            continue;
+                        }
+                    };
+                    peerstore
+                        .record_push_failure(
+                            &failure.peer_id,
+                            &failure.doc_id,
+                            &failure.collection_id,
+                            &failure.cid,
+                            failure.head_priority,
+                            &info_bytes,
+                        )
+                        .await
+                } else {
+                    peerstore
+                        .observe_push_head(
+                            &failure.peer_id,
+                            &failure.doc_id,
+                            &failure.collection_id,
+                            &failure.cid,
+                            failure.head_priority,
+                        )
+                        .await
                 };
-                if let Err(e) = peerstore
-                    .record_push_failure(
-                        &failure.peer_id,
-                        &failure.doc_id,
-                        &failure.collection_id,
-                        &info_bytes,
-                    )
-                    .await
-                {
+                if let Err(e) = result {
                     warn!(error = %e, "Failed to record push failure");
+                    continue;
+                }
+                if !failure.create_retry {
                     continue;
                 }
                 if let Err(e) = set_persisted_replicator_status(
@@ -1124,6 +1163,10 @@ impl Node {
         let retry_store = store.clone();
         let retry_pusher = doc_pusher.clone();
         let retry_loop_task = tokio::spawn(async move {
+            let peerstore = storage::stores::Peerstore::new(retry_store.clone());
+            if let Err(error) = peerstore.activate_dormant_push_retries().await {
+                warn!(error = %error, "Failed to reactivate push retries after restart");
+            }
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let peerstore = storage::stores::Peerstore::new(retry_store.clone());
@@ -1132,17 +1175,15 @@ impl Node {
                     Err(_) => continue,
                 };
                 for (peer_id_str, info_bytes) in peers {
-                    let mut retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
-                        Ok(i) => i,
-                        Err(_) => continue,
-                    };
-                    if !retry_info.is_due() {
-                        continue;
-                    }
+                    let _legacy_retry_info =
+                        match storage::stores::RetryInfo::from_bytes(&info_bytes) {
+                            Ok(i) => i,
+                            Err(_) => continue,
+                        };
                     let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
                     // Iroh request-response can reconnect on demand, so don't
                     // gate retries on the peer-map snapshot.
-                    let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                    let mut docs = match peerstore.get_retry_documents(&peer_id_str).await {
                         Ok(d) => d,
                         Err(_) => continue,
                     };
@@ -1156,19 +1197,11 @@ impl Node {
                         .await;
                         continue;
                     }
-                    if docs.len() > 1 {
-                        // Rotate the starting document by the peer's own
-                        // persisted retry count: the store iterates in stable
-                        // key order, and a global cursor aliases when it
-                        // advances by the number of due peers per sweep, so
-                        // per-peer state is required for every document to
-                        // eventually lead a pass (#1099 review).
-                        let rotate_by = retry_info.num_retries as usize % docs.len();
-                        docs.rotate_left(rotate_by);
-                    }
-                    let mut all_succeeded = true;
                     let mut fast_failures = 0usize;
-                    for (doc_id, collection_id) in &docs {
+                    for retry in &mut docs {
+                        if !retry.retry_info.is_due() {
+                            continue;
+                        }
                         // Bound each send so a nonresponsive peer cannot
                         // stall healthy peers' retries behind it (#1099). A
                         // timeout ends the pass (the peer is unreachable); a
@@ -1177,27 +1210,39 @@ impl Node {
                         // key order cannot starve the rest forever.
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(15),
-                            retry_pusher.retry_doc(&peer_id, doc_id, collection_id),
+                            retry_pusher.retry_doc(&peer_id, &retry.doc_id, &retry.collection_id),
                         )
                         .await
                         {
                             Ok(Ok(())) => {
-                                let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
+                                let _ =
+                                    peerstore.complete_retry_document(&peer_id_str, retry).await;
                             }
                             Ok(Err(_)) => {
-                                all_succeeded = false;
+                                retry
+                                    .retry_info
+                                    .bump_for(&format!("{peer_id_str}:{}", retry.cid));
+                                let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                                 fast_failures += 1;
                                 if fast_failures >= 3 {
                                     break;
                                 }
                             }
                             Err(_) => {
-                                all_succeeded = false;
+                                retry
+                                    .retry_info
+                                    .bump_for(&format!("{peer_id_str}:{}", retry.cid));
+                                let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                                 break;
                             }
                         }
                     }
-                    if all_succeeded {
+                    if peerstore
+                        .get_retry_documents(&peer_id_str)
+                        .await
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
                         let _ = peerstore.clear_retry_peer(&peer_id_str).await;
                         let _ = set_persisted_replicator_status(
                             &peerstore,
@@ -1212,10 +1257,6 @@ impl Node {
                             p2p::ReplicatorStatus::Inactive,
                         )
                         .await;
-                        retry_info.bump();
-                        if let Ok(bytes) = retry_info.to_bytes() {
-                            let _ = peerstore.update_retry_info(&peer_id_str, &bytes).await;
-                        }
                     }
                 }
             }
