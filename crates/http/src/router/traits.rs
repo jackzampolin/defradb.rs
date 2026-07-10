@@ -123,6 +123,15 @@ pub trait P2POperations: Send + Sync {
     /// Get connected peers.
     async fn connected_peers(&self) -> P2PResult<Vec<String>>;
 
+    /// Live snapshot of sync resource state (push backlog occupancy,
+    /// per-peer backlog, pending DAGs, overload counters) for diagnostics
+    /// and downstream conformance (#1099). The JSON shape is owned by
+    /// `p2p::sync::SyncStatus`. Transports without a sync coordinator
+    /// return `Null`.
+    async fn sync_status(&self) -> P2PResult<serde_json::Value> {
+        Ok(serde_json::Value::Null)
+    }
+
     /// Connect to a peer at the given address.
     async fn connect_peer(&self, addr: &str) -> P2PResult<()>;
 

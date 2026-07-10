@@ -53,6 +53,7 @@ mod event_handler;
 mod pubsub_client;
 #[cfg(feature = "libp2p-transport")]
 mod pubsub_services;
+mod push_worker;
 mod replicators;
 mod result_types;
 mod subscriptions;
@@ -96,6 +97,28 @@ pub struct PushFailure {
     pub peer_id: String,
     pub doc_id: String,
     pub collection_id: String,
+}
+
+/// Stable diagnostic snapshot of P2P-owned sync resources (#1099).
+///
+/// Exposed over the P2P operations surface so downstream runtimes can
+/// conformance-test and alert on the effective (not just configured) state:
+/// live queue occupancy, per-peer backlog, worker slots, pending-DAG depth,
+/// retained task handles, and overload counters.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncStatus {
+    pub push_backlog: crate::sync::push_backlog::PushBacklogSnapshot,
+    pub pending_dags: usize,
+    pub pending_dag_capacity: usize,
+    /// Durable pending-DAG registrations (may exceed `pending_dags`: records
+    /// outlive TTL-evicted in-memory entries until their roots merge).
+    pub persisted_pending_dags: usize,
+    pub persisted_pending_dag_capacity: usize,
+    pub pending_resync_in_flight: bool,
+    pub retained_background_tasks: usize,
+    pub missing_link_retries: u64,
+    pub pending_dag_resolved: u64,
+    pub pending_dag_expired: u64,
 }
 
 struct SyncShutdownState {
@@ -198,11 +221,23 @@ impl SyncShutdownHandle {
 
     fn register_task(&self, handle: JoinHandle<()>) {
         let mut tasks = self.inner.background_tasks.lock();
+        // Retire completed handles on every registration so retained handles
+        // track live tasks instead of total spawn count (#1099).
+        tasks.retain(|task| !task.is_finished());
         if self.is_shutting_down() {
             handle.abort();
         } else {
             tasks.push(handle);
         }
+    }
+
+    /// Number of live retained background task handles. Prunes finished
+    /// handles first so a burst of completed tasks does not overstate live
+    /// work between registrations.
+    pub fn retained_task_count(&self) -> usize {
+        let mut tasks = self.inner.background_tasks.lock();
+        tasks.retain(|task| !task.is_finished());
+        tasks.len()
     }
 
     async fn drain_background_tasks(&self, timeout: Duration) {
@@ -248,13 +283,16 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
     pub(super) broadcaster: Broadcaster<T>,
 
     /// Channel for reporting push failures to the FFI layer for retry tracking.
-    pub(super) failure_tx: Option<tokio::sync::mpsc::Sender<PushFailure>>,
+    /// Behind a shared slot so the fixed push workers observe a channel that
+    /// is installed after construction (`set_failure_channel`).
+    pub(super) failure_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<PushFailure>>>>,
 
     /// Limiter for concurrent DAG fetch tasks (configurable via SyncConfig).
     pub(super) dag_fetch_limiter: DagFetchLimiter,
 
-    /// Semaphore limiting concurrent push tasks (configurable via SyncConfig).
-    pub(super) push_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Bounded admission queue for outbound replicator pushes, drained by the
+    /// fixed worker pool spawned at construction (#1099).
+    pub(super) push_backlog: Arc<super::push_backlog::PushBacklog>,
 
     /// Per-peer rate limiter for gossip dispatch (abuse ladder; drop-only).
     pub(super) rate_limiter: Arc<PeerRateLimiter>,
@@ -262,9 +300,6 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
     /// Per-peer rate limiter for request intake (pacing backoff; refusals are
     /// nacked with `RATE_LIMITED_MESSAGE` so pushers retry at the refill rate).
     pub(super) request_rate_limiter: Arc<PeerRateLimiter>,
-
-    /// Timeout for one outbound PushLog send to a replicator peer.
-    pub(super) push_send_timeout: Duration,
 
     /// Maximum document IDs accepted in a single DocSync request.
     pub(super) max_doc_sync_request_doc_ids: usize,
@@ -357,6 +392,56 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let _ = self.kms_transport.set(transport);
     }
 
+    /// Point-in-time snapshot of sync resource state for diagnostics (#1099).
+    pub fn sync_status(&self) -> SyncStatus {
+        let diagnostics = self.manager.diagnostics().snapshot();
+        SyncStatus {
+            push_backlog: self.runtime.push_backlog.snapshot(),
+            pending_dags: self.manager.pending_dag_count(),
+            pending_dag_capacity: self.manager.max_pending_dags(),
+            persisted_pending_dags: self.manager.persisted_pending_count(),
+            persisted_pending_dag_capacity: self.manager.persisted_pending_capacity(),
+            pending_resync_in_flight: self.manager.pending_resync_in_flight(),
+            retained_background_tasks: self.runtime.shutdown.retained_task_count(),
+            missing_link_retries: diagnostics.missing_link_retries,
+            pending_dag_resolved: diagnostics.pending_dag_resolved,
+            pending_dag_expired: diagnostics.pending_dag_expired,
+        }
+    }
+
+    /// Install the durable pending-DAG store (#1099). First-call-wins.
+    /// Hydrates the durable-cap accounting before returning.
+    pub async fn install_pending_dag_store(
+        &self,
+        store: Arc<dyn crate::sync::pending_store::PendingDagStorage>,
+    ) {
+        self.manager.install_pending_dag_store(store).await;
+    }
+
+    /// Reconcile persisted pending-DAG registrations after restart and
+    /// re-drive unmerged ones through the normal fetch path. Emits
+    /// `DagNeedsFetch` sync events, so run it only once a sync-event consumer
+    /// is live (or from a spawned task) to avoid filling the event channel.
+    /// Returns the re-driven count.
+    pub async fn restore_pending_dags(&self) -> usize {
+        self.manager.resync_persisted_pending_dags().await
+    }
+
+    /// Periodic bounded drain for durable pending-DAG registrations: sweeps
+    /// at `interval` until shutdown, so records skipped at capacity (or whose
+    /// in-memory entries TTL-expired) are re-driven even when no peer
+    /// reconnects and the node never restarts. The steady-state early-exit
+    /// inside the sweep makes idle ticks free. Run from a spawned task.
+    pub async fn run_pending_dag_resync(&self, interval: Duration) {
+        loop {
+            if self.runtime.shutdown.is_shutting_down() {
+                return;
+            }
+            self.manager.resync_persisted_pending_dags().await;
+            tokio::time::sleep(interval).await;
+        }
+    }
+
     pub fn shutdown_handle(&self) -> SyncShutdownHandle {
         self.runtime.shutdown.clone()
     }
@@ -374,7 +459,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
         }
         self.runtime.dag_fetch_limiter.close();
-        self.runtime.push_semaphore.close();
+        self.runtime.push_backlog.close();
         self.runtime.shutdown.shutdown().await;
     }
 
@@ -468,6 +553,35 @@ mod shutdown_tests {
             completed.load(Ordering::SeqCst),
             "shutdown should allow in-flight background tasks to finish"
         );
+    }
+
+    /// #1099: completed handles must not accumulate for the process lifetime.
+    #[tokio::test]
+    async fn register_task_prunes_finished_handles() {
+        let shutdown = SyncShutdownHandle::new();
+        let mut handles = Vec::new();
+        for _ in 0..50 {
+            let handle = tokio::spawn(async {});
+            handles.push(handle.abort_handle());
+            shutdown.register_task(handle);
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while handles.iter().any(|handle| !handle.is_finished()) {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        shutdown.register_task(tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }));
+
+        assert!(
+            shutdown.retained_task_count() <= 2,
+            "finished handles must be pruned on registration, retained {}",
+            shutdown.retained_task_count()
+        );
+        shutdown.shutdown().await;
     }
 
     #[tokio::test]

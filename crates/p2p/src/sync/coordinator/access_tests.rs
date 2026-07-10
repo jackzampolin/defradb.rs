@@ -22,7 +22,7 @@ use crate::message::{
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::NoOpCollectionStorage;
 use crate::sync::head_provider::{DocumentHeadProvider, NoOpHeadProvider};
-use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager, DEFAULT_PUSH_SEND_TIMEOUT};
+use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
 use crate::sync::peer_state::PeerStateTracker;
 use crate::sync::rate_limiter::PeerRateLimiter;
 use crate::sync::SyncShutdownHandle;
@@ -226,14 +226,16 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
         runtime: SyncRuntime {
             transport,
             broadcaster,
-            failure_tx: None,
+            failure_tx: Arc::new(parking_lot::Mutex::new(None)),
             dag_fetch_limiter: DagFetchLimiter::new(DEFAULT_MAX_CONCURRENT_DAG_FETCHES),
-            push_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            push_backlog: crate::sync::push_backlog::PushBacklog::new(
+                crate::sync::DEFAULT_PUSH_QUEUE_CAPACITY,
+                crate::sync::DEFAULT_PUSH_QUEUE_BYTE_CAPACITY,
+                crate::sync::DEFAULT_MAX_ACTIVE_PUSHES_PER_PEER,
                 DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
-            )),
+            ),
             rate_limiter,
             request_rate_limiter,
-            push_send_timeout: DEFAULT_PUSH_SEND_TIMEOUT,
             max_doc_sync_request_doc_ids: DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
             shutdown: SyncShutdownHandle::new(),
             filter_matcher: Arc::new(crate::replicator::EqOnlyFilterMatcher),

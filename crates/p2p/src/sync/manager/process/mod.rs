@@ -87,7 +87,35 @@ pub struct SyncManager<B: Blockstore> {
 
     /// Capacity of `pending_dags`; overflow is rejected with a backpressure nack.
     pub(super) max_pending_dags: usize,
+
+    /// Durable backing for push-originated pending registrations (#1099).
+    /// Empty until the embedding layer installs a store; process-local
+    /// semantics apply while empty.
+    pub(super) pending_store:
+        std::sync::OnceLock<Arc<dyn crate::sync::pending_store::PendingDagStorage>>,
+
+    /// Roots with a durable registration. Superset guard so the merge path
+    /// only pays a delete transaction for roots that actually have records,
+    /// and admission can bound durable growth without hitting storage.
+    pub(super) persisted_roots: Arc<RwLock<std::collections::HashSet<Cid>>>,
+
+    /// Single-flight guard for the durable resync sweep.
+    pub(super) pending_resync_in_flight: std::sync::atomic::AtomicBool,
+
+    /// Resync invocation counter; every Nth sweep skips the steady-state
+    /// early-exit so store/set desyncs from rare races self-heal.
+    pub(super) pending_resync_tick: std::sync::atomic::AtomicUsize,
 }
+
+/// Every Nth resync is a forced full sweep (see `pending_resync_tick`).
+pub(super) const PENDING_RESYNC_FORCED_TICK: usize = 10;
+
+/// Durable registrations may outlive their in-memory pending entries (TTL
+/// eviction frees the map slot but not the recovery obligation), so the
+/// durable set gets its own, larger cap. At the cap new registrations are
+/// nacked — the hub refuses the obligation while the pusher still owns its
+/// retry state, rather than accepting and later dropping it.
+pub(super) const PERSISTED_PENDING_CAP_FACTOR: usize = 4;
 
 impl<B: Blockstore + 'static> SyncManager<B> {
     /// Create a new SyncManager.
@@ -117,6 +145,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // A zero cap would reject every missing-link push forever
             // (permanent admission outage); normalize to a 1-slot map.
             max_pending_dags: config.max_pending_dags.max(1),
+            pending_store: std::sync::OnceLock::new(),
+            persisted_roots: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            pending_resync_in_flight: std::sync::atomic::AtomicBool::new(false),
+            pending_resync_tick: std::sync::atomic::AtomicUsize::new(0),
         };
 
         (manager, event_rx)
@@ -131,11 +163,20 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     }
 
     /// Mark a block as merged (called by database layer after CRDT merge).
+    ///
+    /// A successful terminal merge is the point where a durable pending
+    /// registration has discharged its recovery obligation (#1099): only
+    /// here (and never at DagReady emission, TTL eviction, or clear) is the
+    /// persisted record deleted.
     pub async fn mark_as_merged(&self, cid: &Cid) -> crate::error::Result<()> {
         self.blockstore
             .mark_as_merged(cid)
             .await
-            .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))
+            .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
+        if self.persisted_roots.read().contains(cid) {
+            self.remove_persisted_pending(cid).await;
+        }
+        Ok(())
     }
 
     /// Mark multiple blocks as merged in a single transaction.
@@ -143,7 +184,18 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         self.blockstore
             .mark_batch_as_merged(cids)
             .await
-            .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))
+            .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))?;
+        let persisted: Vec<Cid> = {
+            let roots = self.persisted_roots.read();
+            cids.iter()
+                .filter(|cid| roots.contains(cid))
+                .copied()
+                .collect()
+        };
+        for cid in &persisted {
+            self.remove_persisted_pending(cid).await;
+        }
+        Ok(())
     }
 
     /// Get the process queue used to serialize work for the same CID.
@@ -172,5 +224,79 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Shared reference to the sync diagnostics counters.
     pub fn diagnostics(&self) -> Arc<SyncDiagnostics> {
         Arc::clone(&self.diagnostics)
+    }
+
+    /// Effective pending-DAG capacity.
+    pub fn max_pending_dags(&self) -> usize {
+        self.max_pending_dags
+    }
+
+    /// Number of durable pending-DAG registrations currently held.
+    pub fn persisted_pending_count(&self) -> usize {
+        self.persisted_roots.read().len()
+    }
+
+    /// Cap on durable pending-DAG registrations; admission nacks beyond it.
+    pub fn persisted_pending_capacity(&self) -> usize {
+        self.max_pending_dags
+            .saturating_mul(PERSISTED_PENDING_CAP_FACTOR)
+    }
+
+    /// Whether the durable resync sweep is currently running.
+    pub fn pending_resync_in_flight(&self) -> bool {
+        self.pending_resync_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Install the durable pending-DAG store. First-call-wins (OnceLock
+    /// semantics); subsequent calls are silently discarded.
+    ///
+    /// Hydrates the persisted-roots set from the store before returning so
+    /// the durable admission cap is hard from the first PushLog — without
+    /// this, pushes arriving before the first resync sweep would be admitted
+    /// against an empty set.
+    pub async fn install_pending_dag_store(
+        &self,
+        store: Arc<dyn crate::sync::pending_store::PendingDagStorage>,
+    ) {
+        if self.pending_store.set(Arc::clone(&store)).is_err() {
+            return;
+        }
+        match store.load_all().await {
+            Ok(records) => {
+                self.persisted_roots
+                    .write()
+                    .extend(records.iter().map(|(cid, _)| *cid));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Failed to hydrate persisted pending DAG roots; durable cap is soft until the first resync"
+                );
+            }
+        }
+    }
+
+    pub(super) fn pending_store(
+        &self,
+    ) -> Option<Arc<dyn crate::sync::pending_store::PendingDagStorage>> {
+        self.pending_store.get().cloned()
+    }
+
+    pub(super) async fn remove_persisted_pending(&self, root_cid: &Cid) {
+        if let Some(store) = self.pending_store() {
+            match store.remove(root_cid).await {
+                Ok(()) => {
+                    self.persisted_roots.write().remove(root_cid);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        root_cid = %root_cid,
+                        error = %error,
+                        "Failed to delete persisted pending DAG record"
+                    );
+                }
+            }
+        }
     }
 }

@@ -45,6 +45,9 @@ fn default_start_args() -> StartArgs {
         p2p_rate_limit_rate: None,
         p2p_max_doc_sync_request_doc_ids: None,
         p2p_max_pending_dags: None,
+        p2p_push_queue_capacity: None,
+        p2p_push_queue_byte_capacity: None,
+        p2p_max_active_pushes_per_peer: None,
         max_merge_depth: None,
         query_timeout: None,
         transaction_idle_timeout: None,
@@ -154,6 +157,9 @@ fn test_apply_to_config_all_flags() {
         p2p_rate_limit_rate: Some(4.5),
         p2p_max_doc_sync_request_doc_ids: Some(64),
         p2p_max_pending_dags: Some(7),
+        p2p_push_queue_capacity: Some(48),
+        p2p_push_queue_byte_capacity: Some(4096),
+        p2p_max_active_pushes_per_peer: Some(3),
         max_merge_depth: Some(2048),
         query_timeout: Some(45),
         transaction_idle_timeout: Some(900),
@@ -188,6 +194,9 @@ fn test_apply_to_config_all_flags() {
     assert_eq!(config.net.p2p_rate_limit_rate, 4.5);
     assert_eq!(config.net.p2p_max_doc_sync_request_doc_ids, 64);
     assert_eq!(config.net.p2p_max_pending_dags, 7);
+    assert_eq!(config.net.p2p_push_queue_capacity, 48);
+    assert_eq!(config.net.p2p_push_queue_byte_capacity, 4096);
+    assert_eq!(config.net.p2p_max_active_pushes_per_peer, 3);
     assert_eq!(config.datastore.max_merge_depth, 2048);
     assert_eq!(config.api.max_body_size, 1024);
     assert_eq!(config.api.max_schema_size, 2048);

@@ -1395,6 +1395,9 @@ impl NodeBuilder {
         let failure_recorder_task = spawn_failure_recorder(store.clone(), failure_rx);
 
         let coordinator = Arc::new(coordinator);
+        coordinator
+            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
+            .await;
 
         if config.load_persisted_collections {
             db_merge::load_persisted_collections(&coordinator)
@@ -1426,6 +1429,17 @@ impl NodeBuilder {
                 p2p::sync::ReplicationConfig::default(),
             )
             .await;
+        });
+
+        // Re-drive pending-DAG registrations persisted before the last
+        // shutdown/crash, then keep sweeping periodically as the bounded
+        // drain for records skipped at capacity or TTL-evicted (#1099).
+        // Spawned so the sync-event channel already has its consumer above.
+        let coord_for_restore = coordinator.clone();
+        tokio::spawn(async move {
+            coord_for_restore
+                .run_pending_dag_resync(std::time::Duration::from_secs(60))
+                .await;
         });
 
         // 10. IROH event handler (events are already TransportEvent -- no conversion needed)
@@ -1689,7 +1703,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                 // suppress retries based on the peer-map's current
                 // connected_peers snapshot.
 
-                let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
                     Ok(docs) => docs,
                     Err(error) => {
                         tracing::debug!(peer_id = %peer_id_str, error = %error, "failed to load retry docs");
@@ -1713,24 +1727,44 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                         .unwrap_or_default(),
                     _ => p2p::ReplicationFilters::new(),
                 };
+                if docs.len() > 1 {
+                    // Rotate the starting document by the peer's own
+                    // persisted retry count: the store iterates in stable key
+                    // order, and a global cursor aliases when it advances by
+                    // the number of due peers per sweep, so per-peer state is
+                    // required for every document to eventually lead a pass
+                    // (#1099 review).
+                    let rotate_by = retry_info.num_retries as usize % docs.len();
+                    docs.rotate_left(rotate_by);
+                }
                 let mut all_succeeded = true;
+                let mut fast_failures = 0usize;
                 for (doc_id, collection_id) in &docs {
-                    match db_merge::retry_doc_via_transport(
-                        &transport,
-                        database.as_ref(),
-                        None,
-                        &peer_id,
-                        doc_id,
-                        collection_id,
-                        &retry_filters,
-                        &replication_filter::QueryReplicationFilterMatcher::new(),
+                    // Bound each send so a nonresponsive peer cannot stall
+                    // healthy peers' retries behind it (#1099). A timeout
+                    // ends the pass (the peer is unreachable); a fast
+                    // rejection only consumes a bounded budget so one
+                    // permanently rejected doc at the head of the key order
+                    // cannot starve the rest forever.
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(15),
+                        db_merge::retry_doc_via_transport(
+                            &transport,
+                            database.as_ref(),
+                            None,
+                            &peer_id,
+                            doc_id,
+                            collection_id,
+                            &retry_filters,
+                            &replication_filter::QueryReplicationFilterMatcher::new(),
+                        ),
                     )
                     .await
                     {
-                        Ok(()) => {
+                        Ok(Ok(())) => {
                             let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
                         }
-                        Err(error) => {
+                        Ok(Err(error)) => {
                             tracing::warn!(
                                 doc_id = %doc_id,
                                 peer_id = %peer_id,
@@ -1738,6 +1772,19 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                                 "retry push failed"
                             );
                             all_succeeded = false;
+                            fast_failures += 1;
+                            if fast_failures >= 3 {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                doc_id = %doc_id,
+                                peer_id = %peer_id,
+                                "retry push timed out"
+                            );
+                            all_succeeded = false;
+                            break;
                         }
                     }
                 }

@@ -1,6 +1,7 @@
 //! Pending DAG registration and retry logic.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 use cid::Cid;
@@ -49,6 +50,22 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Get CIDs of all pending DAGs.
     pub fn pending_dag_cids(&self) -> Vec<Cid> {
         self.pending_dags.read().keys().copied().collect()
+    }
+
+    /// Pending DAGs worth re-driving when `peer` (re)connects: entries the
+    /// peer originally provided plus entries whose fetches exhausted their
+    /// providers (covers restored registrations whose providers were not yet
+    /// reconnected at restore time, #1099).
+    pub fn pending_dags_needing_redrive(&self, peer: &str) -> Vec<(Cid, PendingDag)> {
+        self.pending_dags
+            .read()
+            .iter()
+            .filter(|(_, dag)| {
+                !dag.missing.is_empty()
+                    && (dag.source_peer.as_deref() == Some(peer) || dag.fetch_failures > 0)
+            })
+            .map(|(cid, dag)| (*cid, dag.clone()))
+            .collect()
     }
 
     /// Get missing CIDs for a pending DAG.
@@ -137,6 +154,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// the capacity. If the map is still at `max_pending_dags` after eviction the
     /// new entry is dropped and `false` is returned so callers can reject with a
     /// backpressure nack (#1088 W1) instead of acking a discarded registration.
+    /// TTL eviction frees the in-memory slot only: a push-originated entry's
+    /// durable record survives (the recovery obligation is discharged solely
+    /// by a successful merge) and is re-driven by restart or the durable
+    /// resync sweep.
     pub(super) fn insert_pending_dag(&self, root_cid: Cid, dag: PendingDag) -> bool {
         let mut pending = self.pending_dags.write();
         evict_expired_pending_dags(&mut pending, Instant::now());
@@ -434,6 +455,194 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         self.diagnostics.record_pending_dag_resolved();
         Ok(true)
+    }
+
+    /// Reconcile the in-memory pending map against the durable registrations
+    /// (#1099): drop records whose roots merged, and re-register + re-drive
+    /// every unmerged record with no live in-memory entry. Runs at startup
+    /// (restore) and as the single-flight sweep behind peer connects, so a
+    /// registration whose in-memory entry was TTL-evicted is recovered
+    /// without a restart. Roots that no longer fit under `max_pending_dags`
+    /// keep their record for the next sweep. Returns the count re-driven.
+    pub async fn resync_persisted_pending_dags(&self) -> usize {
+        let Some(store) = self.pending_store() else {
+            return 0;
+        };
+        // Cheap steady-state exit: nothing to reconcile while every durable
+        // root still has a live, unexpired in-memory entry. An expired entry
+        // must not mask its record — eviction is lazy, and the record is the
+        // only remaining owner of the recovery obligation. Every Nth sweep is
+        // forced past this exit so an orphan record (present in the store but
+        // absent from the accounting set after a rare reserve/put race) is
+        // still rediscovered.
+        let forced = self
+            .pending_resync_tick
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .is_multiple_of(super::PENDING_RESYNC_FORCED_TICK);
+        if !forced {
+            let roots = self.persisted_roots.read();
+            let pending = self.pending_dags.read();
+            let now = Instant::now();
+            let all_live = !roots.is_empty()
+                && roots.iter().all(|root| {
+                    pending
+                        .get(root)
+                        .is_some_and(|dag| now.duration_since(dag.inserted_at) < PENDING_DAG_TTL)
+                });
+            if all_live {
+                return 0;
+            }
+        }
+        if self
+            .pending_resync_in_flight
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return 0;
+        }
+        let resynced = self.resync_persisted_pending_dags_inner(store).await;
+        self.pending_resync_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+        resynced
+    }
+
+    async fn resync_persisted_pending_dags_inner(
+        &self,
+        store: Arc<dyn crate::sync::pending_store::PendingDagStorage>,
+    ) -> usize {
+        let records = match store.load_all().await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to load persisted pending DAG records");
+                return 0;
+            }
+        };
+        // Reconcile the accounting set with the authoritative record list:
+        // extend with every record (a registration persisted between load_all
+        // and this update must stay eligible for merge-time deletion), and
+        // prune entries with neither a record nor a live in-memory entry —
+        // stale leftovers from a rare reserve/put race that would otherwise
+        // hold durable-cap headroom forever. An in-flight reserve→put window
+        // always has an in-memory entry, so it is never pruned.
+        {
+            let record_roots: std::collections::HashSet<Cid> =
+                records.iter().map(|(cid, _)| *cid).collect();
+            // Lock order: persisted_roots before pending_dags, matching the
+            // steady-state exit above.
+            let mut roots = self.persisted_roots.write();
+            let pending = self.pending_dags.read();
+            roots.retain(|root| record_roots.contains(root) || pending.contains_key(root));
+            roots.extend(record_roots);
+        }
+        if records.is_empty() {
+            return 0;
+        }
+
+        let mut restored = 0usize;
+        for (root_cid, record) in records {
+            {
+                let mut pending = self.pending_dags.write();
+                match pending.get(&root_cid) {
+                    Some(dag)
+                        if Instant::now().duration_since(dag.inserted_at) < PENDING_DAG_TTL =>
+                    {
+                        continue;
+                    }
+                    Some(_) => {
+                        // Expired in-memory entry: evict it here so the
+                        // record below re-registers with a fresh TTL and a
+                        // recomputed missing set.
+                        pending.remove(&root_cid);
+                    }
+                    None => {}
+                }
+            }
+            if matches!(self.is_merged(&root_cid).await, Ok(true)) {
+                self.remove_persisted_pending(&root_cid).await;
+                continue;
+            }
+
+            let missing: Vec<Cid> = match self.blockstore.get(&root_cid).await {
+                Ok(Some(data)) => {
+                    match find_all_missing_links(self.blockstore.as_ref(), &data).await {
+                        Ok(missing) => missing,
+                        Err(_) => vec![root_cid],
+                    }
+                }
+                _ => vec![root_cid],
+            };
+
+            let dag = PendingDag {
+                doc_id: record.doc_id.clone(),
+                collection_id: record.collection_id.clone(),
+                creator: record.creator.clone(),
+                missing: missing.iter().copied().collect(),
+                source_peer: record.source_peer.clone(),
+                is_explicit_replicator: record.is_explicit_replicator,
+                explicit_replay_authorization: record
+                    .explicit_replay_authorization
+                    .clone()
+                    .map(Into::into),
+                inserted_at: Instant::now(),
+                attempts: 0,
+                fetch_failures: 0,
+                last_fetch_error: None,
+            };
+
+            if !self.insert_pending_dag(root_cid, dag.clone()) {
+                tracing::warn!(
+                    root_cid = %root_cid,
+                    doc_id = %record.doc_id,
+                    max = self.max_pending_dags,
+                    "Pending DAGs at capacity during resync; record kept for the next sweep"
+                );
+                continue;
+            }
+
+            if missing.is_empty() {
+                if let Err(error) = self.retry_pending_dag(&root_cid).await {
+                    tracing::warn!(
+                        root_cid = %root_cid,
+                        error = %error,
+                        "Failed to resolve complete restored pending DAG"
+                    );
+                }
+            } else {
+                let mut providers = self.get_providers_for_cids(&missing);
+                if let Some(source_peer) = record.source_peer.clone() {
+                    if !providers.contains(&source_peer) {
+                        providers.push(source_peer);
+                    }
+                }
+                if self
+                    .event_tx
+                    .send(SyncEvent::DagNeedsFetch {
+                        root_cid,
+                        missing,
+                        providers,
+                        doc_id: record.doc_id.clone(),
+                        collection_id: record.collection_id.clone(),
+                        creator: record.creator.clone(),
+                        sender_peer: record.source_peer.clone(),
+                        is_explicit_replicator: record.is_explicit_replicator,
+                        explicit_replay_authorization: dag.explicit_replay_authorization.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        root_cid = %root_cid,
+                        "Failed to emit DagNeedsFetch for restored pending DAG"
+                    );
+                    continue;
+                }
+            }
+            restored += 1;
+        }
+
+        if restored > 0 {
+            tracing::info!(restored, "restored persisted pending DAG registrations");
+        }
+        restored
     }
 }
 

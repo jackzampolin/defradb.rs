@@ -11,7 +11,28 @@ use crate::message::MAX_DOC_IDS;
 pub const DEFAULT_MAX_CONCURRENT_DAG_FETCHES: usize = 4;
 
 /// Default maximum number of concurrent push tasks.
+///
+/// This is the size of the fixed outbound push worker pool: exactly this many
+/// worker tasks drain the push backlog for the coordinator's lifetime.
 pub const DEFAULT_MAX_CONCURRENT_PUSH_TASKS: usize = 8;
+
+/// Default maximum queued outbound push jobs (#1099).
+///
+/// Jobs queue as compact specs (head block + identifiers); overflow is
+/// rejected with an explicit outcome that feeds the persisted retry ladder.
+pub const DEFAULT_PUSH_QUEUE_CAPACITY: usize = 1024;
+
+/// Default maximum resident bytes across queued outbound push jobs (#1099).
+///
+/// Prevents a few large head blocks from defeating the item bound. A single
+/// job larger than this is admitted only when the queue is empty.
+pub const DEFAULT_PUSH_QUEUE_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
+
+/// Default maximum push jobs concurrently in flight to one peer (#1099).
+///
+/// Must stay below `max_concurrent_push_tasks` so one nonresponsive peer
+/// cannot occupy every worker.
+pub const DEFAULT_MAX_ACTIVE_PUSHES_PER_PEER: usize = 4;
 
 /// Default maximum document IDs accepted in one DocSync request.
 pub const DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS: usize = MAX_DOC_IDS;
@@ -62,9 +83,19 @@ pub struct SyncConfig {
 
     /// Maximum number of concurrent push tasks for sending blocks to replicators.
     ///
-    /// Caps fan-out from `push_dag_to_replicators` and `push_to_replicators` to
-    /// prevent resource exhaustion when many documents are created in a burst.
+    /// Sizes the fixed worker pool that drains the outbound push backlog, so
+    /// fan-out from `push_dag_to_replicators` and `push_to_replicators` cannot
+    /// exhaust resources when many documents are created in a burst.
     pub max_concurrent_push_tasks: usize,
+
+    /// Maximum queued outbound push jobs before admission rejects overflow.
+    pub push_queue_capacity: usize,
+
+    /// Maximum resident bytes across queued outbound push jobs.
+    pub push_queue_byte_capacity: usize,
+
+    /// Maximum push jobs concurrently in flight to a single peer.
+    pub max_active_pushes_per_peer: usize,
 
     /// Maximum document IDs accepted in a single DocSync request.
     ///
@@ -97,6 +128,9 @@ impl Default for SyncConfig {
             event_buffer_size: 256,
             max_concurrent_dag_fetches: DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
             max_concurrent_push_tasks: DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+            push_queue_capacity: DEFAULT_PUSH_QUEUE_CAPACITY,
+            push_queue_byte_capacity: DEFAULT_PUSH_QUEUE_BYTE_CAPACITY,
+            max_active_pushes_per_peer: DEFAULT_MAX_ACTIVE_PUSHES_PER_PEER,
             max_doc_sync_request_doc_ids: DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
             rate_limit_burst: DEFAULT_RATE_LIMIT_BURST,
             rate_limit_rate: DEFAULT_RATE_LIMIT_RATE,

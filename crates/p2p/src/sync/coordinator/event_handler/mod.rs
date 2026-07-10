@@ -54,9 +54,59 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
     }
 
-    fn handle_peer_connected(&self, peer_id: PeerId) {
+    async fn handle_peer_connected(&self, peer_id: PeerId) {
         tracing::debug!(peer_id = %peer_id, "Peer connected");
         self.access.peer_state.peer_connected(peer_id.as_str());
+        self.redrive_pending_dags_for_peer(&peer_id);
+        // Durable registrations whose in-memory entries were TTL-evicted can
+        // only complete once a provider is reachable again: reconcile them
+        // now (single-flight; a no-op while another sweep runs).
+        self.manager.resync_persisted_pending_dags().await;
+    }
+
+    /// Re-drive pending DAGs a newly connected peer can complete: its own
+    /// prior pushes and entries whose fetches exhausted providers (#1099).
+    /// Best-effort — a full event channel leaves `fetch_failures` set, so the
+    /// next connect retries.
+    fn redrive_pending_dags_for_peer(&self, peer_id: &PeerId) {
+        let peer_key = peer_id.to_string();
+        for (root_cid, dag) in self.manager.pending_dags_needing_redrive(&peer_key) {
+            let mut providers = vec![peer_key.clone()];
+            if let Some(source_peer) = dag.source_peer.clone() {
+                if source_peer != peer_key {
+                    providers.push(source_peer);
+                }
+            }
+            let missing: Vec<_> = dag.missing.iter().copied().collect();
+            tracing::debug!(
+                root_cid = %root_cid,
+                peer_id = %peer_key,
+                missing_count = missing.len(),
+                fetch_failures = dag.fetch_failures,
+                "Re-driving pending DAG fetch after peer connect"
+            );
+            if let Err(error) =
+                self.manager
+                    .event_sender()
+                    .try_send(crate::sync::SyncEvent::DagNeedsFetch {
+                        root_cid,
+                        missing,
+                        providers,
+                        doc_id: dag.doc_id.clone(),
+                        collection_id: dag.collection_id.clone(),
+                        creator: dag.creator.clone(),
+                        sender_peer: dag.source_peer.clone(),
+                        is_explicit_replicator: dag.is_explicit_replicator,
+                        explicit_replay_authorization: dag.explicit_replay_authorization.clone(),
+                    })
+            {
+                tracing::debug!(
+                    root_cid = %root_cid,
+                    error = %error,
+                    "Deferred pending DAG re-drive: event channel unavailable"
+                );
+            }
+        }
     }
 
     fn handle_peer_disconnected(&self, peer_id: PeerId) {
@@ -256,7 +306,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
         match event {
             TransportEvent::PeerConnected(peer_id) => {
-                self.handle_peer_connected(peer_id);
+                self.handle_peer_connected(peer_id).await;
             }
             TransportEvent::PeerDisconnected(peer_id) => {
                 self.handle_peer_disconnected(peer_id);

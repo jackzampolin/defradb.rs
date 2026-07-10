@@ -304,6 +304,40 @@ impl Key for P2PDocumentKey {
     }
 }
 
+/// P2PPendingDagKey: Persisted pending-DAG registration awaiting missing links
+///
+/// Structure: /p2p/pending_dag/[RootCID]
+/// Example: /p2p/pending_dag/bafyreib2rxk3rybk3aobmv5cjuql3bm2twh4jo5uxgf5kpqrsgxbyqx54
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct P2PPendingDagKey {
+    /// Root CID of the pending DAG (canonical string form)
+    pub root_cid: String,
+}
+
+impl P2PPendingDagKey {
+    /// Create a new P2PPendingDagKey
+    pub fn new(root_cid: impl Into<String>) -> Self {
+        Self {
+            root_cid: root_cid.into(),
+        }
+    }
+
+    /// Create a prefix for all persisted pending-DAG registrations
+    pub fn p2p_pending_dag_prefix() -> Vec<u8> {
+        b"/p2p/pending_dag/".to_vec()
+    }
+}
+
+impl Key for P2PPendingDagKey {
+    fn bytes(&self) -> Vec<u8> {
+        format!("/p2p/pending_dag/{}", self.root_cid).into_bytes()
+    }
+
+    fn to_string(&self) -> String {
+        format!("/p2p/pending_dag/{}", self.root_cid)
+    }
+}
+
 /// LensConfigKey: Stores a serialized LensConfig for persistence across restarts.
 ///
 /// Structure: /lens/config/[TransformID]

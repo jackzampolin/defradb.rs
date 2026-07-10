@@ -497,7 +497,7 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
             continue;
         }
 
-        let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+        let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
             Ok(docs) => docs,
             Err(_) => continue,
         };
@@ -512,13 +512,30 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
             continue;
         }
 
+        if docs.len() > 1 {
+            // Rotate the starting document by the peer's own persisted retry
+            // count: the store iterates in stable key order, and a global
+            // cursor aliases when it advances by the number of due peers per
+            // sweep, so per-peer state is required for every document to
+            // eventually lead a pass (#1099 review).
+            let rotate_by = retry_info.num_retries as usize % docs.len();
+            docs.rotate_left(rotate_by);
+        }
         let mut all_succeeded = true;
+        let mut fast_failures = 0usize;
         for (doc_id, collection_id) in &docs {
-            match doc_pusher
-                .retry_doc(handle, peer_id, doc_id, collection_id)
-                .await
+            // Bound each send so a nonresponsive peer cannot stall healthy
+            // peers' retries behind it (#1099). A timeout ends the pass (the
+            // peer is unreachable); a fast rejection only consumes a bounded
+            // budget so one permanently rejected doc at the head of the key
+            // order cannot starve the rest forever.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                doc_pusher.retry_doc(handle, peer_id, doc_id, collection_id),
+            )
+            .await
             {
-                Ok(()) => {
+                Ok(Ok(())) => {
                     // Doc block re-push succeeded; regenerate and re-push
                     // SE artifacts for this doc too. Go re-pushes the
                     // artifact (not just the doc) on reconnect; replicators
@@ -528,9 +545,18 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
                         .await;
                     let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     tracing::warn!(doc_id = %doc_id, peer_id = %peer_id, error = %error, "retry push failed");
                     all_succeeded = false;
+                    fast_failures += 1;
+                    if fast_failures >= 3 {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(doc_id = %doc_id, peer_id = %peer_id, "retry push timed out");
+                    all_succeeded = false;
+                    break;
                 }
             }
         }
@@ -603,7 +629,7 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
         // connected_peers snapshot is not authoritative enough to gate
         // retries here, so let the transport attempt the replay.
 
-        let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+        let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
             Ok(docs) => docs,
             Err(_) => continue,
         };
@@ -618,18 +644,47 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
             continue;
         }
 
+        if docs.len() > 1 {
+            // Rotate the starting document by the peer's own persisted retry
+            // count: the store iterates in stable key order, and a global
+            // cursor aliases when it advances by the number of due peers per
+            // sweep, so per-peer state is required for every document to
+            // eventually lead a pass (#1099 review).
+            let rotate_by = retry_info.num_retries as usize % docs.len();
+            docs.rotate_left(rotate_by);
+        }
         let mut all_succeeded = true;
+        let mut fast_failures = 0usize;
         for (doc_id, collection_id) in &docs {
-            match doc_pusher.retry_doc(&peer_id, doc_id, collection_id).await {
-                Ok(()) => {
+            // Bound each send so a nonresponsive peer cannot stall healthy
+            // peers' retries behind it (#1099). A timeout ends the pass (the
+            // peer is unreachable); a fast rejection only consumes a bounded
+            // budget so one permanently rejected doc at the head of the key
+            // order cannot starve the rest forever.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                doc_pusher.retry_doc(&peer_id, doc_id, collection_id),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
                     se_repusher
                         .regenerate_and_push_se_artifacts(collection_id, doc_id)
                         .await;
                     let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     tracing::warn!(doc_id = %doc_id, peer_id = %peer_id, error = %error, "retry push failed");
                     all_succeeded = false;
+                    fast_failures += 1;
+                    if fast_failures >= 3 {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(doc_id = %doc_id, peer_id = %peer_id, "retry push timed out");
+                    all_succeeded = false;
+                    break;
                 }
             }
         }

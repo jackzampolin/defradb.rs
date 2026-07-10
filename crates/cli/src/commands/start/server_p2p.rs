@@ -222,6 +222,15 @@ impl Node {
 
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
+        coordinator
+            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
+            .await;
+        let coordinator_for_restore = coordinator.clone();
+        tokio::spawn(async move {
+            coordinator_for_restore
+                .run_pending_dag_resync(std::time::Duration::from_secs(60))
+                .await;
+        });
         let coordinator_for_acp = coordinator.clone();
         let serve_acp_for_acp = serve_acp.clone();
         let handle_for_acp = handle.clone();
@@ -570,7 +579,7 @@ impl Node {
                     if !connected.contains(&peer_id) {
                         continue;
                     }
-                    let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                    let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
                         Ok(d) => d,
                         Err(_) => continue,
                     };
@@ -584,17 +593,44 @@ impl Node {
                         .await;
                         continue;
                     }
+                    if docs.len() > 1 {
+                        // Rotate the starting document by the peer's own
+                        // persisted retry count: the store iterates in stable
+                        // key order, and a global cursor aliases when it
+                        // advances by the number of due peers per sweep, so
+                        // per-peer state is required for every document to
+                        // eventually lead a pass (#1099 review).
+                        let rotate_by = retry_info.num_retries as usize % docs.len();
+                        docs.rotate_left(rotate_by);
+                    }
                     let mut all_succeeded = true;
+                    let mut fast_failures = 0usize;
                     for (doc_id, collection_id) in &docs {
-                        match retry_pusher
-                            .retry_doc(&retry_handle, peer_id, doc_id, collection_id)
-                            .await
+                        // Bound each send so a nonresponsive peer cannot
+                        // stall healthy peers' retries behind it (#1099). A
+                        // timeout ends the pass (the peer is unreachable); a
+                        // fast rejection only consumes a bounded budget so
+                        // one permanently rejected doc at the head of the
+                        // key order cannot starve the rest forever.
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(15),
+                            retry_pusher.retry_doc(&retry_handle, peer_id, doc_id, collection_id),
+                        )
+                        .await
                         {
-                            Ok(()) => {
+                            Ok(Ok(())) => {
                                 let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
+                            }
+                            Ok(Err(_)) => {
+                                all_succeeded = false;
+                                fast_failures += 1;
+                                if fast_failures >= 3 {
+                                    break;
+                                }
                             }
                             Err(_) => {
                                 all_succeeded = false;
+                                break;
                             }
                         }
                     }
@@ -807,6 +843,15 @@ impl Node {
 
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
+        coordinator
+            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
+            .await;
+        let coordinator_for_restore = coordinator.clone();
+        tokio::spawn(async move {
+            coordinator_for_restore
+                .run_pending_dag_resync(std::time::Duration::from_secs(60))
+                .await;
+        });
         let coordinator_for_acp = coordinator.clone();
         let serve_acp_for_acp = serve_acp.clone();
         let database_for_acp = database.clone();
@@ -1097,7 +1142,7 @@ impl Node {
                     let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
                     // Iroh request-response can reconnect on demand, so don't
                     // gate retries on the peer-map snapshot.
-                    let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                    let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
                         Ok(d) => d,
                         Err(_) => continue,
                     };
@@ -1111,17 +1156,44 @@ impl Node {
                         .await;
                         continue;
                     }
+                    if docs.len() > 1 {
+                        // Rotate the starting document by the peer's own
+                        // persisted retry count: the store iterates in stable
+                        // key order, and a global cursor aliases when it
+                        // advances by the number of due peers per sweep, so
+                        // per-peer state is required for every document to
+                        // eventually lead a pass (#1099 review).
+                        let rotate_by = retry_info.num_retries as usize % docs.len();
+                        docs.rotate_left(rotate_by);
+                    }
                     let mut all_succeeded = true;
+                    let mut fast_failures = 0usize;
                     for (doc_id, collection_id) in &docs {
-                        match retry_pusher
-                            .retry_doc(&peer_id, doc_id, collection_id)
-                            .await
+                        // Bound each send so a nonresponsive peer cannot
+                        // stall healthy peers' retries behind it (#1099). A
+                        // timeout ends the pass (the peer is unreachable); a
+                        // fast rejection only consumes a bounded budget so
+                        // one permanently rejected doc at the head of the
+                        // key order cannot starve the rest forever.
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(15),
+                            retry_pusher.retry_doc(&peer_id, doc_id, collection_id),
+                        )
+                        .await
                         {
-                            Ok(()) => {
+                            Ok(Ok(())) => {
                                 let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
+                            }
+                            Ok(Err(_)) => {
+                                all_succeeded = false;
+                                fast_failures += 1;
+                                if fast_failures >= 3 {
+                                    break;
+                                }
                             }
                             Err(_) => {
                                 all_succeeded = false;
+                                break;
                             }
                         }
                     }
@@ -1274,6 +1346,9 @@ impl Node {
             rate_limit_rate: config.net.p2p_rate_limit_rate,
             max_doc_sync_request_doc_ids: config.net.p2p_max_doc_sync_request_doc_ids,
             max_pending_dags: config.net.p2p_max_pending_dags,
+            push_queue_capacity: config.net.p2p_push_queue_capacity,
+            push_queue_byte_capacity: config.net.p2p_push_queue_byte_capacity,
+            max_active_pushes_per_peer: config.net.p2p_max_active_pushes_per_peer,
             ..Default::default()
         }
     }

@@ -1,6 +1,10 @@
 //! Broadcasting local updates to the network.
+//!
+//! Replicator pushes are admitted into the bounded push backlog as compact
+//! job specs; the fixed worker pool (`push_worker`) expands DAGs, signs, and
+//! sends. Admission happens before any task is spawned or payload captured,
+//! so outbound resident state stays bounded under sustained writes (#1099).
 
-use std::collections::HashSet;
 use std::time::Duration;
 
 use blockstore::Blockstore;
@@ -8,17 +12,18 @@ use bytes::Bytes;
 use cid::Cid;
 use serde_json::Value as JsonValue;
 
+use super::push_worker::report_push_failure;
 use super::SyncCoordinator;
-use crate::error::{is_rate_limited_message, Result};
-use crate::message::{PushLogRequest, PushSEArtifactsRequest, SEArtifact};
-use crate::signing::sign_with_transport;
+use crate::error::Result;
+use crate::message::{PushSEArtifactsRequest, SEArtifact};
 use crate::sync::broadcaster::Broadcaster;
+use crate::sync::push_backlog::{EnqueueOutcome, PushJobSpec};
 use crate::sync::BroadcastResult;
 use crate::transport::{P2PTransport, PeerId};
 
-const MAX_RATE_LIMITED_PUSH_ATTEMPTS: usize = 10;
+pub(super) const MAX_RATE_LIMITED_PUSH_ATTEMPTS: usize = 10;
 
-fn rate_limited_push_delay(attempt: usize) -> Duration {
+pub(super) fn rate_limited_push_delay(attempt: usize) -> Duration {
     #[cfg(test)]
     {
         match attempt {
@@ -66,18 +71,34 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
     }
 
-    fn report_push_failure(
-        failure_tx: &Option<tokio::sync::mpsc::Sender<super::PushFailure>>,
-        peer_id: &PeerId,
-        doc_id: String,
-        collection_id: String,
-    ) {
-        if let Some(tx) = failure_tx {
-            let _ = tx.try_send(super::PushFailure {
-                peer_id: peer_id.to_string(),
-                doc_id,
-                collection_id,
-            });
+    /// Admit one replicator push into the bounded backlog. Overflow is an
+    /// explicit outcome: it is counted, logged, and handed to the persisted
+    /// retry ladder — never a silent drop and never another waiting task.
+    async fn enqueue_replicator_push(&self, job: PushJobSpec) {
+        let peer_id = job.peer_id.clone();
+        let doc_id = job.doc_id.clone();
+        let collection_id = job.collection_id.clone();
+        let outcome = self.runtime.push_backlog.try_enqueue(job);
+        match outcome {
+            EnqueueOutcome::Enqueued | EnqueueOutcome::Coalesced => {}
+            EnqueueOutcome::RejectedItems | EnqueueOutcome::RejectedBytes => {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    doc_id = %doc_id,
+                    collection_id = %collection_id,
+                    outcome = ?outcome,
+                    "Outbound push backlog full; deferring push to persisted retry"
+                );
+                report_push_failure(&self.runtime.failure_tx, &peer_id, doc_id, collection_id)
+                    .await;
+            }
+            EnqueueOutcome::Closed => {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    doc_id = %doc_id,
+                    "Skipping replicator push because the backlog is closed"
+                );
+            }
         }
     }
 
@@ -158,19 +179,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return;
         }
 
-        let dag_blocks = self
-            .load_dag_blocks(*cid, Bytes::copy_from_slice(block))
-            .await;
-
         tracing::debug!(
             cid = %cid,
             doc_id = %doc_id,
             collection_id = %collection_id,
             replicator_count = replicators.len(),
-            dag_block_count = dag_blocks.len(),
-            "Pushing DAG to replicators"
+            "Queueing DAG push to replicators"
         );
 
+        let head_block = Bytes::copy_from_slice(block);
         for rep in &replicators {
             if !Self::replicator_in_collection(rep, collection_id) {
                 continue;
@@ -183,49 +200,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 continue;
             };
 
-            let mut requests: Vec<(Cid, PushLogRequest)> = Vec::new();
-
-            for (block_cid, block_data) in &dag_blocks {
-                let mut req = PushLogRequest::new(
-                    doc_id.to_string(),
-                    Bytes::from(block_cid.to_bytes()),
-                    collection_id.to_string(),
-                    creator.to_string(),
-                    block_data.clone(),
-                );
-                if sign_with_transport(&self.runtime.transport, &mut req).is_ok() {
-                    requests.push((*block_cid, req));
-                }
-            }
-
-            // Spawn a task per peer, bounded by push_semaphore to prevent
-            // resource exhaustion during document creation bursts.
-            let transport = self.runtime.transport.clone();
-            let failure_tx = self.runtime.failure_tx.clone();
-            let doc_id_owned = doc_id.to_string();
-            let collection_id_owned = collection_id.to_string();
-            let semaphore = self.runtime.push_semaphore.clone();
-            let send_timeout = self.runtime.push_send_timeout;
-            self.spawn_background_task("push_dag_to_replicators", async move {
-                let Ok(_permit) = semaphore.acquire().await else {
-                    return;
-                };
-                let any_failed = Self::send_ordered_pushlogs_via_transport(
-                    &transport,
-                    &peer_id,
-                    requests,
-                    send_timeout,
-                )
-                .await;
-                if any_failed {
-                    Self::report_push_failure(
-                        &failure_tx,
-                        &peer_id,
-                        doc_id_owned,
-                        collection_id_owned,
-                    );
-                }
-            });
+            self.enqueue_replicator_push(PushJobSpec {
+                peer_id,
+                doc_id: doc_id.to_string(),
+                collection_id: collection_id.to_string(),
+                creator: creator.to_string(),
+                root_cid: *cid,
+                head_block: head_block.clone(),
+                expand_dag: true,
+            })
+            .await;
         }
     }
 
@@ -255,6 +239,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return;
         };
 
+        let head_block = Bytes::copy_from_slice(block);
         for rep in &replicators {
             if !Self::replicator_in_collection(rep, collection_id) {
                 continue;
@@ -267,47 +252,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 continue;
             };
 
-            let mut request = PushLogRequest::new(
-                doc_id.to_string(),
-                Bytes::from(cid.to_bytes()),
-                collection_id.to_string(),
-                creator.to_string(),
-                Bytes::copy_from_slice(block),
-            );
-
-            if let Err(e) = sign_with_transport(&self.runtime.transport, &mut request) {
-                tracing::debug!(error = %e, "Failed to sign PushLog request");
-                continue;
-            }
-
-            let transport = self.runtime.transport.clone();
-            let cid_clone = *cid;
-            let failure_tx = self.runtime.failure_tx.clone();
-            let doc_id_owned = doc_id.to_string();
-            let collection_id_owned = collection_id.to_string();
-            let semaphore = self.runtime.push_semaphore.clone();
-            let peer_id_clone = peer_id.clone();
-            let send_timeout = self.runtime.push_send_timeout;
-            self.spawn_background_task("push_to_replicators", async move {
-                let Ok(_permit) = semaphore.acquire().await else {
-                    return;
-                };
-                let any_failed = Self::send_ordered_pushlogs_via_transport(
-                    &transport,
-                    &peer_id_clone,
-                    vec![(cid_clone, request)],
-                    send_timeout,
-                )
-                .await;
-                if any_failed {
-                    Self::report_push_failure(
-                        &failure_tx,
-                        &peer_id_clone,
-                        doc_id_owned,
-                        collection_id_owned,
-                    );
-                }
-            });
+            self.enqueue_replicator_push(PushJobSpec {
+                peer_id,
+                doc_id: doc_id.to_string(),
+                collection_id: collection_id.to_string(),
+                creator: creator.to_string(),
+                root_cid: *cid,
+                head_block: head_block.clone(),
+                expand_dag: false,
+            })
+            .await;
         }
     }
 
@@ -332,7 +286,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return;
         }
 
-        let mut dag_blocks: Option<Vec<(Cid, Bytes)>> = None;
+        let head_block = Bytes::copy_from_slice(block);
         for rep in &replicators {
             if !Self::replicator_in_collection(rep, collection_id) {
                 continue;
@@ -355,74 +309,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 false
             };
 
-            let requests: Vec<(Cid, PushLogRequest)> = if use_full_dag {
-                if dag_blocks.is_none() {
-                    dag_blocks = Some(
-                        self.load_dag_blocks(*cid, Bytes::copy_from_slice(block))
-                            .await,
-                    );
-                }
-                let dag_blocks = dag_blocks.as_ref().expect("dag blocks loaded");
-                let mut requests = Vec::new();
-                for (block_cid, block_data) in dag_blocks.iter() {
-                    let mut req = PushLogRequest::new(
-                        doc_id.to_string(),
-                        Bytes::from(block_cid.to_bytes()),
-                        collection_id.to_string(),
-                        creator.to_string(),
-                        block_data.clone(),
-                    );
-                    if sign_with_transport(&self.runtime.transport, &mut req).is_ok() {
-                        requests.push((*block_cid, req));
-                    }
-                }
-                requests
-            } else {
-                let mut request = PushLogRequest::new(
-                    doc_id.to_string(),
-                    Bytes::from(cid.to_bytes()),
-                    collection_id.to_string(),
-                    creator.to_string(),
-                    Bytes::copy_from_slice(block),
-                );
-                if let Err(e) = sign_with_transport(&self.runtime.transport, &mut request) {
-                    tracing::debug!(error = %e, "Failed to sign PushLog request");
-                    continue;
-                }
-                vec![(*cid, request)]
-            };
-
-            if requests.is_empty() {
-                continue;
-            }
-
-            let transport = self.runtime.transport.clone();
-            let failure_tx = self.runtime.failure_tx.clone();
-            let doc_id_owned = doc_id.to_string();
-            let collection_id_owned = collection_id.to_string();
-            let semaphore = self.runtime.push_semaphore.clone();
-            let peer_id_clone = peer_id.clone();
-            let send_timeout = self.runtime.push_send_timeout;
-            self.spawn_background_task("push_document_to_replicators", async move {
-                let Ok(_permit) = semaphore.acquire().await else {
-                    return;
-                };
-                let any_failed = Self::send_ordered_pushlogs_via_transport(
-                    &transport,
-                    &peer_id_clone,
-                    requests,
-                    send_timeout,
-                )
-                .await;
-                if any_failed {
-                    Self::report_push_failure(
-                        &failure_tx,
-                        &peer_id_clone,
-                        doc_id_owned,
-                        collection_id_owned,
-                    );
-                }
-            });
+            self.enqueue_replicator_push(PushJobSpec {
+                peer_id,
+                doc_id: doc_id.to_string(),
+                collection_id: collection_id.to_string(),
+                creator: creator.to_string(),
+                root_cid: *cid,
+                head_block: head_block.clone(),
+                expand_dag: use_full_dag,
+            })
+            .await;
         }
     }
 
@@ -474,12 +370,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     .map(|artifact| artifact.doc_id.clone())
                     .collect::<std::collections::HashSet<_>>()
                 {
-                    Self::report_push_failure(
+                    report_push_failure(
                         &self.runtime.failure_tx,
                         &peer_id,
                         doc_id,
                         collection_id.to_string(),
-                    );
+                    )
+                    .await;
                 }
             }
         }
@@ -533,161 +430,21 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     .map(|artifact| artifact.doc_id.clone())
                     .collect::<std::collections::HashSet<_>>()
                 {
-                    Self::report_push_failure(
+                    report_push_failure(
                         &self.runtime.failure_tx,
                         &peer_id,
                         doc_id,
                         collection_id.to_string(),
-                    );
+                    )
+                    .await;
                 }
             }
         }
-    }
-
-    /// Load every transitive block in a document DAG, with dependencies first.
-    async fn load_dag_blocks(&self, root_cid: Cid, root_bytes: Bytes) -> Vec<(Cid, Bytes)> {
-        let mut ordered = Vec::new();
-        let mut visited = HashSet::new();
-        let mut stack = vec![(root_cid, root_bytes, false)];
-
-        while let Some((cid, data, expanded)) = stack.pop() {
-            if expanded {
-                ordered.push((cid, data));
-                continue;
-            }
-
-            if !visited.insert(cid) {
-                continue;
-            }
-
-            let linked_cids = defra_core::Block::from_dag_cbor(&data)
-                .ok()
-                .and_then(|block| defra_core::collect_block_links(&block).ok())
-                .unwrap_or_default();
-
-            stack.push((cid, data, true));
-
-            for linked_cid in linked_cids.into_iter().rev() {
-                match self.blockstore().get(&linked_cid).await {
-                    Ok(Some(linked_data)) => stack.push((linked_cid, linked_data, false)),
-                    Ok(None) => {
-                        tracing::debug!(
-                            root_cid = %root_cid,
-                            linked_cid = %linked_cid,
-                            "Linked DAG block not found in blockstore"
-                        );
-                    }
-                    Err(error) => {
-                        tracing::debug!(
-                            root_cid = %root_cid,
-                            linked_cid = %linked_cid,
-                            error = %error,
-                            "Failed to load linked DAG block"
-                        );
-                    }
-                }
-            }
-        }
-
-        ordered
-    }
-
-    /// Send PushLog requests to a peer in order via the transport, waiting for each to complete.
-    async fn send_ordered_pushlogs_via_transport(
-        transport: &T,
-        peer_id: &PeerId,
-        requests: Vec<(Cid, PushLogRequest)>,
-        send_timeout: Duration,
-    ) -> bool {
-        let mut any_failed = false;
-        'requests: for (cid, request) in requests {
-            let mut rate_limited_attempts = 0;
-            loop {
-                match tokio::time::timeout(
-                    send_timeout,
-                    transport.send_two_stream_request(peer_id, request.clone()),
-                )
-                .await
-                {
-                    Err(_) => {
-                        tracing::warn!(
-                            peer_id = %peer_id,
-                            cid = %cid,
-                            timeout_ms = send_timeout.as_millis(),
-                            "PushLog to replicator timed out"
-                        );
-                        any_failed = true;
-                        break 'requests;
-                    }
-                    Ok(Err(e)) => {
-                        if e.is_connection_like() {
-                            tracing::debug!(
-                                peer_id = %peer_id,
-                                cid = %cid,
-                                error = %e,
-                                "PushLog to replicator failed because the connection became unavailable; stopping replay for this peer"
-                            );
-                            any_failed = true;
-                            break 'requests;
-                        }
-
-                        tracing::debug!(
-                            peer_id = %peer_id,
-                            cid = %cid,
-                            error = %e,
-                            "PushLog to replicator failed"
-                        );
-                        any_failed = true;
-                        break;
-                    }
-                    Ok(Ok(reply)) => {
-                        let Some(error_message) = reply.err_message.as_deref() else {
-                            break;
-                        };
-
-                        if is_rate_limited_message(error_message) {
-                            rate_limited_attempts += 1;
-                            if rate_limited_attempts > MAX_RATE_LIMITED_PUSH_ATTEMPTS {
-                                tracing::warn!(
-                                    peer_id = %peer_id,
-                                    cid = %cid,
-                                    attempts = rate_limited_attempts,
-                                    "PushLog to replicator remained rate-limited; stopping ordered push"
-                                );
-                                any_failed = true;
-                                break 'requests;
-                            }
-
-                            let delay = rate_limited_push_delay(rate_limited_attempts);
-                            tracing::debug!(
-                                peer_id = %peer_id,
-                                cid = %cid,
-                                attempt = rate_limited_attempts,
-                                delay_ms = delay.as_millis(),
-                                "PushLog to replicator was rate-limited; backing off before retry"
-                            );
-                            tokio::time::sleep(delay).await;
-                            continue;
-                        }
-
-                        tracing::warn!(
-                            peer_id = %peer_id,
-                            cid = %cid,
-                            error = %error_message,
-                            "PushLog to replicator was rejected"
-                        );
-                        any_failed = true;
-                        break;
-                    }
-                }
-            }
-        }
-        any_failed
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -698,30 +455,35 @@ mod tests {
     use crate::error::{Result as P2PResult, RATE_LIMITED_MESSAGE};
     use crate::message::{
         BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
-        PushLogReply, PushSEArtifactsRequest,
+        PushLogReply, PushLogRequest, PushSEArtifactsRequest,
     };
     use crate::topics::DefraTopic;
     use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId};
     use crate::{QueryId, ReplicatorInfo};
 
+    use super::super::push_worker::send_ordered_pushlogs_via_transport;
     use super::*;
 
+    type SentLog = Vec<(String, Vec<u8>)>;
+
     #[derive(Clone)]
-    struct TestTransport {
+    pub(in crate::sync::coordinator) struct TestTransport {
         peer_id: PeerId,
         pubkey: Vec<u8>,
         replies: Arc<Mutex<VecDeque<PushLogReply>>>,
-        sent_cids: Arc<Mutex<Vec<Vec<u8>>>>,
+        sent: Arc<Mutex<SentLog>>,
+        stalled_peers: Arc<Mutex<std::collections::HashSet<String>>>,
         send_delay: Duration,
     }
 
     impl TestTransport {
-        fn new(replies: Vec<PushLogReply>) -> Self {
+        pub(in crate::sync::coordinator) fn new(replies: Vec<PushLogReply>) -> Self {
             Self {
                 peer_id: PeerId::new("local-peer".to_string()),
                 pubkey: vec![1, 2, 3],
                 replies: Arc::new(Mutex::new(VecDeque::from(replies))),
-                sent_cids: Arc::new(Mutex::new(Vec::new())),
+                sent: Arc::new(Mutex::new(Vec::new())),
+                stalled_peers: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 send_delay: Duration::ZERO,
             }
         }
@@ -731,8 +493,24 @@ mod tests {
             self
         }
 
+        /// Sends to this peer never complete: a deterministic nonresponsive
+        /// peer for worker fault-injection tests.
+        pub(in crate::sync::coordinator) fn with_stalled_peer(self, peer: &str) -> Self {
+            self.stalled_peers.lock().unwrap().insert(peer.to_string());
+            self
+        }
+
         fn sent_cids(&self) -> Vec<Vec<u8>> {
-            self.sent_cids.lock().unwrap().clone()
+            self.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, cid)| cid.clone())
+                .collect()
+        }
+
+        pub(in crate::sync::coordinator) fn sent(&self) -> SentLog {
+            self.sent.lock().unwrap().clone()
         }
     }
 
@@ -814,10 +592,21 @@ mod tests {
 
         async fn send_two_stream_request(
             &self,
-            _peer_id: &PeerId,
+            peer_id: &PeerId,
             req: PushLogRequest,
         ) -> P2PResult<PushLogReply> {
-            self.sent_cids.lock().unwrap().push(req.cid.to_vec());
+            if self
+                .stalled_peers
+                .lock()
+                .unwrap()
+                .contains(&peer_id.to_string())
+            {
+                std::future::pending::<()>().await;
+            }
+            self.sent
+                .lock()
+                .unwrap()
+                .push((peer_id.to_string(), req.cid.to_vec()));
             if !self.send_delay.is_zero() {
                 tokio::time::sleep(self.send_delay).await;
             }
@@ -988,10 +777,7 @@ mod tests {
             ),
         ];
 
-        let any_failed = SyncCoordinator::<
-            blockstore::DefraBlockstore<storage::backends::MemoryStore>,
-            TestTransport,
-        >::send_ordered_pushlogs_via_transport(
+        let any_failed = send_ordered_pushlogs_via_transport(
             &transport,
             &peer_id,
             requests,
@@ -1044,10 +830,7 @@ mod tests {
             ),
         ];
 
-        let any_failed = SyncCoordinator::<
-            blockstore::DefraBlockstore<storage::backends::MemoryStore>,
-            TestTransport,
-        >::send_ordered_pushlogs_via_transport(
+        let any_failed = send_ordered_pushlogs_via_transport(
             &transport,
             &peer_id,
             requests,
@@ -1095,10 +878,7 @@ mod tests {
             ),
         ];
 
-        let any_failed = SyncCoordinator::<
-            blockstore::DefraBlockstore<storage::backends::MemoryStore>,
-            TestTransport,
-        >::send_ordered_pushlogs_via_transport(
+        let any_failed = send_ordered_pushlogs_via_transport(
             &transport,
             &peer_id,
             requests,
@@ -1143,10 +923,7 @@ mod tests {
             ),
         ];
 
-        let any_failed = SyncCoordinator::<
-            blockstore::DefraBlockstore<storage::backends::MemoryStore>,
-            TestTransport,
-        >::send_ordered_pushlogs_via_transport(
+        let any_failed = send_ordered_pushlogs_via_transport(
             &transport,
             &peer_id,
             requests,
