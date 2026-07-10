@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ pub(crate) struct PendingPush {
 }
 
 impl PendingPush {
-    fn version(&self) -> Option<(u64, Vec<u8>)> {
+    fn version(&self) -> Option<(u64, Cid)> {
         let priority = match defra_core::Block::from_dag_cbor(&self.block) {
             Ok(block) => block.delta.priority(),
             Err(error) => {
@@ -44,7 +44,7 @@ impl PendingPush {
                 return None;
             }
         };
-        Some((priority, self.cid.to_bytes()))
+        Some((priority, self.cid))
     }
 
     fn merge_same_version(&mut self, incoming: PendingPush) {
@@ -60,6 +60,7 @@ struct Window {
     started_at: tokio::time::Instant,
     last_update: Mutex<tokio::time::Instant>,
     done: Mutex<bool>,
+    cancelled: AtomicBool,
     notify: Notify,
 }
 
@@ -68,6 +69,37 @@ pub(crate) struct PushFanoutCoalescer {
     coalesced: AtomicU64,
     window: Duration,
     max_delay: Duration,
+}
+
+struct FanoutLeaderGuard<'a> {
+    coalescer: &'a PushFanoutCoalescer,
+    key: (String, String),
+    window: Arc<Window>,
+    armed: bool,
+}
+
+impl FanoutLeaderGuard<'_> {
+    fn complete(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for FanoutLeaderGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut pending = self.coalescer.pending.lock();
+        if pending
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.window))
+        {
+            pending.remove(&self.key);
+        }
+        drop(pending);
+        self.window.cancelled.store(true, Ordering::Release);
+        self.window.notify.notify_waiters();
+    }
 }
 
 impl Default for PushFanoutCoalescer {
@@ -98,84 +130,98 @@ impl PushFanoutCoalescer {
         self.coalesced.load(Ordering::Relaxed)
     }
 
-    /// The returned future must be driven to completion. The first caller for
-    /// a key owns the send and completion notification for every follower;
-    /// cancelling that leader would strand the window. Production callers
-    /// run this inside detached tasks that live through completion.
+    /// Cancellation safe: if the leader is dropped, its guard removes the
+    /// dead window and wakes followers to re-admit the latest buffered push.
     pub(crate) async fn run<F, Fut>(&self, push: PendingPush, send: F)
     where
         F: FnOnce(PendingPush) -> Fut,
         Fut: Future<Output = ()>,
     {
-        if push.doc_id.is_empty() {
-            send(push).await;
-            return;
-        }
-        let Some(push_version) = push.version() else {
-            send(push).await;
-            return;
-        };
-        let key = (push.collection_id.clone(), push.doc_id.clone());
-        let (window, leader) = {
-            let mut pending = self.pending.lock();
-            if let Some(window) = pending.get(&key) {
-                let mut current = window.push.lock();
-                match push_version.cmp(&current.version().expect("pending pushes decode")) {
-                    std::cmp::Ordering::Greater => *current = push,
-                    std::cmp::Ordering::Equal => current.merge_same_version(push),
-                    std::cmp::Ordering::Less => {}
-                }
-                *window.last_update.lock() = tokio::time::Instant::now();
-                self.coalesced.fetch_add(1, Ordering::Relaxed);
-                (Arc::clone(window), false)
-            } else {
-                let now = tokio::time::Instant::now();
-                let window = Arc::new(Window {
-                    push: Mutex::new(push),
-                    started_at: now,
-                    last_update: Mutex::new(now),
-                    done: Mutex::new(false),
-                    notify: Notify::new(),
-                });
-                pending.insert(key.clone(), Arc::clone(&window));
-                (window, true)
-            }
-        };
-
-        if leader {
-            super::broadcast_coalescer::wait_for_quiet(
-                &window.last_update,
-                window.started_at,
-                self.window,
-                self.max_delay,
-            )
-            .await;
-            {
-                let mut pending = self.pending.lock();
-                if pending
-                    .get(&key)
-                    .is_some_and(|current| Arc::ptr_eq(current, &window))
-                {
-                    pending.remove(&key);
-                }
-            }
-            let latest = window.push.lock().clone();
-            send(latest).await;
-            *window.done.lock() = true;
-            window.notify.notify_waiters();
-            return;
-        }
-
+        let mut candidate = push;
+        let mut send = Some(send);
         loop {
-            let notified = window.notify.notified();
-            tokio::pin!(notified);
-            // Register before checking completion so the leader's single
-            // notify_waiters call cannot race this follower into sleeping.
-            notified.as_mut().enable();
-            if *window.done.lock() {
+            if candidate.doc_id.is_empty() {
+                send.take().expect("send closure available")(candidate).await;
                 return;
             }
-            notified.await;
+            let Some(push_version) = candidate.version() else {
+                send.take().expect("send closure available")(candidate).await;
+                return;
+            };
+            let key = (candidate.collection_id.clone(), candidate.doc_id.clone());
+            let (window, leader) = {
+                let mut pending = self.pending.lock();
+                if let Some(window) = pending.get(&key) {
+                    let mut current = window.push.lock();
+                    match push_version.cmp(&current.version().expect("pending pushes decode")) {
+                        std::cmp::Ordering::Greater => *current = candidate,
+                        std::cmp::Ordering::Equal => current.merge_same_version(candidate),
+                        std::cmp::Ordering::Less => {}
+                    }
+                    *window.last_update.lock() = tokio::time::Instant::now();
+                    self.coalesced.fetch_add(1, Ordering::Relaxed);
+                    (Arc::clone(window), false)
+                } else {
+                    let now = tokio::time::Instant::now();
+                    let window = Arc::new(Window {
+                        push: Mutex::new(candidate),
+                        started_at: now,
+                        last_update: Mutex::new(now),
+                        done: Mutex::new(false),
+                        cancelled: AtomicBool::new(false),
+                        notify: Notify::new(),
+                    });
+                    pending.insert(key.clone(), Arc::clone(&window));
+                    (window, true)
+                }
+            };
+
+            if leader {
+                let mut guard = FanoutLeaderGuard {
+                    coalescer: self,
+                    key: key.clone(),
+                    window: Arc::clone(&window),
+                    armed: true,
+                };
+                super::broadcast_coalescer::wait_for_quiet(
+                    &window.last_update,
+                    window.started_at,
+                    self.window,
+                    self.max_delay,
+                )
+                .await;
+                {
+                    let mut pending = self.pending.lock();
+                    if pending
+                        .get(&key)
+                        .is_some_and(|current| Arc::ptr_eq(current, &window))
+                    {
+                        pending.remove(&key);
+                    }
+                }
+                let latest = window.push.lock().clone();
+                send.take().expect("send closure available")(latest).await;
+                *window.done.lock() = true;
+                window.notify.notify_waiters();
+                guard.complete();
+                return;
+            }
+
+            loop {
+                let notified = window.notify.notified();
+                tokio::pin!(notified);
+                // Register before checking completion so the leader's single
+                // notify_waiters call cannot race this follower into sleeping.
+                notified.as_mut().enable();
+                if *window.done.lock() {
+                    return;
+                }
+                if window.cancelled.load(Ordering::Acquire) {
+                    candidate = window.push.lock().clone();
+                    break;
+                }
+                notified.await;
+            }
         }
     }
 }
@@ -364,6 +410,47 @@ mod tests {
         }
         assert_eq!(sends.load(Ordering::Relaxed), 2);
         assert_eq!(coalescer.coalesced(), 0);
+    }
+
+    #[tokio::test]
+    async fn follower_re_elects_after_leader_cancellation() {
+        let coalescer = Arc::new(PushFanoutCoalescer::with_window(Duration::from_millis(200)));
+        let leader = {
+            let coalescer = Arc::clone(&coalescer);
+            tokio::spawn(async move {
+                coalescer
+                    .run(push(b"leader"), |_| async { unreachable!() })
+                    .await;
+            })
+        };
+        while coalescer.pending.lock().is_empty() {
+            tokio::task::yield_now().await;
+        }
+
+        let sends = Arc::new(AtomicUsize::new(0));
+        let follower = {
+            let coalescer = Arc::clone(&coalescer);
+            let sends = Arc::clone(&sends);
+            tokio::spawn(async move {
+                coalescer
+                    .run(push(b"follower"), move |_| async move {
+                        sends.fetch_add(1, Ordering::Relaxed);
+                    })
+                    .await;
+            })
+        };
+        while coalescer.coalesced() == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        leader.abort();
+        assert!(leader.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), follower)
+            .await
+            .expect("replacement leader must complete")
+            .unwrap();
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+        assert!(coalescer.pending.lock().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -23,7 +23,9 @@ pub(crate) struct PushPayload {
     pub(crate) collection_id: String,
     pub(crate) creator: String,
     pub(crate) head_block: Bytes,
-    pub(crate) root_request: OnceCell<Option<(Cid, PushLogRequest)>>,
+    /// Only successful signing is cached. `get_or_try_init` leaves this cell
+    /// empty after a transient signer failure so another peer can retry.
+    pub(crate) root_request: OnceCell<(Cid, PushLogRequest)>,
     pub(crate) dependency_requests: OnceCell<Arc<Vec<(Cid, PushLogRequest)>>>,
 }
 

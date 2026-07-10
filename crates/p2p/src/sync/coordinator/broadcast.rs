@@ -489,6 +489,7 @@ pub(super) mod tests {
         stalled_peers: Arc<Mutex<std::collections::HashSet<String>>>,
         send_delay: Duration,
         signs: Arc<AtomicUsize>,
+        sign_failures_remaining: Arc<AtomicUsize>,
     }
 
     impl TestTransport {
@@ -501,6 +502,7 @@ pub(super) mod tests {
                 stalled_peers: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 send_delay: Duration::ZERO,
                 signs: Arc::new(AtomicUsize::new(0)),
+                sign_failures_remaining: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -516,6 +518,11 @@ pub(super) mod tests {
         /// peer for worker fault-injection tests.
         pub(in crate::sync::coordinator) fn with_stalled_peer(self, peer: &str) -> Self {
             self.stalled_peers.lock().unwrap().insert(peer.to_string());
+            self
+        }
+
+        pub(in crate::sync::coordinator) fn with_sign_failures(self, count: usize) -> Self {
+            self.sign_failures_remaining.store(count, Ordering::Relaxed);
             self
         }
 
@@ -551,6 +558,15 @@ pub(super) mod tests {
 
         fn sign(&self, _data: &[u8]) -> P2PResult<Vec<u8>> {
             self.signs.fetch_add(1, Ordering::Relaxed);
+            if self
+                .sign_failures_remaining
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(crate::Error::SigningFailed("injected failure".to_string()));
+            }
             Ok(vec![0])
         }
 

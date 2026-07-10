@@ -5,9 +5,9 @@ the durable retry ledger. A head can already be active when a newer local head a
 that old send may finish, but its failure must not recreate a stale retry obligation.
 
 The model uses monotonically increasing natural numbers for `(priority, CID)` head
-versions. The Rust implementation uses the real block priority with CID bytes as a
-deterministic tie-break. `LatestOnly` atomically removes queued and persisted
-predecessors before installing the new head. `CurrentOnly` checks the version again on
+versions. The Rust implementation uses the real block priority with `Cid::cmp` as a
+deterministic tie-break across every layer. `LatestOnly` atomically removes queued and
+persisted predecessors before installing the new head. `CurrentOnly` checks the version again on
 failure, so superseded active work is retired instead of persisted.
 
 The green configuration proves:
@@ -22,6 +22,14 @@ The green configuration proves:
 `MC_PushCoalescing_Red_StaleRetry.cfg` demonstrates the active-send race that recreates
 a superseded persisted retry.
 
+The model makes `Fail` and its current-version check atomic. The runtime check and
+peerstore write are separated by an asynchronous recorder channel: a newer-head
+observation can be processed while no record exists, followed by an already-checked
+older failure that creates one stale retry. This narrow interleaving is not covered by
+`INV_NoStaleRetry`. It is bounded self-healing work rather than silent loss because
+`retry_doc` re-reads and sends the document's current heads, and the version-guarded
+completion removes only the record that was actually attempted.
+
 The model intentionally excludes payload encoding and elapsed time. Shared encode-cache
 lifetime is Rust ownership (`Weak<CID> -> Arc<entry>`, so the last peer drops the entry),
 and exponential backoff is a deterministic pure function covered by unit tests.
@@ -32,7 +40,8 @@ maximum forces progress for a continuously written document and bounds the lifet
 of follower tasks. This deliberately accepts up to 250 ms of latency for an isolated
 fan-out or gossip obligation. Transactional document push and gossip are awaited in
 order, while collection commits use an empty document ID and therefore a separate
-CID-scoped backlog key.
+CID-scoped backlog key. A dropped leader removes its window and wakes followers to
+re-admit the latest buffered payload, so cancellation cannot wedge the document key.
 
 Dormant durable records are volatile-send watermarks, not successful acknowledgements.
 They are promoted to immediately due pending retries when a process starts, because the

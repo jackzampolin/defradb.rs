@@ -164,16 +164,18 @@ where
         .unwrap_or_else(|| Arc::new(PushPayload::from_job(job)));
     let root_request = payload
         .root_request
-        .get_or_init(|| async {
+        .get_or_try_init(|| async {
             build_request(
                 &context.transport,
                 &payload,
                 job.root_cid,
                 job.head_block.clone(),
             )
+            .ok_or(())
         })
         .await
-        .clone();
+        .ok()
+        .cloned();
     let dependencies = if job.expand_dag {
         payload
             .dependency_requests
@@ -601,6 +603,54 @@ mod tests {
         }
         assert_eq!(transport.sign_count(), 1);
         assert_eq!(cache.hits(), 1);
+        backlog.close();
+    }
+
+    #[tokio::test]
+    async fn transient_root_sign_failure_is_not_cached_across_fanout() {
+        let backlog = PushBacklog::new(1024, usize::MAX, 1, 2);
+        let transport = TestTransport::new(Vec::new()).with_sign_failures(1);
+        let (context, mut failure_rx) = test_context(
+            transport.clone(),
+            Arc::clone(&backlog),
+            Duration::from_secs(1),
+        );
+        let cache = crate::sync::push_encode_cache::PushEncodeCache::default();
+        let base = job("a", b"shared-sign-retry");
+        let mut first = PushJobSpec::new(
+            base.peer_id,
+            "doc-shared".to_string(),
+            base.collection_id,
+            base.creator,
+            base.root_cid,
+            base.head_block,
+            base.expand_dag,
+        );
+        first.encoded_payload = Some(cache.acquire(&first));
+        let mut second = PushJobSpec::new(
+            PeerId::new("b".to_string()),
+            first.doc_id.clone(),
+            first.collection_id.clone(),
+            first.creator.clone(),
+            first.root_cid,
+            first.head_block.clone(),
+            first.expand_dag,
+        );
+        second.encoded_payload = Some(cache.acquire(&second));
+
+        let shutdown = SyncShutdownHandle::new();
+        spawn_push_workers(context, &shutdown);
+        backlog.try_enqueue(first);
+        backlog.try_enqueue(second);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while backlog.snapshot().completed_total + backlog.snapshot().failed_total < 2 {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(transport.sign_count(), 2);
+        assert_eq!(transport.sent().len(), 1);
+        assert!(failure_rx.try_recv().is_ok());
         backlog.close();
     }
 
