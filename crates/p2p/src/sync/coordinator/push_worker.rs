@@ -80,6 +80,17 @@ async fn report_push_event(
     head_priority: u64,
     create_retry: bool,
 ) {
+    if doc_id.is_empty() {
+        if create_retry {
+            tracing::warn!(
+                peer_id = %peer_id,
+                collection_id,
+                cid = ?cid,
+                "Collection-commit push failed; document retry ledger cannot replay CID-scoped work"
+            );
+        }
+        return;
+    }
     let tx = failure_tx.lock().clone();
     if let Some(tx) = tx {
         let failure = PushFailure {
@@ -674,6 +685,27 @@ mod tests {
             .unwrap();
         assert_eq!(delivered.doc_id, "doc-slow");
         reporter.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn collection_commit_failure_does_not_enter_document_retry_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PushFailure>(1);
+        let slot = Arc::new(Mutex::new(Some(tx)));
+
+        report_push_failure(
+            &slot,
+            &PeerId::new("peer".to_string()),
+            String::new(),
+            "collection".to_string(),
+            Some(Cid::new_v1(
+                0x55,
+                Code::Sha2_256.digest(b"collection-commit"),
+            )),
+            1,
+        )
+        .await;
+
+        assert!(rx.try_recv().is_err());
     }
 
     /// Workers exit promptly when the backlog closes; the worker handles are

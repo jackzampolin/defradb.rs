@@ -67,11 +67,20 @@ impl BroadcastCoalescer {
         self.coalesced.load(Ordering::Relaxed)
     }
 
+    /// The returned future must be driven to completion. The first caller for
+    /// a key owns the send and completion notification for every follower;
+    /// cancelling that leader would strand the window. Production callers
+    /// run this inside detached tasks that live through completion.
     pub(crate) async fn run<F, Fut>(&self, broadcast: PushLogBroadcast, send: F) -> SharedResult
     where
         F: FnOnce(PushLogBroadcast) -> Fut,
         Fut: Future<Output = SharedResult>,
     {
+        let Some(incoming_version) = version(&broadcast) else {
+            // Without a decoded priority there is no safe proof that this
+            // update subsumes another document head.
+            return send(broadcast).await;
+        };
         let key = BroadcastKey {
             collection_id: broadcast.collection_id.clone(),
             doc_id: broadcast.doc_id.clone(),
@@ -80,7 +89,7 @@ impl BroadcastCoalescer {
             let mut all = self.pending.lock();
             if let Some(pending) = all.get(&key) {
                 let mut current = pending.broadcast.lock();
-                if version(&broadcast) > version(&current) {
+                if incoming_version > version(&current).expect("pending broadcasts decode") {
                     *current = broadcast;
                 }
                 *pending.last_update.lock() = tokio::time::Instant::now();
@@ -156,22 +165,22 @@ pub(super) async fn wait_for_quiet(
     }
 }
 
-fn version(broadcast: &PushLogBroadcast) -> (u64, Vec<u8>) {
+fn version(broadcast: &PushLogBroadcast) -> Option<(u64, Vec<u8>)> {
     let priority = match defra_core::Block::from_dag_cbor(&broadcast.block) {
         Ok(block) => block.delta.priority(),
         Err(error) => {
             tracing::warn!(
                 cid = %String::from_utf8_lossy(&broadcast.cid),
                 %error,
-                "broadcast head priority decode failed; using CID tie-break"
+                "broadcast head priority decode failed; bypassing document coalescing"
             );
-            0
+            return None;
         }
     };
     let cid = Cid::try_from(broadcast.cid.as_ref())
         .map(|cid| cid.to_bytes())
         .unwrap_or_else(|_| broadcast.cid.to_vec());
-    (priority, cid)
+    Some((priority, cid))
 }
 
 #[cfg(test)]
@@ -184,6 +193,32 @@ mod tests {
     use super::*;
 
     fn broadcast(seed: &[u8]) -> PushLogBroadcast {
+        use defra_core::{Block, CompositeDeltaPayload, CrdtDelta};
+
+        let block = Block::new_with_options(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                doc_id: b"doc".to_vec(),
+                schema_version_id: "schema".to_string(),
+                priority: seed.iter().map(|byte| u64::from(*byte)).sum(),
+                status: 1,
+            }),
+            vec![],
+            vec![],
+            None,
+            None,
+        );
+        let block = Bytes::from(block.to_dag_cbor().unwrap());
+        let cid = defra_core::block::generate_cid_from_bytes(&block).unwrap();
+        PushLogBroadcast::new(
+            "doc".to_string(),
+            Bytes::from(cid.to_bytes()),
+            "collection".to_string(),
+            "creator".to_string(),
+            block,
+        )
+    }
+
+    fn undecodable_broadcast(seed: &[u8]) -> PushLogBroadcast {
         let cid = Cid::new_v1(0x55, Code::Sha2_256.digest(seed));
         PushLogBroadcast::new(
             "doc".to_string(),
@@ -308,6 +343,24 @@ mod tests {
             assert_eq!(follower.await.unwrap().unwrap(), BroadcastResult::Success);
         }
         assert_eq!(sends.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn undecodable_heads_bypass_document_coalescing() {
+        let coalescer = BroadcastCoalescer::with_window(Duration::from_millis(10));
+        let sends = Arc::new(AtomicUsize::new(0));
+        for seed in [b"first".as_slice(), b"second"] {
+            let sends = Arc::clone(&sends);
+            coalescer
+                .run(undecodable_broadcast(seed), move |_| async move {
+                    sends.fetch_add(1, Ordering::Relaxed);
+                    Ok(BroadcastResult::Success)
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(sends.load(Ordering::Relaxed), 2);
+        assert_eq!(coalescer.coalesced(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -176,6 +176,12 @@ impl<S: Store> Peerstore<S> {
         priority: u64,
         retry_info_bytes: &[u8],
     ) -> Result<()> {
+        // Collection commits are CID-scoped live obligations. The document
+        // retry loop cannot service an empty document ID, so persisting one
+        // would create a permanent peer marker with no runnable work.
+        if doc_id.is_empty() {
+            return Ok(());
+        }
         let mut txn = self.store.new_txn(false).await?;
         let id_key = ReplicatorRetryIDKey::new(peer_id);
         // Only write retry info if not already present (preserve existing backoff state).
@@ -222,6 +228,9 @@ impl<S: Store> Peerstore<S> {
         cid: &str,
         priority: u64,
     ) -> Result<()> {
+        if doc_id.is_empty() {
+            return Ok(());
+        }
         let key = ReplicatorRetryDocIDKey::new(peer_id, doc_id);
         let mut txn = self.store.new_txn(false).await?;
         let Some(bytes) = txn.get(&key.bytes()).await? else {
@@ -438,16 +447,29 @@ impl<S: Store> Peerstore<S> {
         txn.commit().await
     }
 
-    /// Clear retry info and dormant watermarks for a peer once no retry is pending.
+    /// Stop sweeping a peer once no retry is pending. Dormant newest-head
+    /// watermarks deliberately survive: they cover volatile live work and
+    /// are promoted by `activate_dormant_push_retries` after a restart.
     pub async fn clear_retry_peer(&self, peer_id: &str) -> Result<()> {
         let mut txn = self.store.new_txn(false).await?;
         let prefix = ReplicatorRetryDocIDKey::peer_prefix(peer_id);
         let mut iter = txn.iterator(IterOptions::new().with_prefix(prefix)).await?;
-        let mut doc_keys = Vec::new();
+        let expected_prefix = format!("/rep/retry/doc/{peer_id}/");
+        let mut empty_doc_keys = Vec::new();
         let mut has_pending = false;
         while let Some(pair) = iter.next().await? {
+            let key = String::from_utf8_lossy(&pair.key);
+            if key
+                .strip_prefix(&expected_prefix)
+                .is_some_and(str::is_empty)
+            {
+                // Clean up the unserviceable shape produced by earlier
+                // revisions without letting it wedge this peer forever.
+                empty_doc_keys.push(pair.key);
+                continue;
+            }
             match super::PersistedPushRetry::from_bytes(&pair.value) {
-                Ok(retry) if !retry.pending => doc_keys.push(pair.key),
+                Ok(retry) if !retry.pending => {}
                 // A pending or legacy record raced the caller's empty check;
                 // preserve it and its peer marker for the retry loop.
                 _ => {
@@ -460,7 +482,7 @@ impl<S: Store> Peerstore<S> {
         if has_pending {
             return txn.commit().await;
         }
-        for doc_key in doc_keys {
+        for doc_key in empty_doc_keys {
             txn.delete(&doc_key).await?;
         }
         txn.delete(&ReplicatorRetryIDKey::new(peer_id).bytes())
@@ -741,7 +763,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restart_promotes_dormant_watermarks_and_clear_removes_them() {
+    async fn sweep_clear_preserves_dormant_watermark_for_restart_promotion() {
         let store = Arc::new(MemoryStore::new());
         let peerstore = Peerstore::new(store);
         let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
@@ -760,6 +782,10 @@ mod tests {
             .unwrap()
             .is_empty());
 
+        // The live sweep stops revisiting this peer but must preserve the
+        // dormant crash-recovery obligation.
+        peerstore.clear_retry_peer("peer").await.unwrap();
+        assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
         assert_eq!(peerstore.activate_dormant_push_retries().await.unwrap(), 1);
         let retries = peerstore.get_retry_documents("peer").await.unwrap();
         assert_eq!(retries.len(), 1);
@@ -778,18 +804,62 @@ mod tests {
             .unwrap();
         peerstore.clear_retry_peer("peer").await.unwrap();
         assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
-
-        // Once there is no pending work, clear also removes dormant growth.
-        peerstore
-            .record_push_failure("peer", "doc", "collection", "old-2", 3, &initial)
-            .await
-            .unwrap();
-        peerstore
-            .observe_push_head("peer", "doc", "collection", "new-2", 4)
-            .await
-            .unwrap();
-        peerstore.clear_retry_peer("peer").await.unwrap();
         assert_eq!(peerstore.activate_dormant_push_retries().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_document_push_failure_creates_no_retry_state() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+        peerstore
+            .record_push_failure("peer", "", "collection", "collection-cid", 1, &initial)
+            .await
+            .unwrap();
+        peerstore
+            .observe_push_head("peer", "", "collection", "collection-cid", 1)
+            .await
+            .unwrap();
+
         assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
+        assert!(peerstore
+            .get_retry_documents("peer")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn sweep_clear_removes_preexisting_empty_document_retry() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let mut retry =
+            super::super::PersistedPushRetry::new_observed("", "collection", "collection-cid", 1);
+        retry.activate("peer:collection-cid");
+        let mut txn = peerstore.store.new_txn(false).await.unwrap();
+        txn.set(
+            &ReplicatorRetryIDKey::new("peer").bytes(),
+            &super::super::RetryInfo::new_initial().to_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
+        txn.set(
+            &ReplicatorRetryDocIDKey::new("peer", "").bytes(),
+            &retry.to_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        peerstore.clear_retry_peer("peer").await.unwrap();
+
+        assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
+        let txn = peerstore.store.new_txn(true).await.unwrap();
+        assert!(txn
+            .get(&ReplicatorRetryDocIDKey::new("peer", "").bytes())
+            .await
+            .unwrap()
+            .is_none());
     }
 }

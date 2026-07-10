@@ -32,19 +32,19 @@ pub(crate) struct PendingPush {
 }
 
 impl PendingPush {
-    fn version(&self) -> (u64, Vec<u8>) {
+    fn version(&self) -> Option<(u64, Vec<u8>)> {
         let priority = match defra_core::Block::from_dag_cbor(&self.block) {
             Ok(block) => block.delta.priority(),
             Err(error) => {
                 tracing::warn!(
                     cid = %self.cid,
                     %error,
-                    "push fanout head priority decode failed; using CID tie-break"
+                    "push fanout head priority decode failed; bypassing document coalescing"
                 );
-                0
+                return None;
             }
         };
-        (priority, self.cid.to_bytes())
+        Some((priority, self.cid.to_bytes()))
     }
 
     fn merge_same_version(&mut self, incoming: PendingPush) {
@@ -98,6 +98,10 @@ impl PushFanoutCoalescer {
         self.coalesced.load(Ordering::Relaxed)
     }
 
+    /// The returned future must be driven to completion. The first caller for
+    /// a key owns the send and completion notification for every follower;
+    /// cancelling that leader would strand the window. Production callers
+    /// run this inside detached tasks that live through completion.
     pub(crate) async fn run<F, Fut>(&self, push: PendingPush, send: F)
     where
         F: FnOnce(PendingPush) -> Fut,
@@ -107,12 +111,16 @@ impl PushFanoutCoalescer {
             send(push).await;
             return;
         }
+        let Some(push_version) = push.version() else {
+            send(push).await;
+            return;
+        };
         let key = (push.collection_id.clone(), push.doc_id.clone());
         let (window, leader) = {
             let mut pending = self.pending.lock();
             if let Some(window) = pending.get(&key) {
                 let mut current = window.push.lock();
-                match push.version().cmp(&current.version()) {
+                match push_version.cmp(&current.version().expect("pending pushes decode")) {
                     std::cmp::Ordering::Greater => *current = push,
                     std::cmp::Ordering::Equal => current.merge_same_version(push),
                     std::cmp::Ordering::Less => {}
@@ -181,6 +189,33 @@ mod tests {
     use super::*;
 
     fn push(seed: &[u8]) -> PendingPush {
+        use defra_core::{Block, CompositeDeltaPayload, CrdtDelta};
+
+        let block = Block::new_with_options(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                doc_id: b"doc".to_vec(),
+                schema_version_id: "schema".to_string(),
+                priority: seed.iter().map(|byte| u64::from(*byte)).sum(),
+                status: 1,
+            }),
+            vec![],
+            vec![],
+            None,
+            None,
+        );
+        let block = Bytes::from(block.to_dag_cbor().unwrap());
+        PendingPush {
+            cid: defra_core::block::generate_cid_from_bytes(&block).unwrap(),
+            block,
+            doc_id: "doc".to_string(),
+            collection_id: "collection".to_string(),
+            creator: "creator".to_string(),
+            expand_unfiltered_dag: false,
+            document: Some(JsonValue::Null),
+        }
+    }
+
+    fn undecodable_push(seed: &[u8]) -> PendingPush {
         PendingPush {
             cid: Cid::new_v1(0x55, Code::Sha2_256.digest(seed)),
             block: Bytes::copy_from_slice(seed),
@@ -313,6 +348,22 @@ mod tests {
             follower.await.unwrap();
         }
         assert_eq!(sends.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn undecodable_heads_bypass_document_coalescing() {
+        let coalescer = PushFanoutCoalescer::with_window(Duration::from_millis(10));
+        let sends = Arc::new(AtomicUsize::new(0));
+        for seed in [b"first".as_slice(), b"second"] {
+            let sends = Arc::clone(&sends);
+            coalescer
+                .run(undecodable_push(seed), move |_| async move {
+                    sends.fetch_add(1, Ordering::Relaxed);
+                })
+                .await;
+        }
+        assert_eq!(sends.load(Ordering::Relaxed), 2);
+        assert_eq!(coalescer.coalesced(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

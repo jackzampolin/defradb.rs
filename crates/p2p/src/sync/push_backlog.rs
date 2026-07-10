@@ -76,14 +76,14 @@ impl PushJobSpec {
         head_block: Bytes,
         expand_dag: bool,
     ) -> Self {
-        let priority = match defra_core::Block::from_dag_cbor(&head_block) {
-            Ok(block) => block.delta.priority(),
+        let (priority, decoded) = match defra_core::Block::from_dag_cbor(&head_block) {
+            Ok(block) => (block.delta.priority(), true),
             Err(error) => {
-                tracing::warn!(%root_cid, %error, "push head priority decode failed; using CID tie-break");
-                0
+                tracing::warn!(%root_cid, %error, "push head priority decode failed; disabling document-level retirement");
+                (0, false)
             }
         };
-        let key_doc_id = if doc_id.is_empty() {
+        let key_doc_id = if doc_id.is_empty() || !decoded {
             format!("cid:{root_cid}")
         } else {
             doc_id.clone()
@@ -130,6 +130,13 @@ impl PushJobSpec {
     pub(crate) fn head_priority(&self) -> u64 {
         self.version().priority
     }
+
+    fn live_head(&self) -> LiveHead {
+        LiveHead {
+            version: self.version,
+            expand_dag: self.expand_dag,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -145,6 +152,12 @@ struct HeadVersion {
     cid: Cid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LiveHead {
+    version: HeadVersion,
+    expand_dag: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RetryKey {
     peer_id: String,
@@ -155,8 +168,9 @@ struct RetryKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnqueueOutcome {
     Enqueued,
-    /// The same `(document, peer, version)` is already queued or active.
-    /// Queued specs merge the full-DAG obligation without adding an item.
+    /// The same `(document, peer, version)` with equal or stronger delivery
+    /// scope is already queued or active. Queued specs merge the full-DAG
+    /// obligation without adding an item.
     Coalesced,
     /// The arriving head was older than the current `(document, peer)` head.
     RetiredStale,
@@ -193,9 +207,10 @@ struct Inner {
     queues: HashMap<String, VecDeque<PushJobSpec>>,
     ready: VecDeque<String>,
     active: HashMap<String, usize>,
-    /// Greatest live version per `(document, peer)`, across queued and active
-    /// work. Absence makes an active job stale.
-    latest: HashMap<JobKey, HeadVersion>,
+    /// Greatest live version and delivery strength per `(document, peer)`,
+    /// across queued and active work. Absence, a newer version, or a stronger
+    /// full-DAG obligation makes an active root-only job stale.
+    latest: HashMap<JobKey, LiveHead>,
     /// Exact `(peer, cid)` retry state. A failed CID never parks unrelated
     /// work for the same peer.
     retries: HashMap<RetryKey, RetryState>,
@@ -317,6 +332,7 @@ impl PushBacklog {
         let peer_key = job.peer_id.to_string();
         let job_key = job.key().clone();
         let version = job.version();
+        let live_head = job.live_head();
         let mut inner = self.inner.lock();
 
         if inner.closed {
@@ -346,34 +362,45 @@ impl PushBacklog {
         }
 
         if let Some(current) = inner.latest.get(&job_key).copied() {
-            match version.cmp(&current) {
+            match version.cmp(&current.version) {
                 std::cmp::Ordering::Less => {
                     self.stale_head_retirements_total
                         .fetch_add(1, Ordering::Relaxed);
                     return EnqueueOutcome::RetiredStale;
                 }
                 std::cmp::Ordering::Equal => {
-                    if let Some(existing) = inner
+                    let merged = inner
                         .queues
                         .get_mut(&peer_key)
                         .and_then(|queue| queue.iter_mut().find(|queued| queued.key() == &job_key))
-                    {
-                        let old_cost = existing.resident_bytes();
-                        let expand_dag = existing.expand_dag || job.expand_dag;
-                        *existing = job;
-                        existing.expand_dag = expand_dag;
-                        let new_cost = existing.resident_bytes();
+                        .map(|existing| {
+                            let old_cost = existing.resident_bytes();
+                            let expand_dag = existing.expand_dag || job.expand_dag;
+                            *existing = job.clone();
+                            existing.expand_dag = expand_dag;
+                            let new_cost = existing.resident_bytes();
+                            (old_cost, new_cost, existing.live_head())
+                        });
+                    if let Some((old_cost, new_cost, merged_head)) = merged {
                         inner.queued_bytes = inner.queued_bytes - old_cost + new_cost;
+                        inner.latest.insert(job_key, merged_head);
+                        self.coalesced_total.fetch_add(1, Ordering::Relaxed);
+                        return EnqueueOutcome::Coalesced;
                     }
-                    self.coalesced_total.fetch_add(1, Ordering::Relaxed);
-                    return EnqueueOutcome::Coalesced;
+                    if !live_head.expand_dag || current.expand_dag {
+                        self.coalesced_total.fetch_add(1, Ordering::Relaxed);
+                        return EnqueueOutcome::Coalesced;
+                    }
+                    // The equal-version job is active, but it only owns the
+                    // root block. Queue the stronger full-DAG obligation
+                    // instead of losing it behind the active send.
                 }
                 std::cmp::Ordering::Greater => {
                     Self::remove_queued_job(&mut inner, &peer_key, &job_key);
                     inner.latest.remove(&job_key);
                     inner.retries.remove(&RetryKey {
                         peer_id: peer_key.clone(),
-                        cid: current.cid,
+                        cid: current.version.cid,
                     });
                     self.stale_head_retirements_total
                         .fetch_add(1, Ordering::Relaxed);
@@ -417,7 +444,7 @@ impl PushBacklog {
         }
         inner.queued_items += 1;
         inner.queued_bytes += cost;
-        inner.latest.insert(job_key, version);
+        inner.latest.insert(job_key, live_head);
         self.enqueued_total.fetch_add(1, Ordering::Relaxed);
         drop(inner);
         self.notify.notify_waiters();
@@ -455,7 +482,7 @@ impl PushBacklog {
             .lock()
             .latest
             .get(job.key())
-            .is_some_and(|version| *version == job.version())
+            .is_some_and(|head| *head == job.live_head())
     }
 
     /// Next job whose peer is below its active cap and not cooling down,
@@ -607,7 +634,7 @@ impl PushBacklog {
             if inner
                 .latest
                 .get(&job_key)
-                .is_some_and(|version| *version == job.version())
+                .is_some_and(|head| *head == job.live_head())
             {
                 inner.latest.remove(&job_key);
             }
@@ -857,6 +884,47 @@ mod tests {
 
         let popped = backlog.next_job().await.expect("job queued");
         assert!(popped.expand_dag, "coalescing must not shrink the job");
+    }
+
+    #[tokio::test]
+    async fn active_root_only_job_does_not_absorb_full_dag_obligation() {
+        let backlog = PushBacklog::new(1024, usize::MAX, 2, 2);
+        let root_only = versioned_job("a", "doc", 1);
+        assert_eq!(
+            backlog.try_enqueue(root_only.clone()),
+            EnqueueOutcome::Enqueued
+        );
+        let active = backlog.next_job().await.unwrap();
+
+        let mut full_dag = root_only;
+        full_dag.expand_dag = true;
+        assert_eq!(backlog.try_enqueue(full_dag), EnqueueOutcome::Enqueued);
+        assert!(!backlog.is_current(&active));
+        backlog.job_done(&active, JobCompletion::Retired);
+
+        let queued = backlog.next_job().await.unwrap();
+        assert!(queued.expand_dag);
+        assert!(backlog.is_current(&queued));
+    }
+
+    #[tokio::test]
+    async fn undecodable_head_cannot_be_retired_by_document_version_order() {
+        let backlog = PushBacklog::new(1024, usize::MAX, 2, 2);
+        assert_eq!(
+            backlog.try_enqueue(versioned_job("a", "doc", 100)),
+            EnqueueOutcome::Enqueued
+        );
+        let undecodable = PushJobSpec::new(
+            PeerId::new("a".to_string()),
+            "doc".to_string(),
+            "collection".to_string(),
+            "creator".to_string(),
+            Cid::new_v1(0x55, Code::Sha2_256.digest(b"undecodable")),
+            Bytes::from_static(b"not dag-cbor"),
+            false,
+        );
+        assert_eq!(backlog.try_enqueue(undecodable), EnqueueOutcome::Enqueued);
+        assert_eq!(backlog.snapshot().queued_items, 2);
     }
 
     #[tokio::test]

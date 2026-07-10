@@ -40,6 +40,19 @@ in-memory send they represented cannot survive a restart. A live failure activat
 retry with the first deterministic jittered interval (15–30 seconds for the 30-second
 backoff cap); the in-memory backlog owns the immediate attempt.
 
+The live retry sweep removes only the peer scheduling marker when every document record
+is dormant; it deliberately retains those watermarks while their in-memory sends may
+still be queued or active. This closes the enqueue-to-crash window without causing
+2-second sweep churn: restart promotion recreates the peer marker. Collection commits
+have empty document IDs and are not admitted to this document retry ledger because its
+replay operation requires a document whose current heads can be re-read.
+
+For an equal `(priority, CID)` version, full-DAG delivery is stronger than root-only
+delivery. A full-DAG arrival therefore queues behind an active root-only send rather
+than coalescing into it. If a locally produced head cannot be decoded to obtain its
+priority, it uses a CID-scoped obligation key and bypasses both update coalescers; an
+unproven version is never retired as an older document head.
+
 Latest-head retirement assumes that a later document head subsumes its earlier linear
 predecessor. Concurrent sibling heads that must both remain heads do not enter this
 live document-update path: replay and field/KMS DAG paths bypass the outbound backlog,
