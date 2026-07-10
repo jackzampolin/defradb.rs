@@ -23,25 +23,25 @@ const MIGRATION_SCHEMA: &str = "type Users { name: String  verified: Boolean }";
 const P2P_TIMEOUT: Duration = Duration::from_secs(15);
 const MERGE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// JSON Patch to add an Email field (Kind 11 = String) to the Users collection.
+/// JSON Patch to add an Email field to the Users collection.
 const ADD_EMAIL_PATCH: &str =
-    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"Email","Kind":11}}]"#;
+    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"Email","Kind":"String"}}]"#;
 
-/// JSON Patch to add a verified field (Kind 6 = Boolean) to the Users collection.
+/// JSON Patch to add a verified field to the Users collection.
 const ADD_VERIFIED_PATCH: &str =
-    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"verified","Kind":6}}]"#;
+    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"verified","Kind":"Float64"}}]"#;
 
-/// JSON Patch to add an email field (Kind 11 = String) to the Users collection (lowercase).
+/// JSON Patch to add an email field to the Users collection (lowercase).
 const ADD_EMAIL_PATCH_LC: &str =
-    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"email","Kind":11}}]"#;
+    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"email","Kind":"String"}}]"#;
 
-/// JSON Patch to add an address field (Kind 11 = String) to the Users collection.
+/// JSON Patch to add an address field to the Users collection.
 const ADD_ADDRESS_PATCH: &str =
-    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"address","Kind":11}}]"#;
+    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"address","Kind":"String"}}]"#;
 
-/// JSON Patch to add a phone field (Kind 11 = String) to the Users collection.
+/// JSON Patch to add a phone field to the Users collection.
 const ADD_PHONE_PATCH: &str =
-    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"phone","Kind":11}}]"#;
+    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"phone","Kind":"String"}}]"#;
 
 /// Set up a 2-node iroh cluster with schema deployed on both, connected with replicator.
 ///

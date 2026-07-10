@@ -1,4 +1,5 @@
 use db::database::DB;
+use schema::FieldKind;
 use storage::backends::MemoryStore;
 
 #[tokio::test]
@@ -26,7 +27,7 @@ async fn patch_collection_preserves_runtime_root_id() {
             r#"
             [
                 { "op": "add", "path": "/Users/Fields/-", "value": {
-                    "Name": "age", "Kind": 5
+                    "Name": "age", "Kind": "Int"
                 }}
             ]
             "#,
@@ -43,6 +44,64 @@ async fn patch_collection_preserves_runtime_root_id() {
             .resolved_root_id(),
         root_id
     );
+}
+
+#[tokio::test]
+async fn patch_collection_rejects_numeric_kind_before_it_decodes_as_int_array() {
+    let store = MemoryStore::new();
+    let db = DB::new(store).unwrap();
+
+    let collections = query::parse_sdl(
+        r#"
+        type AgentResponse {
+            message: String
+        }
+        "#,
+    )
+    .unwrap();
+    db.create_collections_atomic(collections).await.unwrap();
+
+    let err = db
+        .patch_collection(
+            "AgentResponse",
+            r#"
+            [
+                { "op": "add", "path": "/AgentResponse/Fields/-", "value": {
+                    "Name": "reasoning_progress_seq", "Kind": 5
+                }}
+            ]
+            "#,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid patch: numeric Kind values are not supported in schema patches. Field: reasoning_progress_seq, Kind: 5. Use canonical string \"[Int!]\" instead."
+    );
+
+    let patched = db
+        .patch_collection(
+            "AgentResponse",
+            r#"
+            [
+                { "op": "add", "path": "/AgentResponse/Fields/-", "value": {
+                    "Name": "reasoning_progress_seq", "Kind": "Int"
+                }}
+            ]
+            "#,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let reasoning_progress_seq = patched
+        .fields
+        .iter()
+        .find(|field| field.name == "reasoning_progress_seq")
+        .unwrap();
+    assert_eq!(reasoning_progress_seq.kind, FieldKind::int());
 }
 
 #[tokio::test]
@@ -77,7 +136,7 @@ async fn patch_relation_version_switching_preserves_go_canonical_versions() {
                 "Name": "published", "Kind": "Book", "RelationName": "author_book", "IsPrimary": true
             }},
             { "op": "add", "path": "/Author/Fields/-", "value": {
-                "Name": "_publishedID", "Kind": 1, "RelationName": "author_book", "IsPrimary": true
+                "Name": "_publishedID", "Kind": "ID", "RelationName": "author_book", "IsPrimary": true
             }}
         ]
         "#,

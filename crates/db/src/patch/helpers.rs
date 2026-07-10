@@ -2,7 +2,7 @@ use super::*;
 
 impl<S: Store> crate::database::DB<S> {
     /// Validate a Kind value in a patch field addition.
-    /// Returns error if the Kind is an unsupported numeric value or unknown string.
+    /// Returns error if the Kind is numeric or an unknown string.
     pub(crate) fn validate_patch_field_kind(
         kind_val: &serde_json::Value,
         field_name: &str,
@@ -10,16 +10,15 @@ impl<S: Store> crate::database::DB<S> {
     ) -> Result<()> {
         match kind_val {
             serde_json::Value::Number(n) => {
-                let kind_num = n.as_u64().unwrap_or(0) as u8;
-                // Valid numeric kinds: 1-14, 18-22 (0 is None, only for internal _docID)
-                let valid = matches!(kind_num, 1..=14 | 18..=22);
-                if !valid {
-                    return Err(Error::InvalidPatch(format!(
-                        "no type found for given name. Type: {}",
-                        kind_num
-                    )));
-                }
-                Ok(())
+                let canonical = n.as_u64().and_then(Self::canonical_patch_field_kind_name);
+                let hint = canonical.map_or_else(
+                    || "Use a canonical string such as \"Int\" instead.".to_string(),
+                    |name| format!("Use canonical string \"{}\" instead.", name),
+                );
+                Err(Error::InvalidPatch(format!(
+                    "numeric Kind values are not supported in schema patches. Field: {}, Kind: {}. {}",
+                    field_name, n, hint
+                )))
             }
             serde_json::Value::String(s) => {
                 // Known string kinds
@@ -65,6 +64,31 @@ impl<S: Store> crate::database::DB<S> {
                 Ok(())
             }
             _ => Ok(()),
+        }
+    }
+
+    fn canonical_patch_field_kind_name(kind: u64) -> Option<&'static str> {
+        match kind {
+            1 => Some("ID"),
+            2 => Some("Boolean"),
+            3 => Some("[Boolean!]"),
+            4 => Some("Int"),
+            5 => Some("[Int!]"),
+            6 => Some("Float64"),
+            7 => Some("[Float64!]"),
+            8 => Some("Float32"),
+            9 => Some("[Float32!]"),
+            10 => Some("DateTime"),
+            11 => Some("String"),
+            12 => Some("[String!]"),
+            13 => Some("Blob"),
+            14 => Some("JSON"),
+            18 => Some("[Boolean]"),
+            19 => Some("[Int]"),
+            20 => Some("[Float64]"),
+            21 => Some("[String]"),
+            22 => Some("[Float32]"),
+            _ => None,
         }
     }
 
