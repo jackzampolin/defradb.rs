@@ -3,9 +3,10 @@
 //! Verifies that DocSync and BranchableSync handlers enforce access checks
 //! in Controlled mode before processing requests.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{future::Future, pin::Pin};
 
 use blockstore::{Blockstore, DefraBlockstore, Error as BlockstoreError};
 use cid::Cid;
@@ -17,7 +18,7 @@ use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Error;
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, CarFetchRequest, DocSyncReply, DocSyncRequest,
-    PushLogBroadcast, PushLogRequest,
+    PushLogBroadcast, PushLogReply, PushLogRequest,
 };
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::NoOpCollectionStorage;
@@ -41,6 +42,14 @@ use super::{
 };
 
 type TestBlockstore = DefraBlockstore<MemoryStore>;
+type TwoStreamHandler = Arc<
+    dyn Fn(
+            PeerId,
+            PushLogRequest,
+        ) -> Pin<Box<dyn Future<Output = crate::Result<PushLogReply>> + Send>>
+        + Send
+        + Sync,
+>;
 const BLOCK_DATA: &[u8] = b"block data";
 
 fn create_test_coordinator(
@@ -234,6 +243,9 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
                 crate::sync::DEFAULT_MAX_ACTIVE_PUSHES_PER_PEER,
                 DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
             ),
+            selective_car_access: Arc::new(
+                super::selective_car_access::SelectiveCarAccess::default(),
+            ),
             rate_limiter,
             request_rate_limiter,
             max_doc_sync_request_doc_ids: DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
@@ -364,6 +376,7 @@ struct NoopTransport {
     car_responses: Arc<RwLock<Vec<Vec<u8>>>>,
     pushlog_replies: Arc<RwLock<Vec<crate::message::PushLogReply>>>,
     two_stream_replies: Arc<RwLock<Vec<crate::message::PushLogReply>>>,
+    two_stream_handler: Arc<RwLock<Option<TwoStreamHandler>>>,
     branchable_replies: Arc<RwLock<Vec<BranchableSyncReply>>>,
 }
 
@@ -378,6 +391,7 @@ impl NoopTransport {
             car_responses: Arc::new(RwLock::new(Vec::new())),
             pushlog_replies: Arc::new(RwLock::new(Vec::new())),
             two_stream_replies: Arc::new(RwLock::new(Vec::new())),
+            two_stream_handler: Arc::new(RwLock::new(None)),
             branchable_replies: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -396,6 +410,10 @@ impl NoopTransport {
 
     fn two_stream_replies(&self) -> Vec<crate::message::PushLogReply> {
         self.two_stream_replies.read().clone()
+    }
+
+    fn set_two_stream_handler(&self, handler: TwoStreamHandler) {
+        *self.two_stream_handler.write() = Some(handler);
     }
 
     fn branchable_replies(&self) -> Vec<BranchableSyncReply> {
@@ -488,9 +506,13 @@ impl P2PTransport for NoopTransport {
 
     async fn send_two_stream_request(
         &self,
-        _peer_id: &PeerId,
-        _req: PushLogRequest,
+        peer_id: &PeerId,
+        req: PushLogRequest,
     ) -> crate::Result<crate::message::PushLogReply> {
+        let handler = self.two_stream_handler.read().clone();
+        if let Some(handler) = handler {
+            return handler(peer_id.clone(), req).await;
+        }
         Ok(crate::message::PushLogReply::success("noop"))
     }
 
@@ -736,6 +758,18 @@ fn car_fetch_event(peer_id: PeerId, root_cid: Cid) -> TransportEvent<()> {
     TransportEvent::CarFetchRequest {
         peer_id,
         request: CarFetchRequest::full_dag(root_cid),
+        token: None,
+    }
+}
+
+fn selective_car_fetch_event(
+    peer_id: PeerId,
+    root_cid: Cid,
+    wanted_cids: Vec<Cid>,
+) -> TransportEvent<()> {
+    TransportEvent::CarFetchRequest {
+        peer_id,
+        request: CarFetchRequest::selective_blocks(root_cid, wanted_cids),
         token: None,
     }
 }
@@ -1038,6 +1072,205 @@ async fn car_fetch_controlled_mode_filters_unauthorized_data_block() {
         "no data blocks may be served for a classifier-denied block, got {}",
         served.len()
     );
+}
+
+#[tokio::test]
+async fn selective_car_serves_field_delta_from_active_push_dag() {
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+
+    let peer = random_peer_id();
+    let transport = NoopTransport::new();
+    let transport_handle = transport.clone();
+    let local_peer_id = transport.local_peer_id().to_string();
+    let broadcaster = Broadcaster::new(transport.clone());
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let field_block = Block::new(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            field_name: "status".to_string(),
+            priority: 14,
+            schema_version_id: "version1".to_string(),
+            data: b"ready".to_vec(),
+        }),
+        vec![],
+        vec![],
+    );
+    let field_data = field_block.to_dag_cbor().unwrap();
+    let field_cid = field_block.generate_cid().unwrap();
+    blockstore.put(&field_cid, &field_data).await.unwrap();
+
+    let root_block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "version1".to_string(),
+            priority: 17,
+            status: 1,
+        }),
+        vec![],
+        vec![DAGLink::new("status".to_string(), field_cid)],
+    );
+    let root_data = root_block.to_dag_cbor().unwrap();
+    let root_cid = root_block.generate_cid().unwrap();
+    blockstore.put(&root_cid, &root_data).await.unwrap();
+
+    let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
+        sync_config: SyncConfig::default(),
+        request_rate_limiter: Arc::new(PeerRateLimiter::default()),
+        access_mode: AccessMode::Controlled,
+        replicators: Arc::new(ReplicatorRegistry::new()),
+        peer_state: Arc::new(PeerStateTracker::new()),
+        transport,
+        local_peer_id,
+        broadcaster,
+        blockstore,
+        rate_limiter: Arc::new(PeerRateLimiter::default()),
+    });
+    let _active_push = coordinator
+        .runtime
+        .selective_car_access
+        .register(peer.clone(), [root_cid, field_cid]);
+
+    coordinator
+        .handle_transport_event(selective_car_fetch_event(peer, root_cid, vec![field_cid]))
+        .await
+        .unwrap();
+
+    let responses = transport_handle.car_responses();
+    let (_roots, blocks) = crate::sync::car::decode_car(&responses[0]).unwrap();
+    assert_eq!(blocks, vec![(field_cid, field_data)]);
+}
+
+#[tokio::test]
+async fn active_push_recovers_missing_interior_block_and_acks() {
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+
+    let receiver = random_peer_id();
+    let transport = NoopTransport::new();
+    transport
+        .create_replicator(&receiver, vec!["collection1".to_string()])
+        .await
+        .unwrap();
+
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let field_block = Block::new(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            field_name: "status".to_string(),
+            priority: 14,
+            schema_version_id: "version1".to_string(),
+            data: b"ready".to_vec(),
+        }),
+        vec![],
+        vec![],
+    );
+    let field_data = field_block.to_dag_cbor().unwrap();
+    let field_cid = field_block.generate_cid().unwrap();
+    blockstore.put(&field_cid, &field_data).await.unwrap();
+
+    let root_block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "version1".to_string(),
+            priority: 17,
+            status: 1,
+        }),
+        vec![],
+        vec![DAGLink::new("status".to_string(), field_cid)],
+    );
+    let root_data = root_block.to_dag_cbor().unwrap();
+    let root_cid = root_block.generate_cid().unwrap();
+    blockstore.put(&root_cid, &root_data).await.unwrap();
+
+    let (coordinator, _events) = SyncCoordinator::with_access_control(
+        transport.clone(),
+        blockstore,
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        Arc::new(ReplicatorRegistry::new()),
+        Arc::new(NoOpCollectionStorage),
+        Arc::new(crate::replicator::EqOnlyFilterMatcher),
+    )
+    .await
+    .unwrap();
+    let coordinator = Arc::new(coordinator);
+    let sender = Arc::new(std::sync::OnceLock::new());
+    sender.set(Arc::downgrade(&coordinator)).unwrap();
+
+    let receiver_blocks = Arc::new(RwLock::new(std::collections::HashSet::new()));
+    let root_acked = Arc::new(AtomicBool::new(false));
+    transport.set_two_stream_handler(Arc::new({
+        let sender = Arc::clone(&sender);
+        let transport = transport.clone();
+        let receiver_blocks = Arc::clone(&receiver_blocks);
+        let root_acked = Arc::clone(&root_acked);
+        move |peer_id, request| {
+            let sender = Arc::clone(&sender);
+            let transport = transport.clone();
+            let receiver_blocks = Arc::clone(&receiver_blocks);
+            let root_acked = Arc::clone(&root_acked);
+            Box::pin(async move {
+                let pushed_cid = Cid::try_from(request.cid.as_ref()).unwrap();
+                if pushed_cid == field_cid {
+                    // Simulate a receiver hole: the dependency PushLog was acked
+                    // but its block is absent when the later root arrives.
+                    return Ok(PushLogReply::success("field-ack"));
+                }
+
+                receiver_blocks.write().insert(pushed_cid);
+                assert_eq!(pushed_cid, root_cid);
+                assert!(!receiver_blocks.read().contains(&field_cid));
+
+                let coordinator = sender.get().unwrap().upgrade().unwrap();
+                coordinator
+                    .handle_transport_event(selective_car_fetch_event(
+                        peer_id,
+                        root_cid,
+                        vec![field_cid],
+                    ))
+                    .await?;
+
+                let response = transport.car_responses().last().cloned().unwrap();
+                let (_roots, blocks) = crate::sync::car::decode_car(&response)?;
+                for (cid, _data) in blocks {
+                    receiver_blocks.write().insert(cid);
+                }
+
+                if receiver_blocks.read().contains(&field_cid) {
+                    root_acked.store(true, Ordering::SeqCst);
+                    Ok(PushLogReply::success("root-ack"))
+                } else {
+                    Ok(PushLogReply::error("root", "interior block still missing"))
+                }
+            })
+        }
+    }));
+
+    coordinator
+        .push_dag_to_replicators(&root_cid, &root_data, "doc1", "collection1")
+        .await;
+
+    let snapshot = timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = coordinator.sync_status().push_backlog;
+            if root_acked.load(Ordering::SeqCst) && snapshot.completed_total == 1 {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("sender push did not receive an ack after selective recovery");
+
+    assert_eq!(snapshot.failed_total, 0);
+    assert!(receiver_blocks.read().contains(&root_cid));
+    assert!(receiver_blocks.read().contains(&field_cid));
+    assert!(!coordinator
+        .runtime
+        .selective_car_access
+        .allows(&receiver, &root_cid, &field_cid));
 }
 
 #[tokio::test]

@@ -15,6 +15,17 @@ fn sample_cids(cids: &[Cid]) -> Vec<String> {
     cids.iter().take(4).map(ToString::to_string).collect()
 }
 
+async fn sample_cid_presence<B: Blockstore>(
+    blockstore: &B,
+    cids: &[Cid],
+) -> Vec<(String, Option<bool>)> {
+    let mut presence = Vec::with_capacity(cids.len().min(4));
+    for cid in cids.iter().take(4) {
+        presence.push((cid.to_string(), blockstore.has(cid).await.ok()));
+    }
+    presence
+}
+
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Handle an inbound CAR fetch request: collect the DAG and send CARv1 response.
     pub(crate) async fn handle_car_fetch_request(
@@ -51,8 +62,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             collect_exact_blocks(self.manager.blockstore().as_ref(), &request.wanted_cids).await?
         };
         let truncated = collected.truncated();
+        let collected_count = collected.blocks.len();
         let blocks = self
-            .filter_car_response_blocks(&peer_id, collected.blocks)
+            .filter_car_response_blocks(&peer_id, &request.root_cid, collected.blocks)
             .await;
 
         if blocks.is_empty() {
@@ -70,13 +82,19 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     "CAR handler: no blocks found for request"
                 );
             } else {
+                let requested_presence =
+                    sample_cid_presence(self.manager.blockstore().as_ref(), &request.wanted_cids)
+                        .await;
                 tracing::warn!(
                     root_cid = %request.root_cid,
                     peer_id = %peer_id,
                     root_present = ?root_present,
                     requested_count = request.wanted_cids.len(),
+                    collected_count,
+                    filtered_count = collected_count,
                     requested_cids = ?sample_cids(&request.wanted_cids),
-                    "CAR handler: no exact blocks found for selective request"
+                    requested_presence = ?requested_presence,
+                    "CAR handler: no exact blocks served for selective request"
                 );
             }
             // Send a header-only CAR so both transports (iroh and libp2p)
@@ -141,6 +159,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     async fn filter_car_response_blocks(
         &self,
         peer_id: &PeerId,
+        root_cid: &Cid,
         blocks: Vec<(Cid, Bytes)>,
     ) -> Vec<(Cid, Bytes)> {
         if self.access.access_mode.is_open() {
@@ -153,6 +172,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let mut kept = Vec::with_capacity(blocks.len());
 
         for (cid, data) in blocks {
+            if self
+                .runtime
+                .selective_car_access
+                .allows(peer_id, root_cid, &cid)
+            {
+                kept.push((cid, data));
+                continue;
+            }
+
             match self.classifier.classify(&cid, &data).await {
                 BlockClass::Allow => kept.push((cid, data)),
                 BlockClass::Deny => {

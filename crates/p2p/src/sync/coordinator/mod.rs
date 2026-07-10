@@ -56,6 +56,7 @@ mod pubsub_services;
 mod push_worker;
 mod replicators;
 mod result_types;
+mod selective_car_access;
 mod subscriptions;
 
 pub use result_types::{CreateReplicatorResult, LoadReplicatorsResult};
@@ -293,6 +294,9 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
     /// Bounded admission queue for outbound replicator pushes, drained by the
     /// fixed worker pool spawned at construction (#1099).
     pub(super) push_backlog: Arc<super::push_backlog::PushBacklog>,
+
+    /// Temporary per-peer CAR grants scoped to DAGs in active outbound pushes.
+    pub(super) selective_car_access: Arc<selective_car_access::SelectiveCarAccess>,
 
     /// Per-peer rate limiter for gossip dispatch (abuse ladder; drop-only).
     pub(super) rate_limiter: Arc<PeerRateLimiter>,
