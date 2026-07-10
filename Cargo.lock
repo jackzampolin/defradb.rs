@@ -6050,6 +6050,8 @@ dependencies = [
  "hex",
  "hub-harness",
  "identity",
+ "libc",
+ "mach2",
  "p2p",
  "paste",
  "reqwest 0.12.28",
