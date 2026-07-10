@@ -352,63 +352,99 @@ fn test_go_compat_deserialize_named_object() {
 
 #[test]
 fn test_go_compat_all_scalar_kinds_roundtrip() {
-    // All scalar kinds should roundtrip through their integer representation
+    // All user-facing scalar kinds should roundtrip through both accepted encodings.
     let scalars = vec![
-        (FieldKind::Scalar(ScalarKind::None), 0),
-        (FieldKind::Scalar(ScalarKind::DocID), 1),
-        (FieldKind::Scalar(ScalarKind::Bool), 2),
-        (FieldKind::Scalar(ScalarKind::Int), 4),
-        (FieldKind::Scalar(ScalarKind::Float64), 6),
-        (FieldKind::Scalar(ScalarKind::Float32), 8),
-        (FieldKind::Scalar(ScalarKind::DateTime), 10),
-        (FieldKind::Scalar(ScalarKind::String), 11),
-        (FieldKind::Scalar(ScalarKind::Blob), 13),
-        (FieldKind::Scalar(ScalarKind::Json), 14),
+        (FieldKind::Scalar(ScalarKind::DocID), 1, "ID"),
+        (FieldKind::Scalar(ScalarKind::Bool), 2, "Boolean"),
+        (FieldKind::Scalar(ScalarKind::Int), 4, "Int"),
+        (FieldKind::Scalar(ScalarKind::Float64), 6, "Float64"),
+        (FieldKind::Scalar(ScalarKind::Float32), 8, "Float32"),
+        (FieldKind::Scalar(ScalarKind::DateTime), 10, "DateTime"),
+        (FieldKind::Scalar(ScalarKind::String), 11, "String"),
+        (FieldKind::Scalar(ScalarKind::Blob), 13, "Blob"),
+        (FieldKind::Scalar(ScalarKind::Json), 14, "JSON"),
     ];
 
-    for (kind, expected_int) in scalars {
+    for (kind, expected_int, canonical) in scalars {
         let json = serde_json::to_string(&kind).unwrap();
         assert_eq!(json, expected_int.to_string());
-        let parsed: FieldKind = serde_json::from_str(&json).unwrap();
-        assert_eq!(kind, parsed);
+        let parsed_numeric: FieldKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(kind, parsed_numeric);
+
+        let string_json = serde_json::to_string(canonical).unwrap();
+        let parsed_string: FieldKind = serde_json::from_str(&string_json).unwrap();
+        assert_eq!(kind, parsed_string);
     }
+
+    let none = FieldKind::Scalar(ScalarKind::None);
+    let parsed_none: FieldKind = serde_json::from_str("0").unwrap();
+    assert_eq!(none, parsed_none);
 }
 
 #[test]
 fn test_go_compat_all_array_kinds_roundtrip() {
-    // All array kinds should roundtrip through their integer representation
+    // All array kinds should roundtrip through both accepted encodings.
     let arrays = vec![
-        (FieldKind::ScalarArray(ScalarArrayKind::BoolArray), 3),
-        (FieldKind::ScalarArray(ScalarArrayKind::IntArray), 5),
-        (FieldKind::ScalarArray(ScalarArrayKind::Float64Array), 7),
-        (FieldKind::ScalarArray(ScalarArrayKind::Float32Array), 9),
-        (FieldKind::ScalarArray(ScalarArrayKind::StringArray), 12),
+        (
+            FieldKind::ScalarArray(ScalarArrayKind::BoolArray),
+            3,
+            "[Boolean!]",
+        ),
+        (
+            FieldKind::ScalarArray(ScalarArrayKind::IntArray),
+            5,
+            "[Int!]",
+        ),
+        (
+            FieldKind::ScalarArray(ScalarArrayKind::Float64Array),
+            7,
+            "[Float64!]",
+        ),
+        (
+            FieldKind::ScalarArray(ScalarArrayKind::Float32Array),
+            9,
+            "[Float32!]",
+        ),
+        (
+            FieldKind::ScalarArray(ScalarArrayKind::StringArray),
+            12,
+            "[String!]",
+        ),
         (
             FieldKind::ScalarArray(ScalarArrayKind::NillableBoolArray),
             18,
+            "[Boolean]",
         ),
         (
             FieldKind::ScalarArray(ScalarArrayKind::NillableIntArray),
             19,
+            "[Int]",
         ),
         (
             FieldKind::ScalarArray(ScalarArrayKind::NillableFloat64Array),
             20,
+            "[Float64]",
         ),
         (
             FieldKind::ScalarArray(ScalarArrayKind::NillableStringArray),
             21,
+            "[String]",
         ),
         (
             FieldKind::ScalarArray(ScalarArrayKind::NillableFloat32Array),
             22,
+            "[Float32]",
         ),
     ];
 
-    for (kind, expected_int) in arrays {
+    for (kind, expected_int, canonical) in arrays {
         let json = serde_json::to_string(&kind).unwrap();
         assert_eq!(json, expected_int.to_string());
-        let parsed: FieldKind = serde_json::from_str(&json).unwrap();
-        assert_eq!(kind, parsed);
+        let parsed_numeric: FieldKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(kind, parsed_numeric);
+
+        let string_json = serde_json::to_string(canonical).unwrap();
+        let parsed_string: FieldKind = serde_json::from_str(&string_json).unwrap();
+        assert_eq!(kind, parsed_string);
     }
 }

@@ -57,7 +57,7 @@ async fn patch_collection_adds_field_and_bumps_version() -> Result<()> {
         .context("User should exist after add_schema")?;
 
     let patch = r#"[
-        {"op": "add", "path": "/User/Fields/-", "value": {"Name": "email", "Kind": 11}}
+        {"op": "add", "path": "/User/Fields/-", "value": {"Name": "email", "Kind": "String"}}
     ]"#;
     let patched = node.patch_collection("User", patch).await?;
 
@@ -86,14 +86,14 @@ async fn patch_collection_chained_evolutions_produce_distinct_versions() -> Resu
     let v1 = node
         .patch_collection(
             "User",
-            r#"[{"op":"add","path":"/User/Fields/-","value":{"Name":"email","Kind":11}}]"#,
+            r#"[{"op":"add","path":"/User/Fields/-","value":{"Name":"email","Kind":"String"}}]"#,
         )
         .await?
         .version_id;
     let v2 = node
         .patch_collection(
             "User",
-            r#"[{"op":"add","path":"/User/Fields/-","value":{"Name":"phone","Kind":11}}]"#,
+            r#"[{"op":"add","path":"/User/Fields/-","value":{"Name":"phone","Kind":"String"}}]"#,
         )
         .await?
         .version_id;
@@ -116,7 +116,7 @@ async fn get_collection_by_version_id_finds_prior_and_new() -> Result<()> {
         .version_id;
 
     let patch = r#"[
-        {"op": "add", "path": "/User/Fields/-", "value": {"Name": "email", "Kind": 11}}
+        {"op": "add", "path": "/User/Fields/-", "value": {"Name": "email", "Kind": "String"}}
     ]"#;
     let patched = node.patch_collection("User", patch).await?;
 
@@ -144,7 +144,7 @@ async fn get_all_collection_versions_returns_history() -> Result<()> {
     assert_eq!(initial.len(), 1);
 
     let patch = r#"[
-        {"op": "add", "path": "/User/Fields/-", "value": {"Name": "email", "Kind": 11}}
+        {"op": "add", "path": "/User/Fields/-", "value": {"Name": "email", "Kind": "String"}}
     ]"#;
     node.patch_collection("User", patch).await?;
 
@@ -168,7 +168,7 @@ async fn set_active_collection_version_round_trips_to_original() -> Result<()> {
         .version_id;
 
     let patch = r#"[
-        {"op": "add", "path": "/User/Fields/-", "value": {"Name": "email", "Kind": 11}}
+        {"op": "add", "path": "/User/Fields/-", "value": {"Name": "email", "Kind": "String"}}
     ]"#;
     let patched = node.patch_collection("User", patch).await?;
     assert_ne!(patched.version_id, original_version);
@@ -202,7 +202,7 @@ async fn set_migration_registers_lens_between_versions() -> Result<()> {
         .version_id;
 
     let patch = r#"[
-        {"op": "add", "path": "/User/Fields/-", "value": {"Name": "email", "Kind": 11}}
+        {"op": "add", "path": "/User/Fields/-", "value": {"Name": "email", "Kind": "String"}}
     ]"#;
     let patched = node.patch_collection("User", patch).await?;
 

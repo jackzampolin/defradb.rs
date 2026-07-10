@@ -17,7 +17,7 @@ use serde_json::Value;
 
 const SCHEMA: &str = "type Item { name: String  created_at: DateTime }";
 const PATCH_V1_TO_V2: &str =
-    r#"[{"op":"add","path":"/Item/Fields/-","value":{"Name":"placeholder","Kind":11}}]"#;
+    r#"[{"op":"add","path":"/Item/Fields/-","value":{"Name":"placeholder","Kind":"String"}}]"#;
 
 fn version_id(client: &DefraClient) -> String {
     client
