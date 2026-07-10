@@ -14,6 +14,9 @@
 //! CPU gates use the update-storm window and automatically extend the idle
 //! baseline to 10 seconds; the later stalled-transport window is reported
 //! separately so its timeout wait does not dilute the gate.
+//! The manual driver uses blocking client subprocesses across document
+//! threads. Run CPU-gated comparisons on an otherwise-idle host so driver
+//! contention does not perturb the hub-PID-only measurements.
 //! `DEFRA_PUSH_STORM_REQUIRE_CONVERGENCE=1` gates every healthy peer on the
 //! latest heads once #1101 makes successful selective CAR replies possible.
 //!
@@ -291,7 +294,7 @@ fn process_cpu_seconds(pid: u32) -> Option<f64> {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn process_cpu_seconds(_pid: u32) -> Option<f64> {
-    None
+    panic!("hub CPU measurement unsupported on this platform")
 }
 
 fn process_rss_kib(pid: u32) -> Option<u64> {
@@ -594,12 +597,12 @@ async fn outbound_push_storm_matches_fleet_shape() {
         Some(8),
         "the default-concurrency repro contract changed"
     );
-    let baseline_deferrals = baseline_status["push_backlog"]["rejected_items_total"]
+    let baseline_item_quota_deferrals = baseline_status["push_backlog"]["rejected_items_total"]
         .as_u64()
-        .unwrap_or(0)
-        + baseline_status["push_backlog"]["rejected_bytes_total"]
-            .as_u64()
-            .unwrap_or(0);
+        .unwrap_or(0);
+    let baseline_byte_quota_deferrals = baseline_status["push_backlog"]["rejected_bytes_total"]
+        .as_u64()
+        .unwrap_or(0);
     let baseline_failed_jobs = baseline_status["push_backlog"]["failed_total"]
         .as_u64()
         .unwrap_or(0);
@@ -675,13 +678,15 @@ async fn outbound_push_storm_matches_fleet_shape() {
     finish_symbolized_sample(sample);
 
     let status = sync_status(&hub_api).await;
-    let deferrals = status["push_backlog"]["rejected_items_total"]
+    let item_quota_deferrals = status["push_backlog"]["rejected_items_total"]
         .as_u64()
         .unwrap_or(0)
-        + status["push_backlog"]["rejected_bytes_total"]
-            .as_u64()
-            .unwrap_or(0)
-        - baseline_deferrals;
+        .saturating_sub(baseline_item_quota_deferrals);
+    let byte_quota_deferrals = status["push_backlog"]["rejected_bytes_total"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_sub(baseline_byte_quota_deferrals);
+    let deferrals = item_quota_deferrals + byte_quota_deferrals;
     let logs = log_cursor.scan();
     let timeout_logs = logs.timeouts.saturating_sub(baseline_logs.timeouts);
     let connection_unavailable_logs = logs
@@ -733,6 +738,8 @@ async fn outbound_push_storm_matches_fleet_shape() {
         "stalled_connection_unavailable_observed": stalled_outcome.connection_unavailable_observed,
         "stalled_peer_failure_observed": stalled_outcome.stalled_peer_failure_observed,
         "pushlog_deferrals": deferrals,
+        "deferrals_item_quota": item_quota_deferrals,
+        "deferrals_byte_quota": byte_quota_deferrals,
         "pushlog_deferral_logs": deferral_logs,
         "stale_head_retirements": optional_counter(&status, &[
             "/push_backlog/stale_head_retirements_total",
