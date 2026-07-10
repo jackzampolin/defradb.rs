@@ -234,8 +234,18 @@ impl<S: Store> Peerstore<S> {
         let current = existing
             .as_deref()
             .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
-        let retry_key = format!("{peer_id}:{cid}");
         let retry = match current {
+            // SE-artifact failures are versionless (`cid == ""`). They must
+            // activate the current dormant head instead of comparing as an
+            // older priority-0 document failure and disappearing. The retry
+            // pass re-reads current document heads before regenerating SE
+            // artifacts, so retaining the watermark's version is correct.
+            Some(mut retry) if cid.is_empty() => {
+                if !retry.pending {
+                    retry.activate(&format!("{peer_id}:{}", retry.cid));
+                }
+                retry
+            }
             Some(retry)
                 if compare_push_versions(retry.priority, &retry.cid, priority, cid).is_gt() =>
             {
@@ -243,13 +253,13 @@ impl<S: Store> Peerstore<S> {
             }
             Some(retry) if retry.cid == cid && retry.pending => retry,
             Some(mut retry) if retry.cid == cid => {
-                retry.activate(&retry_key);
+                retry.activate(&format!("{peer_id}:{cid}"));
                 retry
             }
             _ => {
                 let mut retry =
                     super::PersistedPushRetry::new_observed(doc_id, collection_id, cid, priority);
-                retry.activate(&retry_key);
+                retry.activate(&format!("{peer_id}:{cid}"));
                 retry
             }
         };
@@ -882,6 +892,38 @@ mod tests {
         let retries = peerstore.get_retry_documents("peer").await.unwrap();
         assert_eq!(retries.len(), 1);
         assert_eq!(retries[0].cid, "cid");
+        assert!(retries[0].pending);
+    }
+
+    #[tokio::test]
+    async fn versionless_se_failure_activates_current_dormant_head() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+        peerstore
+            .record_push_failure("peer", "doc", "collection", "old", 1, &initial)
+            .await
+            .unwrap();
+        peerstore
+            .observe_push_head("peer", "doc", "collection", "new", 2)
+            .await
+            .unwrap();
+        assert!(peerstore
+            .get_retry_documents("peer")
+            .await
+            .unwrap()
+            .is_empty());
+
+        peerstore
+            .record_push_failure("peer", "doc", "collection", "", 0, &initial)
+            .await
+            .unwrap();
+
+        let retries = peerstore.get_retry_documents("peer").await.unwrap();
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].cid, "new");
+        assert_eq!(retries[0].priority, 2);
         assert!(retries[0].pending);
     }
 

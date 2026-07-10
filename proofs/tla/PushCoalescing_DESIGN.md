@@ -62,7 +62,10 @@ For an equal `(priority, CID)` version, full-DAG delivery is stronger than root-
 delivery. A full-DAG arrival therefore queues behind an active root-only send rather
 than coalescing into it. If a locally produced head cannot be decoded to obtain its
 priority, it uses a CID-scoped obligation key and bypasses both update coalescers; an
-unproven version is never retired as an older document head.
+unproven version is never retired as an older document head. Replicator fan-out keys
+also separate filter-bearing pushes from pushes without current document JSON. This
+prevents an older snapshot from authorizing a newer document-less DAG while retaining
+coalescing within each class and preserving both delivery obligations.
 
 Latest-head retirement assumes that a later document head subsumes its earlier linear
 predecessor. Concurrent sibling heads that must both remain heads do not enter this

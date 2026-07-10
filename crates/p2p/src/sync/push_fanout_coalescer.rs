@@ -58,10 +58,8 @@ impl PendingPush {
     }
 
     fn replace_with_newer(&mut self, mut incoming: PendingPush) {
+        debug_assert_eq!(incoming.document.is_some(), self.document.is_some());
         incoming.expand_unfiltered_dag |= self.expand_unfiltered_dag;
-        if incoming.document.is_none() {
-            incoming.document = self.document.take();
-        }
         *self = incoming;
     }
 }
@@ -77,7 +75,10 @@ struct Window {
 }
 
 pub(crate) struct PushFanoutCoalescer {
-    pending: Mutex<HashMap<(String, String), Arc<Window>>>,
+    // Filter-bearing and document-less pushes use distinct windows. Their
+    // delivery obligations differ, and an older JSON snapshot must never be
+    // reused to authorize a newer document-less DAG.
+    pending: Mutex<HashMap<(String, String, bool), Arc<Window>>>,
     coalesced: AtomicU64,
     window: Duration,
     max_delay: Duration,
@@ -85,7 +86,7 @@ pub(crate) struct PushFanoutCoalescer {
 
 struct FanoutLeaderGuard<'a> {
     coalescer: &'a PushFanoutCoalescer,
-    key: (String, String),
+    key: (String, String, bool),
     window: Arc<Window>,
     armed: bool,
 }
@@ -160,7 +161,11 @@ impl PushFanoutCoalescer {
                 send.take().expect("send closure available")(candidate).await;
                 return;
             };
-            let key = (candidate.collection_id.clone(), candidate.doc_id.clone());
+            let key = (
+                candidate.collection_id.clone(),
+                candidate.doc_id.clone(),
+                candidate.document.is_some(),
+            );
             let (window, leader) = {
                 let mut pending = self.pending.lock();
                 if let Some(window) = pending.get(&key) {
@@ -294,28 +299,28 @@ mod tests {
     }
 
     #[test]
-    fn same_version_merges_unfiltered_and_filtered_dag_obligations() {
+    fn same_version_merges_full_dag_obligation() {
         let mut combined = push(b"same");
-        combined.document = None;
-        combined.expand_unfiltered_dag = true;
+        let mut incoming = push(b"same");
+        incoming.expand_unfiltered_dag = true;
 
-        combined.merge_same_version(push(b"same"));
+        combined.merge_same_version(incoming);
 
         assert!(combined.expand_unfiltered_dag);
         assert!(combined.document.is_some());
     }
 
     #[tokio::test(start_paused = true)]
-    async fn newer_version_preserves_filtered_and_unfiltered_obligations() {
+    async fn documentless_newer_preserves_separate_filtered_obligation() {
         let coalescer = Arc::new(PushFanoutCoalescer::with_window(Duration::from_millis(10)));
         let mut buffered = push(b"old");
         buffered.expand_unfiltered_dag = true;
-        let previous_document = buffered.document.clone();
+        let buffered_cid = buffered.cid;
         let mut newer = push(b"newer-version");
         let newer_cid = newer.cid;
         newer.document = None;
         assert!(newer.version() > buffered.version());
-        let delivered = Arc::new(Mutex::new(None));
+        let delivered = Arc::new(Mutex::new(Vec::new()));
 
         let leader = {
             let coalescer = Arc::clone(&coalescer);
@@ -323,7 +328,7 @@ mod tests {
             tokio::spawn(async move {
                 coalescer
                     .run(buffered, move |latest| async move {
-                        *delivered.lock() = Some(latest);
+                        delivered.lock().push(latest);
                     })
                     .await;
             })
@@ -333,21 +338,54 @@ mod tests {
         }
         let follower = {
             let coalescer = Arc::clone(&coalescer);
+            let delivered = Arc::clone(&delivered);
             tokio::spawn(async move {
-                coalescer.run(newer, |_| async { unreachable!() }).await;
+                coalescer
+                    .run(newer, move |latest| async move {
+                        delivered.lock().push(latest);
+                    })
+                    .await;
             })
         };
-        while coalescer.coalesced() == 0 {
-            tokio::task::yield_now().await;
-        }
 
         leader.await.unwrap();
         follower.await.unwrap();
-        let combined = delivered.lock().take().unwrap();
+        let sent = delivered.lock();
 
-        assert_eq!(combined.cid, newer_cid);
-        assert!(combined.expand_unfiltered_dag);
-        assert_eq!(combined.document, previous_document);
+        assert_eq!(sent.len(), 2);
+        let buffered = sent.iter().find(|push| push.cid == buffered_cid).unwrap();
+        assert!(buffered.expand_unfiltered_dag);
+        assert!(buffered.document.is_some());
+        let newer = sent.iter().find(|push| push.cid == newer_cid).unwrap();
+        assert!(newer.document.is_none());
+        assert_eq!(coalescer.coalesced(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn documentless_updates_still_coalesce_with_each_other() {
+        let coalescer = Arc::new(PushFanoutCoalescer::with_window(Duration::from_millis(10)));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+
+        for seed in [b"first".as_slice(), b"second"] {
+            let mut update = push(seed);
+            update.document = None;
+            let coalescer = Arc::clone(&coalescer);
+            let sends = Arc::clone(&sends);
+            tasks.push(tokio::spawn(async move {
+                coalescer
+                    .run(update, move |_| async move {
+                        sends.fetch_add(1, Ordering::Relaxed);
+                    })
+                    .await;
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+        assert_eq!(coalescer.coalesced(), 1);
     }
 
     #[tokio::test]
