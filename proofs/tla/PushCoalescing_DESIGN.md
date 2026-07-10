@@ -39,9 +39,11 @@ The runtime's update coalescers use a 250 ms trailing-edge quiet period with a h
 maximum forces progress for a continuously written document and bounds the lifetime
 of follower tasks. This deliberately accepts up to 250 ms of latency for an isolated
 fan-out or gossip obligation. Transactional document push and gossip are awaited in
-order, while collection commits use an empty document ID and therefore a separate
-CID-scoped backlog key. A dropped leader removes its window and wakes followers to
-re-admit the latest buffered payload, so cancellation cannot wedge the document key.
+order inside the detached broadcaster task, so their independent quiet periods can
+stack to about 500 ms before gossip is published. Collection commits use an empty
+document ID and therefore a separate CID-scoped backlog key. A dropped leader removes
+its window and wakes followers to re-admit the latest buffered payload, so cancellation
+cannot wedge the document key.
 
 Dormant durable records are volatile-send watermarks, not successful acknowledgements.
 They are promoted to immediately due pending retries when a process starts, because the
@@ -65,6 +67,8 @@ unproven version is never retired as an older document head.
 Latest-head retirement assumes that a later document head subsumes its earlier linear
 predecessor. Concurrent sibling heads that must both remain heads do not enter this
 live document-update path: replay and field/KMS DAG paths bypass the outbound backlog,
-and collection commits are CID-scoped rather than document-scoped. If a future live
-producer can emit non-subsuming document siblings, it must use distinct obligation keys
-or extend the model from one total-order head to an antichain.
+collection commits are CID-scoped rather than document-scoped, and
+`rebroadcast_on_merge` is false at every production construction site. Enabling that
+flag, or adding another live producer of non-subsuming document siblings, requires
+distinct obligation keys or extending the model from one total-order head to an
+antichain.

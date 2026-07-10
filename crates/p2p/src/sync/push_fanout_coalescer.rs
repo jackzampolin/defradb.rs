@@ -47,16 +47,28 @@ impl PendingPush {
         Some((priority, self.cid))
     }
 
-    fn merge_same_version(&mut self, incoming: PendingPush) {
+    fn merge_same_version(&mut self, incoming: PendingPush) -> bool {
+        let strengthened = (!self.expand_unfiltered_dag && incoming.expand_unfiltered_dag)
+            || (self.document.is_none() && incoming.document.is_some());
         self.expand_unfiltered_dag |= incoming.expand_unfiltered_dag;
         if incoming.document.is_some() {
             self.document = incoming.document;
         }
+        strengthened
+    }
+
+    fn replace_with_newer(&mut self, mut incoming: PendingPush) {
+        incoming.expand_unfiltered_dag |= self.expand_unfiltered_dag;
+        if incoming.document.is_none() {
+            incoming.document = self.document.take();
+        }
+        *self = incoming;
     }
 }
 
 struct Window {
     push: Mutex<PendingPush>,
+    version: Mutex<(u64, Cid)>,
     started_at: tokio::time::Instant,
     last_update: Mutex<tokio::time::Instant>,
     done: Mutex<bool>,
@@ -152,19 +164,27 @@ impl PushFanoutCoalescer {
             let (window, leader) = {
                 let mut pending = self.pending.lock();
                 if let Some(window) = pending.get(&key) {
+                    let mut current_version = window.version.lock();
                     let mut current = window.push.lock();
-                    match push_version.cmp(&current.version().expect("pending pushes decode")) {
-                        std::cmp::Ordering::Greater => *current = candidate,
+                    let changed = match push_version.cmp(&current_version) {
+                        std::cmp::Ordering::Greater => {
+                            current.replace_with_newer(candidate);
+                            *current_version = push_version;
+                            true
+                        }
                         std::cmp::Ordering::Equal => current.merge_same_version(candidate),
-                        std::cmp::Ordering::Less => {}
+                        std::cmp::Ordering::Less => false,
+                    };
+                    if changed {
+                        *window.last_update.lock() = tokio::time::Instant::now();
                     }
-                    *window.last_update.lock() = tokio::time::Instant::now();
                     self.coalesced.fetch_add(1, Ordering::Relaxed);
                     (Arc::clone(window), false)
                 } else {
                     let now = tokio::time::Instant::now();
                     let window = Arc::new(Window {
                         push: Mutex::new(candidate),
+                        version: Mutex::new(push_version),
                         started_at: now,
                         last_update: Mutex::new(now),
                         done: Mutex::new(false),
@@ -285,6 +305,51 @@ mod tests {
         assert!(combined.document.is_some());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn newer_version_preserves_filtered_and_unfiltered_obligations() {
+        let coalescer = Arc::new(PushFanoutCoalescer::with_window(Duration::from_millis(10)));
+        let mut buffered = push(b"old");
+        buffered.expand_unfiltered_dag = true;
+        let previous_document = buffered.document.clone();
+        let mut newer = push(b"newer-version");
+        let newer_cid = newer.cid;
+        newer.document = None;
+        assert!(newer.version() > buffered.version());
+        let delivered = Arc::new(Mutex::new(None));
+
+        let leader = {
+            let coalescer = Arc::clone(&coalescer);
+            let delivered = Arc::clone(&delivered);
+            tokio::spawn(async move {
+                coalescer
+                    .run(buffered, move |latest| async move {
+                        *delivered.lock() = Some(latest);
+                    })
+                    .await;
+            })
+        };
+        while coalescer.pending.lock().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        let follower = {
+            let coalescer = Arc::clone(&coalescer);
+            tokio::spawn(async move {
+                coalescer.run(newer, |_| async { unreachable!() }).await;
+            })
+        };
+        while coalescer.coalesced() == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        leader.await.unwrap();
+        follower.await.unwrap();
+        let combined = delivered.lock().take().unwrap();
+
+        assert_eq!(combined.cid, newer_cid);
+        assert!(combined.expand_unfiltered_dag);
+        assert_eq!(combined.document, previous_document);
+    }
+
     #[tokio::test]
     async fn rapid_updates_create_one_peer_fanout() {
         let coalescer = Arc::new(PushFanoutCoalescer::with_window(Duration::from_millis(10)));
@@ -321,7 +386,7 @@ mod tests {
         assert_eq!(coalescer.coalesced(), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn sequential_update_resets_the_quiet_window() {
         let window = Duration::from_millis(40);
         let coalescer = Arc::new(PushFanoutCoalescer::with_window(window));
@@ -337,7 +402,8 @@ mod tests {
                     .await;
             })
         };
-        tokio::time::sleep(window / 2).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(window / 2).await;
         let follower = {
             let coalescer = Arc::clone(&coalescer);
             let sends = Arc::clone(&sends);
@@ -349,12 +415,50 @@ mod tests {
                     .await;
             })
         };
+        tokio::task::yield_now().await;
 
-        tokio::time::sleep(window * 3 / 4).await;
+        tokio::time::advance(window * 3 / 4).await;
         assert_eq!(sends.load(Ordering::Relaxed), 0);
         leader.await.unwrap();
         follower.await.unwrap();
         assert_eq!(sends.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_update_does_not_reset_the_quiet_window() {
+        let window = Duration::from_millis(40);
+        let coalescer = Arc::new(PushFanoutCoalescer::with_window(window));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let leader = {
+            let coalescer = Arc::clone(&coalescer);
+            let sends = Arc::clone(&sends);
+            tokio::spawn(async move {
+                coalescer
+                    .run(push(b"newer"), move |_| async move {
+                        sends.fetch_add(1, Ordering::Relaxed);
+                    })
+                    .await;
+            })
+        };
+        tokio::task::yield_now().await;
+        tokio::time::advance(window / 2).await;
+        let follower = {
+            let coalescer = Arc::clone(&coalescer);
+            tokio::spawn(async move {
+                coalescer
+                    .run(push(b"old"), |_| async { unreachable!() })
+                    .await;
+            })
+        };
+        while coalescer.coalesced() == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::advance(window / 2).await;
+        tokio::task::yield_now().await;
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+        leader.await.unwrap();
+        follower.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
@@ -368,7 +472,7 @@ mod tests {
             let sends = Arc::clone(&sends);
             tokio::spawn(async move {
                 coalescer
-                    .run(push(b"first"), move |_| async move {
+                    .run(push(b"1"), move |_| async move {
                         sends.fetch_add(1, Ordering::Relaxed);
                     })
                     .await;
@@ -377,7 +481,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         let mut followers = Vec::new();
-        for seed in [b"2".as_slice(), b"3", b"4", b"5"] {
+        for seed in [b"22".as_slice(), b"333", b"4444", b"55555"] {
             tokio::time::advance(Duration::from_millis(200)).await;
             let coalescer = Arc::clone(&coalescer);
             followers.push(tokio::spawn(async move {
@@ -428,13 +532,16 @@ mod tests {
         }
 
         let sends = Arc::new(AtomicUsize::new(0));
+        let sent_cid = Arc::new(Mutex::new(None));
         let follower = {
             let coalescer = Arc::clone(&coalescer);
             let sends = Arc::clone(&sends);
+            let sent_cid = Arc::clone(&sent_cid);
             tokio::spawn(async move {
                 coalescer
-                    .run(push(b"follower"), move |_| async move {
+                    .run(push(b"follower"), move |latest| async move {
                         sends.fetch_add(1, Ordering::Relaxed);
+                        *sent_cid.lock() = Some(latest.cid);
                     })
                     .await;
             })
@@ -442,6 +549,15 @@ mod tests {
         while coalescer.coalesced() == 0 {
             tokio::task::yield_now().await;
         }
+        let expected_cid = coalescer
+            .pending
+            .lock()
+            .values()
+            .next()
+            .unwrap()
+            .push
+            .lock()
+            .cid;
 
         leader.abort();
         assert!(leader.await.unwrap_err().is_cancelled());
@@ -450,6 +566,7 @@ mod tests {
             .expect("replacement leader must complete")
             .unwrap();
         assert_eq!(sends.load(Ordering::Relaxed), 1);
+        assert_eq!(*sent_cid.lock(), Some(expected_cid));
         assert!(coalescer.pending.lock().is_empty());
     }
 

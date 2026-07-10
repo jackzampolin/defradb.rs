@@ -176,30 +176,35 @@ where
         .await
         .ok()
         .cloned();
-    let dependencies = if job.expand_dag {
-        payload
+    let root_missing = root_request.is_none();
+    let (dependencies, dependency_failed) = if job.expand_dag {
+        match payload
             .dependency_requests
-            .get_or_init(|| async {
-                let blocks = load_ordered_dag_blocks(
+            .get_or_try_init(|| async {
+                let (blocks, complete) = load_ordered_dag_blocks(
                     context.blockstore.as_ref(),
                     job.root_cid,
                     job.head_block.clone(),
                 )
                 .await;
-                Arc::new(
-                    blocks
-                        .into_iter()
-                        .filter(|(cid, _)| *cid != job.root_cid)
-                        .filter_map(|(cid, block)| {
-                            build_request(&context.transport, &payload, cid, block)
-                        })
-                        .collect(),
-                )
+                if !complete {
+                    return Err(());
+                }
+                blocks
+                    .into_iter()
+                    .filter(|(cid, _)| *cid != job.root_cid)
+                    .map(|(cid, block)| build_request(&context.transport, &payload, cid, block))
+                    .collect::<Option<Vec<_>>>()
+                    .map(Arc::new)
+                    .ok_or(())
             })
             .await
-            .clone()
+        {
+            Ok(requests) => (Arc::clone(requests), false),
+            Err(()) => (Arc::new(Vec::new()), true),
+        }
     } else {
-        Arc::new(Vec::new())
+        (Arc::new(Vec::new()), false)
     };
     let mut requests = Vec::with_capacity(dependencies.len() + usize::from(root_request.is_some()));
     requests.extend(dependencies.iter().cloned());
@@ -207,7 +212,7 @@ where
         requests.push(root_request);
     }
 
-    let any_failed = if requests.is_empty() {
+    let send_failed = if requests.is_empty() {
         // Every block failed to sign: report so the persisted retry ladder
         // regenerates and re-pushes instead of silently losing the doc.
         true
@@ -220,6 +225,7 @@ where
         )
         .await
     };
+    let any_failed = root_missing || dependency_failed || send_failed;
 
     if any_failed && context.backlog.is_current(job) {
         report_push_failure(
@@ -266,8 +272,9 @@ pub(super) async fn load_ordered_dag_blocks<B: Blockstore>(
     blockstore: &B,
     root_cid: Cid,
     root_bytes: Bytes,
-) -> Vec<(Cid, Bytes)> {
+) -> (Vec<(Cid, Bytes)>, bool) {
     let mut ordered = Vec::new();
+    let mut complete = true;
     let mut visited = HashSet::new();
     let mut stack = vec![(root_cid, root_bytes, false)];
 
@@ -292,6 +299,7 @@ pub(super) async fn load_ordered_dag_blocks<B: Blockstore>(
             match blockstore.get(&linked_cid).await {
                 Ok(Some(linked_data)) => stack.push((linked_cid, linked_data, false)),
                 Ok(None) => {
+                    complete = false;
                     tracing::debug!(
                         root_cid = %root_cid,
                         linked_cid = %linked_cid,
@@ -299,6 +307,7 @@ pub(super) async fn load_ordered_dag_blocks<B: Blockstore>(
                     );
                 }
                 Err(error) => {
+                    complete = false;
                     tracing::debug!(
                         root_cid = %root_cid,
                         linked_cid = %linked_cid,
@@ -310,7 +319,7 @@ pub(super) async fn load_ordered_dag_blocks<B: Blockstore>(
         }
     }
 
-    ordered
+    (ordered, complete)
 }
 
 /// Send PushLog requests to a peer in order via the transport, waiting for
@@ -423,6 +432,7 @@ mod tests {
 
     use super::super::broadcast::tests::TestTransport;
     use super::*;
+    use crate::sync::push_backlog::EnqueueOutcome;
     use crate::transport::PeerId;
 
     type TestBlockstore = blockstore::DefraBlockstore<storage::backends::MemoryStore>;
@@ -651,6 +661,60 @@ mod tests {
         assert_eq!(transport.sign_count(), 2);
         assert_eq!(transport.sent().len(), 1);
         assert!(failure_rx.try_recv().is_ok());
+        backlog.close();
+    }
+
+    #[tokio::test]
+    async fn missing_root_request_fails_even_when_dependency_send_succeeds() {
+        use defra_core::{Block, CompositeDeltaPayload, CrdtDelta};
+
+        let backlog = PushBacklog::new(1024, usize::MAX, 1, 1);
+        let transport = TestTransport::new(Vec::new()).with_sign_failures(1);
+        let (context, mut failure_rx) = test_context(
+            transport.clone(),
+            Arc::clone(&backlog),
+            Duration::from_secs(1),
+        );
+        let dependency = Bytes::from_static(b"dependency");
+        let dependency_cid = defra_core::block::generate_cid_from_bytes(&dependency).unwrap();
+        context
+            .blockstore
+            .put(&dependency_cid, &dependency)
+            .await
+            .unwrap();
+        let root = Block::new_with_options(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                doc_id: b"doc".to_vec(),
+                schema_version_id: "schema".to_string(),
+                priority: 1,
+                status: 1,
+            }),
+            vec![dependency_cid],
+            vec![],
+            None,
+            None,
+        );
+        let root = Bytes::from(root.to_dag_cbor().unwrap());
+        let root_cid = defra_core::block::generate_cid_from_bytes(&root).unwrap();
+        let job = PushJobSpec::new(
+            PeerId::new("peer".to_string()),
+            "doc".to_string(),
+            "collection".to_string(),
+            "creator".to_string(),
+            root_cid,
+            root,
+            true,
+        );
+        assert_eq!(backlog.try_enqueue(job), EnqueueOutcome::Enqueued);
+        let active = backlog.next_job().await.unwrap();
+
+        let completion = run_push_job(&context, &active).await;
+
+        assert_eq!(completion, JobCompletion::Failed);
+        assert_eq!(transport.sign_count(), 2);
+        assert_eq!(transport.sent().len(), 1);
+        assert_eq!(failure_rx.recv().await.unwrap().cid, root_cid.to_string());
+        backlog.job_done(&active, completion);
         backlog.close();
     }
 

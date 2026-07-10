@@ -26,6 +26,7 @@ struct BroadcastKey {
 
 struct PendingBroadcast {
     broadcast: Mutex<PushLogBroadcast>,
+    version: Mutex<(u64, Cid)>,
     started_at: tokio::time::Instant,
     last_update: Mutex<tokio::time::Instant>,
     result: Mutex<Option<SharedResult>>,
@@ -121,17 +122,19 @@ impl BroadcastCoalescer {
             let (pending, leader) = {
                 let mut all = self.pending.lock();
                 if let Some(pending) = all.get(&key) {
-                    let mut current = pending.broadcast.lock();
-                    if incoming_version > version(&current).expect("pending broadcasts decode") {
-                        *current = candidate;
+                    let mut current_version = pending.version.lock();
+                    if incoming_version > *current_version {
+                        *pending.broadcast.lock() = candidate;
+                        *current_version = incoming_version;
+                        *pending.last_update.lock() = tokio::time::Instant::now();
                     }
-                    *pending.last_update.lock() = tokio::time::Instant::now();
                     self.coalesced.fetch_add(1, Ordering::Relaxed);
                     (Arc::clone(pending), false)
                 } else {
                     let now = tokio::time::Instant::now();
                     let pending = Arc::new(PendingBroadcast {
                         broadcast: Mutex::new(candidate),
+                        version: Mutex::new(incoming_version),
                         started_at: now,
                         last_update: Mutex::new(now),
                         result: Mutex::new(None),
@@ -317,7 +320,7 @@ mod tests {
         assert_eq!(coalescer.coalesced(), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn sequential_update_resets_the_quiet_window() {
         let window = Duration::from_millis(40);
         let coalescer = Arc::new(BroadcastCoalescer::with_window(window));
@@ -327,14 +330,15 @@ mod tests {
             let sends = Arc::clone(&sends);
             tokio::spawn(async move {
                 coalescer
-                    .run(broadcast(b"first"), move |_| async move {
+                    .run(broadcast(b"1"), move |_| async move {
                         sends.fetch_add(1, Ordering::Relaxed);
                         Ok(BroadcastResult::Success)
                     })
                     .await
             })
         };
-        tokio::time::sleep(window / 2).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(window / 2).await;
         let follower = {
             let coalescer = Arc::clone(&coalescer);
             let sends = Arc::clone(&sends);
@@ -347,12 +351,51 @@ mod tests {
                     .await
             })
         };
+        tokio::task::yield_now().await;
 
-        tokio::time::sleep(window * 3 / 4).await;
+        tokio::time::advance(window * 3 / 4).await;
         assert_eq!(sends.load(Ordering::Relaxed), 0);
         leader.await.unwrap().unwrap();
         follower.await.unwrap().unwrap();
         assert_eq!(sends.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_update_does_not_reset_the_quiet_window() {
+        let window = Duration::from_millis(40);
+        let coalescer = Arc::new(BroadcastCoalescer::with_window(window));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let leader = {
+            let coalescer = Arc::clone(&coalescer);
+            let sends = Arc::clone(&sends);
+            tokio::spawn(async move {
+                coalescer
+                    .run(broadcast(b"newer"), move |_| async move {
+                        sends.fetch_add(1, Ordering::Relaxed);
+                        Ok(BroadcastResult::Success)
+                    })
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        tokio::time::advance(window / 2).await;
+        let follower = {
+            let coalescer = Arc::clone(&coalescer);
+            tokio::spawn(async move {
+                coalescer
+                    .run(broadcast(b"old"), |_| async { unreachable!() })
+                    .await
+            })
+        };
+        while coalescer.coalesced() == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::advance(window / 2).await;
+        tokio::task::yield_now().await;
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+        assert_eq!(leader.await.unwrap().unwrap(), BroadcastResult::Success);
+        assert_eq!(follower.await.unwrap().unwrap(), BroadcastResult::Success);
     }
 
     #[tokio::test(start_paused = true)]
@@ -366,7 +409,7 @@ mod tests {
             let sends = Arc::clone(&sends);
             tokio::spawn(async move {
                 coalescer
-                    .run(broadcast(b"first"), move |_| async move {
+                    .run(broadcast(b"1"), move |_| async move {
                         sends.fetch_add(1, Ordering::Relaxed);
                         Ok(BroadcastResult::Success)
                     })
@@ -376,7 +419,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         let mut followers = Vec::new();
-        for seed in [b"2".as_slice(), b"3", b"4", b"5"] {
+        for seed in [b"22".as_slice(), b"333", b"4444", b"55555"] {
             tokio::time::advance(Duration::from_millis(200)).await;
             let coalescer = Arc::clone(&coalescer);
             followers.push(tokio::spawn(async move {
@@ -429,13 +472,16 @@ mod tests {
         }
 
         let sends = Arc::new(AtomicUsize::new(0));
+        let sent_cid = Arc::new(Mutex::new(None));
         let follower = {
             let coalescer = Arc::clone(&coalescer);
             let sends = Arc::clone(&sends);
+            let sent_cid = Arc::clone(&sent_cid);
             tokio::spawn(async move {
                 coalescer
-                    .run(broadcast(b"follower"), move |_| async move {
+                    .run(broadcast(b"follower"), move |latest| async move {
                         sends.fetch_add(1, Ordering::Relaxed);
+                        *sent_cid.lock() = Some(latest.cid);
                         Ok(BroadcastResult::Success)
                     })
                     .await
@@ -444,6 +490,16 @@ mod tests {
         while coalescer.coalesced() == 0 {
             tokio::task::yield_now().await;
         }
+        let expected_cid = coalescer
+            .pending
+            .lock()
+            .values()
+            .next()
+            .unwrap()
+            .broadcast
+            .lock()
+            .cid
+            .clone();
 
         leader.abort();
         assert!(leader.await.unwrap_err().is_cancelled());
@@ -456,6 +512,7 @@ mod tests {
             BroadcastResult::Success
         );
         assert_eq!(sends.load(Ordering::Relaxed), 1);
+        assert_eq!(*sent_cid.lock(), Some(expected_cid));
         assert!(coalescer.pending.lock().is_empty());
     }
 

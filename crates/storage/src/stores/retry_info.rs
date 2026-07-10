@@ -51,6 +51,9 @@ impl PersistedPushRetry {
         }
     }
 
+    /// Activate a live-send failure with the first 15–30 second jittered
+    /// interval. The in-memory backlog already made the immediate attempt;
+    /// delaying durable fanout prevents failed peers retrying in lockstep.
     pub fn activate(&mut self, retry_key: &str) {
         self.pending = true;
         self.retry_info = RetryInfo::new_initial();
@@ -73,10 +76,11 @@ fn default_pending() -> bool {
 }
 
 impl RetryInfo {
-    /// Create a new RetryInfo with the first retry scheduled immediately.
+    /// Create retry state that is due immediately.
     ///
-    /// The first retry fires on the next 2-second tick rather than waiting
-    /// the full 30s, so temporarily-offline peers recover quickly.
+    /// Restart promotion uses this directly because the volatile live send
+    /// no longer exists. Fresh live failures call `PersistedPushRetry::activate`
+    /// and advance to the first jittered interval instead.
     pub fn new_initial() -> Self {
         Self {
             num_retries: 0,
@@ -160,5 +164,30 @@ mod tests {
         let restored = RetryInfo::from_bytes(&bytes).unwrap();
         assert_eq!(restored.num_retries, info.num_retries);
         assert_eq!(restored.next_retry_unix, info.next_retry_unix);
+    }
+
+    #[test]
+    fn persisted_retry_without_pending_field_defaults_to_pending() {
+        #[derive(serde::Serialize)]
+        struct LegacyPersistedPushRetry<'a> {
+            doc_id: &'a str,
+            collection_id: &'a str,
+            cid: &'a str,
+            priority: u64,
+            retry_info: RetryInfo,
+        }
+
+        let bytes = serde_cbor::to_vec(&LegacyPersistedPushRetry {
+            doc_id: "doc",
+            collection_id: "collection",
+            cid: "cid",
+            priority: 1,
+            retry_info: RetryInfo::new_initial(),
+        })
+        .unwrap();
+        let restored = PersistedPushRetry::from_bytes(&bytes).unwrap();
+
+        assert!(restored.pending);
+        assert_eq!(restored.doc_id, "doc");
     }
 }
