@@ -1,5 +1,7 @@
 #[path = "query/commits_aggregate.rs"]
 mod commits_aggregate;
+#[path = "query/commits_collection_id.rs"]
+mod commits_collection_id;
 #[path = "query/commits_height_filter.rs"]
 mod commits_height_filter;
 #[path = "query/continuous_rollup.rs"]

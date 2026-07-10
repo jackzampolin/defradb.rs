@@ -182,7 +182,7 @@ pub trait DocFetcher: MaybeSendSync {
     /// # Returns
     ///
     /// Commit documents with fields: cid, height, fieldName, docID, delta,
-    /// collectionVersionId, links, heads, signature.
+    /// collectionID, collectionVersionId, links, heads, signature.
     async fn get_commits(&self, options: &CommitsQueryOptions) -> Result<Vec<Document>> {
         let _ = options;
         Err(query_types::error::QueryError::execution(

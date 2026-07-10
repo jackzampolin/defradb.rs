@@ -761,7 +761,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             > = std::collections::HashMap::new();
 
             let mut keep = Vec::with_capacity(commits.len());
-            for commit in &commits {
+            for commit in &mut commits {
                 let version_id = commit.get("collectionVersionId").and_then(|v| v.as_str());
                 let doc_id = commit.get("docID").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -785,7 +785,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     },
                 };
 
-                let allowed = match collection {
+                let allowed = match &collection {
                     // Fail closed: a commit whose collection version cannot be
                     // resolved is denied (Go errors the query here). Never allow
                     // an unresolved version through unchecked.
@@ -821,6 +821,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         }
                     },
                 };
+                if let Some(collection) = collection {
+                    commit.set("collectionID", collection.collection_id.clone());
+                }
                 keep.push(allowed);
             }
             let mut keep = keep.into_iter();
