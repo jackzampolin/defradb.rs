@@ -14,7 +14,9 @@ use multihash_codetable::{Code, MultihashDigest};
 use storage::backends::MemoryStore;
 use tokio::time::timeout;
 
-use crate::bitswap::{AccessMode, ReplicatorRegistry};
+use crate::bitswap::{
+    AccessMode, BlockAcpMeta, BlockClass, BlockClassifier, LateBoundServeAcp, ReplicatorRegistry,
+};
 use crate::error::Error;
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, CarFetchRequest, DocSyncReply, DocSyncRequest,
@@ -30,7 +32,7 @@ use crate::sync::SyncShutdownHandle;
 use crate::topics::{DefraTopic, DOC_SYNC_TOPIC};
 use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
-use crate::ReplicatorInfo;
+use crate::{ReplicationFilter, ReplicationFilters, ReplicatorInfo};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 
@@ -51,6 +53,38 @@ type TwoStreamHandler = Arc<
         + Sync,
 >;
 const BLOCK_DATA: &[u8] = b"block data";
+
+struct StaticDataClassifier {
+    collection_id: String,
+}
+
+#[async_trait]
+impl BlockClassifier for StaticDataClassifier {
+    async fn classify(&self, _cid: &Cid, _data: &[u8]) -> BlockClass {
+        BlockClass::Data(BlockAcpMeta {
+            collection_id: self.collection_id.clone(),
+            is_branchable: false,
+            policy: None,
+            doc_ids: vec!["doc1".to_string()],
+        })
+    }
+}
+
+fn filtered_replicator_registry(peer: &PeerId, collection_id: &str) -> Arc<ReplicatorRegistry> {
+    let mut filters = ReplicationFilters::new();
+    filters.insert(
+        collection_id.to_string(),
+        ReplicationFilter::new("status", serde_json::json!("ready")),
+    );
+    let registry = Arc::new(ReplicatorRegistry::new());
+    registry.set_replicator_info(ReplicatorInfo::from_raw_with_filters(
+        peer.to_string(),
+        vec![collection_id.to_string()],
+        Vec::new(),
+        filters,
+    ));
+    registry
+}
 
 fn create_test_coordinator(
     access_mode: AccessMode,
@@ -1075,14 +1109,12 @@ async fn car_fetch_controlled_mode_filters_unauthorized_data_block() {
 }
 
 #[tokio::test]
-async fn selective_car_serves_field_delta_from_active_push_dag() {
+async fn selective_car_grant_bypasses_filtered_replicator_denial() {
     use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
 
     let peer = random_peer_id();
     let transport = NoopTransport::new();
     let transport_handle = transport.clone();
-    let local_peer_id = transport.local_peer_id().to_string();
-    let broadcaster = Broadcaster::new(transport.clone());
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
 
@@ -1115,22 +1147,58 @@ async fn selective_car_serves_field_delta_from_active_push_dag() {
     let root_cid = root_block.generate_cid().unwrap();
     blockstore.put(&root_cid, &root_data).await.unwrap();
 
-    let (coordinator, _events) = create_test_coordinator_with_blockstore(TestCoordinatorParams {
-        sync_config: SyncConfig::default(),
-        request_rate_limiter: Arc::new(PeerRateLimiter::default()),
-        access_mode: AccessMode::Controlled,
-        replicators: Arc::new(ReplicatorRegistry::new()),
-        peer_state: Arc::new(PeerStateTracker::new()),
+    let replicators = filtered_replicator_registry(&peer, "collection1");
+    let (coordinator, _events) = SyncCoordinator::with_access_control_and_serve_gate(
         transport,
-        local_peer_id,
-        broadcaster,
         blockstore,
-        rate_limiter: Arc::new(PeerRateLimiter::default()),
-    });
-    let _active_push = coordinator
-        .runtime
-        .selective_car_access
-        .register(peer.clone(), [root_cid, field_cid]);
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        replicators,
+        Arc::new(NoOpCollectionStorage),
+        Arc::new(crate::replicator::EqOnlyFilterMatcher),
+        Arc::new(StaticDataClassifier {
+            collection_id: "collection1".to_string(),
+        }),
+        Arc::new(LateBoundServeAcp::new()),
+    )
+    .await
+    .unwrap();
+
+    coordinator
+        .handle_transport_event(selective_car_fetch_event(
+            peer.clone(),
+            root_cid,
+            vec![field_cid],
+        ))
+        .await
+        .unwrap();
+    let responses = transport_handle.car_responses();
+    let (_roots, denied_blocks) = crate::sync::car::decode_car(&responses[0]).unwrap();
+    assert!(
+        denied_blocks.is_empty(),
+        "filtered replicators must be denied generic block reads"
+    );
+
+    let _active_push = coordinator.runtime.selective_car_access.register(
+        peer.clone(),
+        root_cid,
+        [root_cid, field_cid],
+    );
+
+    coordinator
+        .handle_transport_event(selective_car_fetch_event(
+            random_peer_id(),
+            root_cid,
+            vec![field_cid],
+        ))
+        .await
+        .unwrap();
+    let responses = transport_handle.car_responses();
+    let (_roots, unrelated_peer_blocks) = crate::sync::car::decode_car(&responses[1]).unwrap();
+    assert!(
+        unrelated_peer_blocks.is_empty(),
+        "a push grant must not authorize another peer"
+    );
 
     coordinator
         .handle_transport_event(selective_car_fetch_event(peer, root_cid, vec![field_cid]))
@@ -1138,12 +1206,12 @@ async fn selective_car_serves_field_delta_from_active_push_dag() {
         .unwrap();
 
     let responses = transport_handle.car_responses();
-    let (_roots, blocks) = crate::sync::car::decode_car(&responses[0]).unwrap();
+    let (_roots, blocks) = crate::sync::car::decode_car(&responses[2]).unwrap();
     assert_eq!(blocks, vec![(field_cid, field_data)]);
 }
 
 #[tokio::test]
-async fn active_push_recovers_missing_interior_block_and_acks() {
+async fn completed_push_allows_post_ack_selective_recovery() {
     use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
 
     let receiver = random_peer_id();
@@ -1184,31 +1252,30 @@ async fn active_push_recovers_missing_interior_block_and_acks() {
     let root_cid = root_block.generate_cid().unwrap();
     blockstore.put(&root_cid, &root_data).await.unwrap();
 
-    let (coordinator, _events) = SyncCoordinator::with_access_control(
+    let replicators = filtered_replicator_registry(&receiver, "collection1");
+    let (coordinator, _events) = SyncCoordinator::with_access_control_and_serve_gate(
         transport.clone(),
         blockstore,
         SyncConfig::default(),
         AccessMode::Controlled,
-        Arc::new(ReplicatorRegistry::new()),
+        replicators,
         Arc::new(NoOpCollectionStorage),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
+        Arc::new(StaticDataClassifier {
+            collection_id: "collection1".to_string(),
+        }),
+        Arc::new(LateBoundServeAcp::new()),
     )
     .await
     .unwrap();
     let coordinator = Arc::new(coordinator);
-    let sender = Arc::new(std::sync::OnceLock::new());
-    sender.set(Arc::downgrade(&coordinator)).unwrap();
 
     let receiver_blocks = Arc::new(RwLock::new(std::collections::HashSet::new()));
     let root_acked = Arc::new(AtomicBool::new(false));
     transport.set_two_stream_handler(Arc::new({
-        let sender = Arc::clone(&sender);
-        let transport = transport.clone();
         let receiver_blocks = Arc::clone(&receiver_blocks);
         let root_acked = Arc::clone(&root_acked);
-        move |peer_id, request| {
-            let sender = Arc::clone(&sender);
-            let transport = transport.clone();
+        move |_peer_id, request| {
             let receiver_blocks = Arc::clone(&receiver_blocks);
             let root_acked = Arc::clone(&root_acked);
             Box::pin(async move {
@@ -1222,28 +1289,8 @@ async fn active_push_recovers_missing_interior_block_and_acks() {
                 receiver_blocks.write().insert(pushed_cid);
                 assert_eq!(pushed_cid, root_cid);
                 assert!(!receiver_blocks.read().contains(&field_cid));
-
-                let coordinator = sender.get().unwrap().upgrade().unwrap();
-                coordinator
-                    .handle_transport_event(selective_car_fetch_event(
-                        peer_id,
-                        root_cid,
-                        vec![field_cid],
-                    ))
-                    .await?;
-
-                let response = transport.car_responses().last().cloned().unwrap();
-                let (_roots, blocks) = crate::sync::car::decode_car(&response)?;
-                for (cid, _data) in blocks {
-                    receiver_blocks.write().insert(cid);
-                }
-
-                if receiver_blocks.read().contains(&field_cid) {
-                    root_acked.store(true, Ordering::SeqCst);
-                    Ok(PushLogReply::success("root-ack"))
-                } else {
-                    Ok(PushLogReply::error("root", "interior block still missing"))
-                }
+                root_acked.store(true, Ordering::SeqCst);
+                Ok(PushLogReply::success("root-ack"))
             })
         }
     }));
@@ -1262,15 +1309,31 @@ async fn active_push_recovers_missing_interior_block_and_acks() {
         }
     })
     .await
-    .expect("sender push did not receive an ack after selective recovery");
+    .expect("sender push did not complete after the receiver acked the root");
 
     assert_eq!(snapshot.failed_total, 0);
     assert!(receiver_blocks.read().contains(&root_cid));
-    assert!(receiver_blocks.read().contains(&field_cid));
-    assert!(!coordinator
+    assert!(!receiver_blocks.read().contains(&field_cid));
+    assert!(coordinator
         .runtime
         .selective_car_access
         .allows(&receiver, &root_cid, &field_cid));
+
+    coordinator
+        .handle_transport_event(selective_car_fetch_event(
+            receiver,
+            root_cid,
+            vec![field_cid],
+        ))
+        .await
+        .unwrap();
+
+    let response = transport.car_responses().last().cloned().unwrap();
+    let (_roots, blocks) = crate::sync::car::decode_car(&response).unwrap();
+    for (cid, _data) in blocks {
+        receiver_blocks.write().insert(cid);
+    }
+    assert!(receiver_blocks.read().contains(&field_cid));
 }
 
 #[tokio::test]

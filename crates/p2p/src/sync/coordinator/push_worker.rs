@@ -140,7 +140,7 @@ where
         let _car_access = pushed_cids.map(|cids| {
             context
                 .selective_car_access
-                .register(job.peer_id.clone(), cids)
+                .register(job.peer_id.clone(), job.root_cid, cids)
         });
         send_ordered_pushlogs_via_transport(
             &context.transport,

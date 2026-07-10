@@ -66,6 +66,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let blocks = self
             .filter_car_response_blocks(&peer_id, &request.root_cid, collected.blocks)
             .await;
+        let kept_count = blocks.len();
+        let filtered_count = collected_count.saturating_sub(kept_count);
+        let blockstore_miss_count = request.wanted_cids.len().saturating_sub(collected_count);
 
         if blocks.is_empty() {
             self.manager.diagnostics.record_car_no_blocks_served();
@@ -90,8 +93,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     peer_id = %peer_id,
                     root_present = ?root_present,
                     requested_count = request.wanted_cids.len(),
-                    collected_count,
-                    filtered_count = collected_count,
+                    blockstore_hit_count = collected_count,
+                    blockstore_miss_count,
+                    filtered_count,
+                    kept_count,
                     requested_cids = ?sample_cids(&request.wanted_cids),
                     requested_presence = ?requested_presence,
                     "CAR handler: no exact blocks served for selective request"
