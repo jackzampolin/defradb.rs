@@ -409,11 +409,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     }
 
     /// Install the durable pending-DAG store (#1099). First-call-wins.
-    pub fn install_pending_dag_store(
+    /// Hydrates the durable-cap accounting before returning.
+    pub async fn install_pending_dag_store(
         &self,
         store: Arc<dyn crate::sync::pending_store::PendingDagStorage>,
     ) {
-        self.manager.install_pending_dag_store(store);
+        self.manager.install_pending_dag_store(store).await;
     }
 
     /// Reconcile persisted pending-DAG registrations after restart and

@@ -101,7 +101,14 @@ pub struct SyncManager<B: Blockstore> {
 
     /// Single-flight guard for the durable resync sweep.
     pub(super) pending_resync_in_flight: std::sync::atomic::AtomicBool,
+
+    /// Resync invocation counter; every Nth sweep skips the steady-state
+    /// early-exit so store/set desyncs from rare races self-heal.
+    pub(super) pending_resync_tick: std::sync::atomic::AtomicUsize,
 }
+
+/// Every Nth resync is a forced full sweep (see `pending_resync_tick`).
+pub(super) const PENDING_RESYNC_FORCED_TICK: usize = 10;
 
 /// Durable registrations may outlive their in-memory pending entries (TTL
 /// eviction frees the map slot but not the recovery obligation), so the
@@ -141,6 +148,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             pending_store: std::sync::OnceLock::new(),
             persisted_roots: Arc::new(RwLock::new(std::collections::HashSet::new())),
             pending_resync_in_flight: std::sync::atomic::AtomicBool::new(false),
+            pending_resync_tick: std::sync::atomic::AtomicUsize::new(0),
         };
 
         (manager, event_rx)
@@ -242,11 +250,31 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
     /// Install the durable pending-DAG store. First-call-wins (OnceLock
     /// semantics); subsequent calls are silently discarded.
-    pub fn install_pending_dag_store(
+    ///
+    /// Hydrates the persisted-roots set from the store before returning so
+    /// the durable admission cap is hard from the first PushLog — without
+    /// this, pushes arriving before the first resync sweep would be admitted
+    /// against an empty set.
+    pub async fn install_pending_dag_store(
         &self,
         store: Arc<dyn crate::sync::pending_store::PendingDagStorage>,
     ) {
-        let _ = self.pending_store.set(store);
+        if self.pending_store.set(Arc::clone(&store)).is_err() {
+            return;
+        }
+        match store.load_all().await {
+            Ok(records) => {
+                self.persisted_roots
+                    .write()
+                    .extend(records.iter().map(|(cid, _)| *cid));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Failed to hydrate persisted pending DAG roots; durable cap is soft until the first resync"
+                );
+            }
+        }
     }
 
     pub(super) fn pending_store(

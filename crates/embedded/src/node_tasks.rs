@@ -512,15 +512,13 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
             continue;
         }
 
-        // Rotate the starting document each pass: the retry store iterates
-        // in stable key order, so a fixed start would let a few permanently
-        // rejected documents at the head consume the failure budget every
-        // pass and starve the rest forever (#1099 review).
-        static RETRY_ROTATION: std::sync::atomic::AtomicUsize =
-            std::sync::atomic::AtomicUsize::new(0);
-        let rotation = RETRY_ROTATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if docs.len() > 1 {
-            let rotate_by = rotation % docs.len();
+            // Rotate the starting document by the peer's own persisted retry
+            // count: the store iterates in stable key order, and a global
+            // cursor aliases when it advances by the number of due peers per
+            // sweep, so per-peer state is required for every document to
+            // eventually lead a pass (#1099 review).
+            let rotate_by = retry_info.num_retries as usize % docs.len();
             docs.rotate_left(rotate_by);
         }
         let mut all_succeeded = true;
@@ -646,15 +644,13 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
             continue;
         }
 
-        // Rotate the starting document each pass: the retry store iterates
-        // in stable key order, so a fixed start would let a few permanently
-        // rejected documents at the head consume the failure budget every
-        // pass and starve the rest forever (#1099 review).
-        static RETRY_ROTATION: std::sync::atomic::AtomicUsize =
-            std::sync::atomic::AtomicUsize::new(0);
-        let rotation = RETRY_ROTATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if docs.len() > 1 {
-            let rotate_by = rotation % docs.len();
+            // Rotate the starting document by the peer's own persisted retry
+            // count: the store iterates in stable key order, and a global
+            // cursor aliases when it advances by the number of due peers per
+            // sweep, so per-peer state is required for every document to
+            // eventually lead a pass (#1099 review).
+            let rotate_by = retry_info.num_retries as usize % docs.len();
             docs.rotate_left(rotate_by);
         }
         let mut all_succeeded = true;

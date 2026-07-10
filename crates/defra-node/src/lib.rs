@@ -1395,7 +1395,8 @@ impl NodeBuilder {
 
         let coordinator = Arc::new(coordinator);
         coordinator
-            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())));
+            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
+            .await;
 
         if config.load_persisted_collections {
             db_merge::load_persisted_collections(&coordinator)
@@ -1673,7 +1674,6 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
     transport: p2p::iroh::IrohTransport,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut retry_rotation: usize = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             let peerstore = storage::stores::Peerstore::new(store.clone());
@@ -1727,15 +1727,15 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                     _ => p2p::ReplicationFilters::new(),
                 };
                 if docs.len() > 1 {
-                    // Rotate the starting document each pass: the retry store
-                    // iterates in stable key order, so a fixed start would let
-                    // a few permanently rejected documents at the head consume
-                    // the failure budget every pass and starve the rest
-                    // forever (#1099 review).
-                    let rotate_by = retry_rotation % docs.len();
+                    // Rotate the starting document by the peer's own
+                    // persisted retry count: the store iterates in stable key
+                    // order, and a global cursor aliases when it advances by
+                    // the number of due peers per sweep, so per-peer state is
+                    // required for every document to eventually lead a pass
+                    // (#1099 review).
+                    let rotate_by = retry_info.num_retries as usize % docs.len();
                     docs.rotate_left(rotate_by);
                 }
-                retry_rotation = retry_rotation.wrapping_add(1);
                 let mut all_succeeded = true;
                 let mut fast_failures = 0usize;
                 for (doc_id, collection_id) in &docs {

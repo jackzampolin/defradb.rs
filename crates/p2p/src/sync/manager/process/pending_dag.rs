@@ -471,8 +471,15 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         // Cheap steady-state exit: nothing to reconcile while every durable
         // root still has a live, unexpired in-memory entry. An expired entry
         // must not mask its record — eviction is lazy, and the record is the
-        // only remaining owner of the recovery obligation.
-        {
+        // only remaining owner of the recovery obligation. Every Nth sweep is
+        // forced past this exit so an orphan record (present in the store but
+        // absent from the accounting set after a rare reserve/put race) is
+        // still rediscovered.
+        let forced = self
+            .pending_resync_tick
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .is_multiple_of(super::PENDING_RESYNC_FORCED_TICK);
+        if !forced {
             let roots = self.persisted_roots.read();
             let pending = self.pending_dags.read();
             let now = Instant::now();
@@ -509,12 +516,23 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 return 0;
             }
         };
-        // Union, not replace: a registration persisted between load_all and
-        // this update must stay eligible for merge-time deletion. Stale set
-        // entries only cost a harmless delete attempt.
-        self.persisted_roots
-            .write()
-            .extend(records.iter().map(|(cid, _)| *cid));
+        // Reconcile the accounting set with the authoritative record list:
+        // extend with every record (a registration persisted between load_all
+        // and this update must stay eligible for merge-time deletion), and
+        // prune entries with neither a record nor a live in-memory entry —
+        // stale leftovers from a rare reserve/put race that would otherwise
+        // hold durable-cap headroom forever. An in-flight reserve→put window
+        // always has an in-memory entry, so it is never pruned.
+        {
+            let record_roots: std::collections::HashSet<Cid> =
+                records.iter().map(|(cid, _)| *cid).collect();
+            // Lock order: persisted_roots before pending_dags, matching the
+            // steady-state exit above.
+            let mut roots = self.persisted_roots.write();
+            let pending = self.pending_dags.read();
+            roots.retain(|root| record_roots.contains(root) || pending.contains_key(root));
+            roots.extend(record_roots);
+        }
         if records.is_empty() {
             return 0;
         }

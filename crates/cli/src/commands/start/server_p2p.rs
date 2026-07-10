@@ -223,7 +223,8 @@ impl Node {
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         coordinator
-            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())));
+            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
+            .await;
         let coordinator_for_restore = coordinator.clone();
         tokio::spawn(async move {
             coordinator_for_restore
@@ -555,7 +556,6 @@ impl Node {
         let retry_handle = handle.clone();
         let retry_pusher = doc_pusher.clone();
         let retry_loop_task = tokio::spawn(async move {
-            let mut retry_rotation: usize = 0;
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let peerstore = storage::stores::Peerstore::new(retry_store.clone());
@@ -594,14 +594,15 @@ impl Node {
                         continue;
                     }
                     if docs.len() > 1 {
-                        // Rotate the starting document each pass: the retry store iterates
-                        // in stable key order, so a fixed start would let a few permanently
-                        // rejected documents at the head consume the failure budget every
-                        // pass and starve the rest forever (#1099 review).
-                        let rotate_by = retry_rotation % docs.len();
+                        // Rotate the starting document by the peer's own
+                        // persisted retry count: the store iterates in stable
+                        // key order, and a global cursor aliases when it
+                        // advances by the number of due peers per sweep, so
+                        // per-peer state is required for every document to
+                        // eventually lead a pass (#1099 review).
+                        let rotate_by = retry_info.num_retries as usize % docs.len();
                         docs.rotate_left(rotate_by);
                     }
-                    retry_rotation = retry_rotation.wrapping_add(1);
                     let mut all_succeeded = true;
                     let mut fast_failures = 0usize;
                     for (doc_id, collection_id) in &docs {
@@ -842,7 +843,8 @@ impl Node {
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         coordinator
-            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())));
+            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
+            .await;
         let coordinator_for_restore = coordinator.clone();
         tokio::spawn(async move {
             coordinator_for_restore
@@ -1121,7 +1123,6 @@ impl Node {
         let retry_store = store.clone();
         let retry_pusher = doc_pusher.clone();
         let retry_loop_task = tokio::spawn(async move {
-            let mut retry_rotation: usize = 0;
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let peerstore = storage::stores::Peerstore::new(retry_store.clone());
@@ -1155,14 +1156,15 @@ impl Node {
                         continue;
                     }
                     if docs.len() > 1 {
-                        // Rotate the starting document each pass: the retry store iterates
-                        // in stable key order, so a fixed start would let a few permanently
-                        // rejected documents at the head consume the failure budget every
-                        // pass and starve the rest forever (#1099 review).
-                        let rotate_by = retry_rotation % docs.len();
+                        // Rotate the starting document by the peer's own
+                        // persisted retry count: the store iterates in stable
+                        // key order, and a global cursor aliases when it
+                        // advances by the number of due peers per sweep, so
+                        // per-peer state is required for every document to
+                        // eventually lead a pass (#1099 review).
+                        let rotate_by = retry_info.num_retries as usize % docs.len();
                         docs.rotate_left(rotate_by);
                     }
-                    retry_rotation = retry_rotation.wrapping_add(1);
                     let mut all_succeeded = true;
                     let mut fast_failures = 0usize;
                     for (doc_id, collection_id) in &docs {

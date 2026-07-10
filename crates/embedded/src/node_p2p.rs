@@ -156,7 +156,9 @@ where
 
     let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
     let coordinator = Arc::new(coordinator);
-    coordinator.install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())));
+    coordinator
+        .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
+        .await;
     let coordinator_for_restore = coordinator.clone();
     tokio::spawn(async move {
         coordinator_for_restore
@@ -437,7 +439,9 @@ where
 
     let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
     let coordinator = Arc::new(coordinator);
-    coordinator.install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())));
+    coordinator
+        .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
+        .await;
     let coordinator_for_restore = coordinator.clone();
     tokio::spawn(async move {
         coordinator_for_restore
