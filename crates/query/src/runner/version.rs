@@ -249,6 +249,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             fetcher,
                             &doc_id_str,
                             version_select,
+                            &collection.collection_id,
                             Some(cid.as_str()),
                         )
                         .await?;
@@ -385,7 +386,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
             if let Some(doc_id_str) = doc_id {
                 let version_data = self
-                    .fetch_version_data(fetcher, &doc_id_str, version_select, None)
+                    .fetch_version_data(
+                        fetcher,
+                        &doc_id_str,
+                        version_select,
+                        &collection.collection_id,
+                        None,
+                    )
                     .await?;
                 let output_name = version_select.field.output_name();
                 doc_obj.insert(output_name.to_string(), version_data);
