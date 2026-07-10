@@ -1,4 +1,5 @@
 use super::*;
+use schema::{ScalarArrayKind, ScalarKind};
 
 impl<S: Store> crate::database::DB<S> {
     /// Validate a Kind value in a patch field addition.
@@ -12,8 +13,16 @@ impl<S: Store> crate::database::DB<S> {
             serde_json::Value::Number(n) => {
                 let canonical = n.as_u64().and_then(Self::canonical_patch_field_kind_name);
                 let hint = canonical.map_or_else(
-                    || "Use a canonical string such as \"Int\" instead.".to_string(),
-                    |name| format!("Use canonical string \"{}\" instead.", name),
+                    || {
+                        "Use a canonical string for the intended type, such as \"Int\" or \"[Int!]\"."
+                            .to_string()
+                    },
+                    |name| {
+                        format!(
+                            "It maps to \"{}\"; use a canonical string for the intended type, such as \"Int\" or \"[Int!]\".",
+                            name
+                        )
+                    },
                 );
                 Err(Error::InvalidPatch(format!(
                     "numeric Kind values are not supported in schema patches. Field: {}, Kind: {}. {}",
@@ -69,25 +78,25 @@ impl<S: Store> crate::database::DB<S> {
 
     fn canonical_patch_field_kind_name(kind: u64) -> Option<&'static str> {
         match kind {
-            1 => Some("ID"),
-            2 => Some("Boolean"),
-            3 => Some("[Boolean!]"),
-            4 => Some("Int"),
-            5 => Some("[Int!]"),
-            6 => Some("Float64"),
-            7 => Some("[Float64!]"),
-            8 => Some("Float32"),
-            9 => Some("[Float32!]"),
-            10 => Some("DateTime"),
-            11 => Some("String"),
-            12 => Some("[String!]"),
-            13 => Some("Blob"),
-            14 => Some("JSON"),
-            18 => Some("[Boolean]"),
-            19 => Some("[Int]"),
-            20 => Some("[Float64]"),
-            21 => Some("[String]"),
-            22 => Some("[Float32]"),
+            kind if kind == ScalarKind::DocID as u64 => Some("ID"),
+            kind if kind == ScalarKind::Bool as u64 => Some("Boolean"),
+            kind if kind == ScalarArrayKind::BoolArray as u64 => Some("[Boolean!]"),
+            kind if kind == ScalarKind::Int as u64 => Some("Int"),
+            kind if kind == ScalarArrayKind::IntArray as u64 => Some("[Int!]"),
+            kind if kind == ScalarKind::Float64 as u64 => Some("Float64"),
+            kind if kind == ScalarArrayKind::Float64Array as u64 => Some("[Float64!]"),
+            kind if kind == ScalarKind::Float32 as u64 => Some("Float32"),
+            kind if kind == ScalarArrayKind::Float32Array as u64 => Some("[Float32!]"),
+            kind if kind == ScalarKind::DateTime as u64 => Some("DateTime"),
+            kind if kind == ScalarKind::String as u64 => Some("String"),
+            kind if kind == ScalarArrayKind::StringArray as u64 => Some("[String!]"),
+            kind if kind == ScalarKind::Blob as u64 => Some("Blob"),
+            kind if kind == ScalarKind::Json as u64 => Some("JSON"),
+            kind if kind == ScalarArrayKind::NillableBoolArray as u64 => Some("[Boolean]"),
+            kind if kind == ScalarArrayKind::NillableIntArray as u64 => Some("[Int]"),
+            kind if kind == ScalarArrayKind::NillableFloat64Array as u64 => Some("[Float64]"),
+            kind if kind == ScalarArrayKind::NillableStringArray as u64 => Some("[String]"),
+            kind if kind == ScalarArrayKind::NillableFloat32Array as u64 => Some("[Float32]"),
             _ => None,
         }
     }

@@ -29,7 +29,7 @@ const ADD_EMAIL_PATCH: &str =
 
 /// JSON Patch to add a verified field to the Users collection.
 const ADD_VERIFIED_PATCH: &str =
-    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"verified","Kind":"Float64"}}]"#;
+    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"verified","Kind":"Boolean"}}]"#;
 
 /// JSON Patch to add an email field to the Users collection (lowercase).
 const ADD_EMAIL_PATCH_LC: &str =

@@ -78,7 +78,7 @@ async fn patch_collection_rejects_numeric_kind_before_it_decodes_as_int_array() 
 
     assert_eq!(
         err.to_string(),
-        "invalid patch: numeric Kind values are not supported in schema patches. Field: reasoning_progress_seq, Kind: 5. Use canonical string \"[Int!]\" instead."
+        "invalid patch: numeric Kind values are not supported in schema patches. Field: reasoning_progress_seq, Kind: 5. It maps to \"[Int!]\"; use a canonical string for the intended type, such as \"Int\" or \"[Int!]\"."
     );
 
     let patched = db
