@@ -24,6 +24,7 @@ pub(super) struct PushWorkerContext<B, T> {
     pub(super) transport: T,
     pub(super) blockstore: Arc<B>,
     pub(super) backlog: Arc<PushBacklog>,
+    pub(super) selective_car_access: Arc<super::selective_car_access::SelectiveCarAccess>,
     pub(super) failure_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<PushFailure>>>>,
     pub(super) send_timeout: Duration,
 }
@@ -110,6 +111,9 @@ where
     } else {
         vec![(job.root_cid, job.head_block.clone())]
     };
+    let pushed_cids = job
+        .expand_dag
+        .then(|| blocks.iter().map(|(cid, _)| *cid).collect::<Vec<_>>());
 
     let mut requests: Vec<(Cid, PushLogRequest)> = Vec::with_capacity(blocks.len());
     for (block_cid, block_data) in blocks {
@@ -133,6 +137,11 @@ where
         // regenerates and re-pushes instead of silently losing the doc.
         true
     } else {
+        let _car_access = pushed_cids.map(|cids| {
+            context
+                .selective_car_access
+                .register(job.peer_id.clone(), job.root_cid, cids)
+        });
         send_ordered_pushlogs_via_transport(
             &context.transport,
             &job.peer_id,
@@ -335,6 +344,9 @@ mod tests {
             transport,
             blockstore,
             backlog,
+            selective_car_access: Arc::new(
+                super::super::selective_car_access::SelectiveCarAccess::default(),
+            ),
             failure_tx: Arc::new(Mutex::new(Some(tx))),
             send_timeout,
         });
