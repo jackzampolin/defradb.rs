@@ -1692,6 +1692,10 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
     transport: p2p::iroh::IrohTransport,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let peerstore = storage::stores::Peerstore::new(store.clone());
+        if let Err(error) = peerstore.activate_dormant_push_retries().await {
+            tracing::warn!(error = %error, "failed to reactivate push retries after restart");
+        }
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             let peerstore = storage::stores::Peerstore::new(store.clone());

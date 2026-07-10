@@ -12,7 +12,9 @@ use parking_lot::Mutex;
 use serde_json::Value as JsonValue;
 use tokio::sync::Notify;
 
-use super::broadcast_coalescer::DEFAULT_BROADCAST_COALESCING_WINDOW;
+use super::broadcast_coalescer::{
+    DEFAULT_BROADCAST_COALESCING_WINDOW, DEFAULT_BROADCAST_MAX_COALESCING_DELAY,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingPush {
@@ -31,9 +33,17 @@ pub(crate) struct PendingPush {
 
 impl PendingPush {
     fn version(&self) -> (u64, Vec<u8>) {
-        let priority = defra_core::Block::from_dag_cbor(&self.block)
-            .map(|block| block.delta.priority())
-            .unwrap_or(0);
+        let priority = match defra_core::Block::from_dag_cbor(&self.block) {
+            Ok(block) => block.delta.priority(),
+            Err(error) => {
+                tracing::warn!(
+                    cid = %self.cid,
+                    %error,
+                    "push fanout head priority decode failed; using CID tie-break"
+                );
+                0
+            }
+        };
         (priority, self.cid.to_bytes())
     }
 
@@ -47,6 +57,7 @@ impl PendingPush {
 
 struct Window {
     push: Mutex<PendingPush>,
+    started_at: tokio::time::Instant,
     last_update: Mutex<tokio::time::Instant>,
     done: Mutex<bool>,
     notify: Notify,
@@ -56,20 +67,30 @@ pub(crate) struct PushFanoutCoalescer {
     pending: Mutex<HashMap<(String, String), Arc<Window>>>,
     coalesced: AtomicU64,
     window: Duration,
+    max_delay: Duration,
 }
 
 impl Default for PushFanoutCoalescer {
     fn default() -> Self {
-        Self::with_window(DEFAULT_BROADCAST_COALESCING_WINDOW)
+        Self::with_limits(
+            DEFAULT_BROADCAST_COALESCING_WINDOW,
+            DEFAULT_BROADCAST_MAX_COALESCING_DELAY,
+        )
     }
 }
 
 impl PushFanoutCoalescer {
+    #[cfg(test)]
     fn with_window(window: Duration) -> Self {
+        Self::with_limits(window, window * 4)
+    }
+
+    fn with_limits(window: Duration, max_delay: Duration) -> Self {
         Self {
             pending: Mutex::new(HashMap::new()),
             coalesced: AtomicU64::new(0),
             window,
+            max_delay,
         }
     }
 
@@ -100,9 +121,11 @@ impl PushFanoutCoalescer {
                 self.coalesced.fetch_add(1, Ordering::Relaxed);
                 (Arc::clone(window), false)
             } else {
+                let now = tokio::time::Instant::now();
                 let window = Arc::new(Window {
                     push: Mutex::new(push),
-                    last_update: Mutex::new(tokio::time::Instant::now()),
+                    started_at: now,
+                    last_update: Mutex::new(now),
                     done: Mutex::new(false),
                     notify: Notify::new(),
                 });
@@ -112,7 +135,13 @@ impl PushFanoutCoalescer {
         };
 
         if leader {
-            super::broadcast_coalescer::wait_for_quiet(&window.last_update, self.window).await;
+            super::broadcast_coalescer::wait_for_quiet(
+                &window.last_update,
+                window.started_at,
+                self.window,
+                self.max_delay,
+            )
+            .await;
             {
                 let mut pending = self.pending.lock();
                 if pending
@@ -131,6 +160,10 @@ impl PushFanoutCoalescer {
 
         loop {
             let notified = window.notify.notified();
+            tokio::pin!(notified);
+            // Register before checking completion so the leader's single
+            // notify_waiters call cannot race this follower into sleeping.
+            notified.as_mut().enable();
             if *window.done.lock() {
                 return;
             }
@@ -241,5 +274,84 @@ mod tests {
         leader.await.unwrap();
         follower.await.unwrap();
         assert_eq!(sends.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sustained_updates_flush_at_the_max_delay() {
+        let window = Duration::from_millis(250);
+        let max_delay = Duration::from_secs(1);
+        let coalescer = Arc::new(PushFanoutCoalescer::with_limits(window, max_delay));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let leader = {
+            let coalescer = Arc::clone(&coalescer);
+            let sends = Arc::clone(&sends);
+            tokio::spawn(async move {
+                coalescer
+                    .run(push(b"first"), move |_| async move {
+                        sends.fetch_add(1, Ordering::Relaxed);
+                    })
+                    .await;
+            })
+        };
+        tokio::task::yield_now().await;
+
+        let mut followers = Vec::new();
+        for seed in [b"2".as_slice(), b"3", b"4", b"5"] {
+            tokio::time::advance(Duration::from_millis(200)).await;
+            let coalescer = Arc::clone(&coalescer);
+            followers.push(tokio::spawn(async move {
+                coalescer
+                    .run(push(seed), |_| async { unreachable!() })
+                    .await;
+            }));
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_millis(200)).await;
+
+        leader.await.unwrap();
+        for follower in followers {
+            follower.await.unwrap();
+        }
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn many_followers_receive_completion_without_a_missed_wakeup() {
+        const FOLLOWERS: usize = 256;
+        let coalescer = Arc::new(PushFanoutCoalescer::with_window(Duration::from_millis(250)));
+        let leader = {
+            let coalescer = Arc::clone(&coalescer);
+            tokio::spawn(async move {
+                coalescer.run(push(b"leader"), |_| async {}).await;
+            })
+        };
+        while coalescer.pending.lock().is_empty() {
+            tokio::task::yield_now().await;
+        }
+
+        let mut followers = Vec::new();
+        for seed in 0..FOLLOWERS {
+            let coalescer = Arc::clone(&coalescer);
+            followers.push(tokio::spawn(async move {
+                coalescer
+                    .run(push(&seed.to_le_bytes()), |_| async { unreachable!() })
+                    .await;
+            }));
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while coalescer.coalesced() < FOLLOWERS as u64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all followers must join the leader's window");
+
+        leader.await.unwrap();
+        for follower in followers {
+            tokio::time::timeout(Duration::from_secs(1), follower)
+                .await
+                .expect("follower must wake")
+                .unwrap();
+        }
     }
 }

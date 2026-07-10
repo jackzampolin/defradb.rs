@@ -14,6 +14,7 @@ use super::BroadcastResult;
 use crate::message::PushLogBroadcast;
 
 pub(crate) const DEFAULT_BROADCAST_COALESCING_WINDOW: Duration = Duration::from_millis(250);
+pub(crate) const DEFAULT_BROADCAST_MAX_COALESCING_DELAY: Duration = Duration::from_secs(1);
 
 type SharedResult = std::result::Result<BroadcastResult, String>;
 
@@ -25,6 +26,7 @@ struct BroadcastKey {
 
 struct PendingBroadcast {
     broadcast: Mutex<PushLogBroadcast>,
+    started_at: tokio::time::Instant,
     last_update: Mutex<tokio::time::Instant>,
     result: Mutex<Option<SharedResult>>,
     notify: Notify,
@@ -33,20 +35,30 @@ struct PendingBroadcast {
 pub(crate) struct BroadcastCoalescer {
     pending: Mutex<HashMap<BroadcastKey, Arc<PendingBroadcast>>>,
     window: Duration,
+    max_delay: Duration,
     coalesced: AtomicU64,
 }
 
 impl Default for BroadcastCoalescer {
     fn default() -> Self {
-        Self::with_window(DEFAULT_BROADCAST_COALESCING_WINDOW)
+        Self::with_limits(
+            DEFAULT_BROADCAST_COALESCING_WINDOW,
+            DEFAULT_BROADCAST_MAX_COALESCING_DELAY,
+        )
     }
 }
 
 impl BroadcastCoalescer {
+    #[cfg(test)]
     fn with_window(window: Duration) -> Self {
+        Self::with_limits(window, window * 4)
+    }
+
+    fn with_limits(window: Duration, max_delay: Duration) -> Self {
         Self {
             pending: Mutex::new(HashMap::new()),
             window,
+            max_delay,
             coalesced: AtomicU64::new(0),
         }
     }
@@ -75,9 +87,11 @@ impl BroadcastCoalescer {
                 self.coalesced.fetch_add(1, Ordering::Relaxed);
                 (Arc::clone(pending), false)
             } else {
+                let now = tokio::time::Instant::now();
                 let pending = Arc::new(PendingBroadcast {
                     broadcast: Mutex::new(broadcast),
-                    last_update: Mutex::new(tokio::time::Instant::now()),
+                    started_at: now,
+                    last_update: Mutex::new(now),
                     result: Mutex::new(None),
                     notify: Notify::new(),
                 });
@@ -87,7 +101,13 @@ impl BroadcastCoalescer {
         };
 
         if leader {
-            wait_for_quiet(&pending.last_update, self.window).await;
+            wait_for_quiet(
+                &pending.last_update,
+                pending.started_at,
+                self.window,
+                self.max_delay,
+            )
+            .await;
             {
                 let mut all = self.pending.lock();
                 if all
@@ -106,6 +126,11 @@ impl BroadcastCoalescer {
 
         loop {
             let notified = pending.notify.notified();
+            tokio::pin!(notified);
+            // Register before checking the result. `notify_waiters` does not
+            // retain a permit, so polling only after the check can miss the
+            // leader's one completion notification forever.
+            notified.as_mut().enable();
             if let Some(result) = pending.result.lock().clone() {
                 return result;
             }
@@ -114,20 +139,35 @@ impl BroadcastCoalescer {
     }
 }
 
-pub(super) async fn wait_for_quiet(last_update: &Mutex<tokio::time::Instant>, window: Duration) {
+pub(super) async fn wait_for_quiet(
+    last_update: &Mutex<tokio::time::Instant>,
+    started_at: tokio::time::Instant,
+    window: Duration,
+    max_delay: Duration,
+) {
+    let max_deadline = started_at + max_delay;
     loop {
-        let deadline = *last_update.lock() + window;
+        let deadline = (*last_update.lock() + window).min(max_deadline);
         tokio::time::sleep_until(deadline).await;
-        if tokio::time::Instant::now() >= *last_update.lock() + window {
+        let now = tokio::time::Instant::now();
+        if now >= max_deadline || now >= *last_update.lock() + window {
             return;
         }
     }
 }
 
 fn version(broadcast: &PushLogBroadcast) -> (u64, Vec<u8>) {
-    let priority = defra_core::Block::from_dag_cbor(&broadcast.block)
-        .map(|block| block.delta.priority())
-        .unwrap_or(0);
+    let priority = match defra_core::Block::from_dag_cbor(&broadcast.block) {
+        Ok(block) => block.delta.priority(),
+        Err(error) => {
+            tracing::warn!(
+                cid = %String::from_utf8_lossy(&broadcast.cid),
+                %error,
+                "broadcast head priority decode failed; using CID tie-break"
+            );
+            0
+        }
+    };
     let cid = Cid::try_from(broadcast.cid.as_ref())
         .map(|cid| cid.to_bytes())
         .unwrap_or_else(|_| broadcast.cid.to_vec());
@@ -228,5 +268,93 @@ mod tests {
         leader.await.unwrap().unwrap();
         follower.await.unwrap().unwrap();
         assert_eq!(sends.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sustained_updates_flush_at_the_max_delay() {
+        let window = Duration::from_millis(250);
+        let max_delay = Duration::from_secs(1);
+        let coalescer = Arc::new(BroadcastCoalescer::with_limits(window, max_delay));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let leader = {
+            let coalescer = Arc::clone(&coalescer);
+            let sends = Arc::clone(&sends);
+            tokio::spawn(async move {
+                coalescer
+                    .run(broadcast(b"first"), move |_| async move {
+                        sends.fetch_add(1, Ordering::Relaxed);
+                        Ok(BroadcastResult::Success)
+                    })
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+
+        let mut followers = Vec::new();
+        for seed in [b"2".as_slice(), b"3", b"4", b"5"] {
+            tokio::time::advance(Duration::from_millis(200)).await;
+            let coalescer = Arc::clone(&coalescer);
+            followers.push(tokio::spawn(async move {
+                coalescer
+                    .run(broadcast(seed), |_| async { unreachable!() })
+                    .await
+            }));
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_millis(200)).await;
+
+        assert_eq!(leader.await.unwrap().unwrap(), BroadcastResult::Success);
+        for follower in followers {
+            assert_eq!(follower.await.unwrap().unwrap(), BroadcastResult::Success);
+        }
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn many_followers_receive_completion_without_a_missed_wakeup() {
+        const FOLLOWERS: usize = 256;
+        let coalescer = Arc::new(BroadcastCoalescer::with_window(Duration::from_millis(250)));
+        let leader = {
+            let coalescer = Arc::clone(&coalescer);
+            tokio::spawn(async move {
+                coalescer
+                    .run(broadcast(b"leader"), |_| async {
+                        Ok(BroadcastResult::Success)
+                    })
+                    .await
+            })
+        };
+        while coalescer.pending.lock().is_empty() {
+            tokio::task::yield_now().await;
+        }
+
+        let mut followers = Vec::new();
+        for seed in 0..FOLLOWERS {
+            let coalescer = Arc::clone(&coalescer);
+            followers.push(tokio::spawn(async move {
+                coalescer
+                    .run(broadcast(&seed.to_le_bytes()), |_| async { unreachable!() })
+                    .await
+            }));
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while coalescer.coalesced() < FOLLOWERS as u64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all followers must join the leader's window");
+
+        assert_eq!(leader.await.unwrap().unwrap(), BroadcastResult::Success);
+        for follower in followers {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), follower)
+                    .await
+                    .expect("follower must wake")
+                    .unwrap()
+                    .unwrap(),
+                BroadcastResult::Success
+            );
+        }
     }
 }

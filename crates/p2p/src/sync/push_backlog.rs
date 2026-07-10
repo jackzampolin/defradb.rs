@@ -62,9 +62,54 @@ pub struct PushJobSpec {
     pub head_block: Bytes,
     pub expand_dag: bool,
     pub(crate) encoded_payload: Option<Arc<super::push_encode_cache::PushPayload>>,
+    key: JobKey,
+    version: HeadVersion,
 }
 
 impl PushJobSpec {
+    pub(crate) fn new(
+        peer_id: PeerId,
+        doc_id: String,
+        collection_id: String,
+        creator: String,
+        root_cid: Cid,
+        head_block: Bytes,
+        expand_dag: bool,
+    ) -> Self {
+        let priority = match defra_core::Block::from_dag_cbor(&head_block) {
+            Ok(block) => block.delta.priority(),
+            Err(error) => {
+                tracing::warn!(%root_cid, %error, "push head priority decode failed; using CID tie-break");
+                0
+            }
+        };
+        let key_doc_id = if doc_id.is_empty() {
+            format!("cid:{root_cid}")
+        } else {
+            doc_id.clone()
+        };
+        let key = JobKey {
+            peer_id: peer_id.to_string(),
+            collection_id: collection_id.clone(),
+            doc_id: key_doc_id,
+        };
+        Self {
+            peer_id,
+            doc_id,
+            collection_id,
+            creator,
+            root_cid,
+            head_block,
+            expand_dag,
+            encoded_payload: None,
+            key,
+            version: HeadVersion {
+                priority,
+                cid: root_cid,
+            },
+        }
+    }
+
     pub fn resident_bytes(&self) -> usize {
         self.head_block.len()
             + self.doc_id.len()
@@ -74,27 +119,12 @@ impl PushJobSpec {
             + PUSH_JOB_FIXED_OVERHEAD_BYTES
     }
 
-    fn key(&self) -> JobKey {
-        let doc_id = if self.doc_id.is_empty() {
-            format!("cid:{}", self.root_cid)
-        } else {
-            self.doc_id.clone()
-        };
-        JobKey {
-            peer_id: self.peer_id.to_string(),
-            collection_id: self.collection_id.clone(),
-            doc_id,
-        }
+    fn key(&self) -> &JobKey {
+        &self.key
     }
 
     fn version(&self) -> HeadVersion {
-        let priority = defra_core::Block::from_dag_cbor(&self.head_block)
-            .map(|block| block.delta.priority())
-            .unwrap_or(0);
-        HeadVersion {
-            priority,
-            cid: self.root_cid,
-        }
+        self.version
     }
 
     pub(crate) fn head_priority(&self) -> u64 {
@@ -285,7 +315,7 @@ impl PushBacklog {
     pub fn try_enqueue(&self, job: PushJobSpec) -> EnqueueOutcome {
         let cost = job.resident_bytes();
         let peer_key = job.peer_id.to_string();
-        let job_key = job.key();
+        let job_key = job.key().clone();
         let version = job.version();
         let mut inner = self.inner.lock();
 
@@ -326,7 +356,7 @@ impl PushBacklog {
                     if let Some(existing) = inner
                         .queues
                         .get_mut(&peer_key)
-                        .and_then(|queue| queue.iter_mut().find(|queued| queued.key() == job_key))
+                        .and_then(|queue| queue.iter_mut().find(|queued| queued.key() == &job_key))
                     {
                         let old_cost = existing.resident_bytes();
                         let expand_dag = existing.expand_dag || job.expand_dag;
@@ -396,7 +426,7 @@ impl PushBacklog {
 
     fn remove_queued_job(inner: &mut Inner, peer_key: &str, job_key: &JobKey) {
         let removed = inner.queues.get_mut(peer_key).and_then(|queue| {
-            let position = queue.iter().position(|queued| queued.key() == *job_key)?;
+            let position = queue.iter().position(|queued| queued.key() == job_key)?;
             queue.remove(position)
         });
         let Some(removed) = removed else {
@@ -424,7 +454,7 @@ impl PushBacklog {
         self.inner
             .lock()
             .latest
-            .get(&job.key())
+            .get(job.key())
             .is_some_and(|version| *version == job.version())
     }
 
@@ -566,14 +596,14 @@ impl PushBacklog {
                     RetryState {
                         until: Instant::now() + cooldown,
                         retry_count,
-                        job_key: job.key(),
+                        job_key: job.key().clone(),
                         version: job.version(),
                     },
                 );
             } else {
                 inner.retries.remove(&retry_key);
             }
-            let job_key = job.key();
+            let job_key = job.key().clone();
             if inner
                 .latest
                 .get(&job_key)
@@ -692,16 +722,15 @@ mod tests {
     use super::*;
 
     fn job(peer: &str, cid_seed: &[u8]) -> PushJobSpec {
-        PushJobSpec {
-            peer_id: PeerId::new(peer.to_string()),
-            doc_id: format!("doc-{}", hex::encode(cid_seed)),
-            collection_id: "collection".to_string(),
-            creator: "creator".to_string(),
-            root_cid: Cid::new_v1(0x55, Code::Sha2_256.digest(cid_seed)),
-            head_block: Bytes::from_static(b"head-block"),
-            expand_dag: false,
-            encoded_payload: None,
-        }
+        PushJobSpec::new(
+            PeerId::new(peer.to_string()),
+            format!("doc-{}", hex::encode(cid_seed)),
+            "collection".to_string(),
+            "creator".to_string(),
+            Cid::new_v1(0x55, Code::Sha2_256.digest(cid_seed)),
+            Bytes::from_static(b"head-block"),
+            false,
+        )
     }
 
     fn versioned_job(peer: &str, doc_id: &str, priority: u64) -> PushJobSpec {
@@ -720,16 +749,15 @@ mod tests {
             None,
         );
         let head_block = Bytes::from(block.to_dag_cbor().unwrap());
-        PushJobSpec {
-            peer_id: PeerId::new(peer.to_string()),
-            doc_id: doc_id.to_string(),
-            collection_id: "collection".to_string(),
-            creator: "creator".to_string(),
-            root_cid: defra_core::block::generate_cid_from_bytes(&head_block).unwrap(),
+        PushJobSpec::new(
+            PeerId::new(peer.to_string()),
+            doc_id.to_string(),
+            "collection".to_string(),
+            "creator".to_string(),
+            defra_core::block::generate_cid_from_bytes(&head_block).unwrap(),
             head_block,
-            expand_dag: false,
-            encoded_payload: None,
-        }
+            false,
+        )
     }
 
     #[test]
@@ -829,6 +857,32 @@ mod tests {
 
         let popped = backlog.next_job().await.expect("job queued");
         assert!(popped.expand_dag, "coalescing must not shrink the job");
+    }
+
+    #[tokio::test]
+    async fn collection_commit_does_not_compete_with_its_document_head() {
+        let backlog = PushBacklog::new(1024, usize::MAX, 4, 4);
+        let document = versioned_job("a", "doc", 2);
+        let mut collection = versioned_job("a", "doc", 1);
+        collection.doc_id.clear();
+        // Reconstruct after changing the semantic ID so the cached key is
+        // CID-scoped exactly as the transactional broadcaster supplies it.
+        collection = PushJobSpec::new(
+            collection.peer_id,
+            collection.doc_id,
+            collection.collection_id,
+            collection.creator,
+            collection.root_cid,
+            collection.head_block,
+            collection.expand_dag,
+        );
+
+        assert_eq!(backlog.try_enqueue(document), EnqueueOutcome::Enqueued);
+        assert_eq!(backlog.try_enqueue(collection), EnqueueOutcome::Enqueued);
+        assert_eq!(backlog.snapshot().queued_items, 2);
+
+        assert!(backlog.next_job().await.is_some());
+        assert!(backlog.next_job().await.is_some());
     }
 
     #[tokio::test]

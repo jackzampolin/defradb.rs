@@ -315,16 +315,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             } else {
                 push.expand_unfiltered_dag
             };
-            let mut job = PushJobSpec {
+            let mut job = PushJobSpec::new(
                 peer_id,
-                doc_id: push.doc_id.clone(),
-                collection_id: push.collection_id.clone(),
-                creator: push.creator.clone(),
-                root_cid: push.cid,
-                head_block: push.block.clone(),
+                push.doc_id.clone(),
+                push.collection_id.clone(),
+                push.creator.clone(),
+                push.cid,
+                push.block.clone(),
                 expand_dag,
-                encoded_payload: None,
-            };
+            );
             let payload = self.runtime.push_encode_cache.acquire(&job);
             payload_guard.get_or_insert_with(|| Arc::clone(&payload));
             job.encoded_payload = Some(payload);

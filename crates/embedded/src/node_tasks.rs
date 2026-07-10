@@ -601,6 +601,10 @@ pub(crate) fn spawn_libp2p_retry_loop<S: storage::corekv::Store + 'static>(
     se_repusher: Arc<dyn db_merge::SeArtifactRepusher>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let peerstore = storage::stores::Peerstore::new(store.clone());
+        if let Err(error) = peerstore.activate_dormant_push_retries().await {
+            tracing::warn!(error = %error, "failed to reactivate push retries after restart");
+        }
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             run_libp2p_retry_pass(&store, &handle, &doc_pusher, &se_repusher, false).await;
@@ -724,6 +728,10 @@ pub(crate) fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
     se_repusher: Arc<dyn db_merge::SeArtifactRepusher>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let peerstore = storage::stores::Peerstore::new(store.clone());
+        if let Err(error) = peerstore.activate_dormant_push_retries().await {
+            tracing::warn!(error = %error, "failed to reactivate push retries after restart");
+        }
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             run_iroh_retry_pass(&store, &doc_pusher, &se_repusher, false).await;

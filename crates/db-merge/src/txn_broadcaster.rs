@@ -95,10 +95,13 @@ where
             );
 
             if let Some((col_cid, col_block)) = collection_block {
+                // Collection commits are independent DAG obligations. An
+                // empty document ID gives them a CID-scoped backlog key so
+                // they cannot retire, or be retired by, the document head.
                 sync.push_to_replicators_with_creator(
                     &col_cid,
                     &col_block,
-                    &doc_id,
+                    "",
                     &collection_id,
                     creator_ref,
                 )

@@ -436,16 +436,15 @@ mod tests {
     }
 
     fn job(peer: &str, cid_seed: &[u8]) -> PushJobSpec {
-        PushJobSpec {
-            peer_id: PeerId::new(peer.to_string()),
-            doc_id: format!("doc-{peer}-{}", hex::encode(cid_seed)),
-            collection_id: "collection".to_string(),
-            creator: "creator".to_string(),
-            root_cid: Cid::new_v1(0x55, Code::Sha2_256.digest(cid_seed)),
-            head_block: Bytes::from_static(b"head-block"),
-            expand_dag: false,
-            encoded_payload: None,
-        }
+        PushJobSpec::new(
+            PeerId::new(peer.to_string()),
+            format!("doc-{peer}-{}", hex::encode(cid_seed)),
+            "collection".to_string(),
+            "creator".to_string(),
+            Cid::new_v1(0x55, Code::Sha2_256.digest(cid_seed)),
+            Bytes::from_static(b"head-block"),
+            false,
+        )
     }
 
     fn versioned_job(peer: &str, priority: u64) -> PushJobSpec {
@@ -465,16 +464,15 @@ mod tests {
             None,
         );
         let head_block = Bytes::from(block.to_dag_cbor().unwrap());
-        PushJobSpec {
-            peer_id: PeerId::new(peer.to_string()),
-            doc_id: doc_id.to_string(),
-            collection_id: "collection".to_string(),
-            creator: "creator".to_string(),
-            root_cid: defra_core::block::generate_cid_from_bytes(&head_block).unwrap(),
+        PushJobSpec::new(
+            PeerId::new(peer.to_string()),
+            doc_id.to_string(),
+            "collection".to_string(),
+            "creator".to_string(),
+            defra_core::block::generate_cid_from_bytes(&head_block).unwrap(),
             head_block,
-            expand_dag: false,
-            encoded_payload: None,
-        }
+            false,
+        )
     }
 
     /// #1099 fairness: a nonresponsive peer occupying its per-peer cap must
@@ -558,11 +556,26 @@ mod tests {
             Duration::from_secs(1),
         );
         let cache = crate::sync::push_encode_cache::PushEncodeCache::default();
-        let mut first = job("a", b"shared");
-        first.doc_id = "doc-shared".to_string();
+        let base = job("a", b"shared");
+        let mut first = PushJobSpec::new(
+            base.peer_id,
+            "doc-shared".to_string(),
+            base.collection_id,
+            base.creator,
+            base.root_cid,
+            base.head_block,
+            base.expand_dag,
+        );
         first.encoded_payload = Some(cache.acquire(&first));
-        let mut second = first.clone();
-        second.peer_id = PeerId::new("b".to_string());
+        let mut second = PushJobSpec::new(
+            PeerId::new("b".to_string()),
+            first.doc_id.clone(),
+            first.collection_id.clone(),
+            first.creator.clone(),
+            first.root_cid,
+            first.head_block.clone(),
+            first.expand_dag,
+        );
         second.encoded_payload = Some(cache.acquire(&second));
 
         let shutdown = SyncShutdownHandle::new();

@@ -572,6 +572,10 @@ impl Node {
         let retry_handle = handle.clone();
         let retry_pusher = doc_pusher.clone();
         let retry_loop_task = tokio::spawn(async move {
+            let peerstore = storage::stores::Peerstore::new(retry_store.clone());
+            if let Err(error) = peerstore.activate_dormant_push_retries().await {
+                warn!(error = %error, "Failed to reactivate push retries after restart");
+            }
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let peerstore = storage::stores::Peerstore::new(retry_store.clone());
@@ -1159,6 +1163,10 @@ impl Node {
         let retry_store = store.clone();
         let retry_pusher = doc_pusher.clone();
         let retry_loop_task = tokio::spawn(async move {
+            let peerstore = storage::stores::Peerstore::new(retry_store.clone());
+            if let Err(error) = peerstore.activate_dormant_push_retries().await {
+                warn!(error = %error, "Failed to reactivate push retries after restart");
+            }
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let peerstore = storage::stores::Peerstore::new(retry_store.clone());

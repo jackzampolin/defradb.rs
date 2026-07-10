@@ -90,16 +90,15 @@ mod tests {
     use crate::transport::PeerId;
 
     fn job(peer: &str) -> PushJobSpec {
-        PushJobSpec {
-            peer_id: PeerId::new(peer.to_string()),
-            doc_id: "doc".to_string(),
-            collection_id: "collection".to_string(),
-            creator: "creator".to_string(),
-            root_cid: Cid::new_v1(0x55, Code::Sha2_256.digest(b"root")),
-            head_block: Bytes::from_static(b"head"),
-            expand_dag: false,
-            encoded_payload: None,
-        }
+        PushJobSpec::new(
+            PeerId::new(peer.to_string()),
+            "doc".to_string(),
+            "collection".to_string(),
+            "creator".to_string(),
+            Cid::new_v1(0x55, Code::Sha2_256.digest(b"root")),
+            Bytes::from_static(b"head"),
+            false,
+        )
     }
 
     #[test]
