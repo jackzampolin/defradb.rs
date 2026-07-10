@@ -398,6 +398,7 @@ where
         discovery: config.discovery.clone(),
         bind_port: config.bind_port,
         bind_addr: config.bind_addr,
+        gossip_heal: p2p::iroh::GossipHealConfig::from_env(),
     };
     let (command_tx, event_rx, replicator_registry, endpoint_task) =
         p2p::iroh::spawn_endpoint(iroh_config)

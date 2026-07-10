@@ -519,6 +519,7 @@ mod tests {
             discovery: IrohDiscoveryConfig::Disabled,
             bind_port: None,
             bind_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            gossip_heal: Default::default(),
         }
     }
 

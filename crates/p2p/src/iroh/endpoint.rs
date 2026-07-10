@@ -25,10 +25,23 @@ use super::endpoint_config::{
 };
 use super::endpoint_rpc::ConnectionCache;
 use super::endpoint_streams::handle_incoming;
+use super::gossip_heal::{self, GossipHealer};
 use super::peer_map::{parse_endpoint_id, PeerMap};
 use super::protocols;
 
 const MAX_COMMAND_BATCH: usize = 16;
+
+/// Shared handles to the endpoint's long-lived state, cloneable into spawned
+/// tasks (dials, incoming connections, gossip heals).
+#[derive(Clone)]
+pub(super) struct EndpointResources {
+    pub(super) endpoint: Endpoint,
+    pub(super) gossip: Gossip,
+    pub(super) peer_map: Arc<parking_lot::Mutex<PeerMap>>,
+    pub(super) connection_cache: ConnectionCache,
+    pub(super) healer: Arc<GossipHealer>,
+    pub(super) spawned_tasks: SpawnedTasks,
+}
 
 /// Handle to a gossip topic subscription.
 pub(super) struct TopicSubscription {
@@ -47,7 +60,11 @@ pub(super) struct ActiveSync {
 pub(super) type SpawnedTasks = Arc<parking_lot::Mutex<Vec<JoinHandle<()>>>>;
 
 pub(super) fn track_task(spawned_tasks: &SpawnedTasks, task: JoinHandle<()>) {
-    spawned_tasks.lock().push(task);
+    let mut tasks = spawned_tasks.lock();
+    // The heal sweep (#1092) pushes tasks on a timer, so finished handles must
+    // be dropped here or the vec grows without bound over a node's lifetime.
+    tasks.retain(|task| !task.is_finished());
+    tasks.push(task);
 }
 
 async fn shutdown_tracked_tasks(spawned_tasks: SpawnedTasks) {
@@ -135,9 +152,11 @@ pub async fn spawn_endpoint(
     let (event_tx, event_rx) = mpsc::channel::<TransportEvent<iroh::endpoint::SendStream>>(256);
     let replicators = Arc::new(ReplicatorRegistry::new());
 
+    let gossip_heal = config.gossip_heal.clone();
     let task = tokio::spawn(run_event_loop(
         endpoint,
         gossip,
+        gossip_heal,
         command_rx,
         event_tx,
         replicators.clone(),
@@ -150,6 +169,7 @@ pub async fn spawn_endpoint(
 async fn run_event_loop(
     endpoint: Endpoint,
     gossip: Gossip,
+    gossip_heal_config: super::gossip_heal::GossipHealConfig,
     mut command_rx: mpsc::Receiver<IrohCommand>,
     event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
     replicators: Arc<ReplicatorRegistry>,
@@ -167,6 +187,18 @@ async fn run_event_loop(
     let mut active_syncs: HashMap<u64, ActiveSync> = HashMap::new();
     let spawned_tasks: SpawnedTasks = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let mut next_query_id: u64 = 1;
+
+    let heal_enabled = gossip_heal_config.enabled();
+    let mut heal_tick = tokio::time::interval(gossip_heal_config.tick_period());
+    heal_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let resources = EndpointResources {
+        endpoint: endpoint.clone(),
+        gossip: gossip.clone(),
+        peer_map: Arc::clone(&peer_map),
+        connection_cache: Arc::clone(&connection_cache),
+        healer: Arc::new(GossipHealer::new(gossip_heal_config)),
+        spawned_tasks: Arc::clone(&spawned_tasks),
+    };
 
     // Emit Listening event with our endpoint address
     let addr_str = format!("iroh://{}", endpoint.id());
@@ -186,16 +218,12 @@ async fn run_event_loop(
                 while let Some(cmd) = pending_cmd.take() {
                     let should_shutdown = handle_command(
                         cmd,
-                        &endpoint,
-                        &gossip,
-                        &peer_map,
+                        &resources,
                         &pending_pushlog_replies,
-                        &connection_cache,
                         &mut subscriptions,
                         &raw_topics,
                         &replicators,
                         &mut active_syncs,
-                        &spawned_tasks,
                         &mut next_query_id,
                         &event_tx,
                     ).await;
@@ -213,20 +241,16 @@ async fn run_event_loop(
             incoming = endpoint.accept() => {
                 match incoming {
                     Some(incoming) => {
-                        let gossip = gossip.clone();
-                        let peer_map = Arc::clone(&peer_map);
+                        let resources = resources.clone();
                         let pending_pushlog_replies = Arc::clone(&pending_pushlog_replies);
                         let subscription_senders = snapshot_subscription_senders(&subscriptions);
-                        let spawned_tasks_for_incoming = Arc::clone(&spawned_tasks);
                         let event_tx = event_tx.clone();
                         let task = tokio::spawn(async move {
                             handle_incoming(
                                 incoming,
-                                &gossip,
-                                &peer_map,
+                                &resources,
                                 &pending_pushlog_replies,
                                 &subscription_senders,
-                                &spawned_tasks_for_incoming,
                                 &event_tx,
                             )
                             .await;
@@ -235,6 +259,9 @@ async fn run_event_loop(
                     }
                     None => break,
                 }
+            }
+            _ = heal_tick.tick(), if heal_enabled => {
+                gossip_heal::sweep(&resources, &subscriptions);
             }
             else => break,
         }

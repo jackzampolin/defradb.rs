@@ -224,6 +224,22 @@ pub(super) fn close_cached_connections(cache: &ConnectionCache, endpoint_id: &ir
     }
 }
 
+/// Hang up every connection we hold to a peer: all handles retained in
+/// `peer_map` (covering dial- and accept-initiated connections across every
+/// ALPN) and any cached outbound-send connections. Each stream task then
+/// observes the `accept_bi` error and decrements the count until it reaches
+/// zero and `PeerDisconnected` is emitted. Idempotent.
+pub(super) fn close_peer_connections(
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    cache: &ConnectionCache,
+    endpoint_id: &iroh::EndpointId,
+) {
+    for connection in peer_map.lock().take_connections(endpoint_id) {
+        connection.close(DISCONNECT_ERROR_CODE.into(), b"disconnect");
+    }
+    close_cached_connections(cache, endpoint_id);
+}
+
 async fn connect_with_cache(
     endpoint: &Endpoint,
     peer_id: &PeerId,
@@ -241,7 +257,7 @@ async fn connect_with_cache(
     Ok(connection)
 }
 
-async fn connect_with_direct_addr_fallback(
+pub(super) async fn connect_with_direct_addr_fallback(
     endpoint: &Endpoint,
     peer_id: &PeerId,
     alpn: &[u8],
@@ -854,5 +870,69 @@ mod tests {
         assert!(summary.contains(&cid(b"a").to_string()));
         assert!(summary.contains(&cid(b"d").to_string()));
         assert!(summary.contains("+1 more"));
+    }
+
+    async fn localhost_endpoint(alpns: Vec<Vec<u8>>) -> iroh::Endpoint {
+        iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .alpns(alpns)
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+            .expect("bind addr")
+            .bind()
+            .await
+            .expect("bind endpoint")
+    }
+
+    /// Regression (#1092 review): a peer can hold several live connections
+    /// (one per ALPN, dial + accept). Hanging up must close every retained
+    /// handle — closing only the most recent one leaves the others alive, the
+    /// connection count never reaches zero, and `PeerDisconnected` never
+    /// fires.
+    #[tokio::test]
+    async fn close_peer_connections_closes_every_retained_handle() {
+        let accept_ep = localhost_endpoint(vec![b"test/a".to_vec(), b"test/b".to_vec()]).await;
+        let dial_ep = localhost_endpoint(vec![]).await;
+
+        let accept_task = tokio::spawn({
+            let ep = accept_ep.clone();
+            async move {
+                let mut held = Vec::new();
+                while let Some(incoming) = ep.accept().await {
+                    if let Ok(conn) = incoming.await {
+                        held.push(conn);
+                    }
+                }
+            }
+        });
+
+        let addr = accept_ep.addr();
+        let conn_a = dial_ep
+            .connect(addr.clone(), b"test/a")
+            .await
+            .expect("connect a");
+        let conn_b = dial_ep.connect(addr, b"test/b").await.expect("connect b");
+
+        let peer_map = Arc::new(parking_lot::Mutex::new(PeerMap::new()));
+        let cache: ConnectionCache = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+        let id = accept_ep.id();
+        peer_map
+            .lock()
+            .increment_connections(id, None, conn_a.clone());
+        peer_map
+            .lock()
+            .increment_connections(id, None, conn_b.clone());
+
+        close_peer_connections(&peer_map, &cache, &id);
+
+        assert!(
+            conn_a.close_reason().is_some(),
+            "first retained handle must be closed"
+        );
+        assert!(
+            conn_b.close_reason().is_some(),
+            "second retained handle must be closed"
+        );
+
+        accept_task.abort();
     }
 }

@@ -96,7 +96,7 @@ pub unsafe extern "C" fn add_view(
 
             // Parse the GQL query into a Select, matching Go's `addView` behavior:
             // Go wraps query as `query { <input> }` then parses to request.Select
-            let wrapped_query = format!("query {{ {} }}", &query_str);
+            let wrapped_query = format!("query {{ {} }}", query_str);
             let selects = query::parse_query_with_limits(&wrapped_query, None, query_limits)
                 .map_err(|e| format!("failed to parse view query: {}", e))?;
             if selects.is_empty() {

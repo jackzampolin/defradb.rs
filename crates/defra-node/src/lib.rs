@@ -1346,6 +1346,7 @@ impl NodeBuilder {
             discovery: config.discovery.clone(),
             bind_port: Some(config.port),
             bind_addr: config.bind_addr,
+            gossip_heal: p2p::iroh::GossipHealConfig::from_env(),
         };
         let (command_tx, iroh_events, replicator_registry, endpoint_task) =
             p2p::iroh::spawn_endpoint(iroh_config)

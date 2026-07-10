@@ -17,6 +17,7 @@ mod endpoint_commands;
 mod endpoint_config;
 mod endpoint_rpc;
 mod endpoint_streams;
+mod gossip_heal;
 mod peer_map;
 mod protocols;
 mod secret_key;
@@ -29,5 +30,6 @@ pub use addr::{
 pub use config::{IrohDiscoveryConfig, IrohRelayModeConfig};
 pub use endpoint::spawn_endpoint;
 pub use endpoint_config::IrohEndpointConfig;
+pub use gossip_heal::GossipHealConfig;
 pub use secret_key::load_or_generate_secret_key;
 pub use transport::IrohTransport;
