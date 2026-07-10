@@ -56,6 +56,7 @@ mod pubsub_services;
 mod push_worker;
 mod replicators;
 mod result_types;
+mod selective_car_access;
 mod subscriptions;
 
 pub use result_types::{CreateReplicatorResult, LoadReplicatorsResult};
@@ -316,6 +317,9 @@ pub(super) struct SyncRuntime<T: P2PTransport> {
     pub(super) broadcast_coalescer: Arc<super::broadcast_coalescer::BroadcastCoalescer>,
 
     pub(super) push_fanout_coalescer: Arc<super::push_fanout_coalescer::PushFanoutCoalescer>,
+
+    /// Temporary per-peer CAR grants scoped to DAGs in active outbound pushes.
+    pub(super) selective_car_access: Arc<selective_car_access::SelectiveCarAccess>,
 
     /// Per-peer rate limiter for gossip dispatch (abuse ladder; drop-only).
     pub(super) rate_limiter: Arc<PeerRateLimiter>,

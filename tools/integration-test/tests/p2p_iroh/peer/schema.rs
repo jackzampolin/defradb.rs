@@ -41,9 +41,8 @@ async fn setup_schema_version_cluster() -> (TestCluster, String) {
     node0.schema_add(BASE_SCHEMA).expect("schema node0");
     node1.schema_add(BASE_SCHEMA).expect("schema node1");
 
-    // Node0 patches to add Email field (Kind 11 = String)
-    let patch =
-        r#"[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "email", "Kind": 11}}]"#;
+    // Node0 patches to add an email field.
+    let patch = r#"[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "email", "Kind": "String"}}]"#;
     let patch_result = node0.collection_patch(patch);
     if let Err(e) = &patch_result {
         eprintln!("KNOWN GAP: collection patching not yet functional: {}", e);
@@ -263,8 +262,7 @@ async fn create_new_field_syncs_to_newer_version() {
     node1.schema_add(BASE_SCHEMA).expect("schema node1");
 
     // Node0 patches to add email
-    let patch =
-        r#"[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "email", "Kind": 11}}]"#;
+    let patch = r#"[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "email", "Kind": "String"}}]"#;
     if node0.collection_patch(patch).is_err() {
         eprintln!("KNOWN GAP: skipping — collection patch not functional");
         return;
@@ -347,8 +345,7 @@ async fn create_new_field_syncs_to_updated_version() {
     node1.schema_add(BASE_SCHEMA).expect("schema node1");
 
     // Both patch to add email
-    let patch =
-        r#"[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "email", "Kind": 11}}]"#;
+    let patch = r#"[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "email", "Kind": "String"}}]"#;
     if node0.collection_patch(patch).is_err() || node1.collection_patch(patch).is_err() {
         eprintln!("KNOWN GAP: skipping — collection patch not functional");
         return;
@@ -445,7 +442,7 @@ async fn create_synced_before_schema_update_no_new_field() {
             .await;
 
             // Now node1 updates its schema to also have email
-            let patch = r#"[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "email", "Kind": 11}}]"#;
+            let patch = r#"[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "email", "Kind": "String"}}]"#;
             if node1.collection_patch(patch).is_err() {
                 eprintln!("KNOWN GAP: node1 collection patch failed");
                 return;

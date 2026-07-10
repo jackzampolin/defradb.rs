@@ -39,6 +39,10 @@ name = "p2p_backlog"
 path = "tests/p2p_backlog.rs"
 
 [[test]]
+name = "p2p_push_storm"
+path = "tests/p2p_push_storm.rs"
+
+[[test]]
 name = "p2p_deep_catchup"
 path = "tests/p2p_deep_catchup.rs"
 
@@ -89,6 +93,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3.17"
+libc = "0.2"
 identity = { path = "../../crates/identity" }
 crypto = { path = "../../crates/crypto" }
 p2p = { path = "../../crates/p2p", features = ["iroh-transport"] }
@@ -99,3 +104,6 @@ serial_test = "3"
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+mach2 = "0.4"

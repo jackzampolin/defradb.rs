@@ -13,7 +13,7 @@ use serde_json::Value;
 
 const SCHEMA: &str = "type Users { name: String  verified: Boolean }";
 const PATCH_V1_TO_V2: &str =
-    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"placeholder","Kind":11}}]"#;
+    r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"placeholder","Kind":"String"}}]"#;
 
 async fn build_cluster() -> TestCluster {
     TestCluster::builder()

@@ -501,6 +501,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn collect_exact_blocks_serves_field_and_composite_history_subsets() {
+        use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true);
+        let mut previous_field = None;
+        let mut previous_composite = None;
+        let mut field_blocks = Vec::new();
+        let mut composite_blocks = Vec::new();
+
+        for height in 1..=17 {
+            let field = Block::new(
+                CrdtDelta::Lww(LwwDeltaPayload {
+                    doc_id: b"doc1".to_vec(),
+                    field_name: "status".to_string(),
+                    priority: height,
+                    schema_version_id: "version1".to_string(),
+                    data: vec![height as u8],
+                }),
+                previous_field.into_iter().collect(),
+                vec![],
+            );
+            let field_data = field.to_dag_cbor().unwrap();
+            let field_cid = field.generate_cid().unwrap();
+            blockstore.put(&field_cid, &field_data).await.unwrap();
+            field_blocks.push((field_cid, field_data));
+            previous_field = Some(field_cid);
+
+            let composite = Block::new(
+                CrdtDelta::Composite(CompositeDeltaPayload {
+                    doc_id: b"doc1".to_vec(),
+                    schema_version_id: "version1".to_string(),
+                    priority: height,
+                    status: 1,
+                }),
+                previous_composite.into_iter().collect(),
+                vec![DAGLink::new("status", field_cid)],
+            );
+            let composite_data = composite.to_dag_cbor().unwrap();
+            let composite_cid = composite.generate_cid().unwrap();
+            blockstore
+                .put(&composite_cid, &composite_data)
+                .await
+                .unwrap();
+            composite_blocks.push((composite_cid, composite_data));
+            previous_composite = Some(composite_cid);
+        }
+
+        let expected: Vec<(Cid, Bytes)> =
+            [&field_blocks[3], &field_blocks[13], &composite_blocks[16]]
+                .into_iter()
+                .map(|(cid, data)| (*cid, Bytes::from(data.clone())))
+                .collect();
+        let wanted: Vec<Cid> = expected.iter().map(|(cid, _)| *cid).collect();
+        let collected = collect_exact_blocks(&blockstore, &wanted).await.unwrap();
+
+        assert_eq!(collected.blocks, expected);
+        assert!(!collected.truncated());
+    }
+
+    #[tokio::test]
     async fn collect_dag_blocks_handles_deep_chains_iteratively() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = DefraBlockstore::new(store, true);
