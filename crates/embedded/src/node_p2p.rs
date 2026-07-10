@@ -159,7 +159,9 @@ where
     coordinator.install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())));
     let coordinator_for_restore = coordinator.clone();
     tokio::spawn(async move {
-        coordinator_for_restore.restore_pending_dags().await;
+        coordinator_for_restore
+            .run_pending_dag_resync(std::time::Duration::from_secs(60))
+            .await;
     });
     let replication = db_merge::create_replication_stack(
         database.clone(),
@@ -438,7 +440,9 @@ where
     coordinator.install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())));
     let coordinator_for_restore = coordinator.clone();
     tokio::spawn(async move {
-        coordinator_for_restore.restore_pending_dags().await;
+        coordinator_for_restore
+            .run_pending_dag_resync(std::time::Duration::from_secs(60))
+            .await;
     });
     let replication = db_merge::create_replication_stack(
         database.clone(),

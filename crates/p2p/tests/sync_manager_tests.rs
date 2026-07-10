@@ -1071,6 +1071,60 @@ mod pending_persistence {
         );
         assert_eq!(manager.pending_dag_count(), 0);
         assert_eq!(pending_store.load_all().await.expect("load").len(), 4);
+        assert_eq!(manager.persisted_pending_count(), 4);
+        assert_eq!(manager.persisted_pending_capacity(), 4);
+    }
+
+    /// Reviewer scenario (#1100 round 2): a record skipped because the
+    /// in-memory map was at capacity must be re-driven by a later sweep once
+    /// a slot frees — the periodic resync loop supplies that later sweep even
+    /// with no peer reconnect or restart.
+    #[tokio::test]
+    async fn resync_drains_records_skipped_at_capacity_once_slots_free() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
+        let (manager, mut events) = SyncManager::new(
+            blockstore,
+            test_peer_state(),
+            SyncConfig {
+                max_pending_dags: 1,
+                ..SyncConfig::default()
+            },
+        );
+        manager.install_pending_dag_store(Arc::new(PendingDagStore::new(store)));
+
+        // Record A exists but its in-memory entry is gone; the single map
+        // slot is occupied by B.
+        let (comp_a, bytes_a) = composite_with_missing_named_field("field_a");
+        manager
+            .process_pushlog(&pushlog_for(&comp_a, &bytes_a), Some("peer-1"), true, None)
+            .await
+            .expect("register A");
+        manager.clear_pending_dag(&comp_a);
+        let (comp_b, bytes_b) = composite_with_missing_named_field("field_b");
+        manager
+            .process_pushlog(&pushlog_for(&comp_b, &bytes_b), Some("peer-1"), true, None)
+            .await
+            .expect("register B");
+        while tokio::time::timeout(Duration::from_millis(50), events.recv())
+            .await
+            .is_ok()
+        {}
+
+        // Map full: the sweep must keep A's record and re-drive nothing.
+        assert_eq!(manager.resync_persisted_pending_dags().await, 0);
+        assert_eq!(manager.persisted_pending_count(), 2);
+
+        // B's slot frees: the next sweep re-drives one record into the
+        // single slot — the drain progresses one freed slot per sweep.
+        manager.clear_pending_dag(&comp_b);
+        assert_eq!(manager.resync_persisted_pending_dags().await, 1);
+        assert!(manager.pending_dag_count() >= 1);
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("freed slot must produce a re-drive")
+            .expect("event channel open");
+        assert!(matches!(event, SyncEvent::DagNeedsFetch { .. }));
     }
 
     struct FailingStore;

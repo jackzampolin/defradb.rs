@@ -469,11 +469,20 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             return 0;
         };
         // Cheap steady-state exit: nothing to reconcile while every durable
-        // root still has a live in-memory entry.
+        // root still has a live, unexpired in-memory entry. An expired entry
+        // must not mask its record — eviction is lazy, and the record is the
+        // only remaining owner of the recovery obligation.
         {
             let roots = self.persisted_roots.read();
             let pending = self.pending_dags.read();
-            if !roots.is_empty() && roots.iter().all(|root| pending.contains_key(root)) {
+            let now = Instant::now();
+            let all_live = !roots.is_empty()
+                && roots.iter().all(|root| {
+                    pending
+                        .get(root)
+                        .is_some_and(|dag| now.duration_since(dag.inserted_at) < PENDING_DAG_TTL)
+                });
+            if all_live {
                 return 0;
             }
         }
@@ -512,8 +521,22 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         let mut restored = 0usize;
         for (root_cid, record) in records {
-            if self.pending_dags.read().contains_key(&root_cid) {
-                continue;
+            {
+                let mut pending = self.pending_dags.write();
+                match pending.get(&root_cid) {
+                    Some(dag)
+                        if Instant::now().duration_since(dag.inserted_at) < PENDING_DAG_TTL =>
+                    {
+                        continue;
+                    }
+                    Some(_) => {
+                        // Expired in-memory entry: evict it here so the
+                        // record below re-registers with a fresh TTL and a
+                        // recomputed missing set.
+                        pending.remove(&root_cid);
+                    }
+                    None => {}
+                }
             }
             if matches!(self.is_merged(&root_cid).await, Ok(true)) {
                 self.remove_persisted_pending(&root_cid).await;

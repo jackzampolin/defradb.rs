@@ -1430,11 +1430,14 @@ impl NodeBuilder {
         });
 
         // Re-drive pending-DAG registrations persisted before the last
-        // shutdown/crash (#1099). Spawned so the sync-event channel already
-        // has its consumer above.
+        // shutdown/crash, then keep sweeping periodically as the bounded
+        // drain for records skipped at capacity or TTL-evicted (#1099).
+        // Spawned so the sync-event channel already has its consumer above.
         let coord_for_restore = coordinator.clone();
         tokio::spawn(async move {
-            coord_for_restore.restore_pending_dags().await;
+            coord_for_restore
+                .run_pending_dag_resync(std::time::Duration::from_secs(60))
+                .await;
         });
 
         // 10. IROH event handler (events are already TransportEvent -- no conversion needed)
@@ -1670,6 +1673,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
     transport: p2p::iroh::IrohTransport,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let mut retry_rotation: usize = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             let peerstore = storage::stores::Peerstore::new(store.clone());
@@ -1698,7 +1702,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                 // suppress retries based on the peer-map's current
                 // connected_peers snapshot.
 
-                let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
                     Ok(docs) => docs,
                     Err(error) => {
                         tracing::debug!(peer_id = %peer_id_str, error = %error, "failed to load retry docs");
@@ -1722,6 +1726,16 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                         .unwrap_or_default(),
                     _ => p2p::ReplicationFilters::new(),
                 };
+                if docs.len() > 1 {
+                    // Rotate the starting document each pass: the retry store
+                    // iterates in stable key order, so a fixed start would let
+                    // a few permanently rejected documents at the head consume
+                    // the failure budget every pass and starve the rest
+                    // forever (#1099 review).
+                    let rotate_by = retry_rotation % docs.len();
+                    docs.rotate_left(rotate_by);
+                }
+                retry_rotation = retry_rotation.wrapping_add(1);
                 let mut all_succeeded = true;
                 let mut fast_failures = 0usize;
                 for (doc_id, collection_id) in &docs {

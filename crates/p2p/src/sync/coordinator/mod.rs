@@ -109,6 +109,11 @@ pub struct SyncStatus {
     pub push_backlog: crate::sync::push_backlog::PushBacklogSnapshot,
     pub pending_dags: usize,
     pub pending_dag_capacity: usize,
+    /// Durable pending-DAG registrations (may exceed `pending_dags`: records
+    /// outlive TTL-evicted in-memory entries until their roots merge).
+    pub persisted_pending_dags: usize,
+    pub persisted_pending_dag_capacity: usize,
+    pub pending_resync_in_flight: bool,
     pub retained_background_tasks: usize,
     pub missing_link_retries: u64,
     pub pending_dag_resolved: u64,
@@ -389,6 +394,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             push_backlog: self.runtime.push_backlog.snapshot(),
             pending_dags: self.manager.pending_dag_count(),
             pending_dag_capacity: self.manager.max_pending_dags(),
+            persisted_pending_dags: self.manager.persisted_pending_count(),
+            persisted_pending_dag_capacity: self.manager.persisted_pending_capacity(),
+            pending_resync_in_flight: self.manager.pending_resync_in_flight(),
             retained_background_tasks: self.runtime.shutdown.retained_task_count(),
             missing_link_retries: diagnostics.missing_link_retries,
             pending_dag_resolved: diagnostics.pending_dag_resolved,
@@ -411,6 +419,21 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Returns the re-driven count.
     pub async fn restore_pending_dags(&self) -> usize {
         self.manager.resync_persisted_pending_dags().await
+    }
+
+    /// Periodic bounded drain for durable pending-DAG registrations: sweeps
+    /// at `interval` until shutdown, so records skipped at capacity (or whose
+    /// in-memory entries TTL-expired) are re-driven even when no peer
+    /// reconnects and the node never restarts. The steady-state early-exit
+    /// inside the sweep makes idle ticks free. Run from a spawned task.
+    pub async fn run_pending_dag_resync(&self, interval: Duration) {
+        loop {
+            if self.runtime.shutdown.is_shutting_down() {
+                return;
+            }
+            self.manager.resync_persisted_pending_dags().await;
+            tokio::time::sleep(interval).await;
+        }
     }
 
     pub fn shutdown_handle(&self) -> SyncShutdownHandle {

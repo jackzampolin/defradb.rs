@@ -497,7 +497,7 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
             continue;
         }
 
-        let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+        let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
             Ok(docs) => docs,
             Err(_) => continue,
         };
@@ -512,6 +512,17 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
             continue;
         }
 
+        // Rotate the starting document each pass: the retry store iterates
+        // in stable key order, so a fixed start would let a few permanently
+        // rejected documents at the head consume the failure budget every
+        // pass and starve the rest forever (#1099 review).
+        static RETRY_ROTATION: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let rotation = RETRY_ROTATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if docs.len() > 1 {
+            let rotate_by = rotation % docs.len();
+            docs.rotate_left(rotate_by);
+        }
         let mut all_succeeded = true;
         let mut fast_failures = 0usize;
         for (doc_id, collection_id) in &docs {
@@ -620,7 +631,7 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
         // connected_peers snapshot is not authoritative enough to gate
         // retries here, so let the transport attempt the replay.
 
-        let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+        let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
             Ok(docs) => docs,
             Err(_) => continue,
         };
@@ -635,6 +646,17 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
             continue;
         }
 
+        // Rotate the starting document each pass: the retry store iterates
+        // in stable key order, so a fixed start would let a few permanently
+        // rejected documents at the head consume the failure budget every
+        // pass and starve the rest forever (#1099 review).
+        static RETRY_ROTATION: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let rotation = RETRY_ROTATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if docs.len() > 1 {
+            let rotate_by = rotation % docs.len();
+            docs.rotate_left(rotate_by);
+        }
         let mut all_succeeded = true;
         let mut fast_failures = 0usize;
         for (doc_id, collection_id) in &docs {

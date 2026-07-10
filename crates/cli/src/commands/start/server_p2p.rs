@@ -226,7 +226,9 @@ impl Node {
             .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())));
         let coordinator_for_restore = coordinator.clone();
         tokio::spawn(async move {
-            coordinator_for_restore.restore_pending_dags().await;
+            coordinator_for_restore
+                .run_pending_dag_resync(std::time::Duration::from_secs(60))
+                .await;
         });
         let coordinator_for_acp = coordinator.clone();
         let serve_acp_for_acp = serve_acp.clone();
@@ -553,6 +555,7 @@ impl Node {
         let retry_handle = handle.clone();
         let retry_pusher = doc_pusher.clone();
         let retry_loop_task = tokio::spawn(async move {
+            let mut retry_rotation: usize = 0;
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let peerstore = storage::stores::Peerstore::new(retry_store.clone());
@@ -576,7 +579,7 @@ impl Node {
                     if !connected.contains(&peer_id) {
                         continue;
                     }
-                    let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                    let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
                         Ok(d) => d,
                         Err(_) => continue,
                     };
@@ -590,6 +593,15 @@ impl Node {
                         .await;
                         continue;
                     }
+                    if docs.len() > 1 {
+                        // Rotate the starting document each pass: the retry store iterates
+                        // in stable key order, so a fixed start would let a few permanently
+                        // rejected documents at the head consume the failure budget every
+                        // pass and starve the rest forever (#1099 review).
+                        let rotate_by = retry_rotation % docs.len();
+                        docs.rotate_left(rotate_by);
+                    }
+                    retry_rotation = retry_rotation.wrapping_add(1);
                     let mut all_succeeded = true;
                     let mut fast_failures = 0usize;
                     for (doc_id, collection_id) in &docs {
@@ -833,7 +845,9 @@ impl Node {
             .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())));
         let coordinator_for_restore = coordinator.clone();
         tokio::spawn(async move {
-            coordinator_for_restore.restore_pending_dags().await;
+            coordinator_for_restore
+                .run_pending_dag_resync(std::time::Duration::from_secs(60))
+                .await;
         });
         let coordinator_for_acp = coordinator.clone();
         let serve_acp_for_acp = serve_acp.clone();
@@ -1107,6 +1121,7 @@ impl Node {
         let retry_store = store.clone();
         let retry_pusher = doc_pusher.clone();
         let retry_loop_task = tokio::spawn(async move {
+            let mut retry_rotation: usize = 0;
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let peerstore = storage::stores::Peerstore::new(retry_store.clone());
@@ -1125,7 +1140,7 @@ impl Node {
                     let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
                     // Iroh request-response can reconnect on demand, so don't
                     // gate retries on the peer-map snapshot.
-                    let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                    let mut docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
                         Ok(d) => d,
                         Err(_) => continue,
                     };
@@ -1139,6 +1154,15 @@ impl Node {
                         .await;
                         continue;
                     }
+                    if docs.len() > 1 {
+                        // Rotate the starting document each pass: the retry store iterates
+                        // in stable key order, so a fixed start would let a few permanently
+                        // rejected documents at the head consume the failure budget every
+                        // pass and starve the rest forever (#1099 review).
+                        let rotate_by = retry_rotation % docs.len();
+                        docs.rotate_left(rotate_by);
+                    }
+                    retry_rotation = retry_rotation.wrapping_add(1);
                     let mut all_succeeded = true;
                     let mut fast_failures = 0usize;
                     for (doc_id, collection_id) in &docs {

@@ -223,6 +223,23 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         self.max_pending_dags
     }
 
+    /// Number of durable pending-DAG registrations currently held.
+    pub fn persisted_pending_count(&self) -> usize {
+        self.persisted_roots.read().len()
+    }
+
+    /// Cap on durable pending-DAG registrations; admission nacks beyond it.
+    pub fn persisted_pending_capacity(&self) -> usize {
+        self.max_pending_dags
+            .saturating_mul(PERSISTED_PENDING_CAP_FACTOR)
+    }
+
+    /// Whether the durable resync sweep is currently running.
+    pub fn pending_resync_in_flight(&self) -> bool {
+        self.pending_resync_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Install the durable pending-DAG store. First-call-wins (OnceLock
     /// semantics); subsequent calls are silently discarded.
     pub fn install_pending_dag_store(
