@@ -10,7 +10,7 @@ use blockstore::Blockstore;
 
 use crate::error::{Error, Result};
 use crate::sync::manager::events::SyncEvent;
-use crate::sync::manager::links::find_all_missing_links;
+use crate::sync::manager::links::{extract_ipld_links, find_all_missing_links};
 use crate::sync::manager::pending::{PendingDag, PENDING_DAG_TTL};
 
 use super::SyncManager;
@@ -142,7 +142,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         }
     }
 
-    /// Retry pending DAGs that were waiting on `cid`.
+    /// A block just arrived (PushLog store or Bitswap fetch). Update every
+    /// pending root waiting on it: drop it from `missing`, add the block's
+    /// own absent links to the frontier, and run the full verification walk
+    /// (`retry_pending_dag`) ONLY for roots whose frontier emptied. The full
+    /// walk per arriving block was O(DAG) per root per block — the #1112
+    /// inbound storm; the clock's periodic retry self-heals any frontier
+    /// drift this incremental pass might accumulate.
     ///
     /// This covers the explicit replay path where a composite can be registered
     /// as pending before its linked field blocks arrive via later PushLog
@@ -155,9 +161,42 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 .filter_map(|(root_cid, dag)| dag.missing.contains(cid).then_some(*root_cid))
                 .collect()
         };
+        if waiting_roots.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // The arriving block's own links that are still absent become the
+        // new frontier for every waiting root. Computed once per block.
+        // Uses `extract_ipld_links` (not `defra_core::collect_block_links`
+        // directly) so the `encryption` link stays excluded here too — Go
+        // never serves that block over Bitswap (#976), so treating it as
+        // "absent" would strand the frontier on a CID that never arrives.
+        let mut absent_links: Vec<Cid> = Vec::new();
+        if let Ok(Some(data)) = self.blockstore.get(cid).await {
+            for link in extract_ipld_links(&data).unwrap_or_default() {
+                if !matches!(self.blockstore.has(&link).await, Ok(true)) {
+                    absent_links.push(link);
+                }
+            }
+        }
+
+        let emptied: Vec<Cid> = {
+            let mut pending = self.pending_dags.write();
+            let mut emptied = Vec::new();
+            for root_cid in &waiting_roots {
+                if let Some(dag) = pending.get_mut(root_cid) {
+                    dag.missing.remove(cid);
+                    dag.missing.extend(absent_links.iter().copied());
+                    if dag.missing.is_empty() {
+                        emptied.push(*root_cid);
+                    }
+                }
+            }
+            emptied
+        };
 
         let mut completed = Vec::new();
-        for root_cid in waiting_roots {
+        for root_cid in emptied {
             if self.retry_pending_dag(&root_cid).await? {
                 completed.push(root_cid);
             }
@@ -738,6 +777,9 @@ mod tests {
     use std::sync::Arc;
 
     use blockstore::DefraBlockstore;
+    use defra_core::{
+        Block as DefraBlock, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload,
+    };
     use multihash_codetable::{Code, MultihashDigest};
     use storage::backends::MemoryStore;
 
@@ -909,6 +951,107 @@ mod tests {
         assert!(manager
             .claim_due_pending_dag_retries(tokio::time::Instant::now())
             .is_empty());
+    }
+
+    fn lww_leaf(field_name: &str) -> (Cid, Vec<u8>) {
+        let block = DefraBlock::new(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                doc_id: b"doc1".to_vec(),
+                field_name: field_name.to_string(),
+                priority: 1,
+                schema_version_id: "schema1".to_string(),
+                data: b"value".to_vec(),
+            }),
+            vec![],
+            vec![],
+        );
+        let bytes = block.to_dag_cbor().expect("encode lww block");
+        let cid = block.generate_cid().expect("generate lww cid");
+        (cid, bytes)
+    }
+
+    fn composite_node(link_name: &str, link_cid: Cid, priority: u64) -> (Cid, Vec<u8>) {
+        let block = DefraBlock::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                doc_id: b"doc1".to_vec(),
+                schema_version_id: "schema1".to_string(),
+                priority,
+                status: 1,
+            }),
+            vec![],
+            vec![DAGLink::new(link_name, link_cid)],
+        );
+        let bytes = block.to_dag_cbor().expect("encode composite block");
+        let cid = block.generate_cid().expect("generate composite cid");
+        (cid, bytes)
+    }
+
+    #[tokio::test]
+    async fn block_arrival_updates_missing_incrementally_without_full_walks() {
+        // A dropped event receiver would fail the completing `retry_pending_dag`
+        // call with `ChannelSend` before the assertions below run, so keep it
+        // alive (unlike `test_manager()`, which discards it).
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, mut events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
+
+        // 3-level DAG: root -> child (composite) -> grandchild (lww).
+        let (grandchild_cid, grandchild_bytes) = lww_leaf("name");
+        let (child_cid, child_bytes) = composite_node("name", grandchild_cid, 1);
+        let (root_cid, root_bytes) = composite_node("composite", child_cid, 2);
+
+        manager
+            .blockstore
+            .put(&root_cid, &root_bytes)
+            .await
+            .expect("store root");
+        manager
+            .blockstore
+            .put(&child_cid, &child_bytes)
+            .await
+            .expect("store child");
+
+        let mut dag = pending_dag("doc1", Instant::now());
+        dag.missing.insert(child_cid);
+        assert!(manager.insert_pending_dag(root_cid, dag));
+
+        // Child arrives; grandchild is still absent. This must only shrink
+        // the frontier (child -> grandchild), not run the full walk.
+        let completed = manager
+            .retry_pending_dags_waiting_on(&child_cid)
+            .await
+            .expect("retry on child arrival");
+        assert!(completed.is_empty(), "root must not complete yet");
+        assert_eq!(manager.pending_dag_missing(&root_cid), vec![grandchild_cid]);
+        assert_eq!(
+            manager.diagnostics.snapshot().missing_link_retries,
+            0,
+            "a frontier-shrinking arrival must not trigger the full verification walk"
+        );
+
+        // Grandchild arrives; the frontier empties, so the full walk runs
+        // exactly once to verify completion and the root resolves.
+        manager
+            .blockstore
+            .put(&grandchild_cid, &grandchild_bytes)
+            .await
+            .expect("store grandchild");
+        let completed = manager
+            .retry_pending_dags_waiting_on(&grandchild_cid)
+            .await
+            .expect("retry on grandchild arrival");
+        assert_eq!(completed, vec![root_cid]);
+        assert_eq!(manager.diagnostics.snapshot().missing_link_retries, 1);
+        assert_eq!(manager.pending_dag_count(), 0);
+
+        match events.try_recv().expect("DagReady event") {
+            SyncEvent::DagReady {
+                root_cid: event_root,
+                ..
+            } => assert_eq!(event_root, root_cid),
+            other => panic!("expected DagReady, got {:?}", other),
+        }
     }
 
     #[tokio::test(start_paused = true)]
