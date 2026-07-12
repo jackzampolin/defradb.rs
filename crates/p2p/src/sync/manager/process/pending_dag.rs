@@ -47,6 +47,19 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         self.pending_dags.read().len()
     }
 
+    /// Milliseconds until the earliest due incomplete pending-DAG retry, or
+    /// `None` when no incomplete entry is registered (#1116 stage 2
+    /// diagnostics: surfaces the retry clock's own state for `SyncStatus`).
+    pub fn next_pending_retry_in_ms(&self) -> Option<u64> {
+        let now = tokio::time::Instant::now();
+        self.pending_dags
+            .read()
+            .values()
+            .filter(|dag| !dag.missing.is_empty())
+            .map(|dag| dag.next_retry_at.saturating_duration_since(now).as_millis() as u64)
+            .min()
+    }
+
     /// Return whether a root can enter the pending-DAG registry without
     /// decoding its pushed block.
     pub(super) fn can_admit_pending_dag(&self, root_cid: &Cid) -> bool {

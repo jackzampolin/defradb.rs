@@ -857,4 +857,82 @@ mod tests {
             "second tick must not add another dispatch"
         );
     }
+
+    /// #1116 stage 2: `SyncStatus` must surface the retry-clock counters and
+    /// the earliest due retry time so operators can see the clock's state
+    /// without instrumenting the manager directly.
+    #[tokio::test(start_paused = true)]
+    async fn sync_status_surfaces_pending_dag_retry_clock() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let transport = TestTransport::new();
+        let (coordinator, mut events) =
+            SyncCoordinator::new(transport, Arc::clone(&blockstore), SyncConfig::default())
+                .await
+                .expect("coordinator");
+
+        // No pending DAGs registered yet: the clock has nothing due.
+        assert_eq!(coordinator.sync_status().next_pending_retry_in_ms, None);
+
+        let (field_cid, field_block) = create_lww_block("name");
+        let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+
+        coordinator
+            .manager()
+            .process_pushlog(
+                &make_broadcast("doc123", root_cid, root_block, "collection1"),
+                Some("peer-1"),
+                false,
+                None,
+            )
+            .await
+            .expect("root pushlog");
+
+        // Registration claims its own immediate dispatch (#1116 stage 2).
+        match events.try_recv().expect("initial DagNeedsFetch event") {
+            SyncEvent::DagNeedsFetch {
+                root_cid: event_root,
+                ..
+            } => assert_eq!(event_root, root_cid),
+            other => panic!("expected DagNeedsFetch, got {other:?}"),
+        }
+
+        let status = coordinator.sync_status();
+        assert_eq!(status.pending_dag_retry_dispatched, 1);
+        let next_retry_ms = status
+            .next_pending_retry_in_ms
+            .expect("incomplete pending DAG must report a due time");
+        assert!(
+            next_retry_ms <= 60_000,
+            "next retry must respect the backoff cap, got {next_retry_ms}"
+        );
+
+        // A same-instant claim attempt is suppressed.
+        assert!(!coordinator
+            .manager()
+            .try_claim_pending_dag_dispatch(&root_cid, tokio::time::Instant::now()));
+        assert_eq!(coordinator.sync_status().pending_dag_retry_suppressed, 1);
+
+        // Feed the missing field block: the DAG completes and drains from
+        // the pending map, so the clock has nothing left to report.
+        blockstore
+            .put(&field_cid, &field_block)
+            .await
+            .expect("store field block");
+        let completed = coordinator
+            .manager()
+            .retry_pending_dags_waiting_on(&field_cid)
+            .await
+            .expect("retry on field arrival");
+        assert_eq!(completed, vec![root_cid]);
+        match events.try_recv().expect("DagReady event") {
+            SyncEvent::DagReady {
+                root_cid: event_root,
+                ..
+            } => assert_eq!(event_root, root_cid),
+            other => panic!("expected DagReady, got {other:?}"),
+        }
+
+        assert_eq!(coordinator.sync_status().next_pending_retry_in_ms, None);
+    }
 }

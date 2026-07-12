@@ -138,6 +138,13 @@ pub struct SyncStatus {
     pub single_flight_suppressed: u64,
     pub already_merged_fast_path: u64,
     pub pending_dag_capacity_shed: u64,
+    /// Retry-clock ticks that dispatched a due pending-DAG fetch (#1116 stage 2).
+    pub pending_dag_retry_dispatched: u64,
+    /// Retry-clock/claim attempts that found no due entry (#1116 stage 2).
+    pub pending_dag_retry_suppressed: u64,
+    /// Milliseconds until the earliest due incomplete pending-DAG retry;
+    /// `None` when no incomplete entry is registered.
+    pub next_pending_retry_in_ms: Option<u64>,
 }
 
 struct SyncShutdownState {
@@ -443,6 +450,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             single_flight_suppressed: diagnostics.single_flight_suppressed,
             already_merged_fast_path: diagnostics.already_merged_fast_path,
             pending_dag_capacity_shed: diagnostics.pending_dag_capacity_shed,
+            pending_dag_retry_dispatched: diagnostics.pending_dag_retry_dispatched,
+            pending_dag_retry_suppressed: diagnostics.pending_dag_retry_suppressed,
+            next_pending_retry_in_ms: self.manager.next_pending_retry_in_ms(),
         }
     }
 
