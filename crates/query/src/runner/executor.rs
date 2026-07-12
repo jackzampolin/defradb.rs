@@ -849,4 +849,25 @@ mod tests {
         );
         assert_eq!(response.data, Some(json!({ "__typename": "Query" })));
     }
+
+    #[tokio::test]
+    async fn root_typename_resolves_through_the_implicit_read_txn_path() {
+        // Nodes with a transaction registry take the implicit read-txn path, which
+        // re-parses and validates against a txn-scoped provider. Probe that path too.
+        let collections = crate::parse_sdl("type Users { name: String }").expect("schema");
+        let runner = QueryRunner::with_registry(
+            MockFetcher::new(),
+            collections,
+            MockTxnRegistry::new(MockFetcher::new()),
+        );
+
+        let response = runner.execute(QueryRequest::new("{ __typename }")).await;
+
+        assert!(
+            !response.has_errors(),
+            "unexpected errors: {:?}",
+            response.errors
+        );
+        assert_eq!(response.data, Some(json!({ "__typename": "Query" })));
+    }
 }
