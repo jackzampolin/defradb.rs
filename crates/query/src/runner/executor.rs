@@ -795,4 +795,58 @@ mod tests {
             }))
         );
     }
+
+    #[tokio::test]
+    async fn root_typename_resolves_to_the_query_type() {
+        let collections = crate::parse_sdl("type Users { name: String }").expect("schema");
+        let runner = QueryRunner::new(MockFetcher::new(), collections);
+
+        let response = runner.execute(QueryRequest::new("{ __typename }")).await;
+
+        assert!(
+            !response.has_errors(),
+            "unexpected errors: {:?}",
+            response.errors
+        );
+        assert_eq!(response.data, Some(json!({ "__typename": "Query" })));
+    }
+
+    #[tokio::test]
+    async fn root_typename_is_aliasable_and_composes_with_data_fields() {
+        let collections = crate::parse_sdl("type Users { name: String }").expect("schema");
+        let fetcher = MockFetcher::new();
+        fetcher.add_doc("Users", make_users_doc("alice"));
+        let runner = QueryRunner::new(fetcher, collections);
+
+        let response = runner
+            .execute(QueryRequest::new("{ t: __typename Users { name } }"))
+            .await;
+
+        assert!(
+            !response.has_errors(),
+            "unexpected errors: {:?}",
+            response.errors
+        );
+        assert_eq!(
+            response.data,
+            Some(json!({
+                "t": "Query",
+                "Users": [{ "name": "alice" }],
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn root_typename_resolves_with_no_collections_registered() {
+        let runner = QueryRunner::new(MockFetcher::new(), vec![]);
+
+        let response = runner.execute(QueryRequest::new("{ __typename }")).await;
+
+        assert!(
+            !response.has_errors(),
+            "unexpected errors: {:?}",
+            response.errors
+        );
+        assert_eq!(response.data, Some(json!({ "__typename": "Query" })));
+    }
 }

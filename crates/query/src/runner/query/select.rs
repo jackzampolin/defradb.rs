@@ -20,6 +20,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         fetcher: &dyn DocFetcher,
         caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
+        // `__typename` on the root selection set is a meta-field, not a collection:
+        // it names the operation's root type. Answer it before resolving collections.
+        if select.collection_name == "__typename" {
+            return Ok(JsonValue::String("Query".to_string()));
+        }
+
         // Handle encrypted search queries (encrypted_<Collection>)
         if select.is_encrypted {
             return self
