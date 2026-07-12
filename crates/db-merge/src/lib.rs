@@ -28,12 +28,13 @@ pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };
 pub use push_docs::{
-    push_existing_docs, push_existing_docs_with_config, retry_doc, PushExistingDocsSeOptions,
+    push_existing_docs, push_existing_docs_with_config, retry_collection_commit, retry_doc,
+    PushExistingDocsSeOptions,
 };
 pub use push_docs_replay::ReplayPushConfig;
 pub use push_docs_transport::{
     push_existing_docs_via_transport, push_existing_docs_via_transport_with_config,
-    retry_doc_via_transport,
+    retry_collection_commit_via_transport, retry_doc_via_transport,
 };
 pub use replication::{
     attach_failure_channel, create_acp_merge_handler, create_broadcast_mutator,

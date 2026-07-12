@@ -29,6 +29,14 @@ pub trait TransportDocPusher: Send + Sync {
         collection_id: &str,
     ) -> Result<(), String>;
 
+    /// Replay a failed COLLECTION-COMMIT push by CID (defradb#1113).
+    async fn retry_collection_commit(
+        &self,
+        peer_id: &PeerId,
+        collection_id: &str,
+        cid: &Cid,
+    ) -> Result<(), String>;
+
     async fn load_document_head_blocks(&self, doc_id: &str) -> Result<Vec<(Cid, Vec<u8>)>, String>;
 
     async fn load_doc_creator_did(
@@ -145,6 +153,22 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             collection_id,
             &filters,
             &replication_filter::QueryReplicationFilterMatcher::new(),
+        )
+        .await
+    }
+
+    async fn retry_collection_commit(
+        &self,
+        peer_id: &PeerId,
+        collection_id: &str,
+        cid: &Cid,
+    ) -> Result<(), String> {
+        db_merge::retry_collection_commit_via_transport(
+            &self.transport,
+            &self.db,
+            peer_id,
+            collection_id,
+            cid,
         )
         .await
     }

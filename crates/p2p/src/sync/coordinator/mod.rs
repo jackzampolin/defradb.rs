@@ -29,9 +29,12 @@
 //!   channel and skips receiver-side collection access before merge.
 //! - **Pubsub PushLog acceptance** requires collection replicator membership,
 //!   a local collection subscription, or explicit replay authorization.
-//! - **Inbound Gossip acceptance** is topic-scoped to local collection
-//!   subscriptions and rejects outbound replicator targets so one-way
-//!   replicators do not receive reverse-direction gossip from their targets.
+//! - **Inbound Gossip acceptance** is topic-scoped: the payload must match the
+//!   topic it arrived on, and the collection must be locally subscribed or the
+//!   peer explicitly authorized. Replicator membership is a GRANT here, exactly
+//!   as it is for direct PushLog — never a veto. One-way replication is
+//!   expressed by the receiver not subscribing, not by blacklisting a peer we
+//!   happen to push to (which broke every symmetric mesh; see defra-agent#696).
 //! - **Document-level ACP** remains the authoritative policy boundary for whether
 //!   replicated document content is actually mergeable/readable locally.
 //!

@@ -60,6 +60,19 @@ pub trait DocPusher: Send + Sync {
         collection_id: &str,
     ) -> P2PResult<()>;
 
+    /// Replay a failed COLLECTION-COMMIT push by CID (defradb#1113).
+    ///
+    /// Doc-less commits cannot go through `retry_doc`: it resolves work from a
+    /// document's composite heads, would find none, and return `Ok(())` — so the
+    /// ledger would delete the obligation and lose the block.
+    async fn retry_collection_commit(
+        &self,
+        handle: &P2PHostHandle,
+        peer_id: libp2p::PeerId,
+        collection_id: &str,
+        cid: &Cid,
+    ) -> P2PResult<()>;
+
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>>;
 
     async fn load_doc_creator_did(
@@ -312,6 +325,18 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         )
         .await
         .map_err(P2PError::from)
+    }
+
+    async fn retry_collection_commit(
+        &self,
+        handle: &P2PHostHandle,
+        peer_id: libp2p::PeerId,
+        collection_id: &str,
+        cid: &Cid,
+    ) -> P2PResult<()> {
+        db_merge::retry_collection_commit(handle, &self.db, peer_id, collection_id, cid)
+            .await
+            .map_err(P2PError::from)
     }
 
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>> {

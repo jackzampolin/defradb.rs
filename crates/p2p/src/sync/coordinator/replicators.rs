@@ -22,6 +22,18 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     }
 
     /// Set (add/update) a replicator with per-collection filters.
+    ///
+    /// `auto_subscribe` joins the local node to each collection's gossip topic.
+    /// Adapters pass `false`: registering a replicator expresses OUTBOUND intent
+    /// ("push my writes for C to this peer") and must not silently turn the
+    /// sender into a receiver. Receiving is an explicit, separate act
+    /// (`subscribe_collection` / `add_p2p_collection`).
+    ///
+    /// Keeping these axes separate is what makes one-way replication and
+    /// symmetric meshes both expressible: previously a replicator auto-joined
+    /// the topic, so one-way had to be faked with a receive-side veto on
+    /// outbound targets — which dropped every message between mutually
+    /// replicating peers (defra-agent#696).
     pub async fn create_replicator_with_filters(
         &self,
         peer_id: &PeerId,

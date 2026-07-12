@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use acp::DocumentACP;
 use bytes::Bytes;
+use cid::Cid;
 use p2p::message::PushLogRequest;
 use p2p::transport::PeerId;
 use p2p::P2PTransport;
@@ -575,6 +576,108 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Replay a failed COLLECTION-COMMIT push (defradb#1113).
+///
+/// Collection commits are doc-less: their obligation is the CID itself, so they
+/// cannot be replayed by `retry_doc_via_transport`, which resolves work from a
+/// document's composite heads. Before this existed, a failed collection-commit
+/// push had no replay path at all and failed permanently — receivers held heads
+/// whose parents never arrived, so their pending-DAG registrations could never
+/// complete (defra-agent#696).
+///
+/// Unlike the document replay, a missing block is an ERROR, not a silent
+/// success: acking an obligation we did not actually push would delete the
+/// ledger record and lose the block forever.
+pub async fn retry_collection_commit_via_transport<S: Store + 'static, T: P2PTransport>(
+    transport: &T,
+    db: &DB<S>,
+    peer_id: &PeerId,
+    collection_id: &str,
+    cid: &Cid,
+) -> Result<(), String> {
+    let creator = transport.local_peer_id().to_string();
+
+    let blockstore_view = storage::stores::Blockstore::new(db.store().clone(), true);
+    let block_txn = blockstore_view
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("blockstore txn: {}", e))?;
+    let encstore_view = storage::stores::Blockstore::new_with_namespace(
+        db.store().clone(),
+        true,
+        storage::namespace::Namespace::Encstore,
+    );
+    let enc_txn = encstore_view
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("encstore txn: {}", e))?;
+
+    let root_block = match block_txn.get(&cid.to_bytes()).await {
+        Ok(Some(data)) => data,
+        Ok(None) => {
+            return Err(format!(
+                "collection-commit block {cid} is not in the local blockstore"
+            ))
+        }
+        Err(error) => return Err(format!("failed to load collection-commit block: {error}")),
+    };
+
+    let mut successful_blocks = 0usize;
+    for (block_cid, block_data) in
+        load_push_dag_blocks(&*block_txn, &*enc_txn, *cid, root_block).await
+    {
+        let mut request = PushLogRequest::new(
+            // Doc-less: the empty document id is what marks this a collection
+            // commit on the wire, exactly as the live push does.
+            String::new(),
+            Bytes::from(block_cid.to_bytes()),
+            collection_id.to_string(),
+            creator.clone(),
+            Bytes::from(block_data),
+        );
+
+        if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
+            return Err(format!(
+                "failed to sign collection-commit replay block after {successful_blocks} \
+                 successful block(s)"
+            ));
+        }
+
+        match transport.send_two_stream_request(peer_id, request).await {
+            Ok(reply) if reply.err_message.is_some() => {
+                return Err(format!(
+                    "peer rejected collection-commit replay after {successful_blocks} successful \
+                     block(s): {}",
+                    reply
+                        .err_message
+                        .as_deref()
+                        .unwrap_or("unknown pushlog error")
+                ));
+            }
+            Ok(_) => {
+                successful_blocks += 1;
+            }
+            Err(error) => {
+                let prefix = if error.is_connection_like() {
+                    "transport became unavailable"
+                } else {
+                    "collection-commit replay push failed"
+                };
+                return Err(format!(
+                    "{prefix} after {successful_blocks} successful block(s): {error}"
+                ));
+            }
+        }
+    }
+
+    if successful_blocks == 0 {
+        return Err(format!(
+            "collection-commit replay for {cid} pushed no blocks"
+        ));
     }
     Ok(())
 }

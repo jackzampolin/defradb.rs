@@ -20,6 +20,17 @@ pub trait TransportDocPusher: Send + Sync {
     async fn retry_doc(&self, peer_id: &PeerId, doc_id: &str, collection_id: &str)
         -> P2PResult<()>;
 
+    /// Replay a failed COLLECTION-COMMIT push by CID (defradb#1113).
+    ///
+    /// Collection commits are doc-less, so they cannot be replayed through
+    /// `retry_doc`, which resolves work from a document's composite heads.
+    async fn retry_collection_commit(
+        &self,
+        peer_id: &PeerId,
+        collection_id: &str,
+        cid: &Cid,
+    ) -> P2PResult<()>;
+
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>>;
 
     async fn load_doc_creator_did(
@@ -135,6 +146,23 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             collection_id,
             &filters,
             &replication_filter::QueryReplicationFilterMatcher::new(),
+        )
+        .await
+        .map_err(P2PError::from)
+    }
+
+    async fn retry_collection_commit(
+        &self,
+        peer_id: &PeerId,
+        collection_id: &str,
+        cid: &Cid,
+    ) -> P2PResult<()> {
+        db_merge::retry_collection_commit_via_transport(
+            &self.transport,
+            &self.db,
+            peer_id,
+            collection_id,
+            cid,
         )
         .await
         .map_err(P2PError::from)

@@ -466,7 +466,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                 replication_filters.clone(),
             );
             coordinator
-                .create_replicator_info(&peer_id, info, true)
+                .create_replicator_info(&peer_id, info, false)
                 .await
                 .map_err(|e| P2PError::Transport(e.to_string()))?;
         } else {

@@ -825,7 +825,7 @@ pub(super) mod tests {
         )
         .await;
 
-        assert!(!any_failed);
+        assert!(!any_failed.failed);
         assert_eq!(
             transport.sent_cids(),
             vec![cid1.to_bytes(), cid1.to_bytes(), cid2.to_bytes()]
@@ -833,12 +833,17 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn ordered_pushlogs_back_off_on_capacity_nack_reply() {
-        // #1088 W1: the hub maps Error::PendingDagCapacity to the same byte-exact
-        // backpressure sentinel, so the pusher's retry/backoff engages unchanged.
+    async fn ordered_pushlogs_stop_immediately_on_capacity_nack_and_park_the_peer() {
+        // defradb#1112: a saturated receiver is a PEER-WIDE, structural condition —
+        // it cannot accept any new root until it drains. Answering it with the
+        // rate-limit pacing ladder meant one logical push became 11 resends in
+        // ~3.3s, each costing the receiver a block write plus a full DAG
+        // traversal, all guaranteed to fail. The sender must stop at the first
+        // capacity nack, report it, and let the persisted retry ledger
+        // (exponential + jittered) own the replay.
         let capacity_nack = crate::error::Error::PendingDagCapacity { max: 1 }
             .backpressure_reply_message()
-            .expect("capacity error maps to the backpressure sentinel");
+            .expect("capacity error maps to the capacity sentinel");
         let transport = TestTransport::new(vec![
             PushLogReply::error("first", capacity_nack),
             PushLogReply::success("first"),
@@ -870,7 +875,7 @@ pub(super) mod tests {
             ),
         ];
 
-        let any_failed = send_ordered_pushlogs_via_transport(
+        let outcome = send_ordered_pushlogs_via_transport(
             &transport,
             &peer_id,
             requests,
@@ -878,10 +883,16 @@ pub(super) mod tests {
         )
         .await;
 
-        assert!(!any_failed);
+        assert!(outcome.failed, "a capacity nack is a failed push");
+        assert!(
+            outcome.at_capacity,
+            "the caller must learn the receiver is saturated so it can park the peer"
+        );
         assert_eq!(
             transport.sent_cids(),
-            vec![cid1.to_bytes(), cid1.to_bytes(), cid2.to_bytes()]
+            vec![cid1.to_bytes()],
+            "the sender must NOT resend the rejected block, and must not push the \
+             next CID at a saturated peer"
         );
     }
 
@@ -926,7 +937,7 @@ pub(super) mod tests {
         )
         .await;
 
-        assert!(any_failed);
+        assert!(any_failed.failed);
         assert_eq!(
             transport.sent_cids(),
             vec![cid1.to_bytes(); MAX_RATE_LIMITED_PUSH_ATTEMPTS + 1]
@@ -971,7 +982,7 @@ pub(super) mod tests {
         )
         .await;
 
-        assert!(any_failed);
+        assert!(any_failed.failed);
         assert_eq!(transport.sent_cids(), vec![cid1.to_bytes()]);
     }
 }

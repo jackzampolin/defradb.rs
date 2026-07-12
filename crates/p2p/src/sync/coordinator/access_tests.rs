@@ -1966,8 +1966,14 @@ async fn gossip_controlled_mode_rejects_mismatched_document_topic() {
     );
 }
 
+/// A peer we replicate TO must still be accepted as a gossip SOURCE.
+///
+/// This is the symmetric mesh: `add_replicator` also subscribes us to the
+/// collection topic, so two peers that replicate to each other are each other's
+/// outbound targets AND both subscribed. Vetoing outbound targets dropped every
+/// collection-topic message in both directions (defra-agent#696).
 #[tokio::test]
-async fn gossip_controlled_mode_rejects_outbound_replicator_target() {
+async fn gossip_accepts_subscribed_collection_from_outbound_replicator_target() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
@@ -1992,8 +1998,47 @@ async fn gossip_controlled_mode_rejects_outbound_replicator_target() {
         .await;
 
     assert!(
-        matches!(&result, Err(Error::AccessDenied { .. })),
-        "outbound replicator targets must not be accepted as gossip sources, got {:?}",
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "a subscribed collection must accept gossip from a peer we also replicate to \
+         (symmetric mesh), got {:?}",
+        result
+    );
+}
+
+/// Collection commits carry an empty `doc_id`, so they have NO document-topic
+/// fallback: the collection topic is their only delivery path. The veto closed
+/// it, which is why failed collection-commit pushes became permanently
+/// undeliverable (defradb#1113 interaction).
+#[tokio::test]
+async fn gossip_accepts_collection_commit_from_outbound_replicator_target() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    peer_state.peer_connected(peer.as_str());
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .create_replicator(&peer, vec!["collection1".to_string()], false)
+        .await
+        .unwrap();
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    let mut event = gossip_event(peer, "collection1");
+    if let TransportEvent::GossipMessage { message, .. } = &mut event {
+        message.doc_id = String::new();
+    }
+
+    let result = coordinator.handle_transport_event(event).await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "a doc-less collection commit must be accepted on its collection topic, got {:?}",
         result
     );
 }
@@ -2024,7 +2069,7 @@ async fn gossip_document_topic_allows_outbound_replicator_target() {
 }
 
 #[tokio::test]
-async fn gossip_open_mode_rejects_outbound_replicator_target() {
+async fn gossip_open_mode_accepts_outbound_replicator_target() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
@@ -2037,8 +2082,8 @@ async fn gossip_open_mode_rejects_outbound_replicator_target() {
         .await;
 
     assert!(
-        matches!(&result, Err(Error::AccessDenied { .. })),
-        "open access mode must still preserve one-way replicator gossip direction, got {:?}",
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "open access must not veto gossip from a peer we replicate to, got {:?}",
         result
     );
 }
@@ -2382,7 +2427,7 @@ fn always_limited_rate_limiter() -> Arc<PeerRateLimiter> {
 }
 
 #[tokio::test]
-async fn pushlog_request_at_pending_capacity_replies_rate_limited_nack() {
+async fn pushlog_request_at_pending_capacity_replies_at_capacity_nack() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let (coordinator, _events) = create_test_coordinator_with_sync_config(
@@ -2427,13 +2472,13 @@ async fn pushlog_request_at_pending_capacity_replies_rate_limited_nack() {
     let reply = transport.pushlog_replies().pop().expect("overflow reply");
     assert_eq!(
         reply.err_message.as_deref(),
-        Some(crate::error::RATE_LIMITED_MESSAGE),
+        Some(crate::error::AT_CAPACITY_MESSAGE),
         "capacity overflow must nack with the byte-exact backpressure sentinel, never success"
     );
 }
 
 #[tokio::test]
-async fn two_stream_at_pending_capacity_replies_rate_limited_nack() {
+async fn two_stream_at_pending_capacity_replies_at_capacity_nack() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let (coordinator, _events) = create_test_coordinator_with_sync_config(
@@ -2485,7 +2530,7 @@ async fn two_stream_at_pending_capacity_replies_rate_limited_nack() {
         .expect("overflow reply");
     assert_eq!(
         reply.err_message.as_deref(),
-        Some(crate::error::RATE_LIMITED_MESSAGE),
+        Some(crate::error::AT_CAPACITY_MESSAGE),
         "capacity overflow must nack with the byte-exact backpressure sentinel, never success"
     );
 }
@@ -2689,9 +2734,13 @@ async fn fan_in_pushes_keep_pending_depth_bounded_and_account_every_reply() {
     assert_eq!(replies.len(), total, "every push must receive a reply");
 
     let successes = replies.iter().filter(|r| r.err_message.is_none()).count();
+    // defradb#1112: a dropped registration means the pending-DAG registry is
+    // FULL, which is answered with the capacity sentinel — distinct from a
+    // token-bucket rate limit, because the sender must park the peer rather than
+    // resend at pacing intervals.
     let nacks = replies
         .iter()
-        .filter(|r| r.err_message.as_deref() == Some(crate::error::RATE_LIMITED_MESSAGE))
+        .filter(|r| r.err_message.as_deref() == Some(crate::error::AT_CAPACITY_MESSAGE))
         .count();
     assert_eq!(
         successes, CAP,
@@ -2700,7 +2749,7 @@ async fn fan_in_pushes_keep_pending_depth_bounded_and_account_every_reply() {
     assert_eq!(
         nacks,
         total - CAP,
-        "every dropped registration must be nacked with the backpressure sentinel"
+        "every dropped registration must be nacked with the capacity sentinel"
     );
 
     // No completed DAGs and no arriving link blocks here, so admission overflow

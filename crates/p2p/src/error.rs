@@ -9,6 +9,24 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Error text used when the coordinator rejects a request due to peer backpressure.
 pub const RATE_LIMITED_MESSAGE: &str = "rate limited: too many requests, retry later";
 
+/// Reply text for a receiver whose pending-DAG registry is FULL.
+///
+/// Distinct from `RATE_LIMITED_MESSAGE` on purpose (defradb#1112). A token-bucket
+/// rate limit is a per-request pacing signal, and the sender answers it by
+/// resending the same block a few hundred milliseconds later. A full pending-DAG
+/// registry is a *structural, peer-wide* condition: the receiver cannot accept
+/// ANY new root until it drains. Answering it with pacing policy meant one
+/// logical push became 11 resends in ~3.3s — each one a receiver-side block write
+/// plus a full DAG traversal, all guaranteed to fail — and, because the sender's
+/// cooldown is keyed per-CID, every other CID for that peer got its own fresh
+/// burst. That is the storm.
+///
+/// A sender that does not recognize this string treats the reply as a plain
+/// failure and defers to the persisted retry ledger (exponential + jittered),
+/// which is exactly the desired behavior — so the new sentinel is safe against
+/// older peers.
+pub const AT_CAPACITY_MESSAGE: &str = "at capacity: receiver is saturated, back off";
+
 /// P2P error types.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -366,9 +384,20 @@ impl Error {
     /// (`is_rate_limited_message`) to drive its retry/backoff, so all
     /// backpressure shapes must collapse onto that one sentinel.
     pub fn backpressure_reply_message(&self) -> Option<&'static str> {
-        (self.is_rate_limited() || matches!(self, Error::PendingDagCapacity { .. }))
-            .then_some(RATE_LIMITED_MESSAGE)
+        if matches!(self, Error::PendingDagCapacity { .. }) {
+            return Some(AT_CAPACITY_MESSAGE);
+        }
+        self.is_rate_limited().then_some(RATE_LIMITED_MESSAGE)
     }
+}
+
+/// Returns true when a peer reply says its pending-DAG registry is full.
+///
+/// The sender must NOT tight-resend on this: the receiver is saturated peer-wide,
+/// so the work belongs in the persisted retry ledger behind a peer cooldown
+/// (defradb#1112).
+pub fn is_at_capacity_message(message: &str) -> bool {
+    message == AT_CAPACITY_MESSAGE
 }
 
 /// Returns true when a peer reply carries the coordinator's explicit rate-limit signal.
@@ -421,7 +450,10 @@ impl From<libp2p::multiaddr::Error> for Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_rate_limited_message, Error, RATE_LIMITED_MESSAGE};
+    use super::{
+        is_at_capacity_message, is_rate_limited_message, Error, AT_CAPACITY_MESSAGE,
+        RATE_LIMITED_MESSAGE,
+    };
 
     #[test]
     fn txn_conflict_detection_matches_wrapped_storage_messages() {
@@ -480,17 +512,25 @@ mod tests {
 
     #[test]
     fn backpressure_errors_map_to_the_exact_rate_limited_reply() {
-        // #1088 W1: the pusher matches replies with `message == RATE_LIMITED_MESSAGE`
-        // (is_rate_limited_message), so both backpressure shapes must map to the
-        // byte-exact sentinel and everything else must not.
+        // #1088 W1: the pusher matches replies byte-exactly, so each backpressure
+        // shape must map to its own sentinel and everything else to none.
+        //
+        // defradb#1112: capacity is NOT a rate limit. A token-bucket limit is a
+        // pacing signal the sender answers by resending shortly after; a full
+        // pending-DAG registry is peer-wide and structural — the sender must
+        // park the peer and defer to the persisted retry ladder instead.
         let capacity = Error::PendingDagCapacity { max: 1000 };
         assert_eq!(
             capacity.backpressure_reply_message(),
-            Some(RATE_LIMITED_MESSAGE)
+            Some(AT_CAPACITY_MESSAGE)
         );
-        assert!(is_rate_limited_message(
+        assert!(is_at_capacity_message(
             capacity.backpressure_reply_message().unwrap()
         ));
+        assert!(
+            !is_rate_limited_message(capacity.backpressure_reply_message().unwrap()),
+            "a saturated receiver must not be answered with rate-limit pacing policy"
+        );
 
         let rate_limited = Error::AccessDenied {
             peer_id: "peer-1".into(),

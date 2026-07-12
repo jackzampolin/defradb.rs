@@ -72,8 +72,11 @@ async fn create_does_not_sync() {
 
 /// Port: TestP2PCreateWithP2PCollection
 /// When collection subscription + replicator are set, docs sync one-way.
-/// Both nodes subscribe to the same gossip topic, but node0 must still reject
-/// reverse-direction gossip from its outbound replicator target.
+///
+/// One-way is expressed by WHO SUBSCRIBES, not by vetoing a peer we push to:
+/// node1 subscribes (so it receives), node0 only registers a replicator (so it
+/// pushes but does not join the topic). Registering a replicator no longer
+/// auto-subscribes, so a pure sender never becomes a receiver.
 #[tokio::test]
 #[serial]
 async fn create_with_p2p_collection() {
@@ -108,9 +111,8 @@ async fn create_with_p2p_collection() {
         .to_string();
 
     node0.p2p_connect(&[&addr1]).expect("connect peers");
-    node0
-        .p2p_collection_add(&["Users"])
-        .expect("collection add node0");
+    // Only the RECEIVER subscribes. node0 is a pure sender: it registers a
+    // replicator below, which pushes but does not join the collection topic.
     node1
         .p2p_collection_add(&["Users"])
         .expect("collection add node1");
