@@ -480,9 +480,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     }
 
     /// The receiver's re-arm loop (#1116 stage 2): every `interval`, claim
-    /// all due pending roots and dispatch one fetch each. This is the ONLY
-    /// scheduled re-driver; other sites (registration, peer connect,
-    /// post-fetch) either claim through the same clock or merely expedite.
+    /// all due pending roots and dispatch one fetch each. This is not the
+    /// only scheduled re-driver — `run_pending_dag_resync` also re-drives
+    /// restored entries on its own 60s sweep — but every dispatch path
+    /// (registration, peer connect, post-fetch, and resync's restore) claims
+    /// through this same per-root clock before emitting `DagNeedsFetch`, so
+    /// no re-driver can double-dispatch a root this clock also claims.
     pub async fn run_pending_dag_retry_clock(&self, interval: Duration) {
         loop {
             if self.runtime.shutdown.is_shutting_down() {

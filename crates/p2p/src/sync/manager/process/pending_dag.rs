@@ -668,6 +668,16 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 continue;
             }
 
+            // A restored entry is immediately due (`insert_pending_dag`
+            // leaves `next_retry_at = now`); claim it here so the retry
+            // clock's next tick does not also dispatch it. The `bool` is
+            // unused — the DagNeedsFetch emission below (when `missing` is
+            // non-empty) is the dispatch; when `missing` is empty the claim
+            // is a harmless no-op since `try_claim_pending_dag_dispatch`
+            // requires a non-empty `missing` set.
+            let _claimed =
+                self.try_claim_pending_dag_dispatch(&root_cid, tokio::time::Instant::now());
+
             if missing.is_empty() {
                 if let Err(error) = self.retry_pending_dag(&root_cid).await {
                     tracing::warn!(
@@ -893,5 +903,62 @@ mod tests {
         assert!(manager
             .claim_due_pending_dag_retries(tokio::time::Instant::now())
             .is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resync_restore_consumes_retry_clock_claim_before_dispatch() {
+        use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
+
+        let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, mut events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
+
+        // The root's block is never put in the blockstore, so the resync
+        // sweep falls back to treating the root itself as missing and takes
+        // the DagNeedsFetch (non-empty `missing`) path.
+        let root = test_cid(1);
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        pending_store
+            .put(
+                &root,
+                &PersistedPendingDag {
+                    doc_id: "doc".to_string(),
+                    collection_id: "collection".to_string(),
+                    creator: "creator".to_string(),
+                    source_peer: Some("peer".to_string()),
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
+                },
+            )
+            .await
+            .expect("persist pending dag record");
+
+        manager.install_pending_dag_store(pending_store).await;
+
+        let restored = manager.resync_persisted_pending_dags().await;
+        assert_eq!(restored, 1);
+
+        match events
+            .try_recv()
+            .expect("DagNeedsFetch event from resync restore")
+        {
+            SyncEvent::DagNeedsFetch { root_cid, .. } => assert_eq!(root_cid, root),
+            other => panic!("expected DagNeedsFetch, got {:?}", other),
+        }
+
+        // The restore's direct DagNeedsFetch emission already consumed the
+        // immediate claim (mirrors the fresh-registration path in
+        // pushlog.rs) -- the retry clock must not also dispatch this root
+        // before the backoff rung elapses.
+        assert!(manager
+            .claim_due_pending_dag_retries(tokio::time::Instant::now())
+            .is_empty());
+
+        // Becomes due again only after the backoff rung reached by the
+        // restore's claim (dispatches=1 -> retry_backoff(1) = 4s).
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        let claimed = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].0, root);
     }
 }
