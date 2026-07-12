@@ -213,6 +213,10 @@ pub enum Error {
         max: usize,
     },
 
+    /// Another receive task owns this CID and has not established recovery state yet.
+    #[error("PushLog for CID {cid} is already being processed, retry later")]
+    PushLogInFlight { cid: String },
+
     /// Request rejected because the caller is not authorized.
     #[error("unauthorized: {0}")]
     Unauthorized(String),
@@ -360,14 +364,19 @@ impl Error {
     }
 
     /// Reply text for hub-side backpressure rejections (rate limit or
-    /// pending-DAG capacity overflow), or `None` for every other error.
+    /// pending-DAG capacity overflow, or same-CID single-flight suppression),
+    /// or `None` for every other error.
     ///
     /// The pusher matches replies byte-exactly against `RATE_LIMITED_MESSAGE`
     /// (`is_rate_limited_message`) to drive its retry/backoff, so all
     /// backpressure shapes must collapse onto that one sentinel.
     pub fn backpressure_reply_message(&self) -> Option<&'static str> {
-        (self.is_rate_limited() || matches!(self, Error::PendingDagCapacity { .. }))
-            .then_some(RATE_LIMITED_MESSAGE)
+        (self.is_rate_limited()
+            || matches!(
+                self,
+                Error::PendingDagCapacity { .. } | Error::PushLogInFlight { .. }
+            ))
+        .then_some(RATE_LIMITED_MESSAGE)
     }
 }
 
@@ -491,6 +500,14 @@ mod tests {
         assert!(is_rate_limited_message(
             capacity.backpressure_reply_message().unwrap()
         ));
+
+        let in_flight = Error::PushLogInFlight {
+            cid: "bafy-head".to_string(),
+        };
+        assert_eq!(
+            in_flight.backpressure_reply_message(),
+            Some(RATE_LIMITED_MESSAGE)
+        );
 
         let rate_limited = Error::AccessDenied {
             peer_id: "peer-1".into(),

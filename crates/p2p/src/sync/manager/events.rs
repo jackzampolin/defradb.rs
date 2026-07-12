@@ -31,14 +31,6 @@ pub enum SyncEvent {
         explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
     },
 
-    /// A block was already merged (received duplicate).
-    BlockAlreadyMerged {
-        cid: Cid,
-        doc_id: String,
-        collection_id: String,
-        creator: String,
-    },
-
     /// Failed to process a sync request.
     SyncError { cid: Cid, error: String },
 

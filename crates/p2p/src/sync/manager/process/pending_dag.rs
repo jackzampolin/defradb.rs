@@ -47,6 +47,25 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         self.pending_dags.read().len()
     }
 
+    pub(super) fn is_pending_dag_recovery_registered(&self, root_cid: &Cid) -> bool {
+        self.pending_dags
+            .read()
+            .get(root_cid)
+            .is_some_and(|dag| dag.is_recovery_registered)
+    }
+
+    pub(super) fn mark_pending_dag_recovery_registered(
+        &self,
+        root_cid: &Cid,
+        inserted_at: Instant,
+    ) {
+        if let Some(dag) = self.pending_dags.write().get_mut(root_cid) {
+            if dag.inserted_at == inserted_at {
+                dag.is_recovery_registered = true;
+            }
+        }
+    }
+
     /// Return whether a root can enter the pending-DAG registry without
     /// decoding its pushed block.
     pub(super) fn can_admit_pending_dag(&self, root_cid: &Cid) -> bool {
@@ -247,6 +266,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 source_peer: Some(source_peer.clone()),
                 is_explicit_replicator: false,
                 explicit_replay_authorization: None,
+                is_recovery_registered: false,
                 inserted_at: Instant::now(),
                 attempts: 0,
                 fetch_failures: 0,
@@ -290,6 +310,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 source_peer: Some(source_peer.clone()),
                 is_explicit_replicator: false,
                 explicit_replay_authorization: None,
+                is_recovery_registered: false,
                 inserted_at: Instant::now(),
                 attempts: 0,
                 fetch_failures: 0,
@@ -594,6 +615,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     .explicit_replay_authorization
                     .clone()
                     .map(Into::into),
+                is_recovery_registered: true,
                 inserted_at: Instant::now(),
                 attempts: 0,
                 fetch_failures: 0,
@@ -694,6 +716,7 @@ mod tests {
             source_peer: Some("peer".to_string()),
             is_explicit_replicator: false,
             explicit_replay_authorization: None,
+            is_recovery_registered: false,
             inserted_at,
             attempts: 0,
             fetch_failures: 0,
