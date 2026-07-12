@@ -753,6 +753,9 @@ async fn outbound_push_storm_matches_fleet_shape() {
             "/push_backlog/retry_attempts_total",
             "/retry_attempts_total",
         ]),
+        "receive_single_flight_suppressed": status["single_flight_suppressed"].as_u64(),
+        "receive_already_merged_fast_path": status["already_merged_fast_path"].as_u64(),
+        "receive_pending_dag_capacity_shed": status["pending_dag_capacity_shed"].as_u64(),
     });
     println!(
         "PUSH_STORM_RESULT {}",

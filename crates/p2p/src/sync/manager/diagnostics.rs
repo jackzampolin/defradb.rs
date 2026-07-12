@@ -122,6 +122,9 @@ pub struct SyncDiagnostics {
     missing_link_retries: AtomicU64,
     pending_dag_resolved: AtomicU64,
     pending_dag_expired: AtomicU64,
+    single_flight_suppressed: AtomicU64,
+    already_merged_fast_path: AtomicU64,
+    pending_dag_capacity_shed: AtomicU64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -131,6 +134,9 @@ pub struct SyncDiagnosticsSnapshot {
     pub missing_link_retries: u64,
     pub pending_dag_resolved: u64,
     pub pending_dag_expired: u64,
+    pub single_flight_suppressed: u64,
+    pub already_merged_fast_path: u64,
+    pub pending_dag_capacity_shed: u64,
     /// Process-global; see [`record_gossip_decode_failure`].
     pub gossip_decode_failures: u64,
     /// Process-global recent samples captured by
@@ -146,6 +152,9 @@ impl SyncDiagnostics {
             missing_link_retries: self.missing_link_retries.load(Ordering::Relaxed),
             pending_dag_resolved: self.pending_dag_resolved.load(Ordering::Relaxed),
             pending_dag_expired: self.pending_dag_expired.load(Ordering::Relaxed),
+            single_flight_suppressed: self.single_flight_suppressed.load(Ordering::Relaxed),
+            already_merged_fast_path: self.already_merged_fast_path.load(Ordering::Relaxed),
+            pending_dag_capacity_shed: self.pending_dag_capacity_shed.load(Ordering::Relaxed),
             gossip_decode_failures: GOSSIP_DECODE_FAILURES.load(Ordering::Relaxed),
             recent_gossip_decode_failures: RECENT_GOSSIP_DECODE_FAILURES
                 .lock()
@@ -174,6 +183,21 @@ impl SyncDiagnostics {
     pub fn record_pending_dag_expired(&self) {
         self.pending_dag_expired.fetch_add(1, Ordering::Relaxed);
     }
+
+    pub fn record_single_flight_suppressed(&self) {
+        self.single_flight_suppressed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_already_merged_fast_path(&self) {
+        self.already_merged_fast_path
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_pending_dag_capacity_shed(&self) {
+        self.pending_dag_capacity_shed
+            .fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +213,9 @@ mod tests {
         assert_eq!(snap.missing_link_retries, 0);
         assert_eq!(snap.pending_dag_resolved, 0);
         assert_eq!(snap.pending_dag_expired, 0);
+        assert_eq!(snap.single_flight_suppressed, 0);
+        assert_eq!(snap.already_merged_fast_path, 0);
+        assert_eq!(snap.pending_dag_capacity_shed, 0);
     }
 
     #[test]
@@ -200,6 +227,9 @@ mod tests {
         diag.record_missing_link_retry();
         diag.record_pending_dag_resolved();
         diag.record_pending_dag_expired();
+        diag.record_single_flight_suppressed();
+        diag.record_already_merged_fast_path();
+        diag.record_pending_dag_capacity_shed();
 
         let snap = diag.snapshot();
         assert_eq!(snap.car_empty_responses, 2);
@@ -207,6 +237,9 @@ mod tests {
         assert_eq!(snap.missing_link_retries, 1);
         assert_eq!(snap.pending_dag_resolved, 1);
         assert_eq!(snap.pending_dag_expired, 1);
+        assert_eq!(snap.single_flight_suppressed, 1);
+        assert_eq!(snap.already_merged_fast_path, 1);
+        assert_eq!(snap.pending_dag_capacity_shed, 1);
     }
 
     #[test]

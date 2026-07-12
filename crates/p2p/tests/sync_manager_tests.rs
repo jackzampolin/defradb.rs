@@ -131,14 +131,11 @@ async fn test_process_pushlog_already_merged() {
         .await
         .unwrap();
 
-    // Should receive BlockAlreadyMerged event
-    let event = events.try_recv().unwrap();
-    match event {
-        SyncEvent::BlockAlreadyMerged { cid: event_cid, .. } => {
-            assert_eq!(event_cid, cid);
-        }
-        _ => panic!("Expected BlockAlreadyMerged event"),
-    }
+    assert_eq!(manager.diagnostics().snapshot().already_merged_fast_path, 1);
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
 }
 
 #[tokio::test]
@@ -248,9 +245,7 @@ async fn test_process_pushlog_cid_mismatch_returns_error() {
 }
 
 #[tokio::test]
-async fn test_concurrent_processing_second_waiter_processes_on_first_not_merged() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
+async fn test_sequential_unmerged_reannouncement_is_processed_again() {
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, mut events) =
@@ -260,43 +255,19 @@ async fn test_concurrent_processing_second_waiter_processes_on_first_not_merged(
     let cid = test_cid();
     let msg = create_test_broadcast(&cid);
 
-    // Flag to track if first processor completed
-    let first_done = Arc::new(AtomicBool::new(false));
-
-    // First task: acquire lock, store block, but DON'T mark as merged
-    let manager1 = manager.clone();
-    let msg1 = msg.clone();
-    let first_done1 = first_done.clone();
-    let first_task = tokio::spawn(async move {
-        manager1
-            .process_pushlog(&msg1, None, false, None)
-            .await
-            .unwrap();
-        first_done1.store(true, Ordering::SeqCst);
-    });
-
-    // Give first task time to acquire the lock
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
-    // Second task: should wait for first, then also process (since not merged)
-    let manager2 = manager.clone();
-    let msg2 = msg.clone();
-    let second_task = tokio::spawn(async move {
-        manager2
-            .process_pushlog(&msg2, None, false, None)
-            .await
-            .unwrap();
-    });
-
-    // Wait for both tasks
-    first_task.await.unwrap();
-    second_task.await.unwrap();
+    manager
+        .process_pushlog(&msg, None, false, None)
+        .await
+        .unwrap();
+    manager
+        .process_pushlog(&msg, None, false, None)
+        .await
+        .unwrap();
 
     // Block should be stored
     assert!(blockstore.has(&cid).await.unwrap());
 
-    // We should get at least one BlockReceived event
-    // (could get two if second waiter also processes before checking merge status)
+    // Once the first receive has exited, its unmerged head can be retried.
     let mut received_count = 0;
     while let Ok(event) = events.try_recv() {
         match event {
@@ -305,10 +276,7 @@ async fn test_concurrent_processing_second_waiter_processes_on_first_not_merged(
             _ => {}
         }
     }
-    assert!(
-        received_count >= 1,
-        "Should have at least one BlockReceived event"
-    );
+    assert_eq!(received_count, 2);
 }
 
 #[tokio::test]
@@ -339,7 +307,7 @@ async fn test_process_pushlog_returns_error_when_receiver_dropped() {
 }
 
 #[tokio::test]
-async fn test_already_merged_returns_error_when_receiver_dropped() {
+async fn test_already_merged_fast_path_does_not_need_event_receiver() {
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, events) =
@@ -355,15 +323,10 @@ async fn test_already_merged_returns_error_when_receiver_dropped() {
     // Drop the event receiver
     drop(events);
 
-    // Processing already-merged block should fail since we can't send event
+    // The merged lookup is terminal and does not allocate or enqueue an event.
     let result = manager.process_pushlog(&msg, None, false, None).await;
-    assert!(result.is_err());
-    match result {
-        Err(Error::ChannelSend) => {
-            // Expected - can't send BlockAlreadyMerged event
-        }
-        other => panic!("Expected ChannelSend error, got {:?}", other),
-    }
+    assert!(result.is_ok());
+    assert_eq!(manager.diagnostics().snapshot().already_merged_fast_path, 1);
 }
 
 #[tokio::test]
@@ -688,8 +651,8 @@ async fn test_process_pushlog_pending_capacity_returns_typed_error() {
         result
     );
     assert_eq!(manager.pending_dag_count(), 1, "registration was dropped");
-    // The block itself is kept (a later retry can complete without re-sending it).
-    assert!(blockstore.has(&comp_b_cid).await.unwrap());
+    // Cheap shed happens before verification, storage, and DAG decoding.
+    assert!(!blockstore.has(&comp_b_cid).await.unwrap());
 }
 
 #[tokio::test]
