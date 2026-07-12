@@ -101,6 +101,11 @@ RUNS=(
   "MC_DeferredAcp_Red_OwnerBypass.cfg MC_DeferredAcp_Red_OwnerBypass.tla RED" # projection grants what committed state denies
   "MC_DeferredAcp_Red_RollbackHooks.cfg MC_DeferredAcp_Red_RollbackHooks.tla RED" # rollback leaves hooks applied (not a no-op)
   "MC_DeferredAcp_Red_SharedOverlay.cfg MC_DeferredAcp_Red_SharedOverlay.tla RED" # one txn observes another's uncommitted projection
+  "MC_SyncOwnership_Green.cfg SyncOwnership.tla GREEN" # #1116 target: hint + receiver-pull ownership transfer -> conservation, single-flight, bounded queue, eventual currency
+  "MC_SyncOwnership_Red_DocKeyedLedger.cfg SyncOwnership.tla RED" # current main: doc-keyed ledger drops collection scopes -> obligation lost (#1113, INV_ObligationConservation)
+  "MC_SyncOwnership_Red_VolatileRegistration.cfg SyncOwnership.tla RED" # ack without durable registration: receiver crash destroys transferred obligation (INV_ObligationConservation)
+  "MC_SyncOwnership_Red_DupFetch.cfg SyncOwnership.tla RED" # no single-flight at the fetch trigger: overlapping fetches for one head (#630, INV_SingleFlight)
+  "MC_SyncOwnership_Red_StaleAckClears.cfg SyncOwnership.tla RED" # unguarded ack clear: superseded-head ack erases newer obligation (INV_ObligationConservation)
 )
 
 fails=0; n=0

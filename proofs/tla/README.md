@@ -23,6 +23,9 @@ grounded facts for B3 live in [DESIGN.md](DESIGN.md); each later slice has its o
   (`IndexReconciliation.tla`).
 - **Document materialization status** — delete/update status stays componentwise
   (`DocumentMaterialization.tla`).
+- **Sync-ownership transfer** — #1116 target: PushLog as idempotent head hint,
+  receiver-owned pull, marker-plus-rederive sender; obligation conservation
+  (`SyncOwnership_DESIGN.md`).
 
 Run all configured models at once with `./run-all.sh` (red/green oracle, exits non-zero on mismatch).
 
