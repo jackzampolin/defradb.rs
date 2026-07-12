@@ -299,6 +299,7 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
             local_peer_id,
             access_mode,
             replicators,
+            gossip_direction_filtered: std::sync::atomic::AtomicU64::new(0),
         },
         subscriptions: SyncSubscriptionState {
             subscribed_collections: Arc::new(tokio::sync::RwLock::new(
@@ -772,6 +773,26 @@ fn pushlog_request(collection_id: &str) -> PushLogRequest {
         "creator1".to_string(),
         bytes::Bytes::copy_from_slice(BLOCK_DATA),
     )
+}
+
+/// A collection commit: doc-less, so it has no document topic to fall back to.
+fn collection_commit_request(collection_id: &str) -> PushLogRequest {
+    PushLogRequest::new(
+        String::new(),
+        bytes::Bytes::from(cid_for(BLOCK_DATA).to_bytes()),
+        collection_id.to_string(),
+        "creator1".to_string(),
+        bytes::Bytes::copy_from_slice(BLOCK_DATA),
+    )
+}
+
+fn collection_commit_gossip_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
+    TransportEvent::GossipMessage {
+        propagation_source: peer_id,
+        message_id: MessageId::new("gossip".to_string()),
+        topic: collection_id.to_string(),
+        message: PushLogBroadcast::from_request(&collection_commit_request(collection_id)),
+    }
 }
 
 fn pushlog_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
@@ -1966,14 +1987,8 @@ async fn gossip_controlled_mode_rejects_mismatched_document_topic() {
     );
 }
 
-/// A peer we replicate TO must still be accepted as a gossip SOURCE.
-///
-/// This is the symmetric mesh: `add_replicator` also subscribes us to the
-/// collection topic, so two peers that replicate to each other are each other's
-/// outbound targets AND both subscribed. Vetoing outbound targets dropped every
-/// collection-topic message in both directions (defra-agent#696).
 #[tokio::test]
-async fn gossip_accepts_subscribed_collection_from_outbound_replicator_target() {
+async fn gossip_controlled_mode_allows_subscribed_outbound_replicator_target() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
@@ -1999,18 +2014,19 @@ async fn gossip_accepts_subscribed_collection_from_outbound_replicator_target() 
 
     assert!(
         !matches!(&result, Err(Error::AccessDenied { .. })),
-        "a subscribed collection must accept gossip from a peer we also replicate to \
-         (symmetric mesh), got {:?}",
+        "subscribed collections must accept gossip from outbound replicator targets, got {:?}",
         result
     );
+    assert_eq!(coordinator.sync_status().gossip_direction_filtered_total, 0);
 }
 
-/// Collection commits carry an empty `doc_id`, so they have NO document-topic
-/// fallback: the collection topic is their only delivery path. The veto closed
-/// it, which is why failed collection-commit pushes became permanently
-/// undeliverable (defradb#1113 interaction).
+/// Collection commits carry an EMPTY `doc_id`, so unlike document updates they
+/// have no document-topic fallback: the collection topic is their only delivery
+/// path. A symmetric mesh makes both peers each other's outbound replicator
+/// target, so if that closed the collection topic, collection commits could
+/// never be delivered at all (defra-agent#696).
 #[tokio::test]
-async fn gossip_accepts_collection_commit_from_outbound_replicator_target() {
+async fn gossip_allows_doc_less_collection_commit_from_outbound_replicator_target() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
@@ -2022,6 +2038,7 @@ async fn gossip_accepts_collection_commit_from_outbound_replicator_target() {
         .create_replicator(&peer, vec!["collection1".to_string()], false)
         .await
         .unwrap();
+
     coordinator
         .subscriptions
         .subscribed_collections
@@ -2029,18 +2046,17 @@ async fn gossip_accepts_collection_commit_from_outbound_replicator_target() {
         .await
         .insert("collection1".to_string());
 
-    let mut event = gossip_event(peer, "collection1");
-    if let TransportEvent::GossipMessage { message, .. } = &mut event {
-        message.doc_id = String::new();
-    }
-
-    let result = coordinator.handle_transport_event(event).await;
+    let result = coordinator
+        .handle_transport_event(collection_commit_gossip_event(peer, "collection1"))
+        .await;
 
     assert!(
         !matches!(&result, Err(Error::AccessDenied { .. })),
-        "a doc-less collection commit must be accepted on its collection topic, got {:?}",
+        "a doc-less collection commit has no document-topic fallback; the subscribed \
+         collection topic must accept it from a peer we also replicate to, got {:?}",
         result
     );
+    assert_eq!(coordinator.sync_status().gossip_direction_filtered_total, 0);
 }
 
 #[tokio::test]
@@ -2069,7 +2085,7 @@ async fn gossip_document_topic_allows_outbound_replicator_target() {
 }
 
 #[tokio::test]
-async fn gossip_open_mode_accepts_outbound_replicator_target() {
+async fn gossip_open_mode_rejects_unsubscribed_outbound_replicator_target() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
@@ -2082,10 +2098,11 @@ async fn gossip_open_mode_accepts_outbound_replicator_target() {
         .await;
 
     assert!(
-        !matches!(&result, Err(Error::AccessDenied { .. })),
-        "open access must not veto gossip from a peer we replicate to, got {:?}",
+        matches!(&result, Err(Error::AccessDenied { .. })),
+        "unsubscribed outbound replicator targets must not become gossip sources, got {:?}",
         result
     );
+    assert_eq!(coordinator.sync_status().gossip_direction_filtered_total, 1);
 }
 
 #[tokio::test]
@@ -2375,10 +2392,13 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
 // --- #1088 W1/W4: intake backpressure nacks (re-land #592, regressed by fa4a84f7) ---
 //
 // The M1 invariant: a success PushLogReply implies the pushed block is either
-// merged or registered as pending on the hub. Capacity overflow and rate-limit
-// rejections must reply the byte-exact RATE_LIMITED_MESSAGE so the pusher's
-// backoff consumer (send_ordered_pushlogs_via_transport) and persisted retry
-// ladder keep the doc queued instead of laundering the failure as success.
+// merged or registered as pending on the hub. Both rejection classes must reply
+// a byte-exact sentinel so the pusher's backoff consumer
+// (send_ordered_pushlogs_via_transport) and persisted retry ladder keep the doc
+// queued instead of laundering the failure as success — but they are DISTINCT
+// sentinels (defradb#1112): rate limiting is a pacing condition the pusher may
+// retry through, while capacity saturation is peer-wide and structural, so the
+// sender must stop and park the peer rather than resend into a full receiver.
 
 /// A PushLog request whose composite block links to a field block that is never
 /// stored, so `process_pushlog` must register a pending DAG to track it.
@@ -2473,7 +2493,7 @@ async fn pushlog_request_at_pending_capacity_replies_at_capacity_nack() {
     assert_eq!(
         reply.err_message.as_deref(),
         Some(crate::error::AT_CAPACITY_MESSAGE),
-        "capacity overflow must nack with the byte-exact backpressure sentinel, never success"
+        "capacity overflow must nack with the byte-exact capacity sentinel, never success"
     );
 }
 
@@ -2531,7 +2551,7 @@ async fn two_stream_at_pending_capacity_replies_at_capacity_nack() {
     assert_eq!(
         reply.err_message.as_deref(),
         Some(crate::error::AT_CAPACITY_MESSAGE),
-        "capacity overflow must nack with the byte-exact backpressure sentinel, never success"
+        "capacity overflow must nack with the byte-exact capacity sentinel, never success"
     );
 }
 
@@ -2734,10 +2754,6 @@ async fn fan_in_pushes_keep_pending_depth_bounded_and_account_every_reply() {
     assert_eq!(replies.len(), total, "every push must receive a reply");
 
     let successes = replies.iter().filter(|r| r.err_message.is_none()).count();
-    // defradb#1112: a dropped registration means the pending-DAG registry is
-    // FULL, which is answered with the capacity sentinel — distinct from a
-    // token-bucket rate limit, because the sender must park the peer rather than
-    // resend at pacing intervals.
     let nacks = replies
         .iter()
         .filter(|r| r.err_message.as_deref() == Some(crate::error::AT_CAPACITY_MESSAGE))

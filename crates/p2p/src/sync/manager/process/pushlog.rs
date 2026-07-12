@@ -109,78 +109,27 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             "Processing pushlog"
         );
 
-        // Try to acquire exclusive processing rights for this CID
-        match self.process_queue.try_acquire(&cid).await {
-            Ok(_guard) => {
-                // We're the first - process the block
-                self.process_block_inner(
-                    &cid,
-                    msg,
+        let _guard = match self.process_queue.try_acquire_nowait(&cid) {
+            Some(guard) => guard,
+            None => {
+                self.diagnostics.record_single_flight_suppressed();
+                tracing::debug!(
+                    cid = %cid,
                     sender_peer,
-                    is_explicit_replicator,
-                    explicit_replay_authorization.clone(),
-                )
-                .await
+                    "Suppressing PushLog while the same CID is already being processed"
+                );
+                return Ok(());
             }
-            Err(rx) => {
-                // Another task is processing - wait for it
-                if rx.await.is_err() {
-                    tracing::debug!(
-                        ?cid,
-                        "First processor task was cancelled, will check merge status"
-                    );
-                }
+        };
 
-                // Now check if block is already merged
-                match self
-                    .retry_retriable_pushlog_op(&cid, "post_wait_is_merged", || async {
-                        self.blockstore
-                            .is_merged(&cid)
-                            .await
-                            .map_err(Error::from_blockstore)
-                    })
-                    .await
-                {
-                    Ok(true) => {
-                        // Already merged by the other task
-                        if self
-                            .event_tx
-                            .send(SyncEvent::BlockAlreadyMerged {
-                                cid,
-                                doc_id: msg.doc_id.clone(),
-                                collection_id: msg.collection_id.clone(),
-                                creator: msg.creator.clone(),
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!(
-                                ?cid,
-                                "Failed to send BlockAlreadyMerged event - receiver dropped"
-                            );
-                            return Err(Error::ChannelSend);
-                        }
-                        Ok(())
-                    }
-                    Ok(false) => {
-                        // Not yet merged - we need to process it
-                        // (This can happen if the first task failed)
-                        self.process_block_inner(
-                            &cid,
-                            msg,
-                            sender_peer,
-                            is_explicit_replicator,
-                            explicit_replay_authorization.clone(),
-                        )
-                        .await
-                    }
-                    Err(e) => {
-                        self.emit_sync_error(&cid, &e).await?;
-                        Err(e)
-                    }
-                }
-            }
-        }
+        self.process_block_inner(
+            &cid,
+            msg,
+            sender_peer,
+            is_explicit_replicator,
+            explicit_replay_authorization,
+        )
+        .await
     }
 
     /// Inner block processing logic.
@@ -203,24 +152,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .await
         {
             Ok(true) => {
+                self.diagnostics.record_already_merged_fast_path();
                 tracing::debug!(cid = %cid, doc_id = %msg.doc_id, "Block already merged, skipping");
-                if self
-                    .event_tx
-                    .send(SyncEvent::BlockAlreadyMerged {
-                        cid: *cid,
-                        doc_id: msg.doc_id.clone(),
-                        collection_id: msg.collection_id.clone(),
-                        creator: msg.creator.clone(),
-                    })
-                    .await
-                    .is_err()
-                {
-                    tracing::warn!(
-                        ?cid,
-                        "Failed to send BlockAlreadyMerged event - receiver dropped"
-                    );
-                    return Err(Error::ChannelSend);
-                }
                 return Ok(());
             }
             Ok(false) => {
@@ -230,6 +163,21 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 self.emit_sync_error(cid, &e).await?;
                 return Err(e);
             }
+        }
+
+        if !self.can_admit_pending_dag(cid) {
+            self.diagnostics.record_pending_dag_capacity_shed();
+            tracing::warn!(
+                cid = %cid,
+                doc_id = %msg.doc_id,
+                collection_id = %msg.collection_id,
+                source_peer = ?sender_peer,
+                max = self.max_pending_dags,
+                "Pending DAGs at capacity, shedding PushLog before block verification"
+            );
+            return Err(Error::PendingDagCapacity {
+                max: self.max_pending_dags,
+            });
         }
 
         // Verify CID matches block content before storing (finding 06-29).
@@ -376,6 +324,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     },
                 );
                 if !inserted {
+                    self.diagnostics.record_pending_dag_capacity_shed();
                     // The block is stored but its DAG completion is not
                     // tracked. This must surface as an error: a success reply
                     // deletes the pusher's retry record, silently losing the
@@ -428,6 +377,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     }
                 };
                 if matches!(admission, DurableAdmission::AtCapacity) {
+                    self.diagnostics.record_pending_dag_capacity_shed();
                     self.pending_dags.write().remove(cid);
                     tracing::warn!(
                         cid = %cid,
@@ -685,5 +635,184 @@ mod tests {
 
         assert!(matches!(result, Err(Error::ChannelSend)));
         assert_eq!(manager.pending_dag_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn conformance_same_cid_concurrent_announcements_are_idempotent() {
+        const ANNOUNCEMENT_COUNT: usize = 8;
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let config = SyncConfig {
+            event_buffer_size: 1,
+            ..SyncConfig::default()
+        };
+        let (manager, mut events) = SyncManager::new(blockstore, peer_state, config);
+        let manager = Arc::new(manager);
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+        let message = Arc::new(make_broadcast(
+            "doc123",
+            root_cid,
+            root_block,
+            "collection1",
+        ));
+
+        manager
+            .event_tx
+            .send(SyncEvent::SyncError {
+                cid: root_cid,
+                error: "hold event channel full".to_string(),
+            })
+            .await
+            .expect("prefill event channel");
+
+        let owner_manager = Arc::clone(&manager);
+        let owner_message = Arc::clone(&message);
+        let owner = tokio::spawn(async move {
+            owner_manager
+                .process_pushlog(&owner_message, Some("peer-0"), false, None)
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while manager.pending_dag_count() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner should register the pending DAG");
+
+        let mut suppressed = Vec::new();
+        for peer in 1..ANNOUNCEMENT_COUNT {
+            let manager = Arc::clone(&manager);
+            let message = Arc::clone(&message);
+            suppressed.push(tokio::spawn(async move {
+                let peer = format!("peer-{peer}");
+                manager
+                    .process_pushlog(&message, Some(&peer), false, None)
+                    .await
+            }));
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            for task in suppressed {
+                task.await
+                    .expect("suppressed task should not panic")
+                    .expect("suppressed announcement should be accepted");
+            }
+        })
+        .await
+        .expect("same-CID announcements should exit while the owner is still in flight");
+
+        assert_eq!(
+            manager.diagnostics().snapshot().single_flight_suppressed,
+            (ANNOUNCEMENT_COUNT - 1) as u64
+        );
+        assert_eq!(manager.pending_dag_count(), 1);
+        assert_eq!(manager.process_queue.active_count(), 1);
+
+        assert!(matches!(
+            events.recv().await,
+            Some(SyncEvent::SyncError { .. })
+        ));
+        owner
+            .await
+            .expect("owner task should not panic")
+            .expect("owner should complete");
+
+        assert!(matches!(
+            events.recv().await,
+            Some(SyncEvent::DagNeedsFetch { root_cid: cid, .. }) if cid == root_cid
+        ));
+        assert_eq!(manager.pending_dag_count(), 1);
+        assert_eq!(manager.process_queue.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn merged_head_exits_before_block_verification_or_registration() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, mut events) =
+            SyncManager::new(blockstore.clone(), peer_state, SyncConfig::default());
+
+        let (cid, block) = create_lww_block("name");
+        blockstore.put(&cid, &block).await.expect("store block");
+        blockstore
+            .mark_as_merged(&cid)
+            .await
+            .expect("mark block merged");
+
+        let invalid_reannouncement =
+            make_broadcast("doc123", cid, vec![0xff; 1024 * 1024], "collection1");
+        manager
+            .process_pushlog(&invalid_reannouncement, Some("peer-1"), false, None)
+            .await
+            .expect("merged fast path should not inspect the pushed block");
+
+        assert_eq!(manager.pending_dag_count(), 0);
+        assert_eq!(manager.diagnostics().snapshot().already_merged_fast_path, 1);
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_capacity_sheds_before_block_verification() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let config = SyncConfig {
+            max_pending_dags: 1,
+            ..SyncConfig::default()
+        };
+        let (manager, mut events) = SyncManager::new(blockstore.clone(), peer_state, config);
+
+        let (missing_cid, _missing_block) = create_lww_block("missing");
+        let (first_cid, first_block) = create_composite_block("doc123", "name", missing_cid);
+        manager
+            .process_pushlog(
+                &make_broadcast("doc123", first_cid, first_block, "collection1"),
+                Some("peer-1"),
+                false,
+                None,
+            )
+            .await
+            .expect("fill pending DAG registry");
+        assert!(matches!(
+            events.try_recv(),
+            Ok(SyncEvent::DagNeedsFetch { root_cid, .. }) if root_cid == first_cid
+        ));
+
+        let (rejected_cid, _rejected_block) = create_lww_block("rejected");
+        let allocation_heavy_garbage = vec![0xff; 4 * 1024 * 1024];
+        let result = manager
+            .process_pushlog(
+                &make_broadcast(
+                    "doc456",
+                    rejected_cid,
+                    allocation_heavy_garbage,
+                    "collection1",
+                ),
+                Some("peer-2"),
+                false,
+                None,
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::PendingDagCapacity { max: 1 })));
+        assert_eq!(
+            manager.diagnostics().snapshot().pending_dag_capacity_shed,
+            1
+        );
+        assert!(!blockstore
+            .has(&rejected_cid)
+            .await
+            .expect("check rejected block"));
+        assert_eq!(manager.pending_dag_count(), 1);
     }
 }

@@ -155,6 +155,22 @@ impl ProcessQueue {
         }
     }
 
+    /// Try to acquire a CID without allocating or registering a waiter.
+    ///
+    /// Returns `None` immediately when another caller owns the CID.
+    pub fn try_acquire_nowait(&self, cid: &Cid) -> Option<ProcessGuard> {
+        let mut waiters = self.inner.waiters.lock();
+        if waiters.contains_key(cid) {
+            return None;
+        }
+
+        waiters.insert(*cid, Vec::new());
+        Some(ProcessGuard {
+            cid: *cid,
+            queue: self.clone(),
+        })
+    }
+
     /// Release the CID and notify all waiters (synchronous version).
     fn release_sync(&self, cid: &Cid) {
         let mut waiters = self.inner.waiters.lock();
@@ -251,6 +267,16 @@ mod tests {
         // Second caller should get a waiter
         let result = queue.try_acquire(&cid).await;
         assert!(result.is_err(), "Second caller should wait");
+    }
+
+    #[tokio::test]
+    async fn test_nowait_second_caller_is_suppressed() {
+        let queue = ProcessQueue::new();
+        let cid = test_cid();
+
+        let _guard = queue.try_acquire_nowait(&cid).unwrap();
+
+        assert!(queue.try_acquire_nowait(&cid).is_none());
     }
 
     #[tokio::test]

@@ -29,12 +29,9 @@
 //!   channel and skips receiver-side collection access before merge.
 //! - **Pubsub PushLog acceptance** requires collection replicator membership,
 //!   a local collection subscription, or explicit replay authorization.
-//! - **Inbound Gossip acceptance** is topic-scoped: the payload must match the
-//!   topic it arrived on, and the collection must be locally subscribed or the
-//!   peer explicitly authorized. Replicator membership is a GRANT here, exactly
-//!   as it is for direct PushLog — never a veto. One-way replication is
-//!   expressed by the receiver not subscribing, not by blacklisting a peer we
-//!   happen to push to (which broke every symmetric mesh; see defra-agent#696).
+//! - **Inbound Gossip acceptance** treats a local collection subscription as
+//!   receive intent, regardless of outbound replicator configuration. Without
+//!   a subscription, outbound targets remain invalid gossip sources.
 //! - **Document-level ACP** remains the authoritative policy boundary for whether
 //!   replicated document content is actually mergeable/readable locally.
 //!
@@ -65,7 +62,7 @@ mod subscriptions;
 pub use result_types::{CreateReplicatorResult, LoadReplicatorsResult};
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -127,6 +124,9 @@ pub struct SyncStatus {
     pub broadcast_coalesced_total: u64,
     /// Replicator fan-outs folded before enumerating peers.
     pub push_updates_coalesced_total: u64,
+    /// Gossip messages rejected because an unsubscribed sender was configured
+    /// only as an outbound replicator target.
+    pub gossip_direction_filtered_total: u64,
     pub pending_dags: usize,
     pub pending_dag_capacity: usize,
     /// Durable pending-DAG registrations (may exceed `pending_dags`: records
@@ -138,6 +138,9 @@ pub struct SyncStatus {
     pub missing_link_retries: u64,
     pub pending_dag_resolved: u64,
     pub pending_dag_expired: u64,
+    pub single_flight_suppressed: u64,
+    pub already_merged_fast_path: u64,
+    pub pending_dag_capacity_shed: u64,
 }
 
 struct SyncShutdownState {
@@ -354,6 +357,9 @@ pub(super) struct SyncAccessState {
 
     /// Replicator registry for access control checks.
     pub(super) replicators: Arc<ReplicatorRegistry>,
+
+    /// Gossip messages rejected by the receive-side direction guard.
+    pub(super) gossip_direction_filtered: AtomicU64,
 }
 
 /// Subscription and document head support state for the coordinator.
@@ -431,6 +437,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             encode_cache_entries: self.runtime.push_encode_cache.live_entries(),
             broadcast_coalesced_total: self.runtime.broadcast_coalescer.coalesced(),
             push_updates_coalesced_total: self.runtime.push_fanout_coalescer.coalesced(),
+            gossip_direction_filtered_total: self
+                .access
+                .gossip_direction_filtered
+                .load(Ordering::Relaxed),
             pending_dags: self.manager.pending_dag_count(),
             pending_dag_capacity: self.manager.max_pending_dags(),
             persisted_pending_dags: self.manager.persisted_pending_count(),
@@ -440,6 +450,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             missing_link_retries: diagnostics.missing_link_retries,
             pending_dag_resolved: diagnostics.pending_dag_resolved,
             pending_dag_expired: diagnostics.pending_dag_expired,
+            single_flight_suppressed: diagnostics.single_flight_suppressed,
+            already_merged_fast_path: diagnostics.already_merged_fast_path,
+            pending_dag_capacity_shed: diagnostics.pending_dag_capacity_shed,
         }
     }
 

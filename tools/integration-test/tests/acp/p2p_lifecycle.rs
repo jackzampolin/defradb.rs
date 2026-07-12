@@ -359,8 +359,20 @@ async fn acp_p2p_delete_private_documents_on_different_nodes_test(cluster: TestC
     )
     .await;
 
-    assert!(query_user_names(&node0, None).is_empty());
-    assert!(query_user_names(&node1, None).is_empty());
+    poll_until(
+        || query_user_names(&node0, None).is_empty(),
+        Duration::from_secs(15),
+        Duration::from_millis(200),
+        "node0 still exposed a deleted document anonymously",
+    )
+    .await;
+    poll_until(
+        || query_user_names(&node1, None).is_empty(),
+        Duration::from_secs(15),
+        Duration::from_millis(200),
+        "node1 still exposed a deleted document anonymously",
+    )
+    .await;
 }
 
 #[tokio::test]

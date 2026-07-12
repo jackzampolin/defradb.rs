@@ -599,7 +599,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 replication_filters.clone(),
             );
             coordinator
-                .create_replicator_info(&transport_pid, info.clone(), false)
+                .create_replicator_info(&transport_pid, info.clone(), true)
                 .await
                 .map_err(|e| P2PError::Transport(e.to_string()))?;
         } else {
