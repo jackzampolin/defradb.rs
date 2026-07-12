@@ -89,6 +89,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .unwrap_or_default()
     }
 
+    /// Snapshot a pending DAG entry for dispatch (e.g. after a claimed
+    /// post-fetch retry, #1116 stage 2).
+    pub fn pending_dag_snapshot(&self, root_cid: &Cid) -> Option<PendingDag> {
+        self.pending_dags.read().get(root_cid).cloned()
+    }
+
     /// How many times `retry_pending_dag` has been called for this root.
     ///
     /// Returns 0 if no entry exists (either never registered or already resolved).
