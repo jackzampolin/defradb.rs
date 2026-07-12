@@ -125,6 +125,8 @@ pub struct SyncDiagnostics {
     single_flight_suppressed: AtomicU64,
     already_merged_fast_path: AtomicU64,
     pending_dag_capacity_shed: AtomicU64,
+    pending_dag_retry_dispatched: AtomicU64,
+    pending_dag_retry_suppressed: AtomicU64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -137,6 +139,8 @@ pub struct SyncDiagnosticsSnapshot {
     pub single_flight_suppressed: u64,
     pub already_merged_fast_path: u64,
     pub pending_dag_capacity_shed: u64,
+    pub pending_dag_retry_dispatched: u64,
+    pub pending_dag_retry_suppressed: u64,
     /// Process-global; see [`record_gossip_decode_failure`].
     pub gossip_decode_failures: u64,
     /// Process-global recent samples captured by
@@ -155,6 +159,8 @@ impl SyncDiagnostics {
             single_flight_suppressed: self.single_flight_suppressed.load(Ordering::Relaxed),
             already_merged_fast_path: self.already_merged_fast_path.load(Ordering::Relaxed),
             pending_dag_capacity_shed: self.pending_dag_capacity_shed.load(Ordering::Relaxed),
+            pending_dag_retry_dispatched: self.pending_dag_retry_dispatched.load(Ordering::Relaxed),
+            pending_dag_retry_suppressed: self.pending_dag_retry_suppressed.load(Ordering::Relaxed),
             gossip_decode_failures: GOSSIP_DECODE_FAILURES.load(Ordering::Relaxed),
             recent_gossip_decode_failures: RECENT_GOSSIP_DECODE_FAILURES
                 .lock()
@@ -198,6 +204,16 @@ impl SyncDiagnostics {
         self.pending_dag_capacity_shed
             .fetch_add(1, Ordering::Relaxed);
     }
+
+    pub fn record_pending_dag_retry_dispatched(&self) {
+        self.pending_dag_retry_dispatched
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_pending_dag_retry_suppressed(&self) {
+        self.pending_dag_retry_suppressed
+            .fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -216,6 +232,8 @@ mod tests {
         assert_eq!(snap.single_flight_suppressed, 0);
         assert_eq!(snap.already_merged_fast_path, 0);
         assert_eq!(snap.pending_dag_capacity_shed, 0);
+        assert_eq!(snap.pending_dag_retry_dispatched, 0);
+        assert_eq!(snap.pending_dag_retry_suppressed, 0);
     }
 
     #[test]
@@ -230,6 +248,8 @@ mod tests {
         diag.record_single_flight_suppressed();
         diag.record_already_merged_fast_path();
         diag.record_pending_dag_capacity_shed();
+        diag.record_pending_dag_retry_dispatched();
+        diag.record_pending_dag_retry_suppressed();
 
         let snap = diag.snapshot();
         assert_eq!(snap.car_empty_responses, 2);
@@ -240,6 +260,8 @@ mod tests {
         assert_eq!(snap.single_flight_suppressed, 1);
         assert_eq!(snap.already_merged_fast_path, 1);
         assert_eq!(snap.pending_dag_capacity_shed, 1);
+        assert_eq!(snap.pending_dag_retry_dispatched, 1);
+        assert_eq!(snap.pending_dag_retry_suppressed, 1);
     }
 
     #[test]

@@ -321,6 +321,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         attempts: 0,
                         fetch_failures: 0,
                         last_fetch_error: None,
+                        next_retry_at: tokio::time::Instant::now(),
+                        dispatches: 0,
                     },
                 );
                 if !inserted {

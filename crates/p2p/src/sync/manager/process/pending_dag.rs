@@ -216,6 +216,58 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         self.pending_dags.write().remove(root_cid).is_some()
     }
 
+    /// Claim the right to dispatch a fetch for this root. Returns false when
+    /// the entry is missing, already complete, or not yet due — the caller
+    /// must then NOT emit a fetch. A successful claim advances the clock, so
+    /// concurrent dispatch sites (registration, retry clock, peer connect)
+    /// are rate-bounded by construction.
+    pub fn try_claim_pending_dag_dispatch(
+        &self,
+        root_cid: &Cid,
+        now: tokio::time::Instant,
+    ) -> bool {
+        let mut pending = self.pending_dags.write();
+        let Some(dag) = pending.get_mut(root_cid) else {
+            self.diagnostics.record_pending_dag_retry_suppressed();
+            return false;
+        };
+        if dag.missing.is_empty() || now < dag.next_retry_at {
+            self.diagnostics.record_pending_dag_retry_suppressed();
+            return false;
+        }
+        dag.dispatches = dag.dispatches.saturating_add(1);
+        dag.next_retry_at = now + super::super::pending::retry_backoff(dag.dispatches);
+        self.diagnostics.record_pending_dag_retry_dispatched();
+        true
+    }
+
+    /// Make a root promptly due (e.g. a provider just connected) without
+    /// resetting its backoff rung. The retry clock performs the dispatch.
+    pub fn expedite_pending_dag_retry(&self, root_cid: &Cid) {
+        if let Some(dag) = self.pending_dags.write().get_mut(root_cid) {
+            dag.next_retry_at = dag.next_retry_at.min(tokio::time::Instant::now());
+        }
+    }
+
+    /// Atomically claim every due incomplete entry and return snapshots for
+    /// dispatch. Used by the coordinator retry clock.
+    pub fn claim_due_pending_dag_retries(
+        &self,
+        now: tokio::time::Instant,
+    ) -> Vec<(Cid, PendingDag)> {
+        let mut pending = self.pending_dags.write();
+        let mut claimed = Vec::new();
+        for (cid, dag) in pending.iter_mut() {
+            if !dag.missing.is_empty() && now >= dag.next_retry_at {
+                dag.dispatches = dag.dispatches.saturating_add(1);
+                dag.next_retry_at = now + super::super::pending::retry_backoff(dag.dispatches);
+                self.diagnostics.record_pending_dag_retry_dispatched();
+                claimed.push((*cid, dag.clone()));
+            }
+        }
+        claimed
+    }
+
     /// Register a pending DAG for DocSync.
     ///
     /// This is called when a DocSyncReply contains head CIDs that need to be
@@ -251,6 +303,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 attempts: 0,
                 fetch_failures: 0,
                 last_fetch_error: None,
+                next_retry_at: tokio::time::Instant::now(),
+                dispatches: 0,
             },
         ) {
             tracing::warn!(
@@ -294,6 +348,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 attempts: 0,
                 fetch_failures: 0,
                 last_fetch_error: None,
+                next_retry_at: tokio::time::Instant::now(),
+                dispatches: 0,
             },
         ) {
             tracing::warn!(
@@ -598,6 +654,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 attempts: 0,
                 fetch_failures: 0,
                 last_fetch_error: None,
+                next_retry_at: tokio::time::Instant::now(),
+                dispatches: 0,
             };
 
             if !self.insert_pending_dag(root_cid, dag.clone()) {
@@ -698,6 +756,8 @@ mod tests {
             attempts: 0,
             fetch_failures: 0,
             last_fetch_error: None,
+            next_retry_at: tokio::time::Instant::now(),
+            dispatches: 0,
         }
     }
 
@@ -766,5 +826,72 @@ mod tests {
         }
 
         assert!(manager.pending_dag_count() <= DEFAULT_MAX_PENDING_DAGS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_bumps_clock_and_suppresses_duplicates() {
+        let manager = test_manager();
+        let root = test_cid(1);
+        let mut dag = pending_dag("doc", Instant::now());
+        dag.missing.insert(test_cid(2));
+        assert!(manager.insert_pending_dag(root, dag));
+
+        let now = tokio::time::Instant::now();
+        // Fresh entry is due immediately (insert leaves next_retry_at = now).
+        assert!(manager.try_claim_pending_dag_dispatch(&root, now));
+        // Second claim in the same instant is suppressed.
+        assert!(!manager.try_claim_pending_dag_dispatch(&root, now));
+        // Becomes due again after the backoff rung reached by the first
+        // claim (dispatches=1 -> retry_backoff(1) = 4s).
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        assert!(manager.try_claim_pending_dag_dispatch(&root, tokio::time::Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backoff_doubles_and_caps() {
+        use crate::sync::manager::pending::retry_backoff;
+        assert_eq!(retry_backoff(0), std::time::Duration::from_secs(2));
+        assert_eq!(retry_backoff(1), std::time::Duration::from_secs(4));
+        assert_eq!(retry_backoff(4), std::time::Duration::from_secs(32));
+        assert_eq!(retry_backoff(5), std::time::Duration::from_secs(60));
+        assert_eq!(retry_backoff(30), std::time::Duration::from_secs(60));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expedite_makes_entry_due_now_without_resetting_backoff() {
+        let manager = test_manager();
+        let root = test_cid(1);
+        let mut dag = pending_dag("doc", Instant::now());
+        dag.missing.insert(test_cid(2));
+        assert!(manager.insert_pending_dag(root, dag));
+        let now = tokio::time::Instant::now();
+        assert!(manager.try_claim_pending_dag_dispatch(&root, now)); // dispatches -> 1
+        manager.expedite_pending_dag_retry(&root);
+        assert!(manager.try_claim_pending_dag_dispatch(&root, now)); // dispatches -> 2
+                                                                     // Next due time reflects dispatches=2 rung (8s), not a reset.
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        assert!(!manager.try_claim_pending_dag_dispatch(&root, tokio::time::Instant::now()));
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        assert!(manager.try_claim_pending_dag_dispatch(&root, tokio::time::Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_due_returns_and_claims_only_due_entries_with_missing_blocks() {
+        let manager = test_manager();
+        let due = test_cid(1);
+        let complete = test_cid(3);
+        let mut dag = pending_dag("doc-due", Instant::now());
+        dag.missing.insert(test_cid(2));
+        assert!(manager.insert_pending_dag(due, dag));
+        // Entry with no missing blocks must never be dispatched.
+        assert!(manager.insert_pending_dag(complete, pending_dag("doc-done", Instant::now())));
+
+        let claimed = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].0, due);
+        // Claiming consumed due-ness.
+        assert!(manager
+            .claim_due_pending_dag_retries(tokio::time::Instant::now())
+            .is_empty());
     }
 }
