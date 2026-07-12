@@ -231,6 +231,15 @@ impl Node {
                 .run_pending_dag_resync(std::time::Duration::from_secs(60))
                 .await;
         });
+
+        // Receiver's re-arm loop (#1116 stage 2): dispatches due pending
+        // roots at a tight cadence. Sibling of the resync sweep above.
+        let coordinator_for_retry_clock = coordinator.clone();
+        tokio::spawn(async move {
+            coordinator_for_retry_clock
+                .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
+                .await;
+        });
         let coordinator_for_acp = coordinator.clone();
         let serve_acp_for_acp = serve_acp.clone();
         let handle_for_acp = handle.clone();
@@ -873,6 +882,15 @@ impl Node {
         tokio::spawn(async move {
             coordinator_for_restore
                 .run_pending_dag_resync(std::time::Duration::from_secs(60))
+                .await;
+        });
+
+        // Receiver's re-arm loop (#1116 stage 2): dispatches due pending
+        // roots at a tight cadence. Sibling of the resync sweep above.
+        let coordinator_for_retry_clock = coordinator.clone();
+        tokio::spawn(async move {
+            coordinator_for_retry_clock
+                .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
                 .await;
         });
         let coordinator_for_acp = coordinator.clone();

@@ -64,48 +64,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         self.manager.resync_persisted_pending_dags().await;
     }
 
-    /// Re-drive pending DAGs a newly connected peer can complete: its own
-    /// prior pushes and entries whose fetches exhausted providers (#1099).
-    /// Best-effort — a full event channel leaves `fetch_failures` set, so the
-    /// next connect retries.
+    /// A newly connected peer may be able to complete pending DAGs it
+    /// provided (or ones whose fetches exhausted providers): make them
+    /// promptly due and let the retry clock dispatch, so simultaneous
+    /// connects cannot re-drive the same root more than once per tick.
     fn redrive_pending_dags_for_peer(&self, peer_id: &PeerId) {
         let peer_key = peer_id.to_string();
-        for (root_cid, dag) in self.manager.pending_dags_needing_redrive(&peer_key) {
-            let mut providers = vec![peer_key.clone()];
-            if let Some(source_peer) = dag.source_peer.clone() {
-                if source_peer != peer_key {
-                    providers.push(source_peer);
-                }
-            }
-            let missing: Vec<_> = dag.missing.iter().copied().collect();
-            tracing::debug!(
-                root_cid = %root_cid,
-                peer_id = %peer_key,
-                missing_count = missing.len(),
-                fetch_failures = dag.fetch_failures,
-                "Re-driving pending DAG fetch after peer connect"
-            );
-            if let Err(error) =
-                self.manager
-                    .event_sender()
-                    .try_send(crate::sync::SyncEvent::DagNeedsFetch {
-                        root_cid,
-                        missing,
-                        providers,
-                        doc_id: dag.doc_id.clone(),
-                        collection_id: dag.collection_id.clone(),
-                        creator: dag.creator.clone(),
-                        sender_peer: dag.source_peer.clone(),
-                        is_explicit_replicator: dag.is_explicit_replicator,
-                        explicit_replay_authorization: dag.explicit_replay_authorization.clone(),
-                    })
-            {
-                tracing::debug!(
-                    root_cid = %root_cid,
-                    error = %error,
-                    "Deferred pending DAG re-drive: event channel unavailable"
-                );
-            }
+        for (root_cid, _dag) in self.manager.pending_dags_needing_redrive(&peer_key) {
+            self.manager.expedite_pending_dag_retry(&root_cid);
         }
     }
 
@@ -483,5 +449,412 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use blockstore::DefraBlockstore;
+    use bytes::Bytes;
+    use cid::Cid;
+    use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+    use std::sync::Arc;
+    use storage::backends::MemoryStore;
+
+    use crate::error::Result as P2PResult;
+    use crate::message::{
+        BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
+        PushLogReply, PushLogRequest, PushSEArtifactsRequest,
+    };
+    use crate::sync::{SyncConfig, SyncCoordinator, SyncEvent};
+    use crate::topics::DefraTopic;
+    use crate::transport::{MessageId, PeerAddr};
+    use crate::{QueryId, ReplicatorInfo};
+
+    #[derive(Clone)]
+    struct TestTransport {
+        peer_id: PeerId,
+        pubkey: Vec<u8>,
+    }
+
+    impl TestTransport {
+        fn new() -> Self {
+            Self {
+                peer_id: PeerId::new("local-peer".to_string()),
+                pubkey: vec![1, 2, 3],
+            }
+        }
+    }
+
+    #[async_trait]
+    impl P2PTransport for TestTransport {
+        type ResponseToken = ();
+
+        fn local_peer_id(&self) -> &PeerId {
+            &self.peer_id
+        }
+
+        fn local_public_key_proto(&self) -> &[u8] {
+            &self.pubkey
+        }
+
+        fn sign(&self, _data: &[u8]) -> P2PResult<Vec<u8>> {
+            Ok(vec![0])
+        }
+
+        async fn dial(&self, _peer_id: &PeerId, _addrs: Vec<PeerAddr>) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&self, _peer_id: &PeerId) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn listen(&self, _addr: PeerAddr) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn connected_peers(&self) -> P2PResult<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
+        async fn listen_addresses(&self) -> P2PResult<Vec<PeerAddr>> {
+            Ok(Vec::new())
+        }
+
+        async fn poll_until_connected(
+            &self,
+            _peer_id: &PeerId,
+            _timeout: Duration,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn peer_addresses(&self) -> P2PResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn subscribe(&self, _topic: DefraTopic) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn unsubscribe(&self, _topic: DefraTopic) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn publish(
+            &self,
+            _topic: DefraTopic,
+            _msg: PushLogBroadcast,
+        ) -> P2PResult<MessageId> {
+            Ok(MessageId::new("noop".to_string()))
+        }
+
+        async fn topic_peers(&self, _topic: DefraTopic) -> P2PResult<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
+        async fn send_pushlog_response(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: PushLogReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_two_stream_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: PushLogRequest,
+        ) -> P2PResult<PushLogReply> {
+            Ok(PushLogReply::success("noop"))
+        }
+
+        async fn send_two_stream_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: PushLogReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: DocSyncRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: DocSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: BranchableSyncRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: BranchableSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_car_request(&self, _peer_id: &PeerId, _root_cid: Cid) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_car_response(&self, _peer_id: &PeerId, _car_data: Vec<u8>) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_car_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _car_data: Vec<u8>,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: DocSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response_token(
+            &self,
+            _token: Self::ResponseToken,
+            _reply: BranchableSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_se_artifacts(
+            &self,
+            _peer_id: &PeerId,
+            _req: PushSEArtifactsRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn sync_blocks(
+            &self,
+            _root: Cid,
+            _providers: Vec<PeerId>,
+            _missing: Vec<Cid>,
+        ) -> P2PResult<QueryId> {
+            Ok(QueryId(999))
+        }
+
+        async fn cancel_sync(&self, _query_id: QueryId) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn create_replicator(
+            &self,
+            _peer_id: &PeerId,
+            _collections: Vec<String>,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn delete_replicator(&self, _peer_id: &PeerId) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn list_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_replicator(&self, _peer_id: &PeerId) -> P2PResult<Option<ReplicatorInfo>> {
+            Ok(None)
+        }
+
+        async fn remove_replicator_collections(
+            &self,
+            _peer_id: &PeerId,
+            _collections: Vec<String>,
+        ) -> P2PResult<bool> {
+            Ok(false)
+        }
+
+        async fn shutdown(&self) -> P2PResult<()> {
+            Ok(())
+        }
+    }
+
+    fn create_lww_block(field_name: &str) -> (Cid, Vec<u8>) {
+        let block = Block::new(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                doc_id: b"doc123".to_vec(),
+                field_name: field_name.to_string(),
+                priority: 1,
+                schema_version_id: "schema1".to_string(),
+                data: b"value".to_vec(),
+            }),
+            vec![],
+            vec![],
+        );
+        let bytes = block.to_dag_cbor().expect("encode lww block");
+        let cid = block.generate_cid().expect("generate lww cid");
+        (cid, bytes)
+    }
+
+    fn create_composite_block(doc_id: &str, field_name: &str, field_cid: Cid) -> (Cid, Vec<u8>) {
+        let block = Block::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                doc_id: doc_id.as_bytes().to_vec(),
+                schema_version_id: "schema1".to_string(),
+                priority: 1,
+                status: 1,
+            }),
+            vec![],
+            vec![DAGLink::new(field_name, field_cid)],
+        );
+        let bytes = block.to_dag_cbor().expect("encode composite block");
+        let cid = block.generate_cid().expect("generate composite cid");
+        (cid, bytes)
+    }
+
+    fn make_broadcast(
+        doc_id: &str,
+        cid: Cid,
+        block: Vec<u8>,
+        collection_id: &str,
+    ) -> PushLogBroadcast {
+        PushLogBroadcast::new(
+            doc_id.to_string(),
+            Bytes::from(cid.to_bytes()),
+            collection_id.to_string(),
+            "creator1".to_string(),
+            Bytes::from(block),
+        )
+    }
+
+    /// #1116 stage 2: a peer connect must not dispatch `DagNeedsFetch`
+    /// directly anymore — it only expedites the root's retry clock, and the
+    /// clock (a single dispatch site) performs the actual fetch. This
+    /// prevents simultaneous connects from re-driving the same root more
+    /// than once per tick.
+    #[tokio::test(start_paused = true)]
+    async fn peer_connect_expedites_and_clock_dispatches_once() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let transport = TestTransport::new();
+        let (coordinator, mut events) =
+            SyncCoordinator::new(transport, blockstore, SyncConfig::default())
+                .await
+                .expect("coordinator");
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+
+        coordinator
+            .manager()
+            .process_pushlog(
+                &make_broadcast("doc123", root_cid, root_block, "collection1"),
+                Some("peer-1"),
+                false,
+                None,
+            )
+            .await
+            .expect("root pushlog");
+
+        // Registration claims its own immediate dispatch (#1116 stage 2);
+        // drain that event and use its dispatched count as the baseline.
+        match events.try_recv().expect("initial DagNeedsFetch event") {
+            SyncEvent::DagNeedsFetch {
+                root_cid: event_root,
+                ..
+            } => assert_eq!(event_root, root_cid),
+            other => panic!("expected DagNeedsFetch, got {other:?}"),
+        }
+        let dispatched_after_registration = coordinator
+            .manager()
+            .diagnostics()
+            .snapshot()
+            .pending_dag_retry_dispatched;
+
+        // Exhausted providers so this root qualifies for redrive on any
+        // peer connect, not just its original source peer.
+        coordinator
+            .manager()
+            .record_pending_dag_fetch_failure(&root_cid, "synthetic exhaustion");
+
+        // Less than the first backoff rung (4s after one claim): not due yet.
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+
+        // Act: a peer connects. Connect must only expedite, never dispatch.
+        coordinator
+            .handle_transport_event(TransportEvent::PeerConnected(PeerId::new(
+                "peer-2".to_string(),
+            )))
+            .await
+            .expect("peer connected handled");
+        assert!(
+            events.try_recv().is_err(),
+            "connect must expedite only, not dispatch directly"
+        );
+
+        // One clock tick: the expedited root is now due.
+        let due = coordinator
+            .manager()
+            .claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].0, root_cid);
+        for (due_root, dag) in &due {
+            coordinator.dispatch_pending_dag_fetch(*due_root, dag, None);
+        }
+        match events.try_recv().expect("redrive DagNeedsFetch event") {
+            SyncEvent::DagNeedsFetch {
+                root_cid: event_root,
+                ..
+            } => assert_eq!(event_root, root_cid),
+            other => panic!("expected DagNeedsFetch, got {other:?}"),
+        }
+        assert_eq!(
+            coordinator
+                .manager()
+                .diagnostics()
+                .snapshot()
+                .pending_dag_retry_dispatched,
+            dispatched_after_registration + 1,
+            "clock tick should dispatch exactly once"
+        );
+
+        // A second tick without advancing time re-claims nothing: the claim
+        // above already re-armed the root to the next backoff rung.
+        let due_again = coordinator
+            .manager()
+            .claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert!(due_again.is_empty());
+        assert!(
+            events.try_recv().is_err(),
+            "second tick must dispatch nothing"
+        );
+        assert_eq!(
+            coordinator
+                .manager()
+                .diagnostics()
+                .snapshot()
+                .pending_dag_retry_dispatched,
+            dispatched_after_registration + 1,
+            "second tick must not add another dispatch"
+        );
     }
 }

@@ -347,6 +347,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 }
             }
 
+            // A fresh registration is immediately due (`insert_pending_dag`
+            // leaves `next_retry_at = now`); claim it here so the retry
+            // clock's next tick does not also dispatch it. The `bool` is
+            // unused — the DagNeedsFetch emission below is the dispatch.
+            let _claimed = self.try_claim_pending_dag_dispatch(cid, tokio::time::Instant::now());
+
             // Persist the registration before the caller acks success: the
             // ack destroys the pusher's retry record, so an unpersisted
             // registration must fail closed as an error reply instead
