@@ -14,7 +14,7 @@ test = false
 default = ["lark", "redb"]
 lark = ["storage/lark"]
 http = ["dep:defra-http", "dep:axum"]
-p2p = ["dep:p2p", "dep:blockstore", "dep:defra-http", "dep:defra-p2p-adapter"]
+p2p = ["dep:p2p", "dep:blockstore", "dep:cid", "dep:defra-http", "dep:defra-p2p-adapter"]
 redb = ["storage/redb"]
 rocksdb = ["storage/rocksdb"]
 # Compile in OpenTelemetry exporter support. Mirrors the CLI's `otel` feature
@@ -52,6 +52,8 @@ defra-http = { path = "../http", optional = true }
 # Optional — P2P replication (IROH transport)
 p2p = { path = "../p2p", optional = true, features = ["iroh-transport"] }
 blockstore = { path = "../blockstore", optional = true }
+# Collection-commit retry records replay by CID (defradb#1113).
+cid = { workspace = true, optional = true }
 defra-p2p-adapter = { workspace = true, optional = true, default-features = false, features = ["iroh"] }
 
 # Optional — OpenTelemetry exporter (see the `otel` feature)

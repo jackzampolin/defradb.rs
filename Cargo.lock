@@ -3697,6 +3697,7 @@ dependencies = [
  "async-trait",
  "axum",
  "blockstore",
+ "cid",
  "crypto",
  "db",
  "db-merge",
