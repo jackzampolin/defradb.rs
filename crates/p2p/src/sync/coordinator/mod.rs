@@ -135,6 +135,9 @@ pub struct SyncStatus {
     pub missing_link_retries: u64,
     pub pending_dag_resolved: u64,
     pub pending_dag_expired: u64,
+    pub single_flight_suppressed: u64,
+    pub already_merged_fast_path: u64,
+    pub pending_dag_capacity_shed: u64,
 }
 
 struct SyncShutdownState {
@@ -437,6 +440,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             missing_link_retries: diagnostics.missing_link_retries,
             pending_dag_resolved: diagnostics.pending_dag_resolved,
             pending_dag_expired: diagnostics.pending_dag_expired,
+            single_flight_suppressed: diagnostics.single_flight_suppressed,
+            already_merged_fast_path: diagnostics.already_merged_fast_path,
+            pending_dag_capacity_shed: diagnostics.pending_dag_capacity_shed,
         }
     }
 

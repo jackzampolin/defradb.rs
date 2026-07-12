@@ -123,6 +123,22 @@ async fn fan_in_pushlog_admission_no_silent_divergence() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
+    let status: serde_json::Value =
+        reqwest::get(format!("{}/api/v0/p2p/sync/status", cluster.api_url(0)))
+            .await
+            .expect("hub sync status request")
+            .json()
+            .await
+            .expect("hub sync status json");
+    assert!(
+        status["pending_dag_capacity_shed"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "fan-in capacity exits were not counted: {status}"
+    );
+    assert!(status["single_flight_suppressed"].is_u64());
+    assert!(status["already_merged_fast_path"].is_u64());
+
     // M1: every success-acked document must eventually merge on the hub.
     // Overflowed pushes are nacked, kept in the pushers' retry ladders, and
     // re-pushed until the hub admits them — so completeness within the
