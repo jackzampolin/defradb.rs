@@ -71,9 +71,8 @@ async fn create_does_not_sync() {
 }
 
 /// Port: TestP2PCreateWithP2PCollection
-/// When collection subscription + replicator are set, docs sync one-way.
-/// Both nodes subscribe to the same gossip topic, but node0 must still reject
-/// reverse-direction gossip from its outbound replicator target.
+/// When both nodes subscribe, docs gossip symmetrically even if the explicit
+/// replicator configuration has only one outbound leg.
 #[tokio::test]
 #[serial]
 async fn create_with_p2p_collection() {
@@ -114,7 +113,8 @@ async fn create_with_p2p_collection() {
     node1
         .p2p_collection_add(&["Users"])
         .expect("collection add node1");
-    // Replicator: node0 pushes to node1 (one-way)
+    // Replicator: node0 explicitly pushes to node1. The shared subscription
+    // still expresses receive intent in both directions.
     node0
         .p2p_replicator_set(&["Users"], &addr1)
         .expect("replicator set 0→1");
@@ -127,7 +127,7 @@ async fn create_with_p2p_collection() {
         .query(r#"mutation { add_Users(input: {name: "Addo", age: 28}) { _docID } }"#)
         .expect("create Addo on node0");
 
-    // Create doc on node1 (should NOT flow back to node0)
+    // Create doc on node1; the subscription should carry it back to node0.
     node1
         .query(r#"mutation { add_Users(input: {name: "Fred", age: 31}) { _docID } }"#)
         .expect("create Fred on node1");
@@ -171,8 +171,24 @@ async fn create_with_p2p_collection() {
         "node1 should have locally-created Fred"
     );
 
-    // Verify node0 does NOT have Fred (one-way replicator)
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Verify node0 accepts Fred from its outbound replicator target because it
+    // is locally subscribed to the collection.
+    let node0_ref = &node0;
+    poll_until(
+        || {
+            let result = node0_ref
+                .query("query { Users { name } }")
+                .unwrap_or_default();
+            result["Users"]
+                .as_array()
+                .is_some_and(|users| users.iter().any(|user| user["name"] == "Fred"))
+        },
+        Duration::from_secs(30),
+        Duration::from_millis(300),
+        "node0 should accept Fred over its subscribed collection topic",
+    )
+    .await;
+
     let node0_result = node0
         .query("query { Users { name } }")
         .expect("query node0");
@@ -183,8 +199,8 @@ async fn create_with_p2p_collection() {
         .filter_map(|u| u["name"].as_str())
         .collect();
     assert!(
-        !node0_names.contains(&"Fred"),
-        "node0 should NOT have Fred (one-way replicator), got {:?}",
+        node0_names.contains(&"Fred"),
+        "node0 should have Fred from its subscribed collection, got {:?}",
         node0_names
     );
 }

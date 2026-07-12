@@ -1,5 +1,7 @@
 //! GossipSub message handling.
 
+use std::sync::atomic::Ordering;
+
 use blockstore::Blockstore;
 use cid::Cid;
 
@@ -31,12 +33,21 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let is_open_access = self.access.access_mode.is_open();
         let is_outbound_replicator_target =
             self.is_registered_replicator(propagation_source.as_str(), &message.collection_id);
+        let is_direction_filtered = !topic_matches_document
+            && topic_matches_collection
+            && is_outbound_replicator_target
+            && !is_subscribed;
 
         if !topic_matches_document
             && (!topic_matches_collection
-                || is_outbound_replicator_target
+                || is_direction_filtered
                 || (!is_open_access && !is_subscribed))
         {
+            if is_direction_filtered {
+                self.access
+                    .gossip_direction_filtered
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             tracing::warn!(
                 peer_id = %propagation_source,
                 topic = %topic,
@@ -46,7 +57,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 topic_matches_document,
                 is_subscribed,
                 is_outbound_replicator_target,
-                "Dropping GossipSub message outside accepted replication direction"
+                is_direction_filtered,
+                "Dropping GossipSub message outside accepted replication policy"
             );
             return Err(crate::error::Error::AccessDenied {
                 peer_id: propagation_source.to_string(),
