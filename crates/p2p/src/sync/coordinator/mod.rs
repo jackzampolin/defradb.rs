@@ -29,9 +29,9 @@
 //!   channel and skips receiver-side collection access before merge.
 //! - **Pubsub PushLog acceptance** requires collection replicator membership,
 //!   a local collection subscription, or explicit replay authorization.
-//! - **Inbound Gossip acceptance** is topic-scoped to local collection
-//!   subscriptions and rejects outbound replicator targets so one-way
-//!   replicators do not receive reverse-direction gossip from their targets.
+//! - **Inbound Gossip acceptance** treats a local collection subscription as
+//!   receive intent, regardless of outbound replicator configuration. Without
+//!   a subscription, outbound targets remain invalid gossip sources.
 //! - **Document-level ACP** remains the authoritative policy boundary for whether
 //!   replicated document content is actually mergeable/readable locally.
 //!
@@ -62,7 +62,7 @@ mod subscriptions;
 pub use result_types::{CreateReplicatorResult, LoadReplicatorsResult};
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -124,6 +124,9 @@ pub struct SyncStatus {
     pub broadcast_coalesced_total: u64,
     /// Replicator fan-outs folded before enumerating peers.
     pub push_updates_coalesced_total: u64,
+    /// Gossip messages rejected because an unsubscribed sender was configured
+    /// only as an outbound replicator target.
+    pub gossip_direction_filtered_total: u64,
     pub pending_dags: usize,
     pub pending_dag_capacity: usize,
     /// Durable pending-DAG registrations (may exceed `pending_dags`: records
@@ -351,6 +354,9 @@ pub(super) struct SyncAccessState {
 
     /// Replicator registry for access control checks.
     pub(super) replicators: Arc<ReplicatorRegistry>,
+
+    /// Gossip messages rejected by the receive-side direction guard.
+    pub(super) gossip_direction_filtered: AtomicU64,
 }
 
 /// Subscription and document head support state for the coordinator.
@@ -428,6 +434,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             encode_cache_entries: self.runtime.push_encode_cache.live_entries(),
             broadcast_coalesced_total: self.runtime.broadcast_coalescer.coalesced(),
             push_updates_coalesced_total: self.runtime.push_fanout_coalescer.coalesced(),
+            gossip_direction_filtered_total: self
+                .access
+                .gossip_direction_filtered
+                .load(Ordering::Relaxed),
             pending_dags: self.manager.pending_dag_count(),
             pending_dag_capacity: self.manager.max_pending_dags(),
             persisted_pending_dags: self.manager.persisted_pending_count(),

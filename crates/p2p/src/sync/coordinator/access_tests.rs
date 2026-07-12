@@ -299,6 +299,7 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
             local_peer_id,
             access_mode,
             replicators,
+            gossip_direction_filtered: std::sync::atomic::AtomicU64::new(0),
         },
         subscriptions: SyncSubscriptionState {
             subscribed_collections: Arc::new(tokio::sync::RwLock::new(
@@ -1967,7 +1968,7 @@ async fn gossip_controlled_mode_rejects_mismatched_document_topic() {
 }
 
 #[tokio::test]
-async fn gossip_controlled_mode_rejects_outbound_replicator_target() {
+async fn gossip_controlled_mode_allows_subscribed_outbound_replicator_target() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
@@ -1992,10 +1993,11 @@ async fn gossip_controlled_mode_rejects_outbound_replicator_target() {
         .await;
 
     assert!(
-        matches!(&result, Err(Error::AccessDenied { .. })),
-        "outbound replicator targets must not be accepted as gossip sources, got {:?}",
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "subscribed collections must accept gossip from outbound replicator targets, got {:?}",
         result
     );
+    assert_eq!(coordinator.sync_status().gossip_direction_filtered_total, 0);
 }
 
 #[tokio::test]
@@ -2024,7 +2026,7 @@ async fn gossip_document_topic_allows_outbound_replicator_target() {
 }
 
 #[tokio::test]
-async fn gossip_open_mode_rejects_outbound_replicator_target() {
+async fn gossip_open_mode_rejects_unsubscribed_outbound_replicator_target() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
@@ -2038,9 +2040,10 @@ async fn gossip_open_mode_rejects_outbound_replicator_target() {
 
     assert!(
         matches!(&result, Err(Error::AccessDenied { .. })),
-        "open access mode must still preserve one-way replicator gossip direction, got {:?}",
+        "unsubscribed outbound replicator targets must not become gossip sources, got {:?}",
         result
     );
+    assert_eq!(coordinator.sync_status().gossip_direction_filtered_total, 1);
 }
 
 #[tokio::test]
