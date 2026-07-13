@@ -14,6 +14,7 @@ datastore = { path = "../datastore" }
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 schema = { path = "../schema" }
+tracing = { workspace = true }
 storage = { path = "../storage" }
 
 # Error handling

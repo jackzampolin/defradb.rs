@@ -16,6 +16,19 @@ use storage::corekv::Key;
 use storage::index::{FullTextIndex, IndexType};
 use storage::keys::IndexIDSequenceKey;
 
+/// How a live unique conflict was resolved during merge (#1111).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeConflictOutcome {
+    /// No conflict, or the stale-entry heal handled it.
+    Clean,
+    /// The incoming document won the deterministic pick and now holds the
+    /// unique entry; the previous holder is no longer indexed.
+    IncomingIndexed,
+    /// The existing holder won; the incoming document is persisted but not
+    /// indexed for the conflicting values.
+    IncomingUnindexed,
+}
+
 /// Result of a bulk index operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BulkIndexResult {
@@ -79,6 +92,11 @@ pub fn fulltext_index_name(field_name: &str) -> String {
 pub struct IndexManager {
     /// Collection short ID for index key generation
     collection_short_id: u32,
+    /// Collection ID for document/deletion-marker key generation. Unique
+    /// enforcement needs it to ask whether the document a stale index entry
+    /// points at is still alive (#1111/#700). Empty when constructed without a
+    /// schema, in which case stale-entry healing is disabled.
+    collection_id: String,
     /// Active index instances keyed by index name
     indexes: HashMap<String, IndexType>,
 }
@@ -88,6 +106,7 @@ impl IndexManager {
     pub fn new(collection_short_id: u32) -> Self {
         Self {
             collection_short_id,
+            collection_id: String::new(),
             indexes: HashMap::new(),
         }
     }
@@ -100,6 +119,7 @@ impl IndexManager {
     /// (e.g., empty fields list).
     pub fn from_collection(collection_short_id: u32, schema: &CollectionVersion) -> Result<Self> {
         let mut manager = Self::new(collection_short_id);
+        manager.collection_id = schema.collection_id.clone();
         for desc in &schema.indexes {
             if desc.fields.is_empty() {
                 return Err(Error::Other(format!(
@@ -345,6 +365,185 @@ impl IndexManager {
         })
     }
 
+    /// Save an index entry, healing stale unique conflicts (#1111/#700).
+    ///
+    /// A unique violation whose existing entry points at a **deleted or
+    /// missing** document is not a real conflict — it is damage from an era
+    /// when merge/delete paths did not maintain indexes (four production
+    /// stores were wounded this way, and such an entry otherwise blocks the
+    /// value forever with no repair affordance). Deletion is terminal in
+    /// DefraDB, so the stale holder can never become live again: reclaim the
+    /// entry and proceed.
+    ///
+    /// A violation whose holder is alive is a genuine conflict and propagates
+    /// unchanged — local-write semantics stay strict (Go parity).
+    async fn save_healing_stale_unique(
+        &self,
+        datastore: &mut NamespaceView,
+        index: &IndexType,
+        doc_id: &str,
+        values: &[document::NormalValue],
+    ) -> std::result::Result<(), storage::corekv::Error> {
+        match index.save(datastore, doc_id, values).await {
+            Err(storage::corekv::Error::UniqueConstraintViolation) => {
+                let IndexType::Unique(unique) = index else {
+                    return Err(storage::corekv::Error::UniqueConstraintViolation);
+                };
+                if self.collection_id.is_empty() {
+                    return Err(storage::corekv::Error::UniqueConstraintViolation);
+                }
+                let Some(holder) = unique.conflicting_doc_id(datastore, values).await? else {
+                    return Err(storage::corekv::Error::UniqueConstraintViolation);
+                };
+                if holder == doc_id {
+                    // Re-indexing the same document with the same values is
+                    // idempotent, not a conflict (content-addressed docIDs make
+                    // identical-content recreates land on the same id).
+                    return unique.save_blind(datastore, doc_id, values).await;
+                }
+                if doc_is_live(datastore, &self.collection_id, &holder).await? {
+                    return Err(storage::corekv::Error::UniqueConstraintViolation);
+                }
+                tracing::info!(
+                    collection_id = %self.collection_id,
+                    index = %index.description().name,
+                    stale_doc_id = %holder,
+                    new_doc_id = %doc_id,
+                    "reclaimed stale unique index entry pointing at a deleted or missing document"
+                );
+                unique.save_blind(datastore, doc_id, values).await
+            }
+            other => other,
+        }
+    }
+
+    /// Save an index entry on the MERGE path, resolving live unique conflicts
+    /// deterministically instead of failing the merge (#1111).
+    ///
+    /// A CRDT merge cannot preserve cross-replica uniqueness: two nodes that
+    /// each locally accepted the same unique value must still converge when
+    /// they sync. Failing the merge (the previous behavior, and Go's current
+    /// behavior) wedges the document's entire forward history on both sides —
+    /// permanent retry, permanent divergence. Instead, both documents persist
+    /// and the unique entry goes to a deterministic winner, so every replica
+    /// converges to the same index no matter the merge order:
+    ///
+    /// **the lexicographically smallest docID wins.**
+    ///
+    /// docIDs are immutable and totally ordered, so the pick is stable across
+    /// time and identical on every replica — no version/height state needed.
+    /// The losing document remains fully readable by non-index (scan) queries
+    /// and is reported loudly; applications keep their own reconcile policy
+    /// (sourcenetwork/defra-agent#694 already does).
+    async fn save_resolving_unique_conflict(
+        &self,
+        datastore: &mut NamespaceView,
+        index: &IndexType,
+        doc_id: &str,
+        values: &[document::NormalValue],
+    ) -> std::result::Result<MergeConflictOutcome, storage::corekv::Error> {
+        match self
+            .save_healing_stale_unique(datastore, index, doc_id, values)
+            .await
+        {
+            Ok(()) => Ok(MergeConflictOutcome::Clean),
+            Err(storage::corekv::Error::UniqueConstraintViolation) => {
+                let IndexType::Unique(unique) = index else {
+                    return Err(storage::corekv::Error::UniqueConstraintViolation);
+                };
+                let Some(holder) = unique.conflicting_doc_id(datastore, values).await? else {
+                    return Err(storage::corekv::Error::UniqueConstraintViolation);
+                };
+                if doc_id < holder.as_str() {
+                    unique.save_blind(datastore, doc_id, values).await?;
+                    tracing::error!(
+                        collection_id = %self.collection_id,
+                        index = %index.description().name,
+                        winner_doc_id = %doc_id,
+                        unindexed_doc_id = %holder,
+                        "unique index conflict during merge: incoming document wins the \
+                         deterministic pick; the previous holder is no longer indexed"
+                    );
+                    Ok(MergeConflictOutcome::IncomingIndexed)
+                } else {
+                    tracing::error!(
+                        collection_id = %self.collection_id,
+                        index = %index.description().name,
+                        winner_doc_id = %holder,
+                        unindexed_doc_id = %doc_id,
+                        "unique index conflict during merge: existing holder wins the \
+                         deterministic pick; the incoming document is persisted unindexed"
+                    );
+                    Ok(MergeConflictOutcome::IncomingUnindexed)
+                }
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Merge-path variant of [`Self::on_document_create`]: resolves live
+    /// unique conflicts deterministically instead of erroring (#1111).
+    pub async fn on_document_create_merge(
+        &self,
+        datastore: &NamespaceView,
+        doc: &Document,
+        schema: &CollectionVersion,
+    ) -> Result<()> {
+        let doc_id = doc
+            .id()
+            .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
+            .to_string();
+        let mut mutable_datastore = datastore.clone();
+        for index in self.indexes.values() {
+            let value_sets = self.extract_index_values(doc, index.description(), schema)?;
+            for values in &value_sets {
+                self.save_resolving_unique_conflict(&mut mutable_datastore, index, &doc_id, values)
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Merge-path variant of [`Self::on_document_update`]: resolves live
+    /// unique conflicts deterministically instead of erroring (#1111).
+    pub async fn on_document_update_merge(
+        &self,
+        datastore: &NamespaceView,
+        old_doc: &Document,
+        new_doc: &Document,
+        schema: &CollectionVersion,
+    ) -> Result<()> {
+        let doc_id = new_doc
+            .id()
+            .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
+            .to_string();
+        let mut mutable_datastore = datastore.clone();
+        for index in self.indexes.values() {
+            let old_value_sets = self.extract_index_values(old_doc, index.description(), schema)?;
+            let new_value_sets = self.extract_index_values(new_doc, index.description(), schema)?;
+            if old_value_sets != new_value_sets {
+                for old_values in &old_value_sets {
+                    index
+                        .delete(&mut mutable_datastore, &doc_id, old_values)
+                        .await
+                        .map_err(Error::Storage)?;
+                }
+                for new_values in &new_value_sets {
+                    self.save_resolving_unique_conflict(
+                        &mut mutable_datastore,
+                        index,
+                        &doc_id,
+                        new_values,
+                    )
+                    .await
+                    .map_err(Error::Storage)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Update indexes when a document is created.
     pub async fn on_document_create(
         &self,
@@ -362,8 +561,7 @@ impl IndexManager {
         for index in self.indexes.values() {
             let value_sets = self.extract_index_values(doc, index.description(), schema)?;
             for values in &value_sets {
-                index
-                    .save(&mut mutable_datastore, &doc_id, values)
+                self.save_healing_stale_unique(&mut mutable_datastore, index, &doc_id, values)
                     .await
                     .map_err(Error::Storage)?;
             }
@@ -394,8 +592,7 @@ impl IndexManager {
         for index in self.indexes.values() {
             let value_sets = self.extract_index_values(doc, index.description(), schema)?;
             for values in &value_sets {
-                index
-                    .save(&mut mutable_datastore, &doc_id, values)
+                self.save_healing_stale_unique(&mut mutable_datastore, index, &doc_id, values)
                     .await
                     .map_err(Error::Storage)?;
             }
@@ -435,10 +632,14 @@ impl IndexManager {
                         .map_err(Error::Storage)?;
                 }
                 for new_values in &new_value_sets {
-                    index
-                        .save(&mut mutable_datastore, &doc_id, new_values)
-                        .await
-                        .map_err(Error::Storage)?;
+                    self.save_healing_stale_unique(
+                        &mut mutable_datastore,
+                        index,
+                        &doc_id,
+                        new_values,
+                    )
+                    .await
+                    .map_err(Error::Storage)?;
                 }
             }
         }
@@ -482,4 +683,21 @@ impl IndexManager {
     pub fn index_count(&self) -> usize {
         self.indexes.len()
     }
+}
+
+/// Whether the document a unique index entry points at is still alive: its
+/// body exists and it carries no logical-deletion marker. Runs against the
+/// same transactional view as the index write, so the answer is consistent
+/// with the mutation being attempted.
+async fn doc_is_live(
+    datastore: &NamespaceView,
+    collection_id: &str,
+    doc_id: &str,
+) -> std::result::Result<bool, storage::corekv::Error> {
+    let body = storage::keys::doc_key(collection_id, doc_id);
+    if !datastore.has(&body).await? {
+        return Ok(false);
+    }
+    let deleted = storage::keys::deleted_doc_key(collection_id, doc_id);
+    Ok(!datastore.has(&deleted).await?)
 }

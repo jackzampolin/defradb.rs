@@ -183,22 +183,12 @@ impl Collection {
 
     /// Generate the storage key for a document.
     pub(crate) fn doc_key(&self, doc_id: &DocID) -> Vec<u8> {
-        let mut key = Vec::new();
-        key.extend_from_slice(DOC_KEY_PREFIX);
-        key.extend_from_slice(self.def.collection_id.as_bytes());
-        key.push(b'/');
-        key.extend_from_slice(doc_id.to_string().as_bytes());
-        key
+        storage::keys::doc_key(&self.def.collection_id, &doc_id.to_string())
     }
 
     /// Generate the storage key for a document's deletion marker.
     pub(crate) fn deleted_key(&self, doc_id: &DocID) -> Vec<u8> {
-        let mut key = Vec::new();
-        key.extend_from_slice(DELETED_KEY_PREFIX);
-        key.extend_from_slice(self.def.collection_id.as_bytes());
-        key.push(b'/');
-        key.extend_from_slice(doc_id.to_string().as_bytes());
-        key
+        storage::keys::deleted_doc_key(&self.def.collection_id, &doc_id.to_string())
     }
 
     /// Generate the key prefix for all deletion markers in this collection.

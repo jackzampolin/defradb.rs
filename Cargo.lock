@@ -3487,6 +3487,7 @@ dependencies = [
  "schema",
  "storage",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
