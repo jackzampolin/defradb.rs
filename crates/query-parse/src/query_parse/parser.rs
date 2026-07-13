@@ -76,7 +76,7 @@ pub enum ParsedOperation {
         /// The single select for the subscription.
         select: Box<Select>,
     },
-    /// Introspection query (__schema or __type)
+    /// Introspection query (__schema, __type, or root __typename)
     ///
     /// Introspection queries are handled separately using the GraphQL schema
     /// rather than the document storage.
@@ -283,7 +283,13 @@ pub fn parse_request(query: &str) -> Result<ParsedOperation> {
 /// ```
 /// Check if a document is an introspection query.
 ///
-/// Returns true if any root-level field is `__schema` or `__type`.
+/// Returns true if any root-level field is `__schema`, `__type`, or
+/// `__typename`.
+///
+/// Root-level `__typename` (a bare `{ __typename }`, e.g. a GraphQL health
+/// probe) has no collection, so without this it would be treated as a document
+/// query and fail with `collection not found: __typename`. Routing it to the
+/// introspection engine returns the query root type name per the GraphQL spec.
 fn is_introspection_query(doc: &Document<'_, String>) -> bool {
     for def in &doc.definitions {
         if let Definition::Operation(op) = def {
@@ -295,7 +301,10 @@ fn is_introspection_query(doc: &Document<'_, String>) -> bool {
 
             for selection in selections {
                 if let Selection::Field(field) = selection {
-                    if field.name == "__schema" || field.name == "__type" {
+                    if field.name == "__schema"
+                        || field.name == "__type"
+                        || field.name == "__typename"
+                    {
                         return true;
                     }
                 }
@@ -330,8 +339,9 @@ pub fn parse_request_with_limits(
         }
     })?;
 
-    // Check for introspection queries (__schema, __type) before normal parsing
-    // These are handled separately by executing against the GraphQL schema
+    // Check for introspection queries (__schema, __type, __typename) before
+    // normal parsing. These are handled separately by executing against the
+    // GraphQL schema.
     if is_introspection_query(&doc) {
         return Ok(ParsedOperation::Introspection {
             query: query.to_string(),
@@ -989,3 +999,43 @@ mod subscription_tests;
 #[cfg(test)]
 #[path = "limits_tests.rs"]
 mod limits_tests;
+
+#[cfg(test)]
+mod introspection_classification_tests {
+    use super::*;
+
+    #[test]
+    fn root_typename_is_introspection() {
+        // A bare `{ __typename }` (e.g. a GraphQL health probe) has no
+        // collection; it must route to the introspection engine, not the
+        // document-query path (which fails with "collection not found").
+        let op = parse_request("{ __typename }").expect("parse");
+        assert!(
+            matches!(op, ParsedOperation::Introspection { .. }),
+            "root __typename should classify as Introspection, got {op:?}",
+        );
+    }
+
+    #[test]
+    fn schema_and_type_still_introspection() {
+        for q in [
+            "{ __schema { queryType { name } } }",
+            "{ __type(name: \"X\") { name } }",
+        ] {
+            let op = parse_request(q).expect("parse");
+            assert!(
+                matches!(op, ParsedOperation::Introspection { .. }),
+                "{q} should classify as Introspection",
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_query_is_not_introspection() {
+        let op = parse_request("{ Users { name } }").expect("parse");
+        assert!(
+            matches!(op, ParsedOperation::Query { .. }),
+            "ordinary query should not classify as Introspection, got {op:?}",
+        );
+    }
+}

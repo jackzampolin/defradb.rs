@@ -317,3 +317,19 @@ pub async fn execute_introspection(
 
     Ok(json)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bare `{ __typename }` (e.g. a GraphQL health probe) must resolve to
+    /// the root query type name via the introspection engine, not fail as an
+    /// unknown collection. Regression test for #1124.
+    #[tokio::test]
+    async fn root_typename_returns_query() {
+        let result = execute_introspection(vec![], "{ __typename }")
+            .await
+            .expect("introspection execution should succeed");
+        assert_eq!(result, serde_json::json!({ "__typename": "Query" }));
+    }
+}
