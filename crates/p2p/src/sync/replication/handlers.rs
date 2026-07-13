@@ -702,18 +702,6 @@ where
             )
             .await
         }
-        SyncEvent::BlockAlreadyMerged {
-            cid,
-            doc_id,
-            collection_id,
-            creator: _,
-        } => ReplicationResult::Skipped {
-            cid,
-            doc_id,
-            collection_id,
-            reason: "already merged".to_string(),
-            terminal: true,
-        },
         SyncEvent::SyncError { cid, error } => ReplicationResult::Failed { cid, error },
         SyncEvent::DagNeedsFetch {
             root_cid,

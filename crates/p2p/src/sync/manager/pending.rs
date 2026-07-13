@@ -33,6 +33,8 @@ pub struct PendingDag {
     pub is_explicit_replicator: bool,
     /// Capability-based explicit replay authorization carried by two-stream pushes.
     pub explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+    /// Whether a success reply can rely on this entry for eventual recovery.
+    pub is_recovery_registered: bool,
     /// When this entry was inserted (for TTL eviction).
     pub inserted_at: Instant,
     /// How many times `retry_pending_dag` has been invoked for this root.
