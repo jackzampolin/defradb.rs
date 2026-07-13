@@ -81,13 +81,20 @@ async fn report_push_event(
     head_priority: u64,
     create_retry: bool,
 ) {
-    if doc_id.is_empty() {
+    // Collection commits are doc-less: their obligation is CID-scoped. They are
+    // recorded in the ledger's collection-commit keyspace and replayed by CID
+    // (defradb#1113). Dropping them here made a failed collection-commit push
+    // permanent — the receiver kept heads whose parents never arrived, so its
+    // pending-DAG registrations could never complete (defra-agent#696).
+    //
+    // A doc-less failure with no CID (the versionless SE-artifact path) still
+    // has nothing to replay: no document to re-resolve and no CID to re-send.
+    if doc_id.is_empty() && cid.is_none() {
         if create_retry {
             tracing::warn!(
                 peer_id = %peer_id,
                 collection_id,
-                cid = ?cid,
-                "Collection-commit push failed; document retry ledger cannot replay CID-scoped work"
+                "Versionless collection-scoped push failed with no CID; nothing to replay"
             );
         }
         return;
@@ -212,10 +219,13 @@ where
     if let Some(root_request) = root_request {
         requests.push(root_request);
     }
-    let send_failed = if requests.is_empty() {
+    let send_outcome = if requests.is_empty() {
         // Every block failed to sign: report so the persisted retry ladder
         // regenerates and re-pushes instead of silently losing the doc.
-        true
+        PushSendOutcome {
+            failed: true,
+            at_capacity: false,
+        }
     } else {
         // Authorize the receiver's post-ack recovery pull from the DAG
         // itself, not from `requests` (what this job happened to push).
@@ -246,6 +256,12 @@ where
         )
         .await
     };
+    // A saturated receiver parks the whole peer: every CID we would push next
+    // is going to be rejected for the same reason (defradb#1112).
+    if send_outcome.at_capacity {
+        context.backlog.park_peer_at_capacity(&job.peer_id);
+    }
+    let send_failed = send_outcome.failed;
     let any_failed = root_missing || dependency_failed || send_failed;
 
     if any_failed && context.backlog.is_current(job) {
@@ -345,15 +361,27 @@ pub(super) async fn load_ordered_dag_blocks<B: Blockstore>(
 
 /// Send PushLog requests to a peer in order via the transport, waiting for
 /// each to complete. Returns true when any request failed terminally.
+/// Outcome of an ordered push to one peer.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PushSendOutcome {
+    /// Any block failed to land.
+    pub failed: bool,
+    /// The receiver reported its pending-DAG registry FULL. This is peer-wide
+    /// and structural, so the caller parks the whole peer rather than just this
+    /// CID (defradb#1112).
+    pub at_capacity: bool,
+}
+
 pub(super) async fn send_ordered_pushlogs_via_transport<T: P2PTransport>(
     transport: &T,
     peer_id: &crate::transport::PeerId,
     requests: Vec<(Cid, PushLogRequest)>,
     send_timeout: Duration,
-) -> bool {
-    use crate::error::is_rate_limited_message;
+) -> PushSendOutcome {
+    use crate::error::{is_at_capacity_message, is_rate_limited_message};
 
     let mut any_failed = false;
+    let mut at_capacity = false;
     'requests: for (cid, request) in requests {
         let mut rate_limited_attempts = 0;
         loop {
@@ -399,6 +427,27 @@ pub(super) async fn send_ordered_pushlogs_via_transport<T: P2PTransport>(
                         break;
                     };
 
+                    // A saturated receiver is a PEER-WIDE, structural condition:
+                    // it cannot accept any new root until it drains. Resending
+                    // the same block at pacing intervals just burns receiver
+                    // work (a block write + a full DAG traversal per attempt),
+                    // and because the failure cooldown is keyed per-CID, every
+                    // other CID for that peer would start its own burst. Stop
+                    // immediately, park the whole PEER, and let the persisted
+                    // retry ledger (exponential + jittered) own the replay
+                    // (defradb#1112).
+                    if is_at_capacity_message(error_message) {
+                        tracing::debug!(
+                            peer_id = %peer_id,
+                            cid = %cid,
+                            "PushLog rejected: receiver at capacity; parking peer and deferring \
+                             to persisted retry"
+                        );
+                        at_capacity = true;
+                        any_failed = true;
+                        break 'requests;
+                    }
+
                     if is_rate_limited_message(error_message) {
                         rate_limited_attempts += 1;
                         if rate_limited_attempts > super::broadcast::MAX_RATE_LIMITED_PUSH_ATTEMPTS
@@ -438,7 +487,10 @@ pub(super) async fn send_ordered_pushlogs_via_transport<T: P2PTransport>(
             }
         }
     }
-    any_failed
+    PushSendOutcome {
+        failed: any_failed,
+        at_capacity,
+    }
 }
 
 #[cfg(test)]
@@ -895,7 +947,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collection_commit_failure_does_not_enter_document_retry_channel() {
+    async fn collection_commit_failure_enters_the_retry_channel_with_its_cid() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PushFailure>(1);
+        let slot = Arc::new(Mutex::new(Some(tx)));
+        let cid = Cid::new_v1(0x55, Code::Sha2_256.digest(b"collection-commit"));
+
+        report_push_failure(
+            &slot,
+            &PeerId::new("peer".to_string()),
+            String::new(),
+            "collection".to_string(),
+            Some(cid),
+            1,
+        )
+        .await;
+
+        // defradb#1113: the obligation must reach the ledger. It is doc-less, so
+        // it is keyed and replayed by CID; dropping it made failed
+        // collection-commit pushes permanent (defra-agent#696).
+        let failure = rx.try_recv().expect("commit failure must be recorded");
+        assert_eq!(failure.doc_id, "");
+        assert_eq!(failure.collection_id, "collection");
+        assert_eq!(failure.cid, cid.to_string());
+        assert!(failure.create_retry);
+    }
+
+    /// A doc-less failure with no CID has nothing to replay and is still
+    /// dropped (the versionless SE-artifact path).
+    #[tokio::test]
+    async fn versionless_collection_failure_is_not_recorded() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<PushFailure>(1);
         let slot = Arc::new(Mutex::new(Some(tx)));
 
@@ -904,10 +984,7 @@ mod tests {
             &PeerId::new("peer".to_string()),
             String::new(),
             "collection".to_string(),
-            Some(Cid::new_v1(
-                0x55,
-                Code::Sha2_256.digest(b"collection-commit"),
-            )),
+            None,
             1,
         )
         .await;

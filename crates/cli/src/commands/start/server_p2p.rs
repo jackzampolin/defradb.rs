@@ -631,16 +631,38 @@ impl Node {
                         // fast rejection only consumes a bounded budget so
                         // one permanently rejected doc at the head of the
                         // key order cannot starve the rest forever.
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(15),
-                            retry_pusher.retry_doc(
-                                &retry_handle,
-                                peer_id,
-                                &retry.doc_id,
-                                &retry.collection_id,
-                            ),
-                        )
-                        .await
+                        // Collection commits are doc-less and replay by CID
+                        // (defradb#1113).
+                        let replay = async {
+                            if retry.is_collection_commit() {
+                                match retry.cid.parse::<cid::Cid>() {
+                                    Ok(cid) => {
+                                        retry_pusher
+                                            .retry_collection_commit(
+                                                &retry_handle,
+                                                peer_id,
+                                                &retry.collection_id,
+                                                &cid,
+                                            )
+                                            .await
+                                    }
+                                    Err(error) => Err(format!(
+                                        "unparseable collection-commit CID {}: {error}",
+                                        retry.cid
+                                    )),
+                                }
+                            } else {
+                                retry_pusher
+                                    .retry_doc(
+                                        &retry_handle,
+                                        peer_id,
+                                        &retry.doc_id,
+                                        &retry.collection_id,
+                                    )
+                                    .await
+                            }
+                        };
+                        match tokio::time::timeout(std::time::Duration::from_secs(15), replay).await
                         {
                             Ok(Ok(())) => {
                                 let _ =
@@ -1226,11 +1248,33 @@ impl Node {
                         // fast rejection only consumes a bounded budget so
                         // one permanently rejected doc at the head of the
                         // key order cannot starve the rest forever.
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(15),
-                            retry_pusher.retry_doc(&peer_id, &retry.doc_id, &retry.collection_id),
-                        )
-                        .await
+                        // Collection commits are doc-less and replay by CID
+                        // (defradb#1113); the document executor would ack them
+                        // as a no-op and lose the block.
+                        let replay = async {
+                            if retry.is_collection_commit() {
+                                match retry.cid.parse::<cid::Cid>() {
+                                    Ok(cid) => {
+                                        retry_pusher
+                                            .retry_collection_commit(
+                                                &peer_id,
+                                                &retry.collection_id,
+                                                &cid,
+                                            )
+                                            .await
+                                    }
+                                    Err(error) => Err(format!(
+                                        "unparseable collection-commit CID {}: {error}",
+                                        retry.cid
+                                    )),
+                                }
+                            } else {
+                                retry_pusher
+                                    .retry_doc(&peer_id, &retry.doc_id, &retry.collection_id)
+                                    .await
+                            }
+                        };
+                        match tokio::time::timeout(std::time::Duration::from_secs(15), replay).await
                         {
                             Ok(Ok(())) => {
                                 let _ =
@@ -1287,7 +1331,7 @@ impl Node {
                     if let Ok(rep_info) = p2p::ReplicatorInfo::from_bytes(&data) {
                         let pid = p2p::transport::PeerId::new(rep_info.peer_id_str().to_string());
                         let _ = coordinator
-                            .create_replicator_info(&pid, rep_info.clone(), false)
+                            .create_replicator_info(&pid, rep_info.clone(), true)
                             .await;
                     }
                 }

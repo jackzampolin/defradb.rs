@@ -775,6 +775,26 @@ fn pushlog_request(collection_id: &str) -> PushLogRequest {
     )
 }
 
+/// A collection commit: doc-less, so it has no document topic to fall back to.
+fn collection_commit_request(collection_id: &str) -> PushLogRequest {
+    PushLogRequest::new(
+        String::new(),
+        bytes::Bytes::from(cid_for(BLOCK_DATA).to_bytes()),
+        collection_id.to_string(),
+        "creator1".to_string(),
+        bytes::Bytes::copy_from_slice(BLOCK_DATA),
+    )
+}
+
+fn collection_commit_gossip_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
+    TransportEvent::GossipMessage {
+        propagation_source: peer_id,
+        message_id: MessageId::new("gossip".to_string()),
+        topic: collection_id.to_string(),
+        message: PushLogBroadcast::from_request(&collection_commit_request(collection_id)),
+    }
+}
+
 fn pushlog_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
     TransportEvent::PushLogRequest {
         peer_id,
@@ -2000,6 +2020,45 @@ async fn gossip_controlled_mode_allows_subscribed_outbound_replicator_target() {
     assert_eq!(coordinator.sync_status().gossip_direction_filtered_total, 0);
 }
 
+/// Collection commits carry an EMPTY `doc_id`, so unlike document updates they
+/// have no document-topic fallback: the collection topic is their only delivery
+/// path. A symmetric mesh makes both peers each other's outbound replicator
+/// target, so if that closed the collection topic, collection commits could
+/// never be delivered at all (defra-agent#696).
+#[tokio::test]
+async fn gossip_allows_doc_less_collection_commit_from_outbound_replicator_target() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    peer_state.peer_connected(peer.as_str());
+    let (coordinator, _events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .create_replicator(&peer, vec!["collection1".to_string()], false)
+        .await
+        .unwrap();
+
+    coordinator
+        .subscriptions
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    let result = coordinator
+        .handle_transport_event(collection_commit_gossip_event(peer, "collection1"))
+        .await;
+
+    assert!(
+        !matches!(&result, Err(Error::AccessDenied { .. })),
+        "a doc-less collection commit has no document-topic fallback; the subscribed \
+         collection topic must accept it from a peer we also replicate to, got {:?}",
+        result
+    );
+    assert_eq!(coordinator.sync_status().gossip_direction_filtered_total, 0);
+}
+
 #[tokio::test]
 async fn gossip_document_topic_allows_outbound_replicator_target() {
     let replicators = Arc::new(ReplicatorRegistry::new());
@@ -2333,10 +2392,13 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
 // --- #1088 W1/W4: intake backpressure nacks (re-land #592, regressed by fa4a84f7) ---
 //
 // The M1 invariant: a success PushLogReply implies the pushed block is either
-// merged or registered as pending on the hub. Capacity overflow and rate-limit
-// rejections must reply the byte-exact RATE_LIMITED_MESSAGE so the pusher's
-// backoff consumer (send_ordered_pushlogs_via_transport) and persisted retry
-// ladder keep the doc queued instead of laundering the failure as success.
+// merged or registered as pending on the hub. Both rejection classes must reply
+// a byte-exact sentinel so the pusher's backoff consumer
+// (send_ordered_pushlogs_via_transport) and persisted retry ladder keep the doc
+// queued instead of laundering the failure as success — but they are DISTINCT
+// sentinels (defradb#1112): rate limiting is a pacing condition the pusher may
+// retry through, while capacity saturation is peer-wide and structural, so the
+// sender must stop and park the peer rather than resend into a full receiver.
 
 /// A PushLog request whose composite block links to a field block that is never
 /// stored, so `process_pushlog` must register a pending DAG to track it.
@@ -2385,7 +2447,7 @@ fn always_limited_rate_limiter() -> Arc<PeerRateLimiter> {
 }
 
 #[tokio::test]
-async fn pushlog_request_at_pending_capacity_replies_rate_limited_nack() {
+async fn pushlog_request_at_pending_capacity_replies_at_capacity_nack() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let (coordinator, _events) = create_test_coordinator_with_sync_config(
@@ -2430,13 +2492,13 @@ async fn pushlog_request_at_pending_capacity_replies_rate_limited_nack() {
     let reply = transport.pushlog_replies().pop().expect("overflow reply");
     assert_eq!(
         reply.err_message.as_deref(),
-        Some(crate::error::RATE_LIMITED_MESSAGE),
-        "capacity overflow must nack with the byte-exact backpressure sentinel, never success"
+        Some(crate::error::AT_CAPACITY_MESSAGE),
+        "capacity overflow must nack with the byte-exact capacity sentinel, never success"
     );
 }
 
 #[tokio::test]
-async fn two_stream_at_pending_capacity_replies_rate_limited_nack() {
+async fn two_stream_at_pending_capacity_replies_at_capacity_nack() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let (coordinator, _events) = create_test_coordinator_with_sync_config(
@@ -2488,8 +2550,8 @@ async fn two_stream_at_pending_capacity_replies_rate_limited_nack() {
         .expect("overflow reply");
     assert_eq!(
         reply.err_message.as_deref(),
-        Some(crate::error::RATE_LIMITED_MESSAGE),
-        "capacity overflow must nack with the byte-exact backpressure sentinel, never success"
+        Some(crate::error::AT_CAPACITY_MESSAGE),
+        "capacity overflow must nack with the byte-exact capacity sentinel, never success"
     );
 }
 
@@ -2694,7 +2756,7 @@ async fn fan_in_pushes_keep_pending_depth_bounded_and_account_every_reply() {
     let successes = replies.iter().filter(|r| r.err_message.is_none()).count();
     let nacks = replies
         .iter()
-        .filter(|r| r.err_message.as_deref() == Some(crate::error::RATE_LIMITED_MESSAGE))
+        .filter(|r| r.err_message.as_deref() == Some(crate::error::AT_CAPACITY_MESSAGE))
         .count();
     assert_eq!(
         successes, CAP,
@@ -2703,7 +2765,7 @@ async fn fan_in_pushes_keep_pending_depth_bounded_and_account_every_reply() {
     assert_eq!(
         nacks,
         total - CAP,
-        "every dropped registration must be nacked with the backpressure sentinel"
+        "every dropped registration must be nacked with the capacity sentinel"
     );
 
     // No completed DAGs and no arriving link blocks here, so admission overflow

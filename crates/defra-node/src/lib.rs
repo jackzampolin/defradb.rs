@@ -1764,21 +1764,45 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                     // rejection only consumes a bounded budget so one
                     // permanently rejected doc at the head of the key order
                     // cannot starve the rest forever.
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(15),
-                        db_merge::retry_doc_via_transport(
-                            &transport,
-                            database.as_ref(),
-                            None,
-                            &peer_id,
-                            &retry.doc_id,
-                            &retry.collection_id,
-                            &retry_filters,
-                            &replication_filter::QueryReplicationFilterMatcher::new(),
-                        ),
-                    )
-                    .await
-                    {
+                    // Collection commits are doc-less: their obligation is the
+                    // CID, so they replay through the CID-scoped executor. The
+                    // document executor resolves work from a document's
+                    // composite heads and would silently ack a commit as a
+                    // no-op, deleting the ledger record and losing the block
+                    // (defradb#1113).
+                    let replay = async {
+                        if retry.is_collection_commit() {
+                            match retry.cid.parse::<cid::Cid>() {
+                                Ok(cid) => {
+                                    db_merge::retry_collection_commit_via_transport(
+                                        &transport,
+                                        database.as_ref(),
+                                        &peer_id,
+                                        &retry.collection_id,
+                                        &cid,
+                                    )
+                                    .await
+                                }
+                                Err(error) => Err(format!(
+                                    "unparseable collection-commit CID {}: {error}",
+                                    retry.cid
+                                )),
+                            }
+                        } else {
+                            db_merge::retry_doc_via_transport(
+                                &transport,
+                                database.as_ref(),
+                                None,
+                                &peer_id,
+                                &retry.doc_id,
+                                &retry.collection_id,
+                                &retry_filters,
+                                &replication_filter::QueryReplicationFilterMatcher::new(),
+                            )
+                            .await
+                        }
+                    };
+                    match tokio::time::timeout(std::time::Duration::from_secs(15), replay).await {
                         Ok(Ok(())) => {
                             let _ = peerstore.complete_retry_document(&peer_id_str, retry).await;
                         }

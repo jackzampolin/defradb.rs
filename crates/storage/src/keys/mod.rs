@@ -59,7 +59,8 @@ pub use headstore::{
     HeadstoreDocKey, HeadstoreFieldDefinition, HeadstorePriorityKey,
 };
 pub use peerstore::{
-    PeerstoreSERetry, ReplicatorKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
+    PeerstoreSERetry, ReplicatorKey, ReplicatorRetryCommitKey, ReplicatorRetryDocIDKey,
+    ReplicatorRetryIDKey,
 };
 pub use systemstore::{
     CollectionID, CollectionIDSequenceKey, CollectionKey, CollectionNameKey, CollectionVersionKey,

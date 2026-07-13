@@ -121,6 +121,15 @@ pub trait DocPusher: Send + Sync {
         collection_id: &str,
     ) -> Result<(), String>;
 
+    /// Replay a failed COLLECTION-COMMIT push by CID (defradb#1113).
+    async fn retry_collection_commit(
+        &self,
+        handle: &P2PHostHandle,
+        peer_id: libp2p::PeerId,
+        collection_id: &str,
+        cid: &Cid,
+    ) -> Result<(), String>;
+
     async fn load_document_head_blocks(&self, doc_id: &str) -> Result<Vec<(Cid, Vec<u8>)>, String>;
 
     async fn load_doc_creator_did(

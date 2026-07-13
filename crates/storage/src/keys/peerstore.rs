@@ -154,6 +154,73 @@ impl Key for ReplicatorRetryDocIDKey {
     }
 }
 
+/// ReplicatorRetryCommitKey: tracks COLLECTION-COMMIT replication failures.
+///
+/// Structure: /rep/retry/commit/[PeerID]/[CollectionID]/[CID]
+///
+/// Collection commits are doc-less: their DAG obligation is CID-scoped, not
+/// document-scoped, so they cannot be keyed by `ReplicatorRetryDocIDKey` (whose
+/// terminal segment is the document id — an empty doc id would collapse every
+/// commit for a peer into one slot). Before this key existed, a failed
+/// collection-commit push had nowhere to be recorded and failed PERMANENTLY:
+/// receivers kept heads whose parents never arrived, so their pending-DAG
+/// registrations could never complete (defradb#1113, defra-agent#696).
+///
+/// One record per (peer, collection, CID): collection-commit DAGs chain, so a
+/// newer commit does NOT make an older undelivered one redundant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicatorRetryCommitKey {
+    /// Peer network identifier
+    pub peer_id: String,
+    /// Collection identifier
+    pub collection_id: String,
+    /// Root CID of the collection commit
+    pub cid: String,
+}
+
+impl ReplicatorRetryCommitKey {
+    /// Create a new ReplicatorRetryCommitKey
+    pub fn new(
+        peer_id: impl Into<String>,
+        collection_id: impl Into<String>,
+        cid: impl Into<String>,
+    ) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+            collection_id: collection_id.into(),
+            cid: cid.into(),
+        }
+    }
+
+    /// Prefix for all collection-commit retry entries
+    pub fn retry_commit_prefix() -> Vec<u8> {
+        b"/rep/retry/commit/".to_vec()
+    }
+
+    /// Prefix for a specific peer's collection-commit retries
+    pub fn peer_prefix(peer_id: impl Into<String>) -> Vec<u8> {
+        let peer_id = peer_id.into();
+        format!("/rep/retry/commit/{}/", peer_id).into_bytes()
+    }
+}
+
+impl Key for ReplicatorRetryCommitKey {
+    fn bytes(&self) -> Vec<u8> {
+        format!(
+            "/rep/retry/commit/{}/{}/{}",
+            self.peer_id, self.collection_id, self.cid
+        )
+        .into_bytes()
+    }
+
+    fn to_string(&self) -> String {
+        format!(
+            "/rep/retry/commit/{}/{}/{}",
+            self.peer_id, self.collection_id, self.cid
+        )
+    }
+}
+
 /// PeerstoreSERetry: Tracks search engine indexing failures on peer
 ///
 /// Structure: /se-retry/[PeerID]/[CollectionID]/[DocID]

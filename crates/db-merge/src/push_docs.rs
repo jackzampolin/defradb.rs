@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use acp::DocumentACP;
 use bytes::Bytes;
+use cid::Cid;
 use p2p::message::PushLogRequest;
 use storage::corekv::{IterOptions, Reader, Store};
 
@@ -594,4 +595,85 @@ pub async fn retry_doc<S: Store + 'static>(
     } else {
         Ok(())
     }
+}
+
+/// Replay a failed COLLECTION-COMMIT push by CID over a libp2p host handle
+/// (defradb#1113).
+///
+/// Collection commits are doc-less, so `retry_doc` cannot replay them: it
+/// resolves work from a document's composite heads and would find none, return
+/// `Ok(())`, and let the ledger delete the obligation — silently losing the
+/// block. A missing block is therefore an ERROR here, never a silent success.
+pub async fn retry_collection_commit<S: Store + 'static>(
+    handle: &p2p::P2PHostHandle,
+    db: &DB<S>,
+    peer_id: libp2p::PeerId,
+    collection_id: &str,
+    cid: &Cid,
+) -> Result<(), String> {
+    let creator = handle
+        .local_peer_id()
+        .await
+        .map(|peer| peer.to_string())
+        .unwrap_or_default();
+
+    let blockstore_view = storage::stores::Blockstore::new(db.store().clone(), true);
+    let block_txn = blockstore_view
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("blockstore txn: {}", e))?;
+    let encstore_view = storage::stores::Blockstore::new_with_namespace(
+        db.store().clone(),
+        true,
+        storage::namespace::Namespace::Encstore,
+    );
+    let enc_txn = encstore_view
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("encstore txn: {}", e))?;
+
+    let root_block = match block_txn.get(&cid.to_bytes()).await {
+        Ok(Some(data)) => data,
+        Ok(None) => {
+            return Err(format!(
+                "collection-commit block {cid} is not in the local blockstore"
+            ))
+        }
+        Err(error) => return Err(format!("failed to load collection-commit block: {error}")),
+    };
+
+    let mut pushed = 0usize;
+    let mut any_failed = false;
+    for (block_cid, block_data) in
+        load_push_dag_blocks(&*block_txn, &*enc_txn, *cid, root_block).await
+    {
+        let mut request = PushLogRequest::new(
+            String::new(),
+            Bytes::from(block_cid.to_bytes()),
+            collection_id.to_string(),
+            creator.clone(),
+            Bytes::from(block_data),
+        );
+
+        if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {
+            any_failed = true;
+            continue;
+        }
+
+        match handle.send_two_stream_request(peer_id, request).await {
+            Ok(reply) if reply.err_message.is_some() => any_failed = true,
+            Ok(_) => pushed += 1,
+            Err(_) => any_failed = true,
+        }
+    }
+
+    if any_failed {
+        return Err("some collection-commit pushes failed".to_string());
+    }
+    if pushed == 0 {
+        return Err(format!(
+            "collection-commit replay for {cid} pushed no blocks"
+        ));
+    }
+    Ok(())
 }

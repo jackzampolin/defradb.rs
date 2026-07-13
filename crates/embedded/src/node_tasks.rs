@@ -533,12 +533,32 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
             // peer is unreachable); a fast rejection only consumes a bounded
             // budget so one permanently rejected doc at the head of the key
             // order cannot starve the rest forever.
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                doc_pusher.retry_doc(handle, peer_id, &retry.doc_id, &retry.collection_id),
-            )
-            .await
-            {
+            // Collection commits are doc-less and replay by CID (defradb#1113).
+            let replay = async {
+                if retry.is_collection_commit() {
+                    match retry.cid.parse::<cid::Cid>() {
+                        Ok(cid) => {
+                            doc_pusher
+                                .retry_collection_commit(
+                                    handle,
+                                    peer_id,
+                                    &retry.collection_id,
+                                    &cid,
+                                )
+                                .await
+                        }
+                        Err(error) => Err(defra_p2p_adapter::P2PError::Internal(format!(
+                            "unparseable collection-commit CID {}: {error}",
+                            retry.cid
+                        ))),
+                    }
+                } else {
+                    doc_pusher
+                        .retry_doc(handle, peer_id, &retry.doc_id, &retry.collection_id)
+                        .await
+                }
+            };
+            match tokio::time::timeout(std::time::Duration::from_secs(15), replay).await {
                 Ok(Ok(())) => {
                     // Doc block re-push succeeded; regenerate and re-push
                     // SE artifacts for this doc too. Go re-pushes the
@@ -664,12 +684,27 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
             // peer is unreachable); a fast rejection only consumes a bounded
             // budget so one permanently rejected doc at the head of the key
             // order cannot starve the rest forever.
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                doc_pusher.retry_doc(&peer_id, &retry.doc_id, &retry.collection_id),
-            )
-            .await
-            {
+            // Collection commits are doc-less and replay by CID (defradb#1113).
+            let replay = async {
+                if retry.is_collection_commit() {
+                    match retry.cid.parse::<cid::Cid>() {
+                        Ok(cid) => {
+                            doc_pusher
+                                .retry_collection_commit(&peer_id, &retry.collection_id, &cid)
+                                .await
+                        }
+                        Err(error) => Err(defra_p2p_adapter::P2PError::Internal(format!(
+                            "unparseable collection-commit CID {}: {error}",
+                            retry.cid
+                        ))),
+                    }
+                } else {
+                    doc_pusher
+                        .retry_doc(&peer_id, &retry.doc_id, &retry.collection_id)
+                        .await
+                }
+            };
+            match tokio::time::timeout(std::time::Duration::from_secs(15), replay).await {
                 Ok(Ok(())) => {
                     se_repusher
                         .regenerate_and_push_se_artifacts(&retry.collection_id, &retry.doc_id)

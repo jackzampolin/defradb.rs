@@ -3,7 +3,9 @@
 /// The Peerstore handles storage of replicator configuration, replication
 /// retry tracking, and search engine retry tracking for P2P operations.
 use crate::corekv::{IterOptions, Key, Reader, Result, Store, Txn, Writer};
-use crate::keys::peerstore::{ReplicatorKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey};
+use crate::keys::peerstore::{
+    ReplicatorKey, ReplicatorRetryCommitKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
+};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
 use cid::Cid;
@@ -195,11 +197,27 @@ impl<S: Store> Peerstore<S> {
         priority: u64,
         retry_info_bytes: &[u8],
     ) -> Result<()> {
-        // Collection commits are CID-scoped live obligations. The document
-        // retry loop cannot service an empty document ID, so persisting one
-        // would create a permanent peer marker with no runnable work.
+        // Collection commits are doc-less, CID-scoped obligations. They are
+        // recorded under their own keyspace so they can be replayed by CID;
+        // dropping them here made a failed collection-commit push permanent,
+        // leaving receivers with heads whose parents never arrive
+        // (defradb#1113, defra-agent#696).
         if doc_id.is_empty() {
-            return Ok(());
+            if cid.is_empty() {
+                // A versionless doc-less failure (SE artifact) has nothing to
+                // replay: no document to re-resolve and no CID to re-send.
+                return Ok(());
+            }
+            return retry_push_txn_conflicts(|| {
+                self.record_commit_push_failure_once(
+                    peer_id,
+                    collection_id,
+                    cid,
+                    priority,
+                    retry_info_bytes,
+                )
+            })
+            .await;
         }
         retry_push_txn_conflicts(|| {
             self.record_push_failure_once(
@@ -212,6 +230,49 @@ impl<S: Store> Peerstore<S> {
             )
         })
         .await
+    }
+
+    /// Record a failed collection-commit push under `/rep/retry/commit/{peer}/
+    /// {collection}/{cid}`.
+    ///
+    /// One record per CID: collection-commit DAGs chain, so a newer commit does
+    /// not make an older undelivered one redundant. A record for this exact CID
+    /// that is already pending keeps its backoff (repeat failures must not reset
+    /// the ladder); a dormant one is activated.
+    async fn record_commit_push_failure_once(
+        &self,
+        peer_id: &str,
+        collection_id: &str,
+        cid: &str,
+        priority: u64,
+        retry_info_bytes: &[u8],
+    ) -> Result<()> {
+        let mut txn = self.store.new_txn(false).await?;
+        let id_key = ReplicatorRetryIDKey::new(peer_id);
+        if !txn.has(&id_key.bytes()).await? {
+            txn.set(&id_key.bytes(), retry_info_bytes).await?;
+        }
+        let commit_key = ReplicatorRetryCommitKey::new(peer_id, collection_id, cid);
+        let existing = txn.get(&commit_key.bytes()).await?;
+        let current = existing
+            .as_deref()
+            .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
+        let retry = match current {
+            Some(retry) if retry.pending => retry,
+            Some(mut retry) => {
+                retry.activate(&format!("{peer_id}:{cid}"));
+                retry
+            }
+            None => {
+                let mut retry =
+                    super::PersistedPushRetry::new_observed_commit(collection_id, cid, priority);
+                retry.activate(&format!("{peer_id}:{cid}"));
+                retry
+            }
+        };
+        let bytes = retry.to_bytes().map_err(crate::corekv::Error::Other)?;
+        txn.set(&commit_key.bytes(), &bytes).await?;
+        txn.commit().await
     }
 
     async fn record_push_failure_once(
@@ -280,12 +341,40 @@ impl<S: Store> Peerstore<S> {
         priority: u64,
     ) -> Result<()> {
         if doc_id.is_empty() {
-            return Ok(());
+            if cid.is_empty() {
+                return Ok(());
+            }
+            return retry_push_txn_conflicts(|| {
+                self.observe_commit_push_head_once(peer_id, collection_id, cid, priority)
+            })
+            .await;
         }
         retry_push_txn_conflicts(|| {
             self.observe_push_head_once(peer_id, doc_id, collection_id, cid, priority)
         })
         .await
+    }
+
+    /// Dormant watermark for an in-flight collection-commit push, so a restart
+    /// can promote it if the send never completed.
+    async fn observe_commit_push_head_once(
+        &self,
+        peer_id: &str,
+        collection_id: &str,
+        cid: &str,
+        priority: u64,
+    ) -> Result<()> {
+        let key = ReplicatorRetryCommitKey::new(peer_id, collection_id, cid);
+        let mut txn = self.store.new_txn(false).await?;
+        if txn.has(&key.bytes()).await? {
+            // An existing record (pending or dormant) already tracks this exact
+            // CID; observing it again must not reset its backoff.
+            return txn.commit().await;
+        }
+        let retry = super::PersistedPushRetry::new_observed_commit(collection_id, cid, priority);
+        let bytes = retry.to_bytes().map_err(crate::corekv::Error::Other)?;
+        txn.set(&key.bytes(), &bytes).await?;
+        txn.commit().await
     }
 
     async fn observe_push_head_once(
@@ -319,6 +408,16 @@ impl<S: Store> Peerstore<S> {
     /// newest-head watermarks are omitted. Legacy raw collection-ID values
     /// inherit the old peer-level schedule and are rewritten on their next
     /// failure/update.
+    /// The store key a retry record lives under, derived from its scope so
+    /// document heads and collection commits round-trip to the right keyspace.
+    fn retry_key_bytes(peer_id: &str, retry: &super::PersistedPushRetry) -> Vec<u8> {
+        if retry.is_collection_commit() {
+            ReplicatorRetryCommitKey::new(peer_id, &retry.collection_id, &retry.cid).bytes()
+        } else {
+            ReplicatorRetryDocIDKey::new(peer_id, &retry.doc_id).bytes()
+        }
+    }
+
     pub async fn get_retry_documents(
         &self,
         peer_id: &str,
@@ -349,10 +448,26 @@ impl<S: Store> Peerstore<S> {
                     cid: String::new(),
                     priority: 0,
                     pending: true,
+                    scope: super::RetryScope::Document,
                     retry_info: fallback.clone(),
                 }
             });
             if retry.pending {
+                results.push(retry);
+            }
+        }
+
+        // Collection-commit obligations live in their own keyspace and are
+        // replayed by CID (defradb#1113).
+        let commit_prefix = ReplicatorRetryCommitKey::peer_prefix(peer_id);
+        let mut commit_iter = txn
+            .iterator(IterOptions::new().with_prefix(commit_prefix))
+            .await?;
+        while let Some(pair) = commit_iter.next().await? {
+            let Ok(retry) = super::PersistedPushRetry::from_bytes(&pair.value) else {
+                continue;
+            };
+            if retry.pending && retry.is_collection_commit() {
                 results.push(retry);
             }
         }
@@ -386,6 +501,33 @@ impl<S: Store> Peerstore<S> {
             }
         }
         drop(iter);
+
+        // Collection-commit watermarks live under /rep/retry/commit/{peer}/
+        // {collection}/{cid} — a 3-segment key, so the doc-shaped `split_once`
+        // above cannot parse them. Their peer is taken from the record's own
+        // key prefix (defradb#1113).
+        let mut commit_iter = txn
+            .iterator(
+                IterOptions::new().with_prefix(ReplicatorRetryCommitKey::retry_commit_prefix()),
+            )
+            .await?;
+        while let Some(pair) = commit_iter.next().await? {
+            let key = String::from_utf8_lossy(&pair.key);
+            let Some(peer_id) = key
+                .strip_prefix("/rep/retry/commit/")
+                .and_then(|suffix| suffix.split_once('/'))
+                .map(|(peer_id, _)| peer_id)
+            else {
+                continue;
+            };
+            let Ok(retry) = super::PersistedPushRetry::from_bytes(&pair.value) else {
+                continue;
+            };
+            if !retry.pending && retry.is_collection_commit() {
+                dormant.push((peer_id.to_string(), retry.doc_id.clone(), retry));
+            }
+        }
+        drop(commit_iter);
         drop(txn);
 
         let mut activated = 0;
@@ -416,9 +558,13 @@ impl<S: Store> Peerstore<S> {
         key_doc_id: &str,
         retry: &super::PersistedPushRetry,
     ) -> Result<bool> {
-        let key = ReplicatorRetryDocIDKey::new(peer_id, key_doc_id);
+        let key_bytes = if retry.is_collection_commit() {
+            ReplicatorRetryCommitKey::new(peer_id, &retry.collection_id, &retry.cid).bytes()
+        } else {
+            ReplicatorRetryDocIDKey::new(peer_id, key_doc_id).bytes()
+        };
         let mut txn = self.store.new_txn(false).await?;
-        let current_bytes = txn.get(&key.bytes()).await?;
+        let current_bytes = txn.get(&key_bytes).await?;
         let current = current_bytes
             .as_deref()
             .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
@@ -432,7 +578,7 @@ impl<S: Store> Peerstore<S> {
             let bytes = activated_retry
                 .to_bytes()
                 .map_err(crate::corekv::Error::Other)?;
-            txn.set(&key.bytes(), &bytes).await?;
+            txn.set(&key_bytes, &bytes).await?;
             let id_key = ReplicatorRetryIDKey::new(peer_id);
             if !txn.has(&id_key.bytes()).await? {
                 let info = super::RetryInfo::new_initial()
@@ -458,9 +604,9 @@ impl<S: Store> Peerstore<S> {
         peer_id: &str,
         retry: &super::PersistedPushRetry,
     ) -> Result<()> {
-        let key = ReplicatorRetryDocIDKey::new(peer_id, &retry.doc_id);
+        let key_bytes = Self::retry_key_bytes(peer_id, retry);
         let mut txn = self.store.new_txn(false).await?;
-        let current = txn.get(&key.bytes()).await?;
+        let current = txn.get(&key_bytes).await?;
         let current_retry = current
             .as_deref()
             .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
@@ -472,7 +618,7 @@ impl<S: Store> Peerstore<S> {
             return txn.commit().await;
         }
         let bytes = retry.to_bytes().map_err(crate::corekv::Error::Other)?;
-        txn.set(&key.bytes(), &bytes).await?;
+        txn.set(&key_bytes, &bytes).await?;
         txn.commit().await
     }
 
@@ -491,9 +637,9 @@ impl<S: Store> Peerstore<S> {
         peer_id: &str,
         retry: &super::PersistedPushRetry,
     ) -> Result<()> {
-        let key = ReplicatorRetryDocIDKey::new(peer_id, &retry.doc_id);
+        let key_bytes = Self::retry_key_bytes(peer_id, retry);
         let mut txn = self.store.new_txn(false).await?;
-        let current = txn.get(&key.bytes()).await?;
+        let current = txn.get(&key_bytes).await?;
         let current_retry = current
             .as_deref()
             .and_then(|bytes| super::PersistedPushRetry::from_bytes(bytes).ok());
@@ -502,7 +648,7 @@ impl<S: Store> Peerstore<S> {
                 current.pending && current.priority == retry.priority && current.cid == retry.cid
             }) || (current.is_some() && current_retry.is_none() && retry.cid.is_empty());
         if is_current {
-            txn.delete(&key.bytes()).await?;
+            txn.delete(&key_bytes).await?;
         }
         txn.commit().await
     }
@@ -583,6 +729,27 @@ impl<S: Store> Peerstore<S> {
             }
         }
         drop(iter);
+
+        // A pending collection-commit obligation keeps the peer swept, exactly
+        // like a pending document head: dropping the marker here would strand
+        // the commit and re-open defradb#1113 from the other end.
+        if !has_pending {
+            let commit_prefix = ReplicatorRetryCommitKey::peer_prefix(peer_id);
+            let mut commit_iter = txn
+                .iterator(IterOptions::new().with_prefix(commit_prefix))
+                .await?;
+            while let Some(pair) = commit_iter.next().await? {
+                match super::PersistedPushRetry::from_bytes(&pair.value) {
+                    Ok(retry) if !retry.pending => {}
+                    _ => {
+                        has_pending = true;
+                        break;
+                    }
+                }
+            }
+            drop(commit_iter);
+        }
+
         if has_pending {
             return txn.commit().await;
         }
@@ -972,8 +1139,13 @@ mod tests {
         assert_eq!(peerstore.activate_dormant_push_retries().await.unwrap(), 0);
     }
 
+    /// defradb#1113: a failed COLLECTION-COMMIT push must be durably recorded
+    /// and replayable. It has no document id, so it is keyed by
+    /// (peer, collection, CID). Dropping it made the failure permanent —
+    /// receivers kept heads whose parents never arrived, and their pending-DAG
+    /// registrations could never complete (defra-agent#696).
     #[tokio::test]
-    async fn empty_document_push_failure_creates_no_retry_state() {
+    async fn collection_commit_push_failure_is_recorded_and_replayable() {
         let store = Arc::new(MemoryStore::new());
         let peerstore = Peerstore::new(store);
         let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
@@ -982,8 +1154,108 @@ mod tests {
             .record_push_failure("peer", "", "collection", "collection-cid", 1, &initial)
             .await
             .unwrap();
+
+        let peers: Vec<String> = peerstore
+            .get_all_retry_peers()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(peer, _)| peer)
+            .collect();
+        assert_eq!(
+            peers,
+            vec!["peer".to_string()],
+            "a failed collection commit must keep its peer swept"
+        );
+        let retries = peerstore.get_retry_documents("peer").await.unwrap();
+        assert_eq!(retries.len(), 1, "the commit obligation must be replayable");
+        let retry = &retries[0];
+        assert!(retry.is_collection_commit());
+        assert_eq!(retry.doc_id, "");
+        assert_eq!(retry.collection_id, "collection");
+        assert_eq!(retry.cid, "collection-cid");
+        assert!(retry.pending);
+
+        // Completing it clears the obligation and releases the peer.
         peerstore
-            .observe_push_head("peer", "", "collection", "collection-cid", 1)
+            .complete_retry_document("peer", retry)
+            .await
+            .unwrap();
+        assert!(peerstore
+            .get_retry_documents("peer")
+            .await
+            .unwrap()
+            .is_empty());
+        peerstore.clear_retry_peer("peer").await.unwrap();
+        assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
+    }
+
+    /// Commit DAGs chain, so a newer commit does NOT retire an older
+    /// undelivered one: each CID keeps its own record.
+    #[tokio::test]
+    async fn collection_commits_are_tracked_per_cid() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+        peerstore
+            .record_push_failure("peer", "", "collection", "commit-1", 1, &initial)
+            .await
+            .unwrap();
+        peerstore
+            .record_push_failure("peer", "", "collection", "commit-2", 2, &initial)
+            .await
+            .unwrap();
+
+        let retries = peerstore.get_retry_documents("peer").await.unwrap();
+        assert_eq!(retries.len(), 2, "each commit CID keeps its own obligation");
+        let mut cids: Vec<_> = retries.iter().map(|retry| retry.cid.as_str()).collect();
+        cids.sort_unstable();
+        assert_eq!(cids, vec!["commit-1", "commit-2"]);
+    }
+
+    /// A pending commit keeps the peer swept: clearing the marker would strand
+    /// the obligation.
+    #[tokio::test]
+    async fn sweep_clear_keeps_peer_with_pending_collection_commit() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+        peerstore
+            .record_push_failure("peer", "", "collection", "commit-1", 1, &initial)
+            .await
+            .unwrap();
+        peerstore.clear_retry_peer("peer").await.unwrap();
+
+        let peers: Vec<String> = peerstore
+            .get_all_retry_peers()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(peer, _)| peer)
+            .collect();
+        assert_eq!(
+            peers,
+            vec!["peer".to_string()],
+            "a pending collection commit must keep the peer swept"
+        );
+    }
+
+    /// A versionless doc-less failure (SE artifact, no CID) still has nothing
+    /// to replay and must not create state.
+    #[tokio::test]
+    async fn versionless_empty_document_failure_creates_no_retry_state() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+        peerstore
+            .record_push_failure("peer", "", "collection", "", 1, &initial)
+            .await
+            .unwrap();
+        peerstore
+            .observe_push_head("peer", "", "collection", "", 1)
             .await
             .unwrap();
 

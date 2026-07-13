@@ -261,6 +261,16 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         .await
     }
 
+    async fn retry_collection_commit(
+        &self,
+        handle: &P2PHostHandle,
+        peer_id: libp2p::PeerId,
+        collection_id: &str,
+        cid: &Cid,
+    ) -> Result<(), String> {
+        db_merge::retry_collection_commit(handle, &self.db, peer_id, collection_id, cid).await
+    }
+
     async fn load_document_head_blocks(&self, doc_id: &str) -> Result<Vec<(Cid, Vec<u8>)>, String> {
         let provider = db_merge::DbHeadProvider::new(self.db.clone());
         let heads =

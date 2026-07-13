@@ -16,8 +16,23 @@ pub struct RetryInfo {
     pub next_retry_unix: u64,
 }
 
-/// Durable newest-head state for one `(peer, document, CID)` pair. It is either
-/// a dormant ordering watermark for an active live send or a pending retry.
+/// What kind of push obligation a retry record represents.
+///
+/// Document heads replay by document id; collection commits are doc-less and
+/// replay by CID. Persisting the scope lets the ledger re-derive the correct
+/// store key from a record alone, and lets the replay loop dispatch to the
+/// right executor. Defaults to `Document` so records written before the
+/// collection-commit keyspace existed still decode (defradb#1113).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum RetryScope {
+    #[default]
+    Document,
+    CollectionCommit,
+}
+
+/// Durable newest-head state for one `(peer, document, CID)` pair — or, for a
+/// collection commit, one `(peer, collection, CID)` triple. It is either a
+/// dormant ordering watermark for an active live send or a pending retry.
 /// `doc_id` is encoded with the value as a self-contained migration-safe record
 /// even though it is also present in the store key.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -31,10 +46,19 @@ pub struct PersistedPushRetry {
     /// recreate stale retry work or race the active send.
     #[serde(default = "default_pending")]
     pub pending: bool,
+    /// Document head vs collection commit. `#[serde(default)]` keeps records
+    /// written before this field existed decoding as `Document`.
+    #[serde(default)]
+    pub scope: RetryScope,
     pub retry_info: RetryInfo,
 }
 
 impl PersistedPushRetry {
+    /// Whether this record is a doc-less collection-commit obligation.
+    pub fn is_collection_commit(&self) -> bool {
+        matches!(self.scope, RetryScope::CollectionCommit)
+    }
+
     pub fn new_observed(
         doc_id: impl Into<String>,
         collection_id: impl Into<String>,
@@ -47,6 +71,24 @@ impl PersistedPushRetry {
             cid: cid.into(),
             priority,
             pending: false,
+            scope: RetryScope::Document,
+            retry_info: RetryInfo::new_initial(),
+        }
+    }
+
+    /// Dormant watermark for a doc-less collection-commit push.
+    pub fn new_observed_commit(
+        collection_id: impl Into<String>,
+        cid: impl Into<String>,
+        priority: u64,
+    ) -> Self {
+        Self {
+            doc_id: String::new(),
+            collection_id: collection_id.into(),
+            cid: cid.into(),
+            priority,
+            pending: false,
+            scope: RetryScope::CollectionCommit,
             retry_info: RetryInfo::new_initial(),
         }
     }

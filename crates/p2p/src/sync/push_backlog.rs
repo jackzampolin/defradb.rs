@@ -49,6 +49,15 @@ pub const DEFAULT_PUSH_FAILURE_COOLDOWN_BASE: Duration = Duration::from_secs(1);
 /// Cooldown escalation cap: base << PUSH_FAILURE_COOLDOWN_MAX_SHIFT.
 const PUSH_FAILURE_COOLDOWN_MAX_SHIFT: u32 = 6;
 
+/// Base peer-wide cooldown applied when a receiver reports it is at capacity.
+/// Escalates exponentially (capped) while the peer keeps rejecting, and is
+/// jittered so a fleet of senders does not re-fire in lockstep (defradb#1112:
+/// 19 nodes hitting one saturated hub in unison is the storm).
+pub const DEFAULT_PEER_CAPACITY_COOLDOWN_BASE: Duration = Duration::from_secs(2);
+
+/// Peer-cooldown escalation cap: base << PEER_CAPACITY_COOLDOWN_MAX_SHIFT.
+const PEER_CAPACITY_COOLDOWN_MAX_SHIFT: u32 = 5;
+
 /// Compact description of one outbound push to one peer.
 #[derive(Debug, Clone)]
 pub struct PushJobSpec {
@@ -200,6 +209,13 @@ pub enum JobCompletion {
     Retired,
 }
 
+/// Peer-wide parking state for a saturated receiver.
+#[derive(Debug, Clone)]
+struct PeerCooldown {
+    until: Instant,
+    consecutive: u32,
+}
+
 #[derive(Default)]
 struct Inner {
     /// Per-peer FIFO of queued jobs. A peer key is present in `ready` iff its
@@ -214,9 +230,19 @@ struct Inner {
     /// Exact `(peer, cid)` retry state. A failed CID never parks unrelated
     /// work for the same peer.
     retries: HashMap<RetryKey, RetryState>,
+    /// PEER-WIDE cooldown for a receiver that reported its pending-DAG registry
+    /// full. Unlike `retries`, this parks every CID for the peer: a saturated
+    /// receiver rejects the next root for the same reason, so letting other CIDs
+    /// through just manufactures more guaranteed-failing work. Without this, a
+    /// per-CID cooldown gave each distinct CID its own fresh burst and provided
+    /// essentially no protection (defradb#1112).
+    peer_cooldowns: HashMap<String, PeerCooldown>,
     queued_items: usize,
     queued_bytes: usize,
     active_jobs: usize,
+    /// How many times a peer was parked because its receiver was saturated.
+    /// Operator signal that backpressure is engaging (defradb#1112).
+    peer_capacity_parks_total: u64,
     closed: bool,
 }
 
@@ -250,6 +276,9 @@ pub struct PushBacklogSnapshot {
     pub completed_total: u64,
     pub failed_total: u64,
     pub stale_head_retirements_total: u64,
+    /// Times a peer was parked because its receiver reported saturation. Proves
+    /// sender-side backpressure is engaging instead of storming (defradb#1112).
+    pub peer_capacity_parks_total: u64,
     pub per_cid_retry_counts: Vec<CidRetrySnapshot>,
     pub per_peer: Vec<PeerBacklogSnapshot>,
 }
@@ -271,6 +300,7 @@ pub struct PushBacklog {
     per_peer_active_cap: usize,
     worker_count: usize,
     failure_cooldown_base: Duration,
+    peer_capacity_cooldown_base: Duration,
     enqueued_total: AtomicU64,
     coalesced_total: AtomicU64,
     rejected_items_total: AtomicU64,
@@ -312,6 +342,7 @@ impl PushBacklog {
             per_peer_active_cap: per_peer_active_cap.max(1).min(worker_count),
             worker_count,
             failure_cooldown_base,
+            peer_capacity_cooldown_base: DEFAULT_PEER_CAPACITY_COOLDOWN_BASE,
             enqueued_total: AtomicU64::new(0),
             coalesced_total: AtomicU64::new(0),
             rejected_items_total: AtomicU64::new(0),
@@ -477,6 +508,42 @@ impl PushBacklog {
 
     /// Whether this exact head remains the newest live obligation for its
     /// `(document, peer)` pair.
+    /// Park every job for a peer whose receiver reported it is at capacity.
+    ///
+    /// The condition is structural and peer-wide: the receiver cannot accept any
+    /// new root until it drains, so admitting other CIDs for this peer only
+    /// manufactures work that is certain to be rejected. Escalates while the
+    /// peer keeps rejecting and jitters the wake time so a fleet of senders does
+    /// not re-fire in unison (defradb#1112).
+    pub fn park_peer_at_capacity(&self, peer_id: &PeerId) {
+        let peer_key = peer_id.to_string();
+        let mut inner = self.inner.lock();
+        let consecutive = inner
+            .peer_cooldowns
+            .get(&peer_key)
+            .map(|cooldown| cooldown.consecutive)
+            .unwrap_or(0)
+            .saturating_add(1);
+        let shift = (consecutive - 1).min(PEER_CAPACITY_COOLDOWN_MAX_SHIFT);
+        let base = self.peer_capacity_cooldown_base.saturating_mul(1 << shift);
+        // Deterministic jitter in [base, 1.5*base) keyed on the peer, so peers
+        // spread out instead of re-firing together.
+        let jitter_bp = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&(&peer_key, consecutive), &mut hasher);
+            std::hash::Hasher::finish(&hasher) % 500
+        };
+        let cooldown = base + (base * jitter_bp as u32) / 1000;
+        inner.peer_cooldowns.insert(
+            peer_key,
+            PeerCooldown {
+                until: Instant::now() + cooldown,
+                consecutive,
+            },
+        );
+        inner.peer_capacity_parks_total = inner.peer_capacity_parks_total.saturating_add(1);
+    }
+
     pub fn is_current(&self, job: &PushJobSpec) -> bool {
         self.inner
             .lock()
@@ -536,6 +603,19 @@ impl PushBacklog {
             if at_cap {
                 inner.ready.push_back(peer_key);
                 continue;
+            }
+            // A saturated receiver parks ALL of its work, not just the CID that
+            // was rejected (defradb#1112).
+            if let Some(cooldown) = inner.peer_cooldowns.get(&peer_key) {
+                if cooldown.until > now {
+                    next_wake = Some(match next_wake {
+                        Some(wake_at) => wake_at.min(cooldown.until),
+                        None => cooldown.until,
+                    });
+                    inner.ready.push_back(peer_key);
+                    continue;
+                }
+                inner.peer_cooldowns.remove(&peer_key);
             }
             let queue = inner
                 .queues
@@ -734,6 +814,7 @@ impl PushBacklog {
             completed_total: self.completed_total.load(Ordering::Relaxed),
             failed_total: self.failed_total.load(Ordering::Relaxed),
             stale_head_retirements_total: self.stale_head_retirements_total.load(Ordering::Relaxed),
+            peer_capacity_parks_total: inner.peer_capacity_parks_total,
             per_cid_retry_counts,
             per_peer,
         }
@@ -785,6 +866,78 @@ mod tests {
             head_block,
             false,
         )
+    }
+
+    /// defradb#1112: a saturated receiver parks the WHOLE peer, not just the CID
+    /// that was rejected.
+    ///
+    /// The receiver's pending-DAG registry being full is a structural, peer-wide
+    /// condition — it cannot accept any new root until it drains. The per-CID
+    /// cooldown gave every other CID for that peer a fresh burst, which is why
+    /// bounding the receiver did not stop the storm.
+    #[tokio::test]
+    async fn peer_at_capacity_parks_every_cid_for_that_peer() {
+        let backlog = PushBacklog::new(64, 1 << 20, 2, 2);
+        let peer = PeerId::new("peer".to_string());
+        let other = PeerId::new("other".to_string());
+
+        for (target, seed) in [("peer", b"a".as_slice()), ("peer", b"b"), ("other", b"c")] {
+            assert_eq!(
+                backlog.try_enqueue(job(target, seed)),
+                EnqueueOutcome::Enqueued
+            );
+        }
+        let _ = &other;
+
+        backlog.park_peer_at_capacity(&peer);
+
+        // The parked peer yields nothing — including CIDs that never failed.
+        // Only the healthy peer drains.
+        let drained = backlog.next_job().await.expect("healthy peer must drain");
+        assert_eq!(drained.peer_id.to_string(), "other");
+
+        let parked = tokio::time::timeout(Duration::from_millis(150), backlog.next_job()).await;
+        assert!(
+            parked.is_err(),
+            "a saturated peer must not hand out more work while parked"
+        );
+
+        let snapshot = backlog.snapshot();
+        assert_eq!(snapshot.peer_capacity_parks_total, 1);
+    }
+
+    /// The park escalates while the peer keeps rejecting, so a receiver that
+    /// stays full is backed off further rather than re-probed at a fixed rate.
+    #[tokio::test]
+    async fn repeated_capacity_parks_escalate() {
+        let backlog = PushBacklog::new(64, 1 << 20, 2, 2);
+        let peer = PeerId::new("peer".to_string());
+        assert_eq!(
+            backlog.try_enqueue(job("peer", b"a")),
+            EnqueueOutcome::Enqueued
+        );
+
+        backlog.park_peer_at_capacity(&peer);
+        let first = backlog
+            .inner
+            .lock()
+            .peer_cooldowns
+            .get("peer")
+            .map(|c| c.until);
+        backlog.park_peer_at_capacity(&peer);
+        let second = backlog
+            .inner
+            .lock()
+            .peer_cooldowns
+            .get("peer")
+            .map(|c| c.until);
+
+        let (first, second) = (first.expect("first park"), second.expect("second park"));
+        assert!(
+            second > first,
+            "a peer that stays saturated must be backed off further"
+        );
+        assert_eq!(backlog.snapshot().peer_capacity_parks_total, 2);
     }
 
     #[test]
