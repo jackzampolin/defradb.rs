@@ -531,7 +531,7 @@ impl PushBacklog {
         let jitter_bp = {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             std::hash::Hash::hash(&(&peer_key, consecutive), &mut hasher);
-            u64::from(std::hash::Hasher::finish(&hasher) % 500)
+            std::hash::Hasher::finish(&hasher) % 500
         };
         let cooldown = base + (base * jitter_bp as u32) / 1000;
         inner.peer_cooldowns.insert(

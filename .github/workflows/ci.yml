@@ -38,6 +38,14 @@ jobs:
       - run: cargo clippy -p cli --features otel --all-targets -- -D warnings
       - run: cargo clippy -p defra-node --features otel --all-targets -- -D warnings
 
+      # `p2p` is off by default on both crates that gate on it, so no other job
+      # ever builds that dependency set. A dependency missing from the feature
+      # list therefore compiles fine here and only breaks in a downstream
+      # consumer that turns the feature on (which is how a missing `cid` on
+      # defra-node reached a release).
+      - run: cargo clippy -p defra-node --features p2p --all-targets -- -D warnings
+      - run: cargo clippy -p db --features p2p --all-targets -- -D warnings
+
       - name: Cleanup
         if: always()
         run: |
