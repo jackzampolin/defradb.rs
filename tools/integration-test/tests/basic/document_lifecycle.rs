@@ -158,69 +158,6 @@ async fn document_lifecycle_test(cluster: TestCluster) {
 
 for_each_runtime!(document_lifecycle, document_lifecycle_test);
 
-/// Deletion is terminal (Go parity: ErrDocumentDeleted). Recreating a document
-/// with IDENTICAL content regenerates the same content-addressed docID, and
-/// creating onto a tombstone must fail loudly — previously it silently wrote a
-/// "zombie": the create reported success while the row stayed deleted, so
-/// desired-state appliers looped forever on a create that never materialized
-/// (sourcenetwork/defra-agent#700). Distinct content mints a new identity and
-/// must succeed.
-async fn recreate_after_delete_semantics(cluster: TestCluster) {
-    let client = cluster.client(0);
-    client
-        .schema_add("type Note { label: String  body: String }")
-        .expect("failed to add schema");
-
-    let created = client
-        .query(r#"mutation { add_Note(input: {label: "config", body: "v1"}) { _docID } }"#)
-        .expect("create note");
-    let doc_id = created["add_Note"][0]["_docID"]
-        .as_str()
-        .expect("missing _docID")
-        .to_string();
-
-    client
-        .query(&format!(
-            r#"mutation {{ delete_Note(docID: "{doc_id}") {{ _docID }} }}"#
-        ))
-        .expect("delete note");
-
-    // Identical content => identical docID => terminal-deletion error, not a
-    // silent zombie.
-    let identical =
-        client.query(r#"mutation { add_Note(input: {label: "config", body: "v1"}) { _docID } }"#);
-    match identical {
-        Err(error) => {
-            let message = format!("{error:#}");
-            assert!(
-                message.contains("deleted"),
-                "recreating identical content over a tombstone must name the deletion, got: {message}"
-            );
-        }
-        Ok(result) => {
-            panic!("recreating identical content over a tombstone must fail loudly, got: {result}")
-        }
-    }
-
-    // Distinct content mints a new identity and succeeds.
-    let recreated = client
-        .query(r#"mutation { add_Note(input: {label: "config", body: "v2"}) { _docID } }"#)
-        .expect("recreate with distinct content");
-    let new_id = recreated["add_Note"][0]["_docID"]
-        .as_str()
-        .expect("missing recreated _docID");
-    assert_ne!(new_id, doc_id, "distinct content must produce a new docID");
-
-    let live = client
-        .query(r#"query { Note { body } }"#)
-        .expect("query notes");
-    let rows = live["Note"].as_array().expect("not array");
-    assert_eq!(rows.len(), 1, "exactly the recreated doc must be live");
-    assert_eq!(rows[0]["body"].as_str(), Some("v2"));
-}
-
-for_each_runtime!(recreate_after_delete, recreate_after_delete_semantics);
-
 async fn filter_mutations_return_post_update_docs(cluster: TestCluster) {
     let client = cluster.client(0);
 

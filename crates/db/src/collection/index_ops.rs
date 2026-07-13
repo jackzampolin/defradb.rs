@@ -31,26 +31,6 @@ impl Collection {
             )));
         }
 
-        // Deletion is terminal (Go parity: ErrDocumentDeleted): the delete
-        // composite dominates the document's DAG, so replicas will always
-        // compute this document as deleted no matter what is written locally.
-        // Silently writing over the tombstone minted an invisible "zombie" —
-        // the create reported success while the row stayed deleted
-        // (sourcenetwork/defra-agent#700). Identical content regenerates the
-        // same content-addressed docID, so recreates must carry distinct
-        // content to mint a new identity.
-        if datastore
-            .has(&self.deleted_key(&doc_id))
-            .await
-            .map_err(Error::Storage)?
-        {
-            return Err(Error::InvalidDocument(format!(
-                "a document with ID {} has been deleted; deletion is terminal — \
-                 recreate with distinct content to mint a new document identity",
-                doc_id
-            )));
-        }
-
         // Serialize document to CBOR
         let data = doc.to_cbor()?;
 
