@@ -10,7 +10,7 @@ use blockstore::Blockstore;
 
 use crate::error::{Error, Result};
 use crate::sync::manager::events::SyncEvent;
-use crate::sync::manager::links::find_all_missing_links;
+use crate::sync::manager::links::{extract_ipld_links, find_all_missing_links};
 use crate::sync::manager::pending::{PendingDag, PENDING_DAG_TTL};
 
 use super::SyncManager;
@@ -45,6 +45,19 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Get the pending DAGs count (for testing/monitoring).
     pub fn pending_dag_count(&self) -> usize {
         self.pending_dags.read().len()
+    }
+
+    /// Milliseconds until the earliest due incomplete pending-DAG retry, or
+    /// `None` when no incomplete entry is registered (#1116 stage 2
+    /// diagnostics: surfaces the retry clock's own state for `SyncStatus`).
+    pub fn next_pending_retry_in_ms(&self) -> Option<u64> {
+        let now = tokio::time::Instant::now();
+        self.pending_dags
+            .read()
+            .values()
+            .filter(|dag| !dag.missing.is_empty())
+            .map(|dag| dag.next_retry_at.saturating_duration_since(now).as_millis() as u64)
+            .min()
     }
 
     /// Return whether a root can enter the pending-DAG registry without
@@ -87,6 +100,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .get(root_cid)
             .map(|dag| dag.missing.iter().copied().collect())
             .unwrap_or_default()
+    }
+
+    /// Snapshot a pending DAG entry for dispatch (e.g. after a claimed
+    /// post-fetch retry, #1116 stage 2).
+    pub fn pending_dag_snapshot(&self, root_cid: &Cid) -> Option<PendingDag> {
+        self.pending_dags.read().get(root_cid).cloned()
     }
 
     /// How many times `retry_pending_dag` has been called for this root.
@@ -136,7 +155,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         }
     }
 
-    /// Retry pending DAGs that were waiting on `cid`.
+    /// A block just arrived (PushLog store or Bitswap fetch). Update every
+    /// pending root waiting on it: drop it from `missing`, add the block's
+    /// own absent links to the frontier, and run the full verification walk
+    /// (`retry_pending_dag`) ONLY for roots whose frontier emptied. The full
+    /// walk per arriving block was O(DAG) per root per block — the #1112
+    /// inbound storm; the clock's periodic retry self-heals any frontier
+    /// drift this incremental pass might accumulate.
     ///
     /// This covers the explicit replay path where a composite can be registered
     /// as pending before its linked field blocks arrive via later PushLog
@@ -149,9 +174,42 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 .filter_map(|(root_cid, dag)| dag.missing.contains(cid).then_some(*root_cid))
                 .collect()
         };
+        if waiting_roots.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // The arriving block's own links that are still absent become the
+        // new frontier for every waiting root. Computed once per block.
+        // Uses `extract_ipld_links` (not `defra_core::collect_block_links`
+        // directly) so the `encryption` link stays excluded here too — Go
+        // never serves that block over Bitswap (#976), so treating it as
+        // "absent" would strand the frontier on a CID that never arrives.
+        let mut absent_links: Vec<Cid> = Vec::new();
+        if let Ok(Some(data)) = self.blockstore.get(cid).await {
+            for link in extract_ipld_links(&data).unwrap_or_default() {
+                if !matches!(self.blockstore.has(&link).await, Ok(true)) {
+                    absent_links.push(link);
+                }
+            }
+        }
+
+        let emptied: Vec<Cid> = {
+            let mut pending = self.pending_dags.write();
+            let mut emptied = Vec::new();
+            for root_cid in &waiting_roots {
+                if let Some(dag) = pending.get_mut(root_cid) {
+                    dag.missing.remove(cid);
+                    dag.missing.extend(absent_links.iter().copied());
+                    if dag.missing.is_empty() {
+                        emptied.push(*root_cid);
+                    }
+                }
+            }
+            emptied
+        };
 
         let mut completed = Vec::new();
-        for root_cid in waiting_roots {
+        for root_cid in emptied {
             if self.retry_pending_dag(&root_cid).await? {
                 completed.push(root_cid);
             }
@@ -216,6 +274,58 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         self.pending_dags.write().remove(root_cid).is_some()
     }
 
+    /// Claim the right to dispatch a fetch for this root. Returns false when
+    /// the entry is missing, already complete, or not yet due — the caller
+    /// must then NOT emit a fetch. A successful claim advances the clock, so
+    /// concurrent dispatch sites (registration, retry clock, peer connect)
+    /// are rate-bounded by construction.
+    pub fn try_claim_pending_dag_dispatch(
+        &self,
+        root_cid: &Cid,
+        now: tokio::time::Instant,
+    ) -> bool {
+        let mut pending = self.pending_dags.write();
+        let Some(dag) = pending.get_mut(root_cid) else {
+            self.diagnostics.record_pending_dag_retry_suppressed();
+            return false;
+        };
+        if dag.missing.is_empty() || now < dag.next_retry_at {
+            self.diagnostics.record_pending_dag_retry_suppressed();
+            return false;
+        }
+        dag.dispatches = dag.dispatches.saturating_add(1);
+        dag.next_retry_at = now + super::super::pending::retry_backoff(dag.dispatches);
+        self.diagnostics.record_pending_dag_retry_dispatched();
+        true
+    }
+
+    /// Make a root promptly due (e.g. a provider just connected) without
+    /// resetting its backoff rung. The retry clock performs the dispatch.
+    pub fn expedite_pending_dag_retry(&self, root_cid: &Cid) {
+        if let Some(dag) = self.pending_dags.write().get_mut(root_cid) {
+            dag.next_retry_at = dag.next_retry_at.min(tokio::time::Instant::now());
+        }
+    }
+
+    /// Atomically claim every due incomplete entry and return snapshots for
+    /// dispatch. Used by the coordinator retry clock.
+    pub fn claim_due_pending_dag_retries(
+        &self,
+        now: tokio::time::Instant,
+    ) -> Vec<(Cid, PendingDag)> {
+        let mut pending = self.pending_dags.write();
+        let mut claimed = Vec::new();
+        for (cid, dag) in pending.iter_mut() {
+            if !dag.missing.is_empty() && now >= dag.next_retry_at {
+                dag.dispatches = dag.dispatches.saturating_add(1);
+                dag.next_retry_at = now + super::super::pending::retry_backoff(dag.dispatches);
+                self.diagnostics.record_pending_dag_retry_dispatched();
+                claimed.push((*cid, dag.clone()));
+            }
+        }
+        claimed
+    }
+
     /// Register a pending DAG for DocSync.
     ///
     /// This is called when a DocSyncReply contains head CIDs that need to be
@@ -251,6 +361,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 attempts: 0,
                 fetch_failures: 0,
                 last_fetch_error: None,
+                next_retry_at: tokio::time::Instant::now(),
+                dispatches: 0,
             },
         ) {
             tracing::warn!(
@@ -294,6 +406,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 attempts: 0,
                 fetch_failures: 0,
                 last_fetch_error: None,
+                next_retry_at: tokio::time::Instant::now(),
+                dispatches: 0,
             },
         ) {
             tracing::warn!(
@@ -598,6 +712,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 attempts: 0,
                 fetch_failures: 0,
                 last_fetch_error: None,
+                next_retry_at: tokio::time::Instant::now(),
+                dispatches: 0,
             };
 
             if !self.insert_pending_dag(root_cid, dag.clone()) {
@@ -609,6 +725,16 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 );
                 continue;
             }
+
+            // A restored entry is immediately due (`insert_pending_dag`
+            // leaves `next_retry_at = now`); claim it here so the retry
+            // clock's next tick does not also dispatch it. The `bool` is
+            // unused — the DagNeedsFetch emission below (when `missing` is
+            // non-empty) is the dispatch; when `missing` is empty the claim
+            // is a harmless no-op since `try_claim_pending_dag_dispatch`
+            // requires a non-empty `missing` set.
+            let _claimed =
+                self.try_claim_pending_dag_dispatch(&root_cid, tokio::time::Instant::now());
 
             if missing.is_empty() {
                 if let Err(error) = self.retry_pending_dag(&root_cid).await {
@@ -664,6 +790,9 @@ mod tests {
     use std::sync::Arc;
 
     use blockstore::DefraBlockstore;
+    use defra_core::{
+        Block as DefraBlock, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload,
+    };
     use multihash_codetable::{Code, MultihashDigest};
     use storage::backends::MemoryStore;
 
@@ -698,6 +827,8 @@ mod tests {
             attempts: 0,
             fetch_failures: 0,
             last_fetch_error: None,
+            next_retry_at: tokio::time::Instant::now(),
+            dispatches: 0,
         }
     }
 
@@ -766,5 +897,230 @@ mod tests {
         }
 
         assert!(manager.pending_dag_count() <= DEFAULT_MAX_PENDING_DAGS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_bumps_clock_and_suppresses_duplicates() {
+        let manager = test_manager();
+        let root = test_cid(1);
+        let mut dag = pending_dag("doc", Instant::now());
+        dag.missing.insert(test_cid(2));
+        assert!(manager.insert_pending_dag(root, dag));
+
+        let now = tokio::time::Instant::now();
+        // Fresh entry is due immediately (insert leaves next_retry_at = now).
+        assert!(manager.try_claim_pending_dag_dispatch(&root, now));
+        // Second claim in the same instant is suppressed.
+        assert!(!manager.try_claim_pending_dag_dispatch(&root, now));
+        // Becomes due again after the backoff rung reached by the first
+        // claim (dispatches=1 -> retry_backoff(1) = 4s).
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        assert!(manager.try_claim_pending_dag_dispatch(&root, tokio::time::Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backoff_doubles_and_caps() {
+        use crate::sync::manager::pending::retry_backoff;
+        assert_eq!(retry_backoff(0), std::time::Duration::from_secs(2));
+        assert_eq!(retry_backoff(1), std::time::Duration::from_secs(4));
+        assert_eq!(retry_backoff(4), std::time::Duration::from_secs(32));
+        assert_eq!(retry_backoff(5), std::time::Duration::from_secs(60));
+        assert_eq!(retry_backoff(30), std::time::Duration::from_secs(60));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expedite_makes_entry_due_now_without_resetting_backoff() {
+        let manager = test_manager();
+        let root = test_cid(1);
+        let mut dag = pending_dag("doc", Instant::now());
+        dag.missing.insert(test_cid(2));
+        assert!(manager.insert_pending_dag(root, dag));
+        let now = tokio::time::Instant::now();
+        assert!(manager.try_claim_pending_dag_dispatch(&root, now)); // dispatches -> 1
+        manager.expedite_pending_dag_retry(&root);
+        assert!(manager.try_claim_pending_dag_dispatch(&root, now)); // dispatches -> 2
+                                                                     // Next due time reflects dispatches=2 rung (8s), not a reset.
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        assert!(!manager.try_claim_pending_dag_dispatch(&root, tokio::time::Instant::now()));
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        assert!(manager.try_claim_pending_dag_dispatch(&root, tokio::time::Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_due_returns_and_claims_only_due_entries_with_missing_blocks() {
+        let manager = test_manager();
+        let due = test_cid(1);
+        let complete = test_cid(3);
+        let mut dag = pending_dag("doc-due", Instant::now());
+        dag.missing.insert(test_cid(2));
+        assert!(manager.insert_pending_dag(due, dag));
+        // Entry with no missing blocks must never be dispatched.
+        assert!(manager.insert_pending_dag(complete, pending_dag("doc-done", Instant::now())));
+
+        let claimed = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].0, due);
+        // Claiming consumed due-ness.
+        assert!(manager
+            .claim_due_pending_dag_retries(tokio::time::Instant::now())
+            .is_empty());
+    }
+
+    fn lww_leaf(field_name: &str) -> (Cid, Vec<u8>) {
+        let block = DefraBlock::new(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                doc_id: b"doc1".to_vec(),
+                field_name: field_name.to_string(),
+                priority: 1,
+                schema_version_id: "schema1".to_string(),
+                data: b"value".to_vec(),
+            }),
+            vec![],
+            vec![],
+        );
+        let bytes = block.to_dag_cbor().expect("encode lww block");
+        let cid = block.generate_cid().expect("generate lww cid");
+        (cid, bytes)
+    }
+
+    fn composite_node(link_name: &str, link_cid: Cid, priority: u64) -> (Cid, Vec<u8>) {
+        let block = DefraBlock::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                doc_id: b"doc1".to_vec(),
+                schema_version_id: "schema1".to_string(),
+                priority,
+                status: 1,
+            }),
+            vec![],
+            vec![DAGLink::new(link_name, link_cid)],
+        );
+        let bytes = block.to_dag_cbor().expect("encode composite block");
+        let cid = block.generate_cid().expect("generate composite cid");
+        (cid, bytes)
+    }
+
+    #[tokio::test]
+    async fn block_arrival_updates_missing_incrementally_without_full_walks() {
+        // A dropped event receiver would fail the completing `retry_pending_dag`
+        // call with `ChannelSend` before the assertions below run, so keep it
+        // alive (unlike `test_manager()`, which discards it).
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, mut events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
+
+        // 3-level DAG: root -> child (composite) -> grandchild (lww).
+        let (grandchild_cid, grandchild_bytes) = lww_leaf("name");
+        let (child_cid, child_bytes) = composite_node("name", grandchild_cid, 1);
+        let (root_cid, root_bytes) = composite_node("composite", child_cid, 2);
+
+        manager
+            .blockstore
+            .put(&root_cid, &root_bytes)
+            .await
+            .expect("store root");
+        manager
+            .blockstore
+            .put(&child_cid, &child_bytes)
+            .await
+            .expect("store child");
+
+        let mut dag = pending_dag("doc1", Instant::now());
+        dag.missing.insert(child_cid);
+        assert!(manager.insert_pending_dag(root_cid, dag));
+
+        // Child arrives; grandchild is still absent. This must only shrink
+        // the frontier (child -> grandchild), not run the full walk.
+        let completed = manager
+            .retry_pending_dags_waiting_on(&child_cid)
+            .await
+            .expect("retry on child arrival");
+        assert!(completed.is_empty(), "root must not complete yet");
+        assert_eq!(manager.pending_dag_missing(&root_cid), vec![grandchild_cid]);
+        assert_eq!(
+            manager.diagnostics.snapshot().missing_link_retries,
+            0,
+            "a frontier-shrinking arrival must not trigger the full verification walk"
+        );
+
+        // Grandchild arrives; the frontier empties, so the full walk runs
+        // exactly once to verify completion and the root resolves.
+        manager
+            .blockstore
+            .put(&grandchild_cid, &grandchild_bytes)
+            .await
+            .expect("store grandchild");
+        let completed = manager
+            .retry_pending_dags_waiting_on(&grandchild_cid)
+            .await
+            .expect("retry on grandchild arrival");
+        assert_eq!(completed, vec![root_cid]);
+        assert_eq!(manager.diagnostics.snapshot().missing_link_retries, 1);
+        assert_eq!(manager.pending_dag_count(), 0);
+
+        match events.try_recv().expect("DagReady event") {
+            SyncEvent::DagReady {
+                root_cid: event_root,
+                ..
+            } => assert_eq!(event_root, root_cid),
+            other => panic!("expected DagReady, got {:?}", other),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resync_restore_consumes_retry_clock_claim_before_dispatch() {
+        use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
+
+        let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, mut events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
+
+        // The root's block is never put in the blockstore, so the resync
+        // sweep falls back to treating the root itself as missing and takes
+        // the DagNeedsFetch (non-empty `missing`) path.
+        let root = test_cid(1);
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        pending_store
+            .put(
+                &root,
+                &PersistedPendingDag {
+                    doc_id: "doc".to_string(),
+                    collection_id: "collection".to_string(),
+                    creator: "creator".to_string(),
+                    source_peer: Some("peer".to_string()),
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
+                },
+            )
+            .await
+            .expect("persist pending dag record");
+
+        manager.install_pending_dag_store(pending_store).await;
+
+        let restored = manager.resync_persisted_pending_dags().await;
+        assert_eq!(restored, 1);
+
+        match events
+            .try_recv()
+            .expect("DagNeedsFetch event from resync restore")
+        {
+            SyncEvent::DagNeedsFetch { root_cid, .. } => assert_eq!(root_cid, root),
+            other => panic!("expected DagNeedsFetch, got {:?}", other),
+        }
+
+        // The restore's direct DagNeedsFetch emission already consumed the
+        // immediate claim (mirrors the fresh-registration path in
+        // pushlog.rs) -- the retry clock must not also dispatch this root
+        // before the backoff rung elapses.
+        assert!(manager
+            .claim_due_pending_dag_retries(tokio::time::Instant::now())
+            .is_empty());
+
+        // Becomes due again only after the backoff rung reached by the
+        // restore's claim (dispatches=1 -> retry_backoff(1) = 4s).
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        let claimed = manager.claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].0, root);
     }
 }

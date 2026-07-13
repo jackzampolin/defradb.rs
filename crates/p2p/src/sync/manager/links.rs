@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 /// (issue #976). The encryption block is obtained instead during merge via
 /// `decrypt_block_data` (KMS DEK fetch). Signature links are kept, matching
 /// Go's `hasAccess`, which serves signature blocks over Bitswap.
-fn extract_ipld_links(block_data: &[u8]) -> Result<Vec<Cid>> {
+pub(crate) fn extract_ipld_links(block_data: &[u8]) -> Result<Vec<Cid>> {
     use ipld_core::codec::Links;
     use serde_ipld_dagcbor::codec::DagCborCodec;
 
