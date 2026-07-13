@@ -212,20 +212,32 @@ where
     if let Some(root_request) = root_request {
         requests.push(root_request);
     }
-    let pushed_cids = job
-        .expand_dag
-        .then(|| requests.iter().map(|(cid, _)| *cid).collect::<Vec<_>>());
-
     let send_failed = if requests.is_empty() {
         // Every block failed to sign: report so the persisted retry ladder
         // regenerates and re-pushes instead of silently losing the doc.
         true
     } else {
-        let _car_access = pushed_cids.map(|cids| {
+        // Authorize the receiver's post-ack recovery pull from the DAG
+        // itself, not from `requests` (what this job happened to push).
+        // A root-only push (`expand_dag = false`) still grants the full
+        // local DAG, decoupling recovery from payload expansion so a future
+        // removal of payload expansion (#1116 stage 3) keeps recovery
+        // working. Fall back to the pushed CIDs on a walk error: never send
+        // a push whose recovery pull we could not authorize.
+        let grant_cids = match crate::sync::car::collect_dag_cids(
+            context.blockstore.as_ref(),
+            &job.root_cid,
+            crate::sync::car::CAR_MAX_BLOCKS,
+        )
+        .await
+        {
+            Ok(cids) => cids,
+            Err(_) => requests.iter().map(|(cid, _)| *cid).collect(),
+        };
+        let _car_access =
             context
                 .selective_car_access
-                .register(job.peer_id.clone(), job.root_cid, cids)
-        });
+                .register(job.peer_id.clone(), job.root_cid, grant_cids);
         send_ordered_pushlogs_via_transport(
             &context.transport,
             &job.peer_id,
@@ -726,6 +738,75 @@ mod tests {
         assert_eq!(transport.sign_count(), 2);
         assert_eq!(transport.sent().len(), 1);
         assert_eq!(failure_rx.recv().await.unwrap().cid, root_cid.to_string());
+        backlog.job_done(&active, completion);
+        backlog.close();
+    }
+
+    /// A root-only push (`expand_dag = false`) sends just the root block, but
+    /// the selective-CAR grant must still cover the full local DAG so the
+    /// receiver's post-ack recovery pull can fetch missing dependents (#1116
+    /// stage 2): the grant is authorized from the blockstore's DAG shape, not
+    /// from the pushed payload set.
+    #[tokio::test]
+    async fn root_only_push_still_grants_full_dag_for_recovery() {
+        use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink};
+
+        let backlog = PushBacklog::new(1024, usize::MAX, 1, 1);
+        let transport = TestTransport::new(Vec::new());
+        let (context, _failure_rx) = test_context(
+            transport.clone(),
+            Arc::clone(&backlog),
+            Duration::from_secs(1),
+        );
+
+        let child_data = Bytes::from_static(b"child-block");
+        let child_cid = defra_core::block::generate_cid_from_bytes(&child_data).unwrap();
+        context
+            .blockstore
+            .put(&child_cid, &child_data)
+            .await
+            .unwrap();
+
+        let root = Block::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                doc_id: b"doc".to_vec(),
+                schema_version_id: "schema".to_string(),
+                priority: 1,
+                status: 1,
+            }),
+            vec![],
+            vec![DAGLink::new("child", child_cid)],
+        );
+        let root_bytes = Bytes::from(root.to_dag_cbor().unwrap());
+        let root_cid = defra_core::block::generate_cid_from_bytes(&root_bytes).unwrap();
+        context
+            .blockstore
+            .put(&root_cid, &root_bytes)
+            .await
+            .unwrap();
+
+        let peer = PeerId::new("peer".to_string());
+        let job = PushJobSpec::new(
+            peer.clone(),
+            "doc".to_string(),
+            "collection".to_string(),
+            "creator".to_string(),
+            root_cid,
+            root_bytes,
+            false,
+        );
+        assert_eq!(backlog.try_enqueue(job), EnqueueOutcome::Enqueued);
+        let active = backlog.next_job().await.unwrap();
+
+        let completion = run_push_job(&context, &active).await;
+
+        assert_eq!(completion, JobCompletion::Succeeded);
+        assert!(
+            context
+                .selective_car_access
+                .allows(&peer, &root_cid, &child_cid),
+            "root-only push must still grant the child block for receiver recovery"
+        );
         backlog.job_done(&active, completion);
         backlog.close();
     }

@@ -47,4 +47,23 @@ pub struct PendingDag {
     pub fetch_failures: u32,
     /// Most recent provider-exhaustion error for this root, if any.
     pub last_fetch_error: Option<String>,
+    /// Earliest instant a fetch dispatch may be claimed for this root.
+    /// Every dispatch site must win `try_claim_pending_dag_dispatch`,
+    /// which advances this by `retry_backoff(dispatches)` — the receiver's
+    /// re-arm pacing (#1112 inbound half, #1116 stage 2).
+    pub next_retry_at: tokio::time::Instant,
+    /// Fetch dispatches claimed for this root (drives the backoff rung).
+    pub dispatches: u32,
+}
+
+/// Base delay before the first scheduled re-dispatch of a pending root.
+pub const PENDING_RETRY_BASE: Duration = Duration::from_secs(2);
+/// Ceiling for the per-root dispatch backoff.
+pub const PENDING_RETRY_CAP: Duration = Duration::from_secs(60);
+
+/// Capped exponential backoff for pending-DAG fetch dispatches: 2s, 4s,
+/// 8s, 16s, 32s, then 60s forever.
+pub fn retry_backoff(dispatches: u32) -> Duration {
+    let shifted = PENDING_RETRY_BASE.saturating_mul(1u32 << dispatches.min(5));
+    shifted.min(PENDING_RETRY_CAP)
 }

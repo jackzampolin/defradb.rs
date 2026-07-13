@@ -32,4 +32,7 @@ pub use diagnostics::{
     GossipDecodeFailureSample, GossipTransport, SyncDiagnostics, SyncDiagnosticsSnapshot,
 };
 pub use events::SyncEvent;
+// Coordinator dispatch helper (#1116 stage 2) needs to name this type in its
+// signature; the `pending` module itself stays private.
+pub(crate) use pending::PendingDag;
 pub use process::SyncManager;

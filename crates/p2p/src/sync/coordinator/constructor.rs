@@ -1,5 +1,6 @@
 //! Constructor methods for the sync coordinator.
 
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -262,6 +263,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     local_peer_id,
                     access_mode,
                     replicators,
+                    gossip_direction_filtered: AtomicU64::new(0),
                 },
                 subscriptions: SyncSubscriptionState {
                     subscribed_collections,
