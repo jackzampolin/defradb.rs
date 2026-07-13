@@ -81,7 +81,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// # Flow
     ///
     /// 1. Parse CID from the message
-    /// 2. Acquire process queue lock (serialize concurrent syncs for same CID)
+    /// 2. Acquire per-CID ownership or cheaply suppress a concurrent duplicate
     /// 3. Check if already merged
     /// 4. Store block in blockstore (marked as unmerged)
     /// 5. Emit BlockReceived only once the full reachable DAG is locally present,
@@ -115,10 +115,34 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 self.diagnostics.record_single_flight_suppressed();
                 tracing::debug!(
                     cid = %cid,
-                    sender_peer,
+                    sender_peer = ?sender_peer,
                     "Suppressing PushLog while the same CID is already being processed"
                 );
-                return Ok(());
+
+                if self.is_pending_dag_recovery_registered(&cid) {
+                    return Ok(());
+                }
+
+                match self
+                    .retry_retriable_pushlog_op(&cid, "suppressed_is_merged", || async {
+                        self.blockstore
+                            .is_merged(&cid)
+                            .await
+                            .map_err(Error::from_blockstore)
+                    })
+                    .await
+                {
+                    Ok(true) => {
+                        self.diagnostics.record_already_merged_fast_path();
+                        return Ok(());
+                    }
+                    Ok(false) => {
+                        return Err(Error::PushLogInFlight {
+                            cid: cid.to_string(),
+                        });
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         };
 
@@ -306,6 +330,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             );
 
             // Track this DAG as pending (enforces TTL eviction and capacity limit).
+            let inserted_at = Instant::now();
             {
                 let inserted = self.insert_pending_dag(
                     *cid,
@@ -317,7 +342,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         source_peer: sender_peer.map(str::to_owned),
                         is_explicit_replicator,
                         explicit_replay_authorization: explicit_replay_authorization.clone(),
-                        inserted_at: Instant::now(),
+                        is_recovery_registered: false,
+                        inserted_at,
                         attempts: 0,
                         fetch_failures: 0,
                         last_fetch_error: None,
@@ -360,7 +386,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // Durable records outlive TTL-evicted map entries, so they carry
             // their own larger cap; at the cap the obligation is refused
             // (backpressure nack) while the pusher still owns retry state.
-            if let Some(store) = self.pending_store() {
+            let has_durable_registration = if let Some(store) = self.pending_store() {
                 let durable_cap = self
                     .max_pending_dags
                     .saturating_mul(super::PERSISTED_PENDING_CAP_FACTOR);
@@ -421,7 +447,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         "failed to persist pending DAG registration: {error}"
                     )));
                 }
-            }
+                self.mark_pending_dag_recovery_registered(cid, inserted_at);
+                true
+            } else {
+                false
+            };
 
             // Get providers for the missing blocks
             let providers = self.get_providers_for_cids(&missing);
@@ -452,6 +482,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 // resync sweep (the pusher was nacked, so it also retries).
                 self.pending_dags.write().remove(cid);
                 return Err(Error::ChannelSend);
+            }
+            if !has_durable_registration {
+                self.mark_pending_dag_recovery_registered(cid, inserted_at);
             }
         }
 
@@ -707,9 +740,14 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(1), async {
             for task in suppressed {
-                task.await
-                    .expect("suppressed task should not panic")
-                    .expect("suppressed announcement should be accepted");
+                let result = task.await.expect("suppressed task should not panic");
+                assert!(
+                    matches!(
+                        result,
+                        Err(Error::PushLogInFlight { ref cid }) if cid == &root_cid.to_string()
+                    ),
+                    "a duplicate must not ack before the owner establishes recovery state"
+                );
             }
         })
         .await
@@ -737,6 +775,15 @@ mod tests {
         ));
         assert_eq!(manager.pending_dag_count(), 1);
         assert_eq!(manager.process_queue.active_count(), 0);
+
+        let _guard = manager
+            .process_queue
+            .try_acquire_nowait(&root_cid)
+            .expect("simulate a later receive owner");
+        manager
+            .process_pushlog(&message, Some("peer-8"), false, None)
+            .await
+            .expect("an established pending registration can ack a duplicate");
     }
 
     #[tokio::test]

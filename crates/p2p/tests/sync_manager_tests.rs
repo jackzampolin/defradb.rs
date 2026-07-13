@@ -270,10 +270,8 @@ async fn test_sequential_unmerged_reannouncement_is_processed_again() {
     // Once the first receive has exited, its unmerged head can be retried.
     let mut received_count = 0;
     while let Ok(event) = events.try_recv() {
-        match event {
-            SyncEvent::BlockReceived { .. } => received_count += 1,
-            SyncEvent::BlockAlreadyMerged { .. } => {} // Also valid
-            _ => {}
+        if let SyncEvent::BlockReceived { .. } = event {
+            received_count += 1;
         }
     }
     assert_eq!(received_count, 2);

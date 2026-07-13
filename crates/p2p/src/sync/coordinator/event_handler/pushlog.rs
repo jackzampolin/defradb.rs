@@ -264,3 +264,22 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn in_flight_single_flight_suppression_replies_with_backpressure() {
+        let result = Err(crate::error::Error::PushLogInFlight {
+            cid: "bafy-head".to_string(),
+        });
+
+        let reply = build_pushlog_reply("message-1", &result);
+
+        assert_eq!(
+            reply.err_message.as_deref(),
+            Some(crate::error::RATE_LIMITED_MESSAGE)
+        );
+    }
+}
