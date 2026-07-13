@@ -6,7 +6,7 @@ use blockstore::Blockstore;
 
 use super::super::SyncCoordinator;
 use crate::error::Result;
-use crate::transport::{P2PTransport, PeerId};
+use crate::transport::P2PTransport;
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     async fn retry_pending_root_after_bitswap(
@@ -25,42 +25,22 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             Ok(false) => {
                 let missing = self.manager.pending_dag_missing(&root_cid);
                 if !missing.is_empty() {
-                    let mut providers: Vec<PeerId> = self
-                        .access
-                        .peer_state
-                        .connected_peers()
-                        .into_iter()
-                        .map(PeerId::new)
-                        .collect();
-                    if let Some(source) = self.manager.pending_dag_source_peer(&root_cid) {
-                        let source_transport_id = PeerId::new(source);
-                        if !providers.contains(&source_transport_id) {
-                            providers.push(source_transport_id);
-                        }
-                    }
-                    match self
-                        .runtime
-                        .transport
-                        .sync_blocks(root_cid, providers, missing)
-                        .await
+                    // Post-fetch re-issue is paced by the per-root clock:
+                    // an immediate re-fetch against the same providers is
+                    // what produced the #1112 retry storms.
+                    if self
+                        .manager
+                        .try_claim_pending_dag_dispatch(&root_cid, tokio::time::Instant::now())
                     {
-                        Ok(retry_query_id) => {
-                            self.manager.register_query(retry_query_id, root_cid);
-                            tracing::debug!(
-                                query_id = query_id.0,
-                                retry_query_id = retry_query_id.0,
-                                root_cid = %root_cid,
-                                "Started Bitswap fetch for remaining child blocks"
-                            );
+                        if let Some(dag) = self.manager.pending_dag_snapshot(&root_cid) {
+                            self.dispatch_pending_dag_fetch(root_cid, &dag, None);
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                query_id = query_id.0,
-                                root_cid = %root_cid,
-                                error = %e,
-                                "Failed to start Bitswap fetch for remaining child blocks"
-                            );
-                        }
+                    } else {
+                        tracing::debug!(
+                            query_id = query_id.0,
+                            root_cid = %root_cid,
+                            "Pending DAG not due; retry clock will re-dispatch"
+                        );
                     }
                 }
             }
@@ -215,7 +195,7 @@ mod tests {
     };
     use crate::sync::{SyncConfig, SyncCoordinator, SyncEvent};
     use crate::topics::DefraTopic;
-    use crate::transport::{MessageId, P2PTransport, PeerAddr};
+    use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId};
     use crate::{QueryId, ReplicatorInfo};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -567,8 +547,93 @@ mod tests {
         assert_eq!(coordinator.manager().pending_dag_count(), 0);
     }
 
-    #[tokio::test]
-    async fn bitswap_complete_retries_only_its_registered_root() {
+    /// #1116 stage 2 (#1112): a failed post-fetch retry no longer calls the
+    /// transport inline — it must claim the per-root clock first, and only
+    /// dispatch (as a `DagNeedsFetch` event) when the claim succeeds. This
+    /// keeps a root that just registered (and so just consumed its immediate
+    /// claim) from being hammered again the instant its first fetch fails.
+    #[tokio::test(start_paused = true)]
+    async fn bitswap_complete_failure_defers_reissue_to_retry_clock() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let transport = TestTransport::new();
+        let transport_handle = transport.clone();
+        let (coordinator, mut events) =
+            SyncCoordinator::new(transport, blockstore, SyncConfig::default())
+                .await
+                .expect("coordinator");
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (root_cid, root_block) = create_composite_block("doc123", "name", field_cid);
+
+        coordinator
+            .manager()
+            .process_pushlog(
+                &make_broadcast("doc123", root_cid, root_block, "collection1"),
+                Some("peer-1"),
+                false,
+                None,
+            )
+            .await
+            .expect("root pushlog");
+
+        // Registration consumes the root's immediate claim (#1116 stage 2);
+        // drain that event so it isn't mistaken for a post-fetch reissue.
+        match events.try_recv().expect("initial DagNeedsFetch event") {
+            SyncEvent::DagNeedsFetch {
+                root_cid: event_root,
+                ..
+            } => assert_eq!(event_root, root_cid),
+            other => panic!("expected DagNeedsFetch, got {:?}", other),
+        }
+
+        let query_id = QueryId(7);
+        coordinator.manager().register_query(query_id, root_cid);
+        coordinator
+            .handle_bitswap_complete(
+                query_id,
+                false,
+                Some("selective CAR fetch failed".to_string()),
+            )
+            .await
+            .expect("bitswap complete");
+
+        assert!(
+            events.try_recv().is_err(),
+            "root is not yet due; no reissue should be dispatched"
+        );
+        assert!(
+            transport_handle.sync_calls().is_empty(),
+            "post-fetch reissue must never call the transport inline"
+        );
+
+        // Advance past the rung reached by registration's claim
+        // (dispatches=1 -> retry_backoff(1) = 4s) and run one clock tick.
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        let due = coordinator
+            .manager()
+            .claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert_eq!(due.len(), 1);
+        for (due_root, dag) in &due {
+            coordinator.dispatch_pending_dag_fetch(*due_root, dag, None);
+        }
+
+        match events.try_recv().expect("clock-driven DagNeedsFetch event") {
+            SyncEvent::DagNeedsFetch {
+                root_cid: event_root,
+                ..
+            } => assert_eq!(event_root, root_cid),
+            other => panic!("expected DagNeedsFetch, got {:?}", other),
+        }
+        assert!(events.try_recv().is_err(), "clock tick dispatches once");
+        assert!(
+            transport_handle.sync_calls().is_empty(),
+            "dispatch remains event-driven, not a direct transport call"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bitswap_complete_retries_only_its_registered_and_due_root() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let transport = TestTransport::new();
@@ -608,6 +673,10 @@ mod tests {
             let _ = events.try_recv().expect("DagNeedsFetch event");
         }
 
+        // Only root1 is due; root2 stays on its registration-claimed rung so
+        // any dispatch for it would prove the wrong root was retried.
+        coordinator.manager().expedite_pending_dag_retry(&root1_cid);
+
         let query_id = QueryId(7);
         coordinator.manager().register_query(query_id, root1_cid);
         coordinator
@@ -619,17 +688,26 @@ mod tests {
             .await
             .expect("bitswap complete");
 
-        let sync_calls = transport_handle.sync_calls();
-        assert_eq!(sync_calls.len(), 1, "only one pending root should retry");
-        assert_eq!(sync_calls[0].root, root1_cid);
-        assert_eq!(sync_calls[0].missing, vec![field1_cid]);
-        assert_eq!(
-            sync_calls[0].providers,
-            vec![PeerId::new("peer-1".to_string())]
+        match events.try_recv().expect("DagNeedsFetch event for root1") {
+            SyncEvent::DagNeedsFetch {
+                root_cid: event_root,
+                ..
+            } => assert_eq!(event_root, root1_cid),
+            other => panic!("expected DagNeedsFetch, got {:?}", other),
+        }
+        assert!(
+            events.try_recv().is_err(),
+            "only the due root should be dispatched"
         );
         assert_eq!(coordinator.manager().pending_dag_attempts(&root1_cid), 1);
         assert_eq!(coordinator.manager().pending_dag_attempts(&root2_cid), 0);
 
+        // root1 just dispatched (dispatches=2 -> rung 8s): a second failure
+        // right away must not reissue again. QueryId(999) stands in for the
+        // retry query a downstream fetch consumer would have registered.
+        coordinator
+            .manager()
+            .register_query(QueryId(999), root1_cid);
         coordinator
             .handle_bitswap_complete(
                 QueryId(999),
@@ -638,22 +716,46 @@ mod tests {
             )
             .await
             .expect("registered retry bitswap complete");
-        assert_eq!(
-            transport_handle.sync_calls().len(),
-            2,
-            "retry query completion should trigger another retry"
+        assert!(
+            events.try_recv().is_err(),
+            "root1 is not due again yet; no immediate reissue"
         );
         assert_eq!(coordinator.manager().pending_dag_attempts(&root1_cid), 2);
-        assert_eq!(coordinator.manager().pending_dag_attempts(&root2_cid), 0);
+
+        // Advance past root1's second rung (dispatches=2 -> retry_backoff(2)
+        // = 8s). root2's untouched registration rung (4s) has also elapsed
+        // by now, so the clock claims both — dispatch only root1's claim to
+        // keep this assertion about root1's reissue path.
+        tokio::time::advance(std::time::Duration::from_secs(8)).await;
+        let due = coordinator
+            .manager()
+            .claim_due_pending_dag_retries(tokio::time::Instant::now());
+        assert!(
+            due.iter().any(|(cid, _)| *cid == root1_cid),
+            "root1 should be due after its second rung elapses"
+        );
+        for (due_root, dag) in due.iter().filter(|(cid, _)| *cid == root1_cid) {
+            coordinator.dispatch_pending_dag_fetch(*due_root, dag, None);
+        }
+        match events.try_recv().expect("clock-driven DagNeedsFetch event") {
+            SyncEvent::DagNeedsFetch {
+                root_cid: event_root,
+                ..
+            } => assert_eq!(event_root, root1_cid),
+            other => panic!("expected DagNeedsFetch, got {:?}", other),
+        }
 
         coordinator
             .handle_bitswap_complete(QueryId(9999), false, Some("ignored".to_string()))
             .await
             .expect("unknown query is ignored");
-        assert_eq!(
-            transport_handle.sync_calls().len(),
-            2,
+        assert!(
+            events.try_recv().is_err(),
             "unknown query should not trigger another retry"
+        );
+        assert!(
+            transport_handle.sync_calls().is_empty(),
+            "post-fetch reissue is event-driven, never a direct transport call"
         );
     }
 }

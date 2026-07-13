@@ -218,6 +218,64 @@ pub async fn collect_exact_blocks<B: Blockstore>(
     Ok(outcome)
 }
 
+/// Walk the DAG rooted at `root`, collecting every reachable CID for an
+/// access grant (not the block bytes themselves).
+///
+/// Used to authorize a receiver's post-push selective-CAR recovery pull from
+/// the DAG's actual shape, independent of whatever subset of blocks the
+/// pusher happened to send in this job (root-only pushes still let the
+/// receiver recover missing ancestors/dependents via CAR). Mirrors the
+/// receiver-side `find_all_missing_links` walk by following
+/// [`extract_ipld_links`](crate::sync::manager::links::extract_ipld_links),
+/// which excludes the `encryption` link (#976): that block is never served
+/// over CAR (KMS-only, ECIES-wrapped, permission-gated), so it must never be
+/// included in a grant's explicit CID set either — `collect_exact_blocks`
+/// will happily serve any CID the grant allows.
+///
+/// Capped at `max_blocks`; absent blocks are skipped (not an error) so a
+/// partial local DAG still yields a best-effort grant.
+pub async fn collect_dag_cids<B: Blockstore>(
+    blockstore: &B,
+    root: &Cid,
+    max_blocks: usize,
+) -> Result<Vec<Cid>> {
+    let mut collected = Vec::new();
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::from([*root]);
+
+    while let Some(cid) = queue.pop_front() {
+        if !visited.insert(cid) {
+            continue;
+        }
+
+        if collected.len() >= max_blocks {
+            break;
+        }
+
+        let data = match blockstore.get(&cid).await {
+            Ok(Some(d)) => d,
+            Ok(None) => continue,
+            Err(e) => {
+                return Err(Error::BlockstoreError(format!(
+                    "failed to get block {}: {}",
+                    cid, e
+                )));
+            }
+        };
+
+        collected.push(cid);
+
+        let refs = crate::sync::manager::links::extract_ipld_links(&data).unwrap_or_default();
+        for child_cid in refs {
+            if !visited.contains(&child_cid) {
+                queue.push_back(child_cid);
+            }
+        }
+    }
+
+    Ok(collected)
+}
+
 /// Extract CID links from a DAG-CBOR block.
 fn extract_links(block_data: &[u8]) -> Vec<Cid> {
     use ipld_core::codec::Links;
@@ -586,6 +644,40 @@ mod tests {
 
         assert_eq!(collected.blocks.len(), depth);
         assert!(!collected.truncated());
+    }
+
+    #[tokio::test]
+    async fn collect_dag_cids_walks_all_reachable_and_caps() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true);
+
+        let grandchild_data = encode_ipld(ipld!({ "kind": "grandchild" }));
+        let grandchild_cid = make_cid(&grandchild_data);
+        blockstore
+            .put(&grandchild_cid, &grandchild_data)
+            .await
+            .unwrap();
+
+        let child_data = encode_ipld(ipld!({ "child": grandchild_cid }));
+        let child_cid = make_cid(&child_data);
+        blockstore.put(&child_cid, &child_data).await.unwrap();
+
+        let root_data = encode_ipld(ipld!({ "children": [child_cid] }));
+        let root_cid = make_cid(&root_data);
+        blockstore.put(&root_cid, &root_data).await.unwrap();
+
+        let all = collect_dag_cids(&blockstore, &root_cid, CAR_MAX_BLOCKS)
+            .await
+            .unwrap();
+        let all_set: HashSet<Cid> = all.iter().copied().collect();
+        assert_eq!(
+            all_set,
+            HashSet::from([root_cid, child_cid, grandchild_cid]),
+            "expected root, child, and grandchild to be reachable"
+        );
+
+        let capped = collect_dag_cids(&blockstore, &root_cid, 2).await.unwrap();
+        assert_eq!(capped.len(), 2, "cap of 2 must yield exactly 2 CIDs");
     }
 
     #[test]

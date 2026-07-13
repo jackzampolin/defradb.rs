@@ -80,7 +80,7 @@ use crate::transport::{P2PTransport, PeerId};
 use super::broadcaster::Broadcaster;
 use super::collection_store::P2PCollectionStorage;
 use super::head_provider::DocumentHeadProvider;
-use super::manager::SyncManager;
+use super::manager::{PendingDag, SyncManager};
 use super::peer_state::PeerStateTracker;
 use super::rate_limiter::PeerRateLimiter;
 
@@ -141,6 +141,13 @@ pub struct SyncStatus {
     pub single_flight_suppressed: u64,
     pub already_merged_fast_path: u64,
     pub pending_dag_capacity_shed: u64,
+    /// Retry-clock ticks that dispatched a due pending-DAG fetch (#1116 stage 2).
+    pub pending_dag_retry_dispatched: u64,
+    /// Retry-clock/claim attempts that found no due entry (#1116 stage 2).
+    pub pending_dag_retry_suppressed: u64,
+    /// Milliseconds until the earliest due incomplete pending-DAG retry;
+    /// `None` when no incomplete entry is registered.
+    pub next_pending_retry_in_ms: Option<u64>,
 }
 
 struct SyncShutdownState {
@@ -453,6 +460,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             single_flight_suppressed: diagnostics.single_flight_suppressed,
             already_merged_fast_path: diagnostics.already_merged_fast_path,
             pending_dag_capacity_shed: diagnostics.pending_dag_capacity_shed,
+            pending_dag_retry_dispatched: diagnostics.pending_dag_retry_dispatched,
+            pending_dag_retry_suppressed: diagnostics.pending_dag_retry_suppressed,
+            next_pending_retry_in_ms: self.manager.next_pending_retry_in_ms(),
         }
     }
 
@@ -486,6 +496,80 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
             self.manager.resync_persisted_pending_dags().await;
             tokio::time::sleep(interval).await;
+        }
+    }
+
+    /// The receiver's re-arm loop (#1116 stage 2): every `interval`, claim
+    /// all due pending roots and dispatch one fetch each. This is not the
+    /// only scheduled re-driver — `run_pending_dag_resync` also re-drives
+    /// restored entries on its own 60s sweep — but every dispatch path
+    /// (registration, peer connect, post-fetch, and resync's restore) claims
+    /// through this same per-root clock before emitting `DagNeedsFetch`, so
+    /// no re-driver can double-dispatch a root this clock also claims.
+    pub async fn run_pending_dag_retry_clock(&self, interval: Duration) {
+        loop {
+            if self.runtime.shutdown.is_shutting_down() {
+                return;
+            }
+            tokio::time::sleep(interval).await;
+            let due = self
+                .manager
+                .claim_due_pending_dag_retries(tokio::time::Instant::now());
+            for (root_cid, dag) in due {
+                self.dispatch_pending_dag_fetch(root_cid, &dag, None);
+            }
+        }
+    }
+
+    /// Build the provider list for a fetch dispatch — connected peers, an
+    /// optional caller-supplied peer (e.g. a newly connected one), and the
+    /// DAG's original source, deduplicated — and emit `SyncEvent::DagNeedsFetch`.
+    /// Every dispatch site funnels through here so the wire event shape stays
+    /// uniform regardless of what triggered the dispatch.
+    fn dispatch_pending_dag_fetch(
+        &self,
+        root_cid: Cid,
+        dag: &PendingDag,
+        extra_provider: Option<&str>,
+    ) {
+        let mut providers: Vec<String> = self.access.peer_state.connected_peers();
+        if let Some(extra) = extra_provider {
+            if !providers.iter().any(|peer| peer == extra) {
+                providers.push(extra.to_string());
+            }
+        }
+        if let Some(source_peer) = dag.source_peer.clone() {
+            if !providers.contains(&source_peer) {
+                providers.push(source_peer);
+            }
+        }
+        let missing: Vec<_> = dag.missing.iter().copied().collect();
+        tracing::debug!(
+            root_cid = %root_cid,
+            missing_count = missing.len(),
+            fetch_failures = dag.fetch_failures,
+            "Dispatching pending DAG fetch"
+        );
+        if let Err(error) =
+            self.manager
+                .event_sender()
+                .try_send(crate::sync::SyncEvent::DagNeedsFetch {
+                    root_cid,
+                    missing,
+                    providers,
+                    doc_id: dag.doc_id.clone(),
+                    collection_id: dag.collection_id.clone(),
+                    creator: dag.creator.clone(),
+                    sender_peer: dag.source_peer.clone(),
+                    is_explicit_replicator: dag.is_explicit_replicator,
+                    explicit_replay_authorization: dag.explicit_replay_authorization.clone(),
+                })
+        {
+            tracing::debug!(
+                root_cid = %root_cid,
+                error = %error,
+                "Pending DAG dispatch dropped: event channel unavailable; clock re-drives later"
+            );
         }
     }
 

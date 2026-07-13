@@ -1442,6 +1442,15 @@ impl NodeBuilder {
                 .await;
         });
 
+        // Receiver's re-arm loop (#1116 stage 2): dispatches due pending
+        // roots at a tight cadence. Sibling of the resync sweep above.
+        let coord_for_retry_clock = coordinator.clone();
+        tokio::spawn(async move {
+            coord_for_retry_clock
+                .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
+                .await;
+        });
+
         // 10. IROH event handler (events are already TransportEvent -- no conversion needed)
         let coord_for_events = coordinator.clone();
         let event_handler_task = tokio::spawn(async move {
