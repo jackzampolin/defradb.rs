@@ -18,8 +18,9 @@ use async_trait::async_trait;
 use cid::Cid;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use storage::corekv::{IterOptions, Key, Store};
-use storage::keys::systemstore::P2PPendingDagKey;
+use storage::keys::systemstore::{P2PPendingDagKey, P2PQuarantinedDagKey};
 use storage::stores::Systemstore;
 
 use crate::error::{Error, Result};
@@ -84,12 +85,49 @@ impl PersistedPendingDag {
     }
 }
 
+/// A pending-DAG record whose merge failed deterministically (e.g. a unique-index
+/// rejection): moved out of the live keyspace, retained for forensics and counted,
+/// and never re-driven by the resync sweep.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedQuarantinedDag {
+    pub record: PersistedPendingDag,
+    pub reason: String,
+    pub quarantined_at_unix_secs: u64,
+}
+
+impl PersistedQuarantinedDag {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        serde_cbor::to_vec(self).map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        serde_cbor::from_slice(bytes).map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    /// Current wall-clock time as Unix seconds, for stamping `quarantined_at_unix_secs`.
+    pub fn now_unix_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+}
+
 /// Durable KV backing for push-originated pending-DAG registrations.
 #[async_trait]
 pub trait PendingDagStorage: Send + Sync {
     async fn put(&self, root_cid: &Cid, record: &PersistedPendingDag) -> Result<()>;
     async fn remove(&self, root_cid: &Cid) -> Result<()>;
     async fn load_all(&self) -> Result<Vec<(Cid, PersistedPendingDag)>>;
+
+    /// Move a terminally-rejected root into the quarantine keyspace. The caller
+    /// is responsible for deleting the live `/p2p/pending_dag/` record (write
+    /// quarantine first, delete live second, so a crash mid-transition leaves
+    /// a re-drivable live record rather than a silently lost one).
+    async fn quarantine(&self, root_cid: &Cid, entry: &PersistedQuarantinedDag) -> Result<()>;
+    async fn is_quarantined(&self, root_cid: &Cid) -> Result<bool>;
+    async fn load_quarantined(&self) -> Result<Vec<(Cid, PersistedQuarantinedDag)>>;
+    async fn remove_quarantined(&self, root_cid: &Cid) -> Result<()>;
 }
 
 /// `PendingDagStorage` over the systemstore keyspace (`/p2p/pending_dag/`).
@@ -180,6 +218,95 @@ impl<S: Store + 'static> PendingDagStorage for PendingDagStore<S> {
             .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(records)
     }
+
+    async fn quarantine(&self, root_cid: &Cid, entry: &PersistedQuarantinedDag) -> Result<()> {
+        let key = P2PQuarantinedDagKey::new(root_cid.to_string());
+        let value = entry.to_bytes()?;
+        let mut txn = self
+            .systemstore
+            .new_txn(false)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        txn.set(&key.bytes(), &value)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        txn.commit()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    async fn is_quarantined(&self, root_cid: &Cid) -> Result<bool> {
+        let key = P2PQuarantinedDagKey::new(root_cid.to_string());
+        let txn = self
+            .systemstore
+            .new_txn(true)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        let value = txn
+            .get(&key.bytes())
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(value.is_some())
+    }
+
+    async fn load_quarantined(&self) -> Result<Vec<(Cid, PersistedQuarantinedDag)>> {
+        let txn = self
+            .systemstore
+            .new_txn(true)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        let opts =
+            IterOptions::new().with_prefix(P2PQuarantinedDagKey::p2p_quarantined_dag_prefix());
+        let mut iter = txn
+            .iterator(opts)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut records = Vec::new();
+        while let Some(pair) = iter
+            .next()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+        {
+            let key_str = String::from_utf8_lossy(&pair.key);
+            let Some(cid_str) = key_str.strip_prefix("/p2p/quarantined_dag/") else {
+                continue;
+            };
+            let Ok(root_cid) = cid_str.parse::<Cid>() else {
+                tracing::warn!(key = %key_str, "Skipping quarantined DAG with invalid CID key");
+                continue;
+            };
+            match PersistedQuarantinedDag::from_bytes(&pair.value) {
+                Ok(record) => records.push((root_cid, record)),
+                Err(error) => {
+                    tracing::warn!(
+                        root_cid = %root_cid,
+                        error = %error,
+                        "Skipping undecodable quarantined DAG record"
+                    );
+                }
+            }
+        }
+        iter.close()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(records)
+    }
+
+    async fn remove_quarantined(&self, root_cid: &Cid) -> Result<()> {
+        let key = P2PQuarantinedDagKey::new(root_cid.to_string());
+        let mut txn = self
+            .systemstore
+            .new_txn(false)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        txn.delete(&key.bytes())
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        txn.commit()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -243,5 +370,65 @@ mod tests {
         let loaded = store.load_all().await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].1.doc_id, "doc-new");
+    }
+
+    fn quarantined(doc: &str, reason: &str) -> PersistedQuarantinedDag {
+        PersistedQuarantinedDag {
+            record: record(doc),
+            reason: reason.to_string(),
+            quarantined_at_unix_secs: 1_700_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn quarantine_load_remove_roundtrip() {
+        let store = PendingDagStore::new(Arc::new(MemoryStore::new()));
+        let root = cid(b"a");
+
+        assert!(!store.is_quarantined(&root).await.unwrap());
+
+        let entry = quarantined("doc-a", "unique constraint violation");
+        store.quarantine(&root, &entry).await.unwrap();
+
+        assert!(store.is_quarantined(&root).await.unwrap());
+
+        let loaded = store.load_quarantined().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].0, root);
+        assert_eq!(loaded[0].1, entry);
+
+        store.remove_quarantined(&root).await.unwrap();
+        assert!(!store.is_quarantined(&root).await.unwrap());
+        assert!(store.load_quarantined().await.unwrap().is_empty());
+
+        // Removing an absent record is a no-op, not an error.
+        store.remove_quarantined(&root).await.unwrap();
+    }
+
+    /// The quarantine keyspace is deliberately outside `/p2p/pending_dag/`:
+    /// the live resync sweep's prefix scan (`load_all`) must never observe a
+    /// quarantined root, or it would re-drive a merge known to fail every time.
+    #[tokio::test]
+    async fn quarantined_root_is_absent_from_live_load_all() {
+        let store = PendingDagStore::new(Arc::new(MemoryStore::new()));
+        let live_root = cid(b"live");
+        let quarantined_root = cid(b"quarantined");
+
+        store.put(&live_root, &record("doc-live")).await.unwrap();
+        store
+            .quarantine(
+                &quarantined_root,
+                &quarantined("doc-quarantined", "unique constraint violation"),
+            )
+            .await
+            .unwrap();
+
+        let live = store.load_all().await.unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].0, live_root);
+
+        let quarantined_records = store.load_quarantined().await.unwrap();
+        assert_eq!(quarantined_records.len(), 1);
+        assert_eq!(quarantined_records[0].0, quarantined_root);
     }
 }

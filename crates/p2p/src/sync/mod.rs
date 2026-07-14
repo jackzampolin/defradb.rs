@@ -51,7 +51,8 @@ pub use manager::{
 pub use merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome, RecoveredBlockMetadata};
 pub use peer_state::{PeerStateTracker, PeerStats};
 pub use pending_store::{
-    PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedReplayAuthorization,
+    PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedQuarantinedDag,
+    PersistedReplayAuthorization,
 };
 pub use push_backlog::{
     CidRetrySnapshot, EnqueueOutcome, PeerBacklogSnapshot, PushBacklog, PushBacklogSnapshot,
