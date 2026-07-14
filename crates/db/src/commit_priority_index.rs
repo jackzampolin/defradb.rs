@@ -47,9 +47,17 @@ impl<S: Store> DB<S> {
                 .await
                 .map_err(Error::Storage)?;
 
-            let mut root_heads = Vec::new();
+            // Deltas no longer carry docIDs (Go #4838): the doc short ID is
+            // recovered from the head key ("/d/{short_id uvarint}/...") and
+            // inherited by every ancestor reached through that head.
+            let mut root_heads: Vec<(Cid, u64)> = Vec::new();
             let mut seen_root_heads = HashSet::new();
             while let Some(pair) = head_iter.next().await.map_err(Error::Storage)? {
+                let Ok((_, doc_short_id)) =
+                    storage::keys::doc_id_index::decode_doc_short_id_prefix(&pair.key[3..])
+                else {
+                    continue;
+                };
                 let key_str = String::from_utf8_lossy(&pair.key);
                 let Some(cid_str) = key_str.rsplit('/').next() else {
                     continue;
@@ -58,7 +66,7 @@ impl<S: Store> DB<S> {
                     continue;
                 };
                 if seen_root_heads.insert(cid) {
-                    root_heads.push(cid);
+                    root_heads.push((cid, doc_short_id));
                 }
             }
             head_iter.close().await.map_err(Error::Storage)?;
@@ -67,7 +75,7 @@ impl<S: Store> DB<S> {
             let mut visited = HashSet::new();
             let mut indexed_count = 0u64;
 
-            while let Some(cid) = stack.pop() {
+            while let Some((cid, doc_short_id)) = stack.pop() {
                 if !visited.insert(cid) {
                     continue;
                 }
@@ -83,19 +91,16 @@ impl<S: Store> DB<S> {
                     continue;
                 };
 
-                if let Some(doc_id_bytes) = block.delta.doc_id() {
-                    let doc_id = String::from_utf8_lossy(doc_id_bytes).to_string();
-                    let key = HeadstorePriorityKey::new(&doc_id, block.delta.priority(), cid);
-                    headstore
-                        .set(&key.bytes(), &[])
-                        .await
-                        .map_err(Error::Storage)?;
-                    indexed_count += 1;
-                }
+                let key = HeadstorePriorityKey::new(doc_short_id, block.delta.priority(), cid);
+                headstore
+                    .set(&key.bytes(), &[])
+                    .await
+                    .map_err(Error::Storage)?;
+                indexed_count += 1;
 
                 if let Some(heads) = &block.heads {
                     for parent in heads {
-                        stack.push(*parent);
+                        stack.push((*parent, doc_short_id));
                     }
                 }
             }
@@ -164,18 +169,19 @@ mod tests {
             let doc_id = {
                 let blockstore = write_txn.blockstore().unwrap();
                 let headstore = write_txn.headstore().unwrap();
+                let systemstore = write_txn.systemstore().unwrap();
 
+                let identity = db_blocks::DocStorageIdentity::new(1, 1);
                 let mut doc = Document::new();
-                doc.generate_and_set_doc_id().unwrap();
                 doc.set("name", NormalValue::String("Alice".to_string()));
                 doc.set("age", NormalValue::Int(30));
 
-                let doc_id = doc.id().unwrap().to_string();
-                write_document_blocks(
+                let result = write_document_blocks(
                     &blockstore,
                     &headstore,
                     &doc,
                     "schema-v1",
+                    identity,
                     None,
                     None,
                     None,
@@ -183,6 +189,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                let doc_id = result.doc_id.clone();
+                doc.set_id(document::DocID::from_string(&doc_id).unwrap());
+                crate::doc_id_map::set_doc_id_mapping(&systemstore, 1, 1, &doc_id)
+                    .await
+                    .unwrap();
 
                 doc.set("age", NormalValue::Int(31));
                 let age_only = std::iter::once("age".to_string()).collect();
@@ -191,6 +202,7 @@ mod tests {
                     &headstore,
                     &doc,
                     "schema-v1",
+                    identity,
                     Some(&age_only),
                     None,
                     None,
@@ -206,6 +218,7 @@ mod tests {
                     &headstore,
                     &doc,
                     "schema-v1",
+                    identity,
                     Some(&name_only),
                     None,
                     None,
@@ -308,16 +321,17 @@ mod tests {
                 let blockstore = write_txn.blockstore().unwrap();
                 let headstore = write_txn.headstore().unwrap();
 
+                let identity = db_blocks::DocStorageIdentity::new(1, 1);
                 let mut doc = Document::new();
-                doc.generate_and_set_doc_id().unwrap();
                 doc.set("name", NormalValue::String("Alice".to_string()));
                 doc.set("age", NormalValue::Int(30));
 
-                write_document_blocks(
+                let result = write_document_blocks(
                     &blockstore,
                     &headstore,
                     &doc,
                     "schema-v1",
+                    identity,
                     None,
                     None,
                     None,
@@ -325,6 +339,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                doc.set_id(document::DocID::from_string(&result.doc_id).unwrap());
 
                 doc.set("age", NormalValue::Int(31));
                 let age_only = std::iter::once("age".to_string()).collect();
@@ -333,6 +348,7 @@ mod tests {
                     &headstore,
                     &doc,
                     "schema-v1",
+                    identity,
                     Some(&age_only),
                     None,
                     None,

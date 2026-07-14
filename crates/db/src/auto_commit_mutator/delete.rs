@@ -20,14 +20,27 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
         })?;
 
-        // Execute the mutation in a block to drop datastore before commit
-        let result = {
-            let datastore = txn.datastore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get datastore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?;
+        // Acquire store views up front (dropped before commit); the mutation
+        // itself runs in an async block so errors fall through to the discard.
+        // Some(short_id) means the doc existed and was deleted.
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
+
+        let result: query::error::Result<Option<u64>> = async {
+            let Some(doc_short_id) = collection
+                .resolve_doc_short_id(&systemstore, doc_id)
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?
+            else {
+                return Ok(None);
+            };
 
             // Create an IndexManager for index maintenance
             let short_id = collection.resolved_root_id();
@@ -40,14 +53,20 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 })?;
 
             // Use delete_with_indexes to maintain index consistency
-            collection
-                .delete_with_indexes(&datastore, doc_id, &index_manager)
+            let existed = collection
+                .delete_with_indexes(&datastore, doc_id, doc_short_id, &index_manager)
                 .await
-                .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))
-        };
+                .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))?;
+            Ok(existed.then_some(doc_short_id))
+        }
+        .await;
+
+        drop(datastore);
+        drop(systemstore);
 
         match result {
-            Ok(existed) => {
+            Ok(deleted_short_id) => {
+                let existed = deleted_short_id.is_some();
                 // DeleteNode treats existed==false as a no-op; don't write a
                 // tombstone block or emit an event for a missing doc.
                 // Propagate any commit error so callers see the same failure
@@ -92,6 +111,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         &blockstore,
                         &headstore,
                         &doc_id_str,
+                        deleted_short_id.expect("existed implies short id"),
                         schema_version_id,
                         sign_config.as_ref(),
                     )
@@ -99,6 +119,22 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     {
                         Ok(block_result) => {
                             let composite_cid = block_result.cid;
+
+                            if let Ok(systemstore) = txn.systemstore() {
+                                if let Err(e) = crate::doc_id_map::set_block_doc_id_mapping(
+                                    &systemstore,
+                                    &composite_cid.to_string(),
+                                    &doc_id_str,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        collection = %collection_name,
+                                        error = %e,
+                                        "Failed to record block ownership mapping for delete"
+                                    );
+                                }
+                            }
 
                             let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
                             if collection.schema().is_branchable {

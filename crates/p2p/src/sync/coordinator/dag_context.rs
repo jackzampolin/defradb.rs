@@ -9,20 +9,18 @@ use crate::ExplicitReplayAuthorization;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BlockContext {
-    pub(crate) doc_id: Option<String>,
     pub(crate) collection_id: Option<String>,
 }
 
+/// Extract collection context from a block payload. Deltas carry no
+/// document identity (Go #4838) — the DocID travels only in the PushLog
+/// envelope or is derived from the genesis composite CID at merge time.
 pub(crate) fn block_context_from_data(block_data: &[u8]) -> BlockContext {
     let Ok(block) = DefraBlock::from_dag_cbor(block_data) else {
         return BlockContext::default();
     };
 
     BlockContext {
-        doc_id: block
-            .delta
-            .doc_id()
-            .map(|doc_id| String::from_utf8_lossy(doc_id).to_string()),
         collection_id: block.delta.schema_version_id().map(ToString::to_string),
     }
 }
@@ -105,11 +103,6 @@ impl DagFetchContext {
 
     pub(crate) fn fill_missing_from_block(&mut self, block_data: &[u8]) {
         let block_context = block_context_from_data(block_data);
-        if self.doc_id.is_empty() {
-            if let Some(doc_id) = block_context.doc_id {
-                self.doc_id = doc_id;
-            }
-        }
         if self.collection_id.is_empty() {
             if let Some(collection_id) = block_context.collection_id {
                 self.collection_id = collection_id;

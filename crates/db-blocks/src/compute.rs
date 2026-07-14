@@ -35,6 +35,7 @@ pub fn compute_document_blocks(
     let mut headstore_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
+    let mut encryption_cids: Vec<Cid> = Vec::new();
 
     let priority: u64 = 1; // Always 1 for creates
 
@@ -81,6 +82,10 @@ pub fn compute_document_blocks(
         } else {
             (value_bytes, None)
         };
+
+        if let Some(enc_cid) = encryption_cid {
+            encryption_cids.push(enc_cid);
+        }
 
         let is_counter = doc
             .fields()
@@ -159,6 +164,10 @@ pub fn compute_document_blocks(
         None
     };
 
+    if let Some(enc_cid) = composite_encryption_cid {
+        encryption_cids.push(enc_cid);
+    }
+
     let composite_payload = CompositeDeltaPayload {
         schema_version_id: schema_version_id.to_string(),
         priority,
@@ -204,6 +213,7 @@ pub fn compute_document_blocks(
             block: composite_bytes,
             doc_id: derive_doc_id(&composite_cid),
             field_cids,
+            encryption_cids,
         },
     })
 }

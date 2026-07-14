@@ -1,5 +1,9 @@
-use super::helpers::{ensure_collection_is_active, write_local_update};
+use super::helpers::{
+    ensure_collection_is_active, register_block_doc_id_mappings, write_local_update,
+};
 use super::*;
+
+use db_blocks::DocStorageIdentity;
 
 #[allow(clippy::type_complexity)]
 impl<S: Store + 'static> AutoCommitMutator<S> {
@@ -52,15 +56,19 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
         })?;
 
-        // Execute the mutation in a block to drop datastore before commit
-        let result = {
-            let datastore = txn.datastore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get datastore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?;
+        // Acquire store views up front (dropped before commit); the mutation
+        // itself runs in an async block so errors fall through to the discard.
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
 
+        let result: query::error::Result<u64> = async {
             // Create an IndexManager for index maintenance
             let short_id = collection.resolved_root_id();
             let index_manager = IndexManager::from_collection(short_id, collection.schema())
@@ -74,6 +82,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             self.db
                 .validate_downsample_write(
                     &datastore,
+                    &systemstore,
                     collection.schema(),
                     &doc,
                     Some(&modified_fields),
@@ -81,14 +90,39 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .await
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
+            let doc_id = doc.id().cloned().ok_or_else(|| {
+                query::error::QueryError::execution("update requires a document ID")
+            })?;
+            let doc_short_id = collection
+                .require_doc_short_id(&systemstore, &doc_id)
+                .await
+                .map_err(|e| match e {
+                    crate::error::Error::DocumentNotFound(id) => {
+                        query::error::QueryError::document_not_found(id)
+                    }
+                    other => query::error::QueryError::execution(other.to_string()),
+                })?;
+
             // Bundle the counter RMW (#1021) with the doc blob + index write so
             // the authoritative CRDT accumulation store always advances before the
             // blob is persisted — enforced by construction in `write_local_update`.
-            write_local_update(&datastore, &collection, &mut doc, &index_manager).await
-        };
+            write_local_update(
+                &datastore,
+                &collection,
+                &mut doc,
+                doc_short_id,
+                &index_manager,
+            )
+            .await?;
+            Ok(doc_short_id)
+        }
+        .await;
+
+        drop(datastore);
+        drop(systemstore);
 
         match result {
-            Ok(()) => {
+            Ok(doc_short_id) => {
                 // Build blocks and write to blockstore/headstore in a scoped block
                 // This enables _commits queries to find the document's version history
                 // (composite_cid, composite_bytes, optional (collection_cid, collection_bytes))
@@ -116,6 +150,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     // Get signing config from thread-local (set by FFI exec_request)
                     let sign_config = get_signing_config();
 
+                    let identity =
+                        DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id);
+
                     // For update operations, pass the modified fields to only create blocks
                     // for the fields that actually changed
                     match write_document_blocks(
@@ -123,6 +160,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         &headstore,
                         &doc,
                         schema_version_id,
+                        identity,
                         Some(&modified_fields),
                         enc_config.as_ref(),
                         sign_config.as_ref(),
@@ -131,6 +169,21 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     .await
                     {
                         Ok(block_result) => {
+                            if let (Some(doc_id), Ok(systemstore)) = (doc.id(), txn.systemstore()) {
+                                if let Err(e) = register_block_doc_id_mappings(
+                                    &systemstore,
+                                    &block_result,
+                                    &doc_id.to_string(),
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        collection = %collection_name,
+                                        error = %e,
+                                        "Failed to record block ownership mappings for update"
+                                    );
+                                }
+                            }
                             // For branchable collections, create a collection-level block
                             let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
                             if collection.schema().is_branchable {

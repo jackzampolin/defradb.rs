@@ -82,11 +82,11 @@ impl<S: Store> DbDocFetcher<S> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
     async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
-        let (collection, datastore) =
+        let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
-            .get_all_with_datastore(&datastore)
+            .get_all_with_datastore(&datastore, &systemstore)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))
     }
@@ -96,11 +96,11 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         collection_name: &str,
         show_deleted: bool,
     ) -> query::error::Result<Vec<(Document, bool)>> {
-        let (collection, datastore) =
+        let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
-            .get_all_with_datastore_include_deleted(&datastore, show_deleted)
+            .get_all_with_datastore_include_deleted(&datastore, &systemstore, show_deleted)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))
     }
@@ -110,7 +110,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         collection_name: &str,
         doc_ids: &[String],
     ) -> query::error::Result<FetchByIdsResult> {
-        let (collection, datastore) =
+        let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         let mut docs = Vec::new();
@@ -129,7 +129,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             };
 
             match collection
-                .get_with_datastore(&datastore, &doc_id)
+                .get_by_doc_id(&datastore, &systemstore, &doc_id)
                 .await
                 .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?
             {
@@ -160,13 +160,13 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         field_name: &str,
         value: &str,
     ) -> query::error::Result<Vec<Document>> {
-        let (collection, datastore) =
+        let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         // Get all documents and filter by field value.
         // This is a fallback implementation - index-based lookup can be added later.
         let all_docs = collection
-            .get_all_with_datastore(&datastore)
+            .get_all_with_datastore(&datastore, &systemstore)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 
@@ -212,7 +212,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         use std::collections::HashSet;
         use storage::index::IndexIterator;
 
-        let (_collection, datastore, index_manager) =
+        let (_collection, datastore, _systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
 
         // Get the index
@@ -456,7 +456,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         field_name: &str,
         query: &str,
     ) -> query::error::Result<std::collections::HashMap<String, f64>> {
-        let (_collection, datastore, index_manager) =
+        let (_collection, datastore, _systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
 
         let idx_name = crate::index_manager::fulltext_index_name(field_name);

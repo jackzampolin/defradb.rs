@@ -27,13 +27,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     collection_name, e
                 ))
             })?;
+            let systemstore = txn.systemstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+            })?;
 
             let r = collection
-                .exists_with_datastore(&datastore, doc_id)
+                .exists_by_doc_id(&datastore, &systemstore, doc_id)
                 .await
                 .map_err(|e| query::error::QueryError::execution(format!("exists error: {}", e)));
 
             drop(datastore);
+            drop(systemstore);
             r
         };
 
@@ -74,15 +78,19 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     collection_name, e
                 ))
             })?;
+            let systemstore = txn.systemstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+            })?;
 
             let r = collection
-                .get_with_datastore(&datastore, doc_id)
+                .get_by_doc_id(&datastore, &systemstore, doc_id)
                 .await
                 .map_err(|e| {
                     query::error::QueryError::execution(format!("get_for_update error: {}", e))
                 });
 
             drop(datastore);
+            drop(systemstore);
             r
         };
 

@@ -11,6 +11,17 @@ use schema::{CollectionVersion, FieldDescription, FieldKind, IndexedFieldDescrip
 use storage::backends::MemoryStore;
 use storage::index::IndexIterator;
 
+/// Assign a distinct valid DocID for index-layer tests. Index entries are
+/// keyed by DocID string; these tests only need identity, not derivation, so
+/// the ID comes from a per-process seed sequence instead of the genesis-CID
+/// create flow.
+fn set_test_doc_id(doc: &mut Document) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    doc.set_id(document::DocID::new_v0_from_seed(&format!("test-doc-{n}")));
+}
+
 /// Generate a test schema with common fields.
 fn test_schema() -> CollectionVersion {
     CollectionVersion::new(
@@ -69,7 +80,7 @@ proptest! {
             for i in 0..doc_count {
                 let mut doc = Document::new();
                 doc.set("name", NormalValue::String(format!("user_{}", i)));
-                doc.generate_and_set_doc_id().unwrap();
+                set_test_doc_id(&mut doc);
                 docs.push(doc);
             }
 
@@ -126,7 +137,7 @@ proptest! {
             // IMPORTANT: Set fields BEFORE generating doc_id
             let mut doc = Document::new();
             doc.set("name", NormalValue::String(name.clone()));
-            doc.generate_and_set_doc_id().unwrap();
+            set_test_doc_id(&mut doc);
 
             manager
                 .on_document_create(&datastore, &doc, &schema)
@@ -203,7 +214,7 @@ proptest! {
             // IMPORTANT: Set fields BEFORE generating doc_id
             let mut old_doc = Document::new();
             old_doc.set("name", NormalValue::String(old_name.clone()));
-            old_doc.generate_and_set_doc_id().unwrap();
+            set_test_doc_id(&mut old_doc);
             let doc_id = old_doc.id().unwrap().clone();
 
             manager
@@ -285,7 +296,7 @@ proptest! {
                 doc.set("name", NormalValue::String(name.clone()));
                 // Add unique field to ensure different doc_ids
                 doc.set("age", NormalValue::Int(i as i64));
-                doc.generate_and_set_doc_id().unwrap();
+                set_test_doc_id(&mut doc);
 
                 manager
                     .on_document_create(&datastore, &doc, &schema)
@@ -347,7 +358,7 @@ proptest! {
             let mut doc1 = Document::new();
             doc1.set("name", NormalValue::String(name.clone()));
             doc1.set("age", NormalValue::Int(1)); // Unique field for different ID
-            doc1.generate_and_set_doc_id().unwrap();
+            set_test_doc_id(&mut doc1);
 
             let result1 = manager
                 .on_document_create(&datastore, &doc1, &schema)
@@ -359,7 +370,7 @@ proptest! {
             let mut doc2 = Document::new();
             doc2.set("name", NormalValue::String(name.clone()));
             doc2.set("age", NormalValue::Int(2)); // Different age for different ID
-            doc2.generate_and_set_doc_id().unwrap();
+            set_test_doc_id(&mut doc2);
 
             let result2 = manager
                 .on_document_create(&datastore, &doc2, &schema)
@@ -414,7 +425,7 @@ proptest! {
                 doc.set("name", NormalValue::String(name.clone()));
                 // Add unique index to ensure different doc_ids even if names are the same
                 doc.set("age", NormalValue::Int(i as i64));
-                doc.generate_and_set_doc_id().unwrap();
+                set_test_doc_id(&mut doc);
 
                 manager
                     .on_document_create(&datastore, &doc, &schema)

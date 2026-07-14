@@ -153,7 +153,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         use crate::collection_loader::get_collection_with_lazy_load;
         use crate::index_manager::IndexManager;
 
-        let (collection, datastore) =
+        let (collection, datastore, _systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         let short_id = collection.resolved_root_id();

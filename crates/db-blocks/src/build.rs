@@ -124,5 +124,6 @@ pub async fn build_blocks_from_document<B: Blockstore>(
         block: composite_bytes,
         doc_id: derive_doc_id(&composite_cid),
         field_cids,
+        encryption_cids: vec![],
     })
 }

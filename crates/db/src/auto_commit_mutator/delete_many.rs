@@ -48,19 +48,41 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         for doc_id in doc_ids {
             // Delete from datastore + indexes
-            let existed = {
+            let (existed, doc_short_id) = {
                 let datastore = txn.datastore().map_err(|e| {
                     query::error::QueryError::execution(format!(
                         "failed to get datastore for collection '{}': {}",
                         collection_name, e
                     ))
                 })?;
+                let systemstore = txn.systemstore().map_err(|e| {
+                    query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+                })?;
+
+                let doc_short_id = match collection.resolve_doc_short_id(&systemstore, doc_id).await
+                {
+                    Ok(Some(id)) => id,
+                    Ok(None) => {
+                        results.push((doc_id.clone(), false, None));
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(
+                            collection = %collection_name,
+                            doc_id = %doc_id,
+                            error = %e,
+                            "Failed to resolve doc short ID in batch delete"
+                        );
+                        results.push((doc_id.clone(), false, None));
+                        continue;
+                    }
+                };
 
                 match collection
-                    .delete_with_indexes(&datastore, doc_id, &index_manager)
+                    .delete_with_indexes(&datastore, doc_id, doc_short_id, &index_manager)
                     .await
                 {
-                    Ok(existed) => existed,
+                    Ok(existed) => (existed, doc_short_id),
                     Err(e) => {
                         warn!(
                             collection = %collection_name,
@@ -94,6 +116,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &blockstore,
                     &headstore,
                     &doc_id.to_string(),
+                    doc_short_id,
                     &schema_version_id,
                     sign_config.as_ref(),
                 )
@@ -101,6 +124,22 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 {
                     Ok(block_result) => {
                         let composite_cid = block_result.cid;
+
+                        if let Ok(systemstore) = txn.systemstore() {
+                            if let Err(e) = crate::doc_id_map::set_block_doc_id_mapping(
+                                &systemstore,
+                                &composite_cid.to_string(),
+                                &doc_id.to_string(),
+                            )
+                            .await
+                            {
+                                warn!(
+                                    collection = %collection_name,
+                                    error = %e,
+                                    "Failed to record block ownership mapping for delete"
+                                );
+                            }
+                        }
 
                         let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
                         if collection.schema().is_branchable {

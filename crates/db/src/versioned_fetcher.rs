@@ -74,7 +74,12 @@ impl<S: Store> VersionedFetcher<S> {
         }
 
         // Regular document CID path
-        let doc_id = Self::extract_doc_id(&target_block.delta)?;
+        let doc_id = self
+            .resolve_doc_id(txn, &target_cid)
+            .await?
+            .ok_or_else(|| {
+                Error::Serialization("cid either does not exist or belong to document".to_string())
+            })?;
 
         if let Some(expected) = expected_doc_id {
             if doc_id != expected {
@@ -127,7 +132,7 @@ impl<S: Store> VersionedFetcher<S> {
                     let doc_composite_cid = link.link;
                     // Load the document composite block to get its doc_id and priority
                     if let Ok(doc_block) = self.load_block(txn, &doc_composite_cid).await {
-                        if let Ok(doc_id) = Self::extract_doc_id(&doc_block.delta) {
+                        if let Some(doc_id) = self.resolve_doc_id(txn, &doc_composite_cid).await? {
                             let priority = doc_block.delta.priority();
                             match doc_composites.get(&doc_id) {
                                 None => {
@@ -165,9 +170,9 @@ impl<S: Store> VersionedFetcher<S> {
                 Ok(b) => b,
                 Err(_) => continue,
             };
-            let doc_id = match Self::extract_doc_id(&composite_block.delta) {
-                Ok(id) => id,
-                Err(_) => continue,
+            let doc_id = match self.resolve_doc_id(txn, composite_cid).await? {
+                Some(id) => id,
+                None => continue,
             };
 
             // Collect all blocks from this composite back to genesis
@@ -210,14 +215,13 @@ impl<S: Store> VersionedFetcher<S> {
             || s.starts_with("Qm")
     }
 
-    /// Extract document ID from a delta.
-    fn extract_doc_id(delta: &CrdtDelta) -> Result<String> {
-        delta
-            .doc_id()
-            .map(|bytes| String::from_utf8_lossy(bytes).to_string())
-            .ok_or_else(|| {
-                Error::Serialization("cid either does not exist or belong to document".to_string())
-            })
+    /// Resolve the DocID owning a block via the systemstore block-ownership
+    /// index (`/d/b`). Deltas no longer carry docIDs (Go #4838).
+    async fn resolve_doc_id(&self, txn: &mut DbTxn<S>, cid: &Cid) -> Result<Option<String>> {
+        let systemstore = txn.systemstore()?;
+        let owners =
+            crate::doc_id_map::get_doc_ids_for_block(&systemstore, &cid.to_string()).await?;
+        Ok(owners.into_iter().next())
     }
 
     /// Collect all blocks from target CID back to genesis using BFS.
@@ -319,12 +323,6 @@ impl<S: Store> VersionedFetcher<S> {
         for (_cid, block) in blocks {
             match &block.delta {
                 CrdtDelta::Lww(payload) => {
-                    // Check if this delta belongs to our document
-                    let delta_doc_id = String::from_utf8_lossy(&payload.doc_id);
-                    if delta_doc_id != doc_id {
-                        continue;
-                    }
-
                     let field_name = &payload.field_name;
                     let priority = payload.priority;
 
@@ -366,12 +364,6 @@ impl<S: Store> VersionedFetcher<S> {
                     }
                 }
                 CrdtDelta::Counter(payload) => {
-                    // Check if this delta belongs to our document
-                    let delta_doc_id = String::from_utf8_lossy(&payload.doc_id);
-                    if delta_doc_id != doc_id {
-                        continue;
-                    }
-
                     let field_name = &payload.field_name;
 
                     // Counter: accumulate increments

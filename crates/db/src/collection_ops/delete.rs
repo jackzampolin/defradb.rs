@@ -184,12 +184,12 @@ impl<S: Store> crate::database::DB<S> {
         let collection_id = collection.collection_id().to_string();
         let short_id = collection.resolved_root_id();
 
-        // Phase 1: Collect all doc_ids in a read-only txn
-        let doc_ids = self.collect_doc_ids(&collection_id).await?;
+        // Phase 1: Collect all doc short IDs in a read-only txn
+        let doc_ids = self.collect_doc_short_ids(&collection).await?;
 
         // Phase 2: Delete document data in chunks
         for chunk in doc_ids.chunks(TRUNCATE_CHUNK_SIZE) {
-            self.truncate_chunk(&collection_id, chunk).await?;
+            self.truncate_chunk(&collection, chunk).await?;
         }
 
         // Phase 3: Delete collection-level metadata (indexes, collection heads)
@@ -206,25 +206,22 @@ impl<S: Store> crate::database::DB<S> {
         Ok(())
     }
 
-    /// Collect all doc_ids for a collection using a read-only transaction.
-    async fn collect_doc_ids(&self, collection_id: &str) -> Result<Vec<String>> {
+    /// Collect all doc short IDs for a collection using a read-only transaction.
+    async fn collect_doc_short_ids(&self, collection: &Collection) -> Result<Vec<u64>> {
+        use storage::keys::doc_id_index::decode_doc_short_id;
+
         let txn = self.new_txn(true).await?;
         let doc_ids;
         {
             let datastore = txn.datastore()?;
-            let doc_prefix = format!("/d/{}/", collection_id).into_bytes();
+            let doc_prefix = collection.collection_key_prefix();
+            let prefix_len = doc_prefix.len();
             let opts = IterOptions::new().with_prefix(doc_prefix);
             let mut iter = datastore.iterator(opts).await.map_err(Error::Storage)?;
             let mut ids = Vec::new();
             while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
-                if pair.key.ends_with(b"/v") {
-                    continue;
-                }
-                if let Some(pos) = pair.key.iter().rposition(|&b| b == b'/') {
-                    let doc_id = String::from_utf8_lossy(&pair.key[pos + 1..]).to_string();
-                    if !doc_id.is_empty() {
-                        ids.push(doc_id);
-                    }
+                if let Ok(doc_short_id) = decode_doc_short_id(&pair.key[prefix_len..]) {
+                    ids.push(doc_short_id);
                 }
             }
             iter.close().await.map_err(Error::Storage)?;
@@ -234,24 +231,32 @@ impl<S: Store> crate::database::DB<S> {
         Ok(doc_ids)
     }
 
-    /// Delete data for a chunk of doc_ids within a single write transaction.
-    async fn truncate_chunk(&self, collection_id: &str, doc_ids: &[String]) -> Result<()> {
-        use storage::keys::HeadstoreDocKey;
+    /// Delete data for a chunk of doc short IDs within a single write transaction.
+    async fn truncate_chunk(&self, collection: &Collection, doc_short_ids: &[u64]) -> Result<()> {
+        use storage::keys::{HeadstoreDocKey, HeadstorePriorityKey};
 
         let txn = self.new_txn(false).await?;
         let datastore = txn.datastore()?;
         let headstore = txn.headstore()?;
         let blockstore = txn.blockstore()?;
+        let systemstore = txn.systemstore()?;
 
         let result: Result<()> = async {
-            for doc_id in doc_ids {
-                let doc_key_prefix = format!("/d/{}/{}", collection_id, doc_id).into_bytes();
-                delete_prefix(&datastore, doc_key_prefix).await?;
+            for &doc_short_id in doc_short_ids {
+                datastore
+                    .delete(&collection.doc_key(doc_short_id))
+                    .await
+                    .map_err(Error::Storage)?;
+                datastore
+                    .delete(&collection.deleted_key(doc_short_id))
+                    .await
+                    .map_err(Error::Storage)?;
+                datastore
+                    .delete(&collection.version_key(doc_short_id))
+                    .await
+                    .map_err(Error::Storage)?;
 
-                let del_key_prefix = format!("/del/{}/{}", collection_id, doc_id).into_bytes();
-                delete_prefix(&datastore, del_key_prefix).await?;
-
-                let head_prefix = HeadstoreDocKey::document_prefix(doc_id);
+                let head_prefix = HeadstoreDocKey::document_prefix(doc_short_id);
                 let mut block_cids = Vec::new();
                 {
                     let opts = IterOptions::new().with_prefix(head_prefix.clone());
@@ -259,17 +264,35 @@ impl<S: Store> crate::database::DB<S> {
                     while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
                         if let Some(cid_str) = extract_last_path_segment_str(&pair.key) {
                             if let Ok(cid) = cid::Cid::try_from(cid_str.as_str()) {
-                                block_cids.push(cid.to_bytes());
+                                block_cids.push(cid);
                             }
                         }
                     }
                     iter.close().await.map_err(Error::Storage)?;
                 }
                 delete_prefix(&headstore, head_prefix).await?;
+                delete_prefix(
+                    &headstore,
+                    HeadstorePriorityKey::document_prefix(doc_short_id),
+                )
+                .await?;
 
-                for cid_bytes in &block_cids {
-                    let _ = blockstore.delete(cid_bytes).await;
+                let doc_id = crate::doc_id_map::get_doc_id(&systemstore, doc_short_id).await?;
+                for cid in &block_cids {
+                    let _ = blockstore.delete(&cid.to_bytes()).await;
+                    if let Some(ref doc_id) = doc_id {
+                        crate::doc_id_map::delete_block_doc_id_mapping(
+                            &systemstore,
+                            &cid.to_string(),
+                            doc_id,
+                        )
+                        .await?;
+                    }
                 }
+
+                // Clear the identity mappings so recreating identical content
+                // does not trip the create duplicate check.
+                crate::doc_id_map::delete_doc_id_mappings(&systemstore, doc_short_id).await?;
             }
             Ok(())
         }
@@ -279,6 +302,7 @@ impl<S: Store> crate::database::DB<S> {
         drop(datastore);
         drop(headstore);
         drop(blockstore);
+        drop(systemstore);
 
         match result {
             Ok(()) => {
@@ -333,11 +357,13 @@ impl<S: Store> crate::database::DB<S> {
                 let _ = blockstore.delete(cid_bytes).await;
             }
 
-            // Delete the top-level doc/del prefixes (version keys, etc.)
+            // Delete the top-level doc/del/version prefixes
             let doc_prefix = format!("/d/{}/", collection_id).into_bytes();
             delete_prefix(&datastore, doc_prefix).await?;
             let del_prefix = format!("/del/{}/", collection_id).into_bytes();
             delete_prefix(&datastore, del_prefix).await?;
+            let version_prefix = format!("/v/{}/", collection_id).into_bytes();
+            delete_prefix(&datastore, version_prefix).await?;
 
             Ok(())
         }

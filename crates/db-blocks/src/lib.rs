@@ -191,6 +191,9 @@ pub struct BlockResult {
     pub doc_id: String,
     /// CIDs of all field blocks created
     pub field_cids: Vec<Cid>,
+    /// CIDs of all Encryption blocks created (mapped to the owning DocID
+    /// alongside composite + field blocks, mirroring Go's save()).
+    pub encryption_cids: Vec<Cid>,
 }
 
 /// Encode a NormalValue as CBOR bytes.

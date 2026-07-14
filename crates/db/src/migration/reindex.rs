@@ -138,8 +138,11 @@ impl<S: Store> DB<S> {
 
         {
             let datastore = write_txn.datastore()?;
+            let txn_systemstore = write_txn.systemstore()?;
 
-            let raw_docs = collection.get_all_with_datastore(&datastore).await?;
+            let raw_docs = collection
+                .get_all_with_datastore(&datastore, &txn_systemstore)
+                .await?;
 
             let mut migrated_docs = Vec::with_capacity(raw_docs.len());
             for doc in raw_docs {

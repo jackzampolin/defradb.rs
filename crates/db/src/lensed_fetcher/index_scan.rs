@@ -27,7 +27,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         collection_name: &str,
         params: &IndexScanParams,
     ) -> query::error::Result<query::fetcher::IndexScanResult> {
-        let (collection, datastore) =
+        let (collection, datastore, _systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         let short_id = collection.resolved_root_id();

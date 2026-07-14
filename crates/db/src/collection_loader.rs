@@ -113,11 +113,12 @@ pub(crate) async fn load_collection_from_systemstore(
 /// This function checks the transaction's cache first. On cache miss, it loads
 /// the collection from the SystemStore and adds it to the cache.
 ///
-/// Returns the collection and datastore for document operations.
+/// Returns the collection, datastore, and systemstore (for DocID <-> short-ID
+/// resolution) for document operations.
 pub(crate) async fn get_collection_with_lazy_load<S: Store + 'static>(
     txn: &Arc<TokioMutex<Option<DbTxn<S>>>>,
     collection_name: &str,
-) -> query::error::Result<(Collection, NamespaceView)> {
+) -> query::error::Result<(Collection, NamespaceView, NamespaceView)> {
     // Extract what we need from the transaction while holding the lock briefly
     let (collection_opt, systemstore, datastore) = {
         let txn_guard = txn.lock().await;
@@ -168,7 +169,7 @@ pub(crate) async fn get_collection_with_lazy_load<S: Store + 'static>(
         collection
     };
 
-    Ok((collection, datastore))
+    Ok((collection, datastore, systemstore))
 }
 
 /// Get a collection by name with lazy loading and create an IndexManager.
@@ -177,12 +178,14 @@ pub(crate) async fn get_collection_with_lazy_load<S: Store + 'static>(
 /// an IndexManager for the collection, which is needed for document mutations
 /// that maintain index consistency (unique constraints, etc.).
 ///
-/// Returns the collection, datastore, and IndexManager for document operations.
+/// Returns the collection, datastore, systemstore, and IndexManager for
+/// document operations.
 pub(crate) async fn get_collection_with_index_manager<S: Store + 'static>(
     txn: &Arc<TokioMutex<Option<DbTxn<S>>>>,
     collection_name: &str,
-) -> query::error::Result<(Collection, NamespaceView, IndexManager)> {
-    let (collection, datastore) = get_collection_with_lazy_load(txn, collection_name).await?;
+) -> query::error::Result<(Collection, NamespaceView, NamespaceView, IndexManager)> {
+    let (collection, datastore, systemstore) =
+        get_collection_with_lazy_load(txn, collection_name).await?;
 
     // Create an IndexManager from the collection schema.
     let short_id = collection.resolved_root_id();
@@ -194,5 +197,5 @@ pub(crate) async fn get_collection_with_index_manager<S: Store + 'static>(
             ))
         })?;
 
-    Ok((collection, datastore, index_manager))
+    Ok((collection, datastore, systemstore, index_manager))
 }

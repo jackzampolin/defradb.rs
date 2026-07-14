@@ -13,6 +13,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
     pub async fn validate_downsample_write(
         &self,
         datastore: &NamespaceView,
+        systemstore: &NamespaceView,
         source_collection: &CollectionVersion,
         source_doc: &Document,
         modified_fields: Option<&HashSet<String>>,
@@ -72,16 +73,14 @@ impl<S: Store + 'static> crate::database::DB<S> {
                     ))
                 })?;
             let source_window_start_nanos = bucket_start_nanos(&source_time, plan.interval_nanos)?;
-            let target_doc_id = document::DocID::new_v0_from_seed(&format!(
-                "{}:{}",
-                plan.target.collection_id, series_doc_id
-            ));
 
-            let Some(target_collection) = self.get_collection(&plan.target.name)? else {
-                continue;
-            };
-            let Some(target_doc) = target_collection
-                .get_with_datastore(datastore, &target_doc_id)
+            let Some(target_doc) = self
+                .find_downsample_target_in_txn(
+                    datastore,
+                    systemstore,
+                    &plan.target.name,
+                    &series_doc_id,
+                )
                 .await?
             else {
                 continue;

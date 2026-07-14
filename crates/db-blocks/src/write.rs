@@ -38,6 +38,7 @@ pub async fn write_document_blocks(
 
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
+    let mut encryption_cids: Vec<Cid> = Vec::new();
 
     let is_create = modified_fields.is_none();
     let snapshot = if is_create {
@@ -148,6 +149,10 @@ pub async fn write_document_blocks(
             } else {
                 (value_bytes, None)
             };
+
+            if let Some(enc_cid) = encryption_cid {
+                encryption_cids.push(enc_cid);
+            }
 
             let is_counter = doc
                 .fields()
@@ -298,6 +303,10 @@ pub async fn write_document_blocks(
         None
     };
 
+    if let Some(enc_cid) = composite_encryption_cid {
+        encryption_cids.push(enc_cid);
+    }
+
     let mut composite_block = Block::new_with_options(
         CrdtDelta::Composite(composite_payload),
         composite_heads,
@@ -374,6 +383,7 @@ pub async fn write_document_blocks(
         block: composite_bytes,
         doc_id: doc_id_str,
         field_cids,
+        encryption_cids,
     })
 }
 
@@ -458,6 +468,7 @@ pub async fn write_delete_block(
         block: composite_bytes,
         doc_id: doc_id.to_string(),
         field_cids: vec![],
+        encryption_cids: vec![],
     })
 }
 

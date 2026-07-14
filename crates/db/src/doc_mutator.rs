@@ -15,6 +15,7 @@ use crate::collection_loader::{get_collection_with_index_manager, get_collection
 use crate::database::DB;
 use crate::event_emission::register_update_event_callback;
 use crate::txn::DbTxn;
+use db_blocks::DocStorageIdentity;
 use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
 use defra_core::signing::get_signing_config;
 
@@ -186,28 +187,102 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
-        let (collection, datastore, index_manager) =
+        let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
-        // Generate document ID if not present.
-        // Track whether ID was just generated for blind create optimization.
-        let id_was_generated = doc.id().is_none();
-        if id_was_generated {
-            doc.generate_and_set_doc_id().map_err(|e| {
-                query::error::QueryError::execution(format!("failed to generate DocID: {}", e))
-            })?;
-        }
-
-        let doc_id = doc.id().cloned().ok_or_else(|| {
-            query::error::QueryError::execution("document should have ID after generation")
-        })?;
-
         self.db
-            .validate_downsample_write(&datastore, collection.schema(), &doc, None)
+            .validate_downsample_write(&datastore, &systemstore, collection.schema(), &doc, None)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
+        let doc_short_id = crate::doc_id_map::next_doc_short_id(&systemstore)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+        let identity = DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id);
+
+        // Blocks first: the public DocID is derived from the genesis composite
+        // block CID (Go #4838).
+        let (doc_id, doc_cid, doc_block, col_block_data) = {
+            let txn_guard = self.txn.lock().await;
+            let txn = txn_guard.as_ref().ok_or_else(|| {
+                query::error::QueryError::execution("transaction is no longer active")
+            })?;
+
+            let blockstore = txn.blockstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
+            })?;
+            let headstore = txn.headstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get headstore: {}", e))
+            })?;
+
+            let schema_version_id = collection.version_id();
+            let enc_config = get_encryption_config();
+            let sign_config = get_signing_config();
+            let kms = self.db.kms();
+
+            let block_result = write_document_blocks(
+                &blockstore,
+                &headstore,
+                &doc,
+                schema_version_id,
+                identity,
+                None,
+                enc_config.as_ref(),
+                sign_config.as_ref(),
+                kms.as_ref(),
+            )
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to write document blocks for transaction create on collection {}: {}",
+                    collection_name, e
+                ))
+            })?;
+
+            let doc_id = crate::auto_commit_mutator::helpers::register_created_doc(
+                &systemstore,
+                &datastore,
+                &collection,
+                doc_short_id,
+                &block_result,
+            )
+            .await?;
+            doc.set_id(doc_id.clone());
+
+            if let Some(ref config) = enc_config {
+                store_doc_encryption(&doc_id.to_string(), config.clone());
+            }
+
+            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
+            if collection.schema().is_branchable {
+                let short_id = collection.resolved_root_id();
+                match write_collection_block(
+                    &blockstore,
+                    &headstore,
+                    short_id,
+                    schema_version_id,
+                    block_result.cid,
+                    sign_config.as_ref(),
+                )
+                .await
+                {
+                    Ok((col_cid, col_bytes)) => {
+                        col_block_data = Some((col_cid, col_bytes));
+                    }
+                    Err(error) => {
+                        warn!(
+                            collection = %collection_name,
+                            error = %error,
+                            "Failed to write collection block for transaction create"
+                        );
+                    }
+                }
+            }
+
+            (doc_id, block_result.cid, block_result.block, col_block_data)
+        };
 
         // #1044 record-then-finalize: write the doc blob + indexes WITHOUT seeding
         // the counter store and WITHOUT taking any per-doc guard/batch gate. The
@@ -218,8 +293,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             &datastore,
             &collection,
             &doc,
+            doc_short_id,
             &index_manager,
-            id_was_generated,
         )
         .await?;
 
@@ -255,75 +330,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             }
         }
 
-        let (doc_cid, doc_block, col_block_data) = {
-            let txn_guard = self.txn.lock().await;
-            let txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction is no longer active")
-            })?;
-
-            let blockstore = txn.blockstore().map_err(|e| {
-                query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
-            })?;
-            let headstore = txn.headstore().map_err(|e| {
-                query::error::QueryError::execution(format!("failed to get headstore: {}", e))
-            })?;
-
-            let schema_version_id = collection.version_id();
-            let enc_config = get_encryption_config();
-            let sign_config = get_signing_config();
-            let kms = self.db.kms();
-
-            let block_result = write_document_blocks(
-                &blockstore,
-                &headstore,
-                &doc,
-                schema_version_id,
-                None,
-                enc_config.as_ref(),
-                sign_config.as_ref(),
-                kms.as_ref(),
-            )
-            .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to write document blocks for transaction create on collection {}: {}",
-                    collection_name, e
-                ))
-            })?;
-
-            if let Some(ref config) = enc_config {
-                store_doc_encryption(&doc_id.to_string(), config.clone());
-            }
-
-            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-            if collection.schema().is_branchable {
-                let short_id = collection.resolved_root_id();
-                match write_collection_block(
-                    &blockstore,
-                    &headstore,
-                    short_id,
-                    schema_version_id,
-                    block_result.cid,
-                    sign_config.as_ref(),
-                )
-                .await
-                {
-                    Ok((col_cid, col_bytes)) => {
-                        col_block_data = Some((col_cid, col_bytes));
-                    }
-                    Err(error) => {
-                        warn!(
-                            collection = %collection_name,
-                            error = %error,
-                            "Failed to write collection block for transaction create"
-                        );
-                    }
-                }
-            }
-
-            (block_result.cid, block_result.block, col_block_data)
-        };
-
         self.register_update_callback(
             collection_name.to_string(),
             collection.collection_id().to_string(),
@@ -349,7 +355,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
-        let (collection, datastore, index_manager) =
+        let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
@@ -357,12 +363,27 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         self.db
             .validate_downsample_write(
                 &datastore,
+                &systemstore,
                 collection.schema(),
                 &doc,
                 Some(&modified_fields),
             )
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
+        let update_doc_id = doc
+            .id()
+            .cloned()
+            .ok_or_else(|| query::error::QueryError::execution("update requires a document ID"))?;
+        let doc_short_id = collection
+            .require_doc_short_id(&systemstore, &update_doc_id)
+            .await
+            .map_err(|e| match e {
+                crate::error::Error::DocumentNotFound(id) => {
+                    query::error::QueryError::document_not_found(id)
+                }
+                other => query::error::QueryError::execution(other.to_string()),
+            })?;
 
         // #1044 record-then-finalize: write the doc blob + indexes with the
         // query-plan's provisional counter value, but do NOT do the counter RMW
@@ -383,13 +404,10 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .iter()
             .any(|f| f.crdt_type.is_counter() && doc.get_counter_delta(&f.name).is_some())
         {
-            match doc.id() {
-                Some(id) => collection
-                    .get_with_datastore(&datastore, id)
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
-                None => None,
-            }
+            collection
+                .get_with_datastore(&datastore, doc_short_id, &update_doc_id)
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?
         } else {
             None
         };
@@ -421,6 +439,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             &datastore,
             &collection,
             &doc,
+            doc_short_id,
             &index_manager,
         )
         .await?;
@@ -459,6 +478,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &headstore,
                 &doc,
                 schema_version_id,
+                DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id),
                 Some(&modified_fields),
                 enc_config.as_ref(),
                 sign_config.as_ref(),
@@ -471,6 +491,13 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                     collection_name, e
                 ))
             })?;
+
+            crate::auto_commit_mutator::helpers::register_block_doc_id_mappings(
+                &systemstore,
+                &block_result,
+                &update_doc_id.to_string(),
+            )
+            .await?;
 
             let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
             if collection.schema().is_branchable {
@@ -528,19 +555,28 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
-        let (collection, datastore, index_manager) =
+        let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
+
+        let Some(doc_short_id) = collection
+            .resolve_doc_short_id(&systemstore, doc_id)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?
+        else {
+            return Ok(DeleteResult::new(doc_id.clone(), false));
+        };
+
         let pre_delete_document_json = collection
-            .get_with_datastore(&datastore, doc_id)
+            .get_with_datastore(&datastore, doc_short_id, doc_id)
             .await
             .ok()
             .flatten()
             .and_then(|doc| document_json_value(&doc));
 
         let existed = collection
-            .delete_with_indexes(&datastore, doc_id, &index_manager)
+            .delete_with_indexes(&datastore, doc_id, doc_short_id, &index_manager)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))?;
 
@@ -568,6 +604,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &blockstore,
                 &headstore,
                 &doc_id.to_string(),
+                doc_short_id,
                 schema_version_id,
                 sign_config.as_ref(),
             )
@@ -578,6 +615,14 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                     collection_name, e
                 ))
             })?;
+
+            crate::doc_id_map::set_block_doc_id_mapping(
+                &systemstore,
+                &block_result.cid.to_string(),
+                &doc_id.to_string(),
+            )
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
             let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
             if collection.schema().is_branchable {
@@ -623,11 +668,11 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     }
 
     async fn exists(&self, collection_name: &str, doc_id: &DocID) -> query::error::Result<bool> {
-        let (collection, datastore) =
+        let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
-            .exists_with_datastore(&datastore, doc_id)
+            .exists_by_doc_id(&datastore, &systemstore, doc_id)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("exists error: {}", e)))
     }
@@ -637,11 +682,11 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<Option<Document>> {
-        let (collection, datastore) =
+        let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
-            .get_with_datastore(&datastore, doc_id)
+            .get_by_doc_id(&datastore, &systemstore, doc_id)
             .await
             .map_err(|e| {
                 query::error::QueryError::execution(format!("get_for_update error: {}", e))
@@ -981,9 +1026,10 @@ mod tests {
             .expect("collection exists");
         let txn = db.new_txn(true).await.expect("read txn");
         let datastore = txn.datastore().expect("datastore");
+        let systemstore = txn.systemstore().expect("systemstore");
         let doc_id_typed = document::DocID::from_string(doc_id).expect("doc id");
         collection
-            .get_with_datastore(&datastore, &doc_id_typed)
+            .get_by_doc_id(&datastore, &systemstore, &doc_id_typed)
             .await
             .expect("get doc")
     }
@@ -1088,18 +1134,29 @@ mod tests {
                 .expect("index manager");
 
         let mut setup_doc = Document::from_json_str(r#"{"count": 5}"#).expect("doc");
-        setup_doc
-            .generate_and_set_doc_id()
-            .expect("generate doc id");
+        setup_doc.set_id(document::DocID::new_v0_from_seed("legacy-counter-doc"));
         let doc_id = setup_doc.id().expect("doc id").to_string();
 
         let setup_txn = db.new_txn(false).await.expect("write txn");
         let datastore = setup_txn.datastore().expect("datastore");
+        let systemstore = setup_txn.systemstore().expect("systemstore");
+        let doc_short_id = crate::doc_id_map::next_doc_short_id(&systemstore)
+            .await
+            .expect("short id");
+        crate::doc_id_map::set_doc_id_mapping(
+            &systemstore,
+            collection.resolved_root_id(),
+            doc_short_id,
+            &doc_id,
+        )
+        .await
+        .expect("doc id mapping");
         collection
-            .create_with_indexes(&datastore, &setup_doc, &index_manager, true)
+            .create_with_indexes(&datastore, &setup_doc, doc_short_id, &index_manager)
             .await
             .expect("direct create");
         drop(datastore);
+        drop(systemstore);
         setup_txn.force_commit().await.expect("force commit setup");
 
         // Confirm the setup left the store ABSENT but the blob value present.
@@ -1500,11 +1557,7 @@ mod tests {
         let txn = db.new_txn(false).await.expect("new_txn");
         let mutator = DbDocMutator::new(Arc::clone(&db), txn);
 
-        let mut placeholder = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-        placeholder
-            .generate_and_set_doc_id()
-            .expect("generate doc id");
-        let missing_doc_id = placeholder.id().cloned().expect("doc id");
+        let missing_doc_id = document::DocID::new_v0_from_seed("missing-doc");
 
         let result = mutator
             .delete("TestDoc", &missing_doc_id)

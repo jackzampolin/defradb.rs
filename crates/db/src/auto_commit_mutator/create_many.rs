@@ -1,7 +1,8 @@
-use super::helpers::{ensure_collection_is_active, write_local_create};
+use super::helpers::{ensure_collection_is_active, register_created_doc, write_local_create};
 use super::*;
 
 use crate::block_builder::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
+use db_blocks::DocStorageIdentity;
 
 #[allow(clippy::type_complexity)]
 impl<S: Store + 'static> AutoCommitMutator<S> {
@@ -46,7 +47,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             })?;
 
         // === Phase 1: Prepare documents (sequential — embeddings are async/external) ===
-        let mut prepared_docs: Vec<(Document, bool)> = Vec::with_capacity(docs.len());
+        let mut prepared_docs: Vec<Document> = Vec::with_capacity(docs.len());
         let embedding_config = self.db.options().embedding_config();
         for mut doc in docs {
             db_search::set_embedding(
@@ -59,194 +60,202 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
 
-            let id_was_generated = doc.id().is_none();
-            if id_was_generated {
-                doc.generate_and_set_doc_id().map_err(|e| {
-                    query::error::QueryError::execution(format!("failed to generate DocID: {}", e))
-                })?;
-            }
-
-            prepared_docs.push((doc, id_was_generated));
+            prepared_docs.push(doc);
         }
 
-        // === Phase 2: Compute blocks (parallel on native, sequential on WASM) ===
+        // No per-doc write guards for creates: identities are derived inside
+        // the txn; the DocID-mapping duplicate check is the gate.
+
+        // === Phase 2: Transaction — allocate identities, then compute blocks ===
+        let txn = self.db.new_txn(false).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        let identities: Vec<DocStorageIdentity> = {
+            let systemstore = txn.systemstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+            })?;
+            let mut identities = Vec::with_capacity(prepared_docs.len());
+            for _ in &prepared_docs {
+                let doc_short_id = crate::doc_id_map::next_doc_short_id(&systemstore)
+                    .await
+                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+                identities.push(DocStorageIdentity::new(short_id, doc_short_id));
+            }
+            identities
+        };
+
+        // Compute blocks (parallel on native, sequential on WASM). A failure
+        // aborts the batch: without blocks there is no derived DocID.
         #[cfg(feature = "native")]
-        let computed_blocks: Vec<Option<ComputedBlocks>> = {
+        let computed_blocks: Vec<ComputedBlocks> = {
             let block_futures: Vec<_> = prepared_docs
                 .iter()
-                .map(|(doc, _)| {
+                .zip(identities.iter())
+                .map(|(doc, identity)| {
                     let doc_clone = doc.clone();
                     let schema = schema_version_id.clone();
+                    let identity = *identity;
                     let enc = enc_config.clone();
                     let sign = sign_config.clone();
                     tokio::task::spawn_blocking(move || {
-                        compute_document_blocks(&doc_clone, &schema, enc.as_ref(), sign.as_ref())
+                        compute_document_blocks(
+                            &doc_clone,
+                            &schema,
+                            identity,
+                            enc.as_ref(),
+                            sign.as_ref(),
+                        )
                     })
                 })
                 .collect();
 
             let computed_results = futures::future::join_all(block_futures).await;
 
-            computed_results
-                .into_iter()
-                .map(|join_result| match join_result {
-                    Ok(Ok(blocks)) => Some(blocks),
+            let mut computed = Vec::with_capacity(computed_results.len());
+            for join_result in computed_results {
+                let blocks = match join_result {
+                    Ok(Ok(blocks)) => blocks,
                     Ok(Err(e)) => {
-                        warn!(error = %e, "Failed to compute document blocks");
-                        None
+                        return Err(query::error::QueryError::execution(format!(
+                            "failed to compute document blocks: {}",
+                            e
+                        )))
                     }
                     Err(e) => {
-                        warn!(error = %e, "Block computation task panicked");
-                        None
+                        return Err(query::error::QueryError::execution(format!(
+                            "block computation task panicked: {}",
+                            e
+                        )))
                     }
-                })
-                .collect()
+                };
+                computed.push(blocks);
+            }
+            computed
         };
 
         #[cfg(not(feature = "native"))]
-        let computed_blocks: Vec<Option<ComputedBlocks>> = prepared_docs
-            .iter()
-            .map(|(doc, _)| {
-                match compute_document_blocks(
+        let computed_blocks: Vec<ComputedBlocks> = {
+            let mut computed = Vec::with_capacity(prepared_docs.len());
+            for (doc, identity) in prepared_docs.iter().zip(identities.iter()) {
+                let blocks = compute_document_blocks(
                     doc,
                     &schema_version_id,
+                    *identity,
                     enc_config.as_ref(),
                     sign_config.as_ref(),
-                ) {
-                    Ok(blocks) => Some(blocks),
-                    Err(e) => {
-                        warn!(error = %e, "Failed to compute document blocks");
-                        None
-                    }
-                }
-            })
-            .collect();
-
-        // Serialize this batch's counter-store seeding against concurrent
-        // merges/writes on the same documents, held across the shared txn +
-        // commit (#1021). Doc IDs are known here, so acquire the per-doc guards
-        // in SORTED order (deadlock-free against other multi-doc acquirers),
-        // holding the shared batch gate only while acquiring them.
-        let mut guard_doc_ids: Vec<String> = prepared_docs
-            .iter()
-            .filter_map(|(doc, _)| doc.id().map(|id| id.to_string()))
-            .collect();
-        guard_doc_ids.sort();
-        guard_doc_ids.dedup();
-        let mut _doc_guards = Vec::with_capacity(guard_doc_ids.len());
-        {
-            let _batch_gate = self.db.doc_write_queue().acquire_batch_gate().await;
-            for id in &guard_doc_ids {
-                _doc_guards.push(self.db.doc_write_queue().acquire(id).await);
+                )
+                .map_err(|e| {
+                    query::error::QueryError::execution(format!(
+                        "failed to compute document blocks: {}",
+                        e
+                    ))
+                })?;
+                computed.push(blocks);
             }
-        } // gate released; per-doc guards held until end of function
+            computed
+        };
 
-        // === Phase 3: Transaction — sequential writes ===
-        let txn = self.db.new_txn(false).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
+        // === Phase 3: Sequential writes ===
+        let mut results: Vec<(DocID, Document, Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> =
+            Vec::with_capacity(prepared_docs.len());
 
-        let mut results: Vec<(
-            DocID,
-            Document,
-            Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)>,
-        )> = Vec::with_capacity(prepared_docs.len());
-
-        for ((doc, id_was_generated), blocks) in prepared_docs.into_iter().zip(computed_blocks) {
-            let doc_id = doc.id().cloned().ok_or_else(|| {
-                query::error::QueryError::execution("document should have ID after generation")
+        for ((mut doc, identity), computed) in prepared_docs
+            .into_iter()
+            .zip(identities)
+            .zip(computed_blocks)
+        {
+            let datastore = txn.datastore().map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to get datastore for collection '{}': {}",
+                    collection_name, e
+                ))
+            })?;
+            let systemstore = txn.systemstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+            })?;
+            let blockstore = txn.blockstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
+            })?;
+            let headstore = txn.headstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get headstore: {}", e))
             })?;
 
-            // Datastore + index writes
-            {
-                let datastore = txn.datastore().map_err(|e| {
+            self.db
+                .validate_downsample_write(
+                    &datastore,
+                    &systemstore,
+                    collection.schema(),
+                    &doc,
+                    None,
+                )
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
+            insert_computed_blocks(&blockstore, &headstore, &computed)
+                .await
+                .map_err(|e| {
                     query::error::QueryError::execution(format!(
-                        "failed to get datastore for collection '{}': {}",
-                        collection_name, e
+                        "failed to insert pre-computed blocks: {}",
+                        e
                     ))
                 })?;
 
-                self.db
-                    .validate_downsample_write(&datastore, collection.schema(), &doc, None)
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+            let doc_id = register_created_doc(
+                &systemstore,
+                &datastore,
+                &collection,
+                identity.doc_short_id,
+                &computed.block_result,
+            )
+            .await?;
+            doc.set_id(doc_id.clone());
 
-                write_local_create(
-                    &datastore,
-                    &collection,
-                    &doc,
-                    &index_manager,
-                    id_was_generated,
+            if let Some(ref config) = enc_config {
+                store_doc_encryption(&doc_id.to_string(), config.clone());
+            }
+
+            write_local_create(
+                &datastore,
+                &collection,
+                &doc,
+                identity.doc_short_id,
+                &index_manager,
+            )
+            .await?;
+
+            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
+            if collection.schema().is_branchable {
+                match write_collection_block(
+                    &blockstore,
+                    &headstore,
+                    short_id,
+                    &schema_version_id,
+                    computed.block_result.cid,
+                    sign_config.as_ref(),
                 )
-                .await?;
-            } // datastore dropped
-
-            // Insert pre-computed blocks + collection blocks
-            let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = match blocks {
-                Some(computed) => {
-                    let blockstore = txn.blockstore().map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to get blockstore: {}",
-                            e
-                        ))
-                    })?;
-                    let headstore = txn.headstore().map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to get headstore: {}",
-                            e
-                        ))
-                    })?;
-                    match insert_computed_blocks(&blockstore, &headstore, &computed).await {
-                        Ok(()) => {
-                            if let Some(ref config) = enc_config {
-                                store_doc_encryption(&doc_id.to_string(), config.clone());
-                            }
-
-                            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-                            if collection.schema().is_branchable {
-                                match write_collection_block(
-                                    &blockstore,
-                                    &headstore,
-                                    short_id,
-                                    &schema_version_id,
-                                    computed.block_result.cid,
-                                    sign_config.as_ref(),
-                                )
-                                .await
-                                {
-                                    Ok((col_cid, col_bytes)) => {
-                                        col_block_data = Some((col_cid, col_bytes));
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            collection = %collection_name,
-                                            error = %e,
-                                            "Failed to write collection block for branchable create"
-                                        );
-                                    }
-                                }
-                            }
-
-                            Some((
-                                computed.block_result.cid,
-                                computed.block_result.block,
-                                col_block_data,
-                            ))
-                        }
-                        Err(e) => {
-                            warn!(
-                                collection = %collection_name,
-                                error = %e,
-                                "Failed to insert pre-computed blocks"
-                            );
-                            None
-                        }
+                .await
+                {
+                    Ok((col_cid, col_bytes)) => {
+                        col_block_data = Some((col_cid, col_bytes));
+                    }
+                    Err(e) => {
+                        warn!(
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to write collection block for branchable create"
+                        );
                     }
                 }
-                None => None,
-            };
+            }
 
-            results.push((doc_id, doc, commit_result));
+            results.push((
+                doc_id,
+                doc,
+                computed.block_result.cid,
+                computed.block_result.block,
+                col_block_data,
+            ));
         }
 
         // Commit ONCE for the entire batch
@@ -264,30 +273,21 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         // Emit events and build results
         let mut create_results = Vec::with_capacity(results.len());
-        for (doc_id, doc, commit_result) in results {
-            if let Some((cid, block, col_data)) = commit_result.as_ref() {
-                self.emit_update_events(
-                    &collection,
-                    &doc_id.to_string(),
-                    *cid,
-                    block.clone(),
-                    col_data.clone(),
-                );
-            }
+        for (doc_id, doc, cid, block, col_data) in results {
+            self.emit_update_events(
+                &collection,
+                &doc_id.to_string(),
+                cid,
+                block.clone(),
+                col_data.clone(),
+            );
 
-            match commit_result {
-                Some((cid, block, col_data)) => {
-                    let mut result = CreateResult::with_commit(doc_id, doc, cid, block);
-                    if let Some((col_cid, col_bytes)) = col_data {
-                        result.broadcast_cid = Some(col_cid);
-                        result.broadcast_block = Some(col_bytes);
-                    }
-                    create_results.push(result);
-                }
-                None => {
-                    create_results.push(CreateResult::new(doc_id, doc));
-                }
+            let mut result = CreateResult::with_commit(doc_id, doc, cid, block);
+            if let Some((col_cid, col_bytes)) = col_data {
+                result.broadcast_cid = Some(col_cid);
+                result.broadcast_block = Some(col_bytes);
             }
+            create_results.push(result);
         }
 
         Ok(create_results)

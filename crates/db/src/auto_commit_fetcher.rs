@@ -56,10 +56,13 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
                 collection_name, e
             ))
         })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
 
         // Execute the query
         let result = collection
-            .get_all_with_datastore(&datastore)
+            .get_all_with_datastore(&datastore, &systemstore)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)));
 
@@ -99,10 +102,13 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
                 collection_name, e
             ))
         })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
 
         // Execute the query with deletion status
         let result = collection
-            .get_all_with_datastore_include_deleted(&datastore, show_deleted)
+            .get_all_with_datastore_include_deleted(&datastore, &systemstore, show_deleted)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)));
 
@@ -142,6 +148,9 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
                 collection_name, e
             ))
         })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
 
         // Fetch documents
         let mut docs = Vec::new();
@@ -160,7 +169,7 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
             };
 
             match collection
-                .get_with_datastore(&datastore, &doc_id)
+                .get_by_doc_id(&datastore, &systemstore, &doc_id)
                 .await
                 .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?
             {
@@ -217,11 +226,14 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
                 collection_name, e
             ))
         })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
 
         // Get all documents and filter by field value.
         // This is a fallback implementation - index-based lookup can be added later.
         let all_docs = collection
-            .get_all_with_datastore(&datastore)
+            .get_all_with_datastore(&datastore, &systemstore)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 

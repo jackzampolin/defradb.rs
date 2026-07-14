@@ -26,6 +26,39 @@ async fn test_db_with_collections() -> Arc<DB<MemoryStore>> {
     db
 }
 
+/// Create a Users doc through the interactive mutator inside an open txn.
+/// Returns the txn (for the caller to commit or discard) and the derived DocID.
+async fn seed_user_in_txn(
+    db: &Arc<DB<MemoryStore>>,
+    txn: crate::txn::DbTxn<MemoryStore>,
+    name: &str,
+    age: Option<i64>,
+) -> (crate::txn::DbTxn<MemoryStore>, document::DocID) {
+    use query::mutator::DocMutator;
+
+    let mutator = crate::doc_mutator::DbDocMutator::new(db.clone(), txn);
+    let mut doc = Document::new();
+    doc.set("name", NormalValue::String(name.to_string()));
+    if let Some(age) = age {
+        doc.set("age", NormalValue::Int(age));
+    }
+    let result = mutator.create("Users", doc).await.unwrap();
+    let txn = mutator.take_txn().await.unwrap();
+    (txn, result.doc_id)
+}
+
+/// Create and commit a Users doc, returning its derived DocID.
+async fn seed_committed_user(
+    db: &Arc<DB<MemoryStore>>,
+    name: &str,
+    age: Option<i64>,
+) -> document::DocID {
+    let txn = db.new_txn(false).await.unwrap();
+    let (txn, doc_id) = seed_user_in_txn(db, txn, name, age).await;
+    txn.commit().await.unwrap();
+    doc_id
+}
+
 fn empty_wasm_module() -> LensModule {
     LensModule::from_bytes(vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
 }
@@ -385,16 +418,9 @@ async fn test_doc_fetcher_after_txn_consumed_returns_error() {
 async fn test_transaction_sees_committed_data() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db.clone());
-    let collection = db.get_collection("Users").unwrap().unwrap();
 
     // Write data in a separate transaction
-    let write_txn = db.new_txn(false).await.unwrap();
-    let mut doc = Document::new();
-    doc.set("name", NormalValue::String("Alice".to_string()));
-    doc.set("age", NormalValue::Int(30));
-    doc.generate_and_set_doc_id().unwrap();
-    collection.create(&write_txn, &doc).await.unwrap();
-    write_txn.commit().await.unwrap();
+    seed_committed_user(&db, "Alice", Some(30)).await;
 
     // Read via registry
     let txn_id = registry.begin(true).await.unwrap();
@@ -412,23 +438,10 @@ async fn test_transaction_sees_committed_data() {
 async fn test_get_by_ids_returns_matching_docs() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db.clone());
-    let collection = db.get_collection("Users").unwrap().unwrap();
 
     // Create two documents
-    let write_txn = db.new_txn(false).await.unwrap();
-
-    let mut doc1 = Document::new();
-    doc1.set("name", NormalValue::String("Alice".to_string()));
-    doc1.generate_and_set_doc_id().unwrap();
-    let doc1_id = doc1.id().unwrap().to_string();
-    collection.create(&write_txn, &doc1).await.unwrap();
-
-    let mut doc2 = Document::new();
-    doc2.set("name", NormalValue::String("Bob".to_string()));
-    doc2.generate_and_set_doc_id().unwrap();
-    collection.create(&write_txn, &doc2).await.unwrap();
-
-    write_txn.commit().await.unwrap();
+    let doc1_id = seed_committed_user(&db, "Alice", None).await.to_string();
+    seed_committed_user(&db, "Bob", None).await;
 
     // Query for just one document
     let txn_id = registry.begin(true).await.unwrap();
@@ -491,22 +504,25 @@ async fn test_rollback_discards_uncommitted_writes() {
 
     // Write data in a transaction but rollback instead of commit
     let write_txn = db.new_txn(false).await.unwrap();
-    let mut doc = Document::new();
-    doc.set("name", NormalValue::String("RollbackMe".to_string()));
-    doc.set("age", NormalValue::Int(99));
-    doc.generate_and_set_doc_id().unwrap();
-    collection.create(&write_txn, &doc).await.unwrap();
+    let (write_txn, _doc_id) = seed_user_in_txn(&db, write_txn, "RollbackMe", Some(99)).await;
 
     write_txn.force_discard().unwrap();
 
     // Verify data was NOT persisted
     let read_txn = db.new_txn(true).await.unwrap();
-    let all_docs = collection.get_all(&read_txn).await.unwrap();
+    let datastore = read_txn.datastore().unwrap();
+    let systemstore = read_txn.systemstore().unwrap();
+    let all_docs = collection
+        .get_all_with_datastore(&datastore, &systemstore)
+        .await
+        .unwrap();
     assert!(
         all_docs.is_empty(),
         "Rolled-back data should not be visible, found {} docs",
         all_docs.len()
     );
+    drop(datastore);
+    drop(systemstore);
     read_txn.force_discard().unwrap();
 }
 
@@ -514,7 +530,6 @@ async fn test_rollback_discards_uncommitted_writes() {
 async fn test_transaction_does_not_see_uncommitted_writes() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db.clone());
-    let collection = db.get_collection("Users").unwrap().unwrap();
 
     // Start a reader transaction FIRST
     let reader_txn_id = registry.begin(true).await.unwrap();
@@ -523,10 +538,7 @@ async fn test_transaction_does_not_see_uncommitted_writes() {
 
     // Start a writer transaction and write WITHOUT committing
     let write_txn = db.new_txn(false).await.unwrap();
-    let mut doc = Document::new();
-    doc.set("name", NormalValue::String("Uncommitted".to_string()));
-    doc.generate_and_set_doc_id().unwrap();
-    collection.create(&write_txn, &doc).await.unwrap();
+    let (write_txn, _doc_id) = seed_user_in_txn(&db, write_txn, "Uncommitted", None).await;
 
     // Reader should NOT see the uncommitted write
     let docs = reader_fetcher.get_all("Users").await.unwrap();
@@ -596,22 +608,12 @@ async fn test_doc_fetcher_get_by_ids_unknown_collection() {
 async fn test_get_by_ids_with_nonexistent_valid_id() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db.clone());
-    let collection = db.get_collection("Users").unwrap().unwrap();
 
     // Create one document
-    let write_txn = db.new_txn(false).await.unwrap();
-    let mut doc = Document::new();
-    doc.set("name", NormalValue::String("Exists".to_string()));
-    doc.generate_and_set_doc_id().unwrap();
-    let existing_id = doc.id().unwrap().to_string();
-    collection.create(&write_txn, &doc).await.unwrap();
-    write_txn.commit().await.unwrap();
+    let existing_id = seed_committed_user(&db, "Exists", None).await.to_string();
 
     // Create a valid-format ID that doesn't exist
-    let mut nonexistent_doc = Document::new();
-    nonexistent_doc.set("name", NormalValue::String("Ghost".to_string()));
-    nonexistent_doc.generate_and_set_doc_id().unwrap();
-    let nonexistent_id = nonexistent_doc.id().unwrap().to_string();
+    let nonexistent_id = document::DocID::new_v0_from_seed("ghost-user").to_string();
 
     // Query for both
     let txn_id = registry.begin(true).await.unwrap();
@@ -871,7 +873,6 @@ async fn test_snapshot_isolation_after_external_commit() {
     // another transaction commits should NOT see the committed data.
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db.clone());
-    let collection = db.get_collection("Users").unwrap().unwrap();
 
     // Step 1: Start reader transaction A FIRST (gets snapshot at this point)
     let reader_txn_id = registry.begin(true).await.unwrap();
@@ -886,13 +887,7 @@ async fn test_snapshot_isolation_after_external_commit() {
     );
 
     // Step 2: In a separate transaction, write and COMMIT data
-    let write_txn = db.new_txn(false).await.unwrap();
-    let mut doc = Document::new();
-    doc.set("name", NormalValue::String("CommittedData".to_string()));
-    doc.set("age", NormalValue::Int(42));
-    doc.generate_and_set_doc_id().unwrap();
-    collection.create(&write_txn, &doc).await.unwrap();
-    write_txn.commit().await.unwrap();
+    seed_committed_user(&db, "CommittedData", Some(42)).await;
 
     // Step 3: Reader transaction A should STILL see empty (snapshot isolation)
     // because its snapshot was taken before the write committed
@@ -961,18 +956,9 @@ async fn test_collection_snapshot_isolation_during_deletion() {
     // is deleted should still be able to query that collection
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db.clone());
-    let collection = db.get_collection("Users").unwrap().unwrap();
 
     // Add some data to the collection first
-    {
-        let write_txn = db.new_txn(false).await.unwrap();
-        let mut doc = Document::new();
-        doc.set("name", NormalValue::String("Alice".to_string()));
-        doc.set("age", NormalValue::Int(30));
-        doc.generate_and_set_doc_id().unwrap();
-        collection.create(&write_txn, &doc).await.unwrap();
-        write_txn.commit().await.unwrap();
-    }
+    seed_committed_user(&db, "Alice", Some(30)).await;
 
     // Start a transaction BEFORE deletion
     let reader_txn_id = registry.begin(true).await.unwrap();

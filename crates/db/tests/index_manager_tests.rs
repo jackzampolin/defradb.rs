@@ -10,6 +10,17 @@ use schema::{
 use storage::backends::MemoryStore;
 use storage::index::IndexIterator;
 
+/// Assign a distinct valid DocID for index-layer tests. Index entries are
+/// keyed by DocID string; these tests only need identity, not derivation, so
+/// the ID comes from a per-process seed sequence instead of the genesis-CID
+/// create flow.
+fn set_test_doc_id(doc: &mut Document) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    doc.set_id(document::DocID::new_v0_from_seed(&format!("test-doc-{n}")));
+}
+
 const RESERVED_FULLTEXT_INDEX_NAME_FOR_NAME: &str = "__fulltext__:name";
 
 fn test_schema() -> CollectionVersion {
@@ -352,7 +363,7 @@ async fn test_on_document_create() {
             .unwrap();
 
         let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc);
         doc.set("name", NormalValue::String("Alice".to_string()));
         doc.set("age", NormalValue::Int(30));
 
@@ -456,7 +467,7 @@ async fn test_on_document_update_changes_index_entry() {
 
         // Create initial document
         let mut old_doc = Document::new();
-        old_doc.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut old_doc);
         let doc_id = old_doc.id().unwrap().clone();
         old_doc.set("name", NormalValue::String("Alice".to_string()));
         old_doc.set("age", NormalValue::Int(30));
@@ -540,7 +551,7 @@ async fn test_on_document_update_no_change_when_values_same() {
 
         // Create document
         let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc);
         let doc_id = doc.id().unwrap().clone();
         doc.set("name", NormalValue::String("Alice".to_string()));
         doc.set("age", NormalValue::Int(30));
@@ -594,7 +605,7 @@ async fn test_on_document_delete_removes_index_entries() {
 
         // Create document
         let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc);
         doc.set("name", NormalValue::String("Alice".to_string()));
         doc.set("age", NormalValue::Int(30));
 
@@ -664,7 +675,7 @@ async fn test_bulk_index_indexes_all_documents() {
         let mut docs = Vec::new();
         for name in ["Alice", "Bob", "Charlie"] {
             let mut doc = Document::new();
-            doc.generate_and_set_doc_id().unwrap();
+            set_test_doc_id(&mut doc);
             doc.set("name", NormalValue::String(name.to_string()));
             docs.push(doc);
         }
@@ -722,7 +733,7 @@ async fn test_bulk_index_skips_documents_without_id() {
 
         // Create documents - some with IDs, some without
         let mut doc_with_id = Document::new();
-        doc_with_id.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc_with_id);
         doc_with_id.set("name", NormalValue::String("Alice".to_string()));
 
         let mut doc_without_id = Document::new();
@@ -833,7 +844,7 @@ async fn test_on_document_update_without_id_fails() {
 
         // Old doc with ID
         let mut old_doc = Document::new();
-        old_doc.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut old_doc);
         old_doc.set("name", NormalValue::String("Alice".to_string()));
 
         // New doc without ID
@@ -951,7 +962,7 @@ async fn test_multi_index_update() {
 
         // Create document
         let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc);
         let doc_id = doc.id().unwrap().clone();
         doc.set("name", NormalValue::String("Alice".to_string()));
         doc.set(
@@ -1093,19 +1104,19 @@ async fn test_composite_index_through_manager() {
         doc1.set("category", NormalValue::String("electronics".to_string()));
         doc1.set("price", NormalValue::Int(100));
         doc1.set("name", NormalValue::String("Widget".to_string()));
-        doc1.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc1);
 
         let mut doc2 = Document::new();
         doc2.set("category", NormalValue::String("electronics".to_string()));
         doc2.set("price", NormalValue::Int(200));
         doc2.set("name", NormalValue::String("Gadget".to_string()));
-        doc2.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc2);
 
         let mut doc3 = Document::new();
         doc3.set("category", NormalValue::String("books".to_string()));
         doc3.set("price", NormalValue::Int(50));
         doc3.set("name", NormalValue::String("Novel".to_string()));
-        doc3.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc3);
 
         // Index all documents
         manager
@@ -1185,7 +1196,7 @@ async fn test_missing_field_indexed_as_null() {
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("Alice".to_string()));
         // Note: email field is NOT set
-        doc.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc);
 
         // Should succeed - missing field indexed as NULL
         manager
@@ -1208,7 +1219,7 @@ async fn test_missing_field_indexed_as_null() {
         let mut doc2 = Document::new();
         doc2.set("name", NormalValue::String("Bob".to_string()));
         doc2.set("email", NormalValue::Null); // Explicit NULL
-        doc2.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc2);
 
         manager
             .on_document_create(&datastore, &doc2, &schema)
@@ -1260,7 +1271,7 @@ async fn test_unique_index_allows_multiple_nulls() {
         // Set fields BEFORE generating doc_id
         let mut doc1 = Document::new();
         doc1.set("name", NormalValue::String("Alice".to_string()));
-        doc1.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc1);
 
         manager
             .on_document_create(&datastore, &doc1, &schema)
@@ -1272,7 +1283,7 @@ async fn test_unique_index_allows_multiple_nulls() {
         // Set fields BEFORE generating doc_id
         let mut doc2 = Document::new();
         doc2.set("name", NormalValue::String("Bob".to_string()));
-        doc2.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc2);
 
         let result = manager.on_document_create(&datastore, &doc2, &schema).await;
         assert!(
@@ -1369,7 +1380,7 @@ async fn test_unique_constraint_violation_returns_error() {
             "email",
             NormalValue::String("alice@example.com".to_string()),
         );
-        doc1.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc1);
 
         manager
             .on_document_create(&datastore, &doc1, &schema)
@@ -1384,7 +1395,7 @@ async fn test_unique_constraint_violation_returns_error() {
             "email",
             NormalValue::String("alice@example.com".to_string()),
         ); // Duplicate email!
-        doc2.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc2);
 
         let result = manager.on_document_create(&datastore, &doc2, &schema).await;
         let error = result.expect_err("duplicate value should fail through IndexManager");
@@ -1428,7 +1439,7 @@ async fn test_index_field_not_in_schema_fails() {
 
         // Create a document
         let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc);
         doc.set("name", NormalValue::String("Alice".to_string()));
 
         // Indexing should fail because the field doesn't exist in schema
@@ -1477,7 +1488,7 @@ async fn test_index_idempotence_create_same_document_twice() {
         // Set fields BEFORE generating doc_id
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("Alice".to_string()));
-        doc.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc);
 
         // Index the same document twice
         manager
@@ -1539,7 +1550,7 @@ async fn test_delete_then_recreate_same_value() {
         let mut doc1 = Document::new();
         doc1.set("name", NormalValue::String("Alice".to_string()));
         doc1.set("age", NormalValue::Int(30)); // Add unique field for different ID
-        doc1.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc1);
 
         manager
             .on_document_create(&datastore, &doc1, &schema)
@@ -1574,7 +1585,7 @@ async fn test_delete_then_recreate_same_value() {
         let mut doc2 = Document::new();
         doc2.set("name", NormalValue::String("Alice".to_string()));
         doc2.set("age", NormalValue::Int(31)); // Different age for different ID
-        doc2.generate_and_set_doc_id().unwrap();
+        set_test_doc_id(&mut doc2);
 
         manager
             .on_document_create(&datastore, &doc2, &schema)

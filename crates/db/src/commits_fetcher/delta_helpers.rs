@@ -1,7 +1,10 @@
 //! Helper methods for extracting data from CRDT deltas.
 
+use cid::Cid;
 use defra_core::block::CrdtDelta;
 use storage::corekv::Store;
+
+use crate::txn::DbTxn;
 
 use super::CommitsFetcher;
 
@@ -20,11 +23,15 @@ impl<S: Store> CommitsFetcher<S> {
         }
     }
 
-    /// Get document ID from delta
-    pub(super) fn get_doc_id(&self, delta: &CrdtDelta) -> Option<String> {
-        delta
-            .doc_id()
-            .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+    /// Resolve the DocID owning a block via the systemstore block-ownership
+    /// index (`/d/b`). Deltas no longer carry docIDs (Go #4838).
+    pub(super) async fn get_doc_id(&self, txn: &mut DbTxn<S>, cid: &Cid) -> Option<String> {
+        let systemstore = txn.systemstore().ok()?;
+        crate::doc_id_map::get_doc_ids_for_block(&systemstore, &cid.to_string())
+            .await
+            .ok()?
+            .into_iter()
+            .next()
     }
 
     /// Get delta data from delta

@@ -178,17 +178,23 @@ impl<S: Store> CommitsFetcher<S> {
             Error::Serialization("doc_id is required for height range scans".to_string())
         })?;
         let headstore = txn.headstore()?;
+        let systemstore = txn.systemstore()?;
 
-        let prefix = HeadstorePriorityKey::document_prefix(doc_id);
+        let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+            return Ok(Vec::new());
+        };
+        let doc_short_id = doc_ref.doc_short_id;
+
+        let prefix = HeadstorePriorityKey::document_prefix(doc_short_id);
         let start =
-            HeadstorePriorityKey::priority_prefix(doc_id, options.height_start.unwrap_or(0));
+            HeadstorePriorityKey::priority_prefix(doc_short_id, options.height_start.unwrap_or(0));
 
         let mut opts = IterOptions::new().with_prefix(prefix).with_start(start);
         if let Some(end) = options.height_end {
-            opts = opts.with_end(HeadstorePriorityKey::priority_prefix(doc_id, end));
+            opts = opts.with_end(HeadstorePriorityKey::priority_prefix(doc_short_id, end));
         }
 
-        let cid_offset = HeadstorePriorityKey::cid_offset(doc_id);
+        let cid_offset = HeadstorePriorityKey::cid_offset(doc_short_id);
         let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
         let mut commits = Vec::new();
         let mut visited = HashSet::new();
@@ -322,7 +328,11 @@ impl<S: Store> CommitsFetcher<S> {
         }
 
         let doc_prefix = if let Some(ref doc_id) = options.doc_id {
-            format!("/d/{}/", doc_id).into_bytes()
+            let systemstore = txn.systemstore()?;
+            let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+                return Ok(cids);
+            };
+            storage::keys::headstore::HeadstoreDocKey::document_prefix(doc_ref.doc_short_id)
         } else {
             b"/d/".to_vec()
         };
@@ -331,10 +341,11 @@ impl<S: Store> CommitsFetcher<S> {
         let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
 
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+            // Key: /d/{short_id uvarint}/{field}/{cid} — the short-ID segment
+            // is binary, so only the trailing CID segment is parseable.
             let key_str = String::from_utf8_lossy(&pair.key);
-            let parts: Vec<&str> = key_str.split('/').collect();
-            if parts.len() >= 5 {
-                if let Ok(cid) = Cid::from_str(parts[4]) {
+            if let Some(cid_str) = key_str.rsplit('/').next() {
+                if let Ok(cid) = Cid::from_str(cid_str) {
                     cids.push(cid);
                 }
             }
