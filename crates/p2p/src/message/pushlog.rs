@@ -8,6 +8,10 @@ use super::cbor::{nullable_bytes, optional_bytes};
 use super::traits::Message;
 use crate::protocol::MESSAGE_VERSION;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// PushLog request message for sending resource updates to peer nodes.
 ///
 /// This is the primary message type for CRDT synchronization between nodes.
@@ -76,6 +80,16 @@ pub struct PushLogRequest {
         default
     )]
     pub explicit_replay_capability: Option<String>,
+
+    /// Whether the sender can receive the reply on the request's bidirectional stream.
+    ///
+    /// Older iroh senders omit this field and require the legacy reverse-stream response.
+    #[serde(
+        rename = "SupportsSameStreamReply",
+        skip_serializing_if = "is_false",
+        default
+    )]
+    pub supports_same_stream_reply: bool,
 }
 
 impl PushLogRequest {
@@ -100,6 +114,7 @@ impl PushLogRequest {
             creator,
             block,
             explicit_replay_capability: None,
+            supports_same_stream_reply: false,
         }
     }
 }

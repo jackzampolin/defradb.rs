@@ -2575,7 +2575,7 @@ async fn two_stream_reply_with_response_token_does_not_reverse_dial() {
     let peer = random_peer_id();
 
     coordinator
-        .send_two_stream_reply(&peer, PushLogReply::success("message-1"), Some(7))
+        .send_two_stream_reply(&peer, PushLogReply::success("message-1"), Some(7), true)
         .await;
 
     assert_eq!(transport.pushlog_response_tokens(), vec![7]);
@@ -2595,7 +2595,7 @@ async fn two_stream_reply_without_response_token_falls_back_to_reverse_dial() {
     let peer = random_peer_id();
 
     coordinator
-        .send_two_stream_reply(&peer, PushLogReply::success("message-1"), None)
+        .send_two_stream_reply(&peer, PushLogReply::success("message-1"), None, true)
         .await;
 
     assert!(transport.pushlog_response_tokens().is_empty());
@@ -2604,37 +2604,20 @@ async fn two_stream_reply_without_response_token_falls_back_to_reverse_dial() {
 }
 
 #[tokio::test]
-async fn two_stream_fan_in_delivers_every_ack_on_its_response_token() {
-    const SENDERS: usize = 32;
-
+async fn two_stream_reply_for_legacy_sender_falls_back_to_reverse_dial() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
     let transport = coordinator.runtime.transport.clone();
+    let peer = random_peer_id();
 
-    for token in 0..SENDERS {
-        let peer = random_peer_id();
-        timeout(
-            Duration::from_secs(1),
-            coordinator.send_two_stream_reply(
-                &peer,
-                PushLogReply::success(&format!("message-{token}")),
-                Some(token),
-            ),
-        )
-        .await
-        .expect("two-stream ACK should return promptly on the inbound response token");
-    }
+    coordinator
+        .send_two_stream_reply(&peer, PushLogReply::success("message-1"), Some(7), false)
+        .await;
 
-    assert_eq!(
-        transport.pushlog_response_tokens(),
-        (0..SENDERS).collect::<Vec<_>>()
-    );
-    assert_eq!(transport.pushlog_replies().len(), SENDERS);
-    assert!(
-        transport.two_stream_replies().is_empty(),
-        "fan-in ACKs must not reverse-dial any sender"
-    );
+    assert!(transport.pushlog_response_tokens().is_empty());
+    assert!(transport.pushlog_replies().is_empty());
+    assert_eq!(transport.two_stream_replies().len(), 1);
 }
 
 #[tokio::test]
