@@ -137,6 +137,35 @@ impl UniqueIndex {
         txn.set(&key, doc_id.as_bytes()).await
     }
 
+    /// The docID currently holding the unique entry for `values`, if any.
+    ///
+    /// Unique enforcement's error path needs to know *who* holds the entry so
+    /// the layer above can ask whether that document is still alive: an entry
+    /// pointing at a deleted or missing document is stale damage (a store
+    /// wounded before merge/delete index maintenance existed) and is safe to
+    /// reclaim, because deletion is terminal — there is no resurrection path
+    /// that could ever make the old holder live again (#1111/#700).
+    ///
+    /// Nil-bearing values embed the docID in the key and are never unique, so
+    /// they report no holder.
+    pub async fn conflicting_doc_id<R: Reader + MaybeSend>(
+        &self,
+        txn: &R,
+        values: &[NormalValue],
+    ) -> Result<Option<String>> {
+        if Self::has_nil_field(values) {
+            return Ok(None);
+        }
+        let key = self.build_key(values)?;
+        match txn.get(&key).await? {
+            Some(existing) if !existing.is_empty() => Ok(Some(
+                String::from_utf8(existing)
+                    .map_err(|e| crate::corekv::Error::Other(e.to_string()))?,
+            )),
+            _ => Ok(None),
+        }
+    }
+
     /// Get the entry with exact field values.
     ///
     /// Returns an iterator that yields at most one document (uniqueness constraint).
@@ -302,6 +331,15 @@ impl CollectionIndex for UniqueIndex {
             txn.delete(&key).await
         } else {
             let key = self.build_key(values)?;
+            // Only the entry's owner may delete it. With deterministic merge
+            // conflict resolution (#1111) a document can exist UNINDEXED for a
+            // value another document holds; deleting that loser must not free
+            // the winner's slot.
+            if let Some(existing) = txn.get(&key).await? {
+                if !existing.is_empty() && existing != doc_id.as_bytes() {
+                    return Ok(());
+                }
+            }
             txn.delete(&key).await
         }
     }

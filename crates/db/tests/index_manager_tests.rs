@@ -1592,3 +1592,265 @@ async fn test_delete_then_recreate_same_value() {
 
     txn.commit().await.unwrap();
 }
+
+/// Unique-index semantics at the deletion and merge boundaries (#1111 /
+/// sourcenetwork/defra-agent#700).
+mod unique_boundaries {
+    use super::*;
+    use storage::corekv::Writer;
+
+    const COLLECTION_ID: &str = "col-users";
+
+    fn unique_email_schema() -> CollectionVersion {
+        let mut schema = test_schema();
+        schema.indexes = vec![IndexDescription {
+            name: "idx_email_unique".to_string(),
+            id: 1,
+            fields: vec![IndexedFieldDescription {
+                name: "email".to_string(),
+                descending: false,
+            }],
+            unique: true,
+            auto_generated: false,
+        }];
+        schema
+    }
+
+    fn doc_with_email(email: &str) -> Document {
+        // Distinct `name` per doc: docIDs are content-addressed, so identical
+        // content would collapse "two docs" into one id and the conflict under
+        // test would evaporate.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let mut doc = Document::new();
+        doc.set(
+            "name",
+            NormalValue::String(format!("doc-{}", SEQ.fetch_add(1, Ordering::SeqCst))),
+        );
+        doc.set("email", NormalValue::String(email.to_string()));
+        doc.generate_and_set_doc_id().unwrap();
+        doc
+    }
+
+    async fn write_doc_body(datastore: &mut datastore::NamespaceView, doc: &Document) {
+        let key = storage::keys::doc_key(COLLECTION_ID, &doc.id().unwrap().to_string());
+        datastore.set(&key, &doc.to_cbor().unwrap()).await.unwrap();
+    }
+
+    async fn write_tombstone(datastore: &mut datastore::NamespaceView, doc: &Document) {
+        let key = storage::keys::deleted_doc_key(COLLECTION_ID, &doc.id().unwrap().to_string());
+        datastore.set(&key, &[1u8]).await.unwrap();
+    }
+
+    /// Go-parity regression (sourcenetwork/defra-agent#700): deleting the doc
+    /// that holds a unique value frees the slot for a new doc with that value.
+    #[tokio::test]
+    async fn recreate_after_delete_frees_the_unique_slot() {
+        let store = MemoryStore::new();
+        let db = DB::new(store).unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+        let mut datastore = txn.datastore().unwrap();
+
+        let schema = unique_email_schema();
+        let manager = IndexManager::from_collection(1, &schema).unwrap();
+
+        let first = doc_with_email("a@x");
+        write_doc_body(&mut datastore, &first).await;
+        manager
+            .on_document_create(&datastore, &first, &schema)
+            .await
+            .unwrap();
+
+        manager
+            .on_document_delete(&datastore, &first, &schema)
+            .await
+            .unwrap();
+        write_tombstone(&mut datastore, &first).await;
+
+        let second = doc_with_email("a@x");
+        write_doc_body(&mut datastore, &second).await;
+        manager
+            .on_document_create(&datastore, &second, &schema)
+            .await
+            .expect("a tombstone must not hold the unique slot");
+    }
+
+    /// The #700 wound itself: a stale entry pointing at a TOMBSTONED doc
+    /// (minted by an era or path without index maintenance) must be reclaimed
+    /// by the next create instead of blocking the value forever.
+    #[tokio::test]
+    async fn stale_entry_pointing_at_tombstoned_doc_is_reclaimed() {
+        let store = MemoryStore::new();
+        let db = DB::new(store).unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+        let mut datastore = txn.datastore().unwrap();
+
+        let schema = unique_email_schema();
+        let manager = IndexManager::from_collection(1, &schema).unwrap();
+
+        // Wound the store: holder is indexed, then tombstoned WITHOUT index
+        // cleanup (exactly what pre-maintenance eras and out-of-order merges
+        // left behind).
+        let holder = doc_with_email("a@x");
+        write_doc_body(&mut datastore, &holder).await;
+        manager
+            .on_document_create(&datastore, &holder, &schema)
+            .await
+            .unwrap();
+        write_tombstone(&mut datastore, &holder).await;
+
+        let newcomer = doc_with_email("a@x");
+        write_doc_body(&mut datastore, &newcomer).await;
+        manager
+            .on_document_create(&datastore, &newcomer, &schema)
+            .await
+            .expect("a stale unique entry pointing at a tombstone must be reclaimed");
+    }
+
+    /// A stale entry whose holder never existed locally (index written, doc
+    /// body missing — the partial-write wound) is equally reclaimable.
+    #[tokio::test]
+    async fn stale_entry_pointing_at_missing_doc_is_reclaimed() {
+        let store = MemoryStore::new();
+        let db = DB::new(store).unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+        let mut datastore = txn.datastore().unwrap();
+
+        let schema = unique_email_schema();
+        let manager = IndexManager::from_collection(1, &schema).unwrap();
+
+        let ghost = doc_with_email("a@x");
+        // Index the ghost WITHOUT writing its body.
+        manager
+            .on_document_create(&datastore, &ghost, &schema)
+            .await
+            .unwrap();
+
+        let newcomer = doc_with_email("a@x");
+        write_doc_body(&mut datastore, &newcomer).await;
+        manager
+            .on_document_create(&datastore, &newcomer, &schema)
+            .await
+            .expect("a unique entry pointing at a missing doc must be reclaimed");
+    }
+
+    /// Healing must not weaken real enforcement: a live holder still rejects.
+    #[tokio::test]
+    async fn live_conflict_is_still_rejected_on_the_local_path() {
+        let store = MemoryStore::new();
+        let db = DB::new(store).unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+        let mut datastore = txn.datastore().unwrap();
+
+        let schema = unique_email_schema();
+        let manager = IndexManager::from_collection(1, &schema).unwrap();
+
+        let holder = doc_with_email("a@x");
+        write_doc_body(&mut datastore, &holder).await;
+        manager
+            .on_document_create(&datastore, &holder, &schema)
+            .await
+            .unwrap();
+
+        let challenger = doc_with_email("a@x");
+        write_doc_body(&mut datastore, &challenger).await;
+        let result = manager
+            .on_document_create(&datastore, &challenger, &schema)
+            .await;
+        assert!(
+            result.is_err(),
+            "a live unique conflict must still reject on the local path"
+        );
+    }
+
+    /// #1111: the merge path resolves a live conflict deterministically —
+    /// the lexicographically smallest docID wins — instead of failing the
+    /// merge and wedging the document's history in permanent retry. Both
+    /// orders must land on the same winner.
+    #[tokio::test]
+    async fn merge_conflict_resolves_to_the_smallest_doc_id_in_both_orders() {
+        let store = MemoryStore::new();
+        let db = DB::new(store).unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+        let mut datastore = txn.datastore().unwrap();
+
+        let schema = unique_email_schema();
+        let manager = IndexManager::from_collection(1, &schema).unwrap();
+
+        let a = doc_with_email("a@x");
+        let b = doc_with_email("a@x");
+        let (smaller, larger) = if a.id().unwrap().to_string() < b.id().unwrap().to_string() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+
+        // Order 1: larger holds the entry, smaller arrives via merge — the
+        // incoming doc wins and takes the entry.
+        write_doc_body(&mut datastore, &larger).await;
+        manager
+            .on_document_create(&datastore, &larger, &schema)
+            .await
+            .unwrap();
+        write_doc_body(&mut datastore, &smaller).await;
+        manager
+            .on_document_create_merge(&datastore, &smaller, &schema)
+            .await
+            .expect("merge must not fail on a live unique conflict");
+
+        // The winner (smaller) now holds the entry: a fresh local challenger
+        // conflicts, and after tombstoning the LOSER nothing changes (the
+        // loser holds no entry).
+        let challenger = doc_with_email("a@x");
+        write_doc_body(&mut datastore, &challenger).await;
+        assert!(
+            manager
+                .on_document_create(&datastore, &challenger, &schema)
+                .await
+                .is_err(),
+            "the winner must hold the unique entry after resolution"
+        );
+
+        // Order 2 (fresh store): smaller holds, larger arrives via merge —
+        // the incoming doc loses and stays unindexed; merge still succeeds.
+        let store2 = MemoryStore::new();
+        let db2 = DB::new(store2).unwrap();
+        let txn2 = db2.new_txn(false).await.unwrap();
+        let mut datastore2 = txn2.datastore().unwrap();
+        let manager2 = IndexManager::from_collection(1, &schema).unwrap();
+
+        let a2 = doc_with_email("a@x");
+        let b2 = doc_with_email("a@x");
+        let (smaller2, larger2) = if a2.id().unwrap().to_string() < b2.id().unwrap().to_string() {
+            (a2, b2)
+        } else {
+            (b2, a2)
+        };
+        write_doc_body(&mut datastore2, &smaller2).await;
+        manager2
+            .on_document_create(&datastore2, &smaller2, &schema)
+            .await
+            .unwrap();
+        write_doc_body(&mut datastore2, &larger2).await;
+        manager2
+            .on_document_create_merge(&datastore2, &larger2, &schema)
+            .await
+            .expect("merge must not fail when the incoming doc loses the pick");
+
+        // The entry still belongs to smaller2: deleting larger2 (the loser,
+        // unindexed) must leave the slot occupied.
+        manager2
+            .on_document_delete(&datastore2, &larger2, &schema)
+            .await
+            .unwrap();
+        let challenger2 = doc_with_email("a@x");
+        write_doc_body(&mut datastore2, &challenger2).await;
+        assert!(
+            manager2
+                .on_document_create(&datastore2, &challenger2, &schema)
+                .await
+                .is_err(),
+            "the winner must still hold the unique entry after the loser is deleted"
+        );
+    }
+}

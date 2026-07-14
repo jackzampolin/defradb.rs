@@ -40,6 +40,7 @@
 pub mod blockstore;
 pub mod crdt;
 pub mod datastore;
+pub mod document;
 pub mod encstore;
 pub mod headstore;
 pub mod peerstore;
@@ -53,6 +54,7 @@ pub use datastore::{
     DataStoreKey, DatastoreSE, IndexDataStoreKey, IndexedField, PrimaryDataStoreKey, ViewCacheKey,
     DATASTORE_DOC_VERSION_FIELD_ID,
 };
+pub use document::{deleted_doc_key, doc_key, DELETED_KEY_PREFIX, DOC_KEY_PREFIX};
 pub use encstore::EncstoreKey;
 pub use headstore::{
     HeadstoreColKey, HeadstoreCollectionDefinition, HeadstoreCollectionSetDefinition,
