@@ -31,20 +31,22 @@ fn test_from_json() {
     assert_eq!(doc.get("name").and_then(|v| v.as_str()), Some("Bob"));
     assert_eq!(doc.get("age").and_then(|v| v.as_int()), Some(25));
     assert_eq!(doc.get("active").and_then(|v| v.as_bool()), Some(true));
-    assert!(doc.id().is_some()); // DocID should be generated
+    // No client-side DocID generation: identity is assigned at save time
+    // from the genesis composite block CID.
+    assert!(doc.id().is_none());
 }
 
 #[test]
 fn test_from_json_with_doc_id() {
-    // First create a document to get a valid DocID
-    let doc1 = Document::from_json_str(r#"{"name": "Test"}"#).unwrap();
-    let doc_id_str = doc1.id().unwrap().to_string();
+    let genesis_cid: cid::Cid = "bafyreie7rtdexuf47f633477mfieshkeh5rwnjeommkgqrzl22n6g4bfmm"
+        .parse()
+        .unwrap();
+    let doc_id_str = document::DocID::new_v0(genesis_cid).to_string();
 
-    // Now create a document with that DocID
     let json = format!(r#"{{"_docID": "{}", "name": "Test2"}}"#, doc_id_str);
-    let doc2 = Document::from_json_str(&json).unwrap();
+    let doc = Document::from_json_str(&json).unwrap();
 
-    assert_eq!(doc2.id().unwrap().to_string(), doc_id_str);
+    assert_eq!(doc.id().unwrap().to_string(), doc_id_str);
 }
 
 #[test]
@@ -127,40 +129,12 @@ fn test_len_and_is_empty() {
     assert_eq!(doc.len(), 1);
 }
 
-#[test]
-fn test_generate_doc_id_deterministic() {
-    let mut doc1 = Document::new();
-    doc1.set("name", "Test");
-    doc1.set("value", 123i64);
 
-    let mut doc2 = Document::new();
-    doc2.set("name", "Test");
-    doc2.set("value", 123i64);
-
-    let id1 = doc1.generate_doc_id().unwrap();
-    let id2 = doc2.generate_doc_id().unwrap();
-
-    assert_eq!(id1, id2);
-}
 
 #[test]
-fn test_different_content_different_id() {
-    let mut doc1 = Document::new();
-    doc1.set("name", "Alice");
-
-    let mut doc2 = Document::new();
-    doc2.set("name", "Bob");
-
-    let id1 = doc1.generate_doc_id().unwrap();
-    let id2 = doc2.generate_doc_id().unwrap();
-
-    assert_ne!(id1, id2);
-}
-
-#[test]
-fn test_doc_id_field_order_independence() {
-    // Verify that documents with same content but different field insertion order
-    // produce the same DocID (canonical CBOR ordering ensures this)
+fn test_cbor_field_order_independence() {
+    // Documents with same content but different field insertion order
+    // produce identical canonical CBOR
     let mut doc1 = Document::new();
     doc1.set("a", "first");
     doc1.set("b", "second");
@@ -176,20 +150,8 @@ fn test_doc_id_field_order_independence() {
     doc3.set("c", "third");
     doc3.set("a", "first");
 
-    let id1 = doc1.generate_doc_id().unwrap();
-    let id2 = doc2.generate_doc_id().unwrap();
-    let id3 = doc3.generate_doc_id().unwrap();
-
-    assert_eq!(
-        id1, id2,
-        "DocID should be same regardless of field insertion order"
-    );
-    assert_eq!(
-        id2, id3,
-        "DocID should be same regardless of field insertion order"
-    );
-
-    // Also verify CBOR encoding is identical
+    // Canonical CBOR encoding is insertion-order independent — this keeps
+    // genesis composite CIDs (and therefore DocIDs) deterministic.
     assert_eq!(doc1.to_cbor().unwrap(), doc2.to_cbor().unwrap());
     assert_eq!(doc2.to_cbor().unwrap(), doc3.to_cbor().unwrap());
 }
@@ -433,9 +395,10 @@ fn test_canonical_cbor_key_ordering() {
 #[test]
 fn test_doc_id_string_format() {
     // DocID string should start with "bae-" (base32 encoded version 0x01)
-    let mut doc = Document::new();
-    doc.set("test", "value");
-    doc.generate_and_set_doc_id().unwrap();
+    let genesis_cid: cid::Cid = "bafyreie7rtdexuf47f633477mfieshkeh5rwnjeommkgqrzl22n6g4bfmm"
+        .parse()
+        .unwrap();
+    let doc = Document::with_id(document::DocID::new_v0(genesis_cid));
 
     let doc_id_str = doc.id().unwrap().to_string();
     assert!(
