@@ -9,13 +9,11 @@ use crate::block_signature::DocumentStatus;
 
 /// LWW Register delta payload for block embedding
 ///
-/// Matches Go's `crdt.LWWDelta` structure.
+/// Matches Go's `crdt.LWWDelta` structure. Deltas carry no document
+/// identity: the public DocID is derived from the genesis composite
+/// block CID (Go #4838).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LwwDeltaPayload {
-    /// Document ID
-    #[serde(rename = "docID", with = "serde_bytes")]
-    pub doc_id: Vec<u8>,
-
     /// Field name
     #[serde(rename = "fieldName")]
     pub field_name: String,
@@ -37,10 +35,6 @@ pub struct LwwDeltaPayload {
 /// Matches Go's `crdt.CounterDelta` structure.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CounterDeltaPayload {
-    /// Document ID
-    #[serde(rename = "docID", with = "serde_bytes")]
-    pub doc_id: Vec<u8>,
-
     /// Field name
     #[serde(rename = "fieldName")]
     pub field_name: String,
@@ -65,10 +59,6 @@ pub struct CounterDeltaPayload {
 /// Matches Go's `crdt.DocCompositeDelta` structure.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompositeDeltaPayload {
-    /// Document ID
-    #[serde(rename = "docID", with = "serde_bytes")]
-    pub doc_id: Vec<u8>,
-
     /// Collection version identifier
     #[serde(rename = "collectionVersionID")]
     pub schema_version_id: String,
@@ -100,7 +90,6 @@ where
 /// Collection delta payload for block embedding
 ///
 /// Matches Go's `crdt.CollectionDelta` structure.
-/// Note: CollectionDelta does NOT have a docID field (unlike other delta types).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CollectionDeltaPayload {
     /// Collection version identifier

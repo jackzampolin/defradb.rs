@@ -109,7 +109,6 @@ impl TryFrom<&CrdtDelta> for Ipld {
 impl From<&LwwDeltaPayload> for Ipld {
     fn from(payload: &LwwDeltaPayload) -> Self {
         let mut map = BTreeMap::new();
-        map.insert("docID".to_string(), Ipld::Bytes(payload.doc_id.clone()));
         map.insert(
             "fieldName".to_string(),
             Ipld::String(payload.field_name.clone()),
@@ -130,7 +129,6 @@ impl From<&LwwDeltaPayload> for Ipld {
 impl From<&CounterDeltaPayload> for Ipld {
     fn from(payload: &CounterDeltaPayload) -> Self {
         let mut map = BTreeMap::new();
-        map.insert("docID".to_string(), Ipld::Bytes(payload.doc_id.clone()));
         map.insert(
             "fieldName".to_string(),
             Ipld::String(payload.field_name.clone()),
@@ -152,7 +150,6 @@ impl From<&CounterDeltaPayload> for Ipld {
 impl From<&CompositeDeltaPayload> for Ipld {
     fn from(payload: &CompositeDeltaPayload) -> Self {
         let mut map = BTreeMap::new();
-        map.insert("docID".to_string(), Ipld::Bytes(payload.doc_id.clone()));
         map.insert(
             "schemaVersionID".to_string(),
             Ipld::String(payload.schema_version_id.clone()),
@@ -232,10 +229,6 @@ impl TryFrom<&CollectionDefinitionDeltaPayload> for Ipld {
 impl From<&Encryption> for Ipld {
     fn from(enc: &Encryption) -> Self {
         let mut map = BTreeMap::new();
-        map.insert("docID".to_string(), Ipld::Bytes(enc.doc_id.clone()));
-        if let Some(ref field_name) = enc.field_name {
-            map.insert("fieldName".to_string(), Ipld::String(field_name.clone()));
-        }
         map.insert("key".to_string(), Ipld::Bytes(enc.key.clone()));
         Ipld::Map(map)
     }

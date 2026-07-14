@@ -18,7 +18,6 @@ fn test_cid() -> cid::Cid {
 
 fn test_lww_delta() -> CrdtDelta {
     CrdtDelta::Lww(LwwDeltaPayload {
-        doc_id: b"doc1".to_vec(),
         field_name: "name".to_string(),
         priority: 1,
         schema_version_id: "schema1".to_string(),
@@ -39,7 +38,6 @@ fn test_block_ipld_roundtrip() {
 
     assert_eq!(block.delta.priority(), restored.delta.priority());
     if let (CrdtDelta::Lww(orig), CrdtDelta::Lww(rest)) = (&block.delta, &restored.delta) {
-        assert_eq!(orig.doc_id, rest.doc_id);
         assert_eq!(orig.field_name, rest.field_name);
         assert_eq!(orig.data, rest.data);
     }
@@ -74,7 +72,6 @@ fn test_block_with_links_ipld_roundtrip() {
 #[test]
 fn test_counter_delta_ipld_roundtrip() {
     let delta = CrdtDelta::Counter(CounterDeltaPayload {
-        doc_id: b"doc1".to_vec(),
         field_name: "count".to_string(),
         priority: 5,
         nonce: -42,
@@ -97,7 +94,6 @@ fn test_counter_delta_ipld_roundtrip() {
 #[test]
 fn test_composite_delta_ipld_roundtrip() {
     let delta = CrdtDelta::Composite(CompositeDeltaPayload {
-        doc_id: b"doc1".to_vec(),
         schema_version_id: "v1".to_string(),
         priority: 10,
         status: 2,
@@ -306,7 +302,6 @@ fn test_crdt_delta_from_ipld_unknown_type_fails() {
 #[test]
 fn test_lww_payload_from_ipld_missing_field_fails() {
     let mut map = BTreeMap::new();
-    map.insert("docID".to_string(), Ipld::Bytes(b"doc".to_vec()));
     // Missing fieldName, priority, schemaVersionID, data
     let ipld = Ipld::Map(map);
     let result = LwwDeltaPayload::try_from(&ipld);
@@ -317,17 +312,16 @@ fn test_lww_payload_from_ipld_missing_field_fails() {
 #[test]
 fn test_lww_payload_from_ipld_wrong_type_fails() {
     let mut map = BTreeMap::new();
-    map.insert(
-        "docID".to_string(),
-        Ipld::String("should be bytes".to_string()),
-    );
     map.insert("fieldName".to_string(), Ipld::String("name".to_string()));
     map.insert("priority".to_string(), Ipld::Integer(1));
     map.insert(
         "schemaVersionID".to_string(),
         Ipld::String("v1".to_string()),
     );
-    map.insert("data".to_string(), Ipld::Bytes(vec![]));
+    map.insert(
+        "data".to_string(),
+        Ipld::String("should be bytes".to_string()),
+    );
     let ipld = Ipld::Map(map);
     let result = LwwDeltaPayload::try_from(&ipld);
     assert!(result.is_err());
@@ -351,7 +345,6 @@ fn test_parse_u64_out_of_range_fails() {
 #[test]
 fn test_parse_u8_out_of_range_fails() {
     let mut map = BTreeMap::new();
-    map.insert("docID".to_string(), Ipld::Bytes(b"doc".to_vec()));
     map.insert(
         "schemaVersionID".to_string(),
         Ipld::String("v1".to_string()),
@@ -367,7 +360,6 @@ fn test_parse_u8_out_of_range_fails() {
 #[test]
 fn test_composite_status_zero_fails() {
     let mut map = BTreeMap::new();
-    map.insert("docID".to_string(), Ipld::Bytes(b"doc".to_vec()));
     map.insert(
         "schemaVersionID".to_string(),
         Ipld::String("v1".to_string()),
@@ -388,7 +380,6 @@ fn test_composite_status_zero_fails() {
 #[test]
 fn test_composite_status_missing_fails() {
     let mut map = BTreeMap::new();
-    map.insert("docID".to_string(), Ipld::Bytes(b"doc".to_vec()));
     map.insert(
         "schemaVersionID".to_string(),
         Ipld::String("v1".to_string()),
@@ -469,13 +460,11 @@ fn test_signature_header_unknown_type_fails() {
 
 #[test]
 fn test_encryption_ipld_roundtrip() {
-    let enc = Encryption::new_for_field(b"doc1".to_vec(), "secret".to_string(), b"key123".to_vec());
+    let enc = Encryption::new(b"key123".to_vec());
 
     let ipld = Ipld::from(&enc);
     let restored = Encryption::try_from(&ipld).unwrap();
 
-    assert_eq!(enc.doc_id, restored.doc_id);
-    assert_eq!(enc.field_name, restored.field_name);
     assert_eq!(enc.key, restored.key);
 }
 
@@ -634,7 +623,6 @@ fn test_walk_ipld_handles_deeply_nested_lists_iteratively() {
 #[test]
 fn test_crdt_delta_is_definition() {
     let lww = CrdtDelta::Lww(LwwDeltaPayload {
-        doc_id: b"doc".to_vec(),
         field_name: "f".to_string(),
         priority: 1,
         schema_version_id: "v1".to_string(),
@@ -643,7 +631,6 @@ fn test_crdt_delta_is_definition() {
     assert!(!lww.is_definition());
 
     let counter = CrdtDelta::Counter(CounterDeltaPayload {
-        doc_id: b"doc".to_vec(),
         field_name: "f".to_string(),
         priority: 1,
         nonce: 0,
@@ -666,15 +653,6 @@ fn test_crdt_delta_is_definition() {
     assert!(!col_set.is_definition());
 }
 
-#[test]
-fn test_crdt_delta_doc_id_returns_none_for_definitions() {
-    let field_def = CrdtDelta::FieldDefinition(FieldDefinitionDeltaPayload::new(1));
-    assert!(field_def.doc_id().is_none());
-
-    let col_def = CrdtDelta::CollectionDefinition(CollectionDefinitionDeltaPayload::new(1));
-    assert!(col_def.doc_id().is_none());
-}
-
 // ============================================================================
 // Additional Edge Case Tests
 // ============================================================================
@@ -682,7 +660,6 @@ fn test_crdt_delta_doc_id_returns_none_for_definitions() {
 #[test]
 fn test_counter_delta_nonce_i64_overflow_fails() {
     let mut map = BTreeMap::new();
-    map.insert("docID".to_string(), Ipld::Bytes(b"doc".to_vec()));
     map.insert("fieldName".to_string(), Ipld::String("count".to_string()));
     map.insert("priority".to_string(), Ipld::Integer(1));
     map.insert("nonce".to_string(), Ipld::Integer(i128::MAX)); // out of i64 range
