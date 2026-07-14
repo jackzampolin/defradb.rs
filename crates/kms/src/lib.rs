@@ -21,6 +21,7 @@ mod error;
 pub use error::{Error, Result};
 
 mod types;
+pub use defra_kms::BlockDocIDResolver;
 pub use types::{EncryptionCid, KeyScope, PolicyDecision};
 
 mod context;

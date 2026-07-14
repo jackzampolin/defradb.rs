@@ -28,16 +28,13 @@ pub async fn write_document_blocks(
     headstore: &NamespaceView,
     doc: &Document,
     schema_version_id: &str,
+    identity: DocStorageIdentity,
     modified_fields: Option<&std::collections::HashSet<String>>,
     encryption_config: Option<&EncryptionConfig>,
     signing_config: Option<&SigningConfig>,
     kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
 ) -> Result<BlockResult, String> {
-    let doc_id = doc
-        .id()
-        .ok_or_else(|| "Document must have an ID".to_string())?;
-    let doc_id_str = doc_id.to_string();
-    let doc_id_bytes = doc_id_str.as_bytes().to_vec();
+    let doc_ref_bytes = identity.doc_ref_bytes();
 
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
@@ -46,7 +43,7 @@ pub async fn write_document_blocks(
     let snapshot = if is_create {
         None
     } else {
-        Some(DocHeadsSnapshot::load(headstore, &doc_id_str).await?)
+        Some(DocHeadsSnapshot::load(headstore, identity.doc_short_id).await?)
     };
     let priority: u64 = if is_create {
         1
@@ -99,9 +96,11 @@ pub async fn write_document_blocks(
                     if let Some(kms_svc) = kms {
                         // KMS path: the KMS generates + persists the Encryption
                         // block (in its KeyStore) and returns the CID + plain key
-                        // for us to encrypt the field delta with.
+                        // for us to encrypt the field delta with. The scope is
+                        // keyed by the node-local DocRef: the public DocID is
+                        // not yet known on the create path.
                         let scope = kms::KeyScope::Document {
-                            doc_id: doc_id_str.clone(),
+                            doc_id: hex::encode(&doc_ref_bytes),
                             field: key_field_name.map(str::to_owned),
                         };
                         let ctx = kms::RequestContext::anonymous();
@@ -119,7 +118,7 @@ pub async fn write_document_blocks(
                     } else {
                         // Legacy path (unchanged): inline key generation + direct block store.
                         let key = defra_core::encryption::generate_encryption_key_for(
-                            &doc_id_str,
+                            &doc_ref_bytes,
                             key_field_name,
                         );
                         let encrypted = encrypt_delta(&value_bytes, &key)?;
@@ -130,11 +129,7 @@ pub async fn write_document_blocks(
                             "Encrypted field delta"
                         );
 
-                        let enc_block = Encryption {
-                            doc_id: doc_id_bytes.clone(),
-                            field_name: key_field_name.map(ToOwned::to_owned),
-                            key: key.to_vec(),
-                        };
+                        let enc_block = Encryption { key: key.to_vec() };
                         let enc_bytes = enc_block
                             .to_dag_cbor()
                             .map_err(|e| format!("Failed to encode encryption block: {}", e))?;
@@ -169,7 +164,6 @@ pub async fn write_document_blocks(
 
             let delta = if is_counter {
                 CrdtDelta::Counter(CounterDeltaPayload {
-                    doc_id: doc_id_bytes.clone(),
                     field_name: field_name.clone(),
                     priority,
                     nonce,
@@ -178,7 +172,6 @@ pub async fn write_document_blocks(
                 })
             } else {
                 CrdtDelta::Lww(LwwDeltaPayload {
-                    doc_id: doc_id_bytes.clone(),
                     field_name: field_name.clone(),
                     priority,
                     schema_version_id: schema_version_id.to_string(),
@@ -240,14 +233,17 @@ pub async fn write_document_blocks(
                     .map_err(|e| format!("Failed to delete old field head: {}", e))?;
             }
 
-            let head_key = HeadstoreDocKey::new(&doc_id_str, field_name, field_cid);
+            let head_key = HeadstoreDocKey::new(identity.doc_short_id, field_name, field_cid);
             let priority_bytes = encode_priority_varint(priority);
             headstore
                 .set(&head_key.bytes(), &priority_bytes)
                 .await
                 .map_err(|e| format!("Failed to write field head: {}", e))?;
             headstore
-                .set(&priority_index_key(&doc_id_str, priority, field_cid), &[])
+                .set(
+                    &priority_index_key(identity.doc_short_id, priority, field_cid),
+                    &[],
+                )
                 .await
                 .map_err(|e| format!("Failed to write field priority index: {}", e))?;
 
@@ -276,7 +272,6 @@ pub async fn write_document_blocks(
     };
 
     let composite_payload = CompositeDeltaPayload {
-        doc_id: doc_id_bytes,
         schema_version_id: schema_version_id.to_string(),
         priority,
         status: 1,
@@ -284,12 +279,8 @@ pub async fn write_document_blocks(
 
     let composite_encryption_cid = if let Some(enc) = encryption_config {
         if enc.encrypt_doc {
-            let key = defra_core::encryption::generate_encryption_key_for(&doc_id_str, None);
-            let enc_block = Encryption {
-                doc_id: doc_id_str.as_bytes().to_vec(),
-                field_name: None,
-                key: key.to_vec(),
-            };
+            let key = defra_core::encryption::generate_encryption_key_for(&doc_ref_bytes, None);
+            let enc_block = Encryption { key: key.to_vec() };
             let enc_bytes = enc_block
                 .to_dag_cbor()
                 .map_err(|e| format!("Failed to encode composite encryption block: {}", e))?;
@@ -339,7 +330,7 @@ pub async fn write_document_blocks(
             .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
     }
 
-    let composite_head_key = HeadstoreDocKey::new(&doc_id_str, "C", composite_cid);
+    let composite_head_key = HeadstoreDocKey::new(identity.doc_short_id, "C", composite_cid);
     let priority_bytes = encode_priority_varint(priority);
     headstore
         .set(&composite_head_key.bytes(), &priority_bytes)
@@ -347,11 +338,19 @@ pub async fn write_document_blocks(
         .map_err(|e| format!("Failed to write composite head: {}", e))?;
     headstore
         .set(
-            &priority_index_key(&doc_id_str, priority, composite_cid),
+            &priority_index_key(identity.doc_short_id, priority, composite_cid),
             &[],
         )
         .await
         .map_err(|e| format!("Failed to write composite priority index: {}", e))?;
+
+    let doc_id_str = if is_create {
+        derive_doc_id(&composite_cid)
+    } else {
+        doc.id()
+            .ok_or_else(|| "Document must have an ID for updates".to_string())?
+            .to_string()
+    };
 
     tracing::debug!(
         doc_id = %doc_id_str,
@@ -383,18 +382,17 @@ pub async fn write_delete_block(
     blockstore: &NamespaceView,
     headstore: &NamespaceView,
     doc_id: &str,
+    doc_short_id: u64,
     schema_version_id: &str,
     signing_config: Option<&SigningConfig>,
 ) -> Result<BlockResult, String> {
-    let doc_id_bytes = doc_id.as_bytes().to_vec();
-    let snapshot = DocHeadsSnapshot::load(headstore, doc_id).await?;
+    let snapshot = DocHeadsSnapshot::load(headstore, doc_short_id).await?;
     let priority: u64 = snapshot.max_priority() + 1;
 
     let composite_head_entries = snapshot.field_heads("C");
     let composite_heads: Vec<Cid> = composite_head_entries.iter().map(|h| h.cid).collect();
 
     let composite_payload = CompositeDeltaPayload {
-        doc_id: doc_id_bytes,
         schema_version_id: schema_version_id.to_string(),
         priority,
         status: 2,
@@ -430,14 +428,17 @@ pub async fn write_delete_block(
             .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
     }
 
-    let composite_head_key = HeadstoreDocKey::new(doc_id, "C", composite_cid);
+    let composite_head_key = HeadstoreDocKey::new(doc_short_id, "C", composite_cid);
     let priority_bytes = encode_priority_varint(priority);
     headstore
         .set(&composite_head_key.bytes(), &priority_bytes)
         .await
         .map_err(|e| format!("Failed to write delete composite head: {}", e))?;
     headstore
-        .set(&priority_index_key(doc_id, priority, composite_cid), &[])
+        .set(
+            &priority_index_key(doc_short_id, priority, composite_cid),
+            &[],
+        )
         .await
         .map_err(|e| format!("Failed to write delete priority index: {}", e))?;
 
@@ -497,11 +498,8 @@ mod kms_write_tests {
                 kms::KeyScope::Document { doc_id, field } => (doc_id.into_bytes(), field),
                 kms::KeyScope::Collection { collection_id } => (Vec::new(), Some(collection_id)),
             };
-            let block = defra_core::Encryption {
-                doc_id: doc_id_bytes,
-                field_name,
-                key: vec![5u8; 32],
-            };
+            let _ = (doc_id_bytes, field_name);
+            let block = defra_core::Encryption { key: vec![5u8; 32] };
             let bytes = block.to_dag_cbor().unwrap();
             let cid = defra_core::block::generate_cid_from_bytes(&bytes).unwrap();
             Ok((cid, [5u8; 32]))
@@ -516,14 +514,10 @@ mod kms_write_tests {
         }
     }
 
-    /// Recompute the CID the stub KMS would return for a per-field key, so the
-    /// test asserts against the KMS-derived CID rather than a hardcoded value.
-    fn expected_field_cid(doc_id: &str, field: &str) -> Cid {
-        let block = defra_core::Encryption {
-            doc_id: doc_id.as_bytes().to_vec(),
-            field_name: Some(field.to_string()),
-            key: vec![5u8; 32],
-        };
+    /// Recompute the CID the stub KMS would return, so the test asserts
+    /// against the KMS-derived CID rather than a hardcoded value.
+    fn expected_field_cid() -> Cid {
+        let block = defra_core::Encryption { key: vec![5u8; 32] };
         let bytes = block.to_dag_cbor().unwrap();
         generate_cid_from_bytes(&bytes).unwrap()
     }
@@ -537,9 +531,7 @@ mod kms_write_tests {
         let headstore = NamespaceView::new(shared.clone(), Namespace::Headstore);
 
         let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
         doc.set("secret", NormalValue::String("classified".to_string()));
-        let doc_id = doc.id().unwrap().to_string();
 
         let enc = EncryptionConfig {
             encrypt_doc: false,
@@ -553,6 +545,7 @@ mod kms_write_tests {
             &headstore,
             &doc,
             "schema-v1",
+            DocStorageIdentity::new(1, 1),
             None,
             Some(&enc),
             None,
@@ -570,7 +563,7 @@ mod kms_write_tests {
             .expect("field block stored");
         let field_block = Block::from_dag_cbor(&field_bytes).unwrap();
 
-        let expected = expected_field_cid(&doc_id, "secret");
+        let expected = expected_field_cid();
         assert_eq!(
             field_block.encryption,
             Some(expected),

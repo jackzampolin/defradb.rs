@@ -39,23 +39,13 @@ impl KeyStore for MemoryKeyStore {
         Ok(self.inner.read().await.get(cid).cloned())
     }
 
-    async fn generate(&self, scope: &KeyScope) -> Result<(EncryptionCid, StoredKey)> {
+    async fn generate(&self, _scope: &KeyScope) -> Result<(EncryptionCid, StoredKey)> {
         let mut key = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut key);
 
-        let (doc_id_bytes, field_name) = match scope {
-            KeyScope::Document { doc_id, field } => (doc_id.as_bytes().to_vec(), field.clone()),
-            KeyScope::Collection { collection_id } => {
-                // Mirrors Go's internal/kms/pubsub.go: collection-scoped DEKs use an
-                // empty doc_id and carry the collection_id in the field_name slot.
-                (Vec::new(), Some(collection_id.clone()))
-            }
-        };
-        let block = Encryption {
-            doc_id: doc_id_bytes,
-            field_name,
-            key: key.to_vec(),
-        };
+        // Encryption blocks carry only the key (Go #4838); ownership is
+        // tracked in the block-CID -> DocID index, not the block itself.
+        let block = Encryption { key: key.to_vec() };
         let block_bytes = block
             .to_dag_cbor()
             .map_err(|e| Error::Storage(format!("encode encryption block: {e}")))?;
@@ -106,8 +96,6 @@ mod tests {
     async fn put_get_roundtrip() {
         let store = MemoryKeyStore::new();
         let block = defra_core::Encryption {
-            doc_id: b"d".to_vec(),
-            field_name: None,
             key: vec![0x42; 32],
         };
         let block_bytes = block.to_dag_cbor().unwrap();

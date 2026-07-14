@@ -40,6 +40,7 @@ pub struct DefraKms {
     store: Arc<dyn KeyStore>,
     transports: Vec<Arc<dyn KeyTransport>>,
     policy: Arc<dyn AccessPolicy>,
+    doc_resolver: Arc<dyn BlockDocIDResolver>,
     /// Fallback identity used when `RequestContext::user_identity` is None
     /// (gossip-triggered syncs with no caller).
     node_identity: Did,
@@ -57,12 +58,14 @@ impl DefraKms {
         store: Arc<dyn KeyStore>,
         transports: Vec<Arc<dyn KeyTransport>>,
         policy: Arc<dyn AccessPolicy>,
+        doc_resolver: Arc<dyn BlockDocIDResolver>,
         node_identity: Did,
     ) -> Self {
         Self {
             store,
             transports,
             policy,
+            doc_resolver,
             node_identity,
             local_peer_id: RwLock::new(String::new()),
             test_ephemeral: RwLock::new(None),
@@ -97,30 +100,38 @@ impl DefraKms {
         }
     }
 
-    /// Derive a `KeyScope` from the on-disk `Encryption` block.
-    /// Empty `doc_id` ⇒ collection-scoped (mirrors Go).
-    fn scope_from_block(block: &defra_core::Encryption) -> Result<KeyScope> {
-        if block.doc_id.is_empty() {
-            // Collection-scoped: empty doc_id by Go convention.
-            // collection_id is not carried on the on-disk Encryption block (Go
-            // doesn't either — see internal/kms/pubsub.go:354-365 which falls
-            // straight through to a node-level NAC check). Pass empty string;
-            // NacDacPolicy::check_node_release does not consume collection_id.
-            Ok(KeyScope::Collection {
-                collection_id: String::new(),
-            })
-        } else {
-            let doc_id = std::str::from_utf8(&block.doc_id)
-                .map_err(|e| {
-                    Error::Internal(format!("invalid utf-8 in encryption block doc_id: {e}"))
-                })?
-                .to_string();
-            Ok(KeyScope::Document {
+    /// Check whether `actor` may be released the DEK stored under `cid`.
+    ///
+    /// Encryption blocks carry no identity (Go #4838): ownership is
+    /// resolved through the block-CID -> DocID index, and the key is
+    /// released if the actor may read ANY owning document (an encryption
+    /// block can be co-owned by several documents). A block with no
+    /// owning documents is never released — mirrors Go's
+    /// getEncryptionKeysLocally.
+    async fn may_release(&self, actor: Option<&Did>, cid: &EncryptionCid) -> Result<bool> {
+        let doc_ids = self.doc_resolver.doc_ids_for_block(cid).await?;
+        for doc_id in doc_ids {
+            let scope = KeyScope::Document {
                 doc_id,
-                field: block.field_name.clone(),
-            })
+                field: None,
+            };
+            if matches!(
+                self.policy.check_release(actor, &scope).await?,
+                PolicyDecision::Allow
+            ) {
+                return Ok(true);
+            }
         }
+        Ok(false)
     }
+}
+
+/// Resolves which documents own a block, via the node's
+/// block-CID -> DocID index (mirrors Go's `ResolveBlockDocIDs`).
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait BlockDocIDResolver: defra_core::thread_bounds::MaybeSendSync {
+    async fn doc_ids_for_block(&self, cid: &EncryptionCid) -> Result<Vec<String>>;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -139,24 +150,14 @@ impl KmsService for DefraKms {
         for cid in cids.iter().copied() {
             match self.store.get(&cid).await? {
                 Some(stored) => {
-                    let block = defra_core::Encryption::from_dag_cbor(&stored.block_bytes)
-                        .map_err(|e| Error::Storage(format!("decode local block: {e}")))?;
-                    let scope = Self::scope_from_block(&block)?;
-                    match self
-                        .policy
-                        .check_release(user_actor.as_ref(), &scope)
-                        .await?
-                    {
-                        PolicyDecision::Allow => {
-                            let _ = tx.send(Ok((cid, stored.key))).await;
-                        }
-                        PolicyDecision::Deny => {
-                            let _ = tx
-                                .send(Err(Error::AccessDenied {
-                                    reason: "policy denied".into(),
-                                }))
-                                .await;
-                        }
+                    if self.may_release(user_actor.as_ref(), &cid).await? {
+                        let _ = tx.send(Ok((cid, stored.key))).await;
+                    } else {
+                        let _ = tx
+                            .send(Err(Error::AccessDenied {
+                                reason: "policy denied".into(),
+                            }))
+                            .await;
                     }
                 }
                 None => remote.push(cid),
@@ -339,17 +340,11 @@ impl KmsService for DefraKms {
             let Some(stored) = self.store.get(&cid).await? else {
                 continue;
             };
-            let block = defra_core::Encryption::from_dag_cbor(&stored.block_bytes)
-                .map_err(|e| Error::Storage(format!("decode local block: {e}")))?;
-            let scope = Self::scope_from_block(&block)?;
-            match self.policy.check_release(actor.as_ref(), &scope).await? {
-                PolicyDecision::Allow => {
-                    tracing::debug!(cid = %cid, "KMS serve_request: DEK release GRANTED");
-                }
-                PolicyDecision::Deny => {
-                    tracing::warn!(cid = %cid, "KMS serve_request: DEK release DENIED");
-                    continue;
-                }
+            if self.may_release(actor.as_ref(), &cid).await? {
+                tracing::debug!(cid = %cid, "KMS serve_request: DEK release GRANTED");
+            } else {
+                tracing::warn!(cid = %cid, "KMS serve_request: DEK release DENIED");
+                continue;
             }
             let wrapped = crate::ecies_envelope::wrap_for_requester(
                 &stored.block_bytes,
@@ -387,6 +382,21 @@ mod tests {
     };
     use crate::types::KeyScope;
     use std::sync::Arc;
+
+    struct AnyDocResolver;
+    #[async_trait::async_trait]
+    impl BlockDocIDResolver for AnyDocResolver {
+        async fn doc_ids_for_block(
+            &self,
+            _: &EncryptionCid,
+        ) -> crate::Result<Vec<String>> {
+            Ok(vec!["bae-test-doc".to_string()])
+        }
+    }
+
+    fn any_doc_resolver() -> Arc<dyn BlockDocIDResolver> {
+        Arc::new(AnyDocResolver)
+    }
 
     struct AllowAll;
     #[async_trait::async_trait]
@@ -434,7 +444,7 @@ mod tests {
     async fn generate_returns_cid_and_plain_key() {
         let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
-        let kms = DefraKms::new(store, vec![], policy, node_did());
+        let kms = DefraKms::new(store, vec![], policy, any_doc_resolver(), node_did());
         let ctx = RequestContext::anonymous();
         let (cid, key) = kms
             .generate_key(
@@ -457,7 +467,7 @@ mod tests {
     async fn get_keys_missing_returns_unavailable() {
         let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
-        let kms = DefraKms::new(store, vec![], policy, node_did());
+        let kms = DefraKms::new(store, vec![], policy, any_doc_resolver(), node_did());
         let ctx = RequestContext::anonymous();
         let cid: crate::EncryptionCid =
             "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
@@ -473,7 +483,7 @@ mod tests {
     async fn get_keys_local_with_deny_policy_returns_access_denied() {
         let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let allow: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
-        let kms_gen = DefraKms::new(store.clone(), vec![], allow, node_did());
+        let kms_gen = DefraKms::new(store.clone(), vec![], allow, any_doc_resolver(), node_did());
         let ctx = RequestContext::anonymous();
         let (cid, _) = kms_gen
             .generate_key(
@@ -487,7 +497,7 @@ mod tests {
             .unwrap();
 
         let deny: Arc<dyn crate::policy::AccessPolicy> = Arc::new(DenyAll);
-        let kms_check = DefraKms::new(store, vec![], deny, node_did());
+        let kms_check = DefraKms::new(store, vec![], deny, any_doc_resolver(), node_did());
         let results = kms_check.get_keys(&ctx, &[cid]).await.unwrap();
         let mut rx = results.into_receiver();
         let first = rx.recv().await.unwrap();
@@ -498,7 +508,7 @@ mod tests {
     async fn serve_request_returns_ecies_wrapped_block_bytes() {
         let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
-        let kms = DefraKms::new(store.clone(), vec![], policy, node_did());
+        let kms = DefraKms::new(store.clone(), vec![], policy, any_doc_resolver(), node_did());
         kms.set_local_peer_id("peer-1".into());
         let ctx = RequestContext::anonymous();
         let (cid, _) = kms
@@ -536,7 +546,7 @@ mod tests {
         )
         .unwrap();
         let block = defra_core::Encryption::from_dag_cbor(&unwrapped).unwrap();
-        assert_eq!(block.doc_id, b"d1");
+        
         assert_eq!(block.key.len(), 32);
     }
 
@@ -544,7 +554,7 @@ mod tests {
     async fn serve_request_skips_unknown_cids() {
         let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
-        let kms = DefraKms::new(store, vec![], policy, node_did());
+        let kms = DefraKms::new(store, vec![], policy, any_doc_resolver(), node_did());
         let requester = crypto::generate_x25519().unwrap();
         let unknown: crate::EncryptionCid =
             "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
@@ -591,7 +601,7 @@ mod tests {
         // Peer KMS produces a reply for some CID.
         let peer_store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let peer_policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
-        let peer_kms = DefraKms::new(peer_store, vec![], peer_policy, node_did());
+        let peer_kms = DefraKms::new(peer_store, vec![], peer_policy, any_doc_resolver(), node_did());
         peer_kms.set_local_peer_id("peer".into());
         let ctx = RequestContext::anonymous();
         let (peer_cid, _) = peer_kms
@@ -630,7 +640,7 @@ mod tests {
         };
         let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
-        let kms = DefraKms::new(store, vec![Arc::new(fake)], policy, node_did());
+        let kms = DefraKms::new(store, vec![Arc::new(fake)], policy, any_doc_resolver(), node_did());
         kms.set_ephemeral_for_test(requester);
 
         let results = kms.get_keys(&ctx, &[peer_cid]).await.unwrap();

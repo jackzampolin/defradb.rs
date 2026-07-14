@@ -13,7 +13,6 @@ fn make_test_blockstore() -> Arc<DefraBlockstore<MemoryStore>> {
 #[tokio::test]
 async fn test_build_blocks_creates_proper_structure() {
     let mut doc = Document::new();
-    doc.generate_and_set_doc_id().unwrap();
     doc.set("name", NormalValue::String("Alice".to_string()));
     doc.set("age", NormalValue::Int(30));
 
@@ -40,19 +39,21 @@ async fn test_build_blocks_creates_proper_structure() {
 }
 
 #[tokio::test]
-async fn test_build_blocks_requires_doc_id() {
-    let doc = Document::new();
+async fn test_build_blocks_derives_doc_id_from_genesis_cid() {
+    let mut doc = Document::new();
+    doc.set("name", NormalValue::String("Dana".to_string()));
     let blockstore = make_test_blockstore();
 
-    let result = build_blocks_from_document(&doc, "schema-v1", &blockstore).await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("must have an ID"));
+    let result = build_blocks_from_document(&doc, "schema-v1", &blockstore)
+        .await
+        .unwrap();
+    assert_eq!(result.doc_id, derive_doc_id(&result.cid));
+    assert!(result.doc_id.starts_with("bae-"));
 }
 
 #[tokio::test]
 async fn test_field_block_contains_lww_delta() {
     let mut doc = Document::new();
-    doc.generate_and_set_doc_id().unwrap();
     doc.set("name", NormalValue::String("Bob".to_string()));
 
     let blockstore = make_test_blockstore();
@@ -81,7 +82,6 @@ async fn test_field_block_contains_lww_delta() {
 #[tokio::test]
 async fn test_composite_block_has_field_links() {
     let mut doc = Document::new();
-    doc.generate_and_set_doc_id().unwrap();
     doc.set("name", NormalValue::String("Charlie".to_string()));
     doc.set("age", NormalValue::Int(25));
 
@@ -117,7 +117,6 @@ async fn test_composite_block_has_field_links() {
 #[test]
 fn test_compute_document_blocks_places_encryption_metadata_in_blockstore_entries() {
     let mut doc = Document::new();
-    doc.generate_and_set_doc_id().unwrap();
     doc.set("secret", NormalValue::String("classified".to_string()));
 
     let enc = EncryptionConfig {
@@ -125,8 +124,14 @@ fn test_compute_document_blocks_places_encryption_metadata_in_blockstore_entries
         encrypt_fields: vec!["secret".to_string()],
     };
 
-    let computed = compute_document_blocks(&doc, "schema-v1", Some(&enc), None)
-        .expect("blocks should compute");
+    let computed = compute_document_blocks(
+        &doc,
+        "schema-v1",
+        DocStorageIdentity::new(1, 1),
+        Some(&enc),
+        None,
+    )
+    .expect("blocks should compute");
 
     assert!(
         computed.blockstore_entries.len() >= 3,
@@ -160,7 +165,6 @@ fn test_compute_signature_rejects_local_secp256r1_block_signing() {
 
     let block = Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
-            doc_id: b"doc-1".to_vec(),
             schema_version_id: "schema-v1".to_string(),
             status: 1,
             priority: 1,
@@ -195,7 +199,6 @@ fn test_compute_signature_rejects_remote_secp256r1_block_signing() {
 
     let block = Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
-            doc_id: b"doc-1".to_vec(),
             schema_version_id: "schema-v1".to_string(),
             status: 1,
             priority: 1,
@@ -247,7 +250,6 @@ fn test_compute_signature_passes_signing_authorization_to_remote_signer() {
 
     let block = Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
-            doc_id: b"doc-2".to_vec(),
             schema_version_id: "schema-v1".to_string(),
             status: 1,
             priority: 1,

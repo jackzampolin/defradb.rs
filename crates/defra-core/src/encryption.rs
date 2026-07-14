@@ -126,12 +126,15 @@ pub fn generate_encryption_key() -> [u8; 32] {
 
 /// Generate an AES-256 key for a document field.
 ///
-/// Production builds use fresh random keys. When FFI runs under the Go
-/// integration test binary, this mirrors Go's `generateTestEncryptionKey` so
-/// expected encrypted deltas and CIDs are reproducible.
-pub fn generate_encryption_key_for(doc_id: &str, field_name: Option<&str>) -> [u8; 32] {
+/// `doc_key` is the node-local document identity (the encoded DocRef —
+/// collection short ID + doc short ID), matching Go's post-#4838
+/// encryptor cache key. Production builds use fresh random keys. When
+/// FFI runs under the Go integration test binary, this mirrors Go's
+/// `generateTestEncryptionKey` so expected encrypted deltas and CIDs
+/// are reproducible.
+pub fn generate_encryption_key_for(doc_key: &[u8], field_name: Option<&str>) -> [u8; 32] {
     if USE_DETERMINISTIC_ENCRYPTION_KEY.load(Ordering::Acquire) {
-        return generate_deterministic_encryption_key(doc_id, field_name);
+        return generate_deterministic_encryption_key(doc_key, field_name);
     }
     generate_encryption_key()
 }
@@ -149,16 +152,13 @@ pub fn deterministic_encryption_key_enabled() -> bool {
     USE_DETERMINISTIC_ENCRYPTION_KEY.load(Ordering::Acquire)
 }
 
-fn generate_deterministic_encryption_key(doc_id: &str, field_name: Option<&str>) -> [u8; 32] {
-    let material = format!(
-        "{}{}{}",
-        field_name.unwrap_or(""),
-        doc_id,
-        TEST_ENCRYPTION_KEY
-    );
-    let bytes = material.as_bytes();
+fn generate_deterministic_encryption_key(doc_key: &[u8], field_name: Option<&str>) -> [u8; 32] {
+    let mut material = Vec::new();
+    material.extend_from_slice(field_name.unwrap_or("").as_bytes());
+    material.extend_from_slice(doc_key);
+    material.extend_from_slice(TEST_ENCRYPTION_KEY.as_bytes());
     let mut key = [0u8; 32];
-    key.copy_from_slice(&bytes[..32]);
+    key.copy_from_slice(&material[..32]);
     key
 }
 

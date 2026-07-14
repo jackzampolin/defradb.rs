@@ -28,6 +28,7 @@ sha2.workspace = true
 
 # Random (for nonce generation in write path)
 rand = "0.8"
+hex.workspace = true
 
 # Async
 async-trait.workspace = true
