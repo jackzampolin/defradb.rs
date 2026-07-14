@@ -239,13 +239,19 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         &self,
         peer_id: &PeerId,
         reply: PushLogReply,
-        _token: Option<T::ResponseToken>,
+        token: Option<T::ResponseToken>,
     ) {
-        let send_result = self
-            .runtime
-            .transport
-            .send_two_stream_response(peer_id, reply)
-            .await;
+        let send_result = if let Some(token) = token {
+            self.runtime
+                .transport
+                .send_pushlog_response(token, reply)
+                .await
+        } else {
+            self.runtime
+                .transport
+                .send_two_stream_response(peer_id, reply)
+                .await
+        };
 
         if let Err(e) = send_result {
             if e.is_connection_like() {
