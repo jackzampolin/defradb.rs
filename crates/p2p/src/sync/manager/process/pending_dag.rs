@@ -709,6 +709,19 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 continue;
             }
 
+            // A quarantined root's live record is a leftover, not a
+            // recovery obligation. Steady state never reaches this branch
+            // (quarantine_pending_dag's own delete already removed the live
+            // record before this sweep ran); it only fires for the crash
+            // window between that write and delete (steps (2)->(3)). Either
+            // way the quarantine record is authoritative, so clean up the
+            // leftover instead of re-registering a root that will only be
+            // rejected again.
+            if matches!(store.is_quarantined(&root_cid).await, Ok(true)) {
+                self.remove_persisted_pending(&root_cid).await;
+                continue;
+            }
+
             let missing: Vec<Cid> = match self.blockstore.get(&root_cid).await {
                 Ok(Some(data)) => {
                     match find_all_missing_links(self.blockstore.as_ref(), &data).await {
@@ -842,6 +855,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     "Failed to delete live pending-DAG record after quarantine; the next resync sweep will self-heal"
                 );
             }
+            // Unconditional, unlike `remove_persisted_pending`'s only-on-Ok
+            // drop: the quarantine write above (not the live-record delete)
+            // is this root's discharge point, so it must stop counting
+            // against the durable admission cap even if `store.remove` just
+            // failed above. The live record may still be on disk, but the
+            // resync sweep's `is_quarantined` check (Task 4) cleans up that
+            // leftover independently of this in-memory set.
             self.persisted_roots.write().remove(root_cid);
         }
 
@@ -1301,6 +1321,77 @@ mod tests {
             1
         );
         assert_eq!(manager.quarantined_pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn resync_deletes_live_leftover_of_quarantined_root_without_redriving() {
+        use crate::sync::pending_store::{
+            PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedQuarantinedDag,
+        };
+
+        let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, mut events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
+
+        let root = test_cid(1);
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        let record = PersistedPendingDag {
+            doc_id: "doc".to_string(),
+            collection_id: "collection".to_string(),
+            creator: "creator".to_string(),
+            source_peer: Some("peer".to_string()),
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+        };
+
+        // Simulate the crash window inside `quarantine_pending_dag` between
+        // writing the quarantine record and deleting the live one: both
+        // records exist on disk simultaneously.
+        pending_store
+            .put(&root, &record)
+            .await
+            .expect("persist live leftover record");
+        pending_store
+            .quarantine(
+                &root,
+                &PersistedQuarantinedDag {
+                    record: record.clone(),
+                    reason: "unique constraint violation".to_string(),
+                    quarantined_at_unix_secs: PersistedQuarantinedDag::now_unix_secs(),
+                },
+            )
+            .await
+            .expect("persist quarantine record");
+
+        manager
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+
+        let restored = manager.resync_persisted_pending_dags().await;
+
+        assert_eq!(restored, 0, "a quarantined root must not be re-registered");
+        assert_eq!(
+            manager.pending_dag_count(),
+            0,
+            "in-memory pending map must stay empty for a quarantined root"
+        );
+        assert!(
+            pending_store.load_all().await.unwrap().is_empty(),
+            "the resync sweep must delete the live leftover record"
+        );
+        assert!(
+            pending_store
+                .load_quarantined()
+                .await
+                .unwrap()
+                .iter()
+                .any(|(cid, _)| *cid == root),
+            "the quarantine record itself must survive the sweep"
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "no DagNeedsFetch/DagReady must be emitted for a quarantined root"
+        );
     }
 
     #[tokio::test(start_paused = true)]

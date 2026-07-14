@@ -2927,3 +2927,24 @@ async fn request_intake_uses_paced_limiter_separate_from_gossip_ladder() {
         push_result
     );
 }
+
+#[tokio::test]
+async fn sync_status_surfaces_quarantine_counters() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
+
+    let before = coordinator.sync_status();
+    assert_eq!(before.pending_dag_terminal_quarantined, 0);
+    assert_eq!(before.quarantined_pending_dags, 0);
+
+    let root = cid_for(b"sync-status-quarantine-root");
+    coordinator
+        .manager
+        .quarantine_pending_dag(&root, "unique constraint violation")
+        .await;
+
+    let after = coordinator.sync_status();
+    assert_eq!(after.pending_dag_terminal_quarantined, 1);
+    assert_eq!(after.quarantined_pending_dags, 1);
+}

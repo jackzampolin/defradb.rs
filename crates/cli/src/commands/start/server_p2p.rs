@@ -357,6 +357,20 @@ impl Node {
                     p2p::sync::ReplicationResult::MergedButNotMarked { cid, error } => {
                         error!(cid = %cid, error = %error, "Block merged but failed to mark");
                     }
+                    p2p::sync::ReplicationResult::Quarantined {
+                        cid,
+                        doc_id,
+                        collection_id,
+                        reason,
+                    } => {
+                        tracing::warn!(
+                            cid = %cid,
+                            doc_id = %doc_id,
+                            collection_id = %collection_id,
+                            reason = %reason,
+                            "Block quarantined: merge deterministically rejected, will not be re-driven locally"
+                        );
+                    }
                     _ => {}
                 },
             )

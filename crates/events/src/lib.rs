@@ -35,7 +35,7 @@ pub use bus::Bus;
 pub use channel_bus::{ChannelBus, ChannelBusConfig};
 pub use event::{
     AcpCacheInvalidatedData, AcpHeightAdvancedData, EventName, MergeCompleteData, Message,
-    SEArtifactReceivedData, TopicPeerEventData, Update,
+    PendingDagQuarantinedData, SEArtifactReceivedData, TopicPeerEventData, Update,
 };
 pub use noop_bus::NoOpBus;
 pub use subscription::Subscription;
