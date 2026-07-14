@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use iroh::{Endpoint, EndpointAddr};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use crate::message::CarFetchRequest;
+use crate::message::{CarFetchRequest, PushLogReply};
 use crate::transport::{PeerId, TransportEvent};
 use crate::QueryId;
 
@@ -343,6 +343,79 @@ where
     Ok(response)
 }
 
+/// Send a two-stream PushLog request and accept either response shape.
+///
+/// Current peers reply on this request's receive stream. During a rolling
+/// upgrade, older peers may still reverse-dial `ALPN_TWOSTREAM_RESP`, which is
+/// delivered through `legacy_reply`. A failure on either path is therefore not
+/// terminal while the other path can still produce the ACK.
+pub(super) async fn handle_two_stream_request(
+    endpoint: &Endpoint,
+    peer_id: &PeerId,
+    request: &crate::message::PushLogRequest,
+    direct_addr: Option<std::net::SocketAddr>,
+    cache: &ConnectionCache,
+    legacy_reply: oneshot::Receiver<PushLogReply>,
+) -> crate::error::Result<PushLogReply> {
+    let alpn = protocols::ALPN_TWOSTREAM;
+    let connection = connect_with_cache(endpoint, peer_id, alpn, direct_addr, cache).await?;
+
+    let (mut send, mut recv) = match open_bi_with_timeout(&connection, peer_id, alpn).await {
+        Ok(streams) => streams,
+        Err(error) => {
+            evict_connection(cache, peer_id, alpn);
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = protocols::write_message(&mut send, request).await {
+        evict_connection(cache, peer_id, alpn);
+        return Err(error);
+    }
+    if let Err(error) = send
+        .finish()
+        .map_err(|e| crate::error::Error::Transport(e.to_string()))
+    {
+        evict_connection(cache, peer_id, alpn);
+        return Err(error);
+    }
+
+    let wait_for_reply = async {
+        let same_stream_reply = protocols::read_message(&mut recv, protocols::MAX_MESSAGE_SIZE);
+        tokio::pin!(same_stream_reply);
+        tokio::pin!(legacy_reply);
+
+        tokio::select! {
+            result = &mut same_stream_reply => match result {
+                Ok(reply) => Ok(reply),
+                Err(same_stream_error) => match legacy_reply.await {
+                    Ok(reply) => Ok(reply),
+                    Err(_) => Err(same_stream_error),
+                },
+            },
+            result = &mut legacy_reply => match result {
+                Ok(reply) => Ok(reply),
+                Err(_) => same_stream_reply.await,
+            },
+        }
+    };
+
+    tokio::time::timeout(REQUEST_RESPONSE_TIMEOUT, wait_for_reply)
+        .await
+        .map_err(|_| {
+            warn!(
+                peer_id = %peer_id,
+                timeout_secs = REQUEST_RESPONSE_TIMEOUT.as_secs(),
+                "two-stream request timed out waiting for same-stream or legacy reply"
+            );
+            evict_connection(cache, peer_id, alpn);
+            crate::error::Error::ResponseTimeout
+        })?
+        .inspect_err(|_| {
+            evict_connection(cache, peer_id, alpn);
+        })
+}
+
 async fn send_one_way_message<T: serde::Serialize>(
     endpoint: &Endpoint,
     peer_id: &PeerId,
@@ -399,12 +472,10 @@ pub(super) async fn handle_fire_and_forget<T: serde::Serialize>(
 /// Send a one-way message, then keep the bidirectional stream alive briefly so
 /// the peer can finish reading it.
 ///
-/// The two-stream request reply arrives on a separate response ALPN, so we do
-/// not read an application reply here. But dropping the bidi stream immediately
-/// after `finish()` can cause the remote iroh reader to see
-/// `connection lost` mid-frame under burst load. Waiting for the peer to close
-/// their side (or timing out) preserves the request-stream lifetime without
-/// collapsing back to same-stream request/response semantics.
+/// This remains used for messages that do not carry an application reply on
+/// their request stream, including the legacy reverse-stream PushLog response.
+/// Waiting for the peer to close their side avoids dropping the bidi stream
+/// while the remote reader is still consuming the frame.
 pub(super) async fn handle_send_only<T: serde::Serialize>(
     endpoint: &Endpoint,
     peer_id: &PeerId,

@@ -22,6 +22,8 @@ mod peer_map;
 mod protocols;
 mod secret_key;
 mod transport;
+#[cfg(test)]
+mod two_stream_tests;
 
 pub use addr::{
     best_shareable_public_addr, canonical_peer_id, endpoint_addr_from_parts,

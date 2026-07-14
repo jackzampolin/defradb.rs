@@ -417,6 +417,7 @@ struct NoopTransport {
     doc_sync_replies: Arc<RwLock<Vec<DocSyncReply>>>,
     car_responses: Arc<RwLock<Vec<Vec<u8>>>>,
     pushlog_replies: Arc<RwLock<Vec<crate::message::PushLogReply>>>,
+    pushlog_response_tokens: Arc<RwLock<Vec<usize>>>,
     two_stream_replies: Arc<RwLock<Vec<crate::message::PushLogReply>>>,
     two_stream_handler: Arc<RwLock<Option<TwoStreamHandler>>>,
     branchable_replies: Arc<RwLock<Vec<BranchableSyncReply>>>,
@@ -432,6 +433,7 @@ impl NoopTransport {
             doc_sync_replies: Arc::new(RwLock::new(Vec::new())),
             car_responses: Arc::new(RwLock::new(Vec::new())),
             pushlog_replies: Arc::new(RwLock::new(Vec::new())),
+            pushlog_response_tokens: Arc::new(RwLock::new(Vec::new())),
             two_stream_replies: Arc::new(RwLock::new(Vec::new())),
             two_stream_handler: Arc::new(RwLock::new(None)),
             branchable_replies: Arc::new(RwLock::new(Vec::new())),
@@ -448,6 +450,10 @@ impl NoopTransport {
 
     fn pushlog_replies(&self) -> Vec<crate::message::PushLogReply> {
         self.pushlog_replies.read().clone()
+    }
+
+    fn pushlog_response_tokens(&self) -> Vec<usize> {
+        self.pushlog_response_tokens.read().clone()
     }
 
     fn two_stream_replies(&self) -> Vec<crate::message::PushLogReply> {
@@ -471,7 +477,7 @@ impl NoopTransport {
 
 #[async_trait]
 impl P2PTransport for NoopTransport {
-    type ResponseToken = ();
+    type ResponseToken = usize;
 
     fn local_peer_id(&self) -> &PeerId {
         &self.peer_id
@@ -539,9 +545,10 @@ impl P2PTransport for NoopTransport {
 
     async fn send_pushlog_response(
         &self,
-        _token: Self::ResponseToken,
+        token: Self::ResponseToken,
         reply: crate::message::PushLogReply,
     ) -> crate::Result<()> {
+        self.pushlog_response_tokens.write().push(token);
         self.pushlog_replies.write().push(reply);
         Ok(())
     }
@@ -720,11 +727,11 @@ impl P2PTransport for NoopTransport {
     }
 }
 
-fn doc_sync_event(peer_id: PeerId) -> TransportEvent<()> {
+fn doc_sync_event(peer_id: PeerId) -> TransportEvent<usize> {
     doc_sync_event_with_ids(peer_id, vec!["doc1".to_string()])
 }
 
-fn doc_sync_event_with_ids(peer_id: PeerId, doc_ids: Vec<String>) -> TransportEvent<()> {
+fn doc_sync_event_with_ids(peer_id: PeerId, doc_ids: Vec<String>) -> TransportEvent<usize> {
     TransportEvent::DocSyncRequest {
         peer_id,
         request: DocSyncRequest::new(doc_ids),
@@ -732,7 +739,7 @@ fn doc_sync_event_with_ids(peer_id: PeerId, doc_ids: Vec<String>) -> TransportEv
     }
 }
 
-fn branchable_sync_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
+fn branchable_sync_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<usize> {
     TransportEvent::BranchableSyncRequest {
         peer_id,
         request: BranchableSyncRequest::new(collection_id.to_string()),
@@ -744,7 +751,7 @@ fn branchable_sync_reply_event(
     peer_id: PeerId,
     collection_id: &str,
     heads: Vec<Cid>,
-) -> TransportEvent<()> {
+) -> TransportEvent<usize> {
     TransportEvent::BranchableSyncReply {
         peer_id,
         reply: BranchableSyncReply::success(
@@ -786,7 +793,7 @@ fn collection_commit_request(collection_id: &str) -> PushLogRequest {
     )
 }
 
-fn collection_commit_gossip_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
+fn collection_commit_gossip_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<usize> {
     TransportEvent::GossipMessage {
         propagation_source: peer_id,
         message_id: MessageId::new("gossip".to_string()),
@@ -795,19 +802,23 @@ fn collection_commit_gossip_event(peer_id: PeerId, collection_id: &str) -> Trans
     }
 }
 
-fn pushlog_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
+fn pushlog_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<usize> {
     TransportEvent::PushLogRequest {
         peer_id,
         request: pushlog_request(collection_id),
-        token: (),
+        token: 0,
     }
 }
 
-fn gossip_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
+fn gossip_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<usize> {
     gossip_event_on_topic(peer_id, collection_id, collection_id)
 }
 
-fn gossip_event_on_topic(peer_id: PeerId, topic: &str, collection_id: &str) -> TransportEvent<()> {
+fn gossip_event_on_topic(
+    peer_id: PeerId,
+    topic: &str,
+    collection_id: &str,
+) -> TransportEvent<usize> {
     TransportEvent::GossipMessage {
         propagation_source: peer_id,
         message_id: MessageId::new("gossip".to_string()),
@@ -816,7 +827,7 @@ fn gossip_event_on_topic(peer_id: PeerId, topic: &str, collection_id: &str) -> T
     }
 }
 
-fn car_fetch_event(peer_id: PeerId, root_cid: Cid) -> TransportEvent<()> {
+fn car_fetch_event(peer_id: PeerId, root_cid: Cid) -> TransportEvent<usize> {
     TransportEvent::CarFetchRequest {
         peer_id,
         request: CarFetchRequest::full_dag(root_cid),
@@ -828,7 +839,7 @@ fn selective_car_fetch_event(
     peer_id: PeerId,
     root_cid: Cid,
     wanted_cids: Vec<Cid>,
-) -> TransportEvent<()> {
+) -> TransportEvent<usize> {
     TransportEvent::CarFetchRequest {
         peer_id,
         request: CarFetchRequest::selective_blocks(root_cid, wanted_cids),
@@ -855,7 +866,7 @@ fn two_stream_event(
     peer_id: PeerId,
     collection_id: &str,
     is_explicit_replicator: bool,
-) -> TransportEvent<()> {
+) -> TransportEvent<usize> {
     TransportEvent::TwoStreamRequest {
         peer_id,
         request: pushlog_request(collection_id),
@@ -2466,7 +2477,7 @@ async fn pushlog_request_at_pending_capacity_replies_at_capacity_nack() {
         .handle_transport_event(TransportEvent::PushLogRequest {
             peer_id: peer.clone(),
             request: pushlog_request_with_missing_link("collection1", "docA"),
-            token: (),
+            token: 0,
         })
         .await
         .unwrap();
@@ -2480,7 +2491,7 @@ async fn pushlog_request_at_pending_capacity_replies_at_capacity_nack() {
         .handle_transport_event(TransportEvent::PushLogRequest {
             peer_id: peer.clone(),
             request: pushlog_request_with_missing_link("collection1", "docB"),
-            token: (),
+            token: 0,
         })
         .await;
     assert!(
@@ -2553,6 +2564,60 @@ async fn two_stream_at_pending_capacity_replies_at_capacity_nack() {
         Some(crate::error::AT_CAPACITY_MESSAGE),
         "capacity overflow must nack with the byte-exact capacity sentinel, never success"
     );
+}
+
+#[tokio::test]
+async fn two_stream_reply_with_response_token_does_not_reverse_dial() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
+    let transport = coordinator.runtime.transport.clone();
+    let peer = random_peer_id();
+
+    coordinator
+        .send_two_stream_reply(&peer, PushLogReply::success("message-1"), Some(7), true)
+        .await;
+
+    assert_eq!(transport.pushlog_response_tokens(), vec![7]);
+    assert_eq!(transport.pushlog_replies().len(), 1);
+    assert!(
+        transport.two_stream_replies().is_empty(),
+        "a response token must avoid a fresh reverse-dial"
+    );
+}
+
+#[tokio::test]
+async fn two_stream_reply_without_response_token_falls_back_to_reverse_dial() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
+    let transport = coordinator.runtime.transport.clone();
+    let peer = random_peer_id();
+
+    coordinator
+        .send_two_stream_reply(&peer, PushLogReply::success("message-1"), None, true)
+        .await;
+
+    assert!(transport.pushlog_response_tokens().is_empty());
+    assert!(transport.pushlog_replies().is_empty());
+    assert_eq!(transport.two_stream_replies().len(), 1);
+}
+
+#[tokio::test]
+async fn two_stream_reply_for_legacy_sender_falls_back_to_reverse_dial() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
+    let transport = coordinator.runtime.transport.clone();
+    let peer = random_peer_id();
+
+    coordinator
+        .send_two_stream_reply(&peer, PushLogReply::success("message-1"), Some(7), false)
+        .await;
+
+    assert!(transport.pushlog_response_tokens().is_empty());
+    assert!(transport.pushlog_replies().is_empty());
+    assert_eq!(transport.two_stream_replies().len(), 1);
 }
 
 #[tokio::test]

@@ -18,6 +18,7 @@ use crate::message::{
     PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest,
 };
 use crate::replicator::ReplicatorInfo;
+use crate::signing::sign_with_transport;
 use crate::topics::DefraTopic;
 use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId};
 use crate::QueryId;
@@ -201,8 +202,12 @@ impl P2PTransport for IrohTransport {
     async fn send_two_stream_request(
         &self,
         peer_id: &PeerId,
-        req: PushLogRequest,
+        mut req: PushLogRequest,
     ) -> Result<PushLogReply> {
+        // Advertise that this iroh sender consumes the ACK from the request
+        // stream. Re-sign because the capability is part of the wire message.
+        req.supports_same_stream_reply = true;
+        sign_with_transport(self, &mut req)?;
         self.send_command(|reply| IrohCommand::SendTwoStreamRequest {
             peer_id: peer_id.clone(),
             request: req,

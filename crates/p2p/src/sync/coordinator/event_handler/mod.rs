@@ -164,6 +164,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         peer_id: &PeerId,
         message_id: &str,
         token: Option<T::ResponseToken>,
+        supports_same_stream_reply: bool,
         error: Error,
     ) -> Error {
         let mut reply = PushLogReply::error(message_id, RATE_LIMITED_MESSAGE);
@@ -172,7 +173,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         if let Err(sign_err) = sign_with_transport(&self.runtime.transport, &mut reply) {
             tracing::debug!(error = %sign_err, "Failed to sign two-stream backpressure nack");
         }
-        self.send_two_stream_reply(peer_id, reply, token).await;
+        self.send_two_stream_reply(peer_id, reply, token, supports_same_stream_reply)
+            .await;
         error
     }
 
@@ -334,13 +336,20 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 is_explicit_replicator,
                 explicit_replay_authorization,
             } => {
+                let supports_same_stream_reply = request.supports_same_stream_reply;
                 if let Err(error) = self.check_rate_limit(
                     &self.runtime.request_rate_limiter,
                     &peer_id,
                     "TwoStreamRequest",
                 ) {
                     return Err(self
-                        .reject_rate_limited_two_stream(&peer_id, &request.message_id, token, error)
+                        .reject_rate_limited_two_stream(
+                            &peer_id,
+                            &request.message_id,
+                            token,
+                            supports_same_stream_reply,
+                            error,
+                        )
                         .await);
                 }
                 self.handle_two_stream_request(

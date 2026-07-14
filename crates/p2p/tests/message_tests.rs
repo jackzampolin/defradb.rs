@@ -43,6 +43,40 @@ fn test_pushlog_request_serialization() {
     assert_eq!(decoded.collection_id, "collection1");
     assert_eq!(decoded.creator, "creator1");
     assert_eq!(decoded.block, vec![5, 6, 7, 8]);
+    assert!(!decoded.supports_same_stream_reply);
+}
+
+#[test]
+fn test_pushlog_request_same_stream_reply_capability_is_backward_compatible() {
+    let mut request = PushLogRequest::new(
+        "doc123".to_string(),
+        Bytes::from(vec![1, 2, 3, 4]),
+        "collection1".to_string(),
+        "creator1".to_string(),
+        Bytes::from(vec![5, 6, 7, 8]),
+    );
+
+    let encoded = encode_with_ciborium(&request);
+    let value: ciborium::Value = decode_with_ciborium(&encoded);
+    let ciborium::Value::Map(map) = value else {
+        panic!("Expected CBOR map");
+    };
+    assert!(
+        !has_text_key(&map, "SupportsSameStreamReply"),
+        "false capability should be omitted for older peers"
+    );
+    let decoded: PushLogRequest = decode_with_ciborium(&encoded);
+    assert!(!decoded.supports_same_stream_reply);
+
+    request.supports_same_stream_reply = true;
+    let encoded = encode_with_ciborium(&request);
+    let value: ciborium::Value = decode_with_ciborium(&encoded);
+    let ciborium::Value::Map(map) = value else {
+        panic!("Expected CBOR map");
+    };
+    assert!(has_text_key(&map, "SupportsSameStreamReply"));
+    let decoded: PushLogRequest = decode_with_ciborium(&encoded);
+    assert!(decoded.supports_same_stream_reply);
 }
 
 #[test]
