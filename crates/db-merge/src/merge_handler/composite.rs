@@ -567,9 +567,15 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             let mut datastore = datastore.clone();
 
             // process_linked_field_blocks validates @immutable fields BEFORE
-            // persisting any field, so a rejected composite leaves no partial write
-            // in the shared batch txn. A change is a deterministic content
-            // rejection: skip terminally, not retry.
+            // persisting any field, so an immutable rejection leaves no partial
+            // write in the shared batch txn and can terminally skip in place.
+            // A unique-index rejection is different: it is detected AFTER
+            // persist_merged_document has staged the doc in the shared txn,
+            // which cannot roll back a single block — so its Rejected outcome
+            // must poison the whole batch attempt. try_batch_merge discards
+            // the txn and falls back to per-block processing, where the
+            // standalone path's per-CID txn discards cleanly. Both are
+            // deterministic content rejections, not retries.
             match self
                 .process_linked_field_blocks(&mut datastore, headstore, &context, &mut state)
                 .await

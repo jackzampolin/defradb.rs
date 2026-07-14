@@ -3175,4 +3175,156 @@ mod tests {
     // (`non_unique_storage_error_is_not_classified`,
     // `non_storage_index_error_is_not_classified`) rather than re-derived
     // here through a second full store fixture.
+
+    async fn build_session_merge_block(
+        blockstore: &Arc<DefraBlockstore<MemoryStore>>,
+        name: &str,
+        session_id: &str,
+    ) -> (MergeBlock, DocID) {
+        let mut doc = Document::new();
+        doc.set("name", NormalValue::String(name.to_string()));
+        doc.set("session_id", NormalValue::String(session_id.to_string()));
+        doc.generate_and_set_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().clone();
+        let result = db_blocks::build_blocks_from_document(&doc, "v1", blockstore)
+            .await
+            .unwrap();
+        let merge_block = MergeBlock {
+            cid: result.cid,
+            block_data: bytes::Bytes::from(result.block),
+            doc_id: result.doc_id,
+            collection_id: "col-sessions".to_string(),
+            creator: format!("did:key:z6MkrSession{name}"),
+            sender_peer: Some("peer1".to_string()),
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+            verified_creator: None,
+        };
+        (merge_block, doc_id)
+    }
+
+    async fn read_session_doc(
+        handler: &DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+        collection: &Collection,
+        doc_id: &DocID,
+    ) -> Option<Document> {
+        let txn = handler.db.new_txn(true).await.unwrap();
+        let doc = {
+            let datastore = txn.datastore().unwrap();
+            collection
+                .get_with_datastore(&datastore, doc_id)
+                .await
+                .unwrap()
+        };
+        txn.force_discard().unwrap();
+        doc
+    }
+
+    /// Batch path of the #1128 classification: a unique-index violation is
+    /// detected AFTER `persist_merged_document` has staged the doc's field
+    /// data in the SHARED batch txn, so a `Rejected` outcome must poison the
+    /// whole batch attempt (discard + per-block fallback). The rejected doc's
+    /// raw field data must NOT be committed (it would be queryable but
+    /// un-indexed), while the valid sibling in the same batch still merges.
+    #[tokio::test]
+    async fn batch_merge_rejects_unique_violation_without_partial_write() {
+        let (handler, blockstore) = make_handler_with_unique_index_schema().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-sessions")
+            .unwrap()
+            .expect("sessions collection should exist");
+
+        // Doc A commits first (separate merge), owning session_id="dup-session".
+        let (block_a, _doc_a_id) =
+            build_session_merge_block(&blockstore, "Alice", "dup-session").await;
+        let results_a = handler.handle_block_batch(&[block_a]).await;
+        assert!(matches!(results_a[0], Ok(MergeOutcome::Merged)));
+
+        // Batch: [valid sibling, violating duplicate].
+        let (block_valid, valid_id) =
+            build_session_merge_block(&blockstore, "Carol", "other-session").await;
+        let (block_violating, violating_id) =
+            build_session_merge_block(&blockstore, "Bob", "dup-session").await;
+
+        let results = handler
+            .handle_block_batch(&[block_valid, block_violating])
+            .await;
+        assert!(
+            matches!(results[0], Ok(MergeOutcome::Merged)),
+            "valid sibling block must merge, got {:?}",
+            results[0]
+        );
+        assert!(
+            matches!(results[1], Ok(MergeOutcome::Rejected { .. })),
+            "unique-violating batch block must classify as Rejected, got {:?}",
+            results[1]
+        );
+
+        // No partial write: the rejected doc's field data must not be readable.
+        assert!(
+            read_session_doc(&handler, &collection, &violating_id)
+                .await
+                .is_none(),
+            "rejected doc's field data must NOT survive the batch txn"
+        );
+        assert!(
+            read_session_doc(&handler, &collection, &valid_id)
+                .await
+                .is_some(),
+            "valid sibling must be committed"
+        );
+    }
+
+    /// Ordering contrast for the poison-then-fallback flow: the violating
+    /// block comes FIRST, so the batch attempt is poisoned before the valid
+    /// sibling is processed. The fallback must still merge the sibling and
+    /// keep result order aligned with the input blocks.
+    #[tokio::test]
+    async fn batch_merge_unique_violation_first_still_merges_valid_sibling() {
+        let (handler, blockstore) = make_handler_with_unique_index_schema().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-sessions")
+            .unwrap()
+            .expect("sessions collection should exist");
+
+        let (block_a, _doc_a_id) =
+            build_session_merge_block(&blockstore, "Alice", "dup-session").await;
+        let results_a = handler.handle_block_batch(&[block_a]).await;
+        assert!(matches!(results_a[0], Ok(MergeOutcome::Merged)));
+
+        // Batch: [violating duplicate, valid sibling].
+        let (block_violating, violating_id) =
+            build_session_merge_block(&blockstore, "Bob", "dup-session").await;
+        let (block_valid, valid_id) =
+            build_session_merge_block(&blockstore, "Carol", "other-session").await;
+
+        let results = handler
+            .handle_block_batch(&[block_violating, block_valid])
+            .await;
+        assert!(
+            matches!(results[0], Ok(MergeOutcome::Rejected { .. })),
+            "unique-violating batch block must classify as Rejected, got {:?}",
+            results[0]
+        );
+        assert!(
+            matches!(results[1], Ok(MergeOutcome::Merged)),
+            "valid sibling after a poisoning rejection must still merge, got {:?}",
+            results[1]
+        );
+
+        assert!(
+            read_session_doc(&handler, &collection, &violating_id)
+                .await
+                .is_none(),
+            "rejected doc's field data must NOT survive the batch txn"
+        );
+        assert!(
+            read_session_doc(&handler, &collection, &valid_id)
+                .await
+                .is_some(),
+            "valid sibling must be committed"
+        );
+    }
 }
