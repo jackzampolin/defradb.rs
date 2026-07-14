@@ -86,6 +86,14 @@ pub enum MergeOutcome {
         /// unmerged so the block can be retried after policy/state changes.
         terminal: bool,
     },
+    /// Block was deterministically rejected on its content (e.g. a unique-index
+    /// violation): it will never succeed on replay. Unlike a terminal skip, the
+    /// receiver does not discharge the block as merged — it quarantines it
+    /// instead, so local re-drive stops while a remote re-push can still retry.
+    Rejected {
+        /// Human-readable reason for the rejection.
+        reason: String,
+    },
 }
 
 impl MergeOutcome {
@@ -105,6 +113,15 @@ impl MergeOutcome {
         }
     }
 
+    /// Create a rejected outcome: a deterministic content rejection that will
+    /// never succeed on replay. The receiver quarantines rather than
+    /// discharging the block as merged.
+    pub fn rejected(reason: impl Into<String>) -> Self {
+        Self::Rejected {
+            reason: reason.into(),
+        }
+    }
+
     /// Returns true if this outcome indicates the block was merged.
     pub fn is_merged(&self) -> bool {
         matches!(self, Self::Merged)
@@ -113,6 +130,11 @@ impl MergeOutcome {
     /// Returns true if this outcome indicates the block was skipped.
     pub fn is_skipped(&self) -> bool {
         matches!(self, Self::Skipped { .. })
+    }
+
+    /// Returns true if this outcome indicates the block was deterministically rejected.
+    pub fn is_rejected(&self) -> bool {
+        matches!(self, Self::Rejected { .. })
     }
 
     /// Returns true if this outcome is a terminal skip.
@@ -316,6 +338,7 @@ pub trait MergeHandler: Send + Sync {
     ///
     /// * `Ok(MergeOutcome::Merged)` - Block was merged successfully
     /// * `Ok(MergeOutcome::Skipped { reason })` - Block was skipped
+    /// * `Ok(MergeOutcome::Rejected { reason })` - Block was deterministically rejected
     /// * `Err(e)` - Merge failed
     async fn handle_block(
         &self,

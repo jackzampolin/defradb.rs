@@ -28,6 +28,13 @@ pub enum MergeError {
     #[error("immutable field rejected: {0}")]
     ImmutableFieldChanged(String),
 
+    /// A merge would violate a unique-index constraint. Like
+    /// `ImmutableFieldChanged`, this is a deterministic rejection of the
+    /// block's content (the same document content will violate the same
+    /// constraint on every replay), not a transient failure.
+    #[error("unique constraint violation during merge: {0}")]
+    UniqueConstraintViolation(String),
+
     /// Database error.
     #[error("database error: {0}")]
     Database(#[from] db::error::Error),

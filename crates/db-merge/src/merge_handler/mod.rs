@@ -3062,4 +3062,117 @@ mod tests {
         let out = handler.decrypt_block_data(&data, None, None).await.unwrap();
         assert_eq!(out, data);
     }
+
+    async fn make_handler_with_unique_index_schema() -> (
+        DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+        Arc<DefraBlockstore<MemoryStore>>,
+    ) {
+        let store = Arc::new(MemoryStore::new());
+        let db = Arc::new(DB::from_arc(store.clone()).unwrap());
+
+        db.create_collection(
+            CollectionVersion::new(
+                "Sessions",
+                "v1",
+                "col-sessions",
+                vec![
+                    FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                    FieldDescription::new("2", "name", FieldKind::string()),
+                    FieldDescription::new("3", "session_id", FieldKind::string()),
+                ],
+            )
+            .with_index(schema::IndexDescription {
+                name: "idx_session_id_unique".to_string(),
+                id: 1,
+                fields: vec![schema::IndexedFieldDescription {
+                    name: "session_id".to_string(),
+                    descending: false,
+                }],
+                unique: true,
+                auto_generated: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let blockstore = Arc::new(DefraBlockstore::new(store, false));
+        let handler = DbMergeHandler::new(db, blockstore.clone());
+        (handler, blockstore)
+    }
+
+    /// #1128: a replicated composite merge that trips a unique-index
+    /// constraint must classify as `MergeOutcome::Rejected`, not an opaque
+    /// `Err`. `Err` never reaches the durable pending-DAG deletion path, so
+    /// the resync sweep re-drives the same doomed root forever.
+    #[tokio::test]
+    async fn remote_composite_merge_with_unique_index_violation_is_rejected_not_err() {
+        let (handler, blockstore) = make_handler_with_unique_index_schema().await;
+
+        // Doc A: first writer of session_id="dup-session" — merges cleanly.
+        let mut doc_a = Document::new();
+        doc_a.set("name", NormalValue::String("Alice".to_string()));
+        doc_a.set("session_id", NormalValue::String("dup-session".to_string()));
+        doc_a.generate_and_set_doc_id().unwrap();
+        let result_a = db_blocks::build_blocks_from_document(&doc_a, "v1", &blockstore)
+            .await
+            .unwrap();
+        let metadata_a = BlockMetadata::normal(
+            &result_a.doc_id,
+            "col-sessions",
+            "did:key:z6MkrSessionA",
+            None,
+            false,
+        );
+        let outcome_a = handler
+            .handle_block(&result_a.cid, &result_a.block, metadata_a)
+            .await
+            .expect("first writer of the unique value should merge");
+        assert_eq!(outcome_a, MergeOutcome::Merged);
+
+        // Doc B: distinct document content (different name => different doc_id
+        // and CID), but the SAME session_id — a genuine cross-document unique
+        // violation, exactly what a replicated push can carry.
+        let mut doc_b = Document::new();
+        doc_b.set("name", NormalValue::String("Bob".to_string()));
+        doc_b.set("session_id", NormalValue::String("dup-session".to_string()));
+        doc_b.generate_and_set_doc_id().unwrap();
+        let result_b = db_blocks::build_blocks_from_document(&doc_b, "v1", &blockstore)
+            .await
+            .unwrap();
+        let metadata_b = BlockMetadata::normal(
+            &result_b.doc_id,
+            "col-sessions",
+            "did:key:z6MkrSessionB",
+            None,
+            false,
+        );
+        let outcome_b = handler
+            .handle_block(&result_b.cid, &result_b.block, metadata_b)
+            .await;
+
+        match outcome_b {
+            Ok(MergeOutcome::Rejected { reason }) => {
+                assert!(
+                    !reason.is_empty(),
+                    "rejection reason should carry the typed violation detail"
+                );
+            }
+            other => panic!(
+                "unique-index violation on a replicated merge must classify as \
+                 Ok(MergeOutcome::Rejected), not {:?}",
+                other
+            ),
+        }
+    }
+
+    // Transient contrast: only a typed `storage::Error::UniqueConstraintViolation`
+    // is converted to `MergeOutcome::Rejected`. Any other `db_index::Error`
+    // (including other storage failures) must keep surfacing as `Err` so the
+    // caller retries — matching pre-existing behavior for non-deterministic
+    // failures. That discrimination is a pure function of the error value
+    // (independent of collection/store state), so it is covered directly at
+    // the classification seam: see `composite_persist::classify_tests`
+    // (`non_unique_storage_error_is_not_classified`,
+    // `non_storage_index_error_is_not_classified`) rather than re-derived
+    // here through a second full store fixture.
 }

@@ -267,11 +267,16 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 .await
             {
                 Ok(Some(outcome)) => Ok(Some(outcome)),
-                Ok(None) => {
-                    self.persist_merged_document(&mut datastore, &context, &mut state)
-                        .await?;
-                    Ok(None)
-                }
+                Ok(None) => match self
+                    .persist_merged_document(&mut datastore, &context, &mut state)
+                    .await
+                {
+                    Ok(()) => Ok(None),
+                    Err(MergeError::UniqueConstraintViolation(reason)) => {
+                        Ok(Some(MergeOutcome::rejected(reason)))
+                    }
+                    Err(e) => Err(e),
+                },
                 Err(MergeError::ImmutableFieldChanged(reason)) => {
                     Ok(Some(MergeOutcome::terminal_skip(reason)))
                 }
@@ -570,11 +575,16 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 .await
             {
                 Ok(Some(outcome)) => Ok(Some(outcome)),
-                Ok(None) => {
-                    self.persist_merged_document(&mut datastore, &context, &mut state)
-                        .await?;
-                    Ok(None)
-                }
+                Ok(None) => match self
+                    .persist_merged_document(&mut datastore, &context, &mut state)
+                    .await
+                {
+                    Ok(()) => Ok(None),
+                    Err(MergeError::UniqueConstraintViolation(reason)) => {
+                        Ok(Some(MergeOutcome::rejected(reason)))
+                    }
+                    Err(e) => Err(e),
+                },
                 Err(MergeError::ImmutableFieldChanged(reason)) => {
                     Ok(Some(MergeOutcome::terminal_skip(reason)))
                 }

@@ -110,6 +110,17 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     }
                 };
                 if let Err(e) = index_result {
+                    // The merge variants above already resolve the common live
+                    // unique-conflict case deterministically without erroring.
+                    // What still surfaces `UniqueConstraintViolation` here are
+                    // the degenerate arms (non-Unique index type mismatch,
+                    // empty collection_id, `conflicting_doc_id` returning
+                    // None) — internal index-state inconsistency, not a
+                    // transient storage failure. Classify and reject rather
+                    // than retrying forever.
+                    if is_unique_constraint_violation(&e) {
+                        return Err(MergeError::UniqueConstraintViolation(e.to_string()));
+                    }
                     let message = if context.mode.is_standalone() {
                         "Failed to update indexes after merge"
                     } else {
@@ -217,5 +228,36 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         }
 
         Ok(())
+    }
+}
+
+/// True if `e` represents a deterministic unique-index rejection rather than a
+/// transient storage failure during merge-time index maintenance. Only this
+/// case should be converted into `MergeOutcome::Rejected`; every other
+/// `db_index::Error` must keep surfacing as `Err` so transient failures retry.
+fn is_unique_constraint_violation(e: &db::index_manager::Error) -> bool {
+    matches!(e, db::index_manager::Error::Storage(se) if se.is_unique_constraint_violation())
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::is_unique_constraint_violation;
+
+    #[test]
+    fn unique_constraint_violation_is_classified() {
+        let e = db::index_manager::Error::Storage(storage::Error::UniqueConstraintViolation);
+        assert!(is_unique_constraint_violation(&e));
+    }
+
+    #[test]
+    fn non_unique_storage_error_is_not_classified() {
+        let e = db::index_manager::Error::Storage(storage::Error::Other("disk full".to_string()));
+        assert!(!is_unique_constraint_violation(&e));
+    }
+
+    #[test]
+    fn non_storage_index_error_is_not_classified() {
+        let e = db::index_manager::Error::Other("index misconfigured".to_string());
+        assert!(!is_unique_constraint_violation(&e));
     }
 }
