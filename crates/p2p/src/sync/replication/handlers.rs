@@ -351,23 +351,13 @@ where
             }
         }
         Ok(MergeOutcome::Rejected { reason }) => {
-            // Temporary shim: quarantine disposition lands separately (#1128).
-            // Treated as non-terminal so the block stays live and retryable
-            // until quarantine wiring exists, keeping behavior safe standalone.
-            tracing::warn!(
-                cid = %cid,
-                doc_id = %doc_id_for_result,
-                collection_id = %collection_id_for_result,
-                reason = %reason,
-                "merge rejected (deterministic content rejection); treating as retryable skip pending quarantine wiring"
-            );
+            coordinator.quarantine_pending_dag(&cid, &reason).await;
 
-            ReplicationResult::Skipped {
+            ReplicationResult::Quarantined {
                 cid,
                 doc_id: doc_id_for_result,
                 collection_id: collection_id_for_result,
                 reason,
-                terminal: false,
             }
         }
         Err(e) => ReplicationResult::Failed {
@@ -590,23 +580,17 @@ where
                 });
             }
             Ok(MergeOutcome::Rejected { reason }) => {
-                // Temporary shim: quarantine disposition lands separately (#1128).
-                // Not added to merged_cids, so the block stays live and retryable
-                // until quarantine wiring exists.
-                tracing::warn!(
-                    cid = %block.cid,
-                    doc_id = %block.doc_id,
-                    collection_id = %block.collection_id,
-                    reason = %reason,
-                    "merge rejected (deterministic content rejection); treating as retryable skip pending quarantine wiring"
-                );
+                // Deliberately NOT added to merged_cids: quarantine leaves
+                // the block unmerged (see `quarantine_pending_dag`).
+                coordinator
+                    .quarantine_pending_dag(&block.cid, &reason)
+                    .await;
 
-                results.push(ReplicationResult::Skipped {
+                results.push(ReplicationResult::Quarantined {
                     cid: block.cid,
                     doc_id: block.doc_id.clone(),
                     collection_id: block.collection_id.clone(),
                     reason,
-                    terminal: false,
                 });
             }
             Err(e) => {

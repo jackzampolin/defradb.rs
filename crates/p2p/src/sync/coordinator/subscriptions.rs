@@ -172,6 +172,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         self.manager.mark_batch_as_merged(cids).await
     }
 
+    /// Quarantine a terminally-rejected pending-DAG root (#1128).
+    pub async fn quarantine_pending_dag(&self, root_cid: &Cid, reason: &str) {
+        self.manager.quarantine_pending_dag(root_cid, reason).await
+    }
+
     /// Check if a block is merged.
     pub async fn is_merged(&self, cid: &Cid) -> Result<bool> {
         self.manager.is_merged(cid).await

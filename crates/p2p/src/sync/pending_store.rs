@@ -6,9 +6,11 @@
 //! the ack and Bitswap completion silently loses the document (modeled in
 //! `proofs/tla/PendingDagRestart.tla`). Installing a store makes each
 //! push-originated registration durable: it is written before the success
-//! reply, deleted only when the root is successfully marked merged (never at
-//! DagReady emission, TTL eviction, or clear), and re-driven at startup and
-//! by the periodic resync sweep via `resync_persisted_pending_dags`.
+//! reply, deleted only when the root is successfully marked merged or
+//! quarantined (#1128 — a deterministic content rejection that will never
+//! succeed on replay; never at DagReady emission, TTL eviction, or clear),
+//! and re-driven at startup and by the periodic resync sweep via
+//! `resync_persisted_pending_dags`.
 //!
 //! Pull-originated registrations (DocSync/BranchableSync) are not persisted —
 //! no remote retry state is destroyed by their acks, so restart loss is

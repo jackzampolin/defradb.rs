@@ -105,6 +105,14 @@ pub struct SyncManager<B: Blockstore> {
     /// Resync invocation counter; every Nth sweep skips the steady-state
     /// early-exit so store/set desyncs from rare races self-heal.
     pub(super) pending_resync_tick: std::sync::atomic::AtomicUsize,
+
+    /// Gauge of currently quarantined pending-DAG roots (#1128). Hydrated
+    /// from `load_quarantined().len()` when the store is installed and
+    /// bumped on each `quarantine_pending_dag` call, rather than rescanning
+    /// the store on every read — quarantine is rare (deterministic content
+    /// rejection) but `quarantined_pending_count()` may be polled by status
+    /// endpoints far more often than that.
+    pub(super) quarantined_pending_count: std::sync::atomic::AtomicUsize,
 }
 
 /// Every Nth resync is a forced full sweep (see `pending_resync_tick`).
@@ -149,6 +157,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             persisted_roots: Arc::new(RwLock::new(std::collections::HashSet::new())),
             pending_resync_in_flight: std::sync::atomic::AtomicBool::new(false),
             pending_resync_tick: std::sync::atomic::AtomicUsize::new(0),
+            quarantined_pending_count: std::sync::atomic::AtomicUsize::new(0),
         };
 
         (manager, event_rx)
@@ -166,7 +175,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     ///
     /// A successful terminal merge is the point where a durable pending
     /// registration has discharged its recovery obligation (#1099): only
-    /// here (and never at DagReady emission, TTL eviction, or clear) is the
+    /// here or by quarantine (#1128, `quarantine_pending_dag` — a
+    /// deterministic content rejection that will never succeed on replay)
+    /// — and never at DagReady emission, TTL eviction, or clear — is the
     /// persisted record deleted.
     pub async fn mark_as_merged(&self, cid: &Cid) -> crate::error::Result<()> {
         self.blockstore
@@ -275,6 +286,24 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 );
             }
         }
+        match store.load_quarantined().await {
+            Ok(records) => {
+                self.quarantined_pending_count
+                    .store(records.len(), std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Failed to hydrate quarantined pending DAG gauge; count is 0 until the next quarantine"
+                );
+            }
+        }
+    }
+
+    /// Number of pending-DAG roots currently quarantined (#1128).
+    pub fn quarantined_pending_count(&self) -> usize {
+        self.quarantined_pending_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(super) fn pending_store(

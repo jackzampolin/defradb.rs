@@ -631,6 +631,33 @@ mod tests {
         }
     }
 
+    /// Merge handler that always returns a deterministic content rejection.
+    struct RejectingMergeHandler {
+        reason: String,
+    }
+
+    impl RejectingMergeHandler {
+        fn new(reason: &str) -> Self {
+            Self {
+                reason: reason.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MergeHandler for RejectingMergeHandler {
+        type Error = TestError;
+
+        async fn handle_block(
+            &self,
+            _cid: &Cid,
+            _block_data: &[u8],
+            _metadata: BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, Self::Error> {
+            Ok(MergeOutcome::rejected(self.reason.clone()))
+        }
+    }
+
     #[async_trait]
     impl MergeHandler for RetryThenMergeHandler {
         type Error = TestError;
@@ -1049,6 +1076,148 @@ mod tests {
         assert!(
             blockstore.is_merged(&cid).await.unwrap(),
             "successful replay should mark the CID as merged"
+        );
+    }
+
+    /// Seed a coordinator whose manager has a durable pending-DAG store
+    /// installed and a live registration for `cid`, mirroring a push-driven
+    /// registration awaiting merge.
+    async fn coordinator_with_live_pending_dag(
+        blockstore: Arc<DefraBlockstore<MemoryStore>>,
+        cid: Cid,
+    ) -> (
+        crate::sync::coordinator::SyncCoordinator<DefraBlockstore<MemoryStore>, NoopTransport>,
+        Arc<crate::sync::pending_store::PendingDagStore<MemoryStore>>,
+    ) {
+        use crate::sync::pending_store::PendingDagStorage;
+
+        let (coordinator, _events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                NoopTransport::new(),
+                blockstore,
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+                Arc::new(EqOnlyFilterMatcher),
+            )
+            .await
+            .unwrap();
+
+        let pending_store = Arc::new(crate::sync::pending_store::PendingDagStore::new(Arc::new(
+            MemoryStore::new(),
+        )));
+        pending_store
+            .put(
+                &cid,
+                &crate::sync::pending_store::PersistedPendingDag {
+                    doc_id: "doc1".to_string(),
+                    collection_id: "col1".to_string(),
+                    creator: "peer1".to_string(),
+                    source_peer: Some("sender1".to_string()),
+                    is_explicit_replicator: true,
+                    explicit_replay_authorization: None,
+                },
+            )
+            .await
+            .expect("persist live pending dag record");
+
+        // install_pending_dag_store hydrates persisted_roots from the store
+        // at install time, so the record must already be `put` above.
+        coordinator
+            .manager()
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+
+        (coordinator, pending_store)
+    }
+
+    #[tokio::test]
+    async fn test_rejected_merge_quarantines_and_leaves_block_unmerged() {
+        use crate::sync::pending_store::PendingDagStorage;
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let cid = test_cid();
+        blockstore.put(&cid, b"test data").await.unwrap();
+
+        let (coordinator, pending_store) =
+            coordinator_with_live_pending_dag(blockstore.clone(), cid).await;
+
+        let handler = RejectingMergeHandler::new("unique constraint violation");
+        let result = handle_block_received(
+            &coordinator,
+            &handler,
+            &ReplicationConfig::default(),
+            cid,
+            BlockMetadata::normal("doc1", "col1", "peer1", Some("sender1"), true),
+        )
+        .await;
+
+        match result {
+            ReplicationResult::Quarantined {
+                cid: result_cid,
+                reason,
+                ..
+            } => {
+                assert_eq!(result_cid, cid);
+                assert_eq!(reason, "unique constraint violation");
+            }
+            other => panic!("expected Quarantined, got {:?}", other),
+        }
+
+        assert!(
+            !blockstore.is_merged(&cid).await.unwrap(),
+            "quarantine must not mark the block merged (mark_as_merged must not run)"
+        );
+        assert!(
+            pending_store.is_quarantined(&cid).await.unwrap(),
+            "quarantine store must be populated"
+        );
+        assert!(
+            pending_store.load_all().await.unwrap().is_empty(),
+            "live durable record must be removed after quarantine"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transient_merge_error_stays_failed_and_does_not_quarantine() {
+        use crate::sync::pending_store::PendingDagStorage;
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let cid = test_cid();
+        blockstore.put(&cid, b"test data").await.unwrap();
+
+        let (coordinator, pending_store) =
+            coordinator_with_live_pending_dag(blockstore.clone(), cid).await;
+
+        let handler = TestMergeHandler::new(false, false); // handle_block returns Err
+        let result = handle_block_received(
+            &coordinator,
+            &handler,
+            &ReplicationConfig::default(),
+            cid,
+            BlockMetadata::normal("doc1", "col1", "peer1", Some("sender1"), true),
+        )
+        .await;
+
+        match result {
+            ReplicationResult::Failed {
+                cid: result_cid, ..
+            } => assert_eq!(result_cid, cid),
+            other => panic!("expected Failed, got {:?}", other),
+        }
+
+        assert!(!blockstore.is_merged(&cid).await.unwrap());
+        assert!(
+            !pending_store.is_quarantined(&cid).await.unwrap(),
+            "a transient failure must not quarantine the root"
+        );
+        assert_eq!(
+            pending_store.load_all().await.unwrap().len(),
+            1,
+            "durable record must remain live after a transient failure"
         );
     }
 
