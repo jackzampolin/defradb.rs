@@ -177,7 +177,7 @@ async fn two_stream_request_still_accepts_legacy_reverse_stream_reply() {
 
 #[tokio::test]
 async fn concurrent_two_stream_fan_in_replies_on_request_streams() {
-    const SENDERS: usize = 8;
+    const SENDERS: usize = 32;
 
     let mut receiver = TestNode::spawn().await;
     let mut senders = Vec::with_capacity(SENDERS);

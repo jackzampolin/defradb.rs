@@ -84,6 +84,8 @@ pub struct PushLogRequest {
     /// Whether the sender can receive the reply on the request's bidirectional stream.
     ///
     /// Older iroh senders omit this field and require the legacy reverse-stream response.
+    /// This capability is iroh-only. Never set it on libp2p: Go signature verification
+    /// re-serializes the request and would omit this unknown field.
     #[serde(
         rename = "SupportsSameStreamReply",
         skip_serializing_if = "is_false",
