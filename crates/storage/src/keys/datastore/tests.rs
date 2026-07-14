@@ -4,12 +4,7 @@ use crate::keys::utils::{InstanceType, SEPARATOR};
 
 #[test]
 fn test_datastore_key() {
-    let key = DataStoreKey::new(
-        1,
-        InstanceType::Value,
-        "bae123456789abcdef0123456789abcdef012345",
-        "fieldname",
-    );
+    let key = DataStoreKey::new(1, InstanceType::Value, 42, "fieldname");
 
     let bytes = key.bytes();
     assert!(!bytes.is_empty());
@@ -22,13 +17,13 @@ fn test_datastore_key() {
 
 #[test]
 fn test_primary_datastore_key() {
-    let key = PrimaryDataStoreKey::new(1, "bae123456789abcdef0123456789abcdef012345");
+    let key = PrimaryDataStoreKey::new(1, 42);
 
     let bytes = key.bytes();
     let string = key.to_string();
 
-    assert_eq!(string, "/1/pk/bae123456789abcdef0123456789abcdef012345");
-    assert_eq!(bytes, string.as_bytes());
+    assert_eq!(string, "/1/pk/42");
+    assert_eq!(bytes, [&[0x2f, 0x01][..], b"/pk/", &[0x2a]].concat());
 }
 
 #[test]
@@ -154,17 +149,13 @@ fn test_datastore_key_prefixes() {
     let prefix = DataStoreKey::collection_instance_prefix(1, InstanceType::Value);
     assert!(!prefix.is_empty());
 
-    let prefix = DataStoreKey::document_prefix(1, InstanceType::Value, "docid");
+    let prefix = DataStoreKey::document_prefix(1, InstanceType::Value, 42);
     assert!(!prefix.is_empty());
 }
 
 #[test]
 fn test_version_key() {
-    let key = DataStoreKey::version_key(
-        1,
-        InstanceType::Value,
-        "bae123456789abcdef0123456789abcdef012345",
-    );
+    let key = DataStoreKey::version_key(1, InstanceType::Value, 42);
 
     assert!(key.is_version_field());
     assert_eq!(key.field_id, DATASTORE_DOC_VERSION_FIELD_ID);
@@ -177,15 +168,10 @@ fn test_version_key() {
 
 #[test]
 fn test_is_version_field() {
-    let version_key = DataStoreKey::new(
-        1,
-        InstanceType::Value,
-        "docid",
-        DATASTORE_DOC_VERSION_FIELD_ID,
-    );
+    let version_key = DataStoreKey::new(1, InstanceType::Value, 42, DATASTORE_DOC_VERSION_FIELD_ID);
     assert!(version_key.is_version_field());
 
-    let regular_key = DataStoreKey::new(1, InstanceType::Value, "docid", "name");
+    let regular_key = DataStoreKey::new(1, InstanceType::Value, 42, "name");
     assert!(!regular_key.is_version_field());
 }
 

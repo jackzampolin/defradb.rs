@@ -51,7 +51,7 @@ mod tests {
 
         let cid =
             Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
-        let key = HeadstoreDocKey::new("doc1", "field1", cid);
+        let key = HeadstoreDocKey::new(1, "field1", cid);
 
         // Write
         let mut txn = headstore.new_txn(false).await.unwrap();
