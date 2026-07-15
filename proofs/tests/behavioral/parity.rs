@@ -37,7 +37,9 @@
 //! `parity_unique_twins_mixed_partial_materialization` CHARACTERIZES the
 //! observed third outcome (Rust's pre-#1116-stage-3 block-by-block PushLog
 //! replay lands field-delta blocks on the Go peer before the composite is
-//! rejected, leaving a scan-visible unindexed partial document on Go). It is
+//! rejected, leaving a scan-visible unindexed partial document on Go at the
+//! compat pin 6c874754, pre-#4838). This window is CLOSED on Go v1.0.0 and
+//! current develop by #4838's composite-parent guard. It is
 //! a runnable repro artifact for the upstream report, deliberately NOT in
 //! the go-compat CI allowlist — see its doc comment. Upstream Go tracking
 //! issues: sourcenetwork/defradb#5059 (unique-index x CRDT-merge
@@ -1559,8 +1561,13 @@ async fn parity_unique_twins_rust_rust() {
 /// or never-started push would pass a bare sleep-then-assert vacuously.
 /// After wiring, each node therefore creates a NON-conflicting canary doc
 /// (distinct unique values) and the test blocks until both canaries cross in
-/// BOTH directions — proving replication is live through the same channels
-/// that carried (and rejected) the twin — before asserting the divergence.
+/// BOTH directions — proving replication is live over the same collection
+/// and replicator wiring. The twin-attempt ordering holds by generous timing
+/// margin (the twin's catch-up push is dispatched at wiring time, long before
+/// the canaries exist), NOT by protocol-level serialization: Go's catch-up
+/// (`pushHeadsForAllDocs`, async OnSuccessAsync) and live pushes (spawned
+/// goroutines) are concurrent and not ordered. The post-witness settle
+/// re-check below mitigates a still-in-flight twin before asserting divergence.
 /// The replicator-`Active` assertion at the end is the #5058 silent-ack
 /// signature: the sender drained its retry queue believing the rejected push
 /// succeeded.
@@ -1670,6 +1677,7 @@ async fn parity_unique_twins_go_go() {
 /// develop past #4838 (genesis-CID docIDs), a standalone field-delta merge
 /// root is REJECTED (`initCRDTForType` requires a composite parent), so
 /// this exact window closes there — re-characterize when the pin advances.
+/// Pin-bump implications tracked in defradb.rs#1136.
 ///
 /// The assertions are positive pins of the observed state, so ANY behavior
 /// change breaks this test loudly: an upstream Go fix (rollback or
