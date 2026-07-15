@@ -2547,7 +2547,7 @@ name = "conformance"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "defra-harness 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness)",
+ "defra-harness",
  "serde",
  "serde_json",
  "serial_test",
@@ -3638,26 +3638,6 @@ dependencies = [
 [[package]]
 name = "defra-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
-dependencies = [
- "eyre",
- "futures",
- "libc",
- "paste",
- "rand 0.8.5",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sourcehub-harness 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness)",
- "test-infra 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness)",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "defra-harness"
-version = "0.1.0"
 source = "git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d#adaf59db7aaea3e8d48a9b5e14846c24e59d2456"
 dependencies = [
  "eyre",
@@ -3669,8 +3649,8 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sourcehub-harness 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d)",
- "test-infra 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d)",
+ "sourcehub-harness",
+ "test-infra",
  "tokio",
  "tracing",
 ]
@@ -5553,7 +5533,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "test-infra 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d)",
+ "test-infra",
  "tokio",
  "tracing",
 ]
@@ -6066,7 +6046,7 @@ dependencies = [
  "cid",
  "crypto",
  "ctor",
- "defra-harness 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d)",
+ "defra-harness",
  "document",
  "futures",
  "hex",
@@ -11902,22 +11882,6 @@ dependencies = [
 [[package]]
 name = "sourcehub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
-dependencies = [
- "cosmrs",
- "eyre",
- "hex",
- "regex",
- "reqwest 0.12.28",
- "serde_json",
- "test-infra 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness)",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "sourcehub-harness"
-version = "0.1.0"
 source = "git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d#adaf59db7aaea3e8d48a9b5e14846c24e59d2456"
 dependencies = [
  "cosmrs",
@@ -11926,7 +11890,7 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "serde_json",
- "test-infra 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d)",
+ "test-infra",
  "tokio",
  "tracing",
 ]
@@ -12470,22 +12434,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
-]
-
-[[package]]
-name = "test-infra"
-version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
-dependencies = [
- "eyre",
- "futures",
- "libc",
- "rand 0.8.5",
- "regex",
- "serde",
- "tokio",
- "toml 0.8.23",
- "tracing",
 ]
 
 [[package]]

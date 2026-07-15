@@ -24,7 +24,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 
 [dev-dependencies]
-defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", branch = "feat/shared-se-key-harness" }
+defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", rev = "adaf59d" }
 tokio = { version = "1.35", features = ["full"] }
 serial_test = "3"
 
