@@ -3100,19 +3100,35 @@ mod tests {
         (handler, blockstore)
     }
 
-    /// #1128: a replicated composite merge that trips a unique-index
-    /// constraint must classify as `MergeOutcome::Rejected`, not an opaque
-    /// `Err`. `Err` never reaches the durable pending-DAG deletion path, so
-    /// the resync sweep re-drives the same doomed root forever.
+    /// #1128 composed with #1126: a replicated composite merge that trips a
+    /// LIVE twin unique-index conflict (two distinct, both-alive documents
+    /// racing the same unique value) no longer classifies as
+    /// `MergeOutcome::Rejected`. #1126's merge-path index maintenance
+    /// (`on_document_create_merge`/`on_document_update_merge`) resolves this
+    /// deterministically — smallest docID wins the index entry — instead of
+    /// erroring, because a CRDT merge cannot preserve cross-replica
+    /// uniqueness and failing here wedged the document's forward history in
+    /// permanent retry on both replicas (#1111). Both documents persist;
+    /// the classification seam in `composite_persist.rs` remains as
+    /// defense-in-depth for the degenerate arms that `on_document_*_merge`
+    /// still errors on (see
+    /// `remote_composite_merge_with_corrupted_unique_index_entry_is_rejected`
+    /// below).
     #[tokio::test]
-    async fn remote_composite_merge_with_unique_index_violation_is_rejected_not_err() {
+    async fn remote_composite_merge_with_unique_index_twin_conflict_merges_via_canonical_pick() {
         let (handler, blockstore) = make_handler_with_unique_index_schema().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-sessions")
+            .unwrap()
+            .expect("sessions collection should exist");
 
         // Doc A: first writer of session_id="dup-session" — merges cleanly.
         let mut doc_a = Document::new();
         doc_a.set("name", NormalValue::String("Alice".to_string()));
         doc_a.set("session_id", NormalValue::String("dup-session".to_string()));
         doc_a.generate_and_set_doc_id().unwrap();
+        let doc_a_id = doc_a.id().unwrap().clone();
         let result_a = db_blocks::build_blocks_from_document(&doc_a, "v1", &blockstore)
             .await
             .unwrap();
@@ -3130,12 +3146,14 @@ mod tests {
         assert_eq!(outcome_a, MergeOutcome::Merged);
 
         // Doc B: distinct document content (different name => different doc_id
-        // and CID), but the SAME session_id — a genuine cross-document unique
-        // violation, exactly what a replicated push can carry.
+        // and CID), but the SAME session_id — a genuine cross-document live
+        // unique conflict, exactly what a replicated push can carry. #1126
+        // converges this instead of rejecting it.
         let mut doc_b = Document::new();
         doc_b.set("name", NormalValue::String("Bob".to_string()));
         doc_b.set("session_id", NormalValue::String("dup-session".to_string()));
         doc_b.generate_and_set_doc_id().unwrap();
+        let doc_b_id = doc_b.id().unwrap().clone();
         let result_b = db_blocks::build_blocks_from_document(&doc_b, "v1", &blockstore)
             .await
             .unwrap();
@@ -3150,7 +3168,71 @@ mod tests {
             .handle_block(&result_b.cid, &result_b.block, metadata_b)
             .await;
 
-        match outcome_b {
+        assert!(
+            matches!(outcome_b, Ok(MergeOutcome::Merged)),
+            "a live twin unique conflict on a replicated merge must converge via \
+             #1126's canonical pick, not classify as Rejected: {:?}",
+            outcome_b
+        );
+
+        // Both documents persist — the CRDT merge never drops data, even
+        // though only the deterministic winner keeps the index entry.
+        assert!(
+            read_session_doc(&handler, &collection, &doc_a_id)
+                .await
+                .is_some(),
+            "doc A must remain readable after the twin conflict converges"
+        );
+        assert!(
+            read_session_doc(&handler, &collection, &doc_b_id)
+                .await
+                .is_some(),
+            "doc B must remain readable after the twin conflict converges"
+        );
+    }
+
+    /// #1128 composed with #1126: #1126's merge-path resolution heals the
+    /// common live-twin case (above), but its degenerate arms — reached when
+    /// `UniqueIndex::conflicting_doc_id` cannot identify a holder for a key
+    /// it just observed as present — still propagate
+    /// `storage::corekv::Error::UniqueConstraintViolation` unchanged. That is
+    /// internal index-state inconsistency (damaged data), not a live
+    /// conflict a deterministic pick can resolve, so it must still classify
+    /// as `MergeOutcome::Rejected` rather than retrying forever. This drives
+    /// that arm through the real stack — corrupting a unique-index entry to
+    /// an empty value (key present, so `save()` still detects a violation;
+    /// value empty, so `conflicting_doc_id()` reports no holder) — rather
+    /// than only asserting the classification predicate in isolation.
+    #[tokio::test]
+    async fn remote_composite_merge_with_corrupted_unique_index_entry_is_rejected() {
+        let (handler, blockstore) = make_handler_with_unique_index_schema().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-sessions")
+            .unwrap()
+            .expect("sessions collection should exist");
+
+        corrupt_unique_index_entry(&handler, &collection, "dup-session").await;
+
+        let mut doc = Document::new();
+        doc.set("name", NormalValue::String("Alice".to_string()));
+        doc.set("session_id", NormalValue::String("dup-session".to_string()));
+        doc.generate_and_set_doc_id().unwrap();
+        let result = db_blocks::build_blocks_from_document(&doc, "v1", &blockstore)
+            .await
+            .unwrap();
+        let metadata = BlockMetadata::normal(
+            &result.doc_id,
+            "col-sessions",
+            "did:key:z6MkrSessionA",
+            None,
+            false,
+        );
+        let outcome = handler
+            .handle_block(&result.cid, &result.block, metadata)
+            .await;
+
+        match outcome {
             Ok(MergeOutcome::Rejected { reason }) => {
                 assert!(
                     !reason.is_empty(),
@@ -3158,23 +3240,20 @@ mod tests {
                 );
             }
             other => panic!(
-                "unique-index violation on a replicated merge must classify as \
-                 Ok(MergeOutcome::Rejected), not {:?}",
+                "a corrupted unique-index entry (degenerate arm, #1126 cannot heal) \
+                 must classify as Ok(MergeOutcome::Rejected), not {:?}",
                 other
             ),
         }
     }
 
-    // Transient contrast: only a typed `storage::Error::UniqueConstraintViolation`
-    // is converted to `MergeOutcome::Rejected`. Any other `db_index::Error`
-    // (including other storage failures) must keep surfacing as `Err` so the
-    // caller retries — matching pre-existing behavior for non-deterministic
-    // failures. That discrimination is a pure function of the error value
-    // (independent of collection/store state), so it is covered directly at
-    // the classification seam: see `composite_persist::classify_tests`
+    // The pure discrimination between a deterministic unique violation and
+    // any other `db_index::Error` (including other storage failures, which
+    // must keep surfacing as `Err` so the caller retries) is independent of
+    // collection/store state, so it is additionally covered directly at the
+    // classification seam: see `composite_persist::classify_tests`
     // (`non_unique_storage_error_is_not_classified`,
-    // `non_storage_index_error_is_not_classified`) rather than re-derived
-    // here through a second full store fixture.
+    // `non_storage_index_error_is_not_classified`).
 
     async fn build_session_merge_block(
         blockstore: &Arc<DefraBlockstore<MemoryStore>>,
@@ -3220,12 +3299,54 @@ mod tests {
         doc
     }
 
+    /// Corrupt the `idx_session_id_unique` unique index (id=1, see
+    /// `make_handler_with_unique_index_schema`) with an entry whose key is
+    /// present but whose value is empty. `UniqueIndex::save()` treats
+    /// key-presence alone as a violation regardless of value content, while
+    /// `conflicting_doc_id()` only reports a holder for a non-empty value —
+    /// so a merge that targets `session_id` afterward trips the degenerate
+    /// arm in `save_healing_stale_unique`/`save_resolving_unique_conflict`
+    /// (#1126) that #1128's classification seam still converts to
+    /// `MergeOutcome::Rejected`, rather than the live-twin case #1126 now
+    /// resolves deterministically.
+    async fn corrupt_unique_index_entry(
+        handler: &DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+        collection: &Collection,
+        session_id: &str,
+    ) {
+        let short_id = collection.resolved_root_id();
+        let corrupted_key = storage::keys::IndexDataStoreKey::new(
+            short_id,
+            1,
+            vec![storage::keys::IndexedField::new(
+                NormalValue::String(session_id.to_string()),
+                false,
+            )],
+        )
+        .try_bytes()
+        .unwrap();
+        let write_txn = handler.db.new_txn(false).await.unwrap();
+        {
+            let datastore = write_txn.datastore().unwrap();
+            datastore.set(&corrupted_key, &[]).await.unwrap();
+        }
+        write_txn.commit().await.unwrap();
+    }
+
     /// Batch path of the #1128 classification: a unique-index violation is
     /// detected AFTER `persist_merged_document` has staged the doc's field
     /// data in the SHARED batch txn, so a `Rejected` outcome must poison the
     /// whole batch attempt (discard + per-block fallback). The rejected doc's
     /// raw field data must NOT be committed (it would be queryable but
     /// un-indexed), while the valid sibling in the same batch still merges.
+    ///
+    /// #1128 composed with #1126: a live twin (two documents racing the same
+    /// value) no longer rejects — it merges via #1126's canonical pick (see
+    /// `remote_composite_merge_with_unique_index_twin_conflict_merges_via_canonical_pick`).
+    /// The poison/fallback mechanics this test guards are independent of
+    /// *why* a block rejects, so the violating block here is manufactured
+    /// via the still-live degenerate arm (a corrupted, holder-less unique
+    /// index entry) rather than a twin conflict.
     #[tokio::test]
     async fn batch_merge_rejects_unique_violation_without_partial_write() {
         let (handler, blockstore) = make_handler_with_unique_index_schema().await;
@@ -3235,17 +3356,13 @@ mod tests {
             .unwrap()
             .expect("sessions collection should exist");
 
-        // Doc A commits first (separate merge), owning session_id="dup-session".
-        let (block_a, _doc_a_id) =
-            build_session_merge_block(&blockstore, "Alice", "dup-session").await;
-        let results_a = handler.handle_block_batch(&[block_a]).await;
-        assert!(matches!(results_a[0], Ok(MergeOutcome::Merged)));
+        corrupt_unique_index_entry(&handler, &collection, "ghost-session").await;
 
-        // Batch: [valid sibling, violating duplicate].
+        // Batch: [valid sibling, violating block targeting the corrupted entry].
         let (block_valid, valid_id) =
             build_session_merge_block(&blockstore, "Carol", "other-session").await;
         let (block_violating, violating_id) =
-            build_session_merge_block(&blockstore, "Bob", "dup-session").await;
+            build_session_merge_block(&blockstore, "Bob", "ghost-session").await;
 
         let results = handler
             .handle_block_batch(&[block_valid, block_violating])
@@ -3280,6 +3397,11 @@ mod tests {
     /// block comes FIRST, so the batch attempt is poisoned before the valid
     /// sibling is processed. The fallback must still merge the sibling and
     /// keep result order aligned with the input blocks.
+    ///
+    /// #1128 composed with #1126: as above, the violating block is
+    /// manufactured via the still-live degenerate arm (corrupted,
+    /// holder-less unique index entry) since a live twin now merges instead
+    /// of rejecting.
     #[tokio::test]
     async fn batch_merge_unique_violation_first_still_merges_valid_sibling() {
         let (handler, blockstore) = make_handler_with_unique_index_schema().await;
@@ -3289,14 +3411,11 @@ mod tests {
             .unwrap()
             .expect("sessions collection should exist");
 
-        let (block_a, _doc_a_id) =
-            build_session_merge_block(&blockstore, "Alice", "dup-session").await;
-        let results_a = handler.handle_block_batch(&[block_a]).await;
-        assert!(matches!(results_a[0], Ok(MergeOutcome::Merged)));
+        corrupt_unique_index_entry(&handler, &collection, "ghost-session").await;
 
-        // Batch: [violating duplicate, valid sibling].
+        // Batch: [violating block targeting the corrupted entry, valid sibling].
         let (block_violating, violating_id) =
-            build_session_merge_block(&blockstore, "Bob", "dup-session").await;
+            build_session_merge_block(&blockstore, "Bob", "ghost-session").await;
         let (block_valid, valid_id) =
             build_session_merge_block(&blockstore, "Carol", "other-session").await;
 

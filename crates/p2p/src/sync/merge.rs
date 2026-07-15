@@ -86,10 +86,15 @@ pub enum MergeOutcome {
         /// unmerged so the block can be retried after policy/state changes.
         terminal: bool,
     },
-    /// Block was deterministically rejected on its content (e.g. a unique-index
-    /// violation): it will never succeed on replay. Unlike a terminal skip, the
-    /// receiver does not discharge the block as merged — it quarantines it
-    /// instead, so local re-drive stops while a remote re-push can still retry.
+    /// Block was deterministically rejected on its content: it will never
+    /// succeed on replay. Not every unique-index conflict qualifies — a live
+    /// conflict between two alive documents resolves deterministically at
+    /// merge time instead (smallest docID wins) and converges rather than
+    /// rejecting. This variant is for the cases that resolution can't heal
+    /// (e.g. internal index-state inconsistency) and any other content-level
+    /// rejection. Unlike a terminal skip, the receiver does not discharge the
+    /// block as merged — it quarantines it instead, so local re-drive stops
+    /// while a remote re-push can still retry.
     Rejected {
         /// Human-readable reason for the rejection.
         reason: String,

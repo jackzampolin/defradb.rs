@@ -7,19 +7,30 @@ registration *survive* a hub restart?) and `SyncOwnership.tla` (who *owns* a
 registration's completion) — both ask about the registration's lifecycle; this model
 asks what happens to it once a retry comes back with a verdict that will never change.
 
-> **Status: the RED 1 config is current-main behavior.** `MergeOutcome::Rejected` was
-> treated as a retryable skip, so a root whose merge fails on content (not timing) is
-> swept forever by the retry clock and the resync sweep. The GREEN config quarantines
-> it durably instead — write-first ordering so a crash mid-disposition self-heals
-> instead of losing the quarantine. RED 2 is the fix's own failure mode to avoid:
-> over-eager quarantine of a doc that only failed *transiently*.
+> **Status: RED 1 models the pre-#1126 wedge, not current-main's dominant path.**
+> `MergeOutcome::Rejected` was treated as a retryable skip, so a root whose merge fails
+> on content (not timing) was swept forever by the retry clock and the resync sweep.
+> That was current-main behavior when this model was written; #1126 (merged afterward)
+> changed the *dominant* producer of that rejection: a live unique-index conflict between
+> two alive documents (the common "twin" case) now resolves deterministically at merge
+> time — smallest docID wins — and converges instead of rejecting at all. RED 1 still
+> describes exactly what happens to whatever a `Rejected` outcome DOES still get produced
+> from — today, the degenerate arms #1126's merge-path resolution can't heal (internal
+> index-state inconsistency, e.g. a corrupted index entry with no identifiable holder),
+> and any future deterministic-rejection producer this classification seam is extended to
+> cover. The GREEN config quarantines it durably instead — write-first ordering so a crash
+> mid-disposition self-heals instead of losing the quarantine. RED 2 is the fix's own
+> failure mode to avoid: over-eager quarantine of a doc that only failed *transiently*.
 
 ## Mechanism
 
 A registered pending-DAG root is re-driven by a sweep (retry clock, resync, peer
 reconnect — the trigger is irrelevant, as in `PendingDagRestart`). **Poison** docs (a
-doc whose content will never merge, e.g. a unique-index collision with data already
-committed) are rejected on every attempt —
+doc whose content will never merge — since #1126, this means the merge-path unique-index
+resolution's degenerate arms: internal index-state inconsistency such as a corrupted
+entry with no identifiable holder, not a live conflict between two alive documents,
+which #1126 now resolves deterministically instead of rejecting) are rejected on every
+attempt —
 `crates/db-merge/src/merge_handler/composite.rs:261-284` converts
 `MergeError::UniqueConstraintViolation` into `MergeOutcome::Rejected` (defined at
 `crates/p2p/src/sync/merge.rs:89-97`), which
@@ -39,7 +50,7 @@ One knob, three settings — each isolates one way to get the disposition wrong:
 
 | Knob | GREEN | RED 1 | RED 2 |
 |------|-------|-------|-------|
-| `QuarantineMode` | `"Quarantine"` — `Rejected` quarantines durably; a transient failure leaves the root registered | `"RetryForever"` — today's bug: `Rejected` is treated as a retryable skip | `"QuarantineTransient"` — the forbidden overcorrection: a *sound* doc's transient failure also quarantines it |
+| `QuarantineMode` | `"Quarantine"` — `Rejected` quarantines durably; a transient failure leaves the root registered | `"RetryForever"` — the pre-#1128 bug: `Rejected` is treated as a retryable skip | `"QuarantineTransient"` — the forbidden overcorrection: a *sound* doc's transient failure also quarantines it |
 
 ## Properties
 
@@ -97,7 +108,7 @@ vacuously true from `Init`, and `FairSpec`'s two `WF` clauses are load-bearing.
 | Config | Knob | Verdict | Meaning |
 |--------|------|---------|---------|
 | `MC_PendingDagQuarantine_Green.cfg` | `QuarantineMode="Quarantine"` | GREEN | rejection quarantines durably, transient failure retries: no silent drop, all docs eventually disposed correctly (8 states, complete space) |
-| `MC_PendingDagQuarantine_Red_RetryForever.cfg` | `QuarantineMode="RetryForever"` | RED | current main: poison root swept forever, `LIVE_PoisonQuiesces` violated (16 states) |
+| `MC_PendingDagQuarantine_Red_RetryForever.cfg` | `QuarantineMode="RetryForever"` | RED | pre-#1126 wedge, still live for any unclassified `Rejected` producer (today: #1126's degenerate arms): poison root swept forever, `LIVE_PoisonQuiesces` violated (16 states) |
 | `MC_PendingDagQuarantine_Red_OvereagerQuarantine.cfg` | `QuarantineMode="QuarantineTransient"` | RED | forbidden overcorrection: sound doc's transient failure quarantines it, `LIVE_SoundEventuallyMerged` violated (6 states) |
 
 ## Conformance fence
