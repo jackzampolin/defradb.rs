@@ -37,8 +37,10 @@
 //! the atomic-rejection model (Rust's block-by-block PushLog replay lands
 //! field-delta blocks on the Go peer before the composite is rejected,
 //! leaving a scan-visible unindexed partial document) and is pending
-//! adjudication there. See defradb.rs#1134 (upstream Go tracking issue not
-//! filed yet — link here once it is).
+//! adjudication there. Upstream Go tracking issues:
+//! sourcenetwork/defradb#5059 (unique-index x CRDT-merge convergence — the
+//! divergence these probes pin) and sourcenetwork/defradb#5058 (sender never
+//! sees error replies — why the Go mode is silent). See defradb.rs#1134.
 
 use crate::support;
 use defra_harness::{DefraClient, NodeKind, TestCluster};
