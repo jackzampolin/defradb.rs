@@ -1462,6 +1462,10 @@ mod tests {
             .install_pending_dag_store(pending_store.clone())
             .await;
 
+        // Pins the restart-hydration property the e2e composition fence no
+        // longer covers: the in-memory gauge is rebuilt from load_quarantined.
+        assert_eq!(manager.quarantined_pending_count(), 1);
+
         let restored = manager.resync_persisted_pending_dags().await;
 
         assert_eq!(restored, 0, "a quarantined root must not be re-registered");
