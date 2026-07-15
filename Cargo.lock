@@ -2547,7 +2547,7 @@ name = "conformance"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "defra-harness",
+ "defra-harness 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness)",
  "serde",
  "serde_json",
  "serial_test",
@@ -3648,8 +3648,28 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sourcehub-harness",
- "test-infra",
+ "sourcehub-harness 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness)",
+ "test-infra 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness)",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "defra-harness"
+version = "0.1.0"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d#adaf59db7aaea3e8d48a9b5e14846c24e59d2456"
+dependencies = [
+ "eyre",
+ "futures",
+ "libc",
+ "paste",
+ "rand 0.8.5",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sourcehub-harness 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d)",
+ "test-infra 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d)",
  "tokio",
  "tracing",
 ]
@@ -5513,7 +5533,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 [[package]]
 name = "hub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d#adaf59db7aaea3e8d48a9b5e14846c24e59d2456"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -5532,7 +5552,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "test-infra",
+ "test-infra 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d)",
  "tokio",
  "tracing",
 ]
@@ -6045,7 +6065,7 @@ dependencies = [
  "cid",
  "crypto",
  "ctor",
- "defra-harness",
+ "defra-harness 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d)",
  "document",
  "futures",
  "hex",
@@ -8848,6 +8868,7 @@ dependencies = [
  "crdt",
  "crypto",
  "defra-core",
+ "document",
  "futures",
  "hex",
  "identity",
@@ -11888,7 +11909,23 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "serde_json",
- "test-infra",
+ "test-infra 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness)",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sourcehub-harness"
+version = "0.1.0"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d#adaf59db7aaea3e8d48a9b5e14846c24e59d2456"
+dependencies = [
+ "cosmrs",
+ "eyre",
+ "hex",
+ "regex",
+ "reqwest 0.12.28",
+ "serde_json",
+ "test-infra 0.1.0 (git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d)",
  "tokio",
  "tracing",
 ]
@@ -12438,6 +12475,22 @@ dependencies = [
 name = "test-infra"
 version = "0.1.0"
 source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
+dependencies = [
+ "eyre",
+ "futures",
+ "libc",
+ "rand 0.8.5",
+ "regex",
+ "serde",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
+name = "test-infra"
+version = "0.1.0"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d#adaf59db7aaea3e8d48a9b5e14846c24e59d2456"
 dependencies = [
  "eyre",
  "futures",

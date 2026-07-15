@@ -1,11 +1,11 @@
 use serde::Serialize;
 
 /// Go upstream commit we last synced with.
-pub const GO_COMPAT_COMMIT: &str = "6c874754";
+pub const GO_COMPAT_COMMIT: &str = "3de01484";
 /// Go upstream branch.
-pub const GO_COMPAT_BRANCH: &str = "develop";
-/// Go release tag (empty until Go cuts a release).
-pub const GO_COMPAT_TAG: &str = "";
+pub const GO_COMPAT_BRANCH: &str = "release/1.0.0";
+/// Go release tag; CI downloads this release binary for go-compat runs.
+pub const GO_COMPAT_TAG: &str = "v1.0.0";
 
 /// Go compatibility metadata.
 #[derive(Debug, Clone, Serialize)]
