@@ -234,6 +234,8 @@ async fn dispatch_stream(
             }
         }
         x if x == protocols::ALPN_TWOSTREAM_RESP => {
+            // Retained so upgraded senders can receive reverse-stream ACKs
+            // from older receivers during a rolling deployment.
             let reply: PushLogReply =
                 protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
             let (sender, pending_len_after_remove) = {

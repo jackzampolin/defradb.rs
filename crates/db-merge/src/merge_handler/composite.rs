@@ -290,6 +290,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     return Err(MergeError::Database(e));
                 }
             };
+            let systemstore = match txn.systemstore() {
+                Ok(systemstore) => systemstore,
+                Err(e) => {
+                    let _ = txn.force_discard();
+                    return Err(MergeError::Database(e));
+                }
+            };
 
             // process_linked_field_blocks validates @immutable fields BEFORE
             // persisting any field, so a rejected composite leaves no partial
@@ -301,8 +308,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             {
                 Ok(Some(outcome)) => Ok(Some(outcome)),
                 Ok(None) => {
-                    self.persist_merged_document(&mut datastore, &context, &mut state)
-                        .await?;
+                    self.persist_merged_document(
+                        &mut datastore,
+                        &systemstore,
+                        &context,
+                        &mut state,
+                    )
+                    .await?;
                     Ok(None)
                 }
                 Err(MergeError::ImmutableFieldChanged(reason)) => {
@@ -632,7 +644,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             {
                 Ok(Some(outcome)) => Ok(Some(outcome)),
                 Ok(None) => {
-                    self.persist_merged_document(&mut datastore, &context, &mut state)
+                    self.persist_merged_document(&mut datastore, systemstore, &context, &mut state)
                         .await?;
                     Ok(None)
                 }

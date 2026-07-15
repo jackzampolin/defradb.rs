@@ -118,10 +118,6 @@ pub async fn populate_collection_root_id(
 /// Key prefix for document data in datastore.
 pub(super) const DOC_KEY_PREFIX: &[u8] = b"/d/";
 
-/// Key prefix for document deletion markers in datastore.
-/// Deleted documents have their data stored at /d/ and a marker at /del/
-pub(super) const DELETED_KEY_PREFIX: &[u8] = b"/del/";
-
 /// Key prefix for per-document schema versions in datastore.
 pub(super) const VERSION_KEY_PREFIX: &[u8] = b"/v/";
 
@@ -187,28 +183,15 @@ impl Collection {
     ///
     /// Keyed by the node-local doc short ID: iteration order over a
     /// collection is allocation (insertion) order, matching Go v1.0.0's
-    /// short-ID-keyed datastore (#4838).
+    /// short-ID-keyed datastore (#4838). Delegates to the shared key helper
+    /// so the write, merge, and index layers agree on the layout (#1111).
     pub(crate) fn doc_key(&self, doc_short_id: u64) -> Vec<u8> {
-        let mut key = self.collection_key_prefix();
-        key.extend_from_slice(&encode_doc_short_id(doc_short_id));
-        key
+        storage::keys::doc_key(&self.def.collection_id, doc_short_id)
     }
 
     /// Generate the storage key for a document's deletion marker.
     pub(crate) fn deleted_key(&self, doc_short_id: u64) -> Vec<u8> {
-        let mut key = self.deleted_key_prefix();
-        key.extend_from_slice(&encode_doc_short_id(doc_short_id));
-        key
-    }
-
-    /// Generate the key prefix for all deletion markers in this collection.
-    #[allow(dead_code)]
-    pub(crate) fn deleted_key_prefix(&self) -> Vec<u8> {
-        let mut prefix = Vec::new();
-        prefix.extend_from_slice(DELETED_KEY_PREFIX);
-        prefix.extend_from_slice(self.def.collection_id.as_bytes());
-        prefix.push(b'/');
-        prefix
+        storage::keys::deleted_doc_key(&self.def.collection_id, doc_short_id)
     }
 
     /// Generate the storage key for a document's schema version.

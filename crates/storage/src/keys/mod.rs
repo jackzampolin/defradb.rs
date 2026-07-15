@@ -41,6 +41,7 @@ pub mod blockstore;
 pub mod crdt;
 pub mod datastore;
 pub mod doc_id_index;
+pub mod document;
 pub mod encstore;
 pub mod headstore;
 pub mod peerstore;
@@ -59,6 +60,7 @@ pub use doc_id_index::{
     DocIDToDocRefKey, DocRef, DocShortIDSequenceKey, DocShortIDToDocIDAliasKey,
     DocShortIDToDocIDKey, DOC_ID_INDEX, DOC_SHORT_ID_SEQ,
 };
+pub use document::{deleted_doc_key, doc_key, DELETED_KEY_PREFIX, DOC_KEY_PREFIX};
 pub use encstore::EncstoreKey;
 pub use headstore::{
     HeadstoreColKey, HeadstoreCollectionDefinition, HeadstoreCollectionSetDefinition,

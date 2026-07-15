@@ -23,7 +23,7 @@ use super::endpoint::{
 };
 use super::endpoint_rpc::{
     close_peer_connections, handle_block_sync, handle_car_request_response, handle_fire_and_forget,
-    handle_request_response, handle_send_only, BlockSyncResources,
+    handle_request_response, handle_send_only, handle_two_stream_request, BlockSyncResources,
 };
 use super::gossip_heal;
 use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
@@ -197,38 +197,17 @@ pub(super) async fn handle_command(
                         .lock()
                         .insert(request_message_id.clone(), reply_tx);
 
-                    if let Err(error) = handle_send_only(
+                    let result = handle_two_stream_request(
                         &endpoint,
                         &request_peer_id,
-                        protocols::ALPN_TWOSTREAM,
                         &request,
                         direct_addr,
                         &connection_cache,
-                    )
-                    .await
-                    {
-                        pending_pushlog_replies.lock().remove(&request_message_id);
-                        return Err(error);
-                    }
-
-                    match tokio::time::timeout(
-                        super::endpoint_rpc::REQUEST_RESPONSE_TIMEOUT,
                         reply_rx,
                     )
-                    .await
-                    {
-                        Ok(Ok(reply_msg)) => Ok(reply_msg),
-                        Ok(Err(_)) => {
-                            pending_pushlog_replies.lock().remove(&request_message_id);
-                            Err(crate::error::Error::Transport(
-                                "response channel closed".into(),
-                            ))
-                        }
-                        Err(_) => {
-                            pending_pushlog_replies.lock().remove(&request_message_id);
-                            Err(crate::error::Error::ResponseTimeout)
-                        }
-                    }
+                    .await;
+                    pending_pushlog_replies.lock().remove(&request_message_id);
+                    result
                 }
                 .await;
                 let _ = reply.send(result);
@@ -240,6 +219,8 @@ pub(super) async fn handle_command(
             reply_msg,
             reply,
         } => {
+            // Retained for mixed-version peers whose request did not advertise
+            // same-stream reply support.
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let endpoint = endpoint.clone();
             let connection_cache = Arc::clone(connection_cache);

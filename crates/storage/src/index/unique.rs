@@ -126,6 +126,55 @@ impl UniqueIndex {
             .collect()
     }
 
+    /// Save a document to the index without checking uniqueness.
+    ///
+    /// Used to reclaim a stale entry or to install the deterministic winner of
+    /// a merge conflict (#1111/#700): the caller has already decided this doc
+    /// short ID owns the value, so uniqueness is enforced above rather than here.
+    pub async fn save_blind<T: Reader + Writer + MaybeSend>(
+        &self,
+        txn: &mut T,
+        doc_short_id: u64,
+        values: &[NormalValue],
+    ) -> Result<()> {
+        validate_doc_short_id(doc_short_id, &self.desc.name)?;
+        self.validate_field_count(values, doc_short_id)?;
+
+        if Self::has_nil_field(values) {
+            let key = self.build_key_with_doc_short_id(values, doc_short_id)?;
+            return txn.set(&key, &[]).await;
+        }
+
+        let key = self.build_key(values)?;
+        txn.set(&key, &encode_doc_short_id(doc_short_id)).await
+    }
+
+    /// The doc short ID currently holding the unique entry for `values`, if any.
+    ///
+    /// Unique enforcement's error path needs to know *who* holds the entry so
+    /// the layer above can ask whether that document is still alive: an entry
+    /// pointing at a deleted or missing document is stale damage (a store
+    /// wounded before merge/delete index maintenance existed) and is safe to
+    /// reclaim, because deletion is terminal — there is no resurrection path
+    /// that could ever make the old holder live again (#1111/#700).
+    ///
+    /// Nil-bearing values embed the short ID in the key and are never unique, so
+    /// they report no holder.
+    pub async fn conflicting_doc_id<R: Reader + MaybeSend>(
+        &self,
+        txn: &R,
+        values: &[NormalValue],
+    ) -> Result<Option<u64>> {
+        if Self::has_nil_field(values) {
+            return Ok(None);
+        }
+        let key = self.build_key(values)?;
+        match txn.get(&key).await? {
+            Some(existing) if !existing.is_empty() => Ok(Some(decode_doc_short_id(&existing)?)),
+            _ => Ok(None),
+        }
+    }
+
     /// Get the entry with exact field values.
     ///
     /// Returns an iterator that yields at most one document (uniqueness constraint).
@@ -290,6 +339,15 @@ impl CollectionIndex for UniqueIndex {
             txn.delete(&key).await
         } else {
             let key = self.build_key(values)?;
+            // Only the entry's owner may delete it. With deterministic merge
+            // conflict resolution (#1111) a document can exist UNINDEXED for a
+            // value another document holds; deleting that loser must not free
+            // the winner's slot.
+            if let Some(existing) = txn.get(&key).await? {
+                if !existing.is_empty() && existing != encode_doc_short_id(doc_short_id) {
+                    return Ok(());
+                }
+            }
             txn.delete(&key).await
         }
     }

@@ -1600,3 +1600,317 @@ async fn test_delete_then_recreate_same_value() {
 
     txn.commit().await.unwrap();
 }
+
+/// Unique-index semantics at the deletion and merge boundaries (#1111 /
+/// sourcenetwork/defra-agent#700).
+mod unique_boundaries {
+    use super::*;
+    use datastore::NamespaceView;
+    use document::DocID;
+    use storage::corekv::Writer;
+
+    const COLLECTION_ID: &str = "col-users";
+    const COLLECTION_SHORT_ID: u32 = 1;
+
+    fn unique_email_schema() -> CollectionVersion {
+        let mut schema = test_schema();
+        schema.indexes = vec![IndexDescription {
+            name: "idx_email_unique".to_string(),
+            id: 1,
+            fields: vec![IndexedFieldDescription {
+                name: "email".to_string(),
+                descending: false,
+            }],
+            unique: true,
+            auto_generated: false,
+        }];
+        schema
+    }
+
+    /// A test document plus the node-local short ID it is stored under.
+    ///
+    /// Documents and index entries are keyed by short IDs (#4838), but the
+    /// deterministic merge winner is decided on the PUBLIC DocID, so each doc
+    /// carries a distinct DocID whose short ID is registered in the systemstore.
+    struct Doc {
+        doc: Document,
+        short_id: u64,
+    }
+
+    fn doc_with_email(email: &str) -> Document {
+        // Distinct seed per doc: DocIDs are content-addressed, so identical
+        // content would collapse "two docs" into one id and the conflict under
+        // test would evaporate.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let mut doc = Document::new();
+        doc.set("email", NormalValue::String(email.to_string()));
+        doc.set_id(DocID::new_v0_from_seed(&format!(
+            "doc-{}",
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        )));
+        doc
+    }
+
+    /// Allocate a short ID for a doc and register the short ID -> DocID mapping
+    /// the merge winner resolution reads back.
+    async fn register(systemstore: &NamespaceView, email: &str) -> Doc {
+        let doc = doc_with_email(email);
+        let short_id = next_test_doc_short_id();
+        db::doc_id_map::set_doc_id_mapping(
+            systemstore,
+            COLLECTION_SHORT_ID,
+            short_id,
+            &doc.id().unwrap().to_string(),
+        )
+        .await
+        .unwrap();
+        Doc { doc, short_id }
+    }
+
+    async fn write_doc_body(datastore: &mut NamespaceView, entry: &Doc) {
+        let key = storage::keys::doc_key(COLLECTION_ID, entry.short_id);
+        datastore
+            .set(&key, &entry.doc.to_cbor().unwrap())
+            .await
+            .unwrap();
+    }
+
+    async fn write_tombstone(datastore: &mut NamespaceView, entry: &Doc) {
+        let key = storage::keys::deleted_doc_key(COLLECTION_ID, entry.short_id);
+        datastore.set(&key, &[1u8]).await.unwrap();
+    }
+
+    /// Go-parity regression (sourcenetwork/defra-agent#700): deleting the doc
+    /// that holds a unique value frees the slot for a new doc with that value.
+    #[tokio::test]
+    async fn recreate_after_delete_frees_the_unique_slot() {
+        let store = MemoryStore::new();
+        let db = DB::new(store).unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+        let mut datastore = txn.datastore().unwrap();
+        let systemstore = txn.systemstore().unwrap();
+
+        let schema = unique_email_schema();
+        let manager = IndexManager::from_collection(COLLECTION_SHORT_ID, &schema).unwrap();
+
+        let first = register(&systemstore, "a@x").await;
+        write_doc_body(&mut datastore, &first).await;
+        manager
+            .on_document_create(&datastore, &first.doc, first.short_id, &schema)
+            .await
+            .unwrap();
+
+        manager
+            .on_document_delete(&datastore, &first.doc, first.short_id, &schema)
+            .await
+            .unwrap();
+        write_tombstone(&mut datastore, &first).await;
+
+        let second = register(&systemstore, "a@x").await;
+        write_doc_body(&mut datastore, &second).await;
+        manager
+            .on_document_create(&datastore, &second.doc, second.short_id, &schema)
+            .await
+            .expect("a tombstone must not hold the unique slot");
+    }
+
+    /// The #700 wound itself: a stale entry pointing at a TOMBSTONED doc
+    /// (minted by an era or path without index maintenance) must be reclaimed
+    /// by the next create instead of blocking the value forever.
+    #[tokio::test]
+    async fn stale_entry_pointing_at_tombstoned_doc_is_reclaimed() {
+        let store = MemoryStore::new();
+        let db = DB::new(store).unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+        let mut datastore = txn.datastore().unwrap();
+        let systemstore = txn.systemstore().unwrap();
+
+        let schema = unique_email_schema();
+        let manager = IndexManager::from_collection(COLLECTION_SHORT_ID, &schema).unwrap();
+
+        // Wound the store: holder is indexed, then tombstoned WITHOUT index
+        // cleanup (exactly what pre-maintenance eras and out-of-order merges
+        // left behind).
+        let holder = register(&systemstore, "a@x").await;
+        write_doc_body(&mut datastore, &holder).await;
+        manager
+            .on_document_create(&datastore, &holder.doc, holder.short_id, &schema)
+            .await
+            .unwrap();
+        write_tombstone(&mut datastore, &holder).await;
+
+        let newcomer = register(&systemstore, "a@x").await;
+        write_doc_body(&mut datastore, &newcomer).await;
+        manager
+            .on_document_create(&datastore, &newcomer.doc, newcomer.short_id, &schema)
+            .await
+            .expect("a stale unique entry pointing at a tombstone must be reclaimed");
+    }
+
+    /// A stale entry whose holder never existed locally (index written, doc
+    /// body missing — the partial-write wound) is equally reclaimable.
+    #[tokio::test]
+    async fn stale_entry_pointing_at_missing_doc_is_reclaimed() {
+        let store = MemoryStore::new();
+        let db = DB::new(store).unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+        let mut datastore = txn.datastore().unwrap();
+        let systemstore = txn.systemstore().unwrap();
+
+        let schema = unique_email_schema();
+        let manager = IndexManager::from_collection(COLLECTION_SHORT_ID, &schema).unwrap();
+
+        let ghost = register(&systemstore, "a@x").await;
+        // Index the ghost WITHOUT writing its body.
+        manager
+            .on_document_create(&datastore, &ghost.doc, ghost.short_id, &schema)
+            .await
+            .unwrap();
+
+        let newcomer = register(&systemstore, "a@x").await;
+        write_doc_body(&mut datastore, &newcomer).await;
+        manager
+            .on_document_create(&datastore, &newcomer.doc, newcomer.short_id, &schema)
+            .await
+            .expect("a unique entry pointing at a missing doc must be reclaimed");
+    }
+
+    /// Healing must not weaken real enforcement: a live holder still rejects.
+    #[tokio::test]
+    async fn live_conflict_is_still_rejected_on_the_local_path() {
+        let store = MemoryStore::new();
+        let db = DB::new(store).unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+        let mut datastore = txn.datastore().unwrap();
+        let systemstore = txn.systemstore().unwrap();
+
+        let schema = unique_email_schema();
+        let manager = IndexManager::from_collection(COLLECTION_SHORT_ID, &schema).unwrap();
+
+        let holder = register(&systemstore, "a@x").await;
+        write_doc_body(&mut datastore, &holder).await;
+        manager
+            .on_document_create(&datastore, &holder.doc, holder.short_id, &schema)
+            .await
+            .unwrap();
+
+        let challenger = register(&systemstore, "a@x").await;
+        write_doc_body(&mut datastore, &challenger).await;
+        let result = manager
+            .on_document_create(&datastore, &challenger.doc, challenger.short_id, &schema)
+            .await;
+        assert!(
+            result.is_err(),
+            "a live unique conflict must still reject on the local path"
+        );
+    }
+
+    /// #1111: the merge path resolves a live conflict deterministically —
+    /// the lexicographically smallest PUBLIC DocID wins — instead of failing
+    /// the merge and wedging the document's history in permanent retry. The
+    /// winner is decided on the public DocID (identical on every replica), not
+    /// the node-local short id, so both orders land on the same winner.
+    #[tokio::test]
+    async fn merge_conflict_resolves_to_the_smallest_doc_id_in_both_orders() {
+        let store = MemoryStore::new();
+        let db = DB::new(store).unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+        let mut datastore = txn.datastore().unwrap();
+        let systemstore = txn.systemstore().unwrap();
+
+        let schema = unique_email_schema();
+        let manager = IndexManager::from_collection(COLLECTION_SHORT_ID, &schema).unwrap();
+
+        let a = register(&systemstore, "a@x").await;
+        let b = register(&systemstore, "a@x").await;
+        let (smaller, larger) = if a.doc.id().unwrap().to_string() < b.doc.id().unwrap().to_string()
+        {
+            (a, b)
+        } else {
+            (b, a)
+        };
+
+        // Order 1: larger holds the entry, smaller arrives via merge — the
+        // incoming doc wins and takes the entry.
+        write_doc_body(&mut datastore, &larger).await;
+        manager
+            .on_document_create(&datastore, &larger.doc, larger.short_id, &schema)
+            .await
+            .unwrap();
+        write_doc_body(&mut datastore, &smaller).await;
+        manager
+            .on_document_create_merge(
+                &datastore,
+                &systemstore,
+                &smaller.doc,
+                smaller.short_id,
+                &schema,
+            )
+            .await
+            .expect("merge must not fail on a live unique conflict");
+
+        // The winner (smaller) now holds the entry: a fresh local challenger
+        // conflicts, and after tombstoning the LOSER nothing changes (the
+        // loser holds no entry).
+        let challenger = register(&systemstore, "a@x").await;
+        write_doc_body(&mut datastore, &challenger).await;
+        assert!(
+            manager
+                .on_document_create(&datastore, &challenger.doc, challenger.short_id, &schema)
+                .await
+                .is_err(),
+            "the winner must hold the unique entry after resolution"
+        );
+
+        // Order 2 (fresh store): smaller holds, larger arrives via merge —
+        // the incoming doc loses and stays unindexed; merge still succeeds.
+        let store2 = MemoryStore::new();
+        let db2 = DB::new(store2).unwrap();
+        let txn2 = db2.new_txn(false).await.unwrap();
+        let mut datastore2 = txn2.datastore().unwrap();
+        let systemstore2 = txn2.systemstore().unwrap();
+        let manager2 = IndexManager::from_collection(COLLECTION_SHORT_ID, &schema).unwrap();
+
+        let a2 = register(&systemstore2, "a@x").await;
+        let b2 = register(&systemstore2, "a@x").await;
+        let (smaller2, larger2) =
+            if a2.doc.id().unwrap().to_string() < b2.doc.id().unwrap().to_string() {
+                (a2, b2)
+            } else {
+                (b2, a2)
+            };
+        write_doc_body(&mut datastore2, &smaller2).await;
+        manager2
+            .on_document_create(&datastore2, &smaller2.doc, smaller2.short_id, &schema)
+            .await
+            .unwrap();
+        write_doc_body(&mut datastore2, &larger2).await;
+        manager2
+            .on_document_create_merge(
+                &datastore2,
+                &systemstore2,
+                &larger2.doc,
+                larger2.short_id,
+                &schema,
+            )
+            .await
+            .expect("merge must not fail when the incoming doc loses the pick");
+
+        // The entry still belongs to smaller2: deleting larger2 (the loser,
+        // unindexed) must leave the slot occupied.
+        manager2
+            .on_document_delete(&datastore2, &larger2.doc, larger2.short_id, &schema)
+            .await
+            .unwrap();
+        let challenger2 = register(&systemstore2, "a@x").await;
+        write_doc_body(&mut datastore2, &challenger2).await;
+        assert!(
+            manager2
+                .on_document_create(&datastore2, &challenger2.doc, challenger2.short_id, &schema)
+                .await
+                .is_err(),
+            "the winner must still hold the unique entry after the loser is deleted"
+        );
+    }
+}

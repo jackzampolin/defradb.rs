@@ -6,20 +6,14 @@ const DELETED_MARKER: u8 = 0x01;
 
 /// Build the deletion marker key: /del/{collection_id}/{doc_short_id}
 fn build_deleted_key(collection_id: &str, doc_short_id: u64) -> Vec<u8> {
-    let mut key = Vec::new();
-    key.extend_from_slice(b"/del/");
-    key.extend_from_slice(collection_id.as_bytes());
-    key.push(b'/');
-    key.extend_from_slice(&storage::keys::doc_id_index::encode_doc_short_id(
-        doc_short_id,
-    ));
-    key
+    storage::keys::deleted_doc_key(collection_id, doc_short_id)
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     pub(crate) async fn persist_merged_document(
         &self,
         datastore: &mut NamespaceView,
+        systemstore: &NamespaceView,
         context: &CompositeMergeContext<'_, '_>,
         state: &mut CompositeMergeState,
     ) -> std::result::Result<(), MergeError> {
@@ -87,38 +81,79 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             .await
             .map_err(MergeError::Database)?;
 
+        // A merged write onto a logically-deleted document must not touch the
+        // indexes: the document is dead, and indexing it re-mints exactly the
+        // stale unique entry that blocks the value forever (defra-agent#700's
+        // out-of-order create-after-delete arrival). Go skips index sync when
+        // the merged doc reads back absent for the same reason.
+        let deleted_marker_key =
+            build_deleted_key(collection.collection_id(), context.doc_short_id);
+        let doc_is_tombstoned = datastore
+            .has(&deleted_marker_key)
+            .await
+            .map_err(|e| MergeError::Database(db::error::Error::Storage(e)))?;
+
         let short_id = collection.resolved_root_id();
-        if let Ok(index_manager) = IndexManager::from_collection(short_id, collection.schema()) {
-            let index_result = match &old_doc {
-                Some(old_doc) => {
-                    index_manager
-                        .on_document_update(
-                            datastore,
-                            old_doc,
-                            &doc,
-                            context.doc_short_id,
-                            collection.schema(),
-                        )
-                        .await
-                }
-                None => {
-                    index_manager
-                        .on_document_create(
-                            datastore,
-                            &doc,
-                            context.doc_short_id,
-                            collection.schema(),
-                        )
-                        .await
-                }
-            };
-            if let Err(e) = index_result {
-                let message = if context.mode.is_standalone() {
-                    "Failed to update indexes after merge"
-                } else {
-                    "Failed to update indexes after batch merge"
+        match IndexManager::from_collection(short_id, collection.schema()) {
+            Ok(index_manager) if !doc_is_tombstoned => {
+                // Merge-path index maintenance resolves live unique conflicts
+                // deterministically (smallest public DocID wins) instead of
+                // failing: a CRDT merge cannot preserve cross-replica
+                // uniqueness, and failing here wedges the document's entire
+                // forward history in permanent retry on both replicas (#1111).
+                // Both documents persist; the index converges to the same
+                // winner everywhere.
+                let index_result = match &old_doc {
+                    Some(old_doc) => {
+                        index_manager
+                            .on_document_update_merge(
+                                datastore,
+                                systemstore,
+                                old_doc,
+                                &doc,
+                                context.doc_short_id,
+                                collection.schema(),
+                            )
+                            .await
+                    }
+                    None => {
+                        index_manager
+                            .on_document_create_merge(
+                                datastore,
+                                systemstore,
+                                &doc,
+                                context.doc_short_id,
+                                collection.schema(),
+                            )
+                            .await
+                    }
                 };
-                return Err(MergeError::MergeFailed(format!("{message}: {e}")));
+                if let Err(e) = index_result {
+                    let message = if context.mode.is_standalone() {
+                        "Failed to update indexes after merge"
+                    } else {
+                        "Failed to update indexes after batch merge"
+                    };
+                    return Err(MergeError::MergeFailed(format!("{message}: {e}")));
+                }
+            }
+            Ok(_) => {
+                tracing::info!(
+                    doc_id = %context.doc_id_str,
+                    collection = %collection.name(),
+                    "skipping index maintenance for merge onto a tombstoned document"
+                );
+            }
+            Err(e) => {
+                // Previously swallowed silently, skipping ALL index maintenance
+                // with no trace — enforcement disappeared invisibly (#1111).
+                tracing::error!(
+                    doc_id = %context.doc_id_str,
+                    collection = %collection.name(),
+                    error = %e,
+                    "index manager could not be built from the collection schema; \
+                     skipping index maintenance for this merge"
+                );
             }
         }
 
