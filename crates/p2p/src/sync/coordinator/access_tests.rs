@@ -1027,7 +1027,6 @@ async fn doc_sync_filters_heads_outside_replicator_collection() {
 
     let block = Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
-            doc_id: b"doc1".to_vec(),
             schema_version_id: "collection_b".to_string(),
             priority: 1,
             status: 1,
@@ -1095,7 +1094,6 @@ async fn car_fetch_controlled_mode_filters_unauthorized_data_block() {
 
     let block = Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
-            doc_id: b"doc1".to_vec(),
             schema_version_id: "collection_b".to_string(),
             priority: 1,
             status: 1,
@@ -1148,7 +1146,6 @@ async fn selective_car_grant_bypasses_filtered_replicator_denial() {
 
     let field_block = Block::new(
         CrdtDelta::Lww(LwwDeltaPayload {
-            doc_id: b"doc1".to_vec(),
             field_name: "status".to_string(),
             priority: 14,
             schema_version_id: "version1".to_string(),
@@ -1163,7 +1160,6 @@ async fn selective_car_grant_bypasses_filtered_replicator_denial() {
 
     let root_block = Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
-            doc_id: b"doc1".to_vec(),
             schema_version_id: "version1".to_string(),
             priority: 17,
             status: 1,
@@ -1253,7 +1249,6 @@ async fn completed_push_allows_post_ack_selective_recovery() {
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let field_block = Block::new(
         CrdtDelta::Lww(LwwDeltaPayload {
-            doc_id: b"doc1".to_vec(),
             field_name: "status".to_string(),
             priority: 14,
             schema_version_id: "version1".to_string(),
@@ -1268,7 +1263,6 @@ async fn completed_push_allows_post_ack_selective_recovery() {
 
     let root_block = Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
-            doc_id: b"doc1".to_vec(),
             schema_version_id: "version1".to_string(),
             priority: 17,
             status: 1,
@@ -1580,7 +1574,6 @@ async fn branchable_sync_reply_remerges_locally_complete_unmerged_head() {
 
     let block = Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
-            doc_id: b"doc1".to_vec(),
             schema_version_id: "collection1".to_string(),
             priority: 1,
             status: 1,
@@ -1628,7 +1621,7 @@ async fn branchable_sync_reply_remerges_locally_complete_unmerged_head() {
             ..
         } => {
             assert_eq!(event_cid, cid);
-            assert_eq!(doc_id, "doc1");
+            assert_eq!(doc_id, document::DocID::new_v0(cid).to_string());
             assert_eq!(collection_id, "collection1");
             assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
         }
@@ -2403,13 +2396,14 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
 /// A PushLog request whose composite block links to a field block that is never
 /// stored, so `process_pushlog` must register a pending DAG to track it.
 fn pushlog_request_with_missing_link(collection_id: &str, doc_id: &str) -> PushLogRequest {
+    // Deltas no longer carry a docID, so distinct documents must differ in
+    // content to produce distinct genesis CIDs (as unsigned creates do).
     let field_block = defra_core::Block::new(
         defra_core::CrdtDelta::Lww(defra_core::LwwDeltaPayload {
-            doc_id: doc_id.as_bytes().to_vec(),
             field_name: "field".to_string(),
             priority: 1,
             schema_version_id: "schema1".to_string(),
-            data: b"value".to_vec(),
+            data: doc_id.as_bytes().to_vec(),
         }),
         vec![],
         vec![],
@@ -2418,7 +2412,6 @@ fn pushlog_request_with_missing_link(collection_id: &str, doc_id: &str) -> PushL
 
     let composite = defra_core::Block::new(
         defra_core::CrdtDelta::Composite(defra_core::CompositeDeltaPayload {
-            doc_id: doc_id.as_bytes().to_vec(),
             schema_version_id: "schema1".to_string(),
             priority: 1,
             status: 1,

@@ -236,7 +236,6 @@ mod tests {
         use defra_core::{CompositeDeltaPayload, CrdtDelta};
 
         let payload = CompositeDeltaPayload {
-            doc_id: b"doc1".to_vec(),
             priority: 1,
             schema_version_id: collection_id.to_string(),
             status: 1,

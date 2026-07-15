@@ -44,7 +44,6 @@ fn create_test_broadcast(cid: &Cid) -> PushLogBroadcast {
 fn create_lww_block(field_name: &str) -> (Cid, Vec<u8>) {
     let block = Block::new(
         CrdtDelta::Lww(LwwDeltaPayload {
-            doc_id: b"doc123".to_vec(),
             field_name: field_name.to_string(),
             priority: 1,
             schema_version_id: "schema1".to_string(),
@@ -61,7 +60,6 @@ fn create_lww_block(field_name: &str) -> (Cid, Vec<u8>) {
 fn create_composite_block(links: Vec<DAGLink>) -> (Cid, Vec<u8>) {
     let block = Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
-            doc_id: b"doc123".to_vec(),
             schema_version_id: "schema1".to_string(),
             priority: 1,
             status: 1,

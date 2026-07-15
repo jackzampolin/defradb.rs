@@ -111,6 +111,23 @@ impl DagFetchContext {
         self.refresh_explicit_replicator_from_collection();
     }
 
+    /// Derive the document identity from a genesis composite block CID when
+    /// it is not otherwise known (Go #4838). Used on the branchable-collection
+    /// sync path, where blocks arrive without a per-document PushLog envelope.
+    pub(crate) fn fill_missing_doc_id_from_genesis(&mut self, cid: &Cid, block_data: &[u8]) {
+        if !self.doc_id.is_empty() {
+            return;
+        }
+        let Ok(block) = DefraBlock::from_dag_cbor(block_data) else {
+            return;
+        };
+        let is_genesis_composite = matches!(block.delta, defra_core::CrdtDelta::Composite(_))
+            && block.heads.as_ref().is_none_or(Vec::is_empty);
+        if is_genesis_composite {
+            self.doc_id = document::DocID::new_v0(*cid).to_string();
+        }
+    }
+
     fn refresh_explicit_replicator_from_collection(&mut self) {
         let Some(collections) = &self.explicit_replicator_collections else {
             return;

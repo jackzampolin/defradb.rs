@@ -563,7 +563,7 @@ mod tests {
 
         fn make_doc(&self, name: String) -> Document {
             let mut doc = Document::new();
-            doc.generate_and_set_doc_id().expect("doc id");
+            doc.set_id(document::DocID::new_v0_from_seed(&name));
             doc.set("name", serde_json::Value::String(name));
             doc
         }
@@ -601,7 +601,7 @@ mod tests {
 
     fn make_users_doc(name: &str) -> Document {
         let mut doc = Document::new();
-        doc.generate_and_set_doc_id().expect("doc id");
+        doc.set_id(document::DocID::new_v0_from_seed(name));
         doc.set("name", serde_json::Value::String(name.to_string()));
         doc
     }

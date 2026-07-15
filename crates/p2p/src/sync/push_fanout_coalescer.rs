@@ -264,7 +264,6 @@ mod tests {
 
         let block = Block::new_with_options(
             CrdtDelta::Composite(CompositeDeltaPayload {
-                doc_id: b"doc".to_vec(),
                 schema_version_id: "schema".to_string(),
                 priority: seed.iter().map(|byte| u64::from(*byte)).sum(),
                 status: 1,

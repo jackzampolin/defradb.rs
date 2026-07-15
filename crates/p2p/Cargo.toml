@@ -11,6 +11,7 @@ description = "P2P networking for DefraDB using libp2p"
 [dependencies]
 # Internal crates
 defra-core = { path = "../defra-core" }
+document = { path = "../document" }
 crypto = { path = "../crypto" }
 blockstore = { path = "../blockstore" }
 crdt = { path = "../crdt" }
@@ -95,7 +96,6 @@ iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-blobs", "dep:iroh-tic
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 p2p = { path = ".", features = ["test-utils"] }
-document = { path = "../document" }
 
 [lints]
 workspace = true

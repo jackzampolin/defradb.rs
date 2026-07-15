@@ -995,9 +995,10 @@ mod tests {
     impl crate::mutator::DocMutator for CapturingMutator {
         async fn create(&self, _collection_name: &str, mut doc: Document) -> Result<CreateResult> {
             if doc.id().is_none() {
-                doc.generate_and_set_doc_id().map_err(|error| {
-                    QueryError::execution(format!("failed to generate test doc id: {error}"))
-                })?;
+                // Stand in for the genesis-CID identity a real create would
+                // derive: seed a valid DocID from the capture order.
+                let seq = self.created_docs.lock().unwrap().len();
+                doc.set_id(document::DocID::new_v0_from_seed(&format!("test-doc-{seq}")));
             }
             self.created_docs.lock().unwrap().push(doc.clone());
             Ok(CreateResult::new(doc.id().unwrap().clone(), doc))

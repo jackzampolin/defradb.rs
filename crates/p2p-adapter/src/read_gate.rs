@@ -188,19 +188,10 @@ impl BlockReadGate for DbBlockReadGate {
 mod tests {
     use std::sync::Arc;
 
-    use super::{parse_priority_doc_id, DbBlockClassifier};
+    use super::DbBlockClassifier;
     use p2p::bitswap::{BlockClass, BlockClassifier};
     use schema::{CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
     use storage::backends::MemoryStore;
-    use storage::corekv::Key;
-
-    #[test]
-    fn parses_doc_id_from_priority_headstore_key() {
-        let cid = defra_core::block::generate_cid_from_bytes(b"block").unwrap();
-        let key = storage::keys::HeadstorePriorityKey::new("doc-1", 42, cid).bytes();
-
-        assert_eq!(parse_priority_doc_id(&key).as_deref(), Some("doc-1"));
-    }
 
     fn test_collection() -> CollectionVersion {
         CollectionVersion::new(
@@ -219,7 +210,6 @@ mod tests {
     fn data_block(doc_id: &str) -> (cid::Cid, Vec<u8>) {
         let block = defra_core::Block::new(
             defra_core::CrdtDelta::Lww(defra_core::LwwDeltaPayload {
-                doc_id: doc_id.as_bytes().to_vec(),
                 field_name: "name".to_string(),
                 priority: 1,
                 schema_version_id: "version-1".to_string(),
@@ -240,14 +230,12 @@ mod tests {
         let (cid, bytes) = data_block("doc-from-delta");
 
         let txn = db.new_txn(false).await.unwrap();
-        txn.headstore()
-            .unwrap()
-            .set(
-                &storage::keys::HeadstorePriorityKey::new("doc-from-index", 1, cid).bytes(),
-                &[],
-            )
-            .await
-            .unwrap();
+        {
+            let systemstore = txn.systemstore().unwrap();
+            db::doc_id_map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), "doc-from-index")
+                .await
+                .unwrap();
+        }
         txn.commit().await.unwrap();
 
         let classifier = DbBlockClassifier::new(db);
