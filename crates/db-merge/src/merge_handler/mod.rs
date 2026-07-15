@@ -3198,11 +3198,11 @@ mod tests {
     /// `storage::corekv::Error::UniqueConstraintViolation` unchanged. That is
     /// internal index-state inconsistency (damaged data), not a live
     /// conflict a deterministic pick can resolve, so it must still classify
-    /// as `MergeOutcome::Rejected` rather than retrying forever. This drives
-    /// that arm through the real stack — corrupting a unique-index entry to
-    /// an empty value (key present, so `save()` still detects a violation;
-    /// value empty, so `conflicting_doc_id()` reports no holder) — rather
-    /// than only asserting the classification predicate in isolation.
+    /// as `MergeOutcome::Rejected` rather than retrying forever. This test
+    /// exercises the code path end-to-end (the merge disposition is real
+    /// production code), but the precondition (key-present/value-empty unique
+    /// entry) is synthetic corruption not producible by current write paths;
+    /// the test proves the seam exists, not that the state occurs in production.
     #[tokio::test]
     async fn remote_composite_merge_with_corrupted_unique_index_entry_is_rejected() {
         let (handler, blockstore) = make_handler_with_unique_index_schema().await;
