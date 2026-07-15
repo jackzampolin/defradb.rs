@@ -20,8 +20,12 @@ fn extract_indexes(val: &Value) -> Vec<&Value> {
 /// Check if any index in the list has the given name (handles both `name` and `Name` keys).
 fn has_index_name(indexes: &[&Value], name: &str) -> bool {
     indexes.iter().any(|idx| {
-        idx.get("name")
-            .or_else(|| idx.get("Name"))
+        // Go v1.0.0 wraps each index in the Action-system envelope
+        // ({"Description": {...}, "Execution": {...}}); the Rust node still
+        // returns the flat descriptor. Accept both shapes.
+        let desc = idx.get("Description").unwrap_or(idx);
+        desc.get("name")
+            .or_else(|| desc.get("Name"))
             .and_then(|v| v.as_str())
             .map(|n| n == name)
             .unwrap_or(false)

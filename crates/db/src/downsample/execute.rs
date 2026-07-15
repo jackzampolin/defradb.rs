@@ -97,12 +97,19 @@ impl<S: Store + 'static> crate::database::DB<S> {
     }
 
     pub(super) fn series_doc_id(&self, source_doc: &Document) -> Result<String> {
+        self.series_doc_id_opt(source_doc)
+            .ok_or_else(|| Error::Other("downsample source document is missing an id".to_string()))
+    }
+
+    /// Resolve the series identity of a downsample source, or `None` when
+    /// the source has neither an explicit `source_doc_id` nor a DocID yet
+    /// (a first-time create before its genesis identity is assigned).
+    pub(super) fn series_doc_id_opt(&self, source_doc: &Document) -> Option<String> {
         source_doc
             .get("source_doc_id")
             .and_then(|value| value.as_str())
             .map(str::to_string)
             .or_else(|| source_doc.id().map(ToString::to_string))
-            .ok_or_else(|| Error::Other("downsample source document is missing an id".to_string()))
     }
 
     fn set_field(

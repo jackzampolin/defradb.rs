@@ -23,7 +23,13 @@ impl<S: Store + 'static> crate::database::DB<S> {
             return Ok(());
         }
 
-        let series_doc_id = self.series_doc_id(source_doc)?;
+        // The series identity is the source's own DocID, which is only
+        // assigned once the genesis block is written. A source without one
+        // yet is a first-time create: there is no prior rollup target, so
+        // the closed-bucket (late-data) check below cannot apply.
+        let Some(series_doc_id) = self.series_doc_id_opt(source_doc) else {
+            return Ok(());
+        };
 
         for plan in plans {
             if let SourceKind::Raw { measure_field } = &plan.source_kind {
