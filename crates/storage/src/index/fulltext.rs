@@ -1,11 +1,11 @@
 //! FullTextIndex implementation using BM25 scoring
 //!
-//! Stores an inverted index mapping terms to document IDs with term frequency
+//! Stores an inverted index mapping terms to doc short IDs with term frequency
 //! and field length data for BM25 scoring at query time.
 //!
 //! Key layout:
-//!   Posting:  /[col_id]/[idx_id]/[term]/[doc_id] -> [term_freq, field_len]
-//!   Stats:    /[col_id]/[idx_id]/_stats           -> [total_docs, total_field_len]
+//!   Posting:  /[col_id]/[idx_id]/[term]/[doc_short_id] -> [term_freq, field_len]
+//!   Stats:    /[col_id]/[idx_id]/_stats                 -> [total_docs, total_field_len]
 
 use async_trait::async_trait;
 use bm25::{DefaultTokenizer, Language, Tokenizer};
@@ -13,9 +13,10 @@ use document::NormalValue;
 use schema::{FullTextIndexDescription, IndexDescription};
 use std::collections::HashMap;
 
-use super::validate_doc_id;
+use super::validate_doc_short_id;
 use super::CollectionIndex;
 use crate::corekv::{IterOptions, MaybeSend, Reader, Result, Writer};
+use crate::keys::doc_id_index::{decode_doc_short_id, encode_doc_short_id};
 
 /// Map a language string to the bm25 crate's Language enum.
 pub fn parse_language(lang: &str) -> Language {
@@ -88,11 +89,11 @@ impl FullTextIndex {
         prefix
     }
 
-    fn posting_key(&self, term: &str, doc_id: &str) -> Vec<u8> {
+    fn posting_key(&self, term: &str, doc_short_id: u64) -> Vec<u8> {
         let mut key = self.index_prefix();
         key.extend_from_slice(term.as_bytes());
         key.push(b'/');
-        key.extend_from_slice(doc_id.as_bytes());
+        key.extend_from_slice(&encode_doc_short_id(doc_short_id));
         key
     }
 
@@ -149,13 +150,13 @@ impl FullTextIndex {
     async fn write_postings<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         text: &str,
     ) -> Result<u64> {
         let freqs = self.tokenize_with_freqs(text);
         let field_len = freqs.values().sum::<u32>() as u64;
         for (term, freq) in &freqs {
-            let key = self.posting_key(term, doc_id);
+            let key = self.posting_key(term, doc_short_id);
             let mut value = Vec::with_capacity(12);
             value.extend_from_slice(&freq.to_be_bytes());
             value.extend_from_slice(&field_len.to_be_bytes());
@@ -168,27 +169,27 @@ impl FullTextIndex {
     async fn remove_postings<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         text: &str,
     ) -> Result<u64> {
         let freqs = self.tokenize_with_freqs(text);
         let field_len = freqs.values().sum::<u32>() as u64;
         for term in freqs.keys() {
-            let key = self.posting_key(term, doc_id);
+            let key = self.posting_key(term, doc_short_id);
             txn.delete(&key).await?;
         }
         Ok(field_len)
     }
 
     /// Search the index for documents matching query terms.
-    /// Returns Vec of (doc_id, Vec<(term, term_freq, field_len)>).
+    /// Returns Vec of (doc_short_id, Vec<(term, term_freq, field_len)>).
     pub async fn search<R: Reader + MaybeSend>(
         &self,
         txn: &R,
         query: &str,
-    ) -> Result<Vec<(String, Vec<(String, u32, u64)>)>> {
+    ) -> Result<Vec<(u64, Vec<(String, u32, u64)>)>> {
         let query_terms = self.tokenizer.tokenize(query);
-        let mut doc_postings: HashMap<String, Vec<(String, u32, u64)>> = HashMap::new();
+        let mut doc_postings: HashMap<u64, Vec<(String, u32, u64)>> = HashMap::new();
 
         for term in &query_terms {
             let mut key_prefix = self.index_prefix();
@@ -200,15 +201,17 @@ impl FullTextIndex {
             let items = iter.collect_all().await?;
 
             for kv in items {
-                let doc_id_bytes = &kv.key[key_prefix.len()..];
-                let doc_id = String::from_utf8_lossy(doc_id_bytes).to_string();
+                let Ok(doc_short_id) = decode_doc_short_id(&kv.key[key_prefix.len()..]) else {
+                    continue;
+                };
                 if kv.value.len() == 12 {
                     let freq = u32::from_be_bytes(kv.value[0..4].try_into().unwrap());
                     let field_len = u64::from_be_bytes(kv.value[4..12].try_into().unwrap());
-                    doc_postings
-                        .entry(doc_id)
-                        .or_default()
-                        .push((term.clone(), freq, field_len));
+                    doc_postings.entry(doc_short_id).or_default().push((
+                        term.clone(),
+                        freq,
+                        field_len,
+                    ));
                 }
             }
         }
@@ -247,7 +250,7 @@ impl FullTextIndex {
         &self,
         txn: &R,
         query: &str,
-    ) -> Result<HashMap<String, f64>> {
+    ) -> Result<HashMap<u64, f64>> {
         let query_terms = self.tokenizer.tokenize(query);
         if query_terms.is_empty() {
             return Ok(HashMap::new());
@@ -263,7 +266,7 @@ impl FullTextIndex {
         let k1 = self.k1();
         let b = self.b();
 
-        let mut scores: HashMap<String, f64> = HashMap::new();
+        let mut scores: HashMap<u64, f64> = HashMap::new();
 
         for term in &query_terms {
             let mut key_prefix = self.index_prefix();
@@ -279,8 +282,9 @@ impl FullTextIndex {
 
             for kv in &items {
                 if kv.value.len() == 12 {
-                    let doc_id_bytes = &kv.key[key_prefix.len()..];
-                    let doc_id = String::from_utf8_lossy(doc_id_bytes).to_string();
+                    let Ok(doc_short_id) = decode_doc_short_id(&kv.key[key_prefix.len()..]) else {
+                        continue;
+                    };
                     let tf = u32::from_be_bytes(kv.value[0..4].try_into().unwrap()) as f64;
                     let dl = u64::from_be_bytes(kv.value[4..12].try_into().unwrap()) as f64;
 
@@ -291,7 +295,7 @@ impl FullTextIndex {
                     };
                     let tf_norm = (tf * (k1 + 1.0)) / denom;
 
-                    *scores.entry(doc_id).or_insert(0.0) += idf * tf_norm;
+                    *scores.entry(doc_short_id).or_insert(0.0) += idf * tf_norm;
                 }
             }
         }
@@ -310,16 +314,16 @@ impl CollectionIndex for FullTextIndex {
     async fn save<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         values: &[NormalValue],
     ) -> Result<()> {
-        validate_doc_id(doc_id, &self.desc.name)?;
+        validate_doc_short_id(doc_short_id, &self.desc.name)?;
         let text = Self::extract_text(values);
         if text.is_empty() {
             return Ok(());
         }
         let (total_docs, total_field_len) = self.read_stats(txn).await?;
-        let field_len = self.write_postings(txn, doc_id, text).await?;
+        let field_len = self.write_postings(txn, doc_short_id, text).await?;
         self.write_stats(txn, total_docs + 1, total_field_len + field_len)
             .await
     }
@@ -327,23 +331,23 @@ impl CollectionIndex for FullTextIndex {
     async fn update<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         old_values: &[NormalValue],
         new_values: &[NormalValue],
     ) -> Result<()> {
-        validate_doc_id(doc_id, &self.desc.name)?;
+        validate_doc_short_id(doc_short_id, &self.desc.name)?;
         let old_text = Self::extract_text(old_values);
         let new_text = Self::extract_text(new_values);
         let (mut total_docs, mut total_field_len) = self.read_stats(txn).await?;
 
         if !old_text.is_empty() {
-            let old_field_len = self.remove_postings(txn, doc_id, old_text).await?;
+            let old_field_len = self.remove_postings(txn, doc_short_id, old_text).await?;
             total_docs = total_docs.saturating_sub(1);
             total_field_len = total_field_len.saturating_sub(old_field_len);
         }
 
         if !new_text.is_empty() {
-            let new_field_len = self.write_postings(txn, doc_id, new_text).await?;
+            let new_field_len = self.write_postings(txn, doc_short_id, new_text).await?;
             total_docs += 1;
             total_field_len += new_field_len;
         }
@@ -354,16 +358,16 @@ impl CollectionIndex for FullTextIndex {
     async fn delete<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         values: &[NormalValue],
     ) -> Result<()> {
-        validate_doc_id(doc_id, &self.desc.name)?;
+        validate_doc_short_id(doc_short_id, &self.desc.name)?;
         let text = Self::extract_text(values);
         if text.is_empty() {
             return Ok(());
         }
         let (total_docs, total_field_len) = self.read_stats(txn).await?;
-        let field_len = self.remove_postings(txn, doc_id, text).await?;
+        let field_len = self.remove_postings(txn, doc_short_id, text).await?;
         self.write_stats(
             txn,
             total_docs.saturating_sub(1),

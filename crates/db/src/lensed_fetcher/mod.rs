@@ -153,7 +153,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         use crate::collection_loader::get_collection_with_lazy_load;
         use crate::index_manager::IndexManager;
 
-        let (collection, datastore, _systemstore) =
+        let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         let short_id = collection.resolved_root_id();
@@ -176,11 +176,17 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
                 ))
             })?;
 
-        ft_index
+        let scores = ft_index
             .search_scored(&datastore, query)
             .await
             .map_err(|e| {
                 query::error::QueryError::execution(format!("fulltext search error: {}", e))
+            })?;
+
+        crate::doc_id_map::resolve_doc_id_scores(&systemstore, scores)
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("doc ID resolution error: {}", e))
             })
     }
 

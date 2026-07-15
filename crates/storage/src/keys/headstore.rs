@@ -360,8 +360,14 @@ mod tests {
         let mut expected_prefix = b"/p/".to_vec();
         expected_prefix.push(0x2a);
         expected_prefix.extend_from_slice(b"/0000000000000042/");
-        assert_eq!(&bytes[..HeadstorePriorityKey::cid_offset(42)], expected_prefix);
-        assert_eq!(&bytes[HeadstorePriorityKey::cid_offset(42)..], cid.to_bytes());
+        assert_eq!(
+            &bytes[..HeadstorePriorityKey::cid_offset(42)],
+            expected_prefix
+        );
+        assert_eq!(
+            &bytes[HeadstorePriorityKey::cid_offset(42)..],
+            cid.to_bytes()
+        );
     }
 
     #[test]

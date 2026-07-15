@@ -141,18 +141,18 @@ impl<S: Store> DB<S> {
             let txn_systemstore = write_txn.systemstore()?;
 
             let raw_docs = collection
-                .get_all_with_datastore(&datastore, &txn_systemstore)
+                .get_all_with_datastore_short_ids(&datastore, &txn_systemstore, false)
                 .await?;
 
             let mut migrated_docs = Vec::with_capacity(raw_docs.len());
-            for doc in raw_docs {
+            for (doc_short_id, doc, _) in raw_docs {
                 let doc_version = doc
                     .schema_version_id()
                     .unwrap_or(&target_version_id)
                     .to_string();
 
                 if doc_version == target_version_id {
-                    migrated_docs.push(doc);
+                    migrated_docs.push((doc_short_id, doc));
                     continue;
                 }
 
@@ -182,13 +182,13 @@ impl<S: Store> DB<S> {
                                 }
                             }
                             migrated.set_schema_version_id(&target_version_id);
-                            migrated_docs.push(migrated);
+                            migrated_docs.push((doc_short_id, migrated));
                             continue;
                         }
                     }
                 }
 
-                migrated_docs.push(doc);
+                migrated_docs.push((doc_short_id, doc));
             }
 
             let index_manager = IndexManager::from_collection(short_id, collection.schema())

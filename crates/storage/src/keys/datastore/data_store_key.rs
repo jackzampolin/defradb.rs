@@ -75,11 +75,7 @@ impl DataStoreKey {
     /// let key = DataStoreKey::version_key(1, InstanceType::Value, 42);
     /// // Results in key: /1/v/\x2a/v
     /// ```
-    pub fn version_key(
-        collection_id: u32,
-        instance_type: InstanceType,
-        doc_short_id: u64,
-    ) -> Self {
+    pub fn version_key(collection_id: u32, instance_type: InstanceType, doc_short_id: u64) -> Self {
         Self::new(
             collection_id,
             instance_type,
@@ -96,7 +92,8 @@ impl DataStoreKey {
 
 impl Key for DataStoreKey {
     fn bytes(&self) -> Vec<u8> {
-        let mut buf = Self::document_prefix(self.collection_id, self.instance_type, self.doc_short_id);
+        let mut buf =
+            Self::document_prefix(self.collection_id, self.instance_type, self.doc_short_id);
         buf.extend_from_slice(self.field_id.as_bytes());
         buf
     }

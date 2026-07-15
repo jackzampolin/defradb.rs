@@ -63,6 +63,16 @@ fn is_valid_index_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Reject the unset doc short ID (0): index maintenance requires a mapped document.
+fn require_doc_short_id(doc_short_id: u64) -> Result<()> {
+    if doc_short_id == 0 {
+        return Err(Error::InvalidDocument(
+            "document must have a doc short ID".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Generate the internal map key used for full-text indexes.
 ///
 /// This key is intentionally invalid for public index creation APIs because
@@ -293,20 +303,19 @@ impl IndexManager {
     /// Bulk index all existing documents in a collection.
     ///
     /// This should be called after creating a new index to populate it with
-    /// existing document data.
+    /// existing document data. Each document is paired with its node-local
+    /// doc short ID.
     ///
     /// # Returns
     ///
     /// Returns a `BulkIndexResult` containing:
     /// - `indexed`: Number of documents successfully indexed.
-    /// - `skipped`: Number of documents skipped (e.g., documents without an ID).
-    ///
-    /// Documents without an ID are skipped with a warning logged.
+    /// - `skipped`: Number of documents skipped (unset short ID).
     pub async fn bulk_index(
         &self,
         datastore: &NamespaceView,
         index_name: &str,
-        documents: &[Document],
+        documents: &[(u64, Document)],
         schema: &CollectionVersion,
     ) -> Result<BulkIndexResult> {
         let index = self
@@ -318,20 +327,17 @@ impl IndexManager {
         let mut skipped_count = 0;
         let mut mutable_datastore = datastore.clone();
 
-        for doc in documents {
-            let doc_id = match doc.id() {
-                Some(id) => id.to_string(),
-                None => {
-                    skipped_count += 1;
-                    continue;
-                }
-            };
+        for (doc_short_id, doc) in documents {
+            if *doc_short_id == 0 {
+                skipped_count += 1;
+                continue;
+            }
 
             let value_sets = self.extract_index_values(doc, index.description(), schema)?;
 
             for values in &value_sets {
                 index
-                    .save(&mut mutable_datastore, &doc_id, values)
+                    .save(&mut mutable_datastore, *doc_short_id, values)
                     .await
                     .map_err(Error::Storage)?;
             }
@@ -350,12 +356,10 @@ impl IndexManager {
         &self,
         datastore: &NamespaceView,
         doc: &Document,
+        doc_short_id: u64,
         schema: &CollectionVersion,
     ) -> Result<()> {
-        let doc_id = doc
-            .id()
-            .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
-            .to_string();
+        require_doc_short_id(doc_short_id)?;
 
         let mut mutable_datastore = datastore.clone();
 
@@ -363,39 +367,7 @@ impl IndexManager {
             let value_sets = self.extract_index_values(doc, index.description(), schema)?;
             for values in &value_sets {
                 index
-                    .save(&mut mutable_datastore, &doc_id, values)
-                    .await
-                    .map_err(Error::Storage)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Update indexes when a document is created via blind create.
-    ///
-    /// "Blind" means the document existence check was skipped (content-addressed IDs
-    /// are unique by construction). However, unique index constraints on field values
-    /// are still enforced — two different documents can share a content-addressed ID
-    /// scheme but have duplicate field values.
-    pub async fn on_document_create_blind(
-        &self,
-        datastore: &NamespaceView,
-        doc: &Document,
-        schema: &CollectionVersion,
-    ) -> Result<()> {
-        let doc_id = doc
-            .id()
-            .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
-            .to_string();
-
-        let mut mutable_datastore = datastore.clone();
-
-        for index in self.indexes.values() {
-            let value_sets = self.extract_index_values(doc, index.description(), schema)?;
-            for values in &value_sets {
-                index
-                    .save(&mut mutable_datastore, &doc_id, values)
+                    .save(&mut mutable_datastore, doc_short_id, values)
                     .await
                     .map_err(Error::Storage)?;
             }
@@ -414,12 +386,10 @@ impl IndexManager {
         datastore: &NamespaceView,
         old_doc: &Document,
         new_doc: &Document,
+        doc_short_id: u64,
         schema: &CollectionVersion,
     ) -> Result<()> {
-        let doc_id = new_doc
-            .id()
-            .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
-            .to_string();
+        require_doc_short_id(doc_short_id)?;
 
         let mut mutable_datastore = datastore.clone();
 
@@ -430,13 +400,13 @@ impl IndexManager {
             if old_value_sets != new_value_sets {
                 for old_values in &old_value_sets {
                     index
-                        .delete(&mut mutable_datastore, &doc_id, old_values)
+                        .delete(&mut mutable_datastore, doc_short_id, old_values)
                         .await
                         .map_err(Error::Storage)?;
                 }
                 for new_values in &new_value_sets {
                     index
-                        .save(&mut mutable_datastore, &doc_id, new_values)
+                        .save(&mut mutable_datastore, doc_short_id, new_values)
                         .await
                         .map_err(Error::Storage)?;
                 }
@@ -451,12 +421,10 @@ impl IndexManager {
         &self,
         datastore: &NamespaceView,
         doc: &Document,
+        doc_short_id: u64,
         schema: &CollectionVersion,
     ) -> Result<()> {
-        let doc_id = doc
-            .id()
-            .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
-            .to_string();
+        require_doc_short_id(doc_short_id)?;
 
         let mut mutable_datastore = datastore.clone();
 
@@ -464,7 +432,7 @@ impl IndexManager {
             let value_sets = self.extract_index_values(doc, index.description(), schema)?;
             for values in &value_sets {
                 index
-                    .delete(&mut mutable_datastore, &doc_id, values)
+                    .delete(&mut mutable_datastore, doc_short_id, values)
                     .await
                     .map_err(Error::Storage)?;
             }

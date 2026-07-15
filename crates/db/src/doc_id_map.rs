@@ -79,6 +79,36 @@ pub async fn get_doc_id(systemstore: &NamespaceView, doc_short_id: u64) -> Resul
     }
 }
 
+/// Resolve doc short IDs to public DocIDs, preserving order and skipping
+/// IDs with no mapping (index scan read path).
+pub async fn resolve_doc_ids(
+    systemstore: &NamespaceView,
+    doc_short_ids: &[u64],
+) -> Result<Vec<String>> {
+    let mut doc_ids = Vec::with_capacity(doc_short_ids.len());
+    for doc_short_id in doc_short_ids {
+        if let Some(doc_id) = get_doc_id(systemstore, *doc_short_id).await? {
+            doc_ids.push(doc_id);
+        }
+    }
+    Ok(doc_ids)
+}
+
+/// Resolve short-ID-keyed scores to public-DocID-keyed scores, skipping
+/// IDs with no mapping (full-text search read path).
+pub async fn resolve_doc_id_scores(
+    systemstore: &NamespaceView,
+    scores: std::collections::HashMap<u64, f64>,
+) -> Result<std::collections::HashMap<String, f64>> {
+    let mut resolved = std::collections::HashMap::with_capacity(scores.len());
+    for (doc_short_id, score) in scores {
+        if let Some(doc_id) = get_doc_id(systemstore, doc_short_id).await? {
+            resolved.insert(doc_id, score);
+        }
+    }
+    Ok(resolved)
+}
+
 /// Resolve a public DocID to its DocRef (collection + doc short IDs).
 pub async fn get_doc_ref(systemstore: &NamespaceView, doc_id: &str) -> Result<Option<DocRef>> {
     match systemstore

@@ -92,12 +92,23 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             let index_result = match &old_doc {
                 Some(old_doc) => {
                     index_manager
-                        .on_document_update(datastore, old_doc, &doc, collection.schema())
+                        .on_document_update(
+                            datastore,
+                            old_doc,
+                            &doc,
+                            context.doc_short_id,
+                            collection.schema(),
+                        )
                         .await
                 }
                 None => {
                     index_manager
-                        .on_document_create(datastore, &doc, collection.schema())
+                        .on_document_create(
+                            datastore,
+                            &doc,
+                            context.doc_short_id,
+                            collection.schema(),
+                        )
                         .await
                 }
             };
@@ -164,7 +175,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     IndexManager::from_collection(short_id, collection.schema())
                 {
                     if let Err(e) = index_manager
-                        .on_document_delete(datastore, &old_doc, collection.schema())
+                        .on_document_delete(
+                            datastore,
+                            &old_doc,
+                            context.doc_short_id,
+                            collection.schema(),
+                        )
                         .await
                     {
                         let message = if context.mode.is_standalone() {

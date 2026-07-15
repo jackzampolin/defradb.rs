@@ -11,15 +11,13 @@ use schema::{CollectionVersion, FieldDescription, FieldKind, IndexedFieldDescrip
 use storage::backends::MemoryStore;
 use storage::index::IndexIterator;
 
-/// Assign a distinct valid DocID for index-layer tests. Index entries are
-/// keyed by DocID string; these tests only need identity, not derivation, so
-/// the ID comes from a per-process seed sequence instead of the genesis-CID
-/// create flow.
-fn set_test_doc_id(doc: &mut Document) {
+/// Allocate a distinct doc short ID for index-layer tests. Index entries are
+/// keyed by node-local short IDs; these tests only need identity, not the
+/// full allocation/mapping flow of the create path.
+fn next_test_doc_short_id() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    doc.set_id(document::DocID::new_v0_from_seed(&format!("test-doc-{n}")));
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Generate a test schema with common fields.
@@ -75,13 +73,11 @@ proptest! {
                 .unwrap();
 
             // Create documents
-            // IMPORTANT: Set fields BEFORE generating doc_id
             let mut docs = Vec::new();
             for i in 0..doc_count {
                 let mut doc = Document::new();
                 doc.set("name", NormalValue::String(format!("user_{}", i)));
-                set_test_doc_id(&mut doc);
-                docs.push(doc);
+                docs.push((next_test_doc_short_id(), doc));
             }
 
             // Bulk index
@@ -134,13 +130,12 @@ proptest! {
                 .unwrap();
 
             // Create document
-            // IMPORTANT: Set fields BEFORE generating doc_id
             let mut doc = Document::new();
             doc.set("name", NormalValue::String(name.clone()));
-            set_test_doc_id(&mut doc);
+            let doc_short_id = next_test_doc_short_id();
 
             manager
-                .on_document_create(&datastore, &doc, &schema)
+                .on_document_create(&datastore, &doc, doc_short_id, &schema)
                 .await
                 .unwrap();
 
@@ -155,7 +150,7 @@ proptest! {
 
             // Delete document
             manager
-                .on_document_delete(&datastore, &doc, &schema)
+                .on_document_delete(&datastore, &doc, doc_short_id, &schema)
                 .await
                 .unwrap();
 
@@ -211,23 +206,21 @@ proptest! {
                 .unwrap();
 
             // Create document with old name
-            // IMPORTANT: Set fields BEFORE generating doc_id
             let mut old_doc = Document::new();
             old_doc.set("name", NormalValue::String(old_name.clone()));
-            set_test_doc_id(&mut old_doc);
-            let doc_id = old_doc.id().unwrap().clone();
+            let old_doc_short_id = next_test_doc_short_id();
 
             manager
-                .on_document_create(&datastore, &old_doc, &schema)
+                .on_document_create(&datastore, &old_doc, old_doc_short_id, &schema)
                 .await
                 .unwrap();
 
             // Update to new name
-            let mut new_doc = Document::with_id(doc_id);
+            let mut new_doc = Document::new();
             new_doc.set("name", NormalValue::String(new_name.clone()));
 
             manager
-                .on_document_update(&datastore, &old_doc, &new_doc, &schema)
+                .on_document_update(&datastore, &old_doc, &new_doc, old_doc_short_id, &schema)
                 .await
                 .unwrap();
 
@@ -290,16 +283,15 @@ proptest! {
                 .unwrap();
 
             // Create multiple documents with same name but different IDs
-            // IMPORTANT: Set fields BEFORE generating doc_id
             for i in 0..count {
                 let mut doc = Document::new();
                 doc.set("name", NormalValue::String(name.clone()));
                 // Add unique field to ensure different doc_ids
                 doc.set("age", NormalValue::Int(i as i64));
-                set_test_doc_id(&mut doc);
+                let doc_short_id = next_test_doc_short_id();
 
                 manager
-                    .on_document_create(&datastore, &doc, &schema)
+                    .on_document_create(&datastore, &doc, doc_short_id, &schema)
                     .await
                     .unwrap();
             }
@@ -354,26 +346,24 @@ proptest! {
                 .unwrap();
 
             // First document should succeed
-            // IMPORTANT: Set fields BEFORE generating doc_id
             let mut doc1 = Document::new();
             doc1.set("name", NormalValue::String(name.clone()));
             doc1.set("age", NormalValue::Int(1)); // Unique field for different ID
-            set_test_doc_id(&mut doc1);
+            let doc1_short_id = next_test_doc_short_id();
 
             let result1 = manager
-                .on_document_create(&datastore, &doc1, &schema)
+                .on_document_create(&datastore, &doc1, doc1_short_id, &schema)
                 .await;
             assert!(result1.is_ok(), "First document should succeed");
 
             // Second document with same name value should fail (unique constraint)
-            // IMPORTANT: Set fields BEFORE generating doc_id
             let mut doc2 = Document::new();
             doc2.set("name", NormalValue::String(name.clone()));
             doc2.set("age", NormalValue::Int(2)); // Different age for different ID
-            set_test_doc_id(&mut doc2);
+            let doc2_short_id = next_test_doc_short_id();
 
             let result2 = manager
-                .on_document_create(&datastore, &doc2, &schema)
+                .on_document_create(&datastore, &doc2, doc2_short_id, &schema)
                 .await;
             assert!(result2.is_err(), "Duplicate should be rejected");
         });
@@ -418,27 +408,25 @@ proptest! {
                 .unwrap();
 
             // Create all documents
-            // IMPORTANT: Set fields BEFORE generating doc_id
             let mut docs = Vec::new();
             for (i, name) in creates.iter().enumerate() {
                 let mut doc = Document::new();
                 doc.set("name", NormalValue::String(name.clone()));
-                // Add unique index to ensure different doc_ids even if names are the same
                 doc.set("age", NormalValue::Int(i as i64));
-                set_test_doc_id(&mut doc);
+                let doc_short_id = next_test_doc_short_id();
 
                 manager
-                    .on_document_create(&datastore, &doc, &schema)
+                    .on_document_create(&datastore, &doc, doc_short_id, &schema)
                     .await
                     .unwrap();
-                docs.push(doc);
+                docs.push((doc_short_id, doc));
             }
 
             // Delete some documents (up to what we have)
             let actual_deletes = deletes.min(docs.len());
-            for doc in docs.iter().take(actual_deletes) {
+            for (doc_short_id, doc) in docs.iter().take(actual_deletes) {
                 manager
-                    .on_document_delete(&datastore, doc, &schema)
+                    .on_document_delete(&datastore, doc, *doc_short_id, &schema)
                     .await
                     .unwrap();
             }

@@ -224,8 +224,7 @@ impl BlockCIDToDocIDKey {
 
     /// Prefix covering every DocID owning a block (trailing '/').
     pub fn block_prefix(block_cid: &str) -> Vec<u8> {
-        let mut prefix =
-            doc_id_index_key(&[BLOCK_CID_TO_DOC_ID.as_bytes(), block_cid.as_bytes()]);
+        let mut prefix = doc_id_index_key(&[BLOCK_CID_TO_DOC_ID.as_bytes(), block_cid.as_bytes()]);
         prefix.push(b'/');
         prefix
     }

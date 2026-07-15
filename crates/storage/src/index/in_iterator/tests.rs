@@ -27,31 +27,19 @@ async fn test_in_iterator_simple_finds_multiple_values() {
 
     // Insert documents with different values
     index
-        .save(
-            &mut txn,
-            "doc1",
-            &[NormalValue::String("alice".to_string())],
-        )
+        .save(&mut txn, 1, &[NormalValue::String("alice".to_string())])
         .await
         .unwrap();
     index
-        .save(&mut txn, "doc2", &[NormalValue::String("bob".to_string())])
+        .save(&mut txn, 2, &[NormalValue::String("bob".to_string())])
         .await
         .unwrap();
     index
-        .save(
-            &mut txn,
-            "doc3",
-            &[NormalValue::String("charlie".to_string())],
-        )
+        .save(&mut txn, 3, &[NormalValue::String("charlie".to_string())])
         .await
         .unwrap();
     index
-        .save(
-            &mut txn,
-            "doc4",
-            &[NormalValue::String("david".to_string())],
-        )
+        .save(&mut txn, 4, &[NormalValue::String("david".to_string())])
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -72,9 +60,9 @@ async fn test_in_iterator_simple_finds_multiple_values() {
     let entries = iter.collect_all().await.unwrap();
     assert_eq!(entries.len(), 2);
 
-    let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
-    assert!(doc_ids.contains(&"doc1"));
-    assert!(doc_ids.contains(&"doc3"));
+    let doc_ids: Vec<u64> = entries.iter().map(|e| e.doc_short_id).collect();
+    assert!(doc_ids.contains(&1));
+    assert!(doc_ids.contains(&3));
 }
 
 #[tokio::test]
@@ -87,23 +75,15 @@ async fn test_in_iterator_simple_handles_duplicates_same_value() {
 
     // Insert multiple documents with same indexed value
     index
-        .save(
-            &mut txn,
-            "doc1",
-            &[NormalValue::String("alice".to_string())],
-        )
+        .save(&mut txn, 1, &[NormalValue::String("alice".to_string())])
         .await
         .unwrap();
     index
-        .save(
-            &mut txn,
-            "doc2",
-            &[NormalValue::String("alice".to_string())],
-        )
+        .save(&mut txn, 2, &[NormalValue::String("alice".to_string())])
         .await
         .unwrap();
     index
-        .save(&mut txn, "doc3", &[NormalValue::String("bob".to_string())])
+        .save(&mut txn, 3, &[NormalValue::String("bob".to_string())])
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -121,9 +101,9 @@ async fn test_in_iterator_simple_handles_duplicates_same_value() {
     let entries = iter.collect_all().await.unwrap();
     assert_eq!(entries.len(), 2);
 
-    let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
-    assert!(doc_ids.contains(&"doc1"));
-    assert!(doc_ids.contains(&"doc2"));
+    let doc_ids: Vec<u64> = entries.iter().map(|e| e.doc_short_id).collect();
+    assert!(doc_ids.contains(&1));
+    assert!(doc_ids.contains(&2));
 }
 
 #[tokio::test]
@@ -135,23 +115,15 @@ async fn test_in_iterator_unique_finds_values() {
     let index = UniqueIndex::new(1, desc.clone());
 
     index
-        .save(
-            &mut txn,
-            "doc1",
-            &[NormalValue::String("alice".to_string())],
-        )
+        .save(&mut txn, 1, &[NormalValue::String("alice".to_string())])
         .await
         .unwrap();
     index
-        .save(&mut txn, "doc2", &[NormalValue::String("bob".to_string())])
+        .save(&mut txn, 2, &[NormalValue::String("bob".to_string())])
         .await
         .unwrap();
     index
-        .save(
-            &mut txn,
-            "doc3",
-            &[NormalValue::String("charlie".to_string())],
-        )
+        .save(&mut txn, 3, &[NormalValue::String("charlie".to_string())])
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -182,11 +154,7 @@ async fn test_in_iterator_empty_result() {
     let index = SimpleIndex::new(1, desc.clone());
 
     index
-        .save(
-            &mut txn,
-            "doc1",
-            &[NormalValue::String("alice".to_string())],
-        )
+        .save(&mut txn, 1, &[NormalValue::String("alice".to_string())])
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -217,15 +185,11 @@ async fn test_in_iterator_reset() {
     let index = SimpleIndex::new(1, desc.clone());
 
     index
-        .save(
-            &mut txn,
-            "doc1",
-            &[NormalValue::String("alice".to_string())],
-        )
+        .save(&mut txn, 1, &[NormalValue::String("alice".to_string())])
         .await
         .unwrap();
     index
-        .save(&mut txn, "doc2", &[NormalValue::String("bob".to_string())])
+        .save(&mut txn, 2, &[NormalValue::String("bob".to_string())])
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -261,16 +225,9 @@ async fn test_in_iterator_with_null_values() {
     let desc = test_index_description(false);
     let index = SimpleIndex::new(1, desc.clone());
 
+    index.save(&mut txn, 1, &[NormalValue::Null]).await.unwrap();
     index
-        .save(&mut txn, "doc1", &[NormalValue::Null])
-        .await
-        .unwrap();
-    index
-        .save(
-            &mut txn,
-            "doc2",
-            &[NormalValue::String("alice".to_string())],
-        )
+        .save(&mut txn, 2, &[NormalValue::String("alice".to_string())])
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -307,19 +264,19 @@ async fn test_in_iterator_integer_values() {
     let index = SimpleIndex::new(1, desc.clone());
 
     index
-        .save(&mut txn, "doc1", &[NormalValue::Int(25)])
+        .save(&mut txn, 1, &[NormalValue::Int(25)])
         .await
         .unwrap();
     index
-        .save(&mut txn, "doc2", &[NormalValue::Int(30)])
+        .save(&mut txn, 2, &[NormalValue::Int(30)])
         .await
         .unwrap();
     index
-        .save(&mut txn, "doc3", &[NormalValue::Int(35)])
+        .save(&mut txn, 3, &[NormalValue::Int(35)])
         .await
         .unwrap();
     index
-        .save(&mut txn, "doc4", &[NormalValue::Int(40)])
+        .save(&mut txn, 4, &[NormalValue::Int(40)])
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -337,7 +294,7 @@ async fn test_in_iterator_integer_values() {
     let entries = iter.collect_all().await.unwrap();
     assert_eq!(entries.len(), 2);
 
-    let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
-    assert!(doc_ids.contains(&"doc1"));
-    assert!(doc_ids.contains(&"doc3"));
+    let doc_ids: Vec<u64> = entries.iter().map(|e| e.doc_short_id).collect();
+    assert!(doc_ids.contains(&1));
+    assert!(doc_ids.contains(&3));
 }

@@ -23,7 +23,7 @@ pub trait CollectionIndex: MaybeSendSync {
     async fn save<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         values: &[NormalValue],
     ) -> Result<()>;
 
@@ -34,7 +34,7 @@ pub trait CollectionIndex: MaybeSendSync {
     async fn update<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         old_values: &[NormalValue],
         new_values: &[NormalValue],
     ) -> Result<()>;
@@ -45,7 +45,7 @@ pub trait CollectionIndex: MaybeSendSync {
     async fn delete<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         values: &[NormalValue],
     ) -> Result<()>;
 

@@ -112,10 +112,6 @@ impl Collection {
 
     /// Get all documents in the collection with deletion status.
     ///
-    /// Blobs are keyed by doc short ID, so iteration yields documents in
-    /// allocation (insertion) order — matching Go v1.0.0's default result
-    /// ordering. Public DocIDs are resolved through the systemstore mapping.
-    ///
     /// If `show_deleted` is true, returns all documents including deleted ones.
     /// If `show_deleted` is false, returns only non-deleted documents.
     /// Returns tuples of (Document, is_deleted).
@@ -125,6 +121,29 @@ impl Collection {
         systemstore: &NamespaceView,
         show_deleted: bool,
     ) -> Result<Vec<(Document, bool)>> {
+        let entries = self
+            .get_all_with_datastore_short_ids(datastore, systemstore, show_deleted)
+            .await?;
+        Ok(entries
+            .into_iter()
+            .map(|(_, doc, is_deleted)| (doc, is_deleted))
+            .collect())
+    }
+
+    /// Get all documents in the collection with their doc short IDs and
+    /// deletion status.
+    ///
+    /// Blobs are keyed by doc short ID, so iteration yields documents in
+    /// allocation (insertion) order — matching Go v1.0.0's default result
+    /// ordering. Public DocIDs are resolved through the systemstore mapping.
+    ///
+    /// Returns tuples of (doc_short_id, Document, is_deleted).
+    pub async fn get_all_with_datastore_short_ids(
+        &self,
+        datastore: &NamespaceView,
+        systemstore: &NamespaceView,
+        show_deleted: bool,
+    ) -> Result<Vec<(u64, Document, bool)>> {
         let prefix = self.collection_key_prefix();
         let prefix_len = prefix.len();
         let opts = IterOptions::new().with_prefix(prefix);
@@ -163,7 +182,7 @@ impl Collection {
                 doc.set_schema_version_id(version);
             }
 
-            docs.push((doc, is_deleted));
+            docs.push((doc_short_id, doc, is_deleted));
         }
 
         Ok(docs)

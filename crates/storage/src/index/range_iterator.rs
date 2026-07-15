@@ -14,7 +14,8 @@ use tracing::trace;
 use super::iterator::{Bound, IndexEntry, IndexIterator};
 use crate::corekv::{IterOptions, Iterator, MaybeSend, Reader, Result};
 use crate::field_value::{decode_field_value, encode_field_value};
-use crate::keys::IndexDataStoreKey;
+use crate::keys::doc_id_index::decode_doc_short_id;
+use crate::keys::{IndexDataStoreKey, SEPARATOR};
 
 /// Iterator for range queries on an index.
 ///
@@ -226,8 +227,8 @@ impl RangeIterator {
     /// - Reverse exclusive (`reversed`, `!inclusive`): upper bound = seek_key exclusive
     ///
     /// For reverse seeks, the actual storage seek uses `seek_key` appended with `0xFF` so
-    /// that entries whose full key starts with `seek_key` (e.g. `[seek_key][doc_id]`) are
-    /// included in the initial seek position.
+    /// that entries whose full key starts with `seek_key` (e.g. `[seek_key][doc short ID]`)
+    /// are included in the initial seek position.
     ///
     /// `reversed` must match `self.reverse`. The planner sets `IndexScanType::PrefixScan.reverse`
     /// (or `RangeScan.reverse`) to the cursor direction before the KV iterator is created by
@@ -252,8 +253,8 @@ impl RangeIterator {
             self.upper_bound_key = Some(seek_key.clone());
             self.upper_inclusive = inclusive;
             // When seeking in reverse, we want to land at or before the last key that
-            // starts with seek_key. Since keys have the form [seek_key][doc_id], appending
-            // 0xFF (max byte) ensures the storage seek finds those keys.
+            // starts with seek_key. Since keys have the form [seek_key][doc short ID],
+            // appending 0xFF (max byte) ensures the storage seek finds those keys.
             let mut seek_bytes = seek_key;
             seek_bytes.push(0xFF);
             self.inner.seek(&seek_bytes).await?;
@@ -267,29 +268,28 @@ impl RangeIterator {
         Ok(())
     }
 
-    /// Extract document ID and field values from an index key.
+    /// Extract the doc short ID and field values from an index key.
     fn extract_entry(&self, key: &[u8], value: &[u8]) -> Result<IndexEntry> {
-        // Decode field values and get remaining bytes (doc_id suffix)
-        let (values, doc_id_bytes) = self.decode_field_values(key)?;
+        // Decode field values and get remaining bytes (doc short ID suffix)
+        let (values, doc_suffix) = self.decode_field_values(key)?;
 
-        // Determine if this is a NULL entry (doc_id in key suffix)
+        // Determine if this is a NULL entry (doc short ID in key suffix)
         let has_nil = values.iter().any(|v| v.is_nil());
 
-        let doc_id = if self.is_unique && !has_nil && !value.is_empty() {
-            // Unique index with non-NULL value: doc_id is in value
-            String::from_utf8(value.to_vec())
-                .map_err(|e| crate::corekv::Error::Other(format!("invalid doc_id: {}", e)))?
+        let doc_short_id = if self.is_unique && !has_nil && !value.is_empty() {
+            // Unique index with non-NULL value: doc short ID is in the value
+            decode_doc_short_id(value)?
         } else {
-            // Simple index or unique with NULL: doc_id is in key suffix
-            self.extract_doc_id_from_key(doc_id_bytes)?
+            // Simple index or unique with NULL: doc short ID is in the key suffix
+            Self::extract_doc_short_id_from_suffix(doc_suffix)?
         };
 
-        Ok(IndexEntry::new(doc_id, values))
+        Ok(IndexEntry::new(doc_short_id, values))
     }
 
     /// Decode field values from an index key, returning values and remaining bytes.
     ///
-    /// The remaining bytes after decoding all field values contain the doc_id suffix.
+    /// The remaining bytes after decoding all field values contain the doc short ID suffix.
     fn decode_field_values<'a>(&self, key: &'a [u8]) -> Result<(Vec<NormalValue>, &'a [u8])> {
         let mut buf = &key[self.index_prefix_len..];
         let mut values = Vec::with_capacity(self.desc.fields.len());
@@ -317,26 +317,25 @@ impl RangeIterator {
             )));
         }
 
-        // Return values and remaining bytes (the doc_id suffix)
+        // Return values and remaining bytes (the doc short ID suffix)
         Ok((values, buf))
     }
 
-    /// Extract doc_id from key suffix (the remaining bytes after field values).
-    fn extract_doc_id_from_key(&self, doc_id_bytes: &[u8]) -> Result<String> {
-        if doc_id_bytes.is_empty() {
+    /// Extract the doc short ID from the key suffix (the remaining bytes
+    /// after the field values): `/[uvarint doc short ID]`.
+    fn extract_doc_short_id_from_suffix(suffix: &[u8]) -> Result<u64> {
+        if suffix.len() < 2 || suffix[0] != SEPARATOR {
             return Err(crate::corekv::Error::Other(
-                "index key missing doc_id suffix".to_string(),
+                "index key missing doc short ID suffix".to_string(),
             ));
         }
-
-        String::from_utf8(doc_id_bytes.to_vec())
-            .map_err(|e| crate::corekv::Error::Other(format!("invalid doc_id: {}", e)))
+        decode_doc_short_id(&suffix[1..])
     }
 
     /// Check if a key is within the range bounds using byte comparison.
     ///
-    /// Key format: `[index_prefix][encoded_value][doc_id]`
-    /// Bound format: `[index_prefix][encoded_value]` (no doc_id)
+    /// Key format: `[index_prefix][encoded_value][doc short ID suffix]`
+    /// Bound format: `[index_prefix][encoded_value]` (no doc suffix)
     ///
     /// The algorithm compares the key's prefix bytes against the bound. If the key
     /// starts with exactly the bound bytes, then the encoded value equals the bound
@@ -525,15 +524,15 @@ mod tests {
         let index = SimpleIndex::new(1, desc.clone());
 
         index
-            .save(&mut txn, "doc1", &[NormalValue::Int(10)])
+            .save(&mut txn, 1, &[NormalValue::Int(10)])
             .await
             .unwrap();
         index
-            .save(&mut txn, "doc2", &[NormalValue::Int(20)])
+            .save(&mut txn, 2, &[NormalValue::Int(20)])
             .await
             .unwrap();
         index
-            .save(&mut txn, "doc3", &[NormalValue::Int(30)])
+            .save(&mut txn, 3, &[NormalValue::Int(30)])
             .await
             .unwrap();
         txn.commit().await.unwrap();
@@ -556,15 +555,15 @@ mod tests {
         let index = SimpleIndex::new(1, desc.clone());
 
         index
-            .save(&mut txn, "doc1", &[NormalValue::Int(10)])
+            .save(&mut txn, 1, &[NormalValue::Int(10)])
             .await
             .unwrap();
         index
-            .save(&mut txn, "doc2", &[NormalValue::Int(20)])
+            .save(&mut txn, 2, &[NormalValue::Int(20)])
             .await
             .unwrap();
         index
-            .save(&mut txn, "doc3", &[NormalValue::Int(30)])
+            .save(&mut txn, 3, &[NormalValue::Int(30)])
             .await
             .unwrap();
         txn.commit().await.unwrap();
@@ -594,7 +593,7 @@ mod tests {
         index
             .save(
                 &mut txn,
-                "doc1",
+                1,
                 &[NormalValue::String("A".to_string()), NormalValue::Int(100)],
             )
             .await
@@ -602,7 +601,7 @@ mod tests {
         index
             .save(
                 &mut txn,
-                "doc2",
+                2,
                 &[NormalValue::String("A".to_string()), NormalValue::Int(200)],
             )
             .await
@@ -610,7 +609,7 @@ mod tests {
         index
             .save(
                 &mut txn,
-                "doc3",
+                3,
                 &[NormalValue::String("B".to_string()), NormalValue::Int(150)],
             )
             .await
@@ -644,7 +643,7 @@ mod tests {
 
         for i in 1..=10 {
             index
-                .save(&mut txn, &format!("doc{}", i), &[NormalValue::Int(i * 10)])
+                .save(&mut txn, i as u64, &[NormalValue::Int(i * 10)])
                 .await
                 .unwrap();
         }
@@ -678,8 +677,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_cursor_seek_forward_exclusive_skips_boundary() {
-        // Setup: age index with alice=20, bob=30, carol=40.
-        // Forward exclusive seek at age=30 → should return only carol (age=40).
+        // Setup: age index with doc 1 = 20, doc 2 = 30, doc 3 = 40.
+        // Forward exclusive seek at age=30 → should return only doc 3 (age=40).
         let store = MemoryStore::new();
         let mut txn = store.new_txn(false).await.unwrap();
 
@@ -687,15 +686,15 @@ mod tests {
         let index = SimpleIndex::new(1, desc.clone());
 
         index
-            .save(&mut txn, "alice", &[NormalValue::Int(20)])
+            .save(&mut txn, 1, &[NormalValue::Int(20)])
             .await
             .unwrap();
         index
-            .save(&mut txn, "bob", &[NormalValue::Int(30)])
+            .save(&mut txn, 2, &[NormalValue::Int(30)])
             .await
             .unwrap();
         index
-            .save(&mut txn, "carol", &[NormalValue::Int(40)])
+            .save(&mut txn, 3, &[NormalValue::Int(40)])
             .await
             .unwrap();
         txn.commit().await.unwrap();
@@ -705,34 +704,31 @@ mod tests {
             .await
             .unwrap();
 
-        // Seek to age=30 exclusive (forward): iterator should land at carol (age=40).
+        // Seek to age=30 exclusive (forward): iterator should land at doc 3 (age=40).
         let seek_key = build_age_seek_key(30);
         iter.apply_cursor_seek(seek_key, false, false)
             .await
             .unwrap();
 
         let entries = iter.collect_all().await.unwrap();
-        let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
+        let doc_ids: Vec<u64> = entries.iter().map(|e| e.doc_short_id).collect();
 
+        assert!(!doc_ids.contains(&1), "doc 1 should be before the cursor");
         assert!(
-            !doc_ids.contains(&"alice"),
-            "alice should be before the cursor"
+            !doc_ids.contains(&2),
+            "doc 2 is the exclusive boundary and must be skipped"
         );
         assert!(
-            !doc_ids.contains(&"bob"),
-            "bob is the exclusive boundary and must be skipped"
-        );
-        assert!(
-            doc_ids.contains(&"carol"),
-            "carol must be included (after boundary)"
+            doc_ids.contains(&3),
+            "doc 3 must be included (after boundary)"
         );
         assert_eq!(entries.len(), 1);
     }
 
     #[tokio::test]
     async fn test_cursor_seek_backward_inclusive_starts_at_boundary() {
-        // Setup: age index with alice=20, bob=30, carol=40.
-        // Backward inclusive seek at age=30 → should return bob then alice.
+        // Setup: age index with doc 1 = 20, doc 2 = 30, doc 3 = 40.
+        // Backward inclusive seek at age=30 → should return doc 2 then doc 1.
         let store = MemoryStore::new();
         let mut txn = store.new_txn(false).await.unwrap();
 
@@ -740,15 +736,15 @@ mod tests {
         let index = SimpleIndex::new(1, desc.clone());
 
         index
-            .save(&mut txn, "alice", &[NormalValue::Int(20)])
+            .save(&mut txn, 1, &[NormalValue::Int(20)])
             .await
             .unwrap();
         index
-            .save(&mut txn, "bob", &[NormalValue::Int(30)])
+            .save(&mut txn, 2, &[NormalValue::Int(30)])
             .await
             .unwrap();
         index
-            .save(&mut txn, "carol", &[NormalValue::Int(40)])
+            .save(&mut txn, 3, &[NormalValue::Int(40)])
             .await
             .unwrap();
         txn.commit().await.unwrap();
@@ -758,25 +754,25 @@ mod tests {
             .await
             .unwrap();
 
-        // Seek to age=30 inclusive (reverse): iterator should include bob and alice.
+        // Seek to age=30 inclusive (reverse): iterator should include docs 2 and 1.
         // The seek_key encodes age=30; for a reverse scan the storage seek lands at or before it.
         let seek_key = build_age_seek_key(30);
         iter.apply_cursor_seek(seek_key, true, true).await.unwrap();
 
         let entries = iter.collect_all().await.unwrap();
-        let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
+        let doc_ids: Vec<u64> = entries.iter().map(|e| e.doc_short_id).collect();
 
         assert!(
-            !doc_ids.contains(&"carol"),
-            "carol is after the cursor and must be excluded"
+            !doc_ids.contains(&3),
+            "doc 3 is after the cursor and must be excluded"
         );
         assert!(
-            doc_ids.contains(&"bob"),
-            "bob is the inclusive boundary and must be included"
+            doc_ids.contains(&2),
+            "doc 2 is the inclusive boundary and must be included"
         );
         assert!(
-            doc_ids.contains(&"alice"),
-            "alice must be included (before boundary in reverse)"
+            doc_ids.contains(&1),
+            "doc 1 must be included (before boundary in reverse)"
         );
         assert_eq!(entries.len(), 2);
     }
@@ -800,15 +796,15 @@ mod tests {
         let index = SimpleIndex::new(1, desc.clone());
 
         index
-            .save(&mut txn, "alice", &[NormalValue::Int(20)])
+            .save(&mut txn, 1, &[NormalValue::Int(20)])
             .await
             .unwrap();
         index
-            .save(&mut txn, "bob", &[NormalValue::Int(30)])
+            .save(&mut txn, 2, &[NormalValue::Int(30)])
             .await
             .unwrap();
         index
-            .save(&mut txn, "carol", &[NormalValue::Int(40)])
+            .save(&mut txn, 3, &[NormalValue::Int(40)])
             .await
             .unwrap();
         txn.commit().await.unwrap();
@@ -839,18 +835,12 @@ mod tests {
             "inclusive=true must set upper_inclusive"
         );
 
-        // Behavioral check: bob and alice returned (inclusive at 30, exclude carol > 30).
+        // Behavioral check: docs 2 and 1 returned (inclusive at 30, exclude doc 3 > 30).
         let entries = iter.collect_all().await.unwrap();
-        let doc_ids: Vec<&str> = entries.iter().map(|e| e.doc_id.as_str()).collect();
-        assert!(
-            !doc_ids.contains(&"carol"),
-            "carol is above the cursor boundary"
-        );
-        assert!(
-            doc_ids.contains(&"bob"),
-            "bob is at the boundary (inclusive)"
-        );
-        assert!(doc_ids.contains(&"alice"), "alice is before boundary");
+        let doc_ids: Vec<u64> = entries.iter().map(|e| e.doc_short_id).collect();
+        assert!(!doc_ids.contains(&3), "doc 3 is above the cursor boundary");
+        assert!(doc_ids.contains(&2), "doc 2 is at the boundary (inclusive)");
+        assert!(doc_ids.contains(&1), "doc 1 is before boundary");
         assert_eq!(entries.len(), 2);
     }
 }

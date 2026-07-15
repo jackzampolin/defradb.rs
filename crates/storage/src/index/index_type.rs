@@ -47,27 +47,13 @@ impl IndexType {
     pub async fn save<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         values: &[NormalValue],
     ) -> Result<()> {
         match self {
-            IndexType::Simple(idx) => idx.save(txn, doc_id, values).await,
-            IndexType::Unique(idx) => idx.save(txn, doc_id, values).await,
-            IndexType::FullText(idx) => idx.save(txn, doc_id, values).await,
-        }
-    }
-
-    /// Save a document to the index without checking uniqueness on unique indexes.
-    pub async fn save_blind<T: Reader + Writer + MaybeSend>(
-        &self,
-        txn: &mut T,
-        doc_id: &str,
-        values: &[NormalValue],
-    ) -> Result<()> {
-        match self {
-            IndexType::Simple(idx) => idx.save(txn, doc_id, values).await,
-            IndexType::Unique(idx) => idx.save_blind(txn, doc_id, values).await,
-            IndexType::FullText(idx) => idx.save(txn, doc_id, values).await,
+            IndexType::Simple(idx) => idx.save(txn, doc_short_id, values).await,
+            IndexType::Unique(idx) => idx.save(txn, doc_short_id, values).await,
+            IndexType::FullText(idx) => idx.save(txn, doc_short_id, values).await,
         }
     }
 
@@ -75,14 +61,14 @@ impl IndexType {
     pub async fn update<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         old_values: &[NormalValue],
         new_values: &[NormalValue],
     ) -> Result<()> {
         match self {
-            IndexType::Simple(idx) => idx.update(txn, doc_id, old_values, new_values).await,
-            IndexType::Unique(idx) => idx.update(txn, doc_id, old_values, new_values).await,
-            IndexType::FullText(idx) => idx.update(txn, doc_id, old_values, new_values).await,
+            IndexType::Simple(idx) => idx.update(txn, doc_short_id, old_values, new_values).await,
+            IndexType::Unique(idx) => idx.update(txn, doc_short_id, old_values, new_values).await,
+            IndexType::FullText(idx) => idx.update(txn, doc_short_id, old_values, new_values).await,
         }
     }
 
@@ -90,13 +76,13 @@ impl IndexType {
     pub async fn delete<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         values: &[NormalValue],
     ) -> Result<()> {
         match self {
-            IndexType::Simple(idx) => idx.delete(txn, doc_id, values).await,
-            IndexType::Unique(idx) => idx.delete(txn, doc_id, values).await,
-            IndexType::FullText(idx) => idx.delete(txn, doc_id, values).await,
+            IndexType::Simple(idx) => idx.delete(txn, doc_short_id, values).await,
+            IndexType::Unique(idx) => idx.delete(txn, doc_short_id, values).await,
+            IndexType::FullText(idx) => idx.delete(txn, doc_short_id, values).await,
         }
     }
 

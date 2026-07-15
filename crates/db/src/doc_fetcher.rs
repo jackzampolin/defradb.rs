@@ -212,7 +212,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         use std::collections::HashSet;
         use storage::index::IndexIterator;
 
-        let (_collection, datastore, _systemstore, index_manager) =
+        let (_collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
 
         // Get the index
@@ -228,14 +228,14 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         let offset = params.offset;
 
         // Helper to collect entries with optional early termination and value filtering.
-        // Returns (doc_ids, total_iterated) where total_iterated counts ALL entries
+        // Returns (doc_short_ids, total_iterated) where total_iterated counts ALL entries
         // including those filtered out (for indexFetches metrics).
         async fn collect_with_limit<I: IndexIterator>(
             iter: &mut I,
             limit: Option<u64>,
             offset: u64,
             value_filter: Option<&query::planner::index_selection::ScanValueFilter>,
-        ) -> Result<(Vec<String>, u64), query::error::QueryError> {
+        ) -> Result<(Vec<u64>, u64), query::error::QueryError> {
             let mut entries = Vec::new();
             let mut skipped = 0u64;
             let mut total_iterated = 0u64;
@@ -260,7 +260,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                     continue;
                 }
 
-                entries.push(entry.doc_id);
+                entries.push(entry.doc_short_id);
 
                 // Early termination when limit reached
                 if let Some(lim) = limit {
@@ -274,10 +274,11 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         }
 
         // Execute the appropriate scan based on scan type.
-        // Returns (doc_ids, raw_fetches) where raw_fetches counts ALL entries iterated
-        // including those filtered out by value_filter (for indexFetches metrics).
+        // Returns (doc_short_ids, raw_fetches) where raw_fetches counts ALL entries
+        // iterated including those filtered out by value_filter (for indexFetches
+        // metrics). OrScan branches recurse and return already-resolved DocIDs.
         let vf = params.value_filter.as_ref();
-        let (raw_doc_ids, raw_fetches): (Vec<String>, u64) = match &params.scan_type {
+        let (raw_doc_short_ids, raw_fetches): (Vec<u64>, u64) = match &params.scan_type {
             IndexScanType::ExactMatch { values } => {
                 // Cursor seek is intentionally not applied: ExactMatch fetches a single
                 // value; pagination over a single value is meaningless.
@@ -299,7 +300,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                 let is_composite = index.description().fields.len() > 1;
                 let has_full_key = !suffix_values.is_empty()
                     && suffix_values.len() == index.description().fields.len() - 1;
-                let mut all_doc_ids = Vec::new();
+                let mut all_doc_short_ids = Vec::new();
                 for value in values {
                     if has_full_key {
                         // All index fields covered: In value + suffix Eq values = exact match
@@ -314,7 +315,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                                 e
                             ))
                         })?;
-                        all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
+                        all_doc_short_ids.extend(entries.into_iter().map(|e| e.doc_short_id));
                     } else if is_composite {
                         let mut iter = index
                             .scan_prefix(&datastore, std::slice::from_ref(value), false)
@@ -328,7 +329,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                                 e
                             ))
                         })?;
-                        all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
+                        all_doc_short_ids.extend(entries.into_iter().map(|e| e.doc_short_id));
                     } else {
                         let mut iter = index
                             .get(&datastore, std::slice::from_ref(value))
@@ -342,11 +343,11 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                                 e
                             ))
                         })?;
-                        all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
+                        all_doc_short_ids.extend(entries.into_iter().map(|e| e.doc_short_id));
                     }
                 }
-                let count = all_doc_ids.len() as u64;
-                (all_doc_ids, count)
+                let count = all_doc_short_ids.len() as u64;
+                (all_doc_short_ids, count)
             }
             IndexScanType::PrefixScan {
                 prefix_values,
@@ -403,18 +404,33 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                     total_raw_fetches += branch_result.raw_fetches();
                     all_doc_ids.extend(branch_result.doc_ids().iter().cloned());
                 }
-                (all_doc_ids, total_raw_fetches)
+                let mut seen = HashSet::new();
+                let doc_ids: Vec<String> = all_doc_ids
+                    .into_iter()
+                    .filter(|id| seen.insert(id.clone()))
+                    .collect();
+                return Ok(query::fetcher::IndexScanResult::with_raw_count(
+                    doc_ids,
+                    total_raw_fetches,
+                ));
             }
             _ => (Vec::new(), 0),
         };
 
-        // Deduplicate doc_ids while preserving order.
-        // Array indexes can return the same document multiple times (once per array element).
+        // Deduplicate doc short IDs while preserving order.
+        // Array indexes can return the same document multiple times (once per array
+        // element). The public DocIDs are then resolved at this (db) layer.
         let mut seen = HashSet::new();
-        let doc_ids: Vec<String> = raw_doc_ids
+        let doc_short_ids: Vec<u64> = raw_doc_short_ids
             .into_iter()
-            .filter(|id| seen.insert(id.clone()))
+            .filter(|id| seen.insert(*id))
             .collect();
+
+        let doc_ids = crate::doc_id_map::resolve_doc_ids(&systemstore, &doc_short_ids)
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("doc ID resolution error: {}", e))
+            })?;
 
         Ok(query::fetcher::IndexScanResult::with_raw_count(
             doc_ids,
@@ -456,7 +472,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         field_name: &str,
         query: &str,
     ) -> query::error::Result<std::collections::HashMap<String, f64>> {
-        let (_collection, datastore, _systemstore, index_manager) =
+        let (_collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
 
         let idx_name = crate::index_manager::fulltext_index_name(field_name);
@@ -470,11 +486,17 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                 ))
             })?;
 
-        ft_index
+        let scores = ft_index
             .search_scored(&datastore, query)
             .await
             .map_err(|e| {
                 query::error::QueryError::execution(format!("fulltext search error: {}", e))
+            })?;
+
+        crate::doc_id_map::resolve_doc_id_scores(&systemstore, scores)
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("doc ID resolution error: {}", e))
             })
     }
 

@@ -34,7 +34,7 @@ impl Collection {
 
         // Update indexes
         index_manager
-            .on_document_create(datastore, doc, &self.def)
+            .on_document_create(datastore, doc, doc_short_id, &self.def)
             .await?;
 
         Ok(doc_id)
@@ -81,7 +81,7 @@ impl Collection {
 
         // Update indexes
         index_manager
-            .on_document_update(datastore, &old_doc, doc, &self.def)
+            .on_document_update(datastore, &old_doc, doc, doc_short_id, &self.def)
             .await?;
 
         Ok(())
@@ -125,7 +125,7 @@ impl Collection {
 
         // Update indexes (remove from indexes since doc is now "deleted")
         index_manager
-            .on_document_delete(datastore, &doc, &self.def)
+            .on_document_delete(datastore, &doc, doc_short_id, &self.def)
             .await?;
 
         Ok(true)

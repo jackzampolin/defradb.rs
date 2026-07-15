@@ -5,19 +5,24 @@
 //!
 //! # Index Types
 //!
-//! - `SimpleIndex`: Non-unique index that appends document ID to the key
-//! - `UniqueIndex`: Unique index that stores document ID in the value,
-//!   enforcing uniqueness on the indexed field(s)
+//! - `SimpleIndex`: Non-unique index that appends the doc short ID to the key
+//! - `UniqueIndex`: Unique index that stores the encoded doc short ID as the
+//!   value, enforcing uniqueness on the indexed field(s)
 //!
 //! # Key Structure
 //!
 //! Index keys are structured as:
 //! ```text
-//! /[CollectionShortID]/[IndexID]/[EncodedFieldValue1][EncodedFieldValue2]...([DocID])
+//! /[CollectionShortID]/[IndexID]/[EncodedFieldValue1][EncodedFieldValue2]...(/[DocShortID])
 //! ```
 //!
-//! For SimpleIndex, the document ID is appended to the key.
-//! For UniqueIndex, the document ID is stored as the value.
+//! For SimpleIndex, the doc short ID is appended to the key (empty value).
+//! For UniqueIndex, the encoded doc short ID is stored as the value; a key
+//! collision is a uniqueness violation. Entries with a nil field fall back
+//! to the short-ID-in-key layout so multiple NULLs can coexist.
+//!
+//! Iterators yield node-local doc short IDs; callers resolve them to public
+//! DocIDs through the systemstore mapping at the db layer.
 //!
 //! # Query Execution
 //!
@@ -57,15 +62,13 @@ pub use unique::UniqueIndex;
 
 use crate::corekv::Result;
 
-/// Validate that a document ID is valid for use in index keys.
+/// Validate that a doc short ID is valid for use in index entries.
 ///
-/// Checks that the doc_id is:
-/// - Not empty
-/// - Valid UTF-8 (guaranteed by &str type parameter)
-pub(crate) fn validate_doc_id(doc_id: &str, index_name: &str) -> Result<()> {
-    if doc_id.is_empty() {
+/// Short IDs start at 1; 0 marks "unset" and never identifies a document.
+pub(crate) fn validate_doc_short_id(doc_short_id: u64, index_name: &str) -> Result<()> {
+    if doc_short_id == 0 {
         return Err(crate::corekv::Error::Other(format!(
-            "index '{}': doc_id cannot be empty",
+            "index '{}': doc short ID cannot be 0",
             index_name
         )));
     }

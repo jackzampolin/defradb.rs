@@ -146,10 +146,13 @@ pub unsafe extern "C" fn create_index(
                     .map_err(|e| format!("failed to save name mapping: {}", e))?;
 
                 // Bulk index existing documents
-                let documents = collection
-                    .get_all_with_datastore(&datastore, &systemstore)
+                let documents: Vec<(u64, document::Document)> = collection
+                    .get_all_with_datastore_short_ids(&datastore, &systemstore, false)
                     .await
-                    .map_err(|e| format!("failed to get documents: {}", e))?;
+                    .map_err(|e| format!("failed to get documents: {}", e))?
+                    .into_iter()
+                    .map(|(doc_short_id, doc, _)| (doc_short_id, doc))
+                    .collect();
 
                 if !documents.is_empty() {
                     index_manager
