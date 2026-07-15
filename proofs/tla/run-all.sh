@@ -101,6 +101,9 @@ RUNS=(
   "MC_DeferredAcp_Red_OwnerBypass.cfg MC_DeferredAcp_Red_OwnerBypass.tla RED" # projection grants what committed state denies
   "MC_DeferredAcp_Red_RollbackHooks.cfg MC_DeferredAcp_Red_RollbackHooks.tla RED" # rollback leaves hooks applied (not a no-op)
   "MC_DeferredAcp_Red_SharedOverlay.cfg MC_DeferredAcp_Red_SharedOverlay.tla RED" # one txn observes another's uncommitted projection
+  "MC_PendingDagQuarantine_Green.cfg PendingDagQuarantine.tla GREEN" # #1128: deterministic rejection quarantines durably; sound docs merge, poison docs quarantine
+  "MC_PendingDagQuarantine_Red_RetryForever.cfg PendingDagQuarantine.tla RED" # current main: Rejected treated as retryable skip -> poison root swept forever (LIVE_PoisonQuiesces)
+  "MC_PendingDagQuarantine_Red_OvereagerQuarantine.cfg PendingDagQuarantine.tla RED" # forbidden overcorrection: sound doc's transient failure also quarantines it (LIVE_SoundEventuallyMerged)
 )
 
 fails=0; n=0
@@ -109,7 +112,7 @@ for row in "${RUNS[@]}"; do
   n=$((n+1))
   out=$(./tools/tlc -metadir "states/run$n" -config "$cfg" "$mod" 2>&1)
   if echo "$out" | grep -q "No error has been found"; then got=GREEN
-  elif echo "$out" | grep -qE "is violated|properties were violated|Deadlock reached|Deadlock"; then got=RED
+  elif echo "$out" | grep -qE "is violated|was violated|properties were violated|Deadlock reached|Deadlock"; then got=RED
   else got=ERROR; fi
   rm -rf "states/run$n"
   if [ "$got" = "$want" ]; then printf "  ok   %-6s %-34s %s\n" "$got" "$cfg" "$mod"
