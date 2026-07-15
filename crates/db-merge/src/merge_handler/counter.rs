@@ -8,7 +8,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         payload: &defra_core::block::CounterDeltaPayload,
         metadata: &BlockMetadata<'_>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
-        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
+        let Some(doc_id_str) = self.resolve_field_block_doc_id(cid).await? else {
+            return Ok(MergeOutcome::terminal_skip(
+                "field block has no unambiguous owner; merged via its composite",
+            ));
+        };
         let _guard = self.merge_queue.acquire(&doc_id_str).await;
 
         tracing::debug!(
@@ -67,7 +71,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Create the Counter CRDT
         let counter = Counter::new(
             payload.schema_version_id.clone(),
-            &payload.doc_id,
+            doc_id_str.as_bytes(),
             payload.field_name.clone(),
             allow_decrement,
             numeric_kind,
@@ -75,7 +79,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
         // Create the CounterDelta from payload
-        let delta = self.create_counter_delta(payload, numeric_kind)?;
+        let delta = self.create_counter_delta_for(payload, numeric_kind, &doc_id_str)?;
 
         // Perform the merge in a scoped block
         let result = {
@@ -89,8 +93,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             // value it is authoritative and must not be overwritten from a
             // possibly-stale blob. See `Counter::reconcile_int64`.
             if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
-                if let Ok(Some(existing_doc)) =
-                    collection.get_with_datastore(&datastore, &doc_id).await
+                if let Ok(Some(existing_doc)) = collection
+                    .get_by_doc_id(&datastore, &txn.systemstore()?, &doc_id)
+                    .await
                 {
                     doc_exists = true;
                     if let Some(field_value) = existing_doc.get(&payload.field_name) {
@@ -145,12 +150,15 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
     /// Process a Counter delta within an existing transaction, returning the merge result
     /// and the accumulated value for document reconstruction.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn process_counter_delta_in_txn(
         &self,
         datastore: &mut NamespaceView,
         cid: &Cid,
         payload: &defra_core::block::CounterDeltaPayload,
         fallback_collection_id: Option<&str>,
+        doc_id_str: &str,
+        doc_short_id: u64,
     ) -> std::result::Result<CounterMergeResult, MergeError> {
         tracing::debug!(
             cid = %cid,
@@ -192,7 +200,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Create the Counter CRDT
         let counter = Counter::new(
             payload.schema_version_id.clone(),
-            &payload.doc_id,
+            doc_id_str.as_bytes(),
             payload.field_name.clone(),
             allow_decrement,
             numeric_kind,
@@ -219,10 +227,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // and merges both RMW their delta into it, so once it holds a value it is
         // authoritative and must not be overwritten from a possibly-stale blob.
         // See `Counter::reconcile_int64`.
-        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
         let mut doc_exists = false;
-        if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
-            if let Ok(Some(existing_doc)) = collection.get_with_datastore(datastore, &doc_id).await
+        if let Ok(doc_id) = DocID::from_string(doc_id_str) {
+            if let Ok(Some(existing_doc)) = collection
+                .get_with_datastore(datastore, doc_short_id, &doc_id)
+                .await
             {
                 doc_exists = true;
                 if let Some(field_value) = existing_doc.get(&payload.field_name) {
@@ -240,9 +249,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         }
 
         // Create the CounterDelta from payload
-        let delta = self.create_counter_delta(payload, numeric_kind)?;
+        let delta = self.create_counter_delta_for(payload, numeric_kind, doc_id_str)?;
         let ctx = Context {
-            doc_id: DocId::new(&doc_id_str).map_err(|e| MergeError::MergeFailed(e.to_string()))?,
+            doc_id: DocId::new(doc_id_str).map_err(|e| MergeError::MergeFailed(e.to_string()))?,
             schema_version: payload.schema_version_id.clone(),
             is_create: payload.priority == 1 && !doc_exists,
         };
@@ -313,10 +322,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     }
 
     /// Create a CounterDelta from the block payload
-    fn create_counter_delta(
+    fn create_counter_delta_for(
         &self,
         payload: &defra_core::block::CounterDeltaPayload,
         kind: NumericKind,
+        doc_id_str: &str,
     ) -> std::result::Result<CounterDelta, MergeError> {
         // Go encodes counter data as CBOR. We need to decode it first.
         // The payload.data contains CBOR-encoded i64 or f64
@@ -329,7 +339,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     ))
                 })?;
                 CounterDelta::new_int64(
-                    payload.doc_id.clone(),
+                    doc_id_str.as_bytes().to_vec(),
                     payload.field_name.clone(),
                     payload.priority,
                     payload.nonce,
@@ -346,7 +356,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     ))
                 })?;
                 CounterDelta::new_float64(
-                    payload.doc_id.clone(),
+                    doc_id_str.as_bytes().to_vec(),
                     payload.field_name.clone(),
                     payload.priority,
                     payload.nonce,

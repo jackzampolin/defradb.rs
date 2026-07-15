@@ -154,8 +154,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
                 match &linked_block.delta {
                     CrdtDelta::Composite(composite_payload) => {
-                        let doc_id_str =
-                            String::from_utf8_lossy(&composite_payload.doc_id).to_string();
+                        let doc_id_str = self
+                            .resolve_composite_doc_id(link_cid, &linked_block)
+                            .await?;
                         tracing::debug!(
                             link_cid = %link_cid,
                             doc_id = %doc_id_str,
@@ -325,6 +326,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         &self,
         datastore: &NamespaceView,
         headstore: &NamespaceView,
+        systemstore: &NamespaceView,
         cid: &Cid,
         block: &Block,
         payload: &defra_core::block::CollectionDeltaPayload,
@@ -384,6 +386,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     match Box::pin(self.process_collection_delta_in_txn(
                         datastore,
                         headstore,
+                        systemstore,
                         head_cid,
                         &head_block,
                         head_payload,
@@ -430,11 +433,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 };
 
                 if let CrdtDelta::Composite(composite_payload) = &linked_block.delta {
-                    let doc_id_str = String::from_utf8_lossy(&composite_payload.doc_id).to_string();
+                    let doc_id_str = self
+                        .resolve_composite_doc_id(link_cid, &linked_block)
+                        .await?;
                     match self
                         .process_composite_delta_in_txn(
                             datastore,
                             headstore,
+                            systemstore,
                             link_cid,
                             &linked_block,
                             composite_payload,

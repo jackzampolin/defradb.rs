@@ -5,12 +5,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     async fn current_field_priority(
         &self,
         headstore: &NamespaceView,
-        doc_id: &str,
+        doc_short_id: u64,
         field_name: &str,
     ) -> std::result::Result<u64, MergeError> {
         let mut iter = headstore
             .iterator(storage::corekv::IterOptions::new().with_prefix(
-                storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, field_name),
+                storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_short_id, field_name),
             ))
             .await
             .map_err(|e| MergeError::Storage(e.to_string()))?;
@@ -31,6 +31,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         Ok(max_priority)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn seed_lww_from_existing_doc(
         &self,
         datastore: &mut NamespaceView,
@@ -39,6 +40,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         fallback_collection_id: Option<&str>,
         lww: &Lww,
         doc_id_str: &str,
+        doc_short_id: u64,
     ) -> std::result::Result<bool, MergeError> {
         let collection = self
             .db
@@ -60,7 +62,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // state instead of the stale CRDT entry (otherwise a re-walked ancestor
         // delta clobbers a concurrent local write — replicas diverge).
         let hs_priority = self
-            .current_field_priority(headstore, doc_id_str, &payload.field_name)
+            .current_field_priority(headstore, doc_short_id, &payload.field_name)
             .await?;
         let stored_priority = crdt::traits::PriorityReader::priority(lww, datastore)
             .await
@@ -78,7 +80,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             Err(_) => return Ok(false),
         };
 
-        let Some(existing_doc) = collection.get_with_datastore(datastore, &doc_id).await? else {
+        let Some(existing_doc) = collection
+            .get_with_datastore(datastore, doc_short_id, &doc_id)
+            .await?
+        else {
             return Ok(false);
         };
 
@@ -111,7 +116,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         }
 
         let seed_delta = LwwDelta::new(
-            payload.doc_id.clone(),
+            doc_id_str.as_bytes().to_vec(),
             payload.field_name.clone(),
             priority,
             payload.schema_version_id.clone(),
@@ -139,7 +144,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         payload: &defra_core::block::LwwDeltaPayload,
         metadata: &BlockMetadata<'_>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
-        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
+        let Some(doc_id_str) = self.resolve_field_block_doc_id(cid).await? else {
+            return Ok(MergeOutcome::terminal_skip(
+                "field block has no unambiguous owner; merged via its composite",
+            ));
+        };
         let _guard = self.merge_queue.acquire(&doc_id_str).await;
 
         tracing::debug!(
@@ -151,18 +160,33 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
         // Create a new transaction for this merge
         let txn = self.db.new_txn(false).await?;
+        let doc_short_id = {
+            let systemstore = txn.systemstore()?;
+            match db::doc_id_map::get_doc_ref(&systemstore, &doc_id_str)
+                .await
+                .map_err(MergeError::Database)?
+            {
+                Some(doc_ref) => doc_ref.doc_short_id,
+                None => {
+                    let _ = txn.force_discard();
+                    return Ok(MergeOutcome::terminal_skip(
+                        "owning document has no local identity; merged via its composite",
+                    ));
+                }
+            }
+        };
 
         // Create the LWW CRDT for this field
         let lww = Lww::new(
             payload.schema_version_id.clone(),
-            &payload.doc_id,
+            doc_id_str.as_bytes(),
             payload.field_name.clone(),
         )
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
         // Create the delta
         let delta = LwwDelta::new(
-            payload.doc_id.clone(),
+            doc_id_str.as_bytes().to_vec(),
             payload.field_name.clone(),
             payload.priority,
             payload.schema_version_id.clone(),
@@ -183,6 +207,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     metadata.collection_id,
                     &lww,
                     &doc_id_str,
+                    doc_short_id,
                 )
                 .await?;
             let ctx = Context {
@@ -256,6 +281,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
     /// Process an LWW delta within an existing transaction, returning the merge result
     /// and the winning value for document reconstruction.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn process_lww_delta_in_txn(
         &self,
         datastore: &mut NamespaceView,
@@ -263,6 +289,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         cid: &Cid,
         payload: &defra_core::block::LwwDeltaPayload,
         fallback_collection_id: Option<&str>,
+        doc_id_str: &str,
+        doc_short_id: u64,
     ) -> std::result::Result<LwwMergeResult, MergeError> {
         tracing::debug!(
             cid = %cid,
@@ -274,14 +302,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Create the LWW CRDT for this field
         let lww = Lww::new(
             payload.schema_version_id.clone(),
-            &payload.doc_id,
+            doc_id_str.as_bytes(),
             payload.field_name.clone(),
         )
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
         // Create the delta
         let delta = LwwDelta::new(
-            payload.doc_id.clone(),
+            doc_id_str.as_bytes().to_vec(),
             payload.field_name.clone(),
             payload.priority,
             payload.schema_version_id.clone(),
@@ -289,7 +317,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         )
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
-        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
         let doc_exists = self
             .seed_lww_from_existing_doc(
                 datastore,
@@ -297,11 +324,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 payload,
                 fallback_collection_id,
                 &lww,
-                &doc_id_str,
+                doc_id_str,
+                doc_short_id,
             )
             .await?;
         let ctx = Context {
-            doc_id: DocId::new(&doc_id_str).map_err(|e| MergeError::MergeFailed(e.to_string()))?,
+            doc_id: DocId::new(doc_id_str).map_err(|e| MergeError::MergeFailed(e.to_string()))?,
             schema_version: payload.schema_version_id.clone(),
             is_create: payload.priority == 1 && !doc_exists,
         };

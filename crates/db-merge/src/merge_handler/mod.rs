@@ -11,6 +11,7 @@ mod composite_heads;
 mod composite_persist;
 mod counter;
 mod definition;
+mod doc_identity;
 pub(crate) mod error;
 pub(crate) mod hook;
 mod lww;
@@ -194,7 +195,22 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let block =
             Block::from_dag_cbor(block_data).map_err(|e| MergeError::BlockDecode(e.to_string()))?;
 
-        let Some((doc_id, collection_id)) = Self::doc_metadata_from_block(&block) else {
+        // Deltas carry no document identity: recover it from the ownership
+        // index (composites can also derive it from their DAG).
+        let doc_id = match &block.delta {
+            CrdtDelta::Composite(_) => match self.resolve_composite_doc_id(cid, &block).await {
+                Ok(doc_id) => doc_id,
+                Err(_) => return Ok(None),
+            },
+            CrdtDelta::Lww(_) | CrdtDelta::Counter(_) => {
+                match self.resolve_field_block_doc_id(cid).await? {
+                    Some(doc_id) => doc_id,
+                    None => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        };
+        let Some(collection_id) = block.delta.schema_version_id().map(ToString::to_string) else {
             return Ok(None);
         };
 
@@ -206,24 +222,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             RecoveredBlockMetadata::new(doc_id, collection_id, creator.clone())
                 .with_verified_creator(Some(creator)),
         ))
-    }
-
-    fn doc_metadata_from_block(block: &Block) -> Option<(String, String)> {
-        match &block.delta {
-            CrdtDelta::Lww(payload) => Some((
-                String::from_utf8_lossy(&payload.doc_id).to_string(),
-                payload.schema_version_id.clone(),
-            )),
-            CrdtDelta::Counter(payload) => Some((
-                String::from_utf8_lossy(&payload.doc_id).to_string(),
-                payload.schema_version_id.clone(),
-            )),
-            CrdtDelta::Composite(payload) => Some((
-                String::from_utf8_lossy(&payload.doc_id).to_string(),
-                payload.schema_version_id.clone(),
-            )),
-            _ => None,
-        }
     }
 
     /// Decrypt block delta data using the encryption metadata block.
@@ -668,6 +666,97 @@ mod tests {
     use storage::keys::systemstore::CollectionID;
     use tokio::time::{timeout, Duration};
 
+    async fn register_test_block_owner(
+        handler: &DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+        collection_short_id: u32,
+        doc_id: &str,
+        cid: &Cid,
+    ) {
+        let txn = handler.db.new_txn(false).await.unwrap();
+        {
+            let systemstore = txn.systemstore().unwrap();
+            db::doc_id_map::resolve_or_allocate_doc_short_id(
+                &systemstore,
+                collection_short_id,
+                doc_id,
+            )
+            .await
+            .unwrap();
+            db::doc_id_map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), doc_id)
+                .await
+                .unwrap();
+        }
+        txn.force_commit().await.unwrap();
+    }
+
+    /// Create a document locally through the genesis-CID identity flow:
+    /// blocks first (derives the DocID), then mappings, then the blob.
+    async fn create_doc_locally(
+        handler: &DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+        collection: &Collection,
+        doc: &mut Document,
+        schema_version_id: &str,
+    ) -> (DocID, u64, db_blocks::BlockResult) {
+        let txn = handler.db.new_txn(false).await.unwrap();
+        let output = {
+            let datastore = txn.datastore().unwrap();
+            let headstore = txn.headstore().unwrap();
+            let raw_blockstore = txn.blockstore().unwrap();
+            let systemstore = txn.systemstore().unwrap();
+            let short_id = db::doc_id_map::next_doc_short_id(&systemstore)
+                .await
+                .unwrap();
+            let identity =
+                db_blocks::DocStorageIdentity::new(collection.resolved_root_id(), short_id);
+            let result = db_blocks::write_document_blocks(
+                &raw_blockstore,
+                &headstore,
+                doc,
+                schema_version_id,
+                identity,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            db::doc_id_map::set_doc_id_mapping(
+                &systemstore,
+                collection.resolved_root_id(),
+                short_id,
+                &result.doc_id,
+            )
+            .await
+            .unwrap();
+            db::doc_id_map::set_block_doc_id_mapping(
+                &systemstore,
+                &result.cid.to_string(),
+                &result.doc_id,
+            )
+            .await
+            .unwrap();
+            for field_cid in &result.field_cids {
+                db::doc_id_map::set_block_doc_id_mapping(
+                    &systemstore,
+                    &field_cid.to_string(),
+                    &result.doc_id,
+                )
+                .await
+                .unwrap();
+            }
+            let doc_id = DocID::from_string(&result.doc_id).unwrap();
+            doc.set_id(doc_id.clone());
+            collection
+                .save_with_datastore(&datastore, doc, short_id)
+                .await
+                .unwrap();
+            (doc_id, short_id, result)
+        };
+        txn.force_commit().await.unwrap();
+        output
+    }
+
     fn make_handler() -> (
         DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
         Arc<DefraBlockstore<MemoryStore>>,
@@ -766,7 +855,6 @@ mod tests {
         age: i64,
     ) -> MergeBlock {
         let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
         doc.set("name", NormalValue::String(name.to_string()));
         doc.set("age", NormalValue::Int(age));
 
@@ -789,7 +877,6 @@ mod tests {
 
     fn make_lww_block(signature_cid: Option<Cid>) -> Block {
         let payload = LwwDeltaPayload {
-            doc_id: b"doc1".to_vec(),
             field_name: "name".to_string(),
             schema_version_id: "v1".to_string(),
             priority: 1,
@@ -890,6 +977,7 @@ mod tests {
         let (_priv_key, _pub_hex, did) = sign_block_ed25519(&mut block, &blockstore).await;
         let cid = block.generate_cid().unwrap();
         let block_data = block.to_dag_cbor().unwrap();
+        register_test_block_owner(&handler, 1, "doc1", &cid).await;
 
         let metadata = handler
             .recover_block_metadata(&cid, &block_data)
@@ -985,7 +1073,6 @@ mod tests {
 
         // Create a DIFFERENT block (tampered) but attach the same signature
         let tampered_payload = LwwDeltaPayload {
-            doc_id: b"doc1".to_vec(),
             field_name: "name".to_string(),
             schema_version_id: "v1".to_string(),
             priority: 1,
@@ -1136,7 +1223,6 @@ mod tests {
 
         // Create a different block but attach the original signature
         let tampered_payload = LwwDeltaPayload {
-            doc_id: b"doc1".to_vec(),
             field_name: "name".to_string(),
             schema_version_id: "v1".to_string(),
             priority: 1,
@@ -1302,15 +1388,17 @@ mod tests {
     #[tokio::test]
     async fn counter_merge_marks_cid_merged() {
         let (handler, blockstore) = make_handler_with_counter_schema().await;
-        let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
-        let doc_id = doc.id().unwrap().to_string();
+        let doc_id = DocID::new_v0(
+            "bafyreihgg6a5auqhikq4nvw6fj3kbreovdbazlisbs5kerkahoqwwiz75i"
+                .parse()
+                .unwrap(),
+        )
+        .to_string();
 
         let mut delta_data = Vec::new();
         ciborium::into_writer(&5_i64, &mut delta_data).unwrap();
 
         let payload = CounterDeltaPayload {
-            doc_id: doc_id.as_bytes().to_vec(),
             field_name: "score".to_string(),
             schema_version_id: "v1".to_string(),
             priority: 1,
@@ -1327,6 +1415,7 @@ mod tests {
         let cid = block.generate_cid().unwrap();
         let block_data = block.to_dag_cbor().unwrap();
         blockstore.put(&cid, &block_data).await.unwrap();
+        register_test_block_owner(&handler, 1, &doc_id, &cid).await;
 
         let metadata = BlockMetadata::normal(
             &doc_id,
@@ -1381,7 +1470,7 @@ mod tests {
     /// and mark it merged.
     async fn put_counter_delta_block(
         blockstore: &Arc<DefraBlockstore<MemoryStore>>,
-        doc_id: &str,
+        _doc_id: &str,
         increment: i64,
         priority: u64,
         nonce: i64,
@@ -1389,7 +1478,6 @@ mod tests {
         let mut delta_data = Vec::new();
         ciborium::into_writer(&increment, &mut delta_data).unwrap();
         let payload = CounterDeltaPayload {
-            doc_id: doc_id.as_bytes().to_vec(),
             field_name: "score".to_string(),
             schema_version_id: "v1".to_string(),
             priority,
@@ -1495,6 +1583,7 @@ mod tests {
         // and commits its OWN txn, advancing the accumulation store to N+D2 = 15.
         let (merge_cid, merge_payload) =
             put_counter_delta_block(&blockstore, &doc_id, 5, 2, 7777).await;
+        register_test_block_owner(&handler, 1, &doc_id, &merge_cid).await;
         let metadata = BlockMetadata::normal(
             &doc_id,
             "col-counters",
@@ -1567,16 +1656,17 @@ mod tests {
     #[tokio::test]
     async fn handle_block_serializes_standalone_counter_by_doc_id() {
         let (handler, blockstore) = make_handler_with_counter_schema().await;
-        let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
-        let doc_id = doc.id().unwrap().clone();
-        let doc_id_str = doc_id.to_string();
+        let doc_id_str = DocID::new_v0(
+            "bafyreidwus7muqrpwwf22gvpqpow6xg37woh4ikztgl27deo37ehs5ehaa"
+                .parse()
+                .unwrap(),
+        )
+        .to_string();
 
         let mut delta_data = Vec::new();
         ciborium::into_writer(&5_i64, &mut delta_data).unwrap();
 
         let payload = CounterDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             field_name: "score".to_string(),
             schema_version_id: "v1".to_string(),
             priority: 1,
@@ -1593,6 +1683,7 @@ mod tests {
         let cid = block.generate_cid().unwrap();
         let block_data = block.to_dag_cbor().unwrap();
         blockstore.put(&cid, &block_data).await.unwrap();
+        register_test_block_owner(&handler, 1, &doc_id_str, &cid).await;
 
         let metadata = BlockMetadata::normal(
             &doc_id_str,
@@ -1630,16 +1721,17 @@ mod tests {
             .find_collection_by_id("col-counters")
             .unwrap()
             .expect("counter collection should exist");
-        let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
-        let doc_id = doc.id().unwrap().clone();
+        let doc_id = DocID::new_v0(
+            "bafyreie7rtdexuf47f633477mfieshkeh5rwnjeommkgqrzl22n6g4bfmm"
+                .parse()
+                .unwrap(),
+        );
         let doc_id_str = doc_id.to_string();
 
         let mut delta_data = Vec::new();
         ciborium::into_writer(&5_i64, &mut delta_data).unwrap();
 
         let payload = CounterDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             field_name: "score".to_string(),
             schema_version_id: "v1".to_string(),
             priority: 1,
@@ -1657,6 +1749,7 @@ mod tests {
         let block_data = block.to_dag_cbor().unwrap();
         blockstore.put(&cid, &block_data).await.unwrap();
         blockstore.mark_as_merged(&cid).await.unwrap();
+        register_test_block_owner(&handler, 1, &doc_id_str, &cid).await;
 
         let metadata = BlockMetadata::normal(
             &doc_id_str,
@@ -1674,8 +1767,9 @@ mod tests {
         let txn = handler.db.new_txn(true).await.unwrap();
         let stored = {
             let datastore = txn.datastore().unwrap();
+            let systemstore = txn.systemstore().unwrap();
             collection
-                .get_with_datastore(&datastore, &doc_id)
+                .get_by_doc_id(&datastore, &systemstore, &doc_id)
                 .await
                 .unwrap()
         };
@@ -1698,37 +1792,10 @@ mod tests {
         let mut doc = Document::new();
         doc.set_with_crdt("score", CType::PnCounter, NormalValue::Int(10))
             .unwrap();
-        doc.generate_and_set_doc_id().unwrap();
         doc.set_schema_version_id("v1");
-        let doc_id = doc.id().unwrap().clone();
+        let (doc_id, _doc_short_id, local_blocks) =
+            create_doc_locally(&handler, &collection, &mut doc, "v1").await;
         let doc_id_str = doc_id.to_string();
-
-        let local_blocks = {
-            let txn = handler.db.new_txn(false).await.unwrap();
-            let blocks = {
-                let datastore = txn.datastore().unwrap();
-                let headstore = txn.headstore().unwrap();
-                let raw_blockstore = txn.blockstore().unwrap();
-                collection
-                    .save_with_datastore(&datastore, &doc)
-                    .await
-                    .unwrap();
-                db_blocks::write_document_blocks(
-                    &raw_blockstore,
-                    &headstore,
-                    &doc,
-                    "v1",
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .await
-                .unwrap()
-            };
-            txn.force_commit().await.unwrap();
-            blocks
-        };
         assert!(
             blockstore.is_merged(&local_blocks.cid).await.unwrap(),
             "locally-created composite blocks are already merged"
@@ -1737,7 +1804,6 @@ mod tests {
         let mut update_data = Vec::new();
         ciborium::into_writer(&10_i64, &mut update_data).unwrap();
         let update_field_payload = CounterDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             field_name: "score".to_string(),
             schema_version_id: "v1".to_string(),
             priority: 2,
@@ -1757,7 +1823,6 @@ mod tests {
             .unwrap();
 
         let update_payload = CompositeDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             schema_version_id: "v1".to_string(),
             priority: 2,
             status: 1,
@@ -1798,8 +1863,9 @@ mod tests {
             let txn = handler.db.new_txn(true).await.unwrap();
             let stored = {
                 let datastore = txn.datastore().unwrap();
+                let systemstore = txn.systemstore().unwrap();
                 collection
-                    .get_with_datastore(&datastore, &doc_id)
+                    .get_by_doc_id(&datastore, &systemstore, &doc_id)
                     .await
                     .unwrap()
                     .expect("document should still exist")
@@ -1859,38 +1925,12 @@ mod tests {
             NormalValue::String("did:key:alice".to_string()),
         );
         doc.set("body", NormalValue::String("v1".to_string()));
-        doc.generate_and_set_doc_id().unwrap();
         doc.set_schema_version_id("v1");
-        let doc_id = doc.id().unwrap().clone();
-        let doc_id_str = doc_id.to_string();
 
         // Persist the initial document locally (agent_did = alice).
-        let create_blocks = {
-            let txn = handler.db.new_txn(false).await.unwrap();
-            let blocks = {
-                let datastore = txn.datastore().unwrap();
-                let headstore = txn.headstore().unwrap();
-                let raw_blockstore = txn.blockstore().unwrap();
-                collection
-                    .save_with_datastore(&datastore, &doc)
-                    .await
-                    .unwrap();
-                db_blocks::write_document_blocks(
-                    &raw_blockstore,
-                    &headstore,
-                    &doc,
-                    "v1",
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .await
-                .unwrap()
-            };
-            txn.force_commit().await.unwrap();
-            blocks
-        };
+        let (doc_id, _doc_short_id, create_blocks) =
+            create_doc_locally(&handler, &collection, &mut doc, "v1").await;
+        let doc_id_str = doc_id.to_string();
 
         // Craft a higher-priority remote update that flips the immutable field.
         let mut update_data = Vec::new();
@@ -1900,7 +1940,6 @@ mod tests {
         )
         .unwrap();
         let update_field_payload = LwwDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             field_name: "agent_did".to_string(),
             schema_version_id: "v1".to_string(),
             priority: 2,
@@ -1921,7 +1960,6 @@ mod tests {
             .unwrap();
 
         let update_payload = CompositeDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             schema_version_id: "v1".to_string(),
             priority: 2,
             status: 1,
@@ -1971,8 +2009,9 @@ mod tests {
             let txn = handler.db.new_txn(true).await.unwrap();
             let stored = {
                 let datastore = txn.datastore().unwrap();
+                let systemstore = txn.systemstore().unwrap();
                 collection
-                    .get_with_datastore(&datastore, &doc_id)
+                    .get_by_doc_id(&datastore, &systemstore, &doc_id)
                     .await
                     .unwrap()
                     .expect("document should still exist")
@@ -2004,42 +2043,15 @@ mod tests {
             NormalValue::String("did:key:alice".to_string()),
         );
         doc.set("body", NormalValue::String("v1".to_string()));
-        doc.generate_and_set_doc_id().unwrap();
         doc.set_schema_version_id("v1");
-        let doc_id = doc.id().unwrap().clone();
-        let doc_id_str = doc_id.to_string();
 
-        let create_blocks = {
-            let txn = handler.db.new_txn(false).await.unwrap();
-            let blocks = {
-                let datastore = txn.datastore().unwrap();
-                let headstore = txn.headstore().unwrap();
-                let raw_blockstore = txn.blockstore().unwrap();
-                collection
-                    .save_with_datastore(&datastore, &doc)
-                    .await
-                    .unwrap();
-                db_blocks::write_document_blocks(
-                    &raw_blockstore,
-                    &headstore,
-                    &doc,
-                    "v1",
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .await
-                .unwrap()
-            };
-            txn.force_commit().await.unwrap();
-            blocks
-        };
+        let (doc_id, _doc_short_id, create_blocks) =
+            create_doc_locally(&handler, &collection, &mut doc, "v1").await;
+        let doc_id_str = doc_id.to_string();
 
         // Tombstone: an LWW delta with empty data clears the field.
         let clear_field = Block::new(
             CrdtDelta::Lww(LwwDeltaPayload {
-                doc_id: doc_id_str.as_bytes().to_vec(),
                 field_name: "agent_did".to_string(),
                 schema_version_id: "v1".to_string(),
                 priority: 2,
@@ -2054,7 +2066,6 @@ mod tests {
             .await
             .unwrap();
         let clear_payload = CompositeDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             schema_version_id: "v1".to_string(),
             priority: 2,
             status: 1,
@@ -2112,41 +2123,14 @@ mod tests {
             NormalValue::String("did:key:alice".to_string()),
         );
         doc.set("body", NormalValue::String("v1".to_string()));
-        doc.generate_and_set_doc_id().unwrap();
         doc.set_schema_version_id("v1");
-        let doc_id = doc.id().unwrap().clone();
-        let doc_id_str = doc_id.to_string();
 
-        let create_blocks = {
-            let txn = handler.db.new_txn(false).await.unwrap();
-            let blocks = {
-                let datastore = txn.datastore().unwrap();
-                let headstore = txn.headstore().unwrap();
-                let raw_blockstore = txn.blockstore().unwrap();
-                collection
-                    .save_with_datastore(&datastore, &doc)
-                    .await
-                    .unwrap();
-                db_blocks::write_document_blocks(
-                    &raw_blockstore,
-                    &headstore,
-                    &doc,
-                    "v1",
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .await
-                .unwrap()
-            };
-            txn.force_commit().await.unwrap();
-            blocks
-        };
+        let (doc_id, _doc_short_id, create_blocks) =
+            create_doc_locally(&handler, &collection, &mut doc, "v1").await;
+        let doc_id_str = doc_id.to_string();
 
         // Remote deletion (status = 2): sets the deleted marker, retains bytes.
         let delete_payload = CompositeDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             schema_version_id: "v1".to_string(),
             priority: 2,
             status: 2,
@@ -2189,7 +2173,6 @@ mod tests {
         )
         .unwrap();
         let recreate_field_payload = LwwDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             field_name: "agent_did".to_string(),
             schema_version_id: "v1".to_string(),
             priority: 3,
@@ -2210,7 +2193,6 @@ mod tests {
             .unwrap();
 
         let recreate_payload = CompositeDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             schema_version_id: "v1".to_string(),
             priority: 3,
             status: 1,
@@ -2267,41 +2249,14 @@ mod tests {
             NormalValue::String("did:key:alice".to_string()),
         );
         doc.set("body", NormalValue::String("v1".to_string()));
-        doc.generate_and_set_doc_id().unwrap();
         doc.set_schema_version_id("v1");
-        let doc_id = doc.id().unwrap().clone();
-        let doc_id_str = doc_id.to_string();
 
-        let create_blocks = {
-            let txn = handler.db.new_txn(false).await.unwrap();
-            let blocks = {
-                let datastore = txn.datastore().unwrap();
-                let headstore = txn.headstore().unwrap();
-                let raw_blockstore = txn.blockstore().unwrap();
-                collection
-                    .save_with_datastore(&datastore, &doc)
-                    .await
-                    .unwrap();
-                db_blocks::write_document_blocks(
-                    &raw_blockstore,
-                    &headstore,
-                    &doc,
-                    "v1",
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .await
-                .unwrap()
-            };
-            txn.force_commit().await.unwrap();
-            blocks
-        };
+        let (doc_id, _doc_short_id, create_blocks) =
+            create_doc_locally(&handler, &collection, &mut doc, "v1").await;
+        let doc_id_str = doc_id.to_string();
 
         // Delete (status 2).
         let delete_payload = CompositeDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             schema_version_id: "v1".to_string(),
             priority: 2,
             status: 2,
@@ -2338,7 +2293,6 @@ mod tests {
         let mut body_data = Vec::new();
         ciborium::into_writer(&NormalValue::String("v2".to_string()), &mut body_data).unwrap();
         let body_payload = LwwDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             field_name: "body".to_string(),
             schema_version_id: "v1".to_string(),
             priority: 3,
@@ -2355,7 +2309,6 @@ mod tests {
             .await
             .unwrap();
         let recreate_payload = CompositeDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             schema_version_id: "v1".to_string(),
             priority: 3,
             status: 1,
@@ -2411,37 +2364,11 @@ mod tests {
             NormalValue::String("did:key:alice".to_string()),
         );
         doc.set("body", NormalValue::String("v1".to_string()));
-        doc.generate_and_set_doc_id().unwrap();
         doc.set_schema_version_id("v1");
-        let doc_id = doc.id().unwrap().clone();
-        let doc_id_str = doc_id.to_string();
 
-        let create_blocks = {
-            let txn = handler.db.new_txn(false).await.unwrap();
-            let blocks = {
-                let datastore = txn.datastore().unwrap();
-                let headstore = txn.headstore().unwrap();
-                let raw_blockstore = txn.blockstore().unwrap();
-                collection
-                    .save_with_datastore(&datastore, &doc)
-                    .await
-                    .unwrap();
-                db_blocks::write_document_blocks(
-                    &raw_blockstore,
-                    &headstore,
-                    &doc,
-                    "v1",
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .await
-                .unwrap()
-            };
-            txn.force_commit().await.unwrap();
-            blocks
-        };
+        let (doc_id, _doc_short_id, create_blocks) =
+            create_doc_locally(&handler, &collection, &mut doc, "v1").await;
+        let doc_id_str = doc_id.to_string();
 
         // Violating composite: changes the immutable agent_did AND a benign body.
         let encode = |s: &str| {
@@ -2451,7 +2378,6 @@ mod tests {
         };
         let did_block = Block::new(
             CrdtDelta::Lww(LwwDeltaPayload {
-                doc_id: doc_id_str.as_bytes().to_vec(),
                 field_name: "agent_did".to_string(),
                 schema_version_id: "v1".to_string(),
                 priority: 2,
@@ -2467,7 +2393,6 @@ mod tests {
             .unwrap();
         let body_block = Block::new(
             CrdtDelta::Lww(LwwDeltaPayload {
-                doc_id: doc_id_str.as_bytes().to_vec(),
                 field_name: "body".to_string(),
                 schema_version_id: "v1".to_string(),
                 priority: 2,
@@ -2482,7 +2407,6 @@ mod tests {
             .await
             .unwrap();
         let bad_payload = CompositeDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             schema_version_id: "v1".to_string(),
             priority: 2,
             status: 1,
@@ -2519,11 +2443,10 @@ mod tests {
             NormalValue::String("did:key:carol".to_string()),
         );
         sibling.set("body", NormalValue::String("sibling".to_string()));
-        sibling.generate_and_set_doc_id().unwrap();
-        let sibling_id = sibling.id().unwrap().to_string();
         let sibling_result = db_blocks::build_blocks_from_document(&sibling, "v1", &blockstore)
             .await
             .unwrap();
+        let sibling_id = sibling_result.doc_id.clone();
         let sibling_merge = MergeBlock {
             cid: sibling_result.cid,
             block_data: bytes::Bytes::from(sibling_result.block),
@@ -2555,13 +2478,18 @@ mod tests {
         let txn = handler.db.new_txn(true).await.unwrap();
         let (doc1, sibling_present) = {
             let datastore = txn.datastore().unwrap();
+            let systemstore = txn.systemstore().unwrap();
             let doc1 = collection
-                .get_with_datastore(&datastore, &doc_id)
+                .get_by_doc_id(&datastore, &systemstore, &doc_id)
                 .await
                 .unwrap()
                 .expect("doc1 exists");
             let sibling_present = collection
-                .get_with_datastore(&datastore, &DocID::from_string(&sibling_id).unwrap())
+                .get_by_doc_id(
+                    &datastore,
+                    &systemstore,
+                    &DocID::from_string(&sibling_id).unwrap(),
+                )
                 .await
                 .unwrap()
                 .is_some();
@@ -2593,37 +2521,11 @@ mod tests {
 
         let mut doc = Document::new();
         doc.set("age", NormalValue::Int(21));
-        doc.generate_and_set_doc_id().unwrap();
         doc.set_schema_version_id("v1");
-        let doc_id = doc.id().unwrap().clone();
-        let doc_id_str = doc_id.to_string();
 
-        let create_blocks = {
-            let txn = handler.db.new_txn(false).await.unwrap();
-            let blocks = {
-                let datastore = txn.datastore().unwrap();
-                let headstore = txn.headstore().unwrap();
-                let raw_blockstore = txn.blockstore().unwrap();
-                collection
-                    .save_with_datastore(&datastore, &doc)
-                    .await
-                    .unwrap();
-                db_blocks::write_document_blocks(
-                    &raw_blockstore,
-                    &headstore,
-                    &doc,
-                    "v1",
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .await
-                .unwrap()
-            };
-            txn.force_commit().await.unwrap();
-            blocks
-        };
+        let (doc_id, _doc_short_id, create_blocks) =
+            create_doc_locally(&handler, &collection, &mut doc, "v1").await;
+        let doc_id_str = doc_id.to_string();
 
         doc.set("age", NormalValue::Int(60));
         let mut modified_fields = HashSet::new();
@@ -2635,7 +2537,7 @@ mod tests {
                 let headstore = txn.headstore().unwrap();
                 let raw_blockstore = txn.blockstore().unwrap();
                 collection
-                    .save_with_datastore(&datastore, &doc)
+                    .save_with_datastore(&datastore, &doc, _doc_short_id)
                     .await
                     .unwrap();
                 db_blocks::write_document_blocks(
@@ -2643,6 +2545,10 @@ mod tests {
                     &headstore,
                     &doc,
                     "v1",
+                    db_blocks::DocStorageIdentity::new(
+                        collection.resolved_root_id(),
+                        _doc_short_id,
+                    ),
                     Some(&modified_fields),
                     None,
                     None,
@@ -2685,7 +2591,6 @@ mod tests {
         }
 
         let incoming_field_payload = LwwDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             field_name: "age".to_string(),
             schema_version_id: "v1".to_string(),
             priority: 2,
@@ -2704,7 +2609,6 @@ mod tests {
             .unwrap();
 
         let incoming_composite_payload = CompositeDeltaPayload {
-            doc_id: doc_id_str.as_bytes().to_vec(),
             schema_version_id: "v1".to_string(),
             priority: 2,
             status: 1,
@@ -2745,8 +2649,9 @@ mod tests {
             let txn = handler.db.new_txn(true).await.unwrap();
             let stored = {
                 let datastore = txn.datastore().unwrap();
+                let systemstore = txn.systemstore().unwrap();
                 collection
-                    .get_with_datastore(&datastore, &doc_id)
+                    .get_by_doc_id(&datastore, &systemstore, &doc_id)
                     .await
                     .unwrap()
                     .expect("document should exist")
@@ -2768,44 +2673,17 @@ mod tests {
 
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("John".to_string()));
-        doc.generate_and_set_doc_id().unwrap();
         doc.set_schema_version_id("v1");
-        let doc_id = doc.id().unwrap().clone();
-        let doc_id_str = doc_id.to_string();
 
-        let local_blocks = {
-            let txn = handler.db.new_txn(false).await.unwrap();
-            let blocks = {
-                let datastore = txn.datastore().unwrap();
-                let headstore = txn.headstore().unwrap();
-                let raw_blockstore = txn.blockstore().unwrap();
-                collection
-                    .save_with_datastore(&datastore, &doc)
-                    .await
-                    .unwrap();
-                db_blocks::write_document_blocks(
-                    &raw_blockstore,
-                    &headstore,
-                    &doc,
-                    "v1",
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .await
-                .unwrap()
-            };
-            txn.force_commit().await.unwrap();
-            blocks
-        };
+        let (doc_id, _doc_short_id, local_blocks) =
+            create_doc_locally(&handler, &collection, &mut doc, "v1").await;
+        let doc_id_str = doc_id.to_string();
 
         let build_update =
             |name: &str, priority: u64, field_heads: Vec<Cid>, composite_heads: Vec<Cid>| {
                 let mut data = Vec::new();
                 ciborium::into_writer(&NormalValue::String(name.to_string()), &mut data).unwrap();
                 let field_payload = LwwDeltaPayload {
-                    doc_id: doc_id_str.as_bytes().to_vec(),
                     field_name: "name".to_string(),
                     schema_version_id: "v1".to_string(),
                     priority,
@@ -2816,7 +2694,6 @@ mod tests {
                 let field_data = field_block.to_dag_cbor().unwrap();
 
                 let composite_payload = CompositeDeltaPayload {
-                    doc_id: doc_id_str.as_bytes().to_vec(),
                     schema_version_id: "v1".to_string(),
                     priority,
                     status: 1,
@@ -2887,11 +2764,17 @@ mod tests {
         assert_eq!(outcome, MergeOutcome::Merged);
 
         let txn = handler.db.new_txn(true).await.unwrap();
-        let head_keys = {
+        let (head_keys, doc_short_id) = {
             let headstore = txn.headstore().unwrap();
+            let systemstore = txn.systemstore().unwrap();
+            let doc_short_id = db::doc_id_map::get_doc_ref(&systemstore, &doc_id_str)
+                .await
+                .unwrap()
+                .expect("merged doc has a short-ID mapping")
+                .doc_short_id;
             let mut iter = headstore
                 .iterator(storage::corekv::IterOptions::new().with_prefix(
-                    storage::keys::headstore::HeadstoreDocKey::field_prefix(&doc_id_str, "name"),
+                    storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_short_id, "name"),
                 ))
                 .await
                 .unwrap();
@@ -2900,14 +2783,14 @@ mod tests {
                 keys.push(pair.key);
             }
             iter.close().await.unwrap();
-            keys
+            (keys, doc_short_id)
         };
         txn.force_discard().unwrap();
 
         assert_eq!(
             head_keys,
             vec![storage::keys::headstore::HeadstoreDocKey::new(
-                &doc_id_str,
+                doc_short_id,
                 "name",
                 child_field_cid
             )
@@ -2918,15 +2801,8 @@ mod tests {
     #[tokio::test]
     async fn composite_skip_field_does_not_mark_unreadable_linked_counter_merged() {
         let (handler, blockstore) = make_handler_with_counter_schema().await;
-        let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
-        let doc_id = doc.id().unwrap().to_string();
 
-        let encryption = Encryption::new_for_field(
-            doc_id.as_bytes().to_vec(),
-            "score".to_string(),
-            b"wrong-key".to_vec(),
-        );
+        let encryption = Encryption::new(b"wrong-key".to_vec());
         let encryption_cid = encryption.generate_cid().unwrap();
         let encryption_data = encryption.to_dag_cbor().unwrap();
         blockstore
@@ -2935,7 +2811,6 @@ mod tests {
             .unwrap();
 
         let field_payload = CounterDeltaPayload {
-            doc_id: doc_id.as_bytes().to_vec(),
             field_name: "score".to_string(),
             schema_version_id: "v1".to_string(),
             priority: 1,
@@ -2954,7 +2829,6 @@ mod tests {
         blockstore.put(&field_cid, &field_block_data).await.unwrap();
 
         let composite_payload = CompositeDeltaPayload {
-            doc_id: doc_id.as_bytes().to_vec(),
             schema_version_id: "v1".to_string(),
             priority: 1,
             status: 0,
@@ -2967,6 +2841,7 @@ mod tests {
             signature: None,
         };
         let composite_cid = composite_block.generate_cid().unwrap();
+        let doc_id = db_blocks::derive_doc_id(&composite_cid);
 
         let metadata = BlockMetadata::normal(
             &doc_id,

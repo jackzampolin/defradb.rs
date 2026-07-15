@@ -4,13 +4,15 @@ use super::*;
 /// Marker byte indicating a document is deleted (matches Go's DeletedObjectMarker).
 const DELETED_MARKER: u8 = 0x01;
 
-/// Build the deletion marker key: /del/{collection_id}/{doc_id}
-fn build_deleted_key(collection_id: &str, doc_id: &str) -> Vec<u8> {
+/// Build the deletion marker key: /del/{collection_id}/{doc_short_id}
+fn build_deleted_key(collection_id: &str, doc_short_id: u64) -> Vec<u8> {
     let mut key = Vec::new();
     key.extend_from_slice(b"/del/");
     key.extend_from_slice(collection_id.as_bytes());
     key.push(b'/');
-    key.extend_from_slice(doc_id.as_bytes());
+    key.extend_from_slice(&storage::keys::doc_id_index::encode_doc_short_id(
+        doc_short_id,
+    ));
     key
 }
 
@@ -42,7 +44,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let doc_id = DocID::from_string(context.doc_id_str)
             .map_err(|e| MergeError::MergeFailed(format!("Invalid doc_id: {}", e)))?;
 
-        let (mut doc, old_doc) = match collection.get_with_datastore(datastore, &doc_id).await {
+        let (mut doc, old_doc) = match collection
+            .get_with_datastore(datastore, context.doc_short_id, &doc_id)
+            .await
+        {
             Ok(Some(existing)) => {
                 let old = existing.clone();
                 (existing, Some(old))
@@ -78,7 +83,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // partial write.
 
         collection
-            .save_with_datastore(datastore, &doc)
+            .save_with_datastore(datastore, &doc, context.doc_short_id)
             .await
             .map_err(MergeError::Database)?;
 
@@ -150,7 +155,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         collection: &Collection,
     ) -> std::result::Result<(), MergeError> {
         if let Ok(doc_id) = DocID::from_string(context.doc_id_str) {
-            if let Ok(Some(old_doc)) = collection.get_with_datastore(datastore, &doc_id).await {
+            if let Ok(Some(old_doc)) = collection
+                .get_with_datastore(datastore, context.doc_short_id, &doc_id)
+                .await
+            {
                 let short_id = collection.resolved_root_id();
                 if let Ok(index_manager) =
                     IndexManager::from_collection(short_id, collection.schema())
@@ -170,7 +178,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
-        let deleted_key = build_deleted_key(collection.collection_id(), context.doc_id_str);
+        let deleted_key = build_deleted_key(collection.collection_id(), context.doc_short_id);
         datastore
             .set(&deleted_key, &[DELETED_MARKER])
             .await

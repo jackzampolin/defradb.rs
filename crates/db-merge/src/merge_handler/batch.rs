@@ -194,6 +194,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         {
             let datastore = txn.datastore()?;
             let headstore = txn.headstore()?;
+            let systemstore = txn.systemstore()?;
 
             for block in blocks {
                 self.validate_explicit_replay_authorization(
@@ -214,6 +215,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     .process_block_in_txn(
                         &datastore,
                         &headstore,
+                        &systemstore,
                         &block.cid,
                         &block.block_data,
                         &metadata,
@@ -290,6 +292,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         &self,
         datastore: &NamespaceView,
         headstore: &NamespaceView,
+        systemstore: &NamespaceView,
         cid: &Cid,
         block_data: &[u8],
         metadata: &BlockMetadata<'_>,
@@ -375,6 +378,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 self.process_composite_delta_in_txn(
                     datastore,
                     headstore,
+                    systemstore,
                     cid,
                     &block,
                     payload,
@@ -393,6 +397,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 self.process_collection_delta_in_txn(
                     datastore,
                     headstore,
+                    systemstore,
                     cid,
                     &block,
                     payload,
@@ -407,6 +412,13 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 .await
             }
             CrdtDelta::Lww(payload) => {
+                let Some((doc_id_str, doc_short_id)) =
+                    self.resolve_field_block_identity(systemstore, cid).await?
+                else {
+                    return Ok(MergeOutcome::terminal_skip(
+                        "field block has no unambiguous owner; merged via its composite",
+                    ));
+                };
                 let mut ds = datastore.clone();
                 let result = self
                     .process_lww_delta_in_txn(
@@ -415,6 +427,8 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                         cid,
                         payload,
                         metadata.collection_id,
+                        &doc_id_str,
+                        doc_short_id,
                     )
                     .await;
                 match result {
@@ -424,9 +438,23 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 }
             }
             CrdtDelta::Counter(payload) => {
+                let Some((doc_id_str, doc_short_id)) =
+                    self.resolve_field_block_identity(systemstore, cid).await?
+                else {
+                    return Ok(MergeOutcome::terminal_skip(
+                        "field block has no unambiguous owner; merged via its composite",
+                    ));
+                };
                 let mut ds = datastore.clone();
                 let result = self
-                    .process_counter_delta_in_txn(&mut ds, cid, payload, metadata.collection_id)
+                    .process_counter_delta_in_txn(
+                        &mut ds,
+                        cid,
+                        payload,
+                        metadata.collection_id,
+                        &doc_id_str,
+                        doc_short_id,
+                    )
                     .await;
                 match result {
                     Ok(r) if r.applied => {
