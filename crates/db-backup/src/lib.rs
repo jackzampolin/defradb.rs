@@ -10,13 +10,13 @@
 //! - [`import_database`] — import documents from a JSON string
 //! - [`ImportStats`] — statistics returned from an import
 //!
-//! Internal helpers (`classify_schema_fields`, `compute_doc_id_new`,
+//! Internal helpers (`classify_schema_fields`,
 //! `json_to_graphql_input`, `FieldInfo`) are also re-exported for callers
 //! that need to inspect or reuse the classification logic.
 
 pub mod backup;
 
 pub use backup::{
-    classify_schema_fields, compute_doc_id_new, export_database, import_database,
+    classify_schema_fields, export_database, import_database,
     json_to_graphql_input, FieldInfo, ImportStats,
 };

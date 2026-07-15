@@ -124,6 +124,36 @@ pub async fn resolve_or_allocate_doc_short_id(
     Ok(short_id)
 }
 
+/// Register an additional public DocID for an existing document (backup
+/// import aliasing): the alias resolves through `/d/p` and is enumerable
+/// via `/d/r`, without replacing the document's primary `/d/s` entry.
+pub async fn set_doc_id_alias(
+    systemstore: &NamespaceView,
+    collection_short_id: u32,
+    doc_short_id: u64,
+    alias_doc_id: &str,
+) -> Result<()> {
+    if collection_short_id == 0 || doc_short_id == 0 || alias_doc_id.is_empty() {
+        return Ok(());
+    }
+
+    systemstore
+        .set(
+            &DocIDToDocRefKey::new(alias_doc_id).bytes(),
+            &DocRef::new(collection_short_id, doc_short_id).encode(),
+        )
+        .await
+        .map_err(Error::Storage)?;
+
+    systemstore
+        .set(
+            &DocShortIDToDocIDAliasKey::new(doc_short_id, alias_doc_id).bytes(),
+            alias_doc_id.as_bytes(),
+        )
+        .await
+        .map_err(Error::Storage)
+}
+
 /// Record that a block belongs to a document.
 ///
 /// Field blocks can be byte-identical across documents, so ownership is a

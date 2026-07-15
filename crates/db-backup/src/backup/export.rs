@@ -1,12 +1,10 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::{Map, Value as JsonValue};
 
-use schema::CollectionVersion;
 use storage::corekv::Store;
 
-use super::{classify_schema_fields, compute_doc_id_new};
+use super::classify_schema_fields;
 use db::DB;
 
 /// Export database contents to a JSON string.
@@ -61,21 +59,16 @@ pub async fn export_database<S: Store>(
 
     struct DocEntry {
         doc_map: Map<String, JsonValue>,
-        own_doc_id: String,
-        self_ref_excludes: Vec<String>,
     }
 
     struct CollectionData {
         name: String,
-        schema: CollectionVersion,
         docs: Vec<DocEntry>,
-        fk_field_names: Vec<String>,
     }
 
     let mut all_collections: Vec<CollectionData> = Vec::new();
-    let mut doc_id_map: HashMap<String, String> = HashMap::new();
 
-    // Phase 1: Query all docs and compute initial _docIDNew
+    // Phase 1: Query all docs
     for name in &collection_names {
         let collection = database
             .get_collection(name)
@@ -166,68 +159,27 @@ pub async fn export_database<S: Store>(
                 }
             }
 
-            let doc_id_new = compute_doc_id_new(&doc_map, &self_ref_excludes, &schema)?;
-
-            doc_id_map.insert(own_doc_id.clone(), doc_id_new.clone());
-            doc_map.insert("_docIDNew".to_string(), JsonValue::String(doc_id_new));
+            // Identity is genesis-CID-derived and cannot be recomputed from
+            // field values: `_docIDNew` is the document's current identity
+            // (Go v1.0.0 backup format), and the import registers it as an
+            // alias of the freshly derived identity.
+            doc_map.insert(
+                "_docIDNew".to_string(),
+                JsonValue::String(own_doc_id.clone()),
+            );
 
             doc_map.retain(|_, v| !v.is_null());
 
-            doc_entries.push(DocEntry {
-                doc_map,
-                own_doc_id,
-                self_ref_excludes,
-            });
+            doc_entries.push(DocEntry { doc_map });
         }
 
         all_collections.push(CollectionData {
             name: name.clone(),
-            schema,
             docs: doc_entries,
-            fk_field_names,
         });
     }
 
-    // Phase 2: Remap FK values to _docIDNew and recompute _docIDNew
-    for col_data in &mut all_collections {
-        if col_data.fk_field_names.is_empty() {
-            continue;
-        }
-
-        for entry in &mut col_data.docs {
-            let mut needs_recompute = false;
-
-            for fk_name in &col_data.fk_field_names {
-                if let Some(fk_value) = entry
-                    .doc_map
-                    .get(fk_name)
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                {
-                    if let Some(new_id) = doc_id_map.get(&fk_value) {
-                        if new_id != &fk_value {
-                            entry
-                                .doc_map
-                                .insert(fk_name.clone(), JsonValue::String(new_id.clone()));
-                            needs_recompute = true;
-                        }
-                    }
-                }
-            }
-
-            if needs_recompute {
-                let doc_id_new =
-                    compute_doc_id_new(&entry.doc_map, &entry.self_ref_excludes, &col_data.schema)?;
-
-                doc_id_map.insert(entry.own_doc_id.clone(), doc_id_new.clone());
-                entry
-                    .doc_map
-                    .insert("_docIDNew".to_string(), JsonValue::String(doc_id_new));
-            }
-        }
-    }
-
-    // Phase 3: Build export output
+    // Phase 2: Build export output
     let mut collection_json_parts: Vec<String> = Vec::new();
     for col_data in all_collections {
         let export_docs: Vec<JsonValue> = col_data

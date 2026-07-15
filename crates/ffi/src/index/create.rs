@@ -147,7 +147,7 @@ pub unsafe extern "C" fn create_index(
 
                 // Bulk index existing documents
                 let documents = collection
-                    .get_all_with_datastore(&datastore)
+                    .get_all_with_datastore(&datastore, &systemstore)
                     .await
                     .map_err(|e| format!("failed to get documents: {}", e))?;
 

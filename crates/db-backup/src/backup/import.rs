@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use document::Document;
@@ -17,6 +17,15 @@ pub struct ImportStats {
     pub collections_affected: Vec<String>,
 }
 
+/// A relation field whose target could not be resolved when its document
+/// was imported (forward reference); applied after all imports.
+struct PendingRelation {
+    collection_name: String,
+    doc: Document,
+    fk_name: String,
+    imported_doc_id: String,
+}
+
 /// Import documents from a JSON string into the database.
 ///
 /// The data must be a JSON object mapping collection names to arrays of documents:
@@ -27,8 +36,10 @@ pub struct ImportStats {
 /// }
 /// ```
 ///
-/// Self-referencing FK fields are stripped before creation and applied
-/// via update afterward, matching Go DefraDB behavior.
+/// Imported documents receive fresh genesis-CID-derived DocIDs. The file's
+/// `_docID`/`_docIDNew` values are registered as aliases of the new
+/// identity and relation fields are remapped through them, matching Go
+/// v1.0.0's import behavior.
 pub async fn import_database<S: Store + 'static>(
     database: &Arc<DB<S>>,
     _runner: &Arc<dyn query::QueryExecutor>,
@@ -48,6 +59,8 @@ pub async fn import_database<S: Store + 'static>(
 
     let mut documents_imported: u64 = 0;
     let mut collections_affected: HashSet<String> = HashSet::new();
+    let mut imported_doc_ids: HashMap<String, String> = HashMap::new();
+    let mut pending_relations: Vec<PendingRelation> = Vec::new();
     let mutator = AutoCommitMutator::new(database.clone());
 
     for (collection_name, docs_value) in root {
@@ -64,9 +77,9 @@ pub async fn import_database<S: Store + 'static>(
         let schema = collection.schema();
         let fields = classify_schema_fields(schema);
 
-        let self_ref_fk_names: Vec<String> = fields
+        let fk_names: Vec<String> = fields
             .iter()
-            .filter(|f| f.is_self_ref && !f.is_array)
+            .filter(|f| f.is_relation && !f.is_array)
             .map(|f| format!("_{}ID", f.name))
             .collect();
 
@@ -110,8 +123,16 @@ pub async fn import_database<S: Store + 'static>(
                 None => continue,
             };
 
-            doc_map.remove("_docID");
-            doc_map.remove("_docIDNew");
+            // The file's identities become aliases of the fresh
+            // genesis-derived identity.
+            let mut aliases: Vec<String> = Vec::new();
+            for key in ["_docID", "_docIDNew"] {
+                if let Some(JsonValue::String(alias)) = doc_map.remove(key) {
+                    if !alias.is_empty() && !aliases.contains(&alias) {
+                        aliases.push(alias);
+                    }
+                }
+            }
 
             for (rel_name, fk_name) in &relation_to_fk {
                 if let Some(value) = doc_map.remove(rel_name) {
@@ -121,11 +142,24 @@ pub async fn import_database<S: Store + 'static>(
                 }
             }
 
-            let mut self_ref_values: Vec<(String, JsonValue)> = Vec::new();
-            for fk_name in &self_ref_fk_names {
-                if let Some(value) = doc_map.remove(fk_name) {
-                    if !value.is_null() {
-                        self_ref_values.push((fk_name.clone(), value));
+            // Resolve relation targets through already-imported identities;
+            // unresolved targets are stripped and applied after the import
+            // completes (forward references).
+            let mut deferred_relations: Vec<(String, String)> = Vec::new();
+            for fk_name in &fk_names {
+                let Some(value) = doc_map.get(fk_name) else {
+                    continue;
+                };
+                let Some(target) = value.as_str().map(str::to_string) else {
+                    continue;
+                };
+                match imported_doc_ids.get(&target) {
+                    Some(new_id) => {
+                        doc_map.insert(fk_name.clone(), JsonValue::String(new_id.clone()));
+                    }
+                    None => {
+                        doc_map.remove(fk_name);
+                        deferred_relations.push((fk_name.clone(), target));
                     }
                 }
             }
@@ -135,12 +169,9 @@ pub async fn import_database<S: Store + 'static>(
                     format!("failed to create document in '{}': {}", collection_name, e)
                 })?;
             doc.set_collection(schema.clone());
-            doc.generate_and_set_doc_id().map_err(|e| {
-                format!("failed to create document in '{}': {}", collection_name, e)
-            })?;
 
             let create_result = mutator.create(collection_name, doc).await;
-            let mut created_doc = match create_result {
+            let created_doc = match create_result {
                 Ok(result) => result.document,
                 Err(e) => {
                     let err_msg = e.to_string();
@@ -154,37 +185,105 @@ pub async fn import_database<S: Store + 'static>(
                 }
             };
 
+            let new_doc_id = created_doc
+                .id()
+                .ok_or_else(|| {
+                    format!(
+                        "created document in '{}' is missing its derived DocID",
+                        collection_name
+                    )
+                })?
+                .to_string();
+
+            register_doc_id_aliases(database, collection.resolved_root_id(), &new_doc_id, &aliases)
+                .await?;
+            for alias in aliases {
+                imported_doc_ids.insert(alias, new_doc_id.clone());
+            }
+
+            for (fk_name, imported_doc_id) in deferred_relations {
+                pending_relations.push(PendingRelation {
+                    collection_name: collection_name.clone(),
+                    doc: created_doc.clone(),
+                    fk_name,
+                    imported_doc_id,
+                });
+            }
+
             documents_imported += 1;
             collections_affected.insert(collection_name.clone());
-
-            if !self_ref_values.is_empty() {
-                let mut modified_fields = std::collections::HashSet::new();
-                for (fk_name, value) in &self_ref_values {
-                    let doc_id = value.as_str().ok_or_else(|| {
-                        format!(
-                            "failed to update self-ref fields in '{}': expected string doc id",
-                            collection_name
-                        )
-                    })?;
-                    created_doc.set(fk_name.clone(), doc_id.to_string());
-                    modified_fields.insert(fk_name.clone());
-                }
-
-                mutator
-                    .update(collection_name, created_doc, modified_fields)
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "failed to update self-ref fields in '{}': {}",
-                            collection_name, e
-                        )
-                    })?;
-            }
         }
+    }
+
+    for pending in pending_relations {
+        let target = imported_doc_ids
+            .get(&pending.imported_doc_id)
+            .cloned()
+            .unwrap_or(pending.imported_doc_id);
+
+        let mut doc = pending.doc;
+        doc.set(pending.fk_name.clone(), target);
+        let mut modified_fields = HashSet::new();
+        modified_fields.insert(pending.fk_name.clone());
+
+        mutator
+            .update(&pending.collection_name, doc, modified_fields)
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to update relation fields in '{}': {}",
+                    pending.collection_name, e
+                )
+            })?;
     }
 
     Ok(ImportStats {
         documents_imported,
         collections_affected: collections_affected.into_iter().collect(),
     })
+}
+
+/// Register the file's original DocIDs as aliases of the imported
+/// document's new identity, so existing references stay addressable.
+async fn register_doc_id_aliases<S: Store + 'static>(
+    database: &Arc<DB<S>>,
+    collection_short_id: u32,
+    new_doc_id: &str,
+    aliases: &[String],
+) -> Result<(), String> {
+    if aliases.iter().all(|alias| alias == new_doc_id) {
+        return Ok(());
+    }
+
+    let txn = database
+        .new_txn(false)
+        .await
+        .map_err(|e| format!("failed to create alias transaction: {}", e))?;
+    {
+        let systemstore = txn
+            .systemstore()
+            .map_err(|e| format!("failed to get systemstore: {}", e))?;
+        let doc_ref = db::doc_id_map::get_doc_ref(&systemstore, new_doc_id)
+            .await
+            .map_err(|e| format!("doc-ID mapping lookup failed: {}", e))?
+            .ok_or_else(|| format!("imported document '{}' has no identity mapping", new_doc_id))?;
+
+        for alias in aliases {
+            if alias == new_doc_id {
+                continue;
+            }
+            db::doc_id_map::set_doc_id_alias(
+                &systemstore,
+                collection_short_id,
+                doc_ref.doc_short_id,
+                alias,
+            )
+            .await
+            .map_err(|e| format!("failed to register doc-ID alias: {}", e))?;
+        }
+    }
+    txn.commit()
+        .await
+        .map_err(|e| format!("failed to commit alias transaction: {}", e))?;
+    Ok(())
 }
