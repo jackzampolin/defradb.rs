@@ -571,8 +571,9 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         let pre_delete_document_json = collection
             .get_with_datastore(&datastore, doc_short_id, doc_id)
             .await
-            .ok()
-            .flatten()
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("pre-delete document read failed: {e}"))
+            })?
             .and_then(|doc| document_json_value(&doc));
 
         let existed = collection

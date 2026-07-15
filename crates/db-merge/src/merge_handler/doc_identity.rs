@@ -55,8 +55,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 return Ok(head_owners.into_iter().next().expect("len checked"));
             }
 
-            let Ok(Some(head_data)) = self.blockstore.get(head_cid).await else {
-                continue;
+            let head_data = match self.blockstore.get(head_cid).await {
+                Ok(Some(data)) => data,
+                // A genuinely absent head can't help resolve identity; a
+                // blockstore failure is infrastructure and must not be
+                // silently treated as "head missing".
+                Ok(None) => continue,
+                Err(e) => return Err(MergeError::Storage(e.to_string())),
             };
             let Ok(head_block) = Block::from_dag_cbor(&head_data) else {
                 continue;
@@ -73,7 +78,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             .await
             {
                 Ok(doc_id) => return Ok(doc_id),
-                Err(_) => continue,
+                // Only a genuine "could not resolve" is worth trying the next
+                // head for; propagate infrastructure errors.
+                Err(MergeError::MergeFailed(_)) => continue,
+                Err(e) => return Err(e),
             }
         }
 

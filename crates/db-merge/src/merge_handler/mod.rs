@@ -200,7 +200,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let doc_id = match &block.delta {
             CrdtDelta::Composite(_) => match self.resolve_composite_doc_id(cid, &block).await {
                 Ok(doc_id) => doc_id,
-                Err(_) => return Ok(None),
+                // No recoverable identity → treat as unrecoverable metadata;
+                // real infrastructure errors propagate.
+                Err(MergeError::MergeFailed(_)) => return Ok(None),
+                Err(e) => return Err(e),
             },
             CrdtDelta::Lww(_) | CrdtDelta::Counter(_) => {
                 match self.resolve_field_block_doc_id(cid).await? {

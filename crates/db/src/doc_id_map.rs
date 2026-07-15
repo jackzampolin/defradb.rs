@@ -262,14 +262,24 @@ pub async fn delete_doc_id_mappings(systemstore: &NamespaceView, doc_short_id: u
         .map_err(Error::Storage)?;
 
     let prefix = DocShortIDToDocIDAliasKey::short_id_prefix(doc_short_id);
+    let prefix_len = prefix.len();
     let mut iter = systemstore
         .iterator(IterOptions::new().with_prefix(prefix))
         .await
         .map_err(Error::Storage)?;
 
+    // Recover each alias DocID from the KEY suffix, not the value: the key
+    // is authoritative, so a malformed value can never orphan the reverse
+    // (DocID -> DocRef) mapping.
     let mut mappings: Vec<(Vec<u8>, String)> = Vec::new();
     while let Some(kv) = iter.next().await.map_err(Error::Storage)? {
-        let doc_id = String::from_utf8(kv.value.clone()).unwrap_or_default();
+        let doc_id = if kv.key.len() > prefix_len {
+            String::from_utf8(kv.key[prefix_len..].to_vec()).map_err(|e| {
+                Error::InvalidDocument(format!("invalid utf-8 in doc-ID alias key: {e}"))
+            })?
+        } else {
+            String::new()
+        };
         mappings.push((kv.key.clone(), doc_id));
     }
     drop(iter);

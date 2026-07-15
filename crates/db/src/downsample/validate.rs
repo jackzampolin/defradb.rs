@@ -26,10 +26,9 @@ impl<S: Store + 'static> crate::database::DB<S> {
         // The series identity is the source's own DocID, which is only
         // assigned once the genesis block is written. A source without one
         // yet is a first-time create: there is no prior rollup target, so
-        // the closed-bucket (late-data) check below cannot apply.
-        let Some(series_doc_id) = self.series_doc_id_opt(source_doc) else {
-            return Ok(());
-        };
+        // the closed-bucket (late-data) lookup below is skipped — but the
+        // field-shape validation still runs.
+        let series_doc_id = self.series_doc_id_opt(source_doc);
 
         for plan in plans {
             if let SourceKind::Raw { measure_field } = &plan.source_kind {
@@ -80,12 +79,18 @@ impl<S: Store + 'static> crate::database::DB<S> {
                 })?;
             let source_window_start_nanos = bucket_start_nanos(&source_time, plan.interval_nanos)?;
 
+            // No series identity yet ⇒ first-time create ⇒ no prior rollup
+            // bucket to conflict with; the field validation above still ran.
+            let Some(series_doc_id) = series_doc_id.as_deref() else {
+                continue;
+            };
+
             let Some(target_doc) = self
                 .find_downsample_target_in_txn(
                     datastore,
                     systemstore,
                     &plan.target.name,
-                    &series_doc_id,
+                    series_doc_id,
                 )
                 .await?
             else {

@@ -126,6 +126,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 // Build blocks and write to blockstore/headstore in a scoped block
                 // This enables _commits queries to find the document's version history
                 // (composite_cid, composite_bytes, optional (collection_cid, collection_bytes))
+                // Block-ownership registration is correctness-critical (P2P
+                // serve, KMS, and ACP resolution all read the index), so unlike
+                // the best-effort commits-query block writes below its failure
+                // is fatal: surfaced here and routed through the discard path.
+                let mut ownership_error: Option<String> = None;
                 let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
@@ -169,19 +174,20 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     .await
                     {
                         Ok(block_result) => {
-                            if let (Some(doc_id), Ok(systemstore)) = (doc.id(), txn.systemstore()) {
-                                if let Err(e) = register_block_doc_id_mappings(
-                                    &systemstore,
-                                    &block_result,
-                                    &doc_id.to_string(),
-                                )
-                                .await
-                                {
-                                    warn!(
-                                        collection = %collection_name,
-                                        error = %e,
-                                        "Failed to record block ownership mappings for update"
-                                    );
+                            if let Some(doc_id) = doc.id() {
+                                match txn.systemstore() {
+                                    Ok(systemstore) => {
+                                        if let Err(e) = register_block_doc_id_mappings(
+                                            &systemstore,
+                                            &block_result,
+                                            &doc_id.to_string(),
+                                        )
+                                        .await
+                                        {
+                                            ownership_error = Some(e.to_string());
+                                        }
+                                    }
+                                    Err(e) => ownership_error = Some(e.to_string()),
                                 }
                             }
                             // For branchable collections, create a collection-level block
@@ -223,6 +229,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         }
                     }
                 }; // blockstore and headstore dropped here
+
+                // A failed ownership registration must not commit a partial
+                // index; drop the txn (rolls back) and surface the error.
+                if let Some(e) = ownership_error {
+                    return Err(query::error::QueryError::execution(format!(
+                        "failed to record block ownership mappings for update: {e}"
+                    )));
+                }
 
                 // Commit the transaction (all store references now dropped)
                 if let Err(e) = txn.commit().await {

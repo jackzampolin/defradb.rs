@@ -43,6 +43,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
         })?;
 
+        // Block-ownership registration is correctness-critical; a failure must
+        // abort the whole batch rather than commit a tombstone with no owner
+        // (which would break P2P serve, KMS, and ACP resolution).
+        let mut ownership_error: Option<String> = None;
         let mut results: Vec<(DocID, bool, Option<CommitArtifacts>)> =
             Vec::with_capacity(doc_ids.len());
 
@@ -125,20 +129,19 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     Ok(block_result) => {
                         let composite_cid = block_result.cid;
 
-                        if let Ok(systemstore) = txn.systemstore() {
-                            if let Err(e) = crate::doc_id_map::set_block_doc_id_mapping(
-                                &systemstore,
-                                &composite_cid.to_string(),
-                                &doc_id.to_string(),
-                            )
-                            .await
-                            {
-                                warn!(
-                                    collection = %collection_name,
-                                    error = %e,
-                                    "Failed to record block ownership mapping for delete"
-                                );
+                        match txn.systemstore() {
+                            Ok(systemstore) => {
+                                if let Err(e) = crate::doc_id_map::set_block_doc_id_mapping(
+                                    &systemstore,
+                                    &composite_cid.to_string(),
+                                    &doc_id.to_string(),
+                                )
+                                .await
+                                {
+                                    ownership_error = Some(e.to_string());
+                                }
                             }
+                            Err(e) => ownership_error = Some(e.to_string()),
                         }
 
                         let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
@@ -181,6 +184,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             };
 
             results.push((doc_id.clone(), existed, commit_result));
+        }
+
+        // A failed ownership registration must not commit a partial index for
+        // the batch; drop the txn (rolls back) and surface the error.
+        if let Some(e) = ownership_error {
+            return Err(query::error::QueryError::execution(format!(
+                "failed to record block ownership mapping for delete: {e}"
+            )));
         }
 
         // Single commit for entire batch
