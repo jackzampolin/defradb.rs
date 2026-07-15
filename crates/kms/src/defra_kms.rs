@@ -100,16 +100,24 @@ impl DefraKms {
         }
     }
 
-    /// Check whether `actor` may be released the DEK stored under `cid`.
+    /// Local release decision for the DEK stored under `cid`.
     ///
     /// Encryption blocks carry no identity (Go #4838): ownership is
     /// resolved through the block-CID -> DocID index, and the key is
     /// released if the actor may read ANY owning document (an encryption
-    /// block can be co-owned by several documents). A block with no
-    /// owning documents is never released — mirrors Go's
-    /// getEncryptionKeysLocally.
-    async fn may_release(&self, actor: Option<&Did>, cid: &EncryptionCid) -> Result<bool> {
+    /// block can be co-owned by several documents). When ownership is not
+    /// yet recorded — e.g. a block just fetched during replication, before
+    /// its merge registers ownership — the node cannot authorize locally
+    /// and defers to the owner via a remote fetch.
+    async fn local_release_decision(
+        &self,
+        actor: Option<&Did>,
+        cid: &EncryptionCid,
+    ) -> Result<LocalRelease> {
         let doc_ids = self.doc_resolver.doc_ids_for_block(cid).await?;
+        if doc_ids.is_empty() {
+            return Ok(LocalRelease::OwnershipUnknown);
+        }
         for doc_id in doc_ids {
             let scope = KeyScope::Document {
                 doc_id,
@@ -119,11 +127,31 @@ impl DefraKms {
                 self.policy.check_release(actor, &scope).await?,
                 PolicyDecision::Allow
             ) {
-                return Ok(true);
+                return Ok(LocalRelease::Allow);
             }
         }
-        Ok(false)
+        Ok(LocalRelease::Deny)
     }
+
+    /// Serve-side release decision: the owner node has recorded ownership,
+    /// so unknown ownership is treated as a denial (never leak a key we
+    /// cannot attribute).
+    async fn may_serve(&self, actor: Option<&Did>, cid: &EncryptionCid) -> Result<bool> {
+        Ok(matches!(
+            self.local_release_decision(actor, cid).await?,
+            LocalRelease::Allow
+        ))
+    }
+}
+
+/// Outcome of a local DEK release check.
+enum LocalRelease {
+    /// The actor may read an owning document; release the key.
+    Allow,
+    /// Ownership is known but the actor may read none of the owners.
+    Deny,
+    /// No owning document is recorded locally yet; defer to a remote fetch.
+    OwnershipUnknown,
 }
 
 /// Resolves which documents own a block, via the node's
@@ -150,14 +178,23 @@ impl KmsService for DefraKms {
         for cid in cids.iter().copied() {
             match self.store.get(&cid).await? {
                 Some(stored) => {
-                    if self.may_release(user_actor.as_ref(), &cid).await? {
-                        let _ = tx.send(Ok((cid, stored.key))).await;
-                    } else {
-                        let _ = tx
-                            .send(Err(Error::AccessDenied {
-                                reason: "policy denied".into(),
-                            }))
-                            .await;
+                    match self
+                        .local_release_decision(user_actor.as_ref(), &cid)
+                        .await?
+                    {
+                        LocalRelease::Allow => {
+                            let _ = tx.send(Ok((cid, stored.key))).await;
+                        }
+                        LocalRelease::Deny => {
+                            let _ = tx
+                                .send(Err(Error::AccessDenied {
+                                    reason: "policy denied".into(),
+                                }))
+                                .await;
+                        }
+                        // We hold the block but not its ownership yet (e.g. a
+                        // replication fetch before merge). Defer to the owner.
+                        LocalRelease::OwnershipUnknown => remote.push(cid),
                     }
                 }
                 None => remote.push(cid),
@@ -340,7 +377,7 @@ impl KmsService for DefraKms {
             let Some(stored) = self.store.get(&cid).await? else {
                 continue;
             };
-            if self.may_release(actor.as_ref(), &cid).await? {
+            if self.may_serve(actor.as_ref(), &cid).await? {
                 tracing::debug!(cid = %cid, "KMS serve_request: DEK release GRANTED");
             } else {
                 tracing::warn!(cid = %cid, "KMS serve_request: DEK release DENIED");
