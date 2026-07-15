@@ -167,10 +167,19 @@ pub async fn set_doc_id_alias(
         return Ok(());
     }
 
+    let new_ref = DocRef::new(collection_short_id, doc_short_id);
+    if let Some(existing_ref) = get_doc_ref(systemstore, alias_doc_id).await? {
+        if existing_ref != new_ref {
+            return Err(Error::InvalidDocument(format!(
+                "document ID '{alias_doc_id}' already belongs to another document"
+            )));
+        }
+    }
+
     systemstore
         .set(
             &DocIDToDocRefKey::new(alias_doc_id).bytes(),
-            &DocRef::new(collection_short_id, doc_short_id).encode(),
+            &new_ref.encode(),
         )
         .await
         .map_err(Error::Storage)?;
@@ -229,6 +238,43 @@ pub async fn get_doc_ids_for_block(
         }
     }
     Ok(doc_ids)
+}
+
+/// Resolve the document owners used to authorize a block.
+///
+/// `Some([])` identifies collection-level/non-document blocks, `Some(owners)`
+/// identifies document data, and `None` means a document block has no
+/// trustworthy owner yet and must not be served.
+pub async fn resolve_block_doc_ids(
+    systemstore: &NamespaceView,
+    cid: &cid::Cid,
+    block: &defra_core::Block,
+) -> Result<Option<Vec<String>>> {
+    let is_doc_delta = matches!(
+        block.delta,
+        defra_core::CrdtDelta::Lww(_)
+            | defra_core::CrdtDelta::Counter(_)
+            | defra_core::CrdtDelta::Composite(_)
+    );
+    if !is_doc_delta {
+        return Ok(Some(Vec::new()));
+    }
+
+    let mut doc_ids = get_doc_ids_for_block(systemstore, &cid.to_string()).await?;
+    if !doc_ids.is_empty() {
+        doc_ids.sort();
+        doc_ids.dedup();
+        return Ok(Some(doc_ids));
+    }
+
+    let is_genesis = block.heads.as_ref().is_none_or(Vec::is_empty)
+        && block.delta.priority() == 1
+        && matches!(block.delta, defra_core::CrdtDelta::Composite(_));
+    if is_genesis {
+        return Ok(Some(vec![document::DocID::new_v0(*cid).to_string()]));
+    }
+
+    Ok(None)
 }
 
 /// Delete the block ownership record for (block CID, DocID).
@@ -347,6 +393,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(a, b);
+    }
+
+    #[tokio::test]
+    async fn alias_cannot_replace_an_existing_document() {
+        let store = systemstore().await;
+        set_doc_id_mapping(&store, 3, 1, "bae-a").await.unwrap();
+        set_doc_id_mapping(&store, 3, 2, "bae-b").await.unwrap();
+
+        let error = set_doc_id_alias(&store, 3, 2, "bae-a").await.unwrap_err();
+
+        assert!(error.to_string().contains("already belongs"));
+        assert_eq!(get_doc_short_id(&store, 3, "bae-a").await.unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn setting_the_same_alias_is_idempotent() {
+        let store = systemstore().await;
+        set_doc_id_mapping(&store, 3, 1, "bae-a").await.unwrap();
+        store
+            .delete(&DocShortIDToDocIDAliasKey::new(1, "bae-a").bytes())
+            .await
+            .unwrap();
+
+        set_doc_id_alias(&store, 3, 1, "bae-a").await.unwrap();
+
+        assert_eq!(get_doc_short_id(&store, 3, "bae-a").await.unwrap(), Some(1));
+        assert!(store
+            .has(&DocShortIDToDocIDAliasKey::new(1, "bae-a").bytes())
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn ownerless_document_blocks_are_not_authorizable() {
+        let store = systemstore().await;
+        let field_block = defra_core::Block::new(
+            defra_core::CrdtDelta::Lww(defra_core::LwwDeltaPayload {
+                field_name: "name".to_string(),
+                schema_version_id: "v1".to_string(),
+                priority: 1,
+                data: vec![1],
+            }),
+            vec![],
+            vec![],
+        );
+        let field_cid = field_block.generate_cid().unwrap();
+        assert_eq!(
+            resolve_block_doc_ids(&store, &field_cid, &field_block)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let genesis = defra_core::Block::new(
+            defra_core::CrdtDelta::Composite(defra_core::CompositeDeltaPayload {
+                schema_version_id: "v1".to_string(),
+                priority: 1,
+                status: 1,
+            }),
+            vec![],
+            vec![],
+        );
+        let genesis_cid = genesis.generate_cid().unwrap();
+        assert_eq!(
+            resolve_block_doc_ids(&store, &genesis_cid, &genesis)
+                .await
+                .unwrap(),
+            Some(vec![document::DocID::new_v0(genesis_cid).to_string()])
+        );
     }
 
     #[tokio::test]

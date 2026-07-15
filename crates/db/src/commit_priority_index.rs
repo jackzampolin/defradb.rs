@@ -65,7 +65,7 @@ impl<S: Store> DB<S> {
                 let Ok(cid) = Cid::from_str(cid_str) else {
                     continue;
                 };
-                if seen_root_heads.insert(cid) {
+                if seen_root_heads.insert((cid, doc_short_id)) {
                     root_heads.push((cid, doc_short_id));
                 }
             }
@@ -76,7 +76,7 @@ impl<S: Store> DB<S> {
             let mut indexed_count = 0u64;
 
             while let Some((cid, doc_short_id)) = stack.pop() {
-                if !visited.insert(cid) {
+                if !visited.insert((cid, doc_short_id)) {
                     continue;
                 }
 
@@ -157,6 +157,53 @@ mod tests {
             .await
             .unwrap()
             .is_some()
+    }
+
+    #[tokio::test]
+    async fn backfill_indexes_a_shared_cid_for_each_document() {
+        let db = DB::new(MemoryStore::new()).unwrap();
+        let block = Block::new(
+            defra_core::CrdtDelta::Lww(defra_core::LwwDeltaPayload {
+                field_name: "name".to_string(),
+                schema_version_id: "v1".to_string(),
+                priority: 1,
+                data: vec![1],
+            }),
+            vec![],
+            vec![],
+        );
+        let cid = block.generate_cid().unwrap();
+
+        let txn = db.new_txn(false).await.unwrap();
+        {
+            let blockstore = txn.blockstore().unwrap();
+            let headstore = txn.headstore().unwrap();
+            blockstore
+                .set(&cid.to_bytes(), &block.to_dag_cbor().unwrap())
+                .await
+                .unwrap();
+            for doc_short_id in [1, 2] {
+                headstore
+                    .set(
+                        &storage::keys::HeadstoreDocKey::new(doc_short_id, "name", cid).bytes(),
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        txn.commit().await.unwrap();
+
+        db.backfill_commit_priority_index().await.unwrap();
+
+        let txn = db.new_txn(true).await.unwrap();
+        let headstore = txn.headstore().unwrap();
+        for doc_short_id in [1, 2] {
+            assert!(headstore
+                .has(&HeadstorePriorityKey::new(doc_short_id, 1, cid).bytes())
+                .await
+                .unwrap());
+        }
     }
 
     #[tokio::test]

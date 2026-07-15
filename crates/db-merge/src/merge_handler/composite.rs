@@ -55,7 +55,9 @@ pub(crate) struct CompositeMergeState {
     pub(crate) any_field_applied: bool,
     pub(crate) encrypted_policy_checked: bool,
     pub(crate) field_block_heads: HashMap<String, Vec<Cid>>,
+    pub(crate) owned_field_cids: Vec<Cid>,
     pub(crate) linked_field_cids: Vec<Cid>,
+    pub(crate) linked_encryption_cids: Vec<Cid>,
     pub(crate) is_branchable: bool,
 }
 
@@ -383,7 +385,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         &doc_id_str,
                         cid,
                         block,
-                        &state.linked_field_cids,
+                        &state.owned_field_cids,
+                        &state.linked_encryption_cids,
                     )
                     .await?;
                 }
@@ -716,7 +719,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     &doc_id_str,
                     cid,
                     block,
-                    &state.linked_field_cids,
+                    &state.owned_field_cids,
+                    &state.linked_encryption_cids,
                 )
                 .await?;
 

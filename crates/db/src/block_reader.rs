@@ -40,8 +40,8 @@ pub async fn read_document_for_se<S: storage::corekv::Store>(
         .systemstore()
         .map_err(|e| format!("failed to get systemstore: {e}"))?;
 
-    let doc_short_id = match collection
-        .resolve_doc_short_id(&systemstore, &parsed_doc_id)
+    let (doc_short_id, canonical_doc_id) = match collection
+        .resolve_doc_identity(&systemstore, &parsed_doc_id)
         .await
         .map_err(|e| format!("failed to resolve doc short id: {e}"))?
     {
@@ -71,7 +71,7 @@ pub async fn read_document_for_se<S: storage::corekv::Store>(
     };
     let mut document =
         Document::from_cbor(&doc_bytes).map_err(|e| format!("failed to decode document: {e}"))?;
-    document.set_id(parsed_doc_id);
+    document.set_id(canonical_doc_id);
     if let Some(version_bytes) = version_bytes {
         if let Ok(version) = String::from_utf8(version_bytes) {
             document.set_schema_version_id(version);

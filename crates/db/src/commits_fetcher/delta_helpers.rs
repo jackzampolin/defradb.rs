@@ -23,15 +23,35 @@ impl<S: Store> CommitsFetcher<S> {
         }
     }
 
-    /// Resolve the DocID owning a block via the systemstore block-ownership
-    /// index (`/d/b`). Deltas no longer carry docIDs (Go #4838).
-    pub(super) async fn get_doc_id(&self, txn: &mut DbTxn<S>, cid: &Cid) -> Option<String> {
-        let systemstore = txn.systemstore().ok()?;
-        crate::doc_id_map::get_doc_ids_for_block(&systemstore, &cid.to_string())
-            .await
-            .ok()?
-            .into_iter()
-            .next()
+    /// Resolve every DocID owning a block. Field blocks can be shared by
+    /// multiple documents now that their payloads no longer embed identity.
+    pub(super) async fn get_doc_ids(
+        &self,
+        txn: &mut DbTxn<S>,
+        cid: &Cid,
+        block: &defra_core::Block,
+    ) -> crate::Result<Option<Vec<String>>> {
+        let systemstore = txn.systemstore()?;
+        crate::doc_id_map::resolve_block_doc_ids(&systemstore, cid, block).await
+    }
+
+    pub(super) async fn canonical_doc_id(
+        &self,
+        txn: &mut DbTxn<S>,
+        doc_id: &str,
+    ) -> crate::Result<String> {
+        let systemstore = txn.systemstore()?;
+        let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+            return Ok(doc_id.to_string());
+        };
+        crate::doc_id_map::get_doc_id(&systemstore, doc_ref.doc_short_id)
+            .await?
+            .ok_or_else(|| {
+                crate::Error::InvalidDocument(format!(
+                    "document short ID {} has no canonical DocID",
+                    doc_ref.doc_short_id
+                ))
+            })
     }
 
     /// Get delta data from delta

@@ -22,37 +22,6 @@ impl<S: Store + 'static> DbBlockClassifier<S> {
     }
 
     async fn doc_ids_for_block(&self, cid: &Cid, block: &DefraBlock) -> Option<Vec<String>> {
-        let is_doc_delta = matches!(
-            block.delta,
-            defra_core::CrdtDelta::Lww(_)
-                | defra_core::CrdtDelta::Counter(_)
-                | defra_core::CrdtDelta::Composite(_)
-        );
-        if !is_doc_delta {
-            return Some(Vec::new());
-        }
-
-        let mut doc_ids = self.doc_ids_from_ownership_index(cid).await?;
-        if !doc_ids.is_empty() {
-            doc_ids.sort();
-            doc_ids.dedup();
-            return Some(doc_ids);
-        }
-
-        // A genesis composite defines its own identity: its CID is the seed
-        // of the public DocID.
-        let no_heads = block.heads.as_ref().is_none_or(Vec::is_empty);
-        if matches!(block.delta, defra_core::CrdtDelta::Composite(_))
-            && block.delta.priority() == 1
-            && no_heads
-        {
-            return Some(vec![document::DocID::new_v0(*cid).to_string()]);
-        }
-
-        None
-    }
-
-    async fn doc_ids_from_ownership_index(&self, cid: &Cid) -> Option<Vec<String>> {
         let txn = self.db.new_txn(true).await.ok()?;
         let systemstore = match txn.systemstore() {
             Ok(systemstore) => systemstore,
@@ -61,9 +30,10 @@ impl<S: Store + 'static> DbBlockClassifier<S> {
                 return None;
             }
         };
-        let doc_ids = db::doc_id_map::get_doc_ids_for_block(&systemstore, &cid.to_string())
+        let doc_ids = db::doc_id_map::resolve_block_doc_ids(&systemstore, cid, block)
             .await
-            .ok();
+            .ok()
+            .flatten();
         let _ = txn.discard();
         doc_ids
     }

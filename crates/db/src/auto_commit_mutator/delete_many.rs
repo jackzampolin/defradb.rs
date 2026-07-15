@@ -52,7 +52,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         for doc_id in doc_ids {
             // Delete from datastore + indexes
-            let (existed, doc_short_id) = {
+            let (existed, doc_short_id, canonical_doc_id) = {
                 let datastore = txn.datastore().map_err(|e| {
                     query::error::QueryError::execution(format!(
                         "failed to get datastore for collection '{}': {}",
@@ -63,30 +63,30 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
                 })?;
 
-                let doc_short_id = match collection.resolve_doc_short_id(&systemstore, doc_id).await
-                {
-                    Ok(Some(id)) => id,
-                    Ok(None) => {
-                        results.push((doc_id.clone(), false, None));
-                        continue;
-                    }
-                    Err(e) => {
-                        warn!(
-                            collection = %collection_name,
-                            doc_id = %doc_id,
-                            error = %e,
-                            "Failed to resolve doc short ID in batch delete"
-                        );
-                        results.push((doc_id.clone(), false, None));
-                        continue;
-                    }
-                };
+                let (doc_short_id, canonical_doc_id) =
+                    match collection.resolve_doc_identity(&systemstore, doc_id).await {
+                        Ok(Some(identity)) => identity,
+                        Ok(None) => {
+                            results.push((doc_id.clone(), false, None));
+                            continue;
+                        }
+                        Err(e) => {
+                            return Err(query::error::QueryError::execution(format!(
+                                "failed to resolve document identity for '{doc_id}': {e}"
+                            )));
+                        }
+                    };
 
                 match collection
-                    .delete_with_indexes(&datastore, doc_id, doc_short_id, &index_manager)
+                    .delete_with_indexes(
+                        &datastore,
+                        &canonical_doc_id,
+                        doc_short_id,
+                        &index_manager,
+                    )
                     .await
                 {
-                    Ok(existed) => (existed, doc_short_id),
+                    Ok(existed) => (existed, doc_short_id, canonical_doc_id),
                     Err(e) => {
                         warn!(
                             collection = %collection_name,
@@ -103,7 +103,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             // Skip block-write and event emit for missing docs; DeleteNode
             // treats existed==false as a no-op.
             if !existed {
-                results.push((doc_id.clone(), existed, None));
+                results.push((canonical_doc_id, existed, None));
                 continue;
             }
 
@@ -119,7 +119,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 match write_delete_block(
                     &blockstore,
                     &headstore,
-                    &doc_id.to_string(),
+                    &canonical_doc_id.to_string(),
                     doc_short_id,
                     &schema_version_id,
                     sign_config.as_ref(),
@@ -134,7 +134,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                                 if let Err(e) = crate::doc_id_map::set_block_doc_id_mapping(
                                     &systemstore,
                                     &composite_cid.to_string(),
-                                    &doc_id.to_string(),
+                                    &canonical_doc_id.to_string(),
                                 )
                                 .await
                                 {
@@ -174,7 +174,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     Err(e) => {
                         warn!(
                             collection = %collection_name,
-                            doc_id = %doc_id,
+                            doc_id = %canonical_doc_id,
                             error = %e,
                             "Failed to write delete block in batch"
                         );
@@ -183,7 +183,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 }
             };
 
-            results.push((doc_id.clone(), existed, commit_result));
+            results.push((canonical_doc_id, existed, commit_result));
         }
 
         // A failed ownership registration must not commit a partial index for

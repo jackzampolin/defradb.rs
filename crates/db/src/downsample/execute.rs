@@ -337,6 +337,8 @@ impl<S: Store + 'static> crate::database::DB<S> {
         }
 
         let series_doc_id = self.series_doc_id(source_doc)?;
+        let series_lock = format!("downsample/{}/{}", plan.target.collection_id, series_doc_id);
+        let _series_guard = self.doc_write_queue().acquire(&series_lock).await;
 
         let current_target = self
             .find_downsample_target(&plan.target.name, &series_doc_id)

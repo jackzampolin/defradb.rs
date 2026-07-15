@@ -126,15 +126,14 @@ async fn verify_block_signature_with_blockstore<S: Store>(
         {
             let collection = collection.schema();
             if let Some(policy) = &collection.policy {
-                // Deltas no longer carry docIDs (Go #4838): resolve owners via
-                // the block-ownership index. Field blocks can be shared across
-                // documents, so allow if the caller can read ANY owning doc.
-                // Blocks with no recorded owners (e.g. non-doc blocks) fall
-                // through to the doc-less check.
+                // Field blocks can be shared across documents, so allow if the
+                // caller can read any owner. An ownerless document block is
+                // denied; only non-document blocks use collection-level access.
                 let owning_doc_ids =
-                    crate::doc_id_map::get_doc_ids_for_block(&systemstore, cid_str)
+                    crate::doc_id_map::resolve_block_doc_ids(&systemstore, &parsed_cid, &block)
                         .await
-                        .map_err(|e| format!("failed to resolve block owners: {}", e))?;
+                        .map_err(|e| format!("failed to resolve block owners: {}", e))?
+                        .ok_or_else(|| "missing permission".to_string())?;
 
                 let node_did = database.node_did();
                 let checker = acp::read_access::DirectChecker {

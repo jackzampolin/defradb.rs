@@ -449,6 +449,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 let result = self
                     .process_counter_delta_in_txn(
                         &mut ds,
+                        headstore,
                         cid,
                         payload,
                         metadata.collection_id,

@@ -347,7 +347,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     async fn update(
         &self,
         collection_name: &str,
-        doc: Document,
+        mut doc: Document,
         modified_fields: std::collections::HashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         self.db
@@ -360,6 +360,21 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
+        let update_doc_id = doc
+            .id()
+            .cloned()
+            .ok_or_else(|| query::error::QueryError::execution("update requires a document ID"))?;
+        let (doc_short_id, canonical_doc_id) = collection
+            .require_doc_identity(&systemstore, &update_doc_id)
+            .await
+            .map_err(|e| match e {
+                crate::error::Error::DocumentNotFound(id) => {
+                    query::error::QueryError::document_not_found(id)
+                }
+                other => query::error::QueryError::execution(other.to_string()),
+            })?;
+        doc.set_id(canonical_doc_id.clone());
+
         self.db
             .validate_downsample_write(
                 &datastore,
@@ -370,20 +385,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             )
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-
-        let update_doc_id = doc
-            .id()
-            .cloned()
-            .ok_or_else(|| query::error::QueryError::execution("update requires a document ID"))?;
-        let doc_short_id = collection
-            .require_doc_short_id(&systemstore, &update_doc_id)
-            .await
-            .map_err(|e| match e {
-                crate::error::Error::DocumentNotFound(id) => {
-                    query::error::QueryError::document_not_found(id)
-                }
-                other => query::error::QueryError::execution(other.to_string()),
-            })?;
 
         // #1044 record-then-finalize: write the doc blob + indexes with the
         // query-plan's provisional counter value, but do NOT do the counter RMW
@@ -405,7 +406,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .any(|f| f.crdt_type.is_counter() && doc.get_counter_delta(&f.name).is_some())
         {
             collection
-                .get_with_datastore(&datastore, doc_short_id, &update_doc_id)
+                .get_with_datastore(&datastore, doc_short_id, &canonical_doc_id)
                 .await
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?
         } else {
@@ -495,7 +496,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             crate::auto_commit_mutator::helpers::register_block_doc_id_mappings(
                 &systemstore,
                 &block_result,
-                &update_doc_id.to_string(),
+                &canonical_doc_id.to_string(),
             )
             .await?;
 
@@ -560,8 +561,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
-        let Some(doc_short_id) = collection
-            .resolve_doc_short_id(&systemstore, doc_id)
+        let Some((doc_short_id, canonical_doc_id)) = collection
+            .resolve_doc_identity(&systemstore, doc_id)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?
         else {
@@ -569,7 +570,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         };
 
         let pre_delete_document_json = collection
-            .get_with_datastore(&datastore, doc_short_id, doc_id)
+            .get_with_datastore(&datastore, doc_short_id, &canonical_doc_id)
             .await
             .map_err(|e| {
                 query::error::QueryError::execution(format!("pre-delete document read failed: {e}"))
@@ -577,12 +578,12 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .and_then(|doc| document_json_value(&doc));
 
         let existed = collection
-            .delete_with_indexes(&datastore, doc_id, doc_short_id, &index_manager)
+            .delete_with_indexes(&datastore, &canonical_doc_id, doc_short_id, &index_manager)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))?;
 
         if !existed {
-            return Ok(DeleteResult::new(doc_id.clone(), existed));
+            return Ok(DeleteResult::new(canonical_doc_id, existed));
         }
 
         let (doc_cid, doc_block, col_block_data) = {
@@ -604,7 +605,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             let block_result = write_delete_block(
                 &blockstore,
                 &headstore,
-                &doc_id.to_string(),
+                &canonical_doc_id.to_string(),
                 doc_short_id,
                 schema_version_id,
                 sign_config.as_ref(),
@@ -620,7 +621,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             crate::doc_id_map::set_block_doc_id_mapping(
                 &systemstore,
                 &block_result.cid.to_string(),
-                &doc_id.to_string(),
+                &canonical_doc_id.to_string(),
             )
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
@@ -657,7 +658,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         self.register_update_callback(
             collection_name.to_string(),
             collection.collection_id().to_string(),
-            doc_id.to_string(),
+            canonical_doc_id.to_string(),
             doc_cid,
             doc_block,
             pre_delete_document_json,
@@ -665,7 +666,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         )
         .await?;
 
-        Ok(DeleteResult::new(doc_id.clone(), existed))
+        Ok(DeleteResult::new(canonical_doc_id, existed))
     }
 
     async fn exists(&self, collection_name: &str, doc_id: &DocID) -> query::error::Result<bool> {
@@ -698,6 +699,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use document::NormalValue;
     use events::{Bus, ChannelBus, EventName};
     use query::mutator::DocMutator;
     use schema::{CType, CollectionVersion, FieldDescription, FieldKind};
@@ -762,6 +764,69 @@ mod tests {
             .expect("counter value");
         assert_eq!(bytes.len(), 8, "int64 counter store value is 8 bytes");
         i64::from_be_bytes(bytes.try_into().unwrap())
+    }
+
+    #[tokio::test]
+    async fn alias_reads_and_mutations_use_the_canonical_doc_id() {
+        let (db, _bus) = make_test_db_with_bus().await;
+        db.create_collection(test_collection()).await.unwrap();
+        let mutator = crate::AutoCommitMutator::new(db.clone());
+        let mut doc = Document::new();
+        doc.set("x", NormalValue::Int(1));
+        let created = mutator.create("TestDoc", doc).await.unwrap();
+        let canonical_doc_id = created.doc_id;
+        let alias =
+            DocID::new_v0(defra_core::block::generate_cid_from_bytes(b"imported-alias").unwrap());
+
+        let txn = db.new_txn(false).await.unwrap();
+        {
+            let systemstore = txn.systemstore().unwrap();
+            let doc_ref =
+                crate::doc_id_map::get_doc_ref(&systemstore, &canonical_doc_id.to_string())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            crate::doc_id_map::set_doc_id_alias(
+                &systemstore,
+                doc_ref.collection_short_id,
+                doc_ref.doc_short_id,
+                &alias.to_string(),
+            )
+            .await
+            .unwrap();
+        }
+        txn.commit().await.unwrap();
+
+        let mut fetched = mutator
+            .get_for_update("TestDoc", &alias)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.id(), Some(&canonical_doc_id));
+        fetched.set_id(alias.clone());
+        fetched.set("x", NormalValue::Int(2));
+        let updated = mutator
+            .update(
+                "TestDoc",
+                fetched,
+                std::iter::once("x".to_string()).collect(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.document.id(), Some(&canonical_doc_id));
+
+        let deleted = mutator.delete("TestDoc", &alias).await.unwrap();
+        assert!(deleted.existed);
+        assert_eq!(deleted.doc_id, canonical_doc_id);
+        let txn = db.new_txn(true).await.unwrap();
+        let systemstore = txn.systemstore().unwrap();
+        let owners = crate::doc_id_map::get_doc_ids_for_block(
+            &systemstore,
+            &deleted.commit_cid.unwrap().to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(owners, vec![canonical_doc_id.to_string()]);
     }
 
     #[tokio::test]

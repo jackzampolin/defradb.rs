@@ -277,18 +277,20 @@ impl<S: Store> crate::database::DB<S> {
                 )
                 .await?;
 
-                let doc_id = crate::doc_id_map::get_doc_id(&systemstore, doc_short_id).await?;
-                for cid in &block_cids {
-                    let _ = blockstore.delete(&cid.to_bytes()).await;
-                    if let Some(ref doc_id) = doc_id {
-                        crate::doc_id_map::delete_block_doc_id_mapping(
-                            &systemstore,
-                            &cid.to_string(),
-                            doc_id,
-                        )
-                        .await?;
-                    }
-                }
+                let doc_id = crate::doc_id_map::get_doc_id(&systemstore, doc_short_id)
+                    .await?
+                    .ok_or_else(|| {
+                        Error::InvalidDocument(format!(
+                            "document short ID {doc_short_id} has no canonical DocID"
+                        ))
+                    })?;
+                crate::block_cleanup::delete_owned_dag(
+                    &blockstore,
+                    &systemstore,
+                    &block_cids,
+                    &doc_id,
+                )
+                .await?;
 
                 // Clear the identity mappings so recreating identical content
                 // does not trip the create duplicate check.
@@ -330,6 +332,7 @@ impl<S: Store> crate::database::DB<S> {
         let datastore = txn.datastore()?;
         let headstore = txn.headstore()?;
         let blockstore = txn.blockstore()?;
+        let systemstore = txn.systemstore()?;
 
         let result: Result<()> = async {
             // Delete index entries
@@ -345,7 +348,7 @@ impl<S: Store> crate::database::DB<S> {
                 while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
                     if let Some(cid_str) = extract_last_path_segment_str(&pair.key) {
                         if let Ok(cid) = cid::Cid::try_from(cid_str.as_str()) {
-                            block_cids.push(cid.to_bytes());
+                            block_cids.push(cid);
                         }
                     }
                 }
@@ -353,9 +356,8 @@ impl<S: Store> crate::database::DB<S> {
             }
             delete_prefix(&headstore, col_head_prefix).await?;
 
-            for cid_bytes in &block_cids {
-                let _ = blockstore.delete(cid_bytes).await;
-            }
+            crate::block_cleanup::delete_owned_dag(&blockstore, &systemstore, &block_cids, "")
+                .await?;
 
             // Delete the top-level doc/del/version prefixes
             let doc_prefix = format!("/d/{}/", collection_id).into_bytes();
@@ -372,6 +374,7 @@ impl<S: Store> crate::database::DB<S> {
         drop(datastore);
         drop(headstore);
         drop(blockstore);
+        drop(systemstore);
 
         match result {
             Ok(()) => {

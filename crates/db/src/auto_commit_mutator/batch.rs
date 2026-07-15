@@ -323,15 +323,24 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             modified_fields.insert(field);
         }
 
+        let doc_id = doc
+            .id()
+            .cloned()
+            .ok_or_else(|| query::error::QueryError::execution("update requires a document ID"))?;
+        let (doc_short_id, canonical_doc_id) = collection
+            .require_doc_identity(&systemstore, &doc_id)
+            .await
+            .map_err(|e| match e {
+                crate::error::Error::DocumentNotFound(id) => {
+                    query::error::QueryError::document_not_found(id)
+                }
+                other => query::error::QueryError::execution(other.to_string()),
+            })?;
+        doc.set_id(canonical_doc_id.clone());
+
         // Serialize this update's counter read-modify-write against concurrent
-        // merges/writes on the same document, held until the batch commits. The
-        // single-mutation path (`update_impl`) takes the same guard; without it a
-        // concurrent P2P counter merge can interleave its RMW and drop this
-        // increment (#1021).
-        let guard_doc_id = doc.id().map(|id| id.to_string());
-        if let Some(id) = guard_doc_id {
-            self.ensure_doc_guard(&id).await;
-        }
+        // merges/writes on the canonical document, held until the batch commits.
+        self.ensure_doc_guard(&canonical_doc_id.to_string()).await;
 
         self.db
             .validate_downsample_write(
@@ -343,20 +352,6 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             )
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-
-        let doc_id = doc
-            .id()
-            .cloned()
-            .ok_or_else(|| query::error::QueryError::execution("update requires a document ID"))?;
-        let doc_short_id = collection
-            .require_doc_short_id(&systemstore, &doc_id)
-            .await
-            .map_err(|e| match e {
-                crate::error::Error::DocumentNotFound(id) => {
-                    query::error::QueryError::document_not_found(id)
-                }
-                other => query::error::QueryError::execution(other.to_string()),
-            })?;
 
         write_local_update(
             &datastore,
@@ -370,7 +365,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
         let enc_config =
-            get_encryption_config().or_else(|| get_doc_encryption(&doc_id.to_string()));
+            get_encryption_config().or_else(|| get_doc_encryption(&canonical_doc_id.to_string()));
         let sign_config = get_signing_config();
 
         let (doc_cid, doc_block, col_block_data) = {
@@ -395,8 +390,12 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 ))
             })?;
 
-            register_block_doc_id_mappings(&systemstore, &block_result, &doc_id.to_string())
-                .await?;
+            register_block_doc_id_mappings(
+                &systemstore,
+                &block_result,
+                &canonical_doc_id.to_string(),
+            )
+            .await?;
 
             let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
             if collection.schema().is_branchable {
@@ -461,8 +460,8 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
-        let Some(doc_short_id) = collection
-            .resolve_doc_short_id(&systemstore, doc_id)
+        let Some((doc_short_id, canonical_doc_id)) = collection
+            .resolve_doc_identity(&systemstore, doc_id)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?
         else {
@@ -470,12 +469,12 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         };
 
         let existed = collection
-            .delete_with_indexes(&datastore, doc_id, doc_short_id, &index_manager)
+            .delete_with_indexes(&datastore, &canonical_doc_id, doc_short_id, &index_manager)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))?;
 
         if !existed {
-            return Ok(DeleteResult::new(doc_id.clone(), existed));
+            return Ok(DeleteResult::new(canonical_doc_id, existed));
         }
 
         let short_id = collection.resolved_root_id();
@@ -488,7 +487,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             let block_result = write_delete_block(
                 &blockstore,
                 &headstore,
-                &doc_id.to_string(),
+                &canonical_doc_id.to_string(),
                 doc_short_id,
                 schema_version_id,
                 sign_config.as_ref(),
@@ -506,7 +505,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             crate::doc_id_map::set_block_doc_id_mapping(
                 &systemstore,
                 &composite_cid.to_string(),
-                &doc_id.to_string(),
+                &canonical_doc_id.to_string(),
             )
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
@@ -542,14 +541,14 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         self.register_update_callback(
             collection_name.to_string(),
             collection.collection_id().to_string(),
-            doc_id.to_string(),
+            canonical_doc_id.to_string(),
             doc_cid,
             doc_block.clone(),
             col_block_data.clone(),
         )
         .await?;
 
-        let mut result = DeleteResult::with_commit(doc_id.clone(), existed, doc_cid, doc_block);
+        let mut result = DeleteResult::with_commit(canonical_doc_id, existed, doc_cid, doc_block);
         if let Some((col_cid, col_bytes)) = col_block_data {
             result.broadcast_cid = Some(col_cid);
             result.broadcast_block = Some(col_bytes);

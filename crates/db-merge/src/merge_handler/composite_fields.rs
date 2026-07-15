@@ -88,6 +88,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             };
             let linked_block = Block::from_dag_cbor(&linked_block_data)
                 .map_err(|e| MergeError::BlockDecode(e.to_string()))?;
+            state.owned_field_cids.push(*link_cid);
+            if let Some(encryption_cid) = &linked_block.encryption {
+                state.linked_encryption_cids.push(*encryption_cid);
+            }
 
             if let Some(heads) = &linked_block.heads {
                 state
@@ -141,6 +145,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     let result = self
                         .process_counter_delta_in_txn(
                             datastore,
+                            headstore,
                             &link_cid,
                             &counter_payload,
                             context.metadata.collection_id,

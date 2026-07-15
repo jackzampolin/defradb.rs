@@ -236,14 +236,34 @@ impl Collection {
         .await
     }
 
-    /// Resolve a public DocID to this collection's doc short ID, erroring
-    /// with `DocumentNotFound` when no mapping exists.
-    pub(crate) async fn require_doc_short_id(
+    /// Resolve an input DocID or alias to its local short ID and canonical
+    /// genesis-derived DocID.
+    pub(crate) async fn resolve_doc_identity(
         &self,
         systemstore: &NamespaceView,
         doc_id: &DocID,
-    ) -> Result<u64> {
-        self.resolve_doc_short_id(systemstore, doc_id)
+    ) -> Result<Option<(u64, DocID)>> {
+        let Some(doc_short_id) = self.resolve_doc_short_id(systemstore, doc_id).await? else {
+            return Ok(None);
+        };
+        let canonical = crate::doc_id_map::get_doc_id(systemstore, doc_short_id)
+            .await?
+            .ok_or_else(|| {
+                Error::InvalidDocument(format!(
+                    "document short ID {doc_short_id} has no canonical DocID"
+                ))
+            })?
+            .parse::<DocID>()?;
+        Ok(Some((doc_short_id, canonical)))
+    }
+
+    /// Resolve an input DocID or alias, returning the canonical identity.
+    pub(crate) async fn require_doc_identity(
+        &self,
+        systemstore: &NamespaceView,
+        doc_id: &DocID,
+    ) -> Result<(u64, DocID)> {
+        self.resolve_doc_identity(systemstore, doc_id)
             .await?
             .ok_or_else(|| Error::DocumentNotFound(doc_id.to_string()))
     }

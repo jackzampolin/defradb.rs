@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use document::Document;
+use document::{DocID, Document};
 use serde_json::Value as JsonValue;
 
 use storage::corekv::Store;
@@ -21,7 +21,7 @@ pub struct ImportStats {
 /// was imported (forward reference); applied after all imports.
 struct PendingRelation {
     collection_name: String,
-    doc: Document,
+    doc_id: DocID,
     fk_name: String,
     imported_doc_id: String,
 }
@@ -142,6 +142,8 @@ pub async fn import_database<S: Store + 'static>(
                 }
             }
 
+            ensure_doc_id_aliases_available(database, &aliases).await?;
+
             // Resolve relation targets through already-imported identities;
             // unresolved targets are stripped and applied after the import
             // completes (forward references).
@@ -185,31 +187,29 @@ pub async fn import_database<S: Store + 'static>(
                 }
             };
 
-            let new_doc_id = created_doc
-                .id()
-                .ok_or_else(|| {
-                    format!(
-                        "created document in '{}' is missing its derived DocID",
-                        collection_name
-                    )
-                })?
-                .to_string();
+            let new_doc_id = created_doc.id().cloned().ok_or_else(|| {
+                format!(
+                    "created document in '{}' is missing its derived DocID",
+                    collection_name
+                )
+            })?;
+            let new_doc_id_string = new_doc_id.to_string();
 
             register_doc_id_aliases(
                 database,
                 collection.resolved_root_id(),
-                &new_doc_id,
+                &new_doc_id_string,
                 &aliases,
             )
             .await?;
             for alias in aliases {
-                imported_doc_ids.insert(alias, new_doc_id.clone());
+                imported_doc_ids.insert(alias, new_doc_id_string.clone());
             }
 
             for (fk_name, imported_doc_id) in deferred_relations {
                 pending_relations.push(PendingRelation {
                     collection_name: collection_name.clone(),
-                    doc: created_doc.clone(),
+                    doc_id: new_doc_id.clone(),
                     fk_name,
                     imported_doc_id,
                 });
@@ -226,7 +226,21 @@ pub async fn import_database<S: Store + 'static>(
             .cloned()
             .unwrap_or(pending.imported_doc_id);
 
-        let mut doc = pending.doc;
+        let mut doc = mutator
+            .get_for_update(&pending.collection_name, &pending.doc_id)
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to reload relation document in '{}': {}",
+                    pending.collection_name, e
+                )
+            })?
+            .ok_or_else(|| {
+                format!(
+                    "imported document '{}' no longer exists in '{}'",
+                    pending.doc_id, pending.collection_name
+                )
+            })?;
         doc.set(pending.fk_name.clone(), target);
         let mut modified_fields = HashSet::new();
         modified_fields.insert(pending.fk_name.clone());
@@ -246,6 +260,45 @@ pub async fn import_database<S: Store + 'static>(
         documents_imported,
         collections_affected: collections_affected.into_iter().collect(),
     })
+}
+
+async fn ensure_doc_id_aliases_available<S: Store + 'static>(
+    database: &Arc<DB<S>>,
+    aliases: &[String],
+) -> Result<(), String> {
+    if aliases.is_empty() {
+        return Ok(());
+    }
+
+    let txn = database
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("failed to create alias lookup transaction: {e}"))?;
+    let result = {
+        let systemstore = txn
+            .systemstore()
+            .map_err(|e| format!("failed to get systemstore: {e}"))?;
+        let mut collision = false;
+        for alias in aliases {
+            if db::doc_id_map::get_doc_ref(&systemstore, alias)
+                .await
+                .map_err(|e| format!("doc-ID alias lookup failed: {e}"))?
+                .is_some()
+            {
+                collision = true;
+                break;
+            }
+        }
+        collision
+    };
+    txn.discard()
+        .map_err(|e| format!("failed to discard alias lookup transaction: {e}"))?;
+
+    if result {
+        Err("a document with the given ID already exists".to_string())
+    } else {
+        Ok(())
+    }
 }
 
 /// Register the file's original DocIDs as aliases of the imported

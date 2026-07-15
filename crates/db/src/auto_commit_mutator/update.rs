@@ -40,16 +40,51 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             modified_fields.insert(field);
         }
 
+        let input_doc_id = doc
+            .id()
+            .cloned()
+            .ok_or_else(|| query::error::QueryError::execution("update requires a document ID"))?;
+        let canonical_lock_id = {
+            let identity_txn = self.db.new_txn(true).await.map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to create identity transaction: {e}"
+                ))
+            })?;
+            let canonical = {
+                let systemstore = identity_txn.systemstore().map_err(|e| {
+                    query::error::QueryError::execution(format!("failed to get systemstore: {e}"))
+                })?;
+                collection
+                    .require_doc_identity(&systemstore, &input_doc_id)
+                    .await
+                    .map_err(|e| match e {
+                        crate::error::Error::DocumentNotFound(id) => {
+                            query::error::QueryError::document_not_found(id)
+                        }
+                        other => query::error::QueryError::execution(other.to_string()),
+                    })?
+                    .1
+            };
+            identity_txn.discard().map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to discard identity transaction: {e}"
+                ))
+            })?;
+            canonical
+        };
+        doc.set_id(canonical_lock_id.clone());
+
         // Serialize this write against concurrent merges (and other local writes)
         // touching the same document. Local counter increments and P2P merges both
         // read-modify-write the CRDT accumulation store; without this per-doc lock
         // their txns can race in a way the store's optimistic-conflict detection
         // does not always catch, dropping increments (#1021). The guard is held
         // across the whole write + commit.
-        let _doc_guard = match doc.id() {
-            Some(id) => Some(self.db.doc_write_queue().acquire(&id.to_string()).await),
-            None => None,
-        };
+        let _doc_guard = self
+            .db
+            .doc_write_queue()
+            .acquire(&canonical_lock_id.to_string())
+            .await;
 
         // Create a write transaction
         let txn = self.db.new_txn(false).await.map_err(|e| {
@@ -90,11 +125,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .await
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-            let doc_id = doc.id().cloned().ok_or_else(|| {
-                query::error::QueryError::execution("update requires a document ID")
-            })?;
-            let doc_short_id = collection
-                .require_doc_short_id(&systemstore, &doc_id)
+            let (doc_short_id, canonical_doc_id) = collection
+                .require_doc_identity(&systemstore, &input_doc_id)
                 .await
                 .map_err(|e| match e {
                     crate::error::Error::DocumentNotFound(id) => {
@@ -102,6 +134,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     }
                     other => query::error::QueryError::execution(other.to_string()),
                 })?;
+            doc.set_id(canonical_doc_id);
 
             // Bundle the counter RMW (#1021) with the doc blob + index write so
             // the authoritative CRDT accumulation store always advances before the

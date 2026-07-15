@@ -67,6 +67,7 @@ impl<S: Store> CommitsFetcher<S> {
         txn: &mut DbTxn<S>,
         cid: &Cid,
         block: &Block,
+        doc_id: Option<&str>,
     ) -> Result<Document> {
         tracing::debug!(
             cid = %cid,
@@ -85,7 +86,6 @@ impl<S: Store> CommitsFetcher<S> {
             field_name.map(|s| json!(s)).unwrap_or(JsonValue::Null),
         );
 
-        let doc_id = self.get_doc_id(txn, cid).await;
         map.insert(
             "docID".to_string(),
             doc_id.map(|s| json!(s)).unwrap_or(JsonValue::Null),
@@ -123,8 +123,6 @@ impl<S: Store> CommitsFetcher<S> {
                         } else {
                             link.name.clone()
                         };
-                        let doc_id = self.get_doc_id(txn, &link.link).await;
-
                         let nested_links = self.build_simple_links(txn, &linked_block).await;
                         let nested_heads = self.build_simple_heads(txn, &linked_block).await;
 
@@ -157,8 +155,6 @@ impl<S: Store> CommitsFetcher<S> {
                     Ok(head_block) => {
                         let height = head_block.delta.priority() as i64;
                         let field_name = self.get_field_name(&head_block.delta);
-                        let doc_id = self.get_doc_id(txn, head_cid).await;
-
                         let nested_links = self.build_simple_links(txn, &head_block).await;
                         let nested_heads = self.build_simple_heads(txn, &head_block).await;
 

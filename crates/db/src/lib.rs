@@ -48,6 +48,7 @@ pub mod auto_commit_mutator;
 // import directly from `db_backup::*`.
 // Block builder extracted to standalone db-blocks crate for parallel compilation.
 pub(crate) use db_blocks as block_builder;
+pub(crate) mod block_cleanup;
 pub mod block_reader;
 pub mod block_verify;
 pub mod collection;

@@ -1784,6 +1784,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_counter_block_is_applied_once_per_document() {
+        let (handler, blockstore) = make_handler_with_counter_schema().await;
+        let doc_ids = [
+            DocID::new_v0(
+                "bafyreihgg6a5auqhikq4nvw6fj3kbreovdbazlisbs5kerkahoqwwiz75i"
+                    .parse()
+                    .unwrap(),
+            )
+            .to_string(),
+            DocID::new_v0(
+                "bafyreie7rtdexuf47f633477mfieshkeh5rwnjeommkgqrzl22n6g4bfmm"
+                    .parse()
+                    .unwrap(),
+            )
+            .to_string(),
+        ];
+        let mut data = Vec::new();
+        ciborium::into_writer(&5_i64, &mut data).unwrap();
+        let payload = CounterDeltaPayload {
+            field_name: "score".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            data,
+            nonce: 7,
+        };
+        let block = Block::new(CrdtDelta::Counter(payload.clone()), vec![], vec![]);
+        let cid = block.generate_cid().unwrap();
+        blockstore
+            .put(&cid, &block.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+
+        for doc_id in &doc_ids {
+            register_test_block_owner(&handler, 1, doc_id, &cid).await;
+        }
+
+        for (index, doc_id) in doc_ids.iter().enumerate() {
+            let txn = handler.db.new_txn(false).await.unwrap();
+            let doc_short_id = {
+                let systemstore = txn.systemstore().unwrap();
+                db::doc_id_map::get_doc_ref(&systemstore, doc_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .doc_short_id
+            };
+            {
+                let mut datastore = txn.datastore().unwrap();
+                let headstore = txn.headstore().unwrap();
+                let result = handler
+                    .process_counter_delta_in_txn(
+                        &mut datastore,
+                        &headstore,
+                        &cid,
+                        &payload,
+                        Some("col-counters"),
+                        doc_id,
+                        doc_short_id,
+                    )
+                    .await
+                    .unwrap();
+                assert!(result.applied);
+            }
+            txn.force_commit().await.unwrap();
+            if index == 0 {
+                blockstore.mark_as_merged(&cid).await.unwrap();
+            }
+        }
+
+        for doc_id in &doc_ids {
+            assert_eq!(
+                read_counter_accumulation_store(&handler.db, "v1", doc_id, "score").await,
+                5
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn composite_merge_skips_locally_merged_counter_parent() {
         let (handler, blockstore) = make_handler_with_counter_schema().await;
         let collection = handler
@@ -2871,6 +2949,26 @@ mod tests {
             !blockstore.is_merged(&field_cid).await.unwrap(),
             "linked field block should stay unmerged when decryption fails and the field is skipped"
         );
+        let txn = handler.db.new_txn(true).await.unwrap();
+        let systemstore = txn.systemstore().unwrap();
+        let doc_short_id = db::doc_id_map::get_doc_ref(&systemstore, &doc_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .doc_short_id;
+        for owned_cid in [field_cid, encryption_cid] {
+            assert_eq!(
+                db::doc_id_map::get_doc_ids_for_block(&systemstore, &owned_cid.to_string(),)
+                    .await
+                    .unwrap(),
+                vec![doc_id.clone()]
+            );
+        }
+        let headstore = txn.headstore().unwrap();
+        assert!(!headstore
+            .has(&storage::keys::HeadstorePriorityKey::new(doc_short_id, 1, field_cid).bytes())
+            .await
+            .unwrap());
     }
 
     /// Stub KMS that returns a fixed key for every requested CID.

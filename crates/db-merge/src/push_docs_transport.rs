@@ -417,7 +417,7 @@ pub async fn push_existing_docs_via_transport_with_config<S: Store + 'static, T:
                     }
                 }
 
-                let doc_key = format!("/d/{}/{}", collection.collection_id(), doc_id).into_bytes();
+                let doc_key = storage::keys::doc_key(collection.collection_id(), *doc_short_id);
                 let doc_data = match datastore.get(&doc_key).await {
                     Ok(Some(data)) => data,
                     _ => continue,

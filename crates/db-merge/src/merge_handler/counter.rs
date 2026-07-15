@@ -67,6 +67,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
         // Create a new transaction for this merge
         let txn = self.db.new_txn(false).await?;
+        let doc_short_id = db::doc_id_map::get_doc_ref(&txn.systemstore()?, &doc_id_str)
+            .await
+            .map_err(MergeError::Database)?
+            .ok_or_else(|| {
+                MergeError::MissingMetadata(format!("document identity not found for {doc_id_str}"))
+            })?
+            .doc_short_id;
 
         // Create the Counter CRDT
         let counter = Counter::new(
@@ -84,6 +91,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Perform the merge in a scoped block
         let result = {
             let mut datastore = txn.datastore()?;
+            let headstore = txn.headstore()?;
             let mut doc_exists = false;
 
             // Seed the CRDT accumulation store from the document's current
@@ -92,22 +100,23 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             // writes and merges both RMW their delta into it, so once it holds a
             // value it is authoritative and must not be overwritten from a
             // possibly-stale blob. See `Counter::reconcile_int64`.
-            if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
-                if let Ok(Some(existing_doc)) = collection
-                    .get_by_doc_id(&datastore, &txn.systemstore()?, &doc_id)
-                    .await
-                {
-                    doc_exists = true;
-                    if let Some(field_value) = existing_doc.get(&payload.field_name) {
-                        match (numeric_kind, field_value) {
-                            (NumericKind::Int64, NormalValue::Int(v)) => {
-                                let _ = counter.reconcile_int64(&mut datastore, *v).await;
-                            }
-                            (NumericKind::Float64, NormalValue::Float64(v)) => {
-                                let _ = counter.reconcile_float64(&mut datastore, *v).await;
-                            }
-                            _ => {}
+            let doc_id = DocID::from_string(&doc_id_str)
+                .map_err(|e| MergeError::MergeFailed(format!("invalid doc ID: {e}")))?;
+            if let Some(existing_doc) = collection
+                .get_by_doc_id(&datastore, &txn.systemstore()?, &doc_id)
+                .await
+                .map_err(MergeError::Database)?
+            {
+                doc_exists = true;
+                if let Some(field_value) = existing_doc.get(&payload.field_name) {
+                    match (numeric_kind, field_value) {
+                        (NumericKind::Int64, NormalValue::Int(v)) => {
+                            let _ = counter.reconcile_int64(&mut datastore, *v).await;
                         }
+                        (NumericKind::Float64, NormalValue::Float64(v)) => {
+                            let _ = counter.reconcile_float64(&mut datastore, *v).await;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -119,11 +128,22 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 is_create: payload.priority == 1 && !doc_exists,
             };
 
-            counter.merge(&mut datastore, &ctx, &delta).await
+            self.merge_counter_once_for_document(
+                &mut datastore,
+                &headstore,
+                cid,
+                payload,
+                doc_short_id,
+                &counter,
+                &ctx,
+                &delta,
+                numeric_kind,
+            )
+            .await
         };
 
         match result {
-            Ok(_merge_result) => {
+            Ok(result) => {
                 txn.force_commit().await?;
                 self.best_effort_finalize_field_block_merge(cid).await;
                 tracing::info!(
@@ -132,7 +152,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     doc_id = %doc_id_str,
                     "Counter delta merged successfully"
                 );
-                Ok(MergeOutcome::Merged)
+                if result.applied {
+                    Ok(MergeOutcome::Merged)
+                } else {
+                    Ok(MergeOutcome::terminal_skip("already merged"))
+                }
             }
             Err(e) => {
                 if let Err(discard_err) = txn.force_discard() {
@@ -154,6 +178,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     pub(crate) async fn process_counter_delta_in_txn(
         &self,
         datastore: &mut NamespaceView,
+        headstore: &NamespaceView,
         cid: &Cid,
         payload: &defra_core::block::CounterDeltaPayload,
         fallback_collection_id: Option<&str>,
@@ -207,20 +232,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         )
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
-        // Already-merged (re-delivered) block: skip BEFORE any reconcile side
-        // effect, mirroring the standalone `process_counter_delta` ordering so the
-        // dedup/replay path never mutates the store. The block was already applied,
-        // so the store value is authoritative.
-        if self.blockstore.is_merged(cid).await.unwrap_or(false) {
-            let value = self
-                .read_counter_value(&counter, datastore, numeric_kind, &payload.field_name)
-                .await;
-            return Ok(CounterMergeResult {
-                applied: false,
-                value,
-            });
-        }
-
         // Seed the CRDT accumulation store from the document's current
         // materialized value only if the store is not yet initialized
         // (init-if-absent). The store is the single source of truth; local writes
@@ -228,22 +239,23 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // authoritative and must not be overwritten from a possibly-stale blob.
         // See `Counter::reconcile_int64`.
         let mut doc_exists = false;
-        if let Ok(doc_id) = DocID::from_string(doc_id_str) {
-            if let Ok(Some(existing_doc)) = collection
-                .get_with_datastore(datastore, doc_short_id, &doc_id)
-                .await
-            {
-                doc_exists = true;
-                if let Some(field_value) = existing_doc.get(&payload.field_name) {
-                    match (numeric_kind, field_value) {
-                        (NumericKind::Int64, NormalValue::Int(v)) => {
-                            let _ = counter.reconcile_int64(datastore, *v).await;
-                        }
-                        (NumericKind::Float64, NormalValue::Float64(v)) => {
-                            let _ = counter.reconcile_float64(datastore, *v).await;
-                        }
-                        _ => {}
+        let doc_id = DocID::from_string(doc_id_str)
+            .map_err(|e| MergeError::MergeFailed(format!("invalid doc ID: {e}")))?;
+        if let Some(existing_doc) = collection
+            .get_with_datastore(datastore, doc_short_id, &doc_id)
+            .await
+            .map_err(MergeError::Database)?
+        {
+            doc_exists = true;
+            if let Some(field_value) = existing_doc.get(&payload.field_name) {
+                match (numeric_kind, field_value) {
+                    (NumericKind::Int64, NormalValue::Int(v)) => {
+                        let _ = counter.reconcile_int64(datastore, *v).await;
                     }
+                    (NumericKind::Float64, NormalValue::Float64(v)) => {
+                        let _ = counter.reconcile_float64(datastore, *v).await;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -256,14 +268,59 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             is_create: payload.priority == 1 && !doc_exists,
         };
 
-        // Perform the merge
+        self.merge_counter_once_for_document(
+            datastore,
+            headstore,
+            cid,
+            payload,
+            doc_short_id,
+            &counter,
+            &ctx,
+            &delta,
+            numeric_kind,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn merge_counter_once_for_document(
+        &self,
+        datastore: &mut NamespaceView,
+        headstore: &NamespaceView,
+        cid: &Cid,
+        payload: &defra_core::block::CounterDeltaPayload,
+        doc_short_id: u64,
+        counter: &Counter,
+        context: &Context,
+        delta: &CounterDelta,
+        numeric_kind: NumericKind,
+    ) -> std::result::Result<CounterMergeResult, MergeError> {
+        let applied_key =
+            storage::keys::HeadstorePriorityKey::new(doc_short_id, payload.priority, *cid);
+        if headstore
+            .has(&applied_key.bytes())
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?
+        {
+            let value = self
+                .read_counter_value(counter, datastore, numeric_kind, &payload.field_name)
+                .await;
+            return Ok(CounterMergeResult {
+                applied: false,
+                value,
+            });
+        }
+
         let merge_result = counter
-            .merge(datastore, &ctx, &delta)
+            .merge(datastore, context, delta)
             .await
             .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
-        // Read the accumulated value (counters always accumulate, so we always read current)
+        headstore
+            .set(&applied_key.bytes(), &[])
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?;
         let value = self
-            .read_counter_value(&counter, datastore, numeric_kind, &payload.field_name)
+            .read_counter_value(counter, datastore, numeric_kind, &payload.field_name)
             .await;
 
         Ok(CounterMergeResult {

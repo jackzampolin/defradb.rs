@@ -11,10 +11,12 @@ impl Collection {
         systemstore: &NamespaceView,
         doc_id: &DocID,
     ) -> Result<Option<Document>> {
-        let Some(doc_short_id) = self.resolve_doc_short_id(systemstore, doc_id).await? else {
+        let Some((doc_short_id, canonical_doc_id)) =
+            self.resolve_doc_identity(systemstore, doc_id).await?
+        else {
             return Ok(None);
         };
-        self.get_with_datastore(datastore, doc_short_id, doc_id)
+        self.get_with_datastore(datastore, doc_short_id, &canonical_doc_id)
             .await
     }
 

@@ -74,20 +74,27 @@ impl<S: Store> VersionedFetcher<S> {
         }
 
         // Regular document CID path
-        let doc_id = self
-            .resolve_doc_id(txn, &target_cid)
+        let owners = self
+            .resolve_doc_ids(txn, &target_cid, &target_block)
             .await?
             .ok_or_else(|| {
                 Error::Serialization("cid either does not exist or belong to document".to_string())
             })?;
-
-        if let Some(expected) = expected_doc_id {
-            if doc_id != expected {
+        let selected_owners = if let Some(expected) = expected_doc_id {
+            let canonical_expected = self.canonical_doc_id(txn, expected).await?;
+            if !owners.iter().any(|owner| owner == &canonical_expected) {
                 return Err(Error::Serialization(
                     "cid either does not exist or belong to document".to_string(),
                 ));
             }
-        }
+            vec![canonical_expected]
+        } else if owners.is_empty() {
+            return Err(Error::Serialization(
+                "cid either does not exist or belong to document".to_string(),
+            ));
+        } else {
+            owners
+        };
 
         // Collect all blocks from target CID back to genesis
         let blocks = self
@@ -98,10 +105,10 @@ impl<S: Store> VersionedFetcher<S> {
         let mut sorted_blocks: Vec<(Cid, Block)> = blocks.into_iter().collect();
         sorted_blocks.sort_by_key(|(_, block)| block.delta.priority());
 
-        // Replay deltas to reconstruct document
-        let document = self.replay_deltas(&sorted_blocks, &doc_id)?;
-
-        Ok(vec![document])
+        selected_owners
+            .into_iter()
+            .map(|doc_id| self.replay_deltas(&sorted_blocks, &doc_id))
+            .collect()
     }
 
     /// Reconstruct documents from a collection-level CID.
@@ -132,7 +139,11 @@ impl<S: Store> VersionedFetcher<S> {
                     let doc_composite_cid = link.link;
                     // Load the document composite block to get its doc_id and priority
                     if let Ok(doc_block) = self.load_block(txn, &doc_composite_cid).await {
-                        if let Some(doc_id) = self.resolve_doc_id(txn, &doc_composite_cid).await? {
+                        if let Some(doc_id) = self
+                            .resolve_doc_ids(txn, &doc_composite_cid, &doc_block)
+                            .await?
+                            .and_then(|owners| owners.into_iter().next())
+                        {
                             let priority = doc_block.delta.priority();
                             match doc_composites.get(&doc_id) {
                                 None => {
@@ -170,7 +181,11 @@ impl<S: Store> VersionedFetcher<S> {
                 Ok(b) => b,
                 Err(_) => continue,
             };
-            let doc_id = match self.resolve_doc_id(txn, composite_cid).await? {
+            let doc_id = match self
+                .resolve_doc_ids(txn, composite_cid, &composite_block)
+                .await?
+                .and_then(|owners| owners.into_iter().next())
+            {
                 Some(id) => id,
                 None => continue,
             };
@@ -217,11 +232,29 @@ impl<S: Store> VersionedFetcher<S> {
 
     /// Resolve the DocID owning a block via the systemstore block-ownership
     /// index (`/d/b`). Deltas no longer carry docIDs (Go #4838).
-    async fn resolve_doc_id(&self, txn: &mut DbTxn<S>, cid: &Cid) -> Result<Option<String>> {
+    async fn resolve_doc_ids(
+        &self,
+        txn: &mut DbTxn<S>,
+        cid: &Cid,
+        block: &Block,
+    ) -> Result<Option<Vec<String>>> {
         let systemstore = txn.systemstore()?;
-        let owners =
-            crate::doc_id_map::get_doc_ids_for_block(&systemstore, &cid.to_string()).await?;
-        Ok(owners.into_iter().next())
+        crate::doc_id_map::resolve_block_doc_ids(&systemstore, cid, block).await
+    }
+
+    async fn canonical_doc_id(&self, txn: &mut DbTxn<S>, doc_id: &str) -> Result<String> {
+        let systemstore = txn.systemstore()?;
+        let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+            return Ok(doc_id.to_string());
+        };
+        crate::doc_id_map::get_doc_id(&systemstore, doc_ref.doc_short_id)
+            .await?
+            .ok_or_else(|| {
+                Error::InvalidDocument(format!(
+                    "document short ID {} has no canonical DocID",
+                    doc_ref.doc_short_id
+                ))
+            })
     }
 
     /// Collect all blocks from target CID back to genesis using BFS.

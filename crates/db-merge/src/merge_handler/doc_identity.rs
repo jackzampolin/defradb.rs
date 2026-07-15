@@ -149,6 +149,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         composite_cid: &Cid,
         block: &Block,
         linked_field_cids: &[Cid],
+        linked_encryption_cids: &[Cid],
     ) -> std::result::Result<(), MergeError> {
         db::doc_id_map::set_block_doc_id_mapping(systemstore, &composite_cid.to_string(), doc_id)
             .await
@@ -157,6 +158,15 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             db::doc_id_map::set_block_doc_id_mapping(systemstore, &field_cid.to_string(), doc_id)
                 .await
                 .map_err(MergeError::Database)?;
+        }
+        for encryption_cid in linked_encryption_cids {
+            db::doc_id_map::set_block_doc_id_mapping(
+                systemstore,
+                &encryption_cid.to_string(),
+                doc_id,
+            )
+            .await
+            .map_err(MergeError::Database)?;
         }
         if let Some(enc_cid) = &block.encryption {
             db::doc_id_map::set_block_doc_id_mapping(systemstore, &enc_cid.to_string(), doc_id)

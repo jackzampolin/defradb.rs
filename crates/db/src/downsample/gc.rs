@@ -2,7 +2,6 @@ use super::parse::*;
 use super::types::*;
 use crate::error::{Error, Result};
 use cid::Cid;
-use defra_core::block::Block;
 use query::fetcher::CommitsQueryOptions;
 use query::runner::DocFetcher;
 use std::collections::{HashMap, HashSet};
@@ -129,6 +128,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
         let txn = self.new_txn(false).await?;
         let headstore = txn.headstore()?;
         let blockstore = txn.blockstore()?;
+        let systemstore = txn.systemstore()?;
 
         let result: Result<()> = async {
             let mut iter = headstore
@@ -153,7 +153,6 @@ impl<S: Store + 'static> crate::database::DB<S> {
             iter.close().await.map_err(Error::Storage)?;
 
             let mut deleted_commits = HashSet::new();
-            let mut deleted_signatures = HashSet::new();
 
             for (key, cid) in keys_to_delete {
                 headstore.delete(&key).await.map_err(Error::Storage)?;
@@ -162,17 +161,8 @@ impl<S: Store + 'static> crate::database::DB<S> {
                     continue;
                 }
 
-                let block_key = cid.to_bytes();
-                if let Some(bytes) = blockstore.get(&block_key).await.map_err(Error::Storage)? {
-                    if let Ok(block) = Block::from_dag_cbor(&bytes) {
-                        if let Some(signature_cid) = block.signature {
-                            if deleted_signatures.insert(signature_cid) {
-                                let _ = blockstore.delete(&signature_cid.to_bytes()).await;
-                            }
-                        }
-                    }
-                }
-                let _ = blockstore.delete(&block_key).await;
+                crate::block_cleanup::delete_owned_commit(&blockstore, &systemstore, &cid, doc_id)
+                    .await?;
             }
 
             Ok(())
@@ -181,6 +171,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
 
         drop(headstore);
         drop(blockstore);
+        drop(systemstore);
 
         match result {
             Ok(()) => {

@@ -64,6 +64,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
         if let Some(links) = &context.block.links {
             for dag_link in links {
+                if !state.linked_field_cids.contains(&dag_link.link) {
+                    continue;
+                }
                 if let Some(parent_cids) = state.field_block_heads.get(&dag_link.name) {
                     for parent_cid in parent_cids {
                         let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
