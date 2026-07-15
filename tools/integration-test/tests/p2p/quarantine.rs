@@ -1,46 +1,70 @@
-//! #1128 end-to-end fence: terminal-failure quarantine under fleet-mirroring
-//! conditions.
+//! #1126 x #1128 composition fence: canonical-pick convergence with the
+//! quarantine guard staying silent.
 //!
-//! Mirrors the shape of the 2026-07-14 fleet incident (hub "Amy" held 6 stuck
-//! heads: docs whose unique `session_id` index rejected an incoming twin,
-//! re-driven by the 60s resync sweep forever) rather than a minimal repro:
-//! a 3-node fan-in (hub B, spokes A and C) with a UNIQUE index, a genuine
-//! content collision under concurrent *sound* traffic, and a hub restart that
-//! exercises the same resync path the incident's 60s sweep used, on a fast
-//! reconnect-triggered timescale instead of waiting out the real interval.
+//! Mirrors the shape of the 2026-07-14 fleet incident (hub "Amy" held 6
+//! stuck heads: docs whose unique `session_id` index rejected an incoming
+//! twin, re-driven by the 60s resync sweep forever) rather than a minimal
+//! repro — 3-node fan-in (hub B, spokes A and C), a UNIQUE index, a genuine
+//! content collision under concurrent *sound* traffic, and a hub restart —
+//! but proves the POST-#1126 outcome, not the pre-#1126 one.
 //!
-//! Phase 1 (conflict under concurrent sound traffic): B locally owns a
-//! `session_id` value under its own unique index. Spoke A pushes a twin
-//! document with the identical value over gossip (so the rejection runs
-//! through the real pending-DAG -> DagReady -> merge path, not a bundled
-//! push that might never touch the live queue) while spoke C concurrently
-//! fans in several unrelated, sound documents via a replicator. Asserts the
-//! twin is quarantined (counted + durably recorded), sound traffic is
-//! unharmed by the poisoned neighbor, and the live `pending_dags` queue
-//! drains to 0 while the quarantine gauge does not — the load-bearing
-//! contrast with the pre-fix behavior, where the rejected root would stay
-//! stuck in the live retry queue forever.
+//! #1126 changed what a live twin unique-index conflict does on the merge
+//! path: instead of rejecting (the incident's trigger), it now resolves
+//! deterministically — both documents persist, and the lexicographically
+//! smallest docID owns the unique index entry (the losing document stays
+//! fully readable by scan queries, just not by the index). #1128's
+//! quarantine mechanism is trigger-agnostic: it only acts on whatever
+//! `MergeOutcome::Rejected` the classification seam still produces. Composed
+//! together, the question this fence answers is: does #1126's canonical
+//! pick actually convergence through the real fan-in/gossip/merge stack
+//! (not just the db-merge unit level), and does #1128's guard stay quiet
+//! while it does — i.e. does the fleet incident's *signature* (a stuck head,
+//! re-driven forever, `pending_dag_terminal_quarantined` climbing) stay dead
+//! under the healed semantics, with no false-positive quarantine of a
+//! conflict that now resolves cleanly?
 //!
-//! Phase 2 (durability across restart): continuous unrelated writes from A
-//! travel the same missing-link path until B holds a live registration, then
-//! A is frozen mid-fetch (SIGSTOP) so a genuine durable pending-DAG record
-//! exists when B is hard-killed and respawned on its own rootdir. On
-//! reconnect, `handle_peer_connected` triggers
-//! `resync_persisted_pending_dags`, which must (a) restore the genuine
-//! frozen registrations and drive them to a real merge (anti-vacuity: the
-//! restore log fires AND both pending gauges drain to 0) while (b) NOT
-//! re-registering the quarantined root — proven by the fresh process's
-//! `pending_dag_terminal_quarantined` counter staying at 0 across a bounded
-//! window and through the recovery drain, since any re-registration would
-//! re-attempt the merge and re-hit the same deterministic rejection.
+//! Quarantine's OWN producer-level proof — that a `Rejected` outcome (today:
+//! only the degenerate arms `IndexManager::conflicting_doc_id` can't
+//! identify a holder for) still gets quarantined and never re-driven — lives
+//! in the crate tests, not here: `crates/db-merge/src/merge_handler/mod.rs`
+//! (`remote_composite_merge_with_corrupted_unique_index_entry_is_rejected`)
+//! for the degenerate-arm classification, and
+//! `crates/p2p/src/sync/manager/process/pending_dag.rs`
+//! (`quarantine_pending_dag_*`, `resync_deletes_live_leftover_of_quarantined_root_*`)
+//! for the disposition/suppression mechanics. Post-#1126, no public-API path
+//! in this integration harness can manufacture a genuine `Rejected` outcome
+//! any more (the live-twin trigger that could is exactly what #1126 healed),
+//! so an e2e fence asserting quarantine's OWN behavior would have no way to
+//! trigger it without reaching into internals the harness cannot touch —
+//! this fence instead proves the two changes compose correctly at the
+//! system level, which is the property only an e2e test can check.
+//!
+//! Phase 1 (composed convergence under concurrent sound traffic): B locally
+//! owns a `session_id` value under its own unique index. Spoke A pushes a
+//! twin document with the identical value over gossip (so it runs through
+//! the real pending-DAG -> DagReady -> merge path, not a bundled push that
+//! might never touch the live queue) while spoke C concurrently fans in
+//! several unrelated, sound documents via a replicator. Asserts: both
+//! twins persist (docID-level presence — canonical pick never drops data);
+//! the unique-index lookup on the shared value converges to exactly the
+//! lexicographically-smaller docID (computed independently in the test);
+//! sound traffic is unharmed by the colliding neighbor; the quarantine
+//! guard never fires (`pending_dag_terminal_quarantined == 0`,
+//! `quarantined_pending_dags == 0`); and the live `pending_dags` queue
+//! still drains to 0 — no wedge, the incident-class signature stays dead.
+//!
+//! Phase 2 (restart durability of composed state): B is hard-killed
+//! (SIGKILL) and respawned on its own rootdir. Asserts the composed state
+//! (both twins present, indexed lookup still resolving to the same winner)
+//! and the silent guard (`pending_dag_terminal_quarantined == 0`,
+//! `quarantined_pending_dags == 0`) both survive the restart, and that
+//! ordinary post-restart sound traffic from A and C still converges.
 //!
 //! Run with `DEFRA_E2E_KEEP=1` to retain node directories (including
 //! `logs/stdout.log` per node under `target/e2e/`) for post-mortem when a run
 //! fails — the harness normally cleans them up on success.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use integration_test::{extract_doc_id, extract_p2p_addr, poll_until, TestCluster};
@@ -53,19 +77,9 @@ const SPOKE_C: usize = 2;
 const CONFLICT_VALUE: &str = "conflict-v1";
 const SOUND_DOC_COUNT: usize = 5;
 
-fn signal(pid: u32, signal: &str) {
-    let status = std::process::Command::new("kill")
-        .arg(signal)
-        .arg(pid.to_string())
-        .status()
-        .expect("spawn kill");
-    assert!(status.success(), "kill {signal} {pid} failed");
-}
-
 /// The quarantine-relevant subset of `/api/v0/p2p/sync/status` (#1128).
 struct SyncStatusSnapshot {
     pending_dags: usize,
-    persisted_pending_dags: usize,
     pending_dag_terminal_quarantined: u64,
     quarantined_pending_dags: usize,
 }
@@ -82,10 +96,6 @@ async fn fetch_sync_status(cluster: &TestCluster, node: usize) -> SyncStatusSnap
         pending_dags: status["pending_dags"]
             .as_u64()
             .expect("pending_dags field present") as usize,
-        persisted_pending_dags: status["persisted_pending_dags"]
-            .as_u64()
-            .expect("persisted_pending_dags field present")
-            as usize,
         pending_dag_terminal_quarantined: status["pending_dag_terminal_quarantined"]
             .as_u64()
             .expect("pending_dag_terminal_quarantined field present"),
@@ -96,33 +106,51 @@ async fn fetch_sync_status(cluster: &TestCluster, node: usize) -> SyncStatusSnap
     }
 }
 
+/// Every `_docID` currently present in the `Session` collection.
+///
+/// Deliberately panics (rather than defaulting to an empty set) on a query
+/// error or an unexpected response shape: a transient failure here must
+/// fail the test loudly, not silently masquerade as "no documents present"
+/// and let a retention assertion downstream pass vacuously against an
+/// empty snapshot (review finding, #1128 task 8).
 fn doc_ids_present(client: &integration_test::DefraClient) -> HashSet<String> {
     let result = client
         .query("query { Session { _docID } }")
-        .unwrap_or_default();
+        .expect("Session _docID query failed");
     result["Session"]
         .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v["_docID"].as_str().map(str::to_string))
-                .collect()
+        .unwrap_or_else(|| {
+            panic!("Session _docID query did not return an array; full response: {result}")
         })
-        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| v["_docID"].as_str().map(str::to_string))
+        .collect()
 }
 
-fn hub_log_path(cluster: &TestCluster) -> std::path::PathBuf {
-    cluster.nodes[HUB]
-        .rootdir
-        .parent()
-        .expect("hub rootdir has a parent")
-        .join("logs/stdout.log")
+/// docIDs returned by an indexed lookup on `session_id`, driving the same
+/// error-loudly contract as [`doc_ids_present`].
+fn indexed_session_lookup(client: &integration_test::DefraClient, value: &str) -> Vec<String> {
+    let result = client
+        .query(&format!(
+            r#"query {{ Session(filter: {{session_id: {{_eq: "{value}"}}}}) {{ _docID }} }}"#
+        ))
+        .expect("indexed session_id lookup query failed");
+    result["Session"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!("indexed session_id lookup did not return an array; full response: {result}")
+        })
+        .iter()
+        .filter_map(|v| v["_docID"].as_str().map(str::to_string))
+        .collect()
 }
 
-/// 3-node fan-in (hub B, spokes A and C), a real unique-index collision under
-/// concurrent sound traffic, then a hub restart that must not re-drive the
-/// quarantined twin while still recovering a genuinely in-flight registration.
+/// 3-node fan-in (hub B, spokes A and C): a real unique-index collision
+/// under concurrent sound traffic converges via #1126's canonical pick
+/// without #1128's quarantine guard misfiring, and both properties survive
+/// a hub restart.
 #[tokio::test]
-async fn quarantine_survives_fan_in_and_hub_restart() {
+async fn canonical_pick_converges_and_quarantine_guard_stays_silent() {
     let mut cluster = TestCluster::builder()
         .rust_nodes(3)
         .with_node_store(HUB, "redb")
@@ -152,13 +180,13 @@ async fn quarantine_survives_fan_in_and_hub_restart() {
     node_a.p2p_connect(&[&addr_b]).expect("A connects to B");
     node_c.p2p_connect(&[&addr_b]).expect("C connects to B");
 
-    // Subscribe every node to the collection topic: A's twin push (and,
-    // later, its frozen post-restart document) deliberately travels the
-    // gossip head-announcement path rather than a bundled replicator push, so
-    // the receiver must register a pending-DAG entry and Bitswap-fetch the
-    // missing field block — the same mechanism the real incident's stuck
-    // heads went through, and the only way `pending_dags` genuinely carries
-    // the rejected root before quarantine removes it.
+    // Subscribe every node to the collection topic: A's twin push travels
+    // the gossip head-announcement path rather than a bundled replicator
+    // push, so the receiver must register a pending-DAG entry and
+    // Bitswap-fetch the missing field block — the same mechanism the real
+    // incident's stuck heads went through, and the only way the merge
+    // genuinely runs through the pending-DAG -> DagReady path instead of a
+    // bundled push that might never touch it.
     node_b
         .p2p_collection_add(&["Session"])
         .expect("B subscribe");
@@ -170,18 +198,19 @@ async fn quarantine_survives_fan_in_and_hub_restart() {
         .expect("C subscribe");
 
     // C fans in via an explicit replicator: deterministic, fast convergence
-    // for the "sound traffic unharmed by the poison neighbor" assertion,
+    // for the "sound traffic unharmed by the colliding neighbor" assertion,
     // independent of the gossip mechanism forcing A's twin through the
     // pending-DAG path.
     node_c
         .p2p_replicator_set(&["Session"], &addr_b)
         .expect("replicator C -> B");
 
-    // --- Phase 1: conflict under concurrent sound traffic ---
+    // --- Phase 1: composed convergence under concurrent sound traffic ---
 
     // B's unique index is created before any data lands, then B writes its
-    // own local doc under the value it owns — the "pre-fix-era twin" setup:
-    // a hub that already holds v under an active unique index.
+    // own local doc under the value it owns — the same setup that, pre
+    // #1126, produced the incident's twin rejection; post #1126 it instead
+    // sets up a genuine live conflict for the canonical pick to resolve.
     node_b
         .index_create(
             "Session",
@@ -232,323 +261,235 @@ async fn quarantine_survives_fan_in_and_hub_restart() {
         "C never produced its sound-doc load"
     );
 
-    // Anti-vacuity: the scenario must have produced a deterministic merge
-    // rejection, not just eventual quiescence.
-    let quarantine_deadline = Instant::now() + Duration::from_secs(30);
+    // The deterministic winner per #1126: the lexicographically smaller
+    // docID (computed here independently of production code, mirroring
+    // `IndexManager::save_resolving_unique_conflict`'s `doc_id <
+    // holder.as_str()` comparison in
+    // crates/db-index/src/index_manager/mod.rs). Arrival order does not
+    // matter — the pick is a pure function of the two docIDs.
+    let winner_doc_id = if x_doc_id < y_doc_id {
+        x_doc_id.clone()
+    } else {
+        y_doc_id.clone()
+    };
+    eprintln!(
+        "[compose fence] phase 1: X={x_doc_id}, Y={y_doc_id}, computed winner={winner_doc_id}"
+    );
+
+    // Composed convergence, polled together: BOTH twins present at the
+    // docID level (the positive evidence that a genuine collision
+    // occurred and that the CRDT merge never dropped data — anti-vacuity:
+    // if Y never shows up, the scenario never exercised the collision at
+    // all), C's sound docs all converge, and the unique-index lookup on
+    // the shared value resolves to exactly the computed winner (not zero,
+    // not both — exactly one).
+    let convergence_deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let status = fetch_sync_status(&cluster, HUB).await;
-        if status.pending_dag_terminal_quarantined >= 1 && status.quarantined_pending_dags >= 1 {
+        let present = doc_ids_present(&node_b);
+        let indexed = indexed_session_lookup(&node_b, CONFLICT_VALUE);
+        let x_present = present.contains(&x_doc_id);
+        let y_present = present.contains(&y_doc_id);
+        let sound_converged = sound_doc_ids.iter().all(|id| present.contains(id));
+        let index_converged = indexed == [winner_doc_id.clone()];
+
+        if x_present && y_present && sound_converged && index_converged {
             eprintln!(
-                "[quarantine e2e] phase 1: twin rejected+quarantined \
-                 (pending_dag_terminal_quarantined={}, quarantined_pending_dags={}, \
-                 pending_dags={})",
-                status.pending_dag_terminal_quarantined,
-                status.quarantined_pending_dags,
-                status.pending_dags
+                "[compose fence] phase 1 converged: both twins present, {} sound docs converged, \
+                 indexed lookup for {CONFLICT_VALUE} returns exactly the winner {winner_doc_id}",
+                sound_doc_ids.len()
             );
             break;
         }
-        assert!(
-            Instant::now() < quarantine_deadline,
-            "the scenario did not produce a deterministic merge rejection: B never quarantined \
-             the twin session_id={CONFLICT_VALUE} push (pending_dag_terminal_quarantined={}, \
-             quarantined_pending_dags={})",
-            status.pending_dag_terminal_quarantined,
-            status.quarantined_pending_dags
-        );
+
+        if Instant::now() >= convergence_deadline {
+            assert!(
+                y_present,
+                "anti-vacuity failure: twin Y ({y_doc_id}) never arrived on B — the scenario did \
+                 not exercise the unique-index collision at all, so this run proves nothing about \
+                 #1126 x #1128 composition"
+            );
+            assert!(
+                x_present,
+                "hub's own locally-created doc X ({x_doc_id}) is missing from B"
+            );
+            assert!(
+                sound_converged,
+                "C's sound docs did not all converge on B while the twin collision was resolving"
+            );
+            assert!(
+                index_converged,
+                "unique-index lookup for {CONFLICT_VALUE} did not converge to exactly the \
+                 computed winner {winner_doc_id}: got {indexed:?} — #1126's canonical pick did \
+                 not converge through the real fan-in/gossip/merge stack"
+            );
+            unreachable!(
+                "all convergence sub-conditions individually passed but the loop still timed out"
+            );
+        }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    // The load-bearing realism: sound traffic is unharmed by the poisoned
-    // neighbor. All of C's docs converge on B while the rejection is (or was
-    // just) being handled.
-    poll_until(
-        || {
-            let present = doc_ids_present(&node_b);
-            sound_doc_ids.iter().all(|id| present.contains(id))
-        },
-        Duration::from_secs(30),
-        Duration::from_millis(200),
-        "C's sound docs did not all converge on B while the twin rejection was in flight",
-    )
-    .await;
+    // The quarantine guard must stay silent: a live twin conflict resolves
+    // via #1126's canonical pick now, not via rejection, so #1128's
+    // mechanism must never fire for it. `pending_dag_terminal_quarantined`
+    // is a monotonic per-process counter, so a single read after
+    // convergence is equivalent to it never having moved throughout.
+    let status = fetch_sync_status(&cluster, HUB).await;
+    assert_eq!(
+        status.pending_dag_terminal_quarantined, 0,
+        "quarantine guard misfired: {} deterministic rejection(s) counted for a live twin \
+         conflict that should have converged via #1126's canonical pick instead of rejecting",
+        status.pending_dag_terminal_quarantined
+    );
+    assert_eq!(
+        status.quarantined_pending_dags, 0,
+        "quarantine guard misfired: {} root(s) quarantined for a live twin conflict that should \
+         have converged via #1126's canonical pick instead of rejecting",
+        status.quarantined_pending_dags
+    );
 
-    // The quarantined root must leave the live retry queue permanently — the
-    // exact contrast with the pre-fix incident, where it would stay stuck in
-    // `pending_dags`, re-driven by the periodic sweep forever.
+    // The incident-class signature stays dead: the live retry queue must
+    // still drain to 0 (no wedge), with the quarantine guard remaining
+    // silent throughout the drain.
     let drain_deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let status = fetch_sync_status(&cluster, HUB).await;
         if status.pending_dags == 0 {
-            assert!(
-                status.quarantined_pending_dags >= 1,
-                "pending_dags drained to 0 but quarantined_pending_dags also dropped to {} \
-                 (the quarantine gauge must persist once a root is quarantined)",
-                status.quarantined_pending_dags
+            assert_eq!(
+                status.pending_dag_terminal_quarantined, 0,
+                "quarantine guard misfired while draining the live pending-DAG queue"
+            );
+            assert_eq!(
+                status.quarantined_pending_dags, 0,
+                "quarantine guard misfired while draining the live pending-DAG queue"
             );
             break;
         }
         assert!(
             Instant::now() < drain_deadline,
-            "B's live pending_dags gauge never drained to 0 ({} still pending) — a quarantined \
-             root must leave the live retry queue instead of being re-driven",
+            "B's live pending_dags gauge never drained to 0 ({} still pending) — the incident's \
+             stuck-head signature is back",
             status.pending_dags
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    // Data-level confirmation: the rejected twin never lands, and the hub's
-    // own value survives the conflicting spoke push unchanged.
+    // Data-level confirmation: both documents are fully readable via a
+    // non-indexed scan (canonical pick never drops data), and each retains
+    // its own content.
     let rows = node_b
         .query("query { Session { _docID session_id note } }")
         .expect("query B Session")["Session"]
         .as_array()
         .cloned()
         .unwrap_or_default();
-    assert!(
-        !rows
-            .iter()
-            .any(|r| r["_docID"].as_str() == Some(y_doc_id.as_str())),
-        "rejected twin doc Y ({y_doc_id}) must never merge onto B's Session collection"
-    );
     let x_row = rows
         .iter()
         .find(|r| r["_docID"].as_str() == Some(x_doc_id.as_str()))
-        .expect("hub's own doc X missing from its own collection");
-    assert_eq!(
-        x_row["note"].as_str(),
-        Some("hub-owned"),
-        "hub's locally-owned value must survive the conflicting spoke push unchanged"
-    );
+        .expect("hub's own doc X missing from a full scan of its own collection");
+    assert_eq!(x_row["note"].as_str(), Some("hub-owned"));
+    let y_row = rows
+        .iter()
+        .find(|r| r["_docID"].as_str() == Some(y_doc_id.as_str()))
+        .expect("twin doc Y missing from a full scan — canonical pick must not drop data");
+    assert_eq!(y_row["note"].as_str(), Some("spoke-twin"));
 
-    // --- Phase 2: durability across restart ---
+    // --- Phase 2: restart durability of composed state ---
 
-    let quarantined_before = fetch_sync_status(&cluster, HUB)
-        .await
-        .quarantined_pending_dags;
-    assert!(
-        quarantined_before >= 1,
-        "phase 1 must leave a quarantined root behind"
-    );
-
-    // Force a genuine, still-open pending-DAG registration to exist at kill
-    // time. A single fresh document races the freeze — Bitswap can resolve
-    // the missing field block before the SIGSTOP even lands, as observed
-    // empirically (single-shot attempts never landed). Instead, drive
-    // continuous head-only load from A over the same missing-link gossip
-    // mechanism proven above for Y, so at least one registration is reliably
-    // mid-flight whenever the poll samples it (mirrors
-    // p2p_admission_restart.rs's continuous-writer-then-freeze technique,
-    // adapted from replicator pushes to gossip-forced ones).
-    let a_pid = cluster.nodes[SPOKE_A].process.id().expect("A pid");
-    let node_a = cluster.client(SPOKE_A);
-    let stop_writer = Arc::new(AtomicBool::new(false));
-    let w_doc_ids = Arc::new(Mutex::new(Vec::<String>::new()));
-    let writer_handle = {
-        let client = cluster.client(SPOKE_A);
-        let stop = Arc::clone(&stop_writer);
-        let doc_ids = Arc::clone(&w_doc_ids);
-        std::thread::spawn(move || {
-            let mut n = 0usize;
-            while !stop.load(Ordering::Relaxed) {
-                n += 1;
-                let mutation = format!(
-                    r#"mutation {{ add_Session(input: {{session_id: "post-restart-w-{n}", note: "v0"}}) {{ _docID }} }}"#
-                );
-                if let Ok(create) = client.query(&mutation) {
-                    doc_ids
-                        .lock()
-                        .unwrap()
-                        .push(extract_doc_id(&create, "add_Session"));
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        })
-    };
-
-    let freeze_deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        assert!(
-            Instant::now() < freeze_deadline,
-            "hub never showed a live pending-DAG registration under continuous gossip-forced \
-             load from A; without one, restarting B would prove nothing about restoring real \
-             (not synthetic) durable state"
-        );
-        if fetch_sync_status(&cluster, HUB).await.pending_dags == 0 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            continue;
-        }
-        signal(a_pid, "-STOP");
-        // Let any in-flight fetch settle: whatever can still resolve,
-        // resolves now (mirrors p2p_admission_restart.rs's freeze window).
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if fetch_sync_status(&cluster, HUB).await.pending_dags >= 1 {
-            break;
-        }
-        signal(a_pid, "-CONT");
-    }
-
-    // Anti-vacuity input: a durable record must exist before the kill, or
-    // the restore log below would have nothing genuine to restore.
-    let pre_kill_status = fetch_sync_status(&cluster, HUB).await;
-    assert!(
-        pre_kill_status.persisted_pending_dags >= 1,
-        "no durable pending-DAG record existed before the kill (persisted_pending_dags={}) — \
-         the restart would prove nothing about the resync path",
-        pre_kill_status.persisted_pending_dags
-    );
-    eprintln!(
-        "[quarantine e2e] phase 2 pre-kill: pending_dags={}, persisted_pending_dags={}, \
-         quarantined_pending_dags={}",
-        pre_kill_status.pending_dags,
-        pre_kill_status.persisted_pending_dags,
-        pre_kill_status.quarantined_pending_dags
-    );
-
-    // Snapshot B's merged documents right before the kill: everything B held
-    // must survive the restart on its redb rootdir.
+    // Pre-kill snapshot: everything B holds right now must survive the
+    // restart on its redb rootdir. Asserting it contains the known IDs
+    // (rather than trusting an unchecked snapshot) is the fix for the
+    // review finding: `doc_ids_present` used to swallow query errors into
+    // an empty set, which would let the post-restart retention assertion
+    // below pass vacuously against an empty "nothing lost" comparison if
+    // this snapshot silently came back empty. `doc_ids_present` itself now
+    // panics loudly on a query error (see its definition); this assertion
+    // is the second line of defense, failing loudly if the snapshot came
+    // back incomplete for any other reason.
     let pre_kill_docs = doc_ids_present(&node_b);
+    let pre_kill_missing: Vec<&str> = std::iter::once(x_doc_id.as_str())
+        .chain(std::iter::once(y_doc_id.as_str()))
+        .chain(sound_doc_ids.iter().map(String::as_str))
+        .filter(|id| !pre_kill_docs.contains(*id))
+        .collect();
+    assert!(
+        pre_kill_missing.is_empty(),
+        "pre-kill snapshot is missing known documents {pre_kill_missing:?} out of {} total docs \
+         present — doc_ids_present must never silently return an incomplete set",
+        pre_kill_docs.len()
+    );
 
     cluster.nodes[HUB].process.kill();
-    stop_writer.store(true, Ordering::Relaxed);
-
     cluster
         .restart_node(HUB, Duration::from_secs(60))
         .await
         .expect("restart hub on its rootdir");
 
-    signal(a_pid, "-CONT");
-    writer_handle.join().expect("A writer thread panicked");
-    let w_doc_ids = Arc::try_unwrap(w_doc_ids)
-        .expect("writer joined")
-        .into_inner()
-        .unwrap();
-    assert!(
-        !w_doc_ids.is_empty(),
-        "A's writer thread never produced load"
-    );
-
     node_a.p2p_connect(&[&addr_b]).expect("A reconnect to B");
     node_c.p2p_connect(&[&addr_b]).expect("C reconnect to B");
 
-    // Anti-vacuity for the restart itself: the resync path must have
-    // demonstrably run and done real work (mirrors p2p_admission.rs's
-    // "hub never hit capacity" pattern — grep an emitted-only-when-true log
-    // line instead of trusting quiescence).
-    let hub_log = hub_log_path(&cluster);
-    let restore_deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let log = std::fs::read_to_string(&hub_log).unwrap_or_default();
-        if log.contains("restored persisted pending DAG registrations") {
-            break;
-        }
-        assert!(
-            Instant::now() < restore_deadline,
-            "resync path demonstrably never ran after hub restart+reconnect: \"restored \
-             persisted pending DAG registrations\" never logged (persisted_pending_dags was {} \
-             before the kill, so there was genuine work for it to restore)",
-            pre_kill_status.persisted_pending_dags
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-
-    // The quarantine gauge must survive the restart via hydration from
-    // `load_quarantined()`, not just in-memory bookkeeping that a fresh
-    // process would reset to 0.
-    let post_restart_status = fetch_sync_status(&cluster, HUB).await;
-    assert!(
-        post_restart_status.quarantined_pending_dags >= quarantined_before,
-        "quarantined_pending_dags did not survive the restart: was {quarantined_before} before \
-         the kill, {} after restart (must hydrate from load_quarantined at startup)",
-        post_restart_status.quarantined_pending_dags
-    );
-    eprintln!(
-        "[quarantine e2e] phase 2 post-restart: quarantined_pending_dags={} (was \
-         {quarantined_before} pre-kill), pending_dags={}, persisted_pending_dags={}, \
-         fresh-process pending_dag_terminal_quarantined={}",
-        post_restart_status.quarantined_pending_dags,
-        post_restart_status.pending_dags,
-        post_restart_status.persisted_pending_dags,
-        post_restart_status.pending_dag_terminal_quarantined
-    );
-
-    // The quarantined root must NOT be re-registered and re-driven. Because
-    // `pending_dag_terminal_quarantined` is a fresh-process counter (reset to
-    // 0 by the restart, unlike the durable gauge above), any re-registration
-    // of the quarantined root would attempt to re-merge it, re-hit the same
-    // deterministic rejection, and tick this counter off 0 — over a window
-    // spanning several 2s retry-clock ticks.
-    let flat_window_deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < flat_window_deadline {
-        let status = fetch_sync_status(&cluster, HUB).await;
-        assert_eq!(
-            status.pending_dag_terminal_quarantined, 0,
-            "the quarantined twin was re-registered and re-rejected after restart (fresh-process \
-             pending_dag_terminal_quarantined moved off 0) — suppression did not hold across \
-             restart+reconnect"
-        );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-
-    // The restored registrations must actually RESOLVE, not just restore:
-    // both pending gauges drain to 0 once B re-fetches the frozen roots'
-    // missing blocks from the reconnected A. Combined with the fresh-process
-    // quarantine counter staying 0 (checked above and re-checked below), a
-    // drained durable gauge proves every restored root exited through a
-    // successful merge — the only other counted exit is quarantine.
-    //
-    // Note deliberately NOT asserted: that every document A's writer created
-    // lands on B. A's docs travel by gossip, which is best-effort — an
-    // announcement published while B was dead (or before A re-established
-    // the connection) carries no re-delivery obligation. The durable
-    // recovery contract covers exactly the roots B had *registered*, and
-    // that is what the gauge drain verifies. (C's docs below are different:
-    // its replicator has a persistent retry ladder, so full convergence IS
-    // its contract.) This poll runs before C's post-restart pushes so fresh
-    // registrations from C cannot hold the gauges up.
-    let drain_recovery_deadline = Instant::now() + Duration::from_secs(45);
-    loop {
-        let status = fetch_sync_status(&cluster, HUB).await;
-        if status.pending_dags == 0 && status.persisted_pending_dags == 0 {
-            break;
-        }
-        assert!(
-            Instant::now() < drain_recovery_deadline,
-            "restored pending-DAG registrations never resolved after restart+reconnect \
-             (pending_dags={}, persisted_pending_dags={}; {} durable records existed pre-kill)",
-            status.pending_dags,
-            status.persisted_pending_dags,
-            pre_kill_status.persisted_pending_dags
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-
-    // Post-restart sound traffic from C (replicator path, persistent retry
-    // ladder) still converges on the restarted hub.
-    let post_restart_c_1 = node_c
-        .query(r#"mutation { add_Session(input: {session_id: "post-restart-c-1", note: "c-sound"}) { _docID } }"#)
-        .expect("create post-restart doc on C");
-    let post_restart_c_1_id = extract_doc_id(&post_restart_c_1, "add_Session");
-    let post_restart_c_2 = node_c
-        .query(r#"mutation { add_Session(input: {session_id: "post-restart-c-2", note: "c-sound"}) { _docID } }"#)
-        .expect("create post-restart doc on C");
-    let post_restart_c_2_id = extract_doc_id(&post_restart_c_2, "add_Session");
-
     let node_b_after = cluster.client(HUB);
+
+    // Composed state survives the restart: both twins still present, and
+    // the indexed lookup still resolves to the same winner (docIDs are
+    // immutable, so recomputing the pick from a fresh index on restart is
+    // identical to before the kill).
     poll_until(
         || {
             let present = doc_ids_present(&node_b_after);
-            present.contains(&post_restart_c_1_id) && present.contains(&post_restart_c_2_id)
+            let indexed = indexed_session_lookup(&node_b_after, CONFLICT_VALUE);
+            present.contains(&x_doc_id)
+                && present.contains(&y_doc_id)
+                && indexed == [winner_doc_id.clone()]
         },
-        Duration::from_secs(30),
+        Duration::from_secs(45),
         Duration::from_millis(200),
-        "post-restart sound traffic from C did not converge on B after reconnect",
+        "composed state (both twins present + indexed winner) did not survive hub restart+reconnect",
     )
     .await;
 
-    // Final state: everything B held pre-kill survived the restart, the
-    // quarantined twin stays gone (durable, not just in-memory), and the
-    // recovery drain above did not exit through a fresh quarantine.
+    // The silent guard survives the restart too: the durable gauge
+    // hydrates from `load_quarantined()` at startup (0 in, 0 out — nothing
+    // was ever quarantined), and the fresh process's occurrence counter
+    // starts at 0 and must stay there.
+    let post_restart_status = fetch_sync_status(&cluster, HUB).await;
+    assert_eq!(
+        post_restart_status.pending_dag_terminal_quarantined, 0,
+        "quarantine guard misfired after restart: fresh-process pending_dag_terminal_quarantined \
+         moved off 0 for a conflict that should stay resolved via canonical pick"
+    );
+    assert_eq!(
+        post_restart_status.quarantined_pending_dags, 0,
+        "quarantine guard misfired after restart: {} root(s) quarantined",
+        post_restart_status.quarantined_pending_dags
+    );
+
+    // Post-restart sound traffic from both A (gossip) and C (replicator)
+    // still converges on the restarted hub. Unlike traffic racing the
+    // kill/freeze window, these are ordinary live-network writes issued
+    // after reconnection completes, so best-effort gossip delivery is not
+    // a concern here.
+    let post_restart_a = node_a
+        .query(r#"mutation { add_Session(input: {session_id: "post-restart-a", note: "a-sound"}) { _docID } }"#)
+        .expect("create post-restart doc on A");
+    let post_restart_a_id = extract_doc_id(&post_restart_a, "add_Session");
+    let post_restart_c = node_c
+        .query(r#"mutation { add_Session(input: {session_id: "post-restart-c", note: "c-sound"}) { _docID } }"#)
+        .expect("create post-restart doc on C");
+    let post_restart_c_id = extract_doc_id(&post_restart_c, "add_Session");
+
+    poll_until(
+        || {
+            let present = doc_ids_present(&node_b_after);
+            present.contains(&post_restart_a_id) && present.contains(&post_restart_c_id)
+        },
+        Duration::from_secs(30),
+        Duration::from_millis(200),
+        "post-restart sound traffic from A and C did not converge on B after reconnect",
+    )
+    .await;
+
+    // Final retention: everything B held pre-kill survived the restart.
     let present_final = doc_ids_present(&node_b_after);
     let lost: Vec<&String> = pre_kill_docs
         .iter()
@@ -556,32 +497,19 @@ async fn quarantine_survives_fan_in_and_hub_restart() {
         .collect();
     assert!(
         lost.is_empty(),
-        "{} of {} documents merged before the kill are missing after restart: {:?}",
+        "{} of {} documents present before the kill are missing after restart: {:?}",
         lost.len(),
         pre_kill_docs.len(),
         lost
     );
-    assert!(
-        !present_final.contains(&y_doc_id),
-        "quarantined twin Y reappeared on B after restart — quarantine must be durable"
-    );
+
     let final_status = fetch_sync_status(&cluster, HUB).await;
-    assert_eq!(
-        final_status.pending_dag_terminal_quarantined, 0,
-        "recovery drained through a fresh quarantine, not through merges"
-    );
-    assert!(
-        final_status.quarantined_pending_dags >= quarantined_before,
-        "durable quarantine gauge decayed by the end of the run: {} < {quarantined_before}",
-        final_status.quarantined_pending_dags
-    );
+    assert_eq!(final_status.pending_dag_terminal_quarantined, 0);
+    assert_eq!(final_status.quarantined_pending_dags, 0);
     eprintln!(
-        "[quarantine e2e] final: quarantined_pending_dags={}, fresh-process \
-         pending_dag_terminal_quarantined={}, pending_dags={}, docs on B={} \
-         ({} pre-kill docs all retained, twin absent)",
-        final_status.quarantined_pending_dags,
-        final_status.pending_dag_terminal_quarantined,
-        final_status.pending_dags,
+        "[compose fence] final: winner={winner_doc_id}, docs on B={} ({} pre-kill docs all \
+         retained, both twins present), quarantine guard silent throughout \
+         (pending_dag_terminal_quarantined=0, quarantined_pending_dags=0)",
         present_final.len(),
         pre_kill_docs.len()
     );
