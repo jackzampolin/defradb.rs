@@ -14,6 +14,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         cid: &Cid,
         block: &Block,
     ) -> std::result::Result<String, MergeError> {
+        // A genesis composite (no heads) seeds its own DocID from its CID, so
+        // the ownership index could only ever hold that same derived value.
+        // Short-circuit before opening a read txn — this is the hot path for
+        // freshly created documents arriving over replication.
+        if block.heads.as_deref().is_none_or(<[Cid]>::is_empty) {
+            return Ok(db_blocks::derive_doc_id(cid));
+        }
+
         let txn = self.db.new_txn(true).await?;
         let systemstore = txn.systemstore().map_err(MergeError::Database)?;
         let mut visited = HashSet::new();
@@ -28,6 +36,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         block: &Block,
         visited: &mut HashSet<Cid>,
     ) -> std::result::Result<String, MergeError> {
+        // Genesis composite: identity is derived from the CID itself, so no
+        // ownership lookup is needed (see `resolve_composite_doc_id`).
+        let heads = block.heads.as_deref().unwrap_or(&[]);
+        if heads.is_empty() {
+            return Ok(db_blocks::derive_doc_id(cid));
+        }
+
         let owners = db::doc_id_map::get_doc_ids_for_block(systemstore, &cid.to_string())
             .await
             .map_err(MergeError::Database)?;
@@ -35,11 +50,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // authoritative for a composite when it names exactly one document.
         if owners.len() == 1 {
             return Ok(owners.into_iter().next().expect("len checked"));
-        }
-
-        let heads = block.heads.as_deref().unwrap_or(&[]);
-        if heads.is_empty() {
-            return Ok(db_blocks::derive_doc_id(cid));
         }
 
         for head_cid in heads {

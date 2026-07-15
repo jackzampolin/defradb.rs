@@ -79,13 +79,37 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         from_collection: bool,
         depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
+        // Fast path: gossip dual-broadcast (doc topic + collection topic) and
+        // batch-merge retries re-deliver the same composite repeatedly, so a
+        // hit here is the common case. Skip identity resolution and the
+        // per-document guard for an already-merged block; the guarded re-check
+        // below still covers the concurrent-first-delivery race.
+        {
+            let merged = self.merged_composites.lock().unwrap_or_else(|e| {
+                tracing::warn!("merged_composites lock poisoned, recovering");
+                e.into_inner()
+            });
+            if merged.contains(cid) {
+                return Ok(MergeOutcome::terminal_skip("already merged"));
+            }
+        }
+
         let doc_id_str = self.resolve_composite_doc_id(cid, block).await?;
         let _guard = self.merge_queue.acquire(&doc_id_str).await;
 
-        self.process_composite_delta_locked(cid, block, payload, metadata, from_collection, depth)
-            .await
+        self.process_composite_delta_locked(
+            cid,
+            block,
+            payload,
+            metadata,
+            from_collection,
+            depth,
+            doc_id_str,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn process_composite_delta_locked(
         &self,
         cid: &Cid,
@@ -94,6 +118,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         metadata: &BlockMetadata<'_>,
         from_collection: bool,
         depth: usize,
+        doc_id_str: String,
     ) -> std::result::Result<MergeOutcome, MergeError> {
         if depth >= super::MAX_MERGE_DEPTH {
             return Err(MergeError::depth_exceeded(cid, depth));
@@ -110,7 +135,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
-        let doc_id_str = self.resolve_composite_doc_id(cid, block).await?;
+        // Identity was resolved by the caller: `process_composite_delta` for the
+        // entry block, or the recursive head walk below for parents. A
+        // composite's heads are prior composites of the same document, so the
+        // DocID is invariant across the recursion.
 
         tracing::info!(
             cid = %cid,
@@ -222,6 +250,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         metadata,
                         from_collection,
                         depth + 1,
+                        doc_id_str.clone(),
                     ))
                     .await
                     {
