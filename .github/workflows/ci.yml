@@ -420,8 +420,12 @@ jobs:
       # convergence contract: rust_rust asserts #1126 canonical-pick semantics
       # and go_go asserts upstream Go's atomic twin rejection + silent
       # success-ack — go_go MUST fail (and force a pin update) the moment
-      # upstream Go starts converging. A mixed unique-twins probe is deferred
-      # in #1134 pending the partial-replay finding. DEFRA_CONFORMANCE_BINARY
+      # upstream Go starts converging. Note the exact-name selection below
+      # deliberately EXCLUDES `parity_unique_twins_mixed_partial_materialization`:
+      # it characterizes an upstream Go partial-materialization finding as a
+      # runnable repro artifact, and the decision to CI-enforce that pin is
+      # held until #1116 stage 3 changes the Rust sender's delivery shape
+      # (see the test's doc comment and #1134). DEFRA_CONFORMANCE_BINARY
       # points the harness at the restored Rust binary (this job builds to target/ci).
       - name: Run go-compat conformance parity
         if: matrix.suite == 'go-compat'
