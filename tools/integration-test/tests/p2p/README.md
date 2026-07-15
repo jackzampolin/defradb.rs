@@ -12,6 +12,7 @@ cargo test -p integration-test --test p2p
 | `document.rs` | 2 | Document replication across runtimes |
 | `idempotent_replay.rs` | 3 | Idempotent reconnect/replay behavior |
 | `management.rs` | 3 | P2P collection/replicator management |
+| `quarantine.rs` | 1 | #1126 x #1128 composition fence: canonical-pick convergence under fan-in with the quarantine guard staying silent, across a hub restart |
 | `receiver_pull.rs` | 1 | Paced receiver-pull convergence fence (#1116 stage 2 retry clock, storm bound) |
 | `sync.rs` | 11 | Sync protocol (document sync, versions, branchable, invalid CID) |
 | `trust_boundary.rs` | 3 | ACP enforcement at P2P trust boundaries |
@@ -21,7 +22,7 @@ cargo test -p integration-test --test p2p
 | `resilience.rs` | 9 | P2P stress tests (ignored by default) |
 | `write_contention.rs` | 9 | Concurrent write behavior across P2P topologies |
 
-**52 total tests: 41 active, 11 ignored.**
+**53 total tests: 42 active, 11 ignored.**
 
 ### Ignored
 

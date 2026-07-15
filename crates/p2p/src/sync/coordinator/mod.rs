@@ -148,6 +148,11 @@ pub struct SyncStatus {
     /// Milliseconds until the earliest due incomplete pending-DAG retry;
     /// `None` when no incomplete entry is registered.
     pub next_pending_retry_in_ms: Option<u64>,
+    /// Pending-DAG roots quarantined after a deterministic merge rejection
+    /// (#1128); see `SyncManager::quarantine_pending_dag`.
+    pub pending_dag_terminal_quarantined: u64,
+    /// Current gauge of quarantined pending-DAG roots (#1128).
+    pub quarantined_pending_dags: usize,
 }
 
 struct SyncShutdownState {
@@ -463,6 +468,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             pending_dag_retry_dispatched: diagnostics.pending_dag_retry_dispatched,
             pending_dag_retry_suppressed: diagnostics.pending_dag_retry_suppressed,
             next_pending_retry_in_ms: self.manager.next_pending_retry_in_ms(),
+            pending_dag_terminal_quarantined: diagnostics.pending_dag_terminal_quarantined,
+            quarantined_pending_dags: self.manager.quarantined_pending_count(),
         }
     }
 

@@ -225,6 +225,17 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     )
                     .await
                 {
+                    // A Rejected outcome (unique-index violation) surfaces AFTER
+                    // persist_merged_document has staged the doc's field data in
+                    // the SHARED batch txn, and the shared txn cannot roll back a
+                    // single block. Treat it as batch-poisoning: discard the whole
+                    // attempt and let the caller fall back to per-block processing,
+                    // whose per-CID txn discards cleanly and re-yields the clean
+                    // Rejected outcome (partial `results` are dropped with the Err).
+                    Ok(MergeOutcome::Rejected { reason }) => {
+                        batch_error = Some(MergeError::UniqueConstraintViolation(reason));
+                        break;
+                    }
                     Ok(outcome) => results.push(Ok(outcome)),
                     Err(e) => {
                         batch_error = Some(e);

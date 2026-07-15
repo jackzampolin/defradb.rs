@@ -407,6 +407,28 @@ where
                     }
                     tracing::debug!(cid = %cid, reason = %reason, "replication loop skipped block");
                 }
+                ReplicationResult::Quarantined {
+                    cid,
+                    doc_id,
+                    collection_id,
+                    reason,
+                } => {
+                    tracing::warn!(
+                        cid = %cid,
+                        doc_id = %doc_id,
+                        collection_id = %collection_id,
+                        reason = %reason,
+                        "Block quarantined: merge deterministically rejected, will not be re-driven locally"
+                    );
+                    event_bus.publish(events::Message::pending_dag_quarantined(
+                        events::PendingDagQuarantinedData {
+                            cid: *cid,
+                            doc_id: doc_id.clone(),
+                            collection_id: collection_id.clone(),
+                            reason: reason.clone(),
+                        },
+                    ));
+                }
                 _ => {}
             },
         )

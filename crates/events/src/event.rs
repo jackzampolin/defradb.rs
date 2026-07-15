@@ -25,6 +25,9 @@ pub enum EventName {
     AcpHeightAdvanced,
     /// ACP light client invalidated cached entries after a root change.
     AcpCacheInvalidated,
+    /// A pending-DAG root was quarantined after a deterministic merge
+    /// rejection (#1128) — the operator-facing forensics signal.
+    PendingDagQuarantined,
 }
 
 impl EventName {
@@ -49,6 +52,7 @@ impl std::fmt::Display for EventName {
             EventName::SEArtifactReceived => write!(f, "se-artifact-received"),
             EventName::AcpHeightAdvanced => write!(f, "acp-height-advanced"),
             EventName::AcpCacheInvalidated => write!(f, "acp-cache-invalidated"),
+            EventName::PendingDagQuarantined => write!(f, "pending-dag-quarantined"),
         }
     }
 }
@@ -84,6 +88,25 @@ pub struct TopicPeerEventData {
 pub struct SEArtifactReceivedData {
     /// Document ID the artifact is for.
     pub doc_id: String,
+}
+
+/// Pending-DAG quarantine event data (#1128).
+///
+/// Emitted when a pending-DAG root is quarantined after a deterministic
+/// merge rejection: the block is left unmerged and will not be re-driven
+/// locally. This is distinct from `MergeComplete` — the document did NOT
+/// merge — so fleet alerting can distinguish "caught up" from "stuck
+/// forever on bad content" without misreading a quarantine as a success.
+#[derive(Debug, Clone)]
+pub struct PendingDagQuarantinedData {
+    /// CID of the quarantined root block.
+    pub cid: Cid,
+    /// Document ID, if known.
+    pub doc_id: String,
+    /// Collection ID, if known.
+    pub collection_id: String,
+    /// Human-readable rejection reason (e.g. unique-index violation).
+    pub reason: String,
 }
 
 /// ACP light client height advancement event data.
@@ -199,6 +222,8 @@ pub enum MessageData {
     AcpHeightAdvanced(AcpHeightAdvancedData),
     /// ACP light client cache invalidated after a root change.
     AcpCacheInvalidated(AcpCacheInvalidatedData),
+    /// Pending-DAG root quarantined after a deterministic merge rejection.
+    PendingDagQuarantined(PendingDagQuarantinedData),
 }
 
 impl Message {
@@ -266,6 +291,14 @@ impl Message {
         }
     }
 
+    /// Create a new PendingDagQuarantined message.
+    pub fn pending_dag_quarantined(data: PendingDagQuarantinedData) -> Self {
+        Self {
+            name: EventName::PendingDagQuarantined,
+            data: MessageData::PendingDagQuarantined(data),
+        }
+    }
+
     /// Get the SEArtifactReceivedData if this is an SEArtifactReceived message.
     pub fn as_se_artifact_received(&self) -> Option<&SEArtifactReceivedData> {
         match &self.data {
@@ -310,6 +343,14 @@ impl Message {
     pub fn as_acp_cache_invalidated(&self) -> Option<&AcpCacheInvalidatedData> {
         match &self.data {
             MessageData::AcpCacheInvalidated(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Get the PendingDagQuarantinedData if this is a PendingDagQuarantined message.
+    pub fn as_pending_dag_quarantined(&self) -> Option<&PendingDagQuarantinedData> {
+        match &self.data {
+            MessageData::PendingDagQuarantined(d) => Some(d),
             _ => None,
         }
     }
@@ -358,5 +399,25 @@ mod tests {
         assert_eq!(mc_msg.name, EventName::MergeComplete);
         assert!(mc_msg.as_merge_complete().is_some());
         assert_eq!(mc_msg.as_merge_complete().unwrap().doc_id, "doc-789");
+    }
+
+    #[test]
+    fn test_pending_dag_quarantined_message() {
+        let data = PendingDagQuarantinedData {
+            cid: Cid::default(),
+            doc_id: "doc-1".to_string(),
+            collection_id: "col-1".to_string(),
+            reason: "unique constraint violation".to_string(),
+        };
+
+        let msg = Message::pending_dag_quarantined(data);
+        assert_eq!(msg.name, EventName::PendingDagQuarantined);
+        assert!(msg.as_merge_complete().is_none());
+        let quarantined = msg
+            .as_pending_dag_quarantined()
+            .expect("message should carry PendingDagQuarantinedData");
+        assert_eq!(quarantined.doc_id, "doc-1");
+        assert_eq!(quarantined.collection_id, "col-1");
+        assert_eq!(quarantined.reason, "unique constraint violation");
     }
 }

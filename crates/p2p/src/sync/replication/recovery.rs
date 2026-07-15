@@ -108,6 +108,24 @@ where
                     "Block merged during recovery but broadcast failed (expected - recovery mode)"
                 );
             }
+            ReplicationResult::Quarantined {
+                cid,
+                doc_id,
+                collection_id,
+                reason,
+            } => {
+                // Quarantine resolves the recovery obligation just like a
+                // merge or terminal skip: the block will not be retried
+                // locally again, so it counts as handled, not failed.
+                success_count += 1;
+                tracing::warn!(
+                    cid = %cid,
+                    doc_id = %doc_id,
+                    collection_id = %collection_id,
+                    reason = %reason,
+                    "Block quarantined during recovery: merge deterministically rejected"
+                );
+            }
             ReplicationResult::Failed { cid, error } => {
                 failure_count += 1;
                 tracing::error!(

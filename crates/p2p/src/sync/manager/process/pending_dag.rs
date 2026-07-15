@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::sync::manager::events::SyncEvent;
 use crate::sync::manager::links::{extract_ipld_links, find_all_missing_links};
 use crate::sync::manager::pending::{PendingDag, PENDING_DAG_TTL};
+use crate::sync::pending_store::{PersistedPendingDag, PersistedQuarantinedDag};
 
 use super::SyncManager;
 
@@ -708,6 +709,19 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 continue;
             }
 
+            // A quarantined root's live record is a leftover, not a
+            // recovery obligation. Steady state never reaches this branch
+            // (quarantine_pending_dag's own delete already removed the live
+            // record before this sweep ran); it only fires for the crash
+            // window between that write and delete (steps (2)->(3)). Either
+            // way the quarantine record is authoritative, so clean up the
+            // leftover instead of re-registering a root that will only be
+            // rejected again.
+            if matches!(store.is_quarantined(&root_cid).await, Ok(true)) {
+                self.remove_persisted_pending(&root_cid).await;
+                continue;
+            }
+
             let missing: Vec<Cid> = match self.blockstore.get(&root_cid).await {
                 Ok(Some(data)) => {
                     match find_all_missing_links(self.blockstore.as_ref(), &data).await {
@@ -803,6 +817,151 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             tracing::info!(restored, "restored persisted pending DAG registrations");
         }
         restored
+    }
+
+    /// Quarantine a terminally-rejected pending-DAG root (#1128).
+    ///
+    /// `MergeOutcome::Rejected` means the merge failed on the block's
+    /// *content* (e.g. a unique-index violation) rather than transiently:
+    /// replaying it will fail identically every time. Unlike a successful
+    /// merge, the block is deliberately left unmerged — a remote re-push can
+    /// still retry (sender-paced) and re-quarantine on repeat rejection —
+    /// but local re-drive (retry clock, resync sweep) must stop.
+    ///
+    /// Sequencing is load-bearing: the quarantine record is written to the
+    /// durable store BEFORE the live `/p2p/pending_dag/` record is deleted.
+    /// A crash in the window between the two leaves BOTH records on disk
+    /// rather than losing the live one; Task 4's resync sweep consults
+    /// `is_quarantined` before re-registering a leftover live record, so the
+    /// crash window self-heals instead of re-driving (or silently losing) a
+    /// merge that is now known to fail forever.
+    pub async fn quarantine_pending_dag(&self, root_cid: &Cid, reason: &str) {
+        let entry = self.build_quarantine_entry(root_cid, reason).await;
+
+        // Checked BEFORE the write: a remote re-push of an already-rejected
+        // root re-runs this function (repeat rejection is the expected,
+        // sender-paced retry — not a bug), and the gauge below counts
+        // distinct quarantined *roots*, not quarantine *occurrences*.
+        // Without this check a repeat rejection would drift the gauge above
+        // the true record count until the next restart's
+        // `install_pending_dag_store` hydration silently corrects it. The
+        // occurrence-level diagnostic counter
+        // (`pending_dag_terminal_quarantined`, below) is deliberately NOT
+        // deduped the same way — it exists to count every rejection event
+        // for alerting, gauge or no.
+        let mut already_quarantined = false;
+
+        if let Some(store) = self.pending_store() {
+            already_quarantined = matches!(store.is_quarantined(root_cid).await, Ok(true));
+
+            if let Err(error) = store.quarantine(root_cid, &entry).await {
+                tracing::error!(
+                    root_cid = %root_cid,
+                    error = %error,
+                    "Failed to write quarantine record; leaving the live pending-DAG registration in place for retry"
+                );
+                return;
+            }
+
+            if let Err(error) = store.remove(root_cid).await {
+                tracing::warn!(
+                    root_cid = %root_cid,
+                    error = %error,
+                    "Failed to delete live pending-DAG record after quarantine; the next resync sweep will self-heal"
+                );
+            }
+            // Unconditional, unlike `remove_persisted_pending`'s only-on-Ok
+            // drop: the quarantine write above (not the live-record delete)
+            // is this root's discharge point, so it must stop counting
+            // against the durable admission cap even if `store.remove` just
+            // failed above. The live record may still be on disk, but the
+            // resync sweep's `is_quarantined` check (Task 4) cleans up that
+            // leftover independently of this in-memory set.
+            self.persisted_roots.write().remove(root_cid);
+        }
+
+        self.pending_dags.write().remove(root_cid);
+        if !already_quarantined {
+            self.quarantined_pending_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.diagnostics.record_pending_dag_terminal_quarantined();
+
+        tracing::warn!(
+            root_cid = %root_cid,
+            doc_id = %entry.record.doc_id,
+            collection_id = %entry.record.collection_id,
+            reason = %reason,
+            "Pending DAG quarantined: merge deterministically rejected, will not be re-driven locally"
+        );
+    }
+
+    /// Build the quarantine record for `root_cid`, preferring the most
+    /// complete provenance available so quarantine never fails for lack of
+    /// it: the live durable record if one exists, else the in-memory
+    /// `PendingDag` entry, else an empty-provenance record as a last resort.
+    async fn build_quarantine_entry(
+        &self,
+        root_cid: &Cid,
+        reason: &str,
+    ) -> PersistedQuarantinedDag {
+        let record = match self.load_live_durable_record(root_cid).await {
+            Some(record) => record,
+            None => self
+                .pending_dags
+                .read()
+                .get(root_cid)
+                .map(|dag| PersistedPendingDag {
+                    doc_id: dag.doc_id.clone(),
+                    collection_id: dag.collection_id.clone(),
+                    creator: dag.creator.clone(),
+                    source_peer: dag.source_peer.clone(),
+                    is_explicit_replicator: dag.is_explicit_replicator,
+                    explicit_replay_authorization: dag
+                        .explicit_replay_authorization
+                        .as_ref()
+                        .map(Into::into),
+                })
+                .unwrap_or_else(|| PersistedPendingDag {
+                    doc_id: String::new(),
+                    collection_id: String::new(),
+                    creator: String::new(),
+                    source_peer: None,
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
+                }),
+        };
+
+        PersistedQuarantinedDag {
+            record,
+            reason: reason.to_string(),
+            quarantined_at_unix_secs: PersistedQuarantinedDag::now_unix_secs(),
+        }
+    }
+
+    /// Look up the live durable record for `root_cid`, if any. The store has
+    /// no by-CID lookup (only `load_all`/prefix scan), so this pays an O(n)
+    /// scan of the live keyspace — acceptable because quarantine only fires
+    /// on a deterministic content rejection, not the hot merge path.
+    async fn load_live_durable_record(&self, root_cid: &Cid) -> Option<PersistedPendingDag> {
+        if !self.persisted_roots.read().contains(root_cid) {
+            return None;
+        }
+        let store = self.pending_store()?;
+        match store.load_all().await {
+            Ok(records) => records
+                .into_iter()
+                .find(|(cid, _)| cid == root_cid)
+                .map(|(_, record)| record),
+            Err(error) => {
+                tracing::warn!(
+                    root_cid = %root_cid,
+                    error = %error,
+                    "Failed to load durable pending DAG records while building quarantine entry"
+                );
+                None
+            }
+        }
     }
 }
 
@@ -1088,6 +1247,250 @@ mod tests {
             } => assert_eq!(event_root, root_cid),
             other => panic!("expected DagReady, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn quarantine_pending_dag_moves_live_record_and_clears_in_memory_entry() {
+        use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
+
+        let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, _events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
+
+        let root = test_cid(1);
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        pending_store
+            .put(
+                &root,
+                &PersistedPendingDag {
+                    doc_id: "doc".to_string(),
+                    collection_id: "collection".to_string(),
+                    creator: "creator".to_string(),
+                    source_peer: Some("peer".to_string()),
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
+                },
+            )
+            .await
+            .expect("persist live pending dag record");
+
+        // Hydrates persisted_roots from the store (put must happen first, see
+        // install_pending_dag_store's hydration-at-install contract).
+        manager
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+
+        assert!(manager.insert_pending_dag(root, pending_dag("doc", Instant::now())));
+        assert_eq!(manager.pending_dag_count(), 1);
+
+        manager
+            .quarantine_pending_dag(&root, "unique constraint violation")
+            .await;
+
+        let quarantined = pending_store
+            .load_quarantined()
+            .await
+            .expect("load quarantined records");
+        assert_eq!(quarantined.len(), 1);
+        assert_eq!(quarantined[0].0, root);
+        assert_eq!(quarantined[0].1.reason, "unique constraint violation");
+        assert_eq!(quarantined[0].1.record.doc_id, "doc");
+
+        assert!(
+            pending_store.load_all().await.unwrap().is_empty(),
+            "live durable record must be removed once quarantined"
+        );
+        assert_eq!(
+            manager.pending_dag_count(),
+            0,
+            "in-memory entry must be cleared on quarantine"
+        );
+        assert_eq!(manager.persisted_pending_count(), 0);
+        assert_eq!(
+            manager
+                .diagnostics
+                .snapshot()
+                .pending_dag_terminal_quarantined,
+            1
+        );
+        assert_eq!(manager.quarantined_pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn quarantine_pending_dag_dedupes_gauge_on_repeat_rejection() {
+        use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
+
+        let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, _events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
+
+        let root = test_cid(1);
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        pending_store
+            .put(
+                &root,
+                &PersistedPendingDag {
+                    doc_id: "doc".to_string(),
+                    collection_id: "collection".to_string(),
+                    creator: "creator".to_string(),
+                    source_peer: Some("peer".to_string()),
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
+                },
+            )
+            .await
+            .expect("persist live pending dag record");
+
+        manager
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+
+        assert!(manager.insert_pending_dag(root, pending_dag("doc", Instant::now())));
+
+        // First rejection: quarantines the root, gauge and counter both move
+        // to 1.
+        manager
+            .quarantine_pending_dag(&root, "unique constraint violation")
+            .await;
+        assert_eq!(manager.quarantined_pending_count(), 1);
+        assert_eq!(
+            manager
+                .diagnostics
+                .snapshot()
+                .pending_dag_terminal_quarantined,
+            1
+        );
+
+        // Second rejection of the SAME root (e.g. a sender-paced re-push
+        // after the first rejection re-hits the same deterministic
+        // classification): the occurrence counter keeps counting, but the
+        // gauge must NOT double-count a root that was already quarantined —
+        // it tracks distinct quarantined roots, not quarantine events.
+        manager
+            .quarantine_pending_dag(&root, "unique constraint violation")
+            .await;
+        assert_eq!(
+            manager
+                .diagnostics
+                .snapshot()
+                .pending_dag_terminal_quarantined,
+            2,
+            "the occurrence-level diagnostic counter must count every rejection"
+        );
+        assert_eq!(
+            manager.quarantined_pending_count(),
+            1,
+            "the gauge must not drift above the true number of quarantined roots on repeat rejection"
+        );
+
+        let quarantined = pending_store
+            .load_quarantined()
+            .await
+            .expect("load quarantined records");
+        assert_eq!(
+            quarantined.len(),
+            1,
+            "the store itself must hold exactly one quarantine record for this root"
+        );
+    }
+
+    #[tokio::test]
+    async fn quarantine_pending_dag_synthesizes_record_when_no_durable_record_exists() {
+        let manager = test_manager();
+        let root = test_cid(1);
+
+        assert!(manager.insert_pending_dag(root, pending_dag("doc-in-memory", Instant::now())));
+
+        // No pending store installed at all: quarantine must still succeed
+        // (never fail for lack of provenance) and clear the in-memory entry.
+        manager
+            .quarantine_pending_dag(&root, "unique constraint violation")
+            .await;
+
+        assert_eq!(manager.pending_dag_count(), 0);
+        assert_eq!(
+            manager
+                .diagnostics
+                .snapshot()
+                .pending_dag_terminal_quarantined,
+            1
+        );
+        assert_eq!(manager.quarantined_pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn resync_deletes_live_leftover_of_quarantined_root_without_redriving() {
+        use crate::sync::pending_store::{
+            PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedQuarantinedDag,
+        };
+
+        let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, mut events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
+
+        let root = test_cid(1);
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        let record = PersistedPendingDag {
+            doc_id: "doc".to_string(),
+            collection_id: "collection".to_string(),
+            creator: "creator".to_string(),
+            source_peer: Some("peer".to_string()),
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+        };
+
+        // Simulate the crash window inside `quarantine_pending_dag` between
+        // writing the quarantine record and deleting the live one: both
+        // records exist on disk simultaneously.
+        pending_store
+            .put(&root, &record)
+            .await
+            .expect("persist live leftover record");
+        pending_store
+            .quarantine(
+                &root,
+                &PersistedQuarantinedDag {
+                    record: record.clone(),
+                    reason: "unique constraint violation".to_string(),
+                    quarantined_at_unix_secs: PersistedQuarantinedDag::now_unix_secs(),
+                },
+            )
+            .await
+            .expect("persist quarantine record");
+
+        manager
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+
+        // Pins the restart-hydration property the e2e composition fence no
+        // longer covers: the in-memory gauge is rebuilt from load_quarantined.
+        assert_eq!(manager.quarantined_pending_count(), 1);
+
+        let restored = manager.resync_persisted_pending_dags().await;
+
+        assert_eq!(restored, 0, "a quarantined root must not be re-registered");
+        assert_eq!(
+            manager.pending_dag_count(),
+            0,
+            "in-memory pending map must stay empty for a quarantined root"
+        );
+        assert!(
+            pending_store.load_all().await.unwrap().is_empty(),
+            "the resync sweep must delete the live leftover record"
+        );
+        assert!(
+            pending_store
+                .load_quarantined()
+                .await
+                .unwrap()
+                .iter()
+                .any(|(cid, _)| *cid == root),
+            "the quarantine record itself must survive the sweep"
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "no DagNeedsFetch/DagReady must be emitted for a quarantined root"
+        );
     }
 
     #[tokio::test(start_paused = true)]
