@@ -105,6 +105,24 @@ impl ReplicationLoop {
                     ReplicationResult::Skipped { cid, reason, .. } => {
                         tracing::debug!(cid = %cid, reason = %reason, "Block skipped");
                     }
+                    ReplicationResult::Quarantined {
+                        cid,
+                        doc_id,
+                        collection_id,
+                        reason,
+                    } => {
+                        // Non-fatal: local re-drive has stopped for this
+                        // root, but the loop keeps processing other events.
+                        // This line is the operator's forensics pointer —
+                        // the record now lives under /p2p/quarantined_dag/.
+                        tracing::warn!(
+                            cid = %cid,
+                            doc_id = %doc_id,
+                            collection_id = %collection_id,
+                            reason = %reason,
+                            "Block quarantined: merge deterministically rejected, will not be re-driven locally"
+                        );
+                    }
                     ReplicationResult::Failed { cid, error } => {
                         tracing::error!(cid = %cid, error = %error, "Block merge failed");
                         if !config.continue_on_error {

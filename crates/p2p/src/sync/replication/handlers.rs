@@ -350,6 +350,16 @@ where
                 terminal,
             }
         }
+        Ok(MergeOutcome::Rejected { reason }) => {
+            coordinator.quarantine_pending_dag(&cid, &reason).await;
+
+            ReplicationResult::Quarantined {
+                cid,
+                doc_id: doc_id_for_result,
+                collection_id: collection_id_for_result,
+                reason,
+            }
+        }
         Err(e) => ReplicationResult::Failed {
             cid,
             error: e.to_string(),
@@ -567,6 +577,20 @@ where
                     collection_id: block.collection_id.clone(),
                     reason,
                     terminal,
+                });
+            }
+            Ok(MergeOutcome::Rejected { reason }) => {
+                // Deliberately NOT added to merged_cids: quarantine leaves
+                // the block unmerged (see `quarantine_pending_dag`).
+                coordinator
+                    .quarantine_pending_dag(&block.cid, &reason)
+                    .await;
+
+                results.push(ReplicationResult::Quarantined {
+                    cid: block.cid,
+                    doc_id: block.doc_id.clone(),
+                    collection_id: block.collection_id.clone(),
+                    reason,
                 });
             }
             Err(e) => {

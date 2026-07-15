@@ -338,6 +338,45 @@ impl Key for P2PPendingDagKey {
     }
 }
 
+/// P2PQuarantinedDagKey: Terminally-rejected pending-DAG record, retained for forensics
+///
+/// Deliberately a distinct prefix from `/p2p/pending_dag/` (not a subpath of it):
+/// the live-record resync sweep prefix-scans `/p2p/pending_dag/` via `load_all` and
+/// must never observe a quarantined root, or it would re-drive a merge that is
+/// known to fail deterministically on every replay.
+///
+/// Structure: /p2p/quarantined_dag/[RootCID]
+/// Example: /p2p/quarantined_dag/bafyreib2rxk3rybk3aobmv5cjuql3bm2twh4jo5uxgf5kpqrsgxbyqx54
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct P2PQuarantinedDagKey {
+    /// Root CID of the quarantined DAG (canonical string form)
+    pub root_cid: String,
+}
+
+impl P2PQuarantinedDagKey {
+    /// Create a new P2PQuarantinedDagKey
+    pub fn new(root_cid: impl Into<String>) -> Self {
+        Self {
+            root_cid: root_cid.into(),
+        }
+    }
+
+    /// Create a prefix for all quarantined pending-DAG records
+    pub fn p2p_quarantined_dag_prefix() -> Vec<u8> {
+        b"/p2p/quarantined_dag/".to_vec()
+    }
+}
+
+impl Key for P2PQuarantinedDagKey {
+    fn bytes(&self) -> Vec<u8> {
+        format!("/p2p/quarantined_dag/{}", self.root_cid).into_bytes()
+    }
+
+    fn to_string(&self) -> String {
+        format!("/p2p/quarantined_dag/{}", self.root_cid)
+    }
+}
+
 /// LensConfigKey: Stores a serialized LensConfig for persistence across restarts.
 ///
 /// Structure: /lens/config/[TransformID]
@@ -527,6 +566,21 @@ mod tests {
             "/p2p/document/bae123456789abcdef0123456789abcdef012345"
         );
         assert_eq!(key.bytes(), key.to_string().as_bytes());
+    }
+
+    #[test]
+    fn test_p2p_quarantined_dag_key() {
+        let key =
+            P2PQuarantinedDagKey::new("bafyreib2rxk3rybk3aobmv5cjuql3bm2twh4jo5uxgf5kpqrsgxbyqx54");
+        assert_eq!(
+            key.to_string(),
+            "/p2p/quarantined_dag/bafyreib2rxk3rybk3aobmv5cjuql3bm2twh4jo5uxgf5kpqrsgxbyqx54"
+        );
+        assert_eq!(key.bytes(), key.to_string().as_bytes());
+        assert_eq!(
+            P2PQuarantinedDagKey::p2p_quarantined_dag_prefix(),
+            b"/p2p/quarantined_dag/".to_vec()
+        );
     }
 
     #[test]

@@ -631,6 +631,33 @@ mod tests {
         }
     }
 
+    /// Merge handler that always returns a deterministic content rejection.
+    struct RejectingMergeHandler {
+        reason: String,
+    }
+
+    impl RejectingMergeHandler {
+        fn new(reason: &str) -> Self {
+            Self {
+                reason: reason.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MergeHandler for RejectingMergeHandler {
+        type Error = TestError;
+
+        async fn handle_block(
+            &self,
+            _cid: &Cid,
+            _block_data: &[u8],
+            _metadata: BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, Self::Error> {
+            Ok(MergeOutcome::rejected(self.reason.clone()))
+        }
+    }
+
     #[async_trait]
     impl MergeHandler for RetryThenMergeHandler {
         type Error = TestError;
@@ -699,6 +726,7 @@ mod tests {
         batch_calls: AtomicUsize,
         batch_block_count: AtomicUsize,
         fail_at_index: Option<usize>,
+        reject_at_index: Option<(usize, String)>,
     }
 
     impl BatchTestHandler {
@@ -708,6 +736,7 @@ mod tests {
                 batch_calls: AtomicUsize::new(0),
                 batch_block_count: AtomicUsize::new(0),
                 fail_at_index: None,
+                reject_at_index: None,
             }
         }
 
@@ -717,6 +746,20 @@ mod tests {
                 batch_calls: AtomicUsize::new(0),
                 batch_block_count: AtomicUsize::new(0),
                 fail_at_index: Some(index),
+                reject_at_index: None,
+            }
+        }
+
+        /// Returns `MergeOutcome::Rejected` for the block at `index`, leaving
+        /// every other block in the batch a normal merge — exercises that a
+        /// batch-mixed Rejected outcome does not stop siblings from merging.
+        fn with_rejection_at(index: usize, reason: &str) -> Self {
+            Self {
+                per_block_calls: AtomicUsize::new(0),
+                batch_calls: AtomicUsize::new(0),
+                batch_block_count: AtomicUsize::new(0),
+                fail_at_index: None,
+                reject_at_index: Some((index, reason.to_string())),
             }
         }
 
@@ -805,6 +848,12 @@ mod tests {
                 .map(|(i, _block)| {
                     if self.fail_at_index == Some(i) {
                         Err(TestError("batch block failed".to_string()))
+                    } else if let Some((reject_index, reason)) = &self.reject_at_index {
+                        if *reject_index == i {
+                            Ok(MergeOutcome::rejected(reason.clone()))
+                        } else {
+                            Ok(MergeOutcome::Merged)
+                        }
                     } else {
                         Ok(MergeOutcome::Merged)
                     }
@@ -1049,6 +1098,233 @@ mod tests {
         assert!(
             blockstore.is_merged(&cid).await.unwrap(),
             "successful replay should mark the CID as merged"
+        );
+    }
+
+    /// Seed a coordinator whose manager has a durable pending-DAG store
+    /// installed and a live registration for `cid`, mirroring a push-driven
+    /// registration awaiting merge.
+    async fn coordinator_with_live_pending_dag(
+        blockstore: Arc<DefraBlockstore<MemoryStore>>,
+        cid: Cid,
+    ) -> (
+        crate::sync::coordinator::SyncCoordinator<DefraBlockstore<MemoryStore>, NoopTransport>,
+        Arc<crate::sync::pending_store::PendingDagStore<MemoryStore>>,
+    ) {
+        use crate::sync::pending_store::PendingDagStorage;
+
+        let (coordinator, _events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                NoopTransport::new(),
+                blockstore,
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+                Arc::new(EqOnlyFilterMatcher),
+            )
+            .await
+            .unwrap();
+
+        let pending_store = Arc::new(crate::sync::pending_store::PendingDagStore::new(Arc::new(
+            MemoryStore::new(),
+        )));
+        pending_store
+            .put(
+                &cid,
+                &crate::sync::pending_store::PersistedPendingDag {
+                    doc_id: "doc1".to_string(),
+                    collection_id: "col1".to_string(),
+                    creator: "peer1".to_string(),
+                    source_peer: Some("sender1".to_string()),
+                    is_explicit_replicator: true,
+                    explicit_replay_authorization: None,
+                },
+            )
+            .await
+            .expect("persist live pending dag record");
+
+        // install_pending_dag_store hydrates persisted_roots from the store
+        // at install time, so the record must already be `put` above.
+        coordinator
+            .manager()
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+
+        (coordinator, pending_store)
+    }
+
+    #[tokio::test]
+    async fn test_rejected_merge_quarantines_and_leaves_block_unmerged() {
+        use crate::sync::pending_store::PendingDagStorage;
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let cid = test_cid();
+        blockstore.put(&cid, b"test data").await.unwrap();
+
+        let (coordinator, pending_store) =
+            coordinator_with_live_pending_dag(blockstore.clone(), cid).await;
+
+        let handler = RejectingMergeHandler::new("unique constraint violation");
+        let result = handle_block_received(
+            &coordinator,
+            &handler,
+            &ReplicationConfig::default(),
+            cid,
+            BlockMetadata::normal("doc1", "col1", "peer1", Some("sender1"), true),
+        )
+        .await;
+
+        match result {
+            ReplicationResult::Quarantined {
+                cid: result_cid,
+                reason,
+                ..
+            } => {
+                assert_eq!(result_cid, cid);
+                assert_eq!(reason, "unique constraint violation");
+            }
+            other => panic!("expected Quarantined, got {:?}", other),
+        }
+
+        assert!(
+            !blockstore.is_merged(&cid).await.unwrap(),
+            "quarantine must not mark the block merged (mark_as_merged must not run)"
+        );
+        assert!(
+            pending_store.is_quarantined(&cid).await.unwrap(),
+            "quarantine store must be populated"
+        );
+        assert!(
+            pending_store.load_all().await.unwrap().is_empty(),
+            "live durable record must be removed after quarantine"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transient_merge_error_stays_failed_and_does_not_quarantine() {
+        use crate::sync::pending_store::PendingDagStorage;
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let cid = test_cid();
+        blockstore.put(&cid, b"test data").await.unwrap();
+
+        let (coordinator, pending_store) =
+            coordinator_with_live_pending_dag(blockstore.clone(), cid).await;
+
+        let handler = TestMergeHandler::new(false, false); // handle_block returns Err
+        let result = handle_block_received(
+            &coordinator,
+            &handler,
+            &ReplicationConfig::default(),
+            cid,
+            BlockMetadata::normal("doc1", "col1", "peer1", Some("sender1"), true),
+        )
+        .await;
+
+        match result {
+            ReplicationResult::Failed {
+                cid: result_cid, ..
+            } => assert_eq!(result_cid, cid),
+            other => panic!("expected Failed, got {:?}", other),
+        }
+
+        assert!(!blockstore.is_merged(&cid).await.unwrap());
+        assert!(
+            !pending_store.is_quarantined(&cid).await.unwrap(),
+            "a transient failure must not quarantine the root"
+        );
+        assert_eq!(
+            pending_store.load_all().await.unwrap().len(),
+            1,
+            "durable record must remain live after a transient failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_rejected_block_not_marked_merged_while_sibling_merges() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let rejected_cid = make_cid(b"batch-reject");
+        let merged_cid = make_cid(b"batch-merge");
+        blockstore
+            .put(&rejected_cid, b"batch-reject")
+            .await
+            .unwrap();
+        blockstore.put(&merged_cid, b"batch-merge").await.unwrap();
+
+        let (coordinator, _events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                NoopTransport::new(),
+                blockstore.clone(),
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+                Arc::new(EqOnlyFilterMatcher),
+            )
+            .await
+            .unwrap();
+
+        let events = vec![
+            SyncEvent::BlockReceived {
+                cid: rejected_cid,
+                doc_id: "doc-reject".to_string(),
+                collection_id: "col1".to_string(),
+                creator: "peer1".to_string(),
+                sender_peer: None,
+                is_explicit_replicator: false,
+                explicit_replay_authorization: None,
+            },
+            SyncEvent::BlockReceived {
+                cid: merged_cid,
+                doc_id: "doc-merge".to_string(),
+                collection_id: "col1".to_string(),
+                creator: "peer1".to_string(),
+                sender_peer: None,
+                is_explicit_replicator: false,
+                explicit_replay_authorization: None,
+            },
+        ];
+        let handler = BatchTestHandler::with_rejection_at(0, "unique constraint violation");
+
+        let results = process_merge_batch(
+            &coordinator,
+            events,
+            &handler,
+            &ReplicationConfig::default(),
+        )
+        .await;
+
+        assert_eq!(results.len(), 2);
+        match &results[0] {
+            ReplicationResult::Quarantined {
+                cid: result_cid,
+                reason,
+                ..
+            } => {
+                assert_eq!(*result_cid, rejected_cid);
+                assert_eq!(reason, "unique constraint violation");
+            }
+            other => panic!(
+                "expected Quarantined for the rejected block, got {:?}",
+                other
+            ),
+        }
+        assert!(matches!(
+            &results[1],
+            ReplicationResult::Merged { cid, .. } if *cid == merged_cid
+        ));
+
+        assert!(
+            !blockstore.is_merged(&rejected_cid).await.unwrap(),
+            "a Rejected block in a batch must not be marked merged, even though a sibling merged in the same call"
+        );
+        assert!(
+            blockstore.is_merged(&merged_cid).await.unwrap(),
+            "the sibling block must still merge normally"
         );
     }
 

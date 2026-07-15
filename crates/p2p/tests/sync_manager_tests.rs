@@ -684,7 +684,9 @@ mod pending_persistence {
 
     use super::*;
     use async_trait::async_trait;
-    use p2p::sync::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
+    use p2p::sync::{
+        PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedQuarantinedDag,
+    };
 
     async fn manager_with_store(
         store: Arc<MemoryStore>,
@@ -1221,6 +1223,24 @@ mod pending_persistence {
         }
         async fn load_all(&self) -> p2p::error::Result<Vec<(Cid, PersistedPendingDag)>> {
             Ok(Vec::new())
+        }
+        async fn quarantine(
+            &self,
+            _root_cid: &Cid,
+            _entry: &PersistedQuarantinedDag,
+        ) -> p2p::error::Result<()> {
+            Err(Error::Storage("disk full".to_string()))
+        }
+        async fn is_quarantined(&self, _root_cid: &Cid) -> p2p::error::Result<bool> {
+            Ok(false)
+        }
+        async fn load_quarantined(
+            &self,
+        ) -> p2p::error::Result<Vec<(Cid, PersistedQuarantinedDag)>> {
+            Ok(Vec::new())
+        }
+        async fn remove_quarantined(&self, _root_cid: &Cid) -> p2p::error::Result<()> {
+            Ok(())
         }
     }
 

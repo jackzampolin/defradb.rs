@@ -29,6 +29,17 @@ pub enum ReplicationResult {
         reason: String,
         terminal: bool,
     },
+    /// Block was deterministically rejected on its content and has been
+    /// quarantined (#1128): durably retained for forensics, counted, and no
+    /// longer re-driven by local retry (a remote re-push may still repeat
+    /// the rejection independently). See `MergeOutcome::Rejected` and
+    /// `SyncManager::quarantine_pending_dag`.
+    Quarantined {
+        cid: Cid,
+        doc_id: String,
+        collection_id: String,
+        reason: String,
+    },
     /// Merge failed
     Failed { cid: Cid, error: String },
     /// Merge succeeded but failed to mark as merged (will be reprocessed on restart)

@@ -127,6 +127,7 @@ pub struct SyncDiagnostics {
     pending_dag_capacity_shed: AtomicU64,
     pending_dag_retry_dispatched: AtomicU64,
     pending_dag_retry_suppressed: AtomicU64,
+    pending_dag_terminal_quarantined: AtomicU64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -141,6 +142,9 @@ pub struct SyncDiagnosticsSnapshot {
     pub pending_dag_capacity_shed: u64,
     pub pending_dag_retry_dispatched: u64,
     pub pending_dag_retry_suppressed: u64,
+    /// Pending-DAG registrations moved to quarantine after a deterministic
+    /// merge rejection (#1128). See `SyncManager::quarantine_pending_dag`.
+    pub pending_dag_terminal_quarantined: u64,
     /// Process-global; see [`record_gossip_decode_failure`].
     pub gossip_decode_failures: u64,
     /// Process-global recent samples captured by
@@ -161,6 +165,9 @@ impl SyncDiagnostics {
             pending_dag_capacity_shed: self.pending_dag_capacity_shed.load(Ordering::Relaxed),
             pending_dag_retry_dispatched: self.pending_dag_retry_dispatched.load(Ordering::Relaxed),
             pending_dag_retry_suppressed: self.pending_dag_retry_suppressed.load(Ordering::Relaxed),
+            pending_dag_terminal_quarantined: self
+                .pending_dag_terminal_quarantined
+                .load(Ordering::Relaxed),
             gossip_decode_failures: GOSSIP_DECODE_FAILURES.load(Ordering::Relaxed),
             recent_gossip_decode_failures: RECENT_GOSSIP_DECODE_FAILURES
                 .lock()
@@ -214,6 +221,11 @@ impl SyncDiagnostics {
         self.pending_dag_retry_suppressed
             .fetch_add(1, Ordering::Relaxed);
     }
+
+    pub fn record_pending_dag_terminal_quarantined(&self) {
+        self.pending_dag_terminal_quarantined
+            .fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -234,6 +246,7 @@ mod tests {
         assert_eq!(snap.pending_dag_capacity_shed, 0);
         assert_eq!(snap.pending_dag_retry_dispatched, 0);
         assert_eq!(snap.pending_dag_retry_suppressed, 0);
+        assert_eq!(snap.pending_dag_terminal_quarantined, 0);
     }
 
     #[test]
@@ -250,6 +263,7 @@ mod tests {
         diag.record_pending_dag_capacity_shed();
         diag.record_pending_dag_retry_dispatched();
         diag.record_pending_dag_retry_suppressed();
+        diag.record_pending_dag_terminal_quarantined();
 
         let snap = diag.snapshot();
         assert_eq!(snap.car_empty_responses, 2);
@@ -262,6 +276,7 @@ mod tests {
         assert_eq!(snap.pending_dag_capacity_shed, 1);
         assert_eq!(snap.pending_dag_retry_dispatched, 1);
         assert_eq!(snap.pending_dag_retry_suppressed, 1);
+        assert_eq!(snap.pending_dag_terminal_quarantined, 1);
     }
 
     #[test]
