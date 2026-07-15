@@ -838,7 +838,22 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     pub async fn quarantine_pending_dag(&self, root_cid: &Cid, reason: &str) {
         let entry = self.build_quarantine_entry(root_cid, reason).await;
 
+        // Checked BEFORE the write: a remote re-push of an already-rejected
+        // root re-runs this function (repeat rejection is the expected,
+        // sender-paced retry — not a bug), and the gauge below counts
+        // distinct quarantined *roots*, not quarantine *occurrences*.
+        // Without this check a repeat rejection would drift the gauge above
+        // the true record count until the next restart's
+        // `install_pending_dag_store` hydration silently corrects it. The
+        // occurrence-level diagnostic counter
+        // (`pending_dag_terminal_quarantined`, below) is deliberately NOT
+        // deduped the same way — it exists to count every rejection event
+        // for alerting, gauge or no.
+        let mut already_quarantined = false;
+
         if let Some(store) = self.pending_store() {
+            already_quarantined = matches!(store.is_quarantined(root_cid).await, Ok(true));
+
             if let Err(error) = store.quarantine(root_cid, &entry).await {
                 tracing::error!(
                     root_cid = %root_cid,
@@ -866,8 +881,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         }
 
         self.pending_dags.write().remove(root_cid);
-        self.quarantined_pending_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if !already_quarantined {
+            self.quarantined_pending_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         self.diagnostics.record_pending_dag_terminal_quarantined();
 
         tracing::warn!(
@@ -1297,6 +1314,84 @@ mod tests {
             1
         );
         assert_eq!(manager.quarantined_pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn quarantine_pending_dag_dedupes_gauge_on_repeat_rejection() {
+        use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
+
+        let blockstore = Arc::new(DefraBlockstore::new(Arc::new(MemoryStore::new()), true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, _events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
+
+        let root = test_cid(1);
+        let pending_store = Arc::new(PendingDagStore::new(Arc::new(MemoryStore::new())));
+        pending_store
+            .put(
+                &root,
+                &PersistedPendingDag {
+                    doc_id: "doc".to_string(),
+                    collection_id: "collection".to_string(),
+                    creator: "creator".to_string(),
+                    source_peer: Some("peer".to_string()),
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
+                },
+            )
+            .await
+            .expect("persist live pending dag record");
+
+        manager
+            .install_pending_dag_store(pending_store.clone())
+            .await;
+
+        assert!(manager.insert_pending_dag(root, pending_dag("doc", Instant::now())));
+
+        // First rejection: quarantines the root, gauge and counter both move
+        // to 1.
+        manager
+            .quarantine_pending_dag(&root, "unique constraint violation")
+            .await;
+        assert_eq!(manager.quarantined_pending_count(), 1);
+        assert_eq!(
+            manager
+                .diagnostics
+                .snapshot()
+                .pending_dag_terminal_quarantined,
+            1
+        );
+
+        // Second rejection of the SAME root (e.g. a sender-paced re-push
+        // after the first rejection re-hits the same deterministic
+        // classification): the occurrence counter keeps counting, but the
+        // gauge must NOT double-count a root that was already quarantined —
+        // it tracks distinct quarantined roots, not quarantine events.
+        manager
+            .quarantine_pending_dag(&root, "unique constraint violation")
+            .await;
+        assert_eq!(
+            manager
+                .diagnostics
+                .snapshot()
+                .pending_dag_terminal_quarantined,
+            2,
+            "the occurrence-level diagnostic counter must count every rejection"
+        );
+        assert_eq!(
+            manager.quarantined_pending_count(),
+            1,
+            "the gauge must not drift above the true number of quarantined roots on repeat rejection"
+        );
+
+        let quarantined = pending_store
+            .load_quarantined()
+            .await
+            .expect("load quarantined records");
+        assert_eq!(
+            quarantined.len(),
+            1,
+            "the store itself must hold exactly one quarantine record for this root"
+        );
     }
 
     #[tokio::test]
