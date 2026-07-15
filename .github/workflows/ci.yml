@@ -415,7 +415,13 @@ jobs:
       # convergence (`parity_mixed_fields_3node_*`) and equal-priority LWW-tie
       # (`parity_lww_tie_partition_*`) probes ARE selected — they assert the exact
       # convergent state (name=alice, views=17 / tie winner) identically across
-      # Rust-only, Go-only, and mixed Rust<->Go clusters. DEFRA_CONFORMANCE_BINARY
+      # Rust-only, Go-only, and mixed Rust<->Go clusters. The
+      # `parity_unique_twins_*` probes (#1134) are a KNOWN-DIVERGENCE pin, not a
+      # convergence contract: rust_rust asserts #1126 canonical-pick semantics
+      # and go_go asserts upstream Go's atomic twin rejection + silent
+      # success-ack — go_go MUST fail (and force a pin update) the moment
+      # upstream Go starts converging. A mixed unique-twins probe is deferred
+      # in #1134 pending the partial-replay finding. DEFRA_CONFORMANCE_BINARY
       # points the harness at the restored Rust binary (this job builds to target/ci).
       - name: Run go-compat conformance parity
         if: matrix.suite == 'go-compat'
@@ -426,6 +432,7 @@ jobs:
           -- --ignored --test-threads=1
           parity_counter_3node parity_counter_storm_go_go parity_indexed_lww
           parity_mixed_fields_3node parity_lww_tie_partition
+          parity_unique_twins_rust_rust parity_unique_twins_go_go
 
       - name: Run iroh integration tests
         if: matrix.suite == 'iroh'

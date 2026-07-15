@@ -18,6 +18,27 @@
 //! does (Go is the parity target). They stay `#[ignore]` (the default no-Go
 //! conformance run skips them) and are exercised manually unless the go-compat CI
 //! step opts into them.
+//!
+//! `parity_unique_twins_*` (#1134) is a KNOWN-DIVERGENCE pin, not a
+//! convergence contract: `parity_unique_twins_rust_rust` asserts #1126's
+//! canonical-pick semantics (both twins persist, smallest docID owns the
+//! unique slot). `parity_unique_twins_go_go` asserts current upstream Go
+//! behavior — a unique-index twin merge is rejected atomically inside the
+//! merge transaction (`internal/db/index.go` `saveUniqueKey` /
+//! `internal/db/merge.go`), and the sender silently treats the rejection as
+//! success because `message.Send` checks the request's `GetErrMessage()`
+//! instead of the response's (`internal/db/p2p/message/message.go`), so the
+//! two replicas disagree permanently on scan membership and indexed
+//! ownership. The go_go probe is an intentionally asserting
+//! known-Go-divergence test: it must FAIL the moment upstream Go starts
+//! converging, forcing this pin to be updated/removed rather than letting
+//! the compatibility contract drift silently. A mixed Rust<->Go topology
+//! probe is deferred in #1134: the observed mixed behavior does NOT match
+//! the atomic-rejection model (Rust's block-by-block PushLog replay lands
+//! field-delta blocks on the Go peer before the composite is rejected,
+//! leaving a scan-visible unindexed partial document) and is pending
+//! adjudication there. See defradb.rs#1134 (upstream Go tracking issue not
+//! filed yet — link here once it is).
 
 use crate::support;
 use defra_harness::{DefraClient, NodeKind, TestCluster};
@@ -1254,4 +1275,267 @@ async fn parity_counter_storm_mixed() {
         .await
         .expect("mixed 3-node cluster");
     support::run_counter_storm(&cluster, "pcounter", "Int", &[1.0, 1.0, 1.0], 3, 4).await;
+}
+
+// ---- #1134: unique-index twin merge divergence pin ----
+//
+// Fixed schema + fixed fixture `seed` values, chosen so the resulting
+// content-addressed docIDs sort deterministically: node0 always seeds
+// TWIN_SEED_SMALL, node1 always seeds TWIN_SEED_LARGE, and
+// id(TWIN_SEED_SMALL) < id(TWIN_SEED_LARGE) is re-verified at runtime by an
+// ordering fence in `setup_unique_twins` rather than assumed blindly. This
+// keeps the fixture assignment (node0 = smaller docID) deterministic across
+// runs instead of branching on whichever docID happens to sort first — see
+// #1134.
+const UNIQUE_TWIN_SCHEMA: &str = "type Account { handle: String @index(unique: true)  seed: Int }";
+const TWIN_SEED_SMALL: i64 = 5;
+const TWIN_SEED_LARGE: i64 = 6;
+
+fn account_create_fields(node: &DefraClient) -> [&'static str; 2] {
+    match node.kind() {
+        NodeKind::Rust => ["add_Account", "create_Account"],
+        NodeKind::Go => ["create_Account", "add_Account"],
+    }
+}
+
+fn create_account_twin(node: &DefraClient, label: &str, seed: i64) -> String {
+    let mut attempts = Vec::new();
+    for create_field in account_create_fields(node) {
+        match node.query(&format!(
+            r#"mutation {{ {create_field}(input: {{handle: "twin", seed: {seed}}}) {{ _docID }} }}"#
+        )) {
+            Ok(created) => {
+                if let Some(id) = created_user_doc_id(&created, create_field) {
+                    return id.to_string();
+                }
+                attempts.push(format!("{create_field}: {created}"));
+            }
+            Err(err) => attempts.push(format!("{create_field}: {err:#}")),
+        }
+    }
+    panic!(
+        "[{label}] no Account create mutation returned _docID in expected shape; attempts: {}",
+        attempts.join(" | ")
+    );
+}
+
+/// Full collection scan (docID-level presence — bypasses the unique index
+/// entirely, so it proves whether a twin persisted at all, independent of
+/// which one the index resolved to).
+fn account_scan_ids(node: &DefraClient) -> Vec<String> {
+    node.query("query { Account { _docID } }")
+        .unwrap_or_default()["Account"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|d| d["_docID"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Unique-indexed lookup on the shared `handle` value — the resolved
+/// owner(s) of the unique slot, as opposed to everything physically present
+/// (`account_scan_ids`).
+fn account_indexed_owner(node: &DefraClient) -> Vec<String> {
+    node.query(r#"query { Account(filter: {handle: {_eq: "twin"}}) { _docID } }"#)
+        .unwrap_or_default()["Account"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|d| d["_docID"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn poll_account_scan_count(node: &DefraClient, want: usize, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if account_scan_ids(node).len() == want {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// Honesty check mirroring `run_indexed_lww_parity`'s `rust_explain_node`:
+/// confirm the Rust node actually plans an index scan on the unique field, so
+/// a full-scan fallback can't make the indexed-owner assertions vacuous.
+fn assert_rust_explain_uses_index(node: &DefraClient, label: &str) {
+    let index_used = node
+        .query(
+            r#"query @explain(type: simple) { Account(filter: {handle: {_eq: "twin"}}) { seed } }"#,
+        )
+        .map(|v| v.to_string().to_lowercase().contains("index"))
+        .unwrap_or(false);
+    assert!(
+        index_used,
+        "[{label}] Rust node must plan an index scan on the unique field, else the index assertions prove nothing"
+    );
+}
+
+fn wire_account_bidirectional(cluster: &TestCluster) {
+    let (a0, a1) = (node_addr(cluster, 0), node_addr(cluster, 1));
+    cluster
+        .client(0)
+        .p2p_connect(&[a1.as_str()])
+        .expect("connect 0->1");
+    cluster
+        .client(1)
+        .p2p_connect(&[a0.as_str()])
+        .expect("connect 1->0");
+    cluster
+        .client(0)
+        .p2p_collection_add(&["Account"])
+        .expect("subscribe node0");
+    cluster
+        .client(1)
+        .p2p_collection_add(&["Account"])
+        .expect("subscribe node1");
+    cluster
+        .client(0)
+        .p2p_replicator_set(&["Account"], &a1)
+        .expect("replicator 0->1");
+    cluster
+        .client(1)
+        .p2p_replicator_set(&["Account"], &a0)
+        .expect("replicator 1->0");
+}
+
+/// #1134 steps 1-3, shared by both topologies: independent schema +
+/// unique index on isolated nodes, distinct twins holding the identical
+/// unique value created BEFORE any P2P wiring (fixed fixtures, ordering
+/// fenced at runtime), then bidirectional collection subscriptions +
+/// replicators. Returns (node0's docID, node1's docID).
+async fn setup_unique_twins(cluster: &TestCluster, label: &str) -> (String, String) {
+    cluster
+        .client(0)
+        .schema_add(UNIQUE_TWIN_SCHEMA)
+        .expect("schema node0");
+    cluster
+        .client(1)
+        .schema_add(UNIQUE_TWIN_SCHEMA)
+        .expect("schema node1");
+
+    let id0 = create_account_twin(&cluster.client(0), label, TWIN_SEED_SMALL);
+    let id1 = create_account_twin(&cluster.client(1), label, TWIN_SEED_LARGE);
+    assert_ne!(
+        id0, id1,
+        "[{label}] distinct docIDs required for a real twin conflict"
+    );
+    assert!(
+        id0 < id1,
+        "[{label}] ordering fence: node0's fixture (seed={TWIN_SEED_SMALL}) must stay \
+         the lexicographically smaller docID — content-addressing appears to have \
+         changed (got node0={id0} node1={id1}); recompute the fixed TWIN_SEED_* \
+         fixtures rather than adjusting downstream assertions"
+    );
+
+    wire_account_bidirectional(cluster);
+    (id0, id1)
+}
+
+/// Rust<->Rust control (#1134): pins #1126's canonical-pick semantics for
+/// this exact scenario shape — both independently-created twins persist, and
+/// the unique slot converges to the lexicographically smallest docID
+/// identically on both replicas. This is the "Rust is internally consistent"
+/// anchor the `_go_go` divergence pin is measured against. (A mixed
+/// Rust<->Go topology probe is deferred in #1134 pending the partial-replay
+/// finding — see the module header.)
+#[ignore = "parity (asserting); run with --ignored"]
+#[tokio::test]
+async fn parity_unique_twins_rust_rust() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_store("redb")
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("rust-rust cluster");
+    let label = "unique_twins_rust_rust";
+    let (id0, _id1) = setup_unique_twins(&cluster, label).await;
+
+    for n in [0usize, 1] {
+        assert!(
+            poll_account_scan_count(&cluster.client(n), 2, Duration::from_secs(40)).await,
+            "[{label}] node{n} did not converge to both twins scan-visible; ids={:?}",
+            account_scan_ids(&cluster.client(n))
+        );
+    }
+
+    for n in [0usize, 1] {
+        assert_eq!(
+            account_indexed_owner(&cluster.client(n)),
+            vec![id0.clone()],
+            "[{label}] node{n} unique index must resolve to the smallest docID (#1126 canonical pick)"
+        );
+    }
+
+    assert_rust_explain_uses_index(&cluster.client(0), label);
+}
+
+/// Go<->Go KNOWN-DIVERGENCE pin (#1134): current upstream Go behavior for
+/// this exact scenario shape. `saveUniqueKey` performs a bare existence
+/// check inside the merge transaction (`internal/db/index.go`), so the
+/// incoming twin's merge is rejected and the whole merge transaction
+/// (including `MarkAsMerged` and the head update) is discarded
+/// (`internal/db/merge.go`). The push sender then treats the rejection as
+/// success because `message.Send` checks the request's error field instead
+/// of the response's (`internal/db/p2p/message/message.go`), deletes its
+/// retry record, and reports the replicator `Active`. Net effect: each
+/// replica permanently retains ONLY its own local twin, and reconnection /
+/// ordinary replicator retry never repairs it (there is nothing left in
+/// either retry queue to re-drive).
+///
+/// This test MUST start failing the moment upstream Go changes this
+/// behavior — that failure is the signal to update or remove this pin, not
+/// to patch the assertions blind. (A mixed Rust<->Go topology probe is
+/// deferred in #1134 pending the partial-replay finding — see the module
+/// header.)
+#[ignore = "parity (asserting); needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_unique_twins_go_go() {
+    let cluster = TestCluster::builder()
+        .go_nodes(2)
+        .with_p2p()
+        .with_store("badger")
+        .with_development()
+        .build()
+        .await
+        .expect("go-go cluster");
+    let label = "unique_twins_go_go";
+    let (id0, id1) = setup_unique_twins(&cluster, label).await;
+
+    // Not a convergence poll: ordinary replicator retry does not repair this
+    // divergence (the sender believes the push already succeeded and drained
+    // its retry queue). This is a generous stabilization wait before
+    // asserting the permanent, non-converged end state.
+    tokio::time::sleep(Duration::from_secs(20)).await;
+
+    assert_eq!(
+        account_scan_ids(&cluster.client(0)),
+        vec![id0.clone()],
+        "[{label}] node0 must retain ONLY its own local twin — Go silently drops the peer's twin"
+    );
+    assert_eq!(
+        account_scan_ids(&cluster.client(1)),
+        vec![id1.clone()],
+        "[{label}] node1 must retain ONLY its own local twin — Go silently drops the peer's twin"
+    );
+    assert_eq!(
+        account_indexed_owner(&cluster.client(0)),
+        vec![id0],
+        "[{label}] node0's unique index must resolve to its own local twin"
+    );
+    assert_eq!(
+        account_indexed_owner(&cluster.client(1)),
+        vec![id1],
+        "[{label}] node1's unique index must resolve to its own local twin"
+    );
 }
