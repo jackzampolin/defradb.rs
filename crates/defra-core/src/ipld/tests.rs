@@ -301,7 +301,7 @@ fn test_crdt_delta_from_ipld_unknown_type_fails() {
 
 #[test]
 fn test_lww_payload_from_ipld_missing_field_fails() {
-    let mut map = BTreeMap::new();
+    let map = BTreeMap::new();
     // Missing fieldName, priority, schemaVersionID, data
     let ipld = Ipld::Map(map);
     let result = LwwDeltaPayload::try_from(&ipld);

@@ -195,8 +195,13 @@ pub async fn import_database<S: Store + 'static>(
                 })?
                 .to_string();
 
-            register_doc_id_aliases(database, collection.resolved_root_id(), &new_doc_id, &aliases)
-                .await?;
+            register_doc_id_aliases(
+                database,
+                collection.resolved_root_id(),
+                &new_doc_id,
+                &aliases,
+            )
+            .await?;
             for alias in aliases {
                 imported_doc_ids.insert(alias, new_doc_id.clone());
             }

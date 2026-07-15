@@ -998,7 +998,9 @@ mod tests {
                 // Stand in for the genesis-CID identity a real create would
                 // derive: seed a valid DocID from the capture order.
                 let seq = self.created_docs.lock().unwrap().len();
-                doc.set_id(document::DocID::new_v0_from_seed(&format!("test-doc-{seq}")));
+                doc.set_id(document::DocID::new_v0_from_seed(&format!(
+                    "test-doc-{seq}"
+                )));
             }
             self.created_docs.lock().unwrap().push(doc.clone());
             Ok(CreateResult::new(doc.id().unwrap().clone(), doc))

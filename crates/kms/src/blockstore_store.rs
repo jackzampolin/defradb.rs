@@ -175,9 +175,7 @@ mod tests {
     async fn get_missing_returns_none() {
         let fake = Arc::new(FakeEncBlockStore::default());
         let store = BlockstoreKeyStore::new(fake);
-        let block = Encryption {
-            key: vec![1u8; 32],
-        };
+        let block = Encryption { key: vec![1u8; 32] };
         let cid = generate_cid_from_bytes(&block.to_dag_cbor().unwrap()).unwrap();
         assert!(store.get(&cid).await.unwrap().is_none());
     }

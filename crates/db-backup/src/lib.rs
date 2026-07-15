@@ -17,6 +17,6 @@
 pub mod backup;
 
 pub use backup::{
-    classify_schema_fields, export_database, import_database,
-    json_to_graphql_input, FieldInfo, ImportStats,
+    classify_schema_fields, export_database, import_database, json_to_graphql_input, FieldInfo,
+    ImportStats,
 };

@@ -129,8 +129,6 @@ fn test_len_and_is_empty() {
     assert_eq!(doc.len(), 1);
 }
 
-
-
 #[test]
 fn test_cbor_field_order_independence() {
     // Documents with same content but different field insertion order

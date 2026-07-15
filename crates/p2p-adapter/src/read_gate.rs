@@ -207,7 +207,7 @@ mod tests {
         .as_branchable()
     }
 
-    fn data_block(doc_id: &str) -> (cid::Cid, Vec<u8>) {
+    fn data_block(_doc_id: &str) -> (cid::Cid, Vec<u8>) {
         let block = defra_core::Block::new(
             defra_core::CrdtDelta::Lww(defra_core::LwwDeltaPayload {
                 field_name: "name".to_string(),
@@ -232,9 +232,13 @@ mod tests {
         let txn = db.new_txn(false).await.unwrap();
         {
             let systemstore = txn.systemstore().unwrap();
-            db::doc_id_map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), "doc-from-index")
-                .await
-                .unwrap();
+            db::doc_id_map::set_block_doc_id_mapping(
+                &systemstore,
+                &cid.to_string(),
+                "doc-from-index",
+            )
+            .await
+            .unwrap();
         }
         txn.commit().await.unwrap();
 

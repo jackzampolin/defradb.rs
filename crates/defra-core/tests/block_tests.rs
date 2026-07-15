@@ -60,7 +60,8 @@ const GO_LWW_HIGH_PRIORITY_BYTES: &[u8] = &[
     0x6F, 0x6C, 0x6C, 0x65, 0x63, 0x74, 0x69, 0x6F, 0x6E, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E,
     0x49, 0x44, 0x67, 0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x31,
 ];
-const GO_LWW_HIGH_PRIORITY_CID: &str = "bafyreidwus7muqrpwwf22gvpqpow6xg37woh4ikztgl27deo37ehs5ehaa";
+const GO_LWW_HIGH_PRIORITY_CID: &str =
+    "bafyreidwus7muqrpwwf22gvpqpow6xg37woh4ikztgl27deo37ehs5ehaa";
 
 // Go test vector: Counter Block
 const GO_COUNTER_BYTES: &[u8] = &[
@@ -91,7 +92,8 @@ const GO_COMPOSITE_DELETED_BYTES: &[u8] = &[
     0x56, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x49, 0x44, 0x67, 0x73, 0x63, 0x68, 0x65, 0x6D, 0x61,
     0x31,
 ];
-const GO_COMPOSITE_DELETED_CID: &str = "bafyreib35xrgvyzzf6uwwqbavrowwzzg5gytspimnwgiyoi6e5nyb3uyp4";
+const GO_COMPOSITE_DELETED_CID: &str =
+    "bafyreib35xrgvyzzf6uwwqbavrowwzzg5gytspimnwgiyoi6e5nyb3uyp4";
 
 // Go test vector: Collection Block
 const GO_COLLECTION_BYTES: &[u8] = &[
@@ -958,7 +960,8 @@ const GO_BLOCK_WITH_ONE_HEAD_BYTES: &[u8] = &[
     0x52, 0x07, 0x42, 0xA1, 0xC6, 0xD6, 0xDE, 0x2A, 0x76, 0xA0, 0xC4, 0x8E, 0xA8, 0xC2, 0x0C, 0xAD,
     0x12, 0x0C, 0xBA, 0xA2, 0x45, 0x40, 0x3B, 0xA1, 0x6B, 0x23, 0x3F, 0xEA,
 ];
-const GO_BLOCK_WITH_ONE_HEAD_CID: &str = "bafyreifythcezq6nmny7n3aklpqwt7pieydn5wle2cdfpsjemxi5l6axfu";
+const GO_BLOCK_WITH_ONE_HEAD_CID: &str =
+    "bafyreifythcezq6nmny7n3aklpqwt7pieydn5wle2cdfpsjemxi5l6axfu";
 
 // Go test vector: Composite block with links to field-level blocks
 const GO_COMPOSITE_BLOCK_WITH_LINKS_BYTES: &[u8] = &[
@@ -971,7 +974,8 @@ const GO_COMPOSITE_BLOCK_WITH_LINKS_BYTES: &[u8] = &[
     0x1A, 0xAF, 0x83, 0xDD, 0x6F, 0x5C, 0xDB, 0xFD, 0x9C, 0x7E, 0x21, 0x59, 0x99, 0x97, 0xAF, 0x8C,
     0x8E, 0xDF, 0xC8, 0x79, 0x74, 0x87, 0x00, 0x64, 0x6E, 0x61, 0x6D, 0x65, 0x63, 0x61, 0x67, 0x65,
 ];
-const GO_COMPOSITE_BLOCK_WITH_LINKS_CID: &str = "bafyreiekxzg7hljvqjbd5ri6mgxgu7sdezot6o3k4coxklhgdc3464peju";
+const GO_COMPOSITE_BLOCK_WITH_LINKS_CID: &str =
+    "bafyreiekxzg7hljvqjbd5ri6mgxgu7sdezot6o3k4coxklhgdc3464peju";
 
 #[test]
 fn test_go_wire_compat_block_with_head() {

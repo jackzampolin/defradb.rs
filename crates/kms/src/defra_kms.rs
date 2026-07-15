@@ -386,10 +386,7 @@ mod tests {
     struct AnyDocResolver;
     #[async_trait::async_trait]
     impl BlockDocIDResolver for AnyDocResolver {
-        async fn doc_ids_for_block(
-            &self,
-            _: &EncryptionCid,
-        ) -> crate::Result<Vec<String>> {
+        async fn doc_ids_for_block(&self, _: &EncryptionCid) -> crate::Result<Vec<String>> {
             Ok(vec!["bae-test-doc".to_string()])
         }
     }
@@ -508,7 +505,13 @@ mod tests {
     async fn serve_request_returns_ecies_wrapped_block_bytes() {
         let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
-        let kms = DefraKms::new(store.clone(), vec![], policy, any_doc_resolver(), node_did());
+        let kms = DefraKms::new(
+            store.clone(),
+            vec![],
+            policy,
+            any_doc_resolver(),
+            node_did(),
+        );
         kms.set_local_peer_id("peer-1".into());
         let ctx = RequestContext::anonymous();
         let (cid, _) = kms
@@ -546,7 +549,7 @@ mod tests {
         )
         .unwrap();
         let block = defra_core::Encryption::from_dag_cbor(&unwrapped).unwrap();
-        
+
         assert_eq!(block.key.len(), 32);
     }
 
@@ -601,7 +604,13 @@ mod tests {
         // Peer KMS produces a reply for some CID.
         let peer_store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let peer_policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
-        let peer_kms = DefraKms::new(peer_store, vec![], peer_policy, any_doc_resolver(), node_did());
+        let peer_kms = DefraKms::new(
+            peer_store,
+            vec![],
+            peer_policy,
+            any_doc_resolver(),
+            node_did(),
+        );
         peer_kms.set_local_peer_id("peer".into());
         let ctx = RequestContext::anonymous();
         let (peer_cid, _) = peer_kms
@@ -640,7 +649,13 @@ mod tests {
         };
         let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
-        let kms = DefraKms::new(store, vec![Arc::new(fake)], policy, any_doc_resolver(), node_did());
+        let kms = DefraKms::new(
+            store,
+            vec![Arc::new(fake)],
+            policy,
+            any_doc_resolver(),
+            node_did(),
+        );
         kms.set_ephemeral_for_test(requester);
 
         let results = kms.get_keys(&ctx, &[peer_cid]).await.unwrap();

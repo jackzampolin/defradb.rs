@@ -4,7 +4,6 @@ mod import;
 pub use export::export_database;
 pub use import::{import_database, ImportStats};
 
-
 use serde_json::Value as JsonValue;
 
 use schema::{CollectionVersion, FieldKind};

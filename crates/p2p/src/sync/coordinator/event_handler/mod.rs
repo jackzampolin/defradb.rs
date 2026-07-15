@@ -714,7 +714,7 @@ mod tests {
         (cid, bytes)
     }
 
-    fn create_composite_block(doc_id: &str, field_name: &str, field_cid: Cid) -> (Cid, Vec<u8>) {
+    fn create_composite_block(_doc_id: &str, field_name: &str, field_cid: Cid) -> (Cid, Vec<u8>) {
         let block = Block::new(
             CrdtDelta::Composite(CompositeDeltaPayload {
                 schema_version_id: "schema1".to_string(),
