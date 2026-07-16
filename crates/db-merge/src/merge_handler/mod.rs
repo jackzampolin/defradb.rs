@@ -100,6 +100,11 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// the same document are processed one at a time, preventing read-modify-write
     /// races on the CRDT accumulation store (#1021).
     pub(crate) merge_queue: Arc<db::DocWriteQueue>,
+    /// Encryption CIDs for which a background DEK prefetch was already
+    /// spawned, so repeated deliveries of the same deferred field block
+    /// (pushlog + gossip + retries) don't fan out duplicate cross-peer
+    /// fetches.
+    prefetched_dek_cids: std::sync::Mutex<HashSet<Cid>>,
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
@@ -115,7 +120,42 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             se_enc_key: std::sync::OnceLock::new(),
             kms: std::sync::OnceLock::new(),
             merge_queue,
+            prefetched_dek_cids: std::sync::Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Fire-and-forget cross-peer DEK request for an encrypted field block
+    /// whose owner is not yet known locally (its merge is deferred to the
+    /// composite). Go parity: Go requests the DEK unconditionally at DAG-sync
+    /// time (internal/db/p2p/sync_dag.go `kms.GetKeys`), BEFORE any merge
+    /// admission — which is also what makes an unauthorized node's request
+    /// observable as a serve-side denial on the key holder
+    /// (proofs/tests/behavioral/kms.rs). The prefetch runs detached so the
+    /// merge path never blocks on it; on success the reply handler caches the
+    /// key in the local store.
+    pub(crate) fn spawn_dek_prefetch(&self, enc_cid: Cid, metadata: &BlockMetadata<'_>) {
+        let Some(kms) = self.kms() else {
+            return;
+        };
+        {
+            let mut seen = self.prefetched_dek_cids.lock().unwrap();
+            if !seen.insert(enc_cid) {
+                return;
+            }
+        }
+        let ctx = Self::kms_request_context(Some(metadata));
+        tokio::spawn(async move {
+            match kms.get_keys(&ctx, std::slice::from_ref(&enc_cid)).await {
+                Ok(results) => {
+                    // Drain so the reply (if granted) is cached; a denial or
+                    // timeout resolves the stream without a key.
+                    let _ = results.wait_all().await;
+                }
+                Err(e) => {
+                    tracing::debug!(enc_cid = %enc_cid, error = %e, "DEK prefetch failed to send");
+                }
+            }
+        });
     }
 
     /// Set the composite merge hook after construction.
@@ -493,6 +533,63 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
         block_data: &[u8],
         metadata: BlockMetadata<'_>,
     ) -> Result<MergeOutcome, Self::Error> {
+        // Go parity (internal/db/merge.go): merges race concurrent merges and
+        // local writes on shared systemstore keys — the /seq/doc short-ID
+        // sequence and co-owned block-ownership entries — so an optimistic
+        // TxnConflict is expected business. Go retries `executeMerge` up to
+        // MaxTxnRetries; the p2p layer treats a Failed merge as terminal (the
+        // pusher was already acked), so dropping a conflicted merge silently
+        // loses the document (observed as encrypted filtered-replication poll
+        // timeouts on the Linux CI runner).
+        const MAX_TXN_RETRIES: usize = 5;
+
+        let mut result = self
+            .merge_block_attempt(cid, block_data, metadata.clone())
+            .await;
+        for attempt in 1..MAX_TXN_RETRIES {
+            match &result {
+                Err(e) if e.is_txn_conflict() => {
+                    tracing::debug!(cid = %cid, attempt, "Merge txn conflict, retrying");
+                    result = self
+                        .merge_block_attempt(cid, block_data, metadata.clone())
+                        .await;
+                }
+                _ => break,
+            }
+        }
+        if let Err(e) = &result {
+            if e.is_txn_conflict() {
+                tracing::warn!(
+                    cid = %cid,
+                    max_retries = MAX_TXN_RETRIES,
+                    "Merge txn conflict retries exhausted — document merge failed"
+                );
+            }
+        }
+        result
+    }
+
+    async fn handle_block_batch(
+        &self,
+        blocks: &[MergeBlock],
+    ) -> Vec<Result<MergeOutcome, Self::Error>> {
+        if blocks.len() <= 1 {
+            return self.merge_blocks_individually(blocks).await;
+        }
+
+        self.try_batch_merge_with_split(blocks).await
+    }
+}
+
+impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMergeHandler<S, B> {
+    /// One merge attempt for a single block. Conflict retry lives in the
+    /// `MergeHandler::handle_block` wrapper above (Go's `executeMerge` split).
+    pub(crate) async fn merge_block_attempt(
+        &self,
+        cid: &Cid,
+        block_data: &[u8],
+        metadata: BlockMetadata<'_>,
+    ) -> Result<MergeOutcome, MergeError> {
         tracing::debug!(
             cid = %cid,
             block_size = block_data.len(),
@@ -534,6 +631,13 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
             && matches!(block.delta, CrdtDelta::Lww(_) | CrdtDelta::Counter(_))
             && self.resolve_field_block_doc_id(cid).await?.is_none()
         {
+            // Still REQUEST the DEK (detached), Go-parity with sync-time
+            // GetKeys: it warms the local key store for the composite merge
+            // and keeps the serve-side authorization decision — including the
+            // observable denial for unauthorized nodes — prompt.
+            if let Some(enc_cid) = block.encryption {
+                self.spawn_dek_prefetch(enc_cid, &metadata);
+            }
             return Ok(MergeOutcome::terminal_skip(
                 "field block has no unambiguous owner; merged via its composite",
             ));
@@ -655,17 +759,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                 std::mem::discriminant(other)
             ))),
         }
-    }
-
-    async fn handle_block_batch(
-        &self,
-        blocks: &[MergeBlock],
-    ) -> Vec<Result<MergeOutcome, Self::Error>> {
-        if blocks.len() <= 1 {
-            return self.merge_blocks_individually(blocks).await;
-        }
-
-        self.try_batch_merge_with_split(blocks).await
     }
 }
 

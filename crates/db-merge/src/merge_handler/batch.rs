@@ -26,8 +26,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         &self,
         blocks: &[MergeBlock],
     ) -> Vec<Result<MergeOutcome, MergeError>> {
-        const MAX_MERGE_RETRIES: usize = 5;
-
         let mut results = Vec::with_capacity(blocks.len());
         for block in blocks {
             if let Err(error) = self
@@ -50,40 +48,13 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
             )
             .with_explicit_replay_authorization(block.explicit_replay_authorization.clone());
 
-            let mut last_result = None;
-            for attempt in 0..MAX_MERGE_RETRIES {
-                let result = self
-                    .handle_block(&block.cid, &block.block_data, metadata.clone())
-                    .await;
-                match &result {
-                    Err(e) if e.is_txn_conflict() => {
-                        tracing::debug!(
-                            attempt,
-                            doc_id = %block.doc_id,
-                            cid = %block.cid,
-                            "Merge conflict, retrying"
-                        );
-                        last_result = Some(result);
-                        continue;
-                    }
-                    _ => {
-                        last_result = Some(result);
-                        break;
-                    }
-                }
-            }
-            let final_result = last_result.unwrap();
-            if let Err(ref e) = final_result {
-                if e.is_txn_conflict() {
-                    tracing::warn!(
-                        doc_id = %block.doc_id,
-                        cid = %block.cid,
-                        max_retries = MAX_MERGE_RETRIES,
-                        "Merge conflict retries exhausted — document merge failed"
-                    );
-                }
-            }
-            results.push(final_result);
+            // Conflict retry lives inside `handle_block` (Go's MaxTxnRetries
+            // parity), so every caller — including the parallel replication
+            // workers — gets it, not just this batch fallback.
+            results.push(
+                self.handle_block(&block.cid, &block.block_data, metadata)
+                    .await,
+            );
         }
         results
     }
@@ -337,6 +308,11 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 .await?
                 .is_none()
         {
+            // Still REQUEST the DEK (detached) — see the twin gate in
+            // `mod.rs::handle_block` for the Go-parity rationale.
+            if let Some(enc_cid) = block.encryption {
+                self.spawn_dek_prefetch(enc_cid, &metadata);
+            }
             return Ok(MergeOutcome::terminal_skip(
                 "field block has no unambiguous owner; merged via its composite",
             ));
