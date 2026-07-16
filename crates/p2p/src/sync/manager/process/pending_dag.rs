@@ -1151,7 +1151,6 @@ mod tests {
     fn lww_leaf(field_name: &str) -> (Cid, Vec<u8>) {
         let block = DefraBlock::new(
             CrdtDelta::Lww(LwwDeltaPayload {
-                doc_id: b"doc1".to_vec(),
                 field_name: field_name.to_string(),
                 priority: 1,
                 schema_version_id: "schema1".to_string(),
@@ -1168,7 +1167,6 @@ mod tests {
     fn composite_node(link_name: &str, link_cid: Cid, priority: u64) -> (Cid, Vec<u8>) {
         let block = DefraBlock::new(
             CrdtDelta::Composite(CompositeDeltaPayload {
-                doc_id: b"doc1".to_vec(),
                 schema_version_id: "schema1".to_string(),
                 priority,
                 status: 1,

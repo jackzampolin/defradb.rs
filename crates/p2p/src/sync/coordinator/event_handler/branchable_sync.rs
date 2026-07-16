@@ -238,6 +238,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                             self.is_registered_replicator(peer_id.as_str(), &reply.collection_id),
                         );
                         context.fill_missing_from_block(&data);
+                        context.fill_missing_doc_id_from_genesis(&cid, &data);
                         tracing::info!(
                             cid = %cid,
                             collection_id = %context.collection_id,

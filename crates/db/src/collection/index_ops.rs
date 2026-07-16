@@ -1,55 +1,41 @@
 use super::*;
 
 impl Collection {
-    /// Create a new document and update all indexes.
+    /// Create a new document blob and update all indexes.
     ///
-    /// When `blind` is true, skips the document existence check. Use this when
-    /// the document ID was just generated (content-addressed), guaranteeing uniqueness.
+    /// The document must already carry its (genesis-CID-derived) DocID and
+    /// the caller supplies the allocated short ID. Duplicate detection
+    /// happens against the DocID mapping before this is called, so no
+    /// blob-level existence check remains.
     pub async fn create_with_indexes(
         &self,
         datastore: &NamespaceView,
         doc: &Document,
+        doc_short_id: u64,
         index_manager: &IndexManager,
-        blind: bool,
     ) -> Result<DocID> {
         // Validate document against schema
         self.validate_document(doc)?;
 
-        // Generate document ID if not present
         let doc_id = doc
             .id()
             .cloned()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
-        let key = self.doc_key(&doc_id);
-
-        // Skip existence check for blind creates (content-addressed IDs are unique by construction)
-        if !blind && datastore.has(&key).await.map_err(Error::Storage)? {
-            return Err(Error::InvalidDocument(format!(
-                "Document with ID {} already exists",
-                doc_id
-            )));
-        }
-
         // Serialize document to CBOR
         let data = doc.to_cbor()?;
 
         // Store document
+        let key = self.doc_key(doc_short_id);
         datastore.set(&key, &data).await.map_err(Error::Storage)?;
 
         // Store schema version for lens migration support
-        self.store_version(datastore, &doc_id).await?;
+        self.store_version(datastore, doc_short_id).await?;
 
-        // Update indexes (skip unique constraint checks for blind creates)
-        if blind {
-            index_manager
-                .on_document_create_blind(datastore, doc, &self.def)
-                .await?;
-        } else {
-            index_manager
-                .on_document_create(datastore, doc, &self.def)
-                .await?;
-        }
+        // Update indexes
+        index_manager
+            .on_document_create(datastore, doc, doc_short_id, &self.def)
+            .await?;
 
         Ok(doc_id)
     }
@@ -61,6 +47,7 @@ impl Collection {
         &self,
         datastore: &NamespaceView,
         doc: &Document,
+        doc_short_id: u64,
         index_manager: &IndexManager,
     ) -> Result<()> {
         // Validate document against schema
@@ -70,7 +57,7 @@ impl Collection {
             .id()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
-        let key = self.doc_key(doc_id);
+        let key = self.doc_key(doc_short_id);
 
         // Get old document for index update
         let old_doc = match datastore.get(&key).await.map_err(Error::Storage)? {
@@ -90,11 +77,11 @@ impl Collection {
         datastore.set(&key, &data).await.map_err(Error::Storage)?;
 
         // Update schema version to current collection version
-        self.store_version(datastore, doc_id).await?;
+        self.store_version(datastore, doc_short_id).await?;
 
         // Update indexes
         index_manager
-            .on_document_update(datastore, &old_doc, doc, &self.def)
+            .on_document_update(datastore, &old_doc, doc, doc_short_id, &self.def)
             .await?;
 
         Ok(())
@@ -109,10 +96,11 @@ impl Collection {
         &self,
         datastore: &NamespaceView,
         doc_id: &DocID,
+        doc_short_id: u64,
         index_manager: &IndexManager,
     ) -> Result<bool> {
-        let key = self.doc_key(doc_id);
-        let deleted_key = self.deleted_key(doc_id);
+        let key = self.doc_key(doc_short_id);
+        let deleted_key = self.deleted_key(doc_short_id);
 
         // Check if already deleted
         if datastore.has(&deleted_key).await.map_err(Error::Storage)? {
@@ -137,15 +125,15 @@ impl Collection {
 
         // Update indexes (remove from indexes since doc is now "deleted")
         index_manager
-            .on_document_delete(datastore, &doc, &self.def)
+            .on_document_delete(datastore, &doc, doc_short_id, &self.def)
             .await?;
 
         Ok(true)
     }
 
     /// Check if a document is marked as deleted.
-    pub async fn is_deleted(&self, datastore: &NamespaceView, doc_id: &DocID) -> Result<bool> {
-        let deleted_key = self.deleted_key(doc_id);
+    pub async fn is_deleted(&self, datastore: &NamespaceView, doc_short_id: u64) -> Result<bool> {
+        let deleted_key = self.deleted_key(doc_short_id);
         datastore.has(&deleted_key).await.map_err(Error::Storage)
     }
 }

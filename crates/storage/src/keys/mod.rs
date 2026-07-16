@@ -30,7 +30,7 @@
 /// let key = DataStoreKey::new(
 ///     1,
 ///     InstanceType::Value,
-///     "docid123",
+///     42,
 ///     "fieldname",
 /// );
 ///
@@ -40,6 +40,7 @@
 pub mod blockstore;
 pub mod crdt;
 pub mod datastore;
+pub mod doc_id_index;
 pub mod document;
 pub mod encstore;
 pub mod headstore;
@@ -53,6 +54,11 @@ pub use crdt::{CRDTNonceKey, CRDTNoncePrefix, CRDTPriorityKey, CRDTValueKey};
 pub use datastore::{
     DataStoreKey, DatastoreSE, IndexDataStoreKey, IndexedField, PrimaryDataStoreKey, ViewCacheKey,
     DATASTORE_DOC_VERSION_FIELD_ID,
+};
+pub use doc_id_index::{
+    decode_doc_short_id, decode_doc_short_id_prefix, encode_doc_short_id, BlockCIDToDocIDKey,
+    DocIDToDocRefKey, DocRef, DocShortIDSequenceKey, DocShortIDToDocIDAliasKey,
+    DocShortIDToDocIDKey, DOC_ID_INDEX, DOC_SHORT_ID_SEQ,
 };
 pub use document::{deleted_doc_key, doc_key, DELETED_KEY_PREFIX, DOC_KEY_PREFIX};
 pub use encstore::EncstoreKey;
@@ -85,8 +91,8 @@ mod tests {
     #[test]
     fn test_all_key_types_implement_key_trait() {
         // Datastore keys
-        let _: Box<dyn Key> = Box::new(DataStoreKey::new(1, InstanceType::Value, "doc", "field"));
-        let _: Box<dyn Key> = Box::new(PrimaryDataStoreKey::new(1, "doc"));
+        let _: Box<dyn Key> = Box::new(DataStoreKey::new(1, InstanceType::Value, 42, "field"));
+        let _: Box<dyn Key> = Box::new(PrimaryDataStoreKey::new(1, 42));
         let _: Box<dyn Key> = Box::new(IndexDataStoreKey::new(1, 2, vec![]));
         let _: Box<dyn Key> = Box::new(DatastoreSE::new("col", "idx", vec![], "doc"));
         let _: Box<dyn Key> = Box::new(ViewCacheKey::new(1, 5));
@@ -98,12 +104,12 @@ mod tests {
 
         // Headstore keys
         let cid = test_cid();
-        let _: Box<dyn Key> = Box::new(HeadstoreDocKey::new("doc", "field", cid));
+        let _: Box<dyn Key> = Box::new(HeadstoreDocKey::new(42, "field", cid));
         let _: Box<dyn Key> = Box::new(HeadstoreColKey::new(1, cid));
         let _: Box<dyn Key> = Box::new(HeadstoreFieldDefinition::new("col", "field", cid));
         let _: Box<dyn Key> = Box::new(HeadstoreCollectionDefinition::new("col", cid));
         let _: Box<dyn Key> = Box::new(HeadstoreCollectionSetDefinition::new("col", cid));
-        let _: Box<dyn Key> = Box::new(HeadstorePriorityKey::new("doc", 1, cid));
+        let _: Box<dyn Key> = Box::new(HeadstorePriorityKey::new(42, 1, cid));
 
         // Systemstore keys
         let _: Box<dyn Key> = Box::new(CollectionKey::new("col"));
@@ -138,8 +144,8 @@ mod tests {
         // This is a compile-time check that all types exist
 
         // Datastore: 5 keys
-        let _d1 = DataStoreKey::new(1, InstanceType::Value, "d", "f");
-        let _d2 = PrimaryDataStoreKey::new(1, "d");
+        let _d1 = DataStoreKey::new(1, InstanceType::Value, 42, "f");
+        let _d2 = PrimaryDataStoreKey::new(1, 42);
         let _d3 = IndexDataStoreKey::new(1, 2, vec![]);
         let _d4 = DatastoreSE::new("c", "i", vec![], "d");
         let _d5 = ViewCacheKey::new(1, 5);
@@ -150,12 +156,12 @@ mod tests {
 
         // Headstore: 6 keys
         let cid = test_cid();
-        let _h1 = HeadstoreDocKey::new("d", "f", cid);
+        let _h1 = HeadstoreDocKey::new(42, "f", cid);
         let _h2 = HeadstoreColKey::new(1, cid);
         let _h3 = HeadstoreFieldDefinition::new("c", "f", cid);
         let _h4 = HeadstoreCollectionDefinition::new("c", cid);
         let _h5 = HeadstoreCollectionSetDefinition::new("c", cid);
-        let _h6 = HeadstorePriorityKey::new("d", 1, cid);
+        let _h6 = HeadstorePriorityKey::new(42, 1, cid);
 
         // Systemstore: 11 keys
         let _s1 = CollectionKey::new("c");

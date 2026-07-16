@@ -18,9 +18,18 @@ use storage::keys::headstore::HeadstoreDocKey;
 impl<S: Store + 'static> crate::database::DB<S> {
     pub(super) async fn latest_doc_priority(&self, doc_id: &str) -> Result<u64> {
         let txn = self.new_txn(true).await?;
+        let systemstore = txn.systemstore()?;
+        let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+            let _ = txn.discard();
+            return Ok(0);
+        };
+
         let headstore = txn.headstore()?;
         let mut iter = headstore
-            .iterator(IterOptions::new().with_prefix(HeadstoreDocKey::document_prefix(doc_id)))
+            .iterator(
+                IterOptions::new()
+                    .with_prefix(HeadstoreDocKey::document_prefix(doc_ref.doc_short_id)),
+            )
             .await
             .map_err(Error::Storage)?;
 
@@ -43,18 +52,64 @@ impl<S: Store + 'static> crate::database::DB<S> {
             .ok_or_else(|| Error::CollectionNotFound(collection.name.clone()))?;
         let txn = self.new_txn(true).await?;
         let datastore = txn.datastore()?;
-        let result = source_collection.get_all_with_datastore(&datastore).await;
+        let systemstore = txn.systemstore()?;
+        let result = source_collection
+            .get_all_with_datastore(&datastore, &systemstore)
+            .await;
         let _ = txn.discard();
         result
     }
 
+    /// Find the downsample target document for a series by its
+    /// `source_doc_id` field. Target DocIDs are genesis-derived (not
+    /// seed-derived), so the series linkage field is the stable lookup key.
+    pub(super) async fn find_downsample_target(
+        self: &Arc<Self>,
+        target_name: &str,
+        series_doc_id: &str,
+    ) -> Result<Option<Document>> {
+        let fetcher = crate::LensedAutoCommitFetcher::new(self.clone());
+        let docs = fetcher
+            .get_by_field_value(target_name, "source_doc_id", series_doc_id)
+            .await
+            .map_err(Error::Query)?;
+        Ok(docs.into_iter().next())
+    }
+
+    /// Transaction-scoped variant of `find_downsample_target` for callers
+    /// already holding datastore/systemstore views (write validation).
+    pub(super) async fn find_downsample_target_in_txn(
+        &self,
+        datastore: &datastore::NamespaceView,
+        systemstore: &datastore::NamespaceView,
+        target_name: &str,
+        series_doc_id: &str,
+    ) -> Result<Option<Document>> {
+        let Some(target_collection) = self.get_collection(target_name)? else {
+            return Ok(None);
+        };
+        let docs = target_collection
+            .get_all_with_datastore(datastore, systemstore)
+            .await?;
+        Ok(docs
+            .into_iter()
+            .find(|doc| doc.get("source_doc_id").and_then(|v| v.as_str()) == Some(series_doc_id)))
+    }
+
     pub(super) fn series_doc_id(&self, source_doc: &Document) -> Result<String> {
+        self.series_doc_id_opt(source_doc)
+            .ok_or_else(|| Error::Other("downsample source document is missing an id".to_string()))
+    }
+
+    /// Resolve the series identity of a downsample source, or `None` when
+    /// the source has neither an explicit `source_doc_id` nor a DocID yet
+    /// (a first-time create before its genesis identity is assigned).
+    pub(super) fn series_doc_id_opt(&self, source_doc: &Document) -> Option<String> {
         source_doc
             .get("source_doc_id")
             .and_then(|value| value.as_str())
             .map(str::to_string)
             .or_else(|| source_doc.id().map(ToString::to_string))
-            .ok_or_else(|| Error::Other("downsample source document is missing an id".to_string()))
     }
 
     fn set_field(
@@ -197,22 +252,31 @@ impl<S: Store + 'static> crate::database::DB<S> {
         Ok(modified_fields)
     }
 
+    /// Upsert one aggregation window into the target doc. Returns the target
+    /// DocID so a create in the first window threads its derived identity to
+    /// the remaining windows (the DocID only exists after the create).
     async fn persist_window_update(
         self: &Arc<Self>,
         plan: &DownsamplePlan,
         source_doc: &Document,
         series_doc_id: &str,
-        target_doc_id: &DocID,
+        target_doc_id: Option<&DocID>,
         aggregate: &WindowAggregate,
-    ) -> Result<()> {
+    ) -> Result<DocID> {
         let mutator = crate::auto_commit_mutator::AutoCommitMutator::new(self.clone());
-        let maybe_existing = mutator
-            .get_for_update(&plan.target.name, target_doc_id)
-            .await
-            .map_err(Error::Query)?;
+        let maybe_existing = match target_doc_id {
+            Some(id) => mutator
+                .get_for_update(&plan.target.name, id)
+                .await
+                .map_err(Error::Query)?,
+            None => None,
+        };
 
         match maybe_existing {
             Some(mut doc) => {
+                let target_doc_id = target_doc_id
+                    .expect("existing target doc implies a known DocID")
+                    .clone();
                 let modified_fields = self.apply_window_to_target_doc(
                     plan,
                     source_doc,
@@ -222,7 +286,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
                 )?;
 
                 if modified_fields.is_empty() {
-                    return Ok(());
+                    return Ok(target_doc_id);
                 }
 
                 doc.set_collection(plan.target.clone());
@@ -233,9 +297,10 @@ impl<S: Store + 'static> crate::database::DB<S> {
                     .update(&plan.target.name, doc, modified_fields)
                     .await
                     .map_err(Error::Query)?;
+                Ok(target_doc_id)
             }
             None => {
-                let mut doc = Document::with_id(target_doc_id.clone());
+                let mut doc = Document::new();
                 doc.set_collection(plan.target.clone());
                 doc.set_schema_version_id(plan.target.version_id.clone());
 
@@ -247,14 +312,13 @@ impl<S: Store + 'static> crate::database::DB<S> {
                     series_doc_id,
                 )?;
 
-                mutator
+                let created = mutator
                     .create(&plan.target.name, doc)
                     .await
                     .map_err(Error::Query)?;
+                Ok(created.doc_id)
             }
         }
-
-        Ok(())
     }
 
     async fn process_source_doc_for_plan(
@@ -273,14 +337,13 @@ impl<S: Store + 'static> crate::database::DB<S> {
         }
 
         let series_doc_id = self.series_doc_id(source_doc)?;
-        let target_doc_id =
-            DocID::new_v0_from_seed(&format!("{}:{}", plan.target.collection_id, series_doc_id));
+        let series_lock = format!("downsample/{}/{}", plan.target.collection_id, series_doc_id);
+        let _series_guard = self.doc_write_queue().acquire(&series_lock).await;
 
-        let mutator = crate::auto_commit_mutator::AutoCommitMutator::new(self.clone());
-        let current_target = mutator
-            .get_for_update(&plan.target.name, &target_doc_id)
-            .await
-            .map_err(Error::Query)?;
+        let current_target = self
+            .find_downsample_target(&plan.target.name, &series_doc_id)
+            .await?;
+        let mut target_doc_id = current_target.as_ref().and_then(|doc| doc.id().cloned());
         let processed_height = current_target
             .as_ref()
             .and_then(|doc| doc.get("source_height"))
@@ -329,14 +392,16 @@ impl<S: Store + 'static> crate::database::DB<S> {
         }
 
         for aggregate in windows {
-            self.persist_window_update(
-                plan,
-                source_doc,
-                &series_doc_id,
-                &target_doc_id,
-                &aggregate,
-            )
-            .await?;
+            let persisted_id = self
+                .persist_window_update(
+                    plan,
+                    source_doc,
+                    &series_doc_id,
+                    target_doc_id.as_ref(),
+                    &aggregate,
+                )
+                .await?;
+            target_doc_id = Some(persisted_id);
         }
 
         Ok(())

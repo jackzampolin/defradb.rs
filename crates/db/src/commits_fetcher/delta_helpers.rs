@@ -1,7 +1,10 @@
 //! Helper methods for extracting data from CRDT deltas.
 
+use cid::Cid;
 use defra_core::block::CrdtDelta;
 use storage::corekv::Store;
+
+use crate::txn::DbTxn;
 
 use super::CommitsFetcher;
 
@@ -20,11 +23,35 @@ impl<S: Store> CommitsFetcher<S> {
         }
     }
 
-    /// Get document ID from delta
-    pub(super) fn get_doc_id(&self, delta: &CrdtDelta) -> Option<String> {
-        delta
-            .doc_id()
-            .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+    /// Resolve every DocID owning a block. Field blocks can be shared by
+    /// multiple documents now that their payloads no longer embed identity.
+    pub(super) async fn get_doc_ids(
+        &self,
+        txn: &mut DbTxn<S>,
+        cid: &Cid,
+        block: &defra_core::Block,
+    ) -> crate::Result<Option<Vec<String>>> {
+        let systemstore = txn.systemstore()?;
+        crate::doc_id_map::resolve_block_doc_ids(&systemstore, cid, block).await
+    }
+
+    pub(super) async fn canonical_doc_id(
+        &self,
+        txn: &mut DbTxn<S>,
+        doc_id: &str,
+    ) -> crate::Result<String> {
+        let systemstore = txn.systemstore()?;
+        let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+            return Ok(doc_id.to_string());
+        };
+        crate::doc_id_map::get_doc_id(&systemstore, doc_ref.doc_short_id)
+            .await?
+            .ok_or_else(|| {
+                crate::Error::InvalidDocument(format!(
+                    "document short ID {} has no canonical DocID",
+                    doc_ref.doc_short_id
+                ))
+            })
     }
 
     /// Get delta data from delta

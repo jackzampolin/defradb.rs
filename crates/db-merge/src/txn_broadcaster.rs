@@ -82,6 +82,7 @@ where
                 block: doc_block,
                 doc_id: doc_id.clone(),
                 field_cids: vec![],
+                encryption_cids: vec![],
             };
             log_broadcast_failure(
                 &broadcast_with_retry_with_creator(
@@ -112,6 +113,7 @@ where
                     block: col_block,
                     doc_id: String::new(),
                     field_cids: vec![],
+                    encryption_cids: vec![],
                 };
                 log_broadcast_failure(
                     &broadcast_with_retry_with_creator(

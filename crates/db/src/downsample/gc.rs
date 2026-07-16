@@ -2,10 +2,7 @@ use super::parse::*;
 use super::types::*;
 use crate::error::{Error, Result};
 use cid::Cid;
-use defra_core::block::Block;
-use document::DocID;
 use query::fetcher::CommitsQueryOptions;
-use query::mutator::DocMutator;
 use query::runner::DocFetcher;
 use std::collections::{HashMap, HashSet};
 use std::str;
@@ -23,13 +20,9 @@ impl<S: Store + 'static> crate::database::DB<S> {
             return Ok(None);
         };
 
-        let target_doc_id =
-            DocID::new_v0_from_seed(&format!("{}:{}", plan.target.collection_id, series_doc_id));
-        let fetcher = crate::auto_commit_mutator::AutoCommitMutator::new(self.clone());
-        let Some(target_doc) = fetcher
-            .get_for_update(&plan.target.name, &target_doc_id)
-            .await
-            .map_err(Error::Query)?
+        let Some(target_doc) = self
+            .find_downsample_target(&plan.target.name, series_doc_id)
+            .await?
         else {
             return Ok(None);
         };
@@ -65,11 +58,13 @@ impl<S: Store + 'static> crate::database::DB<S> {
         Ok(heights)
     }
 
-    async fn current_head_cids(&self, doc_id: &str) -> Result<HashSet<Cid>> {
+    async fn current_head_cids(&self, doc_short_id: u64) -> Result<HashSet<Cid>> {
         let txn = self.new_txn(true).await?;
         let headstore = txn.headstore()?;
         let mut iter = headstore
-            .iterator(IterOptions::new().with_prefix(HeadstoreDocKey::document_prefix(doc_id)))
+            .iterator(
+                IterOptions::new().with_prefix(HeadstoreDocKey::document_prefix(doc_short_id)),
+            )
             .await
             .map_err(Error::Storage)?;
 
@@ -95,9 +90,9 @@ impl<S: Store + 'static> crate::database::DB<S> {
         Ok(cids)
     }
 
-    fn parse_priority_entry(doc_id: &str, key: &[u8]) -> Option<(u64, Cid)> {
-        let doc_prefix_len = HeadstorePriorityKey::document_prefix(doc_id).len();
-        let cid_offset = HeadstorePriorityKey::cid_offset(doc_id);
+    fn parse_priority_entry(doc_short_id: u64, key: &[u8]) -> Option<(u64, Cid)> {
+        let doc_prefix_len = HeadstorePriorityKey::document_prefix(doc_short_id).len();
+        let cid_offset = HeadstorePriorityKey::cid_offset(doc_short_id);
         let priority_hex = key
             .get(doc_prefix_len..doc_prefix_len + 16)
             .and_then(|bytes| str::from_utf8(bytes).ok())?;
@@ -117,22 +112,37 @@ impl<S: Store + 'static> crate::database::DB<S> {
             return Ok(());
         }
 
-        let current_head_cids = self.current_head_cids(doc_id).await?;
+        let doc_short_id = {
+            let txn = self.new_txn(true).await?;
+            let systemstore = txn.systemstore()?;
+            let doc_ref = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await?;
+            drop(systemstore);
+            let _ = txn.discard();
+            match doc_ref {
+                Some(doc_ref) => doc_ref.doc_short_id,
+                None => return Ok(()),
+            }
+        };
+
+        let current_head_cids = self.current_head_cids(doc_short_id).await?;
         let txn = self.new_txn(false).await?;
         let headstore = txn.headstore()?;
         let blockstore = txn.blockstore()?;
+        let systemstore = txn.systemstore()?;
 
         let result: Result<()> = async {
             let mut iter = headstore
                 .iterator(
-                    IterOptions::new().with_prefix(HeadstorePriorityKey::document_prefix(doc_id)),
+                    IterOptions::new()
+                        .with_prefix(HeadstorePriorityKey::document_prefix(doc_short_id)),
                 )
                 .await
                 .map_err(Error::Storage)?;
 
             let mut keys_to_delete = Vec::new();
             while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
-                let Some((priority, cid)) = Self::parse_priority_entry(doc_id, &pair.key) else {
+                let Some((priority, cid)) = Self::parse_priority_entry(doc_short_id, &pair.key)
+                else {
                     continue;
                 };
                 if !pruneable_heights.contains(&priority) || current_head_cids.contains(&cid) {
@@ -143,7 +153,6 @@ impl<S: Store + 'static> crate::database::DB<S> {
             iter.close().await.map_err(Error::Storage)?;
 
             let mut deleted_commits = HashSet::new();
-            let mut deleted_signatures = HashSet::new();
 
             for (key, cid) in keys_to_delete {
                 headstore.delete(&key).await.map_err(Error::Storage)?;
@@ -152,17 +161,8 @@ impl<S: Store + 'static> crate::database::DB<S> {
                     continue;
                 }
 
-                let block_key = cid.to_bytes();
-                if let Some(bytes) = blockstore.get(&block_key).await.map_err(Error::Storage)? {
-                    if let Ok(block) = Block::from_dag_cbor(&bytes) {
-                        if let Some(signature_cid) = block.signature {
-                            if deleted_signatures.insert(signature_cid) {
-                                let _ = blockstore.delete(&signature_cid.to_bytes()).await;
-                            }
-                        }
-                    }
-                }
-                let _ = blockstore.delete(&block_key).await;
+                crate::block_cleanup::delete_owned_commit(&blockstore, &systemstore, &cid, doc_id)
+                    .await?;
             }
 
             Ok(())
@@ -171,6 +171,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
 
         drop(headstore);
         drop(blockstore);
+        drop(systemstore);
 
         match result {
             Ok(()) => {

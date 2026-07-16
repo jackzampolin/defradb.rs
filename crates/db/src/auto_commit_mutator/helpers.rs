@@ -4,6 +4,7 @@ use crate::collection::Collection;
 use crdt::traits::{Context, ValueReader};
 use crdt::{Counter, CounterDelta, NumericKind};
 use datastore::NamespaceView;
+use db_blocks::BlockResult;
 use defra_core::types::DocId as CrdtDocId;
 use document::NormalValue;
 use schema::{FieldKind, ScalarKind};
@@ -17,11 +18,12 @@ pub(crate) async fn write_local_update(
     datastore: &NamespaceView,
     collection: &Collection,
     doc: &mut Document,
+    doc_short_id: u64,
     index_manager: &IndexManager,
 ) -> query::error::Result<()> {
-    apply_local_counter_deltas(datastore, collection, doc).await?;
+    apply_local_counter_deltas(datastore, collection, doc, doc_short_id).await?;
     collection
-        .update_with_indexes(datastore, doc, index_manager)
+        .update_with_indexes(datastore, doc, doc_short_id, index_manager)
         .await
         .map_err(|e| match e {
             crate::error::Error::DocumentNotFound(id) => {
@@ -38,11 +40,11 @@ pub(crate) async fn write_local_create(
     datastore: &NamespaceView,
     collection: &Collection,
     doc: &Document,
+    doc_short_id: u64,
     index_manager: &IndexManager,
-    id_was_generated: bool,
 ) -> query::error::Result<()> {
     collection
-        .create_with_indexes(datastore, doc, index_manager, id_was_generated)
+        .create_with_indexes(datastore, doc, doc_short_id, index_manager)
         .await
         .map_err(|e| crate::error::index_write_query_error("create", e))?;
     init_counter_stores_on_create(datastore, collection, doc).await
@@ -57,10 +59,11 @@ pub(crate) async fn write_local_update_deferred(
     datastore: &NamespaceView,
     collection: &Collection,
     doc: &Document,
+    doc_short_id: u64,
     index_manager: &IndexManager,
 ) -> query::error::Result<()> {
     collection
-        .update_with_indexes(datastore, doc, index_manager)
+        .update_with_indexes(datastore, doc, doc_short_id, index_manager)
         .await
         .map_err(|e| match e {
             crate::error::Error::DocumentNotFound(id) => {
@@ -77,13 +80,80 @@ pub(crate) async fn write_local_create_deferred(
     datastore: &NamespaceView,
     collection: &Collection,
     doc: &Document,
+    doc_short_id: u64,
     index_manager: &IndexManager,
-    id_was_generated: bool,
 ) -> query::error::Result<()> {
     collection
-        .create_with_indexes(datastore, doc, index_manager, id_was_generated)
+        .create_with_indexes(datastore, doc, doc_short_id, index_manager)
         .await
         .map_err(|e| crate::error::index_write_query_error("create", e))?;
+    Ok(())
+}
+
+/// Register the identity of a freshly created document (Go `save()` isAdd):
+/// duplicate-check the derived DocID against the mapping, persist the
+/// short-ID <-> DocID mapping, and record block ownership for the genesis
+/// composite, field, and encryption blocks. Returns the parsed DocID.
+pub(crate) async fn register_created_doc(
+    systemstore: &NamespaceView,
+    datastore: &NamespaceView,
+    collection: &Collection,
+    doc_short_id: u64,
+    block_result: &BlockResult,
+) -> query::error::Result<DocID> {
+    let doc_id_str = &block_result.doc_id;
+
+    let existing = crate::doc_id_map::get_doc_ref(systemstore, doc_id_str)
+        .await
+        .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+    if let Some(doc_ref) = existing {
+        let is_deleted = collection
+            .is_deleted(datastore, doc_ref.doc_short_id)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+        if is_deleted {
+            return Err(query::error::QueryError::execution(format!(
+                "Document with ID {} has been deleted",
+                doc_id_str
+            )));
+        }
+        return Err(query::error::QueryError::execution(format!(
+            "Document with ID {} already exists",
+            doc_id_str
+        )));
+    }
+
+    crate::doc_id_map::set_doc_id_mapping(
+        systemstore,
+        collection.resolved_root_id(),
+        doc_short_id,
+        doc_id_str,
+    )
+    .await
+    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
+    register_block_doc_id_mappings(systemstore, block_result, doc_id_str).await?;
+
+    DocID::from_string(doc_id_str)
+        .map_err(|e| query::error::QueryError::execution(format!("invalid derived DocID: {}", e)))
+}
+
+/// Record block ownership (`/d/b/{cid}/{docID}`) for every block produced by
+/// a mutation: the composite, each field block, and each encryption block.
+pub(crate) async fn register_block_doc_id_mappings(
+    systemstore: &NamespaceView,
+    block_result: &BlockResult,
+    doc_id: &str,
+) -> query::error::Result<()> {
+    let mut cids = Vec::with_capacity(1 + block_result.field_cids.len());
+    cids.push(block_result.cid);
+    cids.extend(block_result.field_cids.iter().copied());
+    cids.extend(block_result.encryption_cids.iter().copied());
+    for cid in cids {
+        crate::doc_id_map::set_block_doc_id_mapping(systemstore, &cid.to_string(), doc_id)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -225,6 +295,7 @@ async fn apply_local_counter_deltas(
     datastore: &NamespaceView,
     collection: &Collection,
     doc: &mut Document,
+    doc_short_id: u64,
 ) -> query::error::Result<()> {
     let schema_version_id = collection.version_id().to_string();
 
@@ -263,7 +334,7 @@ async fn apply_local_counter_deltas(
     // first time it is touched (init-if-absent). A first update of a doc with no
     // committed value seeds 0.
     let committed = collection
-        .get_with_datastore(datastore, &doc_id)
+        .get_with_datastore(datastore, doc_short_id, &doc_id)
         .await
         .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 

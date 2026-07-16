@@ -1,7 +1,7 @@
 //! Index iterator traits and types for scanning index entries
 //!
 //! This module provides the core abstractions for iterating over index entries:
-//! - `IndexEntry`: A single index entry containing document ID and field values
+//! - `IndexEntry`: A single index entry containing the doc short ID and field values
 //! - `IndexIterator`: Trait for iterating over index entries
 //! - Bound types for configuring range queries
 
@@ -12,29 +12,31 @@ use crate::corekv::{MaybeSend, Result};
 
 /// A single entry from an index scan.
 ///
-/// Contains the document ID and the indexed field values for that document.
-/// The values are in the same order as the index field definitions.
+/// Contains the node-local doc short ID and the indexed field values for
+/// that document. The public DocID is resolved from the short ID at the db
+/// layer via the systemstore mapping. The values are in the same order as
+/// the index field definitions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexEntry {
-    /// The document ID this entry points to
-    pub doc_id: String,
+    /// The doc short ID this entry points to
+    pub doc_short_id: u64,
     /// The indexed field values in field order
     pub values: Vec<NormalValue>,
 }
 
 impl IndexEntry {
     /// Create a new index entry
-    pub fn new(doc_id: impl Into<String>, values: Vec<NormalValue>) -> Self {
+    pub fn new(doc_short_id: u64, values: Vec<NormalValue>) -> Self {
         Self {
-            doc_id: doc_id.into(),
+            doc_short_id,
             values,
         }
     }
 
     /// Create an index entry with a single value
-    pub fn single(doc_id: impl Into<String>, value: NormalValue) -> Self {
+    pub fn single(doc_short_id: u64, value: NormalValue) -> Self {
         Self {
-            doc_id: doc_id.into(),
+            doc_short_id,
             values: vec![value],
         }
     }
@@ -169,20 +171,20 @@ mod tests {
     #[test]
     fn test_index_entry_new() {
         let entry = IndexEntry::new(
-            "doc1",
+            1,
             vec![
                 NormalValue::String("alice".to_string()),
                 NormalValue::Int(25),
             ],
         );
-        assert_eq!(entry.doc_id, "doc1");
+        assert_eq!(entry.doc_short_id, 1);
         assert_eq!(entry.values.len(), 2);
     }
 
     #[test]
     fn test_index_entry_single() {
-        let entry = IndexEntry::single("doc1", NormalValue::String("alice".to_string()));
-        assert_eq!(entry.doc_id, "doc1");
+        let entry = IndexEntry::single(1, NormalValue::String("alice".to_string()));
+        assert_eq!(entry.doc_short_id, 1);
         assert_eq!(entry.values.len(), 1);
     }
 

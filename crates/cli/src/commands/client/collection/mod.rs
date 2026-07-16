@@ -14,7 +14,7 @@ use crate::error::Result;
 #[derive(Args, Debug)]
 pub struct CollectionArgs {
     /// Collection name
-    #[arg(long, global = true)]
+    #[arg(long = "collection-name", global = true)]
     pub name: Option<String>,
 
     /// Collection ID

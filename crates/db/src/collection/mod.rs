@@ -10,21 +10,20 @@
 /// If the document write succeeds but the index update fails, the caller MUST discard the
 /// transaction (do not commit) to maintain consistency. The underlying transaction will
 /// roll back both operations when discarded.
-mod crud;
 mod crud_datastore;
 mod index_ops;
 mod validation;
 
 use crate::error::{Error, Result};
 use crate::index_manager::IndexManager;
-use crate::txn::DbTxn;
 use datastore::NamespaceView;
 use document::{DocID, Document, NormalValue};
 use schema::{
     legacy_collection_short_id, CollectionVersion, FieldKind, IndexDescription, ScalarArrayKind,
     ScalarKind,
 };
-use storage::corekv::{IterOptions, Key, Store};
+use storage::corekv::{IterOptions, Key};
+use storage::keys::doc_id_index::encode_doc_short_id;
 use storage::keys::systemstore::{CollectionID, CollectionIDSequenceKey};
 
 /// Derive the legacy short ID from a collection_id string.
@@ -119,9 +118,8 @@ pub async fn populate_collection_root_id(
 /// Key prefix for document data in datastore.
 pub(super) const DOC_KEY_PREFIX: &[u8] = b"/d/";
 
-/// Key prefix for document deletion markers in datastore.
-/// Deleted documents have their data stored at /d/ and a marker at /del/
-pub(super) const DELETED_KEY_PREFIX: &[u8] = b"/del/";
+/// Key prefix for per-document schema versions in datastore.
+pub(super) const VERSION_KEY_PREFIX: &[u8] = b"/v/";
 
 /// Marker byte indicating a document is deleted (matches Go's DeletedObjectMarker).
 pub(super) const DELETED_MARKER: u8 = 0x01;
@@ -181,24 +179,19 @@ impl Collection {
         self.def.indexes.iter().find(|idx| idx.name == name)
     }
 
-    /// Generate the storage key for a document.
-    pub(crate) fn doc_key(&self, doc_id: &DocID) -> Vec<u8> {
-        storage::keys::doc_key(&self.def.collection_id, &doc_id.to_string())
+    /// Generate the storage key for a document blob.
+    ///
+    /// Keyed by the node-local doc short ID: iteration order over a
+    /// collection is allocation (insertion) order, matching Go v1.0.0's
+    /// short-ID-keyed datastore (#4838). Delegates to the shared key helper
+    /// so the write, merge, and index layers agree on the layout (#1111).
+    pub(crate) fn doc_key(&self, doc_short_id: u64) -> Vec<u8> {
+        storage::keys::doc_key(&self.def.collection_id, doc_short_id)
     }
 
     /// Generate the storage key for a document's deletion marker.
-    pub(crate) fn deleted_key(&self, doc_id: &DocID) -> Vec<u8> {
-        storage::keys::deleted_doc_key(&self.def.collection_id, &doc_id.to_string())
-    }
-
-    /// Generate the key prefix for all deletion markers in this collection.
-    #[allow(dead_code)]
-    pub(crate) fn deleted_key_prefix(&self) -> Vec<u8> {
-        let mut prefix = Vec::new();
-        prefix.extend_from_slice(DELETED_KEY_PREFIX);
-        prefix.extend_from_slice(self.def.collection_id.as_bytes());
-        prefix.push(b'/');
-        prefix
+    pub(crate) fn deleted_key(&self, doc_short_id: u64) -> Vec<u8> {
+        storage::keys::deleted_doc_key(&self.def.collection_id, doc_short_id)
     }
 
     /// Generate the storage key for a document's schema version.
@@ -206,11 +199,14 @@ impl Collection {
     /// The version is stored separately from the document data to enable
     /// efficient version checks without deserializing the full document.
     ///
-    /// Key format: /d/<collection_id>/<doc_id>/v
-    pub(crate) fn version_key(&self, doc_id: &DocID) -> Vec<u8> {
-        let mut key = self.doc_key(doc_id);
+    /// Key format: /v/<collection_id>/<doc_short_id> — a prefix distinct
+    /// from doc blobs so blob scans never have to filter version keys.
+    pub(crate) fn version_key(&self, doc_short_id: u64) -> Vec<u8> {
+        let mut key = Vec::new();
+        key.extend_from_slice(VERSION_KEY_PREFIX);
+        key.extend_from_slice(self.def.collection_id.as_bytes());
         key.push(b'/');
-        key.push(b'v'); // DATASTORE_DOC_VERSION_FIELD_ID
+        key.extend_from_slice(&encode_doc_short_id(doc_short_id));
         key
     }
 
@@ -223,13 +219,62 @@ impl Collection {
         key
     }
 
+    /// Resolve a public DocID to this collection's doc short ID.
+    ///
+    /// Returns `None` for unknown documents or documents belonging to a
+    /// different collection.
+    pub(crate) async fn resolve_doc_short_id(
+        &self,
+        systemstore: &NamespaceView,
+        doc_id: &DocID,
+    ) -> Result<Option<u64>> {
+        crate::doc_id_map::get_doc_short_id(
+            systemstore,
+            self.resolved_root_id(),
+            &doc_id.to_string(),
+        )
+        .await
+    }
+
+    /// Resolve an input DocID or alias to its local short ID and canonical
+    /// genesis-derived DocID.
+    pub(crate) async fn resolve_doc_identity(
+        &self,
+        systemstore: &NamespaceView,
+        doc_id: &DocID,
+    ) -> Result<Option<(u64, DocID)>> {
+        let Some(doc_short_id) = self.resolve_doc_short_id(systemstore, doc_id).await? else {
+            return Ok(None);
+        };
+        let canonical = crate::doc_id_map::get_doc_id(systemstore, doc_short_id)
+            .await?
+            .ok_or_else(|| {
+                Error::InvalidDocument(format!(
+                    "document short ID {doc_short_id} has no canonical DocID"
+                ))
+            })?
+            .parse::<DocID>()?;
+        Ok(Some((doc_short_id, canonical)))
+    }
+
+    /// Resolve an input DocID or alias, returning the canonical identity.
+    pub(crate) async fn require_doc_identity(
+        &self,
+        systemstore: &NamespaceView,
+        doc_id: &DocID,
+    ) -> Result<(u64, DocID)> {
+        self.resolve_doc_identity(systemstore, doc_id)
+            .await?
+            .ok_or_else(|| Error::DocumentNotFound(doc_id.to_string()))
+    }
+
     /// Store the schema version for a document.
     pub(crate) async fn store_version(
         &self,
         datastore: &NamespaceView,
-        doc_id: &DocID,
+        doc_short_id: u64,
     ) -> Result<()> {
-        let key = self.version_key(doc_id);
+        let key = self.version_key(doc_short_id);
         let version = self.def.version_id.as_bytes();
         datastore.set(&key, version).await.map_err(Error::Storage)
     }
@@ -238,9 +283,9 @@ impl Collection {
     pub(crate) async fn load_version(
         &self,
         datastore: &NamespaceView,
-        doc_id: &DocID,
+        doc_short_id: u64,
     ) -> Result<Option<String>> {
-        let key = self.version_key(doc_id);
+        let key = self.version_key(doc_short_id);
 
         match datastore.get(&key).await.map_err(Error::Storage)? {
             Some(bytes) => {
@@ -256,9 +301,9 @@ impl Collection {
     pub(crate) async fn delete_version(
         &self,
         datastore: &NamespaceView,
-        doc_id: &DocID,
+        doc_short_id: u64,
     ) -> Result<()> {
-        let key = self.version_key(doc_id);
+        let key = self.version_key(doc_short_id);
         datastore.delete(&key).await.map_err(Error::Storage)
     }
 }

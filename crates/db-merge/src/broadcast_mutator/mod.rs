@@ -322,6 +322,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             block,
             doc_id: doc_id_str,
             field_cids: vec![],
+            encryption_cids: vec![],
         };
 
         // Read broadcast creator DID before spawning (reads thread-local state).
@@ -345,6 +346,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 block: col_block.clone(),
                 doc_id: String::new(),
                 field_cids: vec![],
+                encryption_cids: vec![],
             })
         } else {
             None
@@ -502,6 +504,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 block,
                 doc_id: doc_id_str,
                 field_cids: vec![],
+                encryption_cids: vec![],
             };
 
             let branchable_data = if let (Some(col_cid), Some(col_block)) =
@@ -512,6 +515,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                     block: col_block.clone(),
                     doc_id: String::new(),
                     field_cids: vec![],
+                    encryption_cids: vec![],
                 })
             } else {
                 None
@@ -670,6 +674,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             block,
             doc_id: doc_id_str,
             field_cids: vec![],
+            encryption_cids: vec![],
         };
 
         // Read broadcast creator DID before spawning (reads thread-local state).
@@ -684,6 +689,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 block: col_block.clone(),
                 doc_id: String::new(),
                 field_cids: vec![],
+                encryption_cids: vec![],
             })
         } else {
             None
@@ -819,6 +825,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                     block: block.clone(),
                     doc_id: doc_id_str,
                     field_cids: vec![],
+                    encryption_cids: vec![],
                 }
             } else {
                 match read_latest_composite_block(&self.db, &doc_id_str).await {
@@ -853,6 +860,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 block: col_block.clone(),
                 doc_id: String::new(),
                 field_cids: vec![],
+                encryption_cids: vec![],
             })
         } else {
             None

@@ -1466,7 +1466,6 @@ mod tests {
 
         let child_block = Block::new(
             CrdtDelta::Lww(LwwDeltaPayload {
-                doc_id: b"doc1".to_vec(),
                 field_name: "name".to_string(),
                 priority: 1,
                 schema_version_id: "schema1".to_string(),
@@ -1480,7 +1479,6 @@ mod tests {
 
         let root_block = Block::new(
             CrdtDelta::Composite(CompositeDeltaPayload {
-                doc_id: b"doc1".to_vec(),
                 schema_version_id: "schema1".to_string(),
                 priority: 1,
                 status: 1,

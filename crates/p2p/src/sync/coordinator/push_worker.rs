@@ -552,7 +552,6 @@ mod tests {
         let doc_id = "doc-versioned";
         let block = Block::new_with_options(
             CrdtDelta::Composite(CompositeDeltaPayload {
-                doc_id: doc_id.as_bytes().to_vec(),
                 schema_version_id: "schema".to_string(),
                 priority,
                 status: 1,
@@ -760,7 +759,6 @@ mod tests {
             .unwrap();
         let root = Block::new_with_options(
             CrdtDelta::Composite(CompositeDeltaPayload {
-                doc_id: b"doc".to_vec(),
                 schema_version_id: "schema".to_string(),
                 priority: 1,
                 status: 1,
@@ -821,7 +819,6 @@ mod tests {
 
         let root = Block::new(
             CrdtDelta::Composite(CompositeDeltaPayload {
-                doc_id: b"doc".to_vec(),
                 schema_version_id: "schema".to_string(),
                 priority: 1,
                 status: 1,

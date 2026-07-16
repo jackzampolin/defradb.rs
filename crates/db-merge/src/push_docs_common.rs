@@ -67,16 +67,18 @@ pub(crate) async fn load_push_dag_blocks<R: Reader + ?Sized, E: Reader + ?Sized>
 pub(crate) async fn load_latest_composite_head_cids<R: Reader + ?Sized, B: Reader + ?Sized>(
     head_reader: &R,
     block_reader: &B,
-    doc_id: &str,
+    doc_short_id: u64,
 ) -> Vec<Cid> {
     let mut cids = Vec::new();
     let mut max_priority: Option<u64> = None;
 
     if let Ok(mut iter) = head_reader
-        .iterator(IterOptions::new().with_prefix(HeadstorePriorityKey::document_prefix(doc_id)))
+        .iterator(
+            IterOptions::new().with_prefix(HeadstorePriorityKey::document_prefix(doc_short_id)),
+        )
         .await
     {
-        let cid_offset = HeadstorePriorityKey::cid_offset(doc_id);
+        let cid_offset = HeadstorePriorityKey::cid_offset(doc_short_id);
         while let Ok(Some(pair)) = iter.next().await {
             let cid_bytes = match pair.key.get(cid_offset..) {
                 Some(bytes) => bytes,
@@ -113,17 +115,15 @@ pub(crate) async fn load_latest_composite_head_cids<R: Reader + ?Sized, B: Reade
         return cids;
     }
 
+    let field_prefix = HeadstoreDocKey::field_prefix(doc_short_id, "C");
+    let field_prefix_len = field_prefix.len();
     if let Ok(mut iter) = head_reader
-        .iterator(IterOptions::new().with_prefix(HeadstoreDocKey::field_prefix(doc_id, "C")))
+        .iterator(IterOptions::new().with_prefix(field_prefix))
         .await
     {
         while let Ok(Some(pair)) = iter.next().await {
-            let key_str = String::from_utf8_lossy(&pair.key);
-            let parts: Vec<&str> = key_str.split('/').collect();
-            if parts.len() < 5 {
-                continue;
-            }
-            let Ok(cid) = Cid::from_str(parts[4]) else {
+            let cid_str = String::from_utf8_lossy(&pair.key[field_prefix_len..]);
+            let Ok(cid) = Cid::from_str(&cid_str) else {
                 continue;
             };
             cids.push(cid);
@@ -166,10 +166,9 @@ mod tests {
     async fn latest_composite_head_selection_prefers_highest_priority_index() {
         let store = Arc::new(MemoryStore::new());
         let db = Arc::new(DB::from_arc(store).unwrap());
-        let doc_id = "bae-test-latest-head";
+        let doc_short_id = 7_u64;
         let first = Block::new_with_options(
             CrdtDelta::Composite(CompositeDeltaPayload {
-                doc_id: doc_id.as_bytes().to_vec(),
                 schema_version_id: "schema-v1".to_string(),
                 priority: 1,
                 status: 1,
@@ -184,7 +183,6 @@ mod tests {
 
         let second = Block::new_with_options(
             CrdtDelta::Composite(CompositeDeltaPayload {
-                doc_id: doc_id.as_bytes().to_vec(),
                 schema_version_id: "schema-v1".to_string(),
                 priority: 2,
                 status: 1,
@@ -210,18 +208,8 @@ mod tests {
             .unwrap();
         txn.headstore()
             .unwrap()
-            .set(&HeadstoreDocKey::new(doc_id, "C", first_cid).bytes(), &[])
-            .await
-            .unwrap();
-        txn.headstore()
-            .unwrap()
-            .set(&HeadstoreDocKey::new(doc_id, "C", second_cid).bytes(), &[])
-            .await
-            .unwrap();
-        txn.headstore()
-            .unwrap()
             .set(
-                &HeadstorePriorityKey::new(doc_id, 1, first_cid).bytes(),
+                &HeadstoreDocKey::new(doc_short_id, "C", first_cid).bytes(),
                 &[],
             )
             .await
@@ -229,7 +217,23 @@ mod tests {
         txn.headstore()
             .unwrap()
             .set(
-                &HeadstorePriorityKey::new(doc_id, 2, second_cid).bytes(),
+                &HeadstoreDocKey::new(doc_short_id, "C", second_cid).bytes(),
+                &[],
+            )
+            .await
+            .unwrap();
+        txn.headstore()
+            .unwrap()
+            .set(
+                &HeadstorePriorityKey::new(doc_short_id, 1, first_cid).bytes(),
+                &[],
+            )
+            .await
+            .unwrap();
+        txn.headstore()
+            .unwrap()
+            .set(
+                &HeadstorePriorityKey::new(doc_short_id, 2, second_cid).bytes(),
                 &[],
             )
             .await
@@ -240,7 +244,7 @@ mod tests {
         let heads = load_latest_composite_head_cids(
             &txn.headstore().unwrap(),
             &txn.blockstore().unwrap(),
-            doc_id,
+            doc_short_id,
         )
         .await;
 

@@ -17,9 +17,8 @@ use tokio::time::timeout;
 const COLLECTION_USERS: &str = "bafyusers";
 const COLLECTION_POSTS: &str = "bafyposts";
 
-fn make_data_block(collection_id: &str, doc_id: &[u8]) -> (cid::Cid, Vec<u8>) {
+fn make_data_block(collection_id: &str) -> (cid::Cid, Vec<u8>) {
     let payload = CompositeDeltaPayload {
-        doc_id: doc_id.to_vec(),
         priority: 1,
         schema_version_id: collection_id.to_string(),
         status: 1,
@@ -70,11 +69,12 @@ impl p2p::bitswap::BlockClassifier for SyntheticBlockClassifier {
         let Some(collection_id) = block.delta.schema_version_id() else {
             return p2p::bitswap::BlockClass::Deny;
         };
-        let doc_ids = block
-            .delta
-            .doc_id()
-            .map(|bytes| vec![String::from_utf8_lossy(bytes).to_string()])
-            .unwrap_or_default();
+        // Deltas carry no identity (Go #4838): a genesis composite's docID
+        // derives from its own CID.
+        let doc_ids = match block.delta {
+            CrdtDelta::Composite(_) => vec![document::DocID::new_v0(*cid).to_string()],
+            _ => Vec::new(),
+        };
 
         p2p::bitswap::BlockClass::Data(p2p::bitswap::BlockAcpMeta {
             collection_id: collection_id.to_string(),
@@ -135,7 +135,7 @@ async fn drain_until_complete(
 
 #[tokio::test]
 async fn controlled_mode_denies_unregistered_bitswap_peer() {
-    let (cid, bytes) = make_data_block(COLLECTION_USERS, b"alice");
+    let (cid, bytes) = make_data_block(COLLECTION_USERS);
 
     let producer_store = MockBitswapStore::new().with_block(cid, bytes);
     let consumer_store = MockBitswapStore::new();
@@ -194,7 +194,7 @@ async fn controlled_mode_denies_unregistered_bitswap_peer() {
 
 #[tokio::test]
 async fn controlled_mode_serves_registered_replicator() {
-    let (cid, bytes) = make_data_block(COLLECTION_USERS, b"alice");
+    let (cid, bytes) = make_data_block(COLLECTION_USERS);
 
     let producer_store = MockBitswapStore::new().with_block(cid, bytes);
     let consumer_store = MockBitswapStore::new();
@@ -246,7 +246,7 @@ async fn controlled_mode_serves_registered_replicator() {
 
 #[tokio::test]
 async fn controlled_mode_denies_replicator_for_other_collection() {
-    let (cid, bytes) = make_data_block(COLLECTION_USERS, b"alice");
+    let (cid, bytes) = make_data_block(COLLECTION_USERS);
 
     let producer_store = MockBitswapStore::new().with_block(cid, bytes);
     let consumer_store = MockBitswapStore::new();
@@ -379,7 +379,7 @@ async fn bitswap_unauthorized_against_go_defradb() {
 
 #[tokio::test]
 async fn open_mode_serves_all_peers() {
-    let (cid, bytes) = make_data_block(COLLECTION_USERS, b"alice");
+    let (cid, bytes) = make_data_block(COLLECTION_USERS);
 
     let producer_store = MockBitswapStore::new().with_block(cid, bytes);
     let consumer_store = MockBitswapStore::new();

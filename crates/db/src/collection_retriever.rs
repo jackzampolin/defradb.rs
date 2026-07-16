@@ -59,10 +59,22 @@ pub async fn resolve_collection_from_doc_id<S: Store>(
     let blockstore = txn.blockstore()?;
     let systemstore = txn.systemstore()?;
 
-    let prefix = HeadstorePriorityKey::document_prefix(doc_id);
+    let doc_short_id = match crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await {
+        Ok(Some(doc_ref)) => doc_ref.doc_short_id,
+        Ok(None) => {
+            let _ = txn.discard();
+            return Ok(None);
+        }
+        Err(e) => {
+            let _ = txn.discard();
+            return Err(e);
+        }
+    };
+
+    let prefix = HeadstorePriorityKey::document_prefix(doc_short_id);
     let opts = IterOptions::new().with_prefix(prefix);
     let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
-    let cid_offset = HeadstorePriorityKey::cid_offset(doc_id);
+    let cid_offset = HeadstorePriorityKey::cid_offset(doc_short_id);
 
     let pair = match iter.next().await.map_err(Error::Storage)? {
         Some(p) => p,

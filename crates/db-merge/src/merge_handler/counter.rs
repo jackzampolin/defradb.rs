@@ -8,7 +8,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         payload: &defra_core::block::CounterDeltaPayload,
         metadata: &BlockMetadata<'_>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
-        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
+        let Some(doc_id_str) = self.resolve_field_block_doc_id(cid).await? else {
+            return Ok(MergeOutcome::terminal_skip(
+                "field block has no unambiguous owner; merged via its composite",
+            ));
+        };
         let _guard = self.merge_queue.acquire(&doc_id_str).await;
 
         tracing::debug!(
@@ -63,11 +67,18 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
         // Create a new transaction for this merge
         let txn = self.db.new_txn(false).await?;
+        let doc_short_id = db::doc_id_map::get_doc_ref(&txn.systemstore()?, &doc_id_str)
+            .await
+            .map_err(MergeError::Database)?
+            .ok_or_else(|| {
+                MergeError::MissingMetadata(format!("document identity not found for {doc_id_str}"))
+            })?
+            .doc_short_id;
 
         // Create the Counter CRDT
         let counter = Counter::new(
             payload.schema_version_id.clone(),
-            &payload.doc_id,
+            doc_id_str.as_bytes(),
             payload.field_name.clone(),
             allow_decrement,
             numeric_kind,
@@ -75,11 +86,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
         // Create the CounterDelta from payload
-        let delta = self.create_counter_delta(payload, numeric_kind)?;
+        let delta = self.create_counter_delta_for(payload, numeric_kind, &doc_id_str)?;
 
         // Perform the merge in a scoped block
         let result = {
             let mut datastore = txn.datastore()?;
+            let headstore = txn.headstore()?;
             let mut doc_exists = false;
 
             // Seed the CRDT accumulation store from the document's current
@@ -88,21 +100,23 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             // writes and merges both RMW their delta into it, so once it holds a
             // value it is authoritative and must not be overwritten from a
             // possibly-stale blob. See `Counter::reconcile_int64`.
-            if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
-                if let Ok(Some(existing_doc)) =
-                    collection.get_with_datastore(&datastore, &doc_id).await
-                {
-                    doc_exists = true;
-                    if let Some(field_value) = existing_doc.get(&payload.field_name) {
-                        match (numeric_kind, field_value) {
-                            (NumericKind::Int64, NormalValue::Int(v)) => {
-                                let _ = counter.reconcile_int64(&mut datastore, *v).await;
-                            }
-                            (NumericKind::Float64, NormalValue::Float64(v)) => {
-                                let _ = counter.reconcile_float64(&mut datastore, *v).await;
-                            }
-                            _ => {}
+            let doc_id = DocID::from_string(&doc_id_str)
+                .map_err(|e| MergeError::MergeFailed(format!("invalid doc ID: {e}")))?;
+            if let Some(existing_doc) = collection
+                .get_by_doc_id(&datastore, &txn.systemstore()?, &doc_id)
+                .await
+                .map_err(MergeError::Database)?
+            {
+                doc_exists = true;
+                if let Some(field_value) = existing_doc.get(&payload.field_name) {
+                    match (numeric_kind, field_value) {
+                        (NumericKind::Int64, NormalValue::Int(v)) => {
+                            let _ = counter.reconcile_int64(&mut datastore, *v).await;
                         }
+                        (NumericKind::Float64, NormalValue::Float64(v)) => {
+                            let _ = counter.reconcile_float64(&mut datastore, *v).await;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -114,11 +128,22 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 is_create: payload.priority == 1 && !doc_exists,
             };
 
-            counter.merge(&mut datastore, &ctx, &delta).await
+            self.merge_counter_once_for_document(
+                &mut datastore,
+                &headstore,
+                cid,
+                payload,
+                doc_short_id,
+                &counter,
+                &ctx,
+                &delta,
+                numeric_kind,
+            )
+            .await
         };
 
         match result {
-            Ok(_merge_result) => {
+            Ok(result) => {
                 txn.force_commit().await?;
                 self.best_effort_finalize_field_block_merge(cid).await;
                 tracing::info!(
@@ -127,7 +152,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     doc_id = %doc_id_str,
                     "Counter delta merged successfully"
                 );
-                Ok(MergeOutcome::Merged)
+                if result.applied {
+                    Ok(MergeOutcome::Merged)
+                } else {
+                    Ok(MergeOutcome::terminal_skip("already merged"))
+                }
             }
             Err(e) => {
                 if let Err(discard_err) = txn.force_discard() {
@@ -145,12 +174,16 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
     /// Process a Counter delta within an existing transaction, returning the merge result
     /// and the accumulated value for document reconstruction.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn process_counter_delta_in_txn(
         &self,
         datastore: &mut NamespaceView,
+        headstore: &NamespaceView,
         cid: &Cid,
         payload: &defra_core::block::CounterDeltaPayload,
         fallback_collection_id: Option<&str>,
+        doc_id_str: &str,
+        doc_short_id: u64,
     ) -> std::result::Result<CounterMergeResult, MergeError> {
         tracing::debug!(
             cid = %cid,
@@ -192,26 +225,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Create the Counter CRDT
         let counter = Counter::new(
             payload.schema_version_id.clone(),
-            &payload.doc_id,
+            doc_id_str.as_bytes(),
             payload.field_name.clone(),
             allow_decrement,
             numeric_kind,
         )
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
-
-        // Already-merged (re-delivered) block: skip BEFORE any reconcile side
-        // effect, mirroring the standalone `process_counter_delta` ordering so the
-        // dedup/replay path never mutates the store. The block was already applied,
-        // so the store value is authoritative.
-        if self.blockstore.is_merged(cid).await.unwrap_or(false) {
-            let value = self
-                .read_counter_value(&counter, datastore, numeric_kind, &payload.field_name)
-                .await;
-            return Ok(CounterMergeResult {
-                applied: false,
-                value,
-            });
-        }
 
         // Seed the CRDT accumulation store from the document's current
         // materialized value only if the store is not yet initialized
@@ -219,42 +238,89 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // and merges both RMW their delta into it, so once it holds a value it is
         // authoritative and must not be overwritten from a possibly-stale blob.
         // See `Counter::reconcile_int64`.
-        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
         let mut doc_exists = false;
-        if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
-            if let Ok(Some(existing_doc)) = collection.get_with_datastore(datastore, &doc_id).await
-            {
-                doc_exists = true;
-                if let Some(field_value) = existing_doc.get(&payload.field_name) {
-                    match (numeric_kind, field_value) {
-                        (NumericKind::Int64, NormalValue::Int(v)) => {
-                            let _ = counter.reconcile_int64(datastore, *v).await;
-                        }
-                        (NumericKind::Float64, NormalValue::Float64(v)) => {
-                            let _ = counter.reconcile_float64(datastore, *v).await;
-                        }
-                        _ => {}
+        let doc_id = DocID::from_string(doc_id_str)
+            .map_err(|e| MergeError::MergeFailed(format!("invalid doc ID: {e}")))?;
+        if let Some(existing_doc) = collection
+            .get_with_datastore(datastore, doc_short_id, &doc_id)
+            .await
+            .map_err(MergeError::Database)?
+        {
+            doc_exists = true;
+            if let Some(field_value) = existing_doc.get(&payload.field_name) {
+                match (numeric_kind, field_value) {
+                    (NumericKind::Int64, NormalValue::Int(v)) => {
+                        let _ = counter.reconcile_int64(datastore, *v).await;
                     }
+                    (NumericKind::Float64, NormalValue::Float64(v)) => {
+                        let _ = counter.reconcile_float64(datastore, *v).await;
+                    }
+                    _ => {}
                 }
             }
         }
 
         // Create the CounterDelta from payload
-        let delta = self.create_counter_delta(payload, numeric_kind)?;
+        let delta = self.create_counter_delta_for(payload, numeric_kind, doc_id_str)?;
         let ctx = Context {
-            doc_id: DocId::new(&doc_id_str).map_err(|e| MergeError::MergeFailed(e.to_string()))?,
+            doc_id: DocId::new(doc_id_str).map_err(|e| MergeError::MergeFailed(e.to_string()))?,
             schema_version: payload.schema_version_id.clone(),
             is_create: payload.priority == 1 && !doc_exists,
         };
 
-        // Perform the merge
+        self.merge_counter_once_for_document(
+            datastore,
+            headstore,
+            cid,
+            payload,
+            doc_short_id,
+            &counter,
+            &ctx,
+            &delta,
+            numeric_kind,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn merge_counter_once_for_document(
+        &self,
+        datastore: &mut NamespaceView,
+        headstore: &NamespaceView,
+        cid: &Cid,
+        payload: &defra_core::block::CounterDeltaPayload,
+        doc_short_id: u64,
+        counter: &Counter,
+        context: &Context,
+        delta: &CounterDelta,
+        numeric_kind: NumericKind,
+    ) -> std::result::Result<CounterMergeResult, MergeError> {
+        let applied_key =
+            storage::keys::HeadstorePriorityKey::new(doc_short_id, payload.priority, *cid);
+        if headstore
+            .has(&applied_key.bytes())
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?
+        {
+            let value = self
+                .read_counter_value(counter, datastore, numeric_kind, &payload.field_name)
+                .await;
+            return Ok(CounterMergeResult {
+                applied: false,
+                value,
+            });
+        }
+
         let merge_result = counter
-            .merge(datastore, &ctx, &delta)
+            .merge(datastore, context, delta)
             .await
             .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
-        // Read the accumulated value (counters always accumulate, so we always read current)
+        headstore
+            .set(&applied_key.bytes(), &[])
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?;
         let value = self
-            .read_counter_value(&counter, datastore, numeric_kind, &payload.field_name)
+            .read_counter_value(counter, datastore, numeric_kind, &payload.field_name)
             .await;
 
         Ok(CounterMergeResult {
@@ -313,10 +379,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     }
 
     /// Create a CounterDelta from the block payload
-    fn create_counter_delta(
+    fn create_counter_delta_for(
         &self,
         payload: &defra_core::block::CounterDeltaPayload,
         kind: NumericKind,
+        doc_id_str: &str,
     ) -> std::result::Result<CounterDelta, MergeError> {
         // Go encodes counter data as CBOR. We need to decode it first.
         // The payload.data contains CBOR-encoded i64 or f64
@@ -329,7 +396,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     ))
                 })?;
                 CounterDelta::new_int64(
-                    payload.doc_id.clone(),
+                    doc_id_str.as_bytes().to_vec(),
                     payload.field_name.clone(),
                     payload.priority,
                     payload.nonce,
@@ -346,7 +413,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     ))
                 })?;
                 CounterDelta::new_float64(
-                    payload.doc_id.clone(),
+                    doc_id_str.as_bytes().to_vec(),
                     payload.field_name.clone(),
                     payload.priority,
                     payload.nonce,

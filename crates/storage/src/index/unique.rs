@@ -7,22 +7,23 @@ use schema::IndexDescription;
 use super::eq_iterator::ExactMatchIterator;
 use super::iterator::Bound;
 use super::range_iterator::RangeIterator;
-use super::validate_doc_id;
+use super::validate_doc_short_id;
 use super::CollectionIndex;
 use crate::corekv::{IterOptions, MaybeSend, Reader, Result, Writer};
 use crate::keys::datastore::IndexedField;
+use crate::keys::doc_id_index::{decode_doc_short_id, encode_doc_short_id};
 use crate::keys::IndexDataStoreKey;
 
 /// A unique index implementation.
 ///
-/// UniqueIndex stores document IDs in the value, enforcing that
-/// each indexed field value combination can only appear once.
+/// UniqueIndex stores the encoded doc short ID in the value, enforcing
+/// that each indexed field value combination can only appear once.
 ///
 /// Key format: /[ColID]/[IdxID]/[EncodedFields]
-/// Value: [DocID] (or empty for NULL values)
+/// Value: order-preserving uvarint doc short ID (or empty for NULL values)
 ///
-/// For fields that allow NULL, NULL values are stored specially
-/// to allow multiple documents with NULL in the indexed field.
+/// For fields that allow NULL, entries fall back to the short-ID-in-key
+/// layout (like SimpleIndex) so multiple documents with NULL can coexist.
 pub struct UniqueIndex {
     /// The collection's short ID
     collection_short_id: u32,
@@ -69,12 +70,12 @@ impl UniqueIndex {
     }
 
     /// Validate that the number of values matches the index field count.
-    fn validate_field_count(&self, values: &[NormalValue], doc_id: &str) -> Result<()> {
+    fn validate_field_count(&self, values: &[NormalValue], doc_short_id: u64) -> Result<()> {
         if values.len() != self.desc.fields.len() {
             return Err(crate::corekv::Error::Other(format!(
                 "index '{}' field count mismatch for document '{}': expected {} fields, got {}",
                 self.desc.name,
-                doc_id,
+                doc_short_id,
                 self.desc.fields.len(),
                 values.len()
             )));
@@ -93,17 +94,27 @@ impl UniqueIndex {
 
     /// Build the index key for given field values.
     ///
-    /// For unique indexes, the doc_id is NOT part of the key (it's in the value).
+    /// For unique indexes, the doc short ID is NOT part of the key (it's in
+    /// the value).
     fn build_key(&self, values: &[NormalValue]) -> Result<Vec<u8>> {
         let fields = self.build_indexed_fields(values);
         IndexDataStoreKey::new(self.collection_short_id, self.desc.id, fields).try_bytes()
     }
 
-    /// Build the key with doc_id appended (for NULL case).
-    fn build_key_with_doc_id(&self, values: &[NormalValue], doc_id: &str) -> Result<Vec<u8>> {
-        let mut key = self.build_key(values)?;
-        key.extend_from_slice(doc_id.as_bytes());
-        Ok(key)
+    /// Build the key with the doc short ID appended (for the NULL case).
+    fn build_key_with_doc_short_id(
+        &self,
+        values: &[NormalValue],
+        doc_short_id: u64,
+    ) -> Result<Vec<u8>> {
+        let fields = self.build_indexed_fields(values);
+        IndexDataStoreKey::with_doc_short_id(
+            self.collection_short_id,
+            self.desc.id,
+            fields,
+            doc_short_id,
+        )
+        .try_bytes()
     }
 
     /// Build IndexedField structs from values and index description.
@@ -117,27 +128,28 @@ impl UniqueIndex {
 
     /// Save a document to the index without checking uniqueness.
     ///
-    /// Used for blind creates where uniqueness is guaranteed by construction
-    /// (e.g., content-addressed document IDs with blockchain-derived values).
+    /// Used to reclaim a stale entry or to install the deterministic winner of
+    /// a merge conflict (#1111/#700): the caller has already decided this doc
+    /// short ID owns the value, so uniqueness is enforced above rather than here.
     pub async fn save_blind<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         values: &[NormalValue],
     ) -> Result<()> {
-        validate_doc_id(doc_id, &self.desc.name)?;
-        self.validate_field_count(values, doc_id)?;
+        validate_doc_short_id(doc_short_id, &self.desc.name)?;
+        self.validate_field_count(values, doc_short_id)?;
 
         if Self::has_nil_field(values) {
-            let key = self.build_key_with_doc_id(values, doc_id)?;
+            let key = self.build_key_with_doc_short_id(values, doc_short_id)?;
             return txn.set(&key, &[]).await;
         }
 
         let key = self.build_key(values)?;
-        txn.set(&key, doc_id.as_bytes()).await
+        txn.set(&key, &encode_doc_short_id(doc_short_id)).await
     }
 
-    /// The docID currently holding the unique entry for `values`, if any.
+    /// The doc short ID currently holding the unique entry for `values`, if any.
     ///
     /// Unique enforcement's error path needs to know *who* holds the entry so
     /// the layer above can ask whether that document is still alive: an entry
@@ -146,22 +158,19 @@ impl UniqueIndex {
     /// reclaim, because deletion is terminal — there is no resurrection path
     /// that could ever make the old holder live again (#1111/#700).
     ///
-    /// Nil-bearing values embed the docID in the key and are never unique, so
+    /// Nil-bearing values embed the short ID in the key and are never unique, so
     /// they report no holder.
     pub async fn conflicting_doc_id<R: Reader + MaybeSend>(
         &self,
         txn: &R,
         values: &[NormalValue],
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<u64>> {
         if Self::has_nil_field(values) {
             return Ok(None);
         }
         let key = self.build_key(values)?;
         match txn.get(&key).await? {
-            Some(existing) if !existing.is_empty() => Ok(Some(
-                String::from_utf8(existing)
-                    .map_err(|e| crate::corekv::Error::Other(e.to_string()))?,
-            )),
+            Some(existing) if !existing.is_empty() => Ok(Some(decode_doc_short_id(&existing)?)),
             _ => Ok(None),
         }
     }
@@ -246,16 +255,16 @@ impl CollectionIndex for UniqueIndex {
     async fn save<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         values: &[NormalValue],
     ) -> Result<()> {
-        validate_doc_id(doc_id, &self.desc.name)?;
-        self.validate_field_count(values, doc_id)?;
+        validate_doc_short_id(doc_short_id, &self.desc.name)?;
+        self.validate_field_count(values, doc_short_id)?;
 
-        // Special case: if all values are nil, allow multiple entries
-        // by appending doc_id to the key (like SimpleIndex)
+        // Special case: if any value is nil, allow multiple entries
+        // by appending the doc short ID to the key (like SimpleIndex)
         if Self::has_nil_field(values) {
-            let key = self.build_key_with_doc_id(values, doc_id)?;
+            let key = self.build_key_with_doc_short_id(values, doc_short_id)?;
             return txn.set(&key, &[]).await;
         }
 
@@ -263,36 +272,35 @@ impl CollectionIndex for UniqueIndex {
 
         // Check for existing entry (uniqueness constraint).
         // Any existing key is a violation during save (create). Unlike update(),
-        // save() should never encounter the same key for the same doc_id — that
+        // save() should never encounter the same key for the same document — that
         // would indicate duplicate values within the same document (e.g., JSON
         // array self-duplicates like [5, 8, 5]).
         if txn.has(&key).await? {
             return Err(crate::corekv::Error::UniqueConstraintViolation);
         }
 
-        // Store doc_id as the value
-        txn.set(&key, doc_id.as_bytes()).await
+        // Store the encoded doc short ID as the value
+        txn.set(&key, &encode_doc_short_id(doc_short_id)).await
     }
 
     async fn update<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         old_values: &[NormalValue],
         new_values: &[NormalValue],
     ) -> Result<()> {
-        validate_doc_id(doc_id, &self.desc.name)?;
-        self.validate_field_count(old_values, doc_id)?;
-        self.validate_field_count(new_values, doc_id)?;
+        validate_doc_short_id(doc_short_id, &self.desc.name)?;
+        self.validate_field_count(old_values, doc_short_id)?;
+        self.validate_field_count(new_values, doc_short_id)?;
 
         // Check uniqueness of new values BEFORE deleting old entry
         // This prevents data loss if the uniqueness check fails
         if !Self::has_nil_field(new_values) {
             let new_key = self.build_key(new_values)?;
             if let Some(existing) = txn.get(&new_key).await? {
-                let existing_doc_id = String::from_utf8(existing)
-                    .map_err(|e| crate::corekv::Error::Other(e.to_string()))?;
-                if existing_doc_id != doc_id {
+                let existing_doc_short_id = decode_doc_short_id(&existing)?;
+                if existing_doc_short_id != doc_short_id {
                     return Err(crate::corekv::Error::UniqueConstraintViolation);
                 }
             }
@@ -300,7 +308,7 @@ impl CollectionIndex for UniqueIndex {
 
         // Delete old entry (safe now that we've validated the new values)
         if Self::has_nil_field(old_values) {
-            let old_key = self.build_key_with_doc_id(old_values, doc_id)?;
+            let old_key = self.build_key_with_doc_short_id(old_values, doc_short_id)?;
             txn.delete(&old_key).await?;
         } else {
             let old_key = self.build_key(old_values)?;
@@ -309,25 +317,25 @@ impl CollectionIndex for UniqueIndex {
 
         // Insert new entry
         if Self::has_nil_field(new_values) {
-            let key = self.build_key_with_doc_id(new_values, doc_id)?;
+            let key = self.build_key_with_doc_short_id(new_values, doc_short_id)?;
             txn.set(&key, &[]).await
         } else {
             let key = self.build_key(new_values)?;
-            txn.set(&key, doc_id.as_bytes()).await
+            txn.set(&key, &encode_doc_short_id(doc_short_id)).await
         }
     }
 
     async fn delete<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        doc_id: &str,
+        doc_short_id: u64,
         values: &[NormalValue],
     ) -> Result<()> {
-        validate_doc_id(doc_id, &self.desc.name)?;
-        self.validate_field_count(values, doc_id)?;
+        validate_doc_short_id(doc_short_id, &self.desc.name)?;
+        self.validate_field_count(values, doc_short_id)?;
 
         if Self::has_nil_field(values) {
-            let key = self.build_key_with_doc_id(values, doc_id)?;
+            let key = self.build_key_with_doc_short_id(values, doc_short_id)?;
             txn.delete(&key).await
         } else {
             let key = self.build_key(values)?;
@@ -336,7 +344,7 @@ impl CollectionIndex for UniqueIndex {
             // value another document holds; deleting that loser must not free
             // the winner's slot.
             if let Some(existing) = txn.get(&key).await? {
-                if !existing.is_empty() && existing != doc_id.as_bytes() {
+                if !existing.is_empty() && existing != encode_doc_short_id(doc_short_id) {
                     return Ok(());
                 }
             }

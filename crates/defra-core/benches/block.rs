@@ -6,7 +6,6 @@ use std::hint::black_box;
 fn lww_block() -> Block {
     Block::new(
         CrdtDelta::Lww(LwwDeltaPayload {
-            doc_id: b"doc1".to_vec(),
             field_name: "name".to_string(),
             priority: 1,
             schema_version_id: "schema1".to_string(),
@@ -29,7 +28,6 @@ fn composite_block_with_links() -> Block {
 
     Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
-            doc_id: b"doc-composite".to_vec(),
             schema_version_id: "schema1".to_string(),
             priority: 7,
             status: 1,

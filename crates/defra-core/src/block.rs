@@ -300,22 +300,6 @@ impl CrdtDelta {
         }
     }
 
-    /// Get the document ID (if present)
-    ///
-    /// Note: Collection, FieldDefinition, and CollectionDefinition deltas
-    /// do not have a doc_id, so return None for those types.
-    pub fn doc_id(&self) -> Option<&[u8]> {
-        match self {
-            CrdtDelta::Lww(d) => Some(&d.doc_id),
-            CrdtDelta::Counter(d) => Some(&d.doc_id),
-            CrdtDelta::Composite(d) => Some(&d.doc_id),
-            CrdtDelta::Collection(_) => None,
-            CrdtDelta::CollectionSet(_) => None,
-            CrdtDelta::FieldDefinition(_) => None,
-            CrdtDelta::CollectionDefinition(_) => None,
-        }
-    }
-
     /// Get the schema version ID / collection version ID (if present)
     ///
     /// Note: FieldDefinition and CollectionDefinition deltas do not have

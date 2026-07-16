@@ -606,6 +606,7 @@ where
             store,
             transports,
             policy as Arc<dyn kms::AccessPolicy>,
+            Arc::new(db::DbBlockDocIDResolver::new(database.clone())),
             node_did,
         ))
     };

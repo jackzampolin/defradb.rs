@@ -47,6 +47,20 @@ const SUBSCRIBER_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Poll interval while waiting for an encryption-topic subscriber to appear.
 const SUBSCRIBER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Upper bound on the total wait for a key-holding peer's reply. Mirrors Go's
+/// `fetchEncryptionKeyResponseTimeout` (internal/kms/pubsub.go). Without this
+/// bound a single lost gossip message (request or reply) parks the caller —
+/// and on the merge path, the node's whole replication loop — forever.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a single publish may wait for a reply before the request is
+/// republished. Mirrors Go's `fetchEncryptionKeyRetryInterval`: pubsub topic
+/// membership can lag behind direct peer connections (especially right after
+/// a connect), so the first publish can be silently lost even when the
+/// subscriber is already known locally. Republishing (fresh gossipsub seqno ⇒
+/// fresh message id, so no duplicate suppression) re-solicits the reply.
+const REPUBLISH_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Gossip-backed `KeyTransport`, generic over the underlying P2P transport.
 ///
 /// Outgoing fetches are correlated by request-CID via [`Correlator`]; replies
@@ -329,30 +343,82 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
         // `(FetchEncryptionKeyReply, responder_peer_id)`. The responder peer id
         // is the verified gossip source of the `_response` message — exactly
         // what Go binds into the ECIES AAD via `resp.From`.
+        //
+        // Go parity (internal/kms/pubsub.go): while waiting, republish the
+        // identical request every `REPUBLISH_INTERVAL` and give up after
+        // `RESPONSE_TIMEOUT` — closing the stream so the caller's `wait_all`
+        // resolves instead of hanging forever on a lost gossip message.
         let (tx, rx) = mpsc::channel(16);
+        let transport = self.transport.clone();
+        let correlator = self.correlator.clone();
         tokio::spawn(async move {
-            // Hold `prep` for the lifetime of the task; its Drop releases the
-            // correlation slot once the spawned task ends.
-            while let Some(resp) = prep.responses.recv().await {
-                if let Some(err) = &resp.err {
-                    debug!(from = %resp.from, error = %err, "KMS reply carried responder error");
-                    continue;
-                }
-                let reply: FetchEncryptionKeyReply = match serde_cbor::from_slice(&resp.data) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!(
-                            from = %resp.from,
-                            error = %e,
-                            payload_len = resp.data.len(),
-                            "KMS reply: failed to decode FetchEncryptionKeyReply from envelope Data"
-                        );
-                        continue;
+            let deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
+            let mut republish_at = tokio::time::Instant::now() + REPUBLISH_INTERVAL;
+            loop {
+                tokio::select! {
+                    // Prefer an already-delivered reply over a concurrent
+                    // republish tick — the tick's re-registration drops the
+                    // old channel, and with it any buffered reply.
+                    biased;
+                    resp = prep.responses.recv() => {
+                        let Some(resp) = resp else {
+                            // Channel closed: single-response entry consumed
+                            // (reply already forwarded) or cancelled. Done.
+                            break;
+                        };
+                        if let Some(err) = &resp.err {
+                            debug!(from = %resp.from, error = %err, "KMS reply carried responder error");
+                            continue;
+                        }
+                        let reply: FetchEncryptionKeyReply = match serde_cbor::from_slice(&resp.data) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                warn!(
+                                    from = %resp.from,
+                                    error = %e,
+                                    payload_len = resp.data.len(),
+                                    "KMS reply: failed to decode FetchEncryptionKeyReply from envelope Data"
+                                );
+                                continue;
+                            }
+                        };
+                        // Single-response semantics: the correlator entry is
+                        // consumed by this delivery, so forward it and finish
+                        // (also prevents a concurrent republish tick from
+                        // re-registering a request that was already answered).
+                        let _ = tx.send((reply, resp.from)).await;
+                        break;
                     }
-                };
-                if tx.send((reply, resp.from)).await.is_err() {
-                    // Receiver (get_keys spawned task) gone; stop draining.
-                    break;
+                    _ = tokio::time::sleep_until(republish_at) => {
+                        if tokio::time::Instant::now() >= deadline {
+                            warn!(
+                                request_id = %prep.id,
+                                timeout = ?RESPONSE_TIMEOUT,
+                                "KMS fetch got no reply within the response timeout; giving up"
+                            );
+                            break;
+                        }
+                        // Re-register BEFORE dropping the old handle: identical
+                        // bytes derive the identical request-ID, and
+                        // `PreparedPublish::drop` removes the map entry by ID —
+                        // dropping the old handle after inserting the new one
+                        // would tear down the fresh registration. Drop first,
+                        // then insert.
+                        let data = std::mem::take(&mut prep.data);
+                        let id = prep.id;
+                        drop(prep);
+                        prep = correlator.publish(data, PublishOptions::default());
+                        debug_assert_eq!(prep.id, id, "identical payload must re-derive the same request id");
+                        if let Err(e) = transport
+                            .publish_raw(ENCRYPTION_TOPIC.to_string(), prep.data.clone())
+                            .await
+                        {
+                            debug!(request_id = %prep.id, error = %e, "KMS request republish failed; will retry");
+                        } else {
+                            debug!(request_id = %prep.id, "KMS request republished (no reply yet)");
+                        }
+                        republish_at += REPUBLISH_INTERVAL;
+                    }
                 }
             }
         });
@@ -653,6 +719,85 @@ mod tests {
             responder.to_string(),
             "responder peer id must be the verified gossip source"
         );
+    }
+
+    /// Go parity (internal/kms/pubsub.go `fetchEncryptionKeyRetryInterval`):
+    /// while no reply arrives, the identical request must be republished every
+    /// `REPUBLISH_INTERVAL`, and a late reply must still be correlated and
+    /// surfaced through the re-registered entry.
+    #[tokio::test(start_paused = true)]
+    async fn request_republishes_until_reply_arrives() {
+        let transport = RacyTransport::new(0);
+        let published = transport.published.clone();
+        let kt = PubsubKeyTransport::new(transport).await.unwrap();
+
+        let payload = b"retry-me".to_vec();
+        let req = EncodedFetchRequest {
+            payload: payload.clone(),
+            request_id: "r1".to_string(),
+        };
+        let mut rx = kt.send_request(req).await.expect("send_request");
+
+        // Two republish intervals with no reply → initial + 2 republishes.
+        tokio::time::sleep(REPUBLISH_INTERVAL * 2 + Duration::from_millis(100)).await;
+        {
+            let pubs = published.lock();
+            assert_eq!(
+                pubs.len(),
+                3,
+                "one initial publish plus one republish per interval"
+            );
+            assert!(
+                pubs.iter()
+                    .all(|(t, d)| t == ENCRYPTION_TOPIC && d == &payload),
+                "republished bytes must be identical (same request-ID)"
+            );
+        }
+
+        // A reply arriving AFTER republishes must still correlate.
+        let reply = FetchEncryptionKeyReply {
+            links: vec![vec![1]],
+            blocks: vec![vec![2]],
+            ephemeral_public_key: vec![7; 32],
+        };
+        let envelope = InternalResponse {
+            id: crate::pubsub_rpc::derive_request_id(&payload).to_string(),
+            err: String::new(),
+            data: serde_cbor::to_vec(&reply).unwrap(),
+            from: Vec::new(),
+        };
+        kt.dispatch_incoming(
+            a_libp2p_peer().to_string(),
+            kt.self_response_topic().to_string(),
+            envelope.to_cbor().unwrap(),
+        )
+        .await;
+
+        let (got, _) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("reply within timeout")
+            .expect("reply present");
+        assert_eq!(got, reply);
+    }
+
+    /// Go parity (`fetchEncryptionKeyResponseTimeout`): with no reply at all,
+    /// the reply stream must CLOSE once the response timeout elapses, so
+    /// `get_keys`' `wait_all` resolves instead of hanging the merge forever.
+    #[tokio::test(start_paused = true)]
+    async fn request_with_no_reply_times_out_and_closes_stream() {
+        let transport = RacyTransport::new(0);
+        let kt = PubsubKeyTransport::new(transport).await.unwrap();
+
+        let req = EncodedFetchRequest {
+            payload: b"never-answered".to_vec(),
+            request_id: "r1".to_string(),
+        };
+        let mut rx = kt.send_request(req).await.expect("send_request");
+
+        let got = tokio::time::timeout(RESPONSE_TIMEOUT + Duration::from_secs(1), rx.recv())
+            .await
+            .expect("stream must close at the response timeout, not hang");
+        assert!(got.is_none(), "no reply means the stream closes empty");
     }
 
     /// An inbound request on the base topic must be answered by publishing an

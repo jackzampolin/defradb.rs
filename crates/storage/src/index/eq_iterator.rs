@@ -10,19 +10,21 @@ use schema::IndexDescription;
 use super::iterator::{IndexEntry, IndexIterator};
 use crate::corekv::{IterOptions, Iterator, MaybeSend, Reader, Result};
 use crate::keys::datastore::IndexedField;
-use crate::keys::IndexDataStoreKey;
+use crate::keys::doc_id_index::decode_doc_short_id;
+use crate::keys::{IndexDataStoreKey, SEPARATOR};
 
 /// Iterator for exact match queries on an index.
 ///
 /// For SimpleIndex: scans all entries with the exact encoded value prefix,
-/// extracting document IDs from the key suffix.
+/// extracting doc short IDs from the key suffix.
 ///
-/// For UniqueIndex: performs a direct lookup for non-NULL values (single result),
-/// or prefix scan for NULL values (multiple results allowed).
+/// For UniqueIndex: performs a direct lookup for non-NULL values (single result,
+/// doc short ID decoded from the value), or prefix scan for NULL values
+/// (multiple results allowed, doc short ID in the key suffix).
 pub struct ExactMatchIterator {
     /// The underlying KV iterator (None after exhaustion or for unique index after first result)
     inner: Option<Box<dyn Iterator>>,
-    /// The key prefix (encoded field values without doc_id)
+    /// The key prefix (encoded field values without the doc short ID)
     key_prefix: Vec<u8>,
     /// The exact field values being matched
     values: Vec<NormalValue>,
@@ -92,11 +94,10 @@ impl ExactMatchIterator {
                 exhausted: false,
             })
         } else {
-            // Non-NULL values: direct lookup, doc_id stored in value
+            // Non-NULL values: direct lookup, doc short ID stored in the value
             let unique_result = if let Some(value_bytes) = txn.get(&key_prefix).await? {
-                let doc_id = String::from_utf8(value_bytes)
-                    .map_err(|e| crate::corekv::Error::Other(e.to_string()))?;
-                Some(IndexEntry::new(doc_id, values.to_vec()))
+                let doc_short_id = decode_doc_short_id(&value_bytes)?;
+                Some(IndexEntry::new(doc_short_id, values.to_vec()))
             } else {
                 None
             };
@@ -112,20 +113,18 @@ impl ExactMatchIterator {
         }
     }
 
-    /// Extract the document ID from an index key.
+    /// Extract the doc short ID from an index key.
     ///
-    /// For simple index keys, the doc_id is appended after the encoded field values.
-    fn extract_doc_id(&self, key: &[u8]) -> Result<String> {
-        // The key is: [prefix_bytes][doc_id_bytes]
-        // where prefix_bytes is what we already have in key_prefix
-        if key.len() <= self.key_prefix.len() {
+    /// For entries carrying doc identity in the key, the suffix after the
+    /// encoded field values is `/[uvarint doc short ID]`.
+    fn extract_doc_short_id(&self, key: &[u8]) -> Result<u64> {
+        let suffix = &key[self.key_prefix.len().min(key.len())..];
+        if suffix.len() < 2 || suffix[0] != SEPARATOR {
             return Err(crate::corekv::Error::Other(
-                "index key too short to contain doc_id".to_string(),
+                "index key missing doc short ID suffix".to_string(),
             ));
         }
-        let doc_id_bytes = &key[self.key_prefix.len()..];
-        String::from_utf8(doc_id_bytes.to_vec())
-            .map_err(|e| crate::corekv::Error::Other(format!("invalid doc_id in index key: {}", e)))
+        decode_doc_short_id(&suffix[1..])
     }
 }
 
@@ -146,11 +145,11 @@ impl IndexIterator for ExactMatchIterator {
         // Use the inner iterator if available
         if let Some(ref mut iter) = self.inner {
             if let Some(kv) = iter.next().await? {
-                // For unique index with NULL: doc_id is in key suffix
-                // For simple index: doc_id is in key suffix
+                // For unique index with NULL: doc short ID is in key suffix
+                // For simple index: doc short ID is in key suffix
                 // For unique index without NULL: handled above via unique_result
-                let doc_id = self.extract_doc_id(&kv.key)?;
-                return Ok(Some(IndexEntry::new(doc_id, self.values.clone())));
+                let doc_short_id = self.extract_doc_short_id(&kv.key)?;
+                return Ok(Some(IndexEntry::new(doc_short_id, self.values.clone())));
             }
         }
 
@@ -229,11 +228,7 @@ mod tests {
         let index = SimpleIndex::new(1, desc.clone());
 
         index
-            .save(
-                &mut txn,
-                "doc1",
-                &[NormalValue::String("alice".to_string())],
-            )
+            .save(&mut txn, 1, &[NormalValue::String("alice".to_string())])
             .await
             .unwrap();
         txn.commit().await.unwrap();
@@ -251,7 +246,7 @@ mod tests {
         let entry = iter.next().await.unwrap();
         assert!(entry.is_some());
         let entry = entry.unwrap();
-        assert_eq!(entry.doc_id, "doc1");
+        assert_eq!(entry.doc_short_id, 1);
 
         let entry = iter.next().await.unwrap();
         assert!(entry.is_none());
@@ -267,23 +262,15 @@ mod tests {
 
         // Same value, multiple documents
         index
-            .save(
-                &mut txn,
-                "doc1",
-                &[NormalValue::String("alice".to_string())],
-            )
+            .save(&mut txn, 1, &[NormalValue::String("alice".to_string())])
             .await
             .unwrap();
         index
-            .save(
-                &mut txn,
-                "doc2",
-                &[NormalValue::String("alice".to_string())],
-            )
+            .save(&mut txn, 2, &[NormalValue::String("alice".to_string())])
             .await
             .unwrap();
         index
-            .save(&mut txn, "doc3", &[NormalValue::String("bob".to_string())])
+            .save(&mut txn, 3, &[NormalValue::String("bob".to_string())])
             .await
             .unwrap();
         txn.commit().await.unwrap();
@@ -300,8 +287,8 @@ mod tests {
 
         let entries = iter.collect_all().await.unwrap();
         assert_eq!(entries.len(), 2);
-        assert!(entries.iter().any(|e| e.doc_id == "doc1"));
-        assert!(entries.iter().any(|e| e.doc_id == "doc2"));
+        assert!(entries.iter().any(|e| e.doc_short_id == 1));
+        assert!(entries.iter().any(|e| e.doc_short_id == 2));
     }
 
     #[tokio::test]
@@ -313,11 +300,7 @@ mod tests {
         let index = UniqueIndex::new(1, desc.clone());
 
         index
-            .save(
-                &mut txn,
-                "doc1",
-                &[NormalValue::String("alice".to_string())],
-            )
+            .save(&mut txn, 1, &[NormalValue::String("alice".to_string())])
             .await
             .unwrap();
         txn.commit().await.unwrap();
@@ -335,7 +318,7 @@ mod tests {
         let entry = iter.next().await.unwrap();
         assert!(entry.is_some());
         let entry = entry.unwrap();
-        assert_eq!(entry.doc_id, "doc1");
+        assert_eq!(entry.doc_short_id, 1);
 
         let entry = iter.next().await.unwrap();
         assert!(entry.is_none());
@@ -350,11 +333,7 @@ mod tests {
         let index = UniqueIndex::new(1, desc.clone());
 
         index
-            .save(
-                &mut txn,
-                "doc1",
-                &[NormalValue::String("alice".to_string())],
-            )
+            .save(&mut txn, 1, &[NormalValue::String("alice".to_string())])
             .await
             .unwrap();
         txn.commit().await.unwrap();
@@ -382,14 +361,8 @@ mod tests {
         let index = UniqueIndex::new(1, desc.clone());
 
         // Multiple documents with NULL - allowed for unique index
-        index
-            .save(&mut txn, "doc1", &[NormalValue::Null])
-            .await
-            .unwrap();
-        index
-            .save(&mut txn, "doc2", &[NormalValue::Null])
-            .await
-            .unwrap();
+        index.save(&mut txn, 1, &[NormalValue::Null]).await.unwrap();
+        index.save(&mut txn, 2, &[NormalValue::Null]).await.unwrap();
         txn.commit().await.unwrap();
 
         let txn = store.new_txn(true).await.unwrap();

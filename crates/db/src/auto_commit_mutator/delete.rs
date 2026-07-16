@@ -20,14 +20,27 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
         })?;
 
-        // Execute the mutation in a block to drop datastore before commit
-        let result = {
-            let datastore = txn.datastore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get datastore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?;
+        // Acquire store views up front (dropped before commit); the mutation
+        // itself runs in an async block so errors fall through to the discard.
+        // Some(short_id) means the doc existed and was deleted.
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
+
+        let result: query::error::Result<Option<(u64, DocID)>> = async {
+            let Some((doc_short_id, canonical_doc_id)) = collection
+                .resolve_doc_identity(&systemstore, doc_id)
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?
+            else {
+                return Ok(None);
+            };
 
             // Create an IndexManager for index maintenance
             let short_id = collection.resolved_root_id();
@@ -40,20 +53,25 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 })?;
 
             // Use delete_with_indexes to maintain index consistency
-            collection
-                .delete_with_indexes(&datastore, doc_id, &index_manager)
+            let existed = collection
+                .delete_with_indexes(&datastore, &canonical_doc_id, doc_short_id, &index_manager)
                 .await
-                .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))
-        };
+                .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))?;
+            Ok(existed.then_some((doc_short_id, canonical_doc_id)))
+        }
+        .await;
+
+        drop(datastore);
+        drop(systemstore);
 
         match result {
-            Ok(existed) => {
+            Ok(deleted) => {
                 // DeleteNode treats existed==false as a no-op; don't write a
                 // tombstone block or emit an event for a missing doc.
                 // Propagate any commit error so callers see the same failure
                 // surface they get on the normal commit path (Go returns the
                 // commit error on a no-op delete too).
-                if !existed {
+                let Some((deleted_short_id, canonical_doc_id)) = deleted else {
                     if let Err(e) = txn.commit().await {
                         warn!(
                             collection = %collection_name,
@@ -65,10 +83,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             e
                         )));
                     }
-                    return Ok(DeleteResult::new(doc_id.clone(), existed));
-                }
+                    return Ok(DeleteResult::new(doc_id.clone(), false));
+                };
+                let existed = true;
 
                 // Build delete block (composite with status=2) in a scoped block
+                let mut ownership_error: Option<String> = None;
                 let commit_result: Option<CommitArtifacts> = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
@@ -84,7 +104,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     })?;
 
                     let schema_version_id = collection.version_id();
-                    let doc_id_str = doc_id.to_string();
+                    let doc_id_str = canonical_doc_id.to_string();
                     // Get signing config from thread-local (set by FFI exec_request)
                     let sign_config = get_signing_config();
 
@@ -92,6 +112,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         &blockstore,
                         &headstore,
                         &doc_id_str,
+                        deleted_short_id,
                         schema_version_id,
                         sign_config.as_ref(),
                     )
@@ -99,6 +120,21 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     {
                         Ok(block_result) => {
                             let composite_cid = block_result.cid;
+
+                            match txn.systemstore() {
+                                Ok(systemstore) => {
+                                    if let Err(e) = crate::doc_id_map::set_block_doc_id_mapping(
+                                        &systemstore,
+                                        &composite_cid.to_string(),
+                                        &doc_id_str,
+                                    )
+                                    .await
+                                    {
+                                        ownership_error = Some(e.to_string());
+                                    }
+                                }
+                                Err(e) => ownership_error = Some(e.to_string()),
+                            }
 
                             let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
                             if collection.schema().is_branchable {
@@ -139,6 +175,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     }
                 }; // blockstore and headstore dropped here
 
+                if let Some(e) = ownership_error {
+                    return Err(query::error::QueryError::execution(format!(
+                        "failed to record block ownership mapping for delete: {e}"
+                    )));
+                }
+
                 // Commit the transaction (datastore reference is now dropped)
                 if let Err(e) = txn.commit().await {
                     warn!(
@@ -156,7 +198,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 if let Some((cid, block, col_data)) = commit_result.as_ref() {
                     self.emit_update_events(
                         &collection,
-                        &doc_id.to_string(),
+                        &canonical_doc_id.to_string(),
                         *cid,
                         block.clone(),
                         col_data.clone(),
@@ -165,15 +207,19 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
                 match commit_result {
                     Some((cid, block, col_data)) => {
-                        let mut result =
-                            DeleteResult::with_commit(doc_id.clone(), existed, cid, block);
+                        let mut result = DeleteResult::with_commit(
+                            canonical_doc_id.clone(),
+                            existed,
+                            cid,
+                            block,
+                        );
                         if let Some((col_cid, col_bytes)) = col_data {
                             result.broadcast_cid = Some(col_cid);
                             result.broadcast_block = Some(col_bytes);
                         }
                         Ok(result)
                     }
-                    None => Ok(DeleteResult::new(doc_id.clone(), existed)),
+                    None => Ok(DeleteResult::new(canonical_doc_id, existed)),
                 }
             }
             Err(e) => {

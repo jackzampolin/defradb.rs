@@ -19,8 +19,9 @@
 //! assert_eq!(doc.get("name").and_then(|v| v.as_str()), Some("Alice"));
 //! assert_eq!(doc.get("age").and_then(|v| v.as_int()), Some(30));
 //!
-//! // Document has auto-generated ID
-//! assert!(doc.id().is_some());
+//! // Identity is assigned at save time, derived from the genesis
+//! // composite block CID — new documents carry no ID.
+//! assert!(doc.id().is_none());
 //! ```
 
 mod doc_id;

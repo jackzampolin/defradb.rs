@@ -20,11 +20,14 @@ pub struct PushExistingDocsSeOptions<'a> {
 async fn document_matches_filter<R: Reader + ?Sized>(
     datastore: &R,
     collection_id: &str,
-    doc_id: &str,
+    doc_short_id: u64,
     filter: &p2p::ReplicationFilter,
     matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
 ) -> Result<bool, String> {
-    let doc_key = format!("/d/{}/{}", collection_id, doc_id).into_bytes();
+    let mut doc_key = format!("/d/{}/", collection_id).into_bytes();
+    doc_key.extend_from_slice(&storage::keys::doc_id_index::encode_doc_short_id(
+        doc_short_id,
+    ));
     let Some(doc_data) = datastore
         .get(&doc_key)
         .await
@@ -132,6 +135,9 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
     let datastore = txn
         .datastore()
         .map_err(|e| format!("failed to get datastore: {}", e))?;
+    let systemstore = txn
+        .systemstore()
+        .map_err(|e| format!("failed to get systemstore: {}", e))?;
 
     // Collect JoinHandles so we can await all pushes before signaling completion.
     let mut push_handles = Vec::new();
@@ -152,6 +158,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
         // Key format: /d/{collection_id}/{doc_id}
         // Sub-keys like /d/{collection_id}/{doc_id}/v are filtered out.
         let col_prefix = format!("/d/{}/", collection.collection_id()).into_bytes();
+        let doc_prefix_len = col_prefix.len();
         let opts = IterOptions::new()
             .with_prefix(col_prefix)
             .with_keys_only(true);
@@ -160,17 +167,16 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
             .await
             .map_err(|e| format!("failed to iterate datastore: {}", e))?;
 
-        let mut doc_ids = Vec::new();
+        let mut doc_short_ids = Vec::new();
         while let Some(pair) = doc_iter
             .next()
             .await
             .map_err(|e| format!("datastore iteration error: {}", e))?
         {
-            let key_str = String::from_utf8_lossy(&pair.key);
-            let parts: Vec<&str> = key_str.split('/').collect();
-            // Exact doc key: ["", "d", collection_id, doc_id] = 4 parts
-            if parts.len() == 4 {
-                doc_ids.push(parts[3].to_string());
+            if let Ok(short_id) =
+                storage::keys::doc_id_index::decode_doc_short_id(&pair.key[doc_prefix_len..])
+            {
+                doc_short_ids.push(short_id);
             }
         }
         doc_iter
@@ -178,17 +184,26 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
             .await
             .map_err(|e| format!("datastore close error: {}", e))?;
 
+        let mut doc_ids = Vec::new();
+        for short_id in doc_short_ids {
+            match db::doc_id_map::get_doc_id(&systemstore, short_id).await {
+                Ok(Some(doc_id)) => doc_ids.push((short_id, doc_id)),
+                Ok(None) => {}
+                Err(e) => return Err(format!("doc-ID mapping lookup failed: {}", e)),
+            }
+        }
+
         // For each document, push its composite head block(s) and non-counter
         // field blocks as PushLog heads; counter field blocks are dropped and
         // DAG-fetched by the receiver instead (see the #1043 filter below). An
         // encrypted LWW field must arrive as a head so the receiver's merge
         // triggers the KMS DEK request.
-        for doc_id in &doc_ids {
+        for (doc_short_id, doc_id) in &doc_ids {
             if let Some(filter) = filters.get(collection.collection_id()) {
                 if !document_matches_filter(
                     &datastore,
                     collection.collection_id(),
-                    doc_id,
+                    *doc_short_id,
                     filter,
                     matcher,
                 )
@@ -222,7 +237,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
             // Collect phase: pre-load all DAG blocks before spawning tasks.
             let mut doc_blocks = Vec::new();
             for head_cid in
-                load_latest_composite_head_cids(&headstore, &blockstore_view, doc_id).await
+                load_latest_composite_head_cids(&headstore, &blockstore_view, *doc_short_id).await
             {
                 let block_key = head_cid.to_bytes();
                 let block_data = match blockstore_view.get(&block_key).await {
@@ -375,6 +390,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
 
             // Iterate datastore to get doc IDs (same pattern as block push above)
             let col_prefix = format!("/d/{}/", collection.collection_id()).into_bytes();
+            let doc_prefix_len = col_prefix.len();
             let opts = IterOptions::new()
                 .with_prefix(col_prefix)
                 .with_keys_only(true);
@@ -383,16 +399,16 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                 .await
                 .map_err(|e| format!("SE: failed to iterate datastore: {}", e))?;
 
-            let mut se_doc_ids = Vec::new();
+            let mut se_doc_short_ids = Vec::new();
             while let Some(pair) = doc_iter
                 .next()
                 .await
                 .map_err(|e| format!("SE: datastore iteration error: {}", e))?
             {
-                let key_str = String::from_utf8_lossy(&pair.key);
-                let parts: Vec<&str> = key_str.split('/').collect();
-                if parts.len() == 4 {
-                    se_doc_ids.push(parts[3].to_string());
+                if let Ok(short_id) =
+                    storage::keys::doc_id_index::decode_doc_short_id(&pair.key[doc_prefix_len..])
+                {
+                    se_doc_short_ids.push(short_id);
                 }
             }
             doc_iter
@@ -400,14 +416,23 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                 .await
                 .map_err(|e| format!("SE: datastore close error: {}", e))?;
 
+            let mut se_doc_ids = Vec::new();
+            for short_id in se_doc_short_ids {
+                match db::doc_id_map::get_doc_id(&systemstore, short_id).await {
+                    Ok(Some(doc_id)) => se_doc_ids.push((short_id, doc_id)),
+                    Ok(None) => {}
+                    Err(e) => return Err(format!("SE: doc-ID mapping lookup failed: {}", e)),
+                }
+            }
+
             // For each document, load field values and generate artifacts.
             let mut all_artifacts = Vec::new();
-            for doc_id in &se_doc_ids {
+            for (doc_short_id, doc_id) in &se_doc_ids {
                 if let Some(filter) = filters.get(collection.collection_id()) {
                     if !document_matches_filter(
                         &datastore,
                         collection.collection_id(),
-                        doc_id,
+                        *doc_short_id,
                         filter,
                         matcher,
                     )
@@ -417,8 +442,7 @@ pub async fn push_existing_docs_with_config<S: storage::corekv::Store + 'static>
                     }
                 }
 
-                // Read document CBOR from datastore: /d/{collection_id}/{doc_id}
-                let doc_key = format!("/d/{}/{}", collection.collection_id(), doc_id).into_bytes();
+                let doc_key = storage::keys::doc_key(collection.collection_id(), *doc_short_id);
                 let doc_data = match datastore.get(&doc_key).await {
                     Ok(Some(data)) => data,
                     _ => continue,
@@ -509,6 +533,22 @@ pub async fn retry_doc<S: Store + 'static>(
         .find_collection_by_id(collection_id)
         .map_err(|e| format!("failed to get collection: {}", e))?
         .ok_or_else(|| format!("collection '{}' not found", collection_id))?;
+    let doc_short_id = {
+        let txn = db
+            .new_txn(true)
+            .await
+            .map_err(|e| format!("failed to create identity transaction: {}", e))?;
+        let systemstore = txn
+            .systemstore()
+            .map_err(|e| format!("failed to get systemstore: {}", e))?;
+        match db::doc_id_map::get_doc_ref(&systemstore, doc_id)
+            .await
+            .map_err(|e| format!("doc-ID mapping lookup failed: {}", e))?
+        {
+            Some(doc_ref) => doc_ref.doc_short_id,
+            None => return Ok(()),
+        }
+    };
     if let Some(filter) = filters.get(collection_id) {
         let txn = db
             .new_txn(true)
@@ -517,7 +557,9 @@ pub async fn retry_doc<S: Store + 'static>(
         let datastore = txn
             .datastore()
             .map_err(|e| format!("failed to get datastore: {}", e))?;
-        if !document_matches_filter(&datastore, collection_id, doc_id, filter, matcher).await? {
+        if !document_matches_filter(&datastore, collection_id, doc_short_id, filter, matcher)
+            .await?
+        {
             return Ok(());
         }
     }
@@ -547,7 +589,7 @@ pub async fn retry_doc<S: Store + 'static>(
         .map_err(|e| format!("encstore txn: {}", e))?;
 
     let mut any_failed = false;
-    for head_cid in load_latest_composite_head_cids(&*head_txn, &*block_txn, doc_id).await {
+    for head_cid in load_latest_composite_head_cids(&*head_txn, &*block_txn, doc_short_id).await {
         let block_data = match block_txn.get(&head_cid.to_bytes()).await {
             Ok(Some(data)) => data,
             _ => continue,

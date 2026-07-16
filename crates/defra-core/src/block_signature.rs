@@ -14,16 +14,10 @@ use super::block::generate_cid_from_bytes;
 /// Encryption metadata block
 ///
 /// Matches Go's `internal/core/block/encryption.go:Encryption`.
+/// Carries only the key: document identity is derived from the genesis
+/// composite block CID (Go #4838).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Encryption {
-    /// Document ID bytes
-    #[serde(rename = "docID", with = "serde_bytes")]
-    pub doc_id: Vec<u8>,
-
-    /// Field name (None for document-level encryption)
-    #[serde(rename = "fieldName", default, skip_serializing_if = "Option::is_none")]
-    pub field_name: Option<String>,
-
     /// Encryption key
     #[serde(with = "serde_bytes")]
     pub key: Vec<u8>,
@@ -31,21 +25,8 @@ pub struct Encryption {
 
 impl Encryption {
     /// Create a new encryption block
-    pub fn new(doc_id: Vec<u8>, key: Vec<u8>) -> Self {
-        Self {
-            doc_id,
-            field_name: None,
-            key,
-        }
-    }
-
-    /// Create a field-level encryption block
-    pub fn new_for_field(doc_id: Vec<u8>, field_name: String, key: Vec<u8>) -> Self {
-        Self {
-            doc_id,
-            field_name: Some(field_name),
-            key,
-        }
+    pub fn new(key: Vec<u8>) -> Self {
+        Self { key }
     }
 
     /// Serialize to DAG-CBOR bytes

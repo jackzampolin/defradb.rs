@@ -64,7 +64,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             limit: Option<u64>,
             offset: u64,
             value_filter: Option<&query::planner::index_selection::ScanValueFilter>,
-        ) -> Result<(Vec<String>, u64), query::error::QueryError> {
+        ) -> Result<(Vec<u64>, u64), query::error::QueryError> {
             let mut entries = Vec::new();
             let mut skipped = 0u64;
             let mut total_iterated = 0u64;
@@ -87,7 +87,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                     continue;
                 }
 
-                entries.push(entry.doc_id);
+                entries.push(entry.doc_short_id);
 
                 if let Some(lim) = limit {
                     if entries.len() >= lim as usize {
@@ -100,7 +100,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         }
 
         let vf = params.value_filter.as_ref();
-        let (raw_doc_ids, raw_fetches): (Vec<String>, u64) = match &params.scan_type {
+        let (raw_doc_short_ids, raw_fetches): (Vec<u64>, u64) = match &params.scan_type {
             IndexScanType::ExactMatch { values } => {
                 // Cursor seek is intentionally not applied: ExactMatch fetches a single
                 // value; pagination over a single value is meaningless.
@@ -118,7 +118,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                 let is_composite = index.description().fields.len() > 1;
                 let has_full_key = !suffix_values.is_empty()
                     && suffix_values.len() == index.description().fields.len() - 1;
-                let mut all_doc_ids = Vec::new();
+                let mut all_doc_short_ids = Vec::new();
                 for value in values {
                     if has_full_key {
                         let mut key_values = vec![value.clone()];
@@ -132,7 +132,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                                 e
                             ))
                         })?;
-                        all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
+                        all_doc_short_ids.extend(entries.into_iter().map(|e| e.doc_short_id));
                     } else if is_composite {
                         let mut iter = index
                             .scan_prefix(&datastore, std::slice::from_ref(value), false)
@@ -146,7 +146,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                                 e
                             ))
                         })?;
-                        all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
+                        all_doc_short_ids.extend(entries.into_iter().map(|e| e.doc_short_id));
                     } else {
                         let mut iter = index
                             .get(&datastore, std::slice::from_ref(value))
@@ -160,11 +160,11 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                                 e
                             ))
                         })?;
-                        all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
+                        all_doc_short_ids.extend(entries.into_iter().map(|e| e.doc_short_id));
                     }
                 }
-                let count = all_doc_ids.len() as u64;
-                (all_doc_ids, count)
+                let count = all_doc_short_ids.len() as u64;
+                (all_doc_short_ids, count)
             }
             IndexScanType::PrefixScan {
                 prefix_values,
@@ -235,13 +235,22 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             _ => unreachable!(),
         };
 
-        let _ = txn.discard();
-
         let mut seen = HashSet::new();
-        let doc_ids: Vec<String> = raw_doc_ids
+        let doc_short_ids: Vec<u64> = raw_doc_short_ids
             .into_iter()
-            .filter(|id| seen.insert(id.clone()))
+            .filter(|id| seen.insert(*id))
             .collect();
+
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
+        let doc_ids = crate::doc_id_map::resolve_doc_ids(&systemstore, &doc_short_ids)
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("doc ID resolution error: {}", e))
+            })?;
+
+        let _ = txn.discard();
 
         Ok(query::fetcher::IndexScanResult::with_raw_count(
             doc_ids,

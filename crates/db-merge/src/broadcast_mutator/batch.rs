@@ -176,6 +176,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             block,
             doc_id: doc_id.clone(),
             field_cids: vec![],
+            encryption_cids: vec![],
         };
         let broadcast_status = super::broadcast::broadcast_with_retry_with_creator(
             sync,
@@ -201,6 +202,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
                 block: col_block,
                 doc_id: String::new(),
                 field_cids: vec![],
+                encryption_cids: vec![],
             };
             sync.push_to_replicators_with_creator(
                 &col_block_result.cid,

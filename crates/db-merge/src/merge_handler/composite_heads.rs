@@ -13,7 +13,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         if let Some(heads) = &context.block.heads {
             for parent_cid in heads {
                 let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
-                    context.doc_id_str,
+                    context.doc_short_id,
                     "C",
                     *parent_cid,
                 );
@@ -28,7 +28,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         }
 
         let composite_head_key =
-            storage::keys::headstore::HeadstoreDocKey::new(context.doc_id_str, "C", *context.cid);
+            storage::keys::headstore::HeadstoreDocKey::new(context.doc_short_id, "C", *context.cid);
         if let Err(e) = headstore
             .set(
                 &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(
@@ -44,7 +44,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         }
 
         let composite_priority_key = storage::keys::headstore::HeadstorePriorityKey::new(
-            context.doc_id_str,
+            context.doc_short_id,
             context.payload.priority,
             *context.cid,
         );
@@ -64,10 +64,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
         if let Some(links) = &context.block.links {
             for dag_link in links {
+                if !state.linked_field_cids.contains(&dag_link.link) {
+                    continue;
+                }
                 if let Some(parent_cids) = state.field_block_heads.get(&dag_link.name) {
                     for parent_cid in parent_cids {
                         let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
-                            context.doc_id_str,
+                            context.doc_short_id,
                             &dag_link.name,
                             *parent_cid,
                         );
@@ -82,7 +85,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 }
 
                 let field_head_key = storage::keys::headstore::HeadstoreDocKey::new(
-                    context.doc_id_str,
+                    context.doc_short_id,
                     &dag_link.name,
                     dag_link.link,
                 );
@@ -105,7 +108,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 }
 
                 let field_priority_key = storage::keys::headstore::HeadstorePriorityKey::new(
-                    context.doc_id_str,
+                    context.doc_short_id,
                     context.payload.priority,
                     dag_link.link,
                 );

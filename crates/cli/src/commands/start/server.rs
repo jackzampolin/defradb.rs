@@ -242,6 +242,7 @@ impl Node {
                 kms_store,
                 transports,
                 policy as Arc<dyn kms::AccessPolicy>,
+                Arc::new(db::DbBlockDocIDResolver::new(database.clone())),
                 node_did,
             ));
             kms_service.set_local_peer_id(p2p_setup.local_peer_id.clone());

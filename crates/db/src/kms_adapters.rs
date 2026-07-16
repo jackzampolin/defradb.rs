@@ -6,7 +6,10 @@
 use async_trait::async_trait;
 use std::sync::{Arc, Weak};
 
-use kms::{DocCollectionInfo, DocCollectionLookup, EncBlockStore, EncryptionCid, NodeAcpRead};
+use kms::{
+    BlockDocIDResolver, DocCollectionInfo, DocCollectionLookup, EncBlockStore, EncryptionCid,
+    NodeAcpRead,
+};
 
 /// Resolves doc_id → collection via the DB headstore (Go's
 /// `RetrieveCollectionFromDocID` port).
@@ -48,6 +51,43 @@ impl<S: storage::corekv::Store + Send + Sync + 'static> DocCollectionLookup
             Ok(None) => Ok(None),
             Err(e) => Err(kms::Error::Storage(e.to_string())),
         }
+    }
+}
+
+/// Resolves which documents own a block via the systemstore ownership
+/// index (Go's `ResolveBlockDocIDs` port). Weak back-reference for the
+/// same cycle reason as [`DbDocCollectionLookup`].
+pub struct DbBlockDocIDResolver<S: storage::corekv::Store + Send + Sync + 'static> {
+    db: Weak<crate::DB<S>>,
+}
+
+impl<S: storage::corekv::Store + Send + Sync + 'static> DbBlockDocIDResolver<S> {
+    pub fn new(db: Arc<crate::DB<S>>) -> Self {
+        Self {
+            db: Arc::downgrade(&db),
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S: storage::corekv::Store + Send + Sync + 'static> BlockDocIDResolver
+    for DbBlockDocIDResolver<S>
+{
+    async fn doc_ids_for_block(&self, cid: &EncryptionCid) -> kms::Result<Vec<String>> {
+        let Some(db) = self.db.upgrade() else {
+            return Ok(Vec::new());
+        };
+        let txn = db
+            .new_txn(true)
+            .await
+            .map_err(|e| kms::Error::Storage(e.to_string()))?;
+        let systemstore = txn
+            .systemstore()
+            .map_err(|e| kms::Error::Storage(e.to_string()))?;
+        crate::doc_id_map::get_doc_ids_for_block(&systemstore, &cid.to_string())
+            .await
+            .map_err(|e| kms::Error::Storage(e.to_string()))
     }
 }
 

@@ -24,7 +24,7 @@ async fn test_multistore_all_stores_isolated() {
 
     // Write to each store with same logical key
     // Datastore
-    let ds_key = DataStoreKey::new(1, InstanceType::Value, "doc1", "field");
+    let ds_key = DataStoreKey::new(1, InstanceType::Value, 1, "field");
     let mut txn = ms.datastore.new_txn(false).await.unwrap();
     txn.set(&ds_key.bytes(), b"datastore_value").await.unwrap();
     txn.commit().await.unwrap();
@@ -37,7 +37,7 @@ async fn test_multistore_all_stores_isolated() {
     txn.commit().await.unwrap();
 
     // Headstore
-    let hs_key = HeadstoreDocKey::new("doc1", "field", cid);
+    let hs_key = HeadstoreDocKey::new(1, "field", cid);
     let mut txn = ms.headstore.new_txn(false).await.unwrap();
     txn.set(&hs_key.bytes(), b"headstore_value").await.unwrap();
     txn.commit().await.unwrap();

@@ -43,8 +43,13 @@ impl PartialEq for IndexedField {
 
 /// IndexDataStoreKey: Stores indexed field values for secondary indexes
 ///
-/// Structure: /[CollectionShortID]/[IndexID]/[EncodedFieldValue1][EncodedFieldValue2]...
+/// Structure: /[CollectionShortID]/[IndexID]/[EncodedFieldValue1][EncodedFieldValue2]...(/[DocShortID])
 /// Example: /1/2/<encoded value A><encoded value B>
+///
+/// The trailing doc short ID makes equal index values unique and lets
+/// index scans resolve the matching document without storing the full
+/// DocID. It is 0 (omitted) for unique-index keys, whose values carry
+/// the doc identity instead.
 ///
 /// Note: Field values are encoded using order-preserving encoding that
 /// maintains sort order when compared as byte sequences.
@@ -56,6 +61,8 @@ pub struct IndexDataStoreKey {
     pub index_id: u32,
     /// Indexed fields with values and sort direction
     pub fields: Vec<IndexedField>,
+    /// Document short ID suffix (varint-encoded in key bytes; 0 = omitted)
+    pub doc_short_id: u64,
 }
 
 impl PartialEq for IndexDataStoreKey {
@@ -63,16 +70,33 @@ impl PartialEq for IndexDataStoreKey {
         self.collection_short_id == other.collection_short_id
             && self.index_id == other.index_id
             && self.fields == other.fields
+            && self.doc_short_id == other.doc_short_id
     }
 }
 
 impl IndexDataStoreKey {
-    /// Create a new IndexDataStoreKey
+    /// Create a new IndexDataStoreKey without a doc short ID suffix.
     pub fn new(collection_short_id: u32, index_id: u32, fields: Vec<IndexedField>) -> Self {
         Self {
             collection_short_id,
             index_id,
             fields,
+            doc_short_id: 0,
+        }
+    }
+
+    /// Create a new IndexDataStoreKey with a doc short ID suffix.
+    pub fn with_doc_short_id(
+        collection_short_id: u32,
+        index_id: u32,
+        fields: Vec<IndexedField>,
+        doc_short_id: u64,
+    ) -> Self {
+        Self {
+            collection_short_id,
+            index_id,
+            fields,
+            doc_short_id,
         }
     }
 
@@ -107,6 +131,13 @@ impl IndexDataStoreKey {
 
         for field in &self.fields {
             buf = crate::field_value::encode_field_value(buf, &field.value, field.descending)?;
+        }
+
+        if self.doc_short_id != 0 {
+            buf.push(SEPARATOR);
+            buf.extend_from_slice(&super::super::doc_id_index::encode_doc_short_id(
+                self.doc_short_id,
+            ));
         }
 
         Ok(buf)

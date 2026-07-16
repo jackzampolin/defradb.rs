@@ -1,19 +1,20 @@
+use super::super::doc_id_index::encode_doc_short_id;
 use super::super::utils::{encode_uvarint_ascending, InstanceType, SEPARATOR};
 use super::DATASTORE_DOC_VERSION_FIELD_ID;
 use crate::corekv::Key;
 
 /// DataStoreKey: Main key for storing field values in documents
 ///
-/// Structure: /[CollectionRootID]/[InstanceType]/[DocID]/[FieldID]
-/// Example: /1/v/bae123456789abcdef0123456789abcdef012345/fieldname
+/// Structure: /[CollectionShortID]/[InstanceType]/[DocShortID uvarint]/[FieldID]
+/// Example: /1/v/\x2a/fieldname
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataStoreKey {
     /// Collection short ID (varint-encoded)
     pub collection_id: u32,
     /// Instance type (value, priority, or deleted)
     pub instance_type: InstanceType,
-    /// Document ID (40 character string)
-    pub doc_id: String,
+    /// Document short ID (varint-encoded)
+    pub doc_short_id: u64,
     /// Field ID (variable length string)
     pub field_id: String,
 }
@@ -23,13 +24,13 @@ impl DataStoreKey {
     pub fn new(
         collection_id: u32,
         instance_type: InstanceType,
-        doc_id: impl Into<String>,
+        doc_short_id: u64,
         field_id: impl Into<String>,
     ) -> Self {
         Self {
             collection_id,
             instance_type,
-            doc_id: doc_id.into(),
+            doc_short_id,
             field_id: field_id.into(),
         }
     }
@@ -54,11 +55,10 @@ impl DataStoreKey {
     pub fn document_prefix(
         collection_id: u32,
         instance_type: InstanceType,
-        doc_id: impl Into<String>,
+        doc_short_id: u64,
     ) -> Vec<u8> {
-        let doc_id = doc_id.into();
         let mut buf = Self::collection_instance_prefix(collection_id, instance_type);
-        buf.extend_from_slice(doc_id.as_bytes());
+        buf.extend_from_slice(&encode_doc_short_id(doc_short_id));
         buf.push(SEPARATOR);
         buf
     }
@@ -72,18 +72,14 @@ impl DataStoreKey {
     /// # Example
     ///
     /// ```ignore
-    /// let key = DataStoreKey::version_key(1, InstanceType::Value, "bae123...");
-    /// // Results in key: /1/v/bae123.../v
+    /// let key = DataStoreKey::version_key(1, InstanceType::Value, 42);
+    /// // Results in key: /1/v/\x2a/v
     /// ```
-    pub fn version_key(
-        collection_id: u32,
-        instance_type: InstanceType,
-        doc_id: impl Into<String>,
-    ) -> Self {
+    pub fn version_key(collection_id: u32, instance_type: InstanceType, doc_short_id: u64) -> Self {
         Self::new(
             collection_id,
             instance_type,
-            doc_id,
+            doc_short_id,
             DATASTORE_DOC_VERSION_FIELD_ID,
         )
     }
@@ -96,13 +92,8 @@ impl DataStoreKey {
 
 impl Key for DataStoreKey {
     fn bytes(&self) -> Vec<u8> {
-        let mut buf = vec![SEPARATOR];
-        buf = encode_uvarint_ascending(buf, self.collection_id as u64);
-        buf.push(SEPARATOR);
-        buf.push(self.instance_type.as_byte());
-        buf.push(SEPARATOR);
-        buf.extend_from_slice(self.doc_id.as_bytes());
-        buf.push(SEPARATOR);
+        let mut buf =
+            Self::document_prefix(self.collection_id, self.instance_type, self.doc_short_id);
         buf.extend_from_slice(self.field_id.as_bytes());
         buf
     }
@@ -112,7 +103,7 @@ impl Key for DataStoreKey {
             "/{}/{}/{}/{}",
             self.collection_id,
             self.instance_type.as_str(),
-            self.doc_id,
+            self.doc_short_id,
             self.field_id
         )
     }
@@ -120,39 +111,47 @@ impl Key for DataStoreKey {
 
 /// PrimaryDataStoreKey: Maps documents to their primary keys
 ///
-/// Structure: /[CollectionID]/pk/[DocID]
-/// Example: /1/pk/bae123456789abcdef0123456789abcdef012345
+/// Structure: /[CollectionShortID]/pk/[DocShortID uvarint]
+/// Example: /1/pk/\x2a
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrimaryDataStoreKey {
-    /// Collection short ID (decimal format, not varint)
+    /// Collection short ID (varint-encoded)
     pub collection_id: u32,
-    /// Document ID
-    pub doc_id: String,
+    /// Document short ID (varint-encoded)
+    pub doc_short_id: u64,
 }
 
 impl PrimaryDataStoreKey {
     /// Create a new PrimaryDataStoreKey
-    pub fn new(collection_id: u32, doc_id: impl Into<String>) -> Self {
+    pub fn new(collection_id: u32, doc_short_id: u64) -> Self {
         Self {
             collection_id,
-            doc_id: doc_id.into(),
+            doc_short_id,
         }
     }
 
     /// Create a prefix for all primary keys in a collection
     pub fn collection_prefix(collection_id: u32) -> Vec<u8> {
-        let prefix = format!("/{}/pk/", collection_id);
-        prefix.into_bytes()
+        let mut buf = vec![SEPARATOR];
+        buf = encode_uvarint_ascending(buf, collection_id as u64);
+        buf.extend_from_slice(b"/pk/");
+        buf
+    }
+
+    /// Convert to the corresponding DataStoreKey (no instance type or field).
+    pub fn to_data_store_key(&self, instance_type: InstanceType) -> DataStoreKey {
+        DataStoreKey::new(self.collection_id, instance_type, self.doc_short_id, "")
     }
 }
 
 impl Key for PrimaryDataStoreKey {
     fn bytes(&self) -> Vec<u8> {
-        let s = format!("/{}/pk/{}", self.collection_id, self.doc_id);
-        s.into_bytes()
+        let mut buf = Self::collection_prefix(self.collection_id);
+        buf.extend_from_slice(&encode_doc_short_id(self.doc_short_id));
+        buf
     }
 
     fn to_string(&self) -> String {
-        format!("/{}/pk/{}", self.collection_id, self.doc_id)
+        format!("/{}/pk/{}", self.collection_id, self.doc_short_id)
     }
 }

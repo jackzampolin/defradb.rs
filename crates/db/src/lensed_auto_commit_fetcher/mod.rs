@@ -156,12 +156,26 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
                 ))
             })?;
 
-        let result = ft_index
-            .search_scored(&datastore, query)
-            .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!("fulltext search error: {}", e))
-            });
+        let result = match ft_index.search_scored(&datastore, query).await {
+            Ok(scores) => match txn.systemstore() {
+                Ok(systemstore) => crate::doc_id_map::resolve_doc_id_scores(&systemstore, scores)
+                    .await
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "doc ID resolution error: {}",
+                            e
+                        ))
+                    }),
+                Err(e) => Err(query::error::QueryError::execution(format!(
+                    "failed to get systemstore: {}",
+                    e
+                ))),
+            },
+            Err(e) => Err(query::error::QueryError::execution(format!(
+                "fulltext search error: {}",
+                e
+            ))),
+        };
 
         let _ = txn.discard();
         result

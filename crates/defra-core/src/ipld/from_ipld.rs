@@ -182,7 +182,6 @@ impl TryFrom<&Ipld> for LwwDeltaPayload {
         };
 
         Ok(LwwDeltaPayload {
-            doc_id: parse_bytes(map, "docID")?,
             field_name: parse_string(map, "fieldName")?,
             priority: parse_u64(map, "priority")?,
             schema_version_id: parse_string(map, "schemaVersionID")?,
@@ -206,7 +205,6 @@ impl TryFrom<&Ipld> for CounterDeltaPayload {
         };
 
         Ok(CounterDeltaPayload {
-            doc_id: parse_bytes(map, "docID")?,
             field_name: parse_string(map, "fieldName")?,
             priority: parse_u64(map, "priority")?,
             nonce: parse_i64(map, "nonce")?,
@@ -234,7 +232,6 @@ impl TryFrom<&Ipld> for CompositeDeltaPayload {
             .map_err(Error::IpldError)?;
 
         Ok(CompositeDeltaPayload {
-            doc_id: parse_bytes(map, "docID")?,
             schema_version_id: parse_string(map, "schemaVersionID")?,
             priority: parse_u64(map, "priority")?,
             status,
@@ -326,8 +323,6 @@ impl TryFrom<&Ipld> for Encryption {
         };
 
         Ok(Encryption {
-            doc_id: parse_bytes(map, "docID")?,
-            field_name: parse_optional_string(map, "fieldName")?,
             key: parse_bytes(map, "key")?,
         })
     }

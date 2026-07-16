@@ -73,7 +73,7 @@ async fn test_simple_index_save_too_few_values() {
     // Composite index expects 2 values, but we provide only 1
     let values = vec![NormalValue::String("electronics".to_string())];
 
-    let result = index.save(&mut txn, "doc1", &values).await;
+    let result = index.save(&mut txn, 1, &values).await;
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
@@ -93,8 +93,8 @@ async fn test_simple_index_save_too_few_values() {
         err_msg
     );
     assert!(
-        err_msg.contains("doc1"),
-        "error should mention document ID: {}",
+        err_msg.contains("for document '1'"),
+        "error should mention the doc short ID: {}",
         err_msg
     );
 }
@@ -111,7 +111,7 @@ async fn test_simple_index_save_too_many_values() {
         NormalValue::String("extra".to_string()),
     ];
 
-    let result = index.save(&mut txn, "doc1", &values).await;
+    let result = index.save(&mut txn, 1, &values).await;
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
@@ -145,9 +145,7 @@ async fn test_simple_index_update_old_values_mismatch() {
         NormalValue::Int(10),
     ];
 
-    let result = index
-        .update(&mut txn, "doc1", &old_values, &new_values)
-        .await;
+    let result = index.update(&mut txn, 1, &old_values, &new_values).await;
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("field count"));
@@ -166,9 +164,7 @@ async fn test_simple_index_update_new_values_mismatch() {
     // New values has wrong count
     let new_values = vec![NormalValue::String("electronics".to_string())];
 
-    let result = index
-        .update(&mut txn, "doc1", &old_values, &new_values)
-        .await;
+    let result = index.update(&mut txn, 1, &old_values, &new_values).await;
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("field count"));
@@ -183,7 +179,7 @@ async fn test_simple_index_delete_values_mismatch() {
     // Wrong number of values for delete
     let values = vec![NormalValue::String("electronics".to_string())];
 
-    let result = index.delete(&mut txn, "doc1", &values).await;
+    let result = index.delete(&mut txn, 1, &values).await;
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("field count"));
@@ -197,7 +193,7 @@ async fn test_unique_index_save_too_few_values() {
     let index = UniqueIndex::new(1, composite_index_description(true));
     let values = vec![NormalValue::String("electronics".to_string())];
 
-    let result = index.save(&mut txn, "doc1", &values).await;
+    let result = index.save(&mut txn, 1, &values).await;
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
@@ -215,7 +211,7 @@ async fn test_unique_index_save_too_many_values() {
         NormalValue::String("extra".to_string()),
     ];
 
-    let result = index.save(&mut txn, "doc1", &values).await;
+    let result = index.save(&mut txn, 1, &values).await;
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
@@ -230,7 +226,7 @@ async fn test_unique_index_empty_values() {
     let index = UniqueIndex::new(1, unique_index_description());
     let values: Vec<NormalValue> = vec![];
 
-    let result = index.save(&mut txn, "doc1", &values).await;
+    let result = index.save(&mut txn, 1, &values).await;
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
@@ -292,9 +288,12 @@ async fn test_concurrent_saves_to_simple_index() {
         let index_clone = index.clone();
         let handle = tokio::spawn(async move {
             let mut txn = store_clone.new_txn(false).await.unwrap();
-            let doc_id = format!("doc{}", i);
+            let doc_short_id = (i + 1) as u64;
             let values = vec![NormalValue::String(format!("value{}", i))];
-            index_clone.save(&mut txn, &doc_id, &values).await.unwrap();
+            index_clone
+                .save(&mut txn, doc_short_id, &values)
+                .await
+                .unwrap();
             txn.commit().await.unwrap();
         });
         handles.push(handle);
@@ -330,9 +329,12 @@ async fn test_concurrent_saves_to_unique_index_different_values() {
         let index_clone = index.clone();
         let handle = tokio::spawn(async move {
             let mut txn = store_clone.new_txn(false).await.unwrap();
-            let doc_id = format!("doc{}", i);
+            let doc_short_id = (i + 1) as u64;
             let values = vec![NormalValue::String(format!("unique_email_{}@test.com", i))];
-            index_clone.save(&mut txn, &doc_id, &values).await.unwrap();
+            index_clone
+                .save(&mut txn, doc_short_id, &values)
+                .await
+                .unwrap();
             txn.commit().await.unwrap();
         });
         handles.push(handle);
@@ -365,9 +367,9 @@ async fn test_concurrent_save_and_delete() {
     {
         let mut txn = store.new_txn(false).await.unwrap();
         for i in 0..5 {
-            let doc_id = format!("doc{}", i);
+            let doc_short_id = (i + 1) as u64;
             let values = vec![NormalValue::String(format!("value{}", i))];
-            index.save(&mut txn, &doc_id, &values).await.unwrap();
+            index.save(&mut txn, doc_short_id, &values).await.unwrap();
         }
         txn.commit().await.unwrap();
     }
@@ -381,9 +383,12 @@ async fn test_concurrent_save_and_delete() {
         let index_clone = index.clone();
         let handle = tokio::spawn(async move {
             let mut txn = store_clone.new_txn(false).await.unwrap();
-            let doc_id = format!("doc{}", i);
+            let doc_short_id = (i + 1) as u64;
             let values = vec![NormalValue::String(format!("value{}", i))];
-            index_clone.save(&mut txn, &doc_id, &values).await.unwrap();
+            index_clone
+                .save(&mut txn, doc_short_id, &values)
+                .await
+                .unwrap();
             txn.commit().await.unwrap();
         });
         handles.push(handle);
@@ -395,10 +400,10 @@ async fn test_concurrent_save_and_delete() {
         let index_clone = index.clone();
         let handle = tokio::spawn(async move {
             let mut txn = store_clone.new_txn(false).await.unwrap();
-            let doc_id = format!("doc{}", i);
+            let doc_short_id = (i + 1) as u64;
             let values = vec![NormalValue::String(format!("value{}", i))];
             index_clone
-                .delete(&mut txn, &doc_id, &values)
+                .delete(&mut txn, doc_short_id, &values)
                 .await
                 .unwrap();
             txn.commit().await.unwrap();
@@ -433,9 +438,9 @@ async fn test_concurrent_updates() {
     {
         let mut txn = store.new_txn(false).await.unwrap();
         for i in 0..5 {
-            let doc_id = format!("doc{}", i);
+            let doc_short_id = (i + 1) as u64;
             let values = vec![NormalValue::String(format!("old_value{}", i))];
-            index.save(&mut txn, &doc_id, &values).await.unwrap();
+            index.save(&mut txn, doc_short_id, &values).await.unwrap();
         }
         txn.commit().await.unwrap();
     }
@@ -447,11 +452,11 @@ async fn test_concurrent_updates() {
         let index_clone = index.clone();
         let handle = tokio::spawn(async move {
             let mut txn = store_clone.new_txn(false).await.unwrap();
-            let doc_id = format!("doc{}", i);
+            let doc_short_id = (i + 1) as u64;
             let old_values = vec![NormalValue::String(format!("old_value{}", i))];
             let new_values = vec![NormalValue::String(format!("new_value{}", i))];
             index_clone
-                .update(&mut txn, &doc_id, &old_values, &new_values)
+                .update(&mut txn, doc_short_id, &old_values, &new_values)
                 .await
                 .unwrap();
             txn.commit().await.unwrap();
@@ -491,8 +496,8 @@ async fn test_composite_unique_partial_null_first_field() {
     let values2 = vec![NormalValue::Null, NormalValue::Int(20)];
 
     // Both should succeed since NULL is in the composite
-    index.save(&mut txn, "doc1", &values1).await.unwrap();
-    index.save(&mut txn, "doc2", &values2).await.unwrap();
+    index.save(&mut txn, 1, &values1).await.unwrap();
+    index.save(&mut txn, 2, &values2).await.unwrap();
     txn.commit().await.unwrap();
 }
 
@@ -516,8 +521,8 @@ async fn test_composite_unique_partial_null_second_field() {
     // Go-compatible behavior: if ANY field is NULL, uniqueness is bypassed.
     // Multiple documents can have the same non-NULL values as long as at least
     // one field is NULL. This matches Go's hasIndexKeyNilField() behavior.
-    index.save(&mut txn, "doc1", &values1).await.unwrap();
-    index.save(&mut txn, "doc2", &values2).await.unwrap();
+    index.save(&mut txn, 1, &values1).await.unwrap();
+    index.save(&mut txn, 2, &values2).await.unwrap();
     txn.commit().await.unwrap();
 }
 
@@ -534,10 +539,10 @@ async fn test_composite_unique_enforced_on_non_null() {
         NormalValue::Int(10),
     ];
 
-    index.save(&mut txn, "doc1", &values).await.unwrap();
+    index.save(&mut txn, 1, &values).await.unwrap();
 
     // Should fail - same non-NULL values
-    let result = index.save(&mut txn, "doc2", &values).await;
+    let result = index.save(&mut txn, 2, &values).await;
     let error = result.expect_err("duplicate composite unique value should fail");
     assert!(matches!(
         error,

@@ -3,15 +3,8 @@
 use std::collections::HashMap;
 
 use cid::Cid;
-use defra_core::SHA2_256_CODE;
-use multicodec::Codec;
-use multihash::Multihash;
 use schema::{CType, CollectionVersion};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-
-/// Raw codec for CID
-static RAW_CODEC: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| Codec::Bin.code() as u64);
 
 use crate::encoding::{
     canonical_cbor_key_order, cbor_to_normal_value, json_to_normal_value, normal_value_to_cbor,
@@ -156,11 +149,6 @@ impl Document {
             let field = Field::lww(&key)?;
             doc.fields.insert(key.clone(), field);
             doc.values.insert(key, FieldValue::new_lww(normal_value));
-        }
-
-        // Generate DocID if not provided
-        if doc.id.is_none() {
-            doc.generate_and_set_doc_id()?;
         }
 
         Ok(doc)
@@ -454,44 +442,6 @@ impl Document {
         Ok(doc)
     }
 
-    /// Generate the document ID from its content.
-    ///
-    /// The DocID is generated from:
-    /// 1. CBOR encoding of the document values
-    /// 2. Collection ID (if available)
-    /// 3. SHA-256 hash of the combined bytes
-    /// 4. UUID v5 derived from the hash
-    pub fn generate_doc_id(&self) -> Result<DocID> {
-        let cbor_bytes = self.to_cbor()?;
-
-        // If we have a collection, include its ID in the hash
-        let mut hash_input = cbor_bytes;
-        if let Some(ref collection) = self.collection {
-            hash_input.extend_from_slice(collection.collection_id.as_bytes());
-        }
-
-        // Hash with SHA2-256
-        let mut hasher = Sha256::new();
-        hasher.update(&hash_input);
-        let hash_bytes = hasher.finalize();
-
-        // Create multihash
-        let mh: Multihash<64> = Multihash::wrap(*SHA2_256_CODE, &hash_bytes)
-            .map_err(|e| Error::CborEncode(format!("Failed to create multihash: {}", e)))?;
-
-        // Create CID from the hash
-        let cid = Cid::new_v1(*RAW_CODEC, mh);
-
-        Ok(DocID::new_v0(cid))
-    }
-
-    /// Generate and set the document ID.
-    pub fn generate_and_set_doc_id(&mut self) -> Result<()> {
-        let doc_id = self.generate_doc_id()?;
-        self.id = Some(doc_id);
-        Ok(())
-    }
-
     /// Check if the document has a specific field.
     pub fn has_field(&self, field: &str) -> bool {
         self.values.contains_key(field)
@@ -523,71 +473,6 @@ impl PartialEq for Document {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_docid_generation_matches_go() {
-        // Go's JSON type stores ALL numbers as float64. When CBOR-encoding
-        // with CanonicalEncOptions (ShortestFloat16), float64(250) becomes
-        // CBOR float16 (f9 5bd0), not CBOR integer (18 fa).
-        //
-        // Go output for: {"name": "John", "custom": {"tree": "maple", "age": 250}}
-        // with CollectionID "1" and JSON-typed "custom" field:
-        //
-        // CBOR bytes: a2646e616d65644a6f686e66637573746f6da263616765f95bd06474726565656d61706c65
-        // SHA256: d60b53278b02df404694ae586b12b88557dee6af4c98b1f1fc7e30a98290608c
-        // CID: bafkreigwbnjspcyc35aenffolbvrfoefk7ponl2mtcy7d7d6gcuyfedarq
-
-        let json = r#"{"name": "John", "custom": {"tree": "maple", "age": 250}}"#;
-        let mut doc = Document::from_json_str(json).expect("should parse");
-
-        // Set a collection with CollectionID "1"
-        doc.set_collection(schema::CollectionVersion {
-            name: "Users".to_string(),
-            version_id: "test-version".to_string(),
-            collection_id: "1".to_string(),
-            collection_set: None,
-            query: None,
-            previous_version: None,
-            fields: vec![],
-            indexes: vec![],
-            encrypted_indexes: vec![],
-            fulltext_indexes: vec![],
-            policy: None,
-            is_active: true,
-            is_materialized: false,
-            downsample_interval: None,
-            downsample_time_field: None,
-            downsample_retention: None,
-            downsample_source: None,
-            is_branchable: false,
-            is_embedded_only: false,
-            is_placeholder: false,
-            vector_embeddings: vec![],
-            root_id: 0,
-        });
-
-        // Generate the docID
-        let doc_id = doc.generate_doc_id().expect("should generate");
-
-        // The CID should match Go's
-        let cid = doc_id.cid().expect("should have CID");
-        let cid_str = cid.to_string();
-
-        // Verify the CBOR bytes match Go's JSON-type encoding
-        let cbor_bytes = doc.to_cbor().expect("should encode");
-        let expected_cbor =
-            "a2646e616d65644a6f686e66637573746f6da263616765f95bd06474726565656d61706c65";
-        let actual_cbor: String = cbor_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-
-        assert_eq!(
-            actual_cbor, expected_cbor,
-            "CBOR should match Go's JSON-type encoding"
-        );
-        assert_eq!(
-            cid_str, "bafkreigwbnjspcyc35aenffolbvrfoefk7ponl2mtcy7d7d6gcuyfedarq",
-            "CID should match Go"
-        );
-    }
 
     #[test]
     fn test_cbor_encoding_matches_go() {

@@ -9,20 +9,18 @@ use crate::ExplicitReplayAuthorization;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BlockContext {
-    pub(crate) doc_id: Option<String>,
     pub(crate) collection_id: Option<String>,
 }
 
+/// Extract collection context from a block payload. Deltas carry no
+/// document identity (Go #4838) — the DocID travels only in the PushLog
+/// envelope or is derived from the genesis composite CID at merge time.
 pub(crate) fn block_context_from_data(block_data: &[u8]) -> BlockContext {
     let Ok(block) = DefraBlock::from_dag_cbor(block_data) else {
         return BlockContext::default();
     };
 
     BlockContext {
-        doc_id: block
-            .delta
-            .doc_id()
-            .map(|doc_id| String::from_utf8_lossy(doc_id).to_string()),
         collection_id: block.delta.schema_version_id().map(ToString::to_string),
     }
 }
@@ -105,17 +103,29 @@ impl DagFetchContext {
 
     pub(crate) fn fill_missing_from_block(&mut self, block_data: &[u8]) {
         let block_context = block_context_from_data(block_data);
-        if self.doc_id.is_empty() {
-            if let Some(doc_id) = block_context.doc_id {
-                self.doc_id = doc_id;
-            }
-        }
         if self.collection_id.is_empty() {
             if let Some(collection_id) = block_context.collection_id {
                 self.collection_id = collection_id;
             }
         }
         self.refresh_explicit_replicator_from_collection();
+    }
+
+    /// Derive the document identity from a genesis composite block CID when
+    /// it is not otherwise known (Go #4838). Used on the branchable-collection
+    /// sync path, where blocks arrive without a per-document PushLog envelope.
+    pub(crate) fn fill_missing_doc_id_from_genesis(&mut self, cid: &Cid, block_data: &[u8]) {
+        if !self.doc_id.is_empty() {
+            return;
+        }
+        let Ok(block) = DefraBlock::from_dag_cbor(block_data) else {
+            return;
+        };
+        let is_genesis_composite = matches!(block.delta, defra_core::CrdtDelta::Composite(_))
+            && block.heads.as_ref().is_none_or(Vec::is_empty);
+        if is_genesis_composite {
+            self.doc_id = document::DocID::new_v0(*cid).to_string();
+        }
     }
 
     fn refresh_explicit_replicator_from_collection(&mut self) {

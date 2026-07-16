@@ -32,11 +32,15 @@ pub async fn verify_block_signature<S: Store>(
     let blockstore = txn
         .blockstore()
         .map_err(|e| format!("failed to get blockstore: {}", e))?;
+    let systemstore = txn
+        .systemstore()
+        .map_err(|e| format!("failed to get systemstore: {}", e))?;
 
     verify_block_signature_with_blockstore(
         database,
         document_acp,
         blockstore,
+        systemstore,
         cid_str,
         pub_key.as_ref(),
         public_key_hex,
@@ -60,11 +64,15 @@ pub async fn verify_block_signature_in_txn<S: Store>(
     let blockstore = txn
         .blockstore()
         .map_err(|e| format!("failed to get blockstore: {}", e))?;
+    let systemstore = txn
+        .systemstore()
+        .map_err(|e| format!("failed to get systemstore: {}", e))?;
 
     verify_block_signature_with_blockstore(
         database,
         document_acp,
         blockstore,
+        systemstore,
         cid_str,
         pub_key.as_ref(),
         public_key_hex,
@@ -73,10 +81,12 @@ pub async fn verify_block_signature_in_txn<S: Store>(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn verify_block_signature_with_blockstore<S: Store>(
     database: &Arc<DB<S>>,
     document_acp: &dyn acp::DocumentACP,
     blockstore: NamespaceView,
+    systemstore: NamespaceView,
     cid_str: &str,
     pub_key: &dyn crypto::PublicKey,
     public_key_hex: &str,
@@ -116,27 +126,45 @@ async fn verify_block_signature_with_blockstore<S: Store>(
         {
             let collection = collection.schema();
             if let Some(policy) = &collection.policy {
-                let doc_id = block
-                    .delta
-                    .doc_id()
-                    .map(|bytes| String::from_utf8_lossy(bytes).to_string())
-                    .unwrap_or_default();
+                // Field blocks can be shared across documents, so allow if the
+                // caller can read any owner. An ownerless document block is
+                // denied; only non-document blocks use collection-level access.
+                let owning_doc_ids =
+                    crate::doc_id_map::resolve_block_doc_ids(&systemstore, &parsed_cid, &block)
+                        .await
+                        .map_err(|e| format!("failed to resolve block owners: {}", e))?
+                        .ok_or_else(|| "missing permission".to_string())?;
+
                 let node_did = database.node_did();
                 let checker = acp::read_access::DirectChecker {
                     acp: document_acp,
                     identity: caller_identity,
                     node_did: node_did.as_ref(),
                 };
-                let has_permission = acp::read_access::check_doc_read_access(
-                    &checker,
-                    &policy.id,
-                    &policy.resource_name,
-                    &collection.collection_id,
-                    collection.is_branchable,
-                    &doc_id,
-                )
-                .await
-                .map_err(|e| format!("ACP check failed: {}", e))?;
+
+                let candidates = if owning_doc_ids.is_empty() {
+                    vec![String::new()]
+                } else {
+                    owning_doc_ids
+                };
+
+                let mut has_permission = false;
+                for doc_id in &candidates {
+                    if acp::read_access::check_doc_read_access(
+                        &checker,
+                        &policy.id,
+                        &policy.resource_name,
+                        &collection.collection_id,
+                        collection.is_branchable,
+                        doc_id,
+                    )
+                    .await
+                    .map_err(|e| format!("ACP check failed: {}", e))?
+                    {
+                        has_permission = true;
+                        break;
+                    }
+                }
 
                 if !has_permission {
                     return Err("missing permission".to_string());

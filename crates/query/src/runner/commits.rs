@@ -727,7 +727,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     else {
                         continue;
                     };
-                    if seen_commit_cids.insert(commit_cid.to_string()) {
+                    let doc_id = commit
+                        .get("docID")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    if seen_commit_cids.insert((commit_cid.to_string(), doc_id.to_string())) {
                         commits.push(commit);
                     }
                 }

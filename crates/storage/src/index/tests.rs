@@ -60,7 +60,7 @@ async fn test_simple_index_save() {
     let index = SimpleIndex::new(1, test_index_description(false));
     let values = vec![NormalValue::String("alice".to_string())];
 
-    index.save(&mut txn, "doc1", &values).await.unwrap();
+    index.save(&mut txn, 1, &values).await.unwrap();
     txn.commit().await.unwrap();
 
     // Verify entry exists
@@ -79,8 +79,8 @@ async fn test_simple_index_allows_duplicates() {
     let values = vec![NormalValue::String("alice".to_string())];
 
     // Same value, different doc IDs - should work
-    index.save(&mut txn, "doc1", &values).await.unwrap();
-    index.save(&mut txn, "doc2", &values).await.unwrap();
+    index.save(&mut txn, 1, &values).await.unwrap();
+    index.save(&mut txn, 2, &values).await.unwrap();
     txn.commit().await.unwrap();
 
     // Verify both entries exist
@@ -99,9 +99,9 @@ async fn test_simple_index_update() {
     let old_values = vec![NormalValue::String("alice".to_string())];
     let new_values = vec![NormalValue::String("bob".to_string())];
 
-    index.save(&mut txn, "doc1", &old_values).await.unwrap();
+    index.save(&mut txn, 1, &old_values).await.unwrap();
     index
-        .update(&mut txn, "doc1", &old_values, &new_values)
+        .update(&mut txn, 1, &old_values, &new_values)
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -121,8 +121,8 @@ async fn test_simple_index_delete() {
     let index = SimpleIndex::new(1, test_index_description(false));
     let values = vec![NormalValue::String("alice".to_string())];
 
-    index.save(&mut txn, "doc1", &values).await.unwrap();
-    index.delete(&mut txn, "doc1", &values).await.unwrap();
+    index.save(&mut txn, 1, &values).await.unwrap();
+    index.delete(&mut txn, 1, &values).await.unwrap();
     txn.commit().await.unwrap();
 
     // Verify no entries exist
@@ -140,15 +140,15 @@ async fn test_simple_index_remove_all() {
     let index = SimpleIndex::new(1, test_index_description(false));
 
     index
-        .save(&mut txn, "doc1", &[NormalValue::String("a".to_string())])
+        .save(&mut txn, 1, &[NormalValue::String("a".to_string())])
         .await
         .unwrap();
     index
-        .save(&mut txn, "doc2", &[NormalValue::String("b".to_string())])
+        .save(&mut txn, 2, &[NormalValue::String("b".to_string())])
         .await
         .unwrap();
     index
-        .save(&mut txn, "doc3", &[NormalValue::String("c".to_string())])
+        .save(&mut txn, 3, &[NormalValue::String("c".to_string())])
         .await
         .unwrap();
     index.remove_all(&mut txn).await.unwrap();
@@ -169,15 +169,18 @@ async fn test_unique_index_save() {
     let index = UniqueIndex::new(1, test_index_description(true));
     let values = vec![NormalValue::String("alice".to_string())];
 
-    index.save(&mut txn, "doc1", &values).await.unwrap();
+    index.save(&mut txn, 1, &values).await.unwrap();
     txn.commit().await.unwrap();
 
-    // Verify entry exists with doc_id in value
+    // Verify entry exists with the encoded doc short ID in the value
     let txn = store.new_txn(true).await.unwrap();
     let prefix = IndexDataStoreKey::index_prefix(1, 1);
     let entries = get_entries(txn.as_ref(), &prefix).await;
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].1, "doc1".as_bytes());
+    assert_eq!(
+        entries[0].1,
+        crate::keys::doc_id_index::encode_doc_short_id(1)
+    );
 }
 
 #[tokio::test]
@@ -188,10 +191,10 @@ async fn test_unique_index_rejects_duplicates() {
     let index = UniqueIndex::new(1, test_index_description(true));
     let values = vec![NormalValue::String("alice".to_string())];
 
-    index.save(&mut txn, "doc1", &values).await.unwrap();
+    index.save(&mut txn, 1, &values).await.unwrap();
 
     // Same value, different doc ID - should fail
-    let result = index.save(&mut txn, "doc2", &values).await;
+    let result = index.save(&mut txn, 2, &values).await;
     let error = result.expect_err("duplicate unique value should fail");
     assert!(matches!(
         error,
@@ -211,10 +214,10 @@ async fn test_unique_index_rejects_same_doc_duplicate() {
     let index = UniqueIndex::new(1, test_index_description(true));
     let values = vec![NormalValue::String("alice".to_string())];
 
-    index.save(&mut txn, "doc1", &values).await.unwrap();
+    index.save(&mut txn, 1, &values).await.unwrap();
 
     // Same value, same doc ID - should fail (e.g., JSON array self-duplicates)
-    let result = index.save(&mut txn, "doc1", &values).await;
+    let result = index.save(&mut txn, 1, &values).await;
     assert!(result.is_err());
 }
 
@@ -227,8 +230,8 @@ async fn test_unique_index_null_allows_duplicates() {
     let null_values = vec![NormalValue::Null];
 
     // Multiple docs with NULL value - should be allowed
-    index.save(&mut txn, "doc1", &null_values).await.unwrap();
-    index.save(&mut txn, "doc2", &null_values).await.unwrap();
+    index.save(&mut txn, 1, &null_values).await.unwrap();
+    index.save(&mut txn, 2, &null_values).await.unwrap();
     txn.commit().await.unwrap();
 
     // Verify both entries exist
@@ -247,9 +250,9 @@ async fn test_unique_index_update() {
     let old_values = vec![NormalValue::String("alice".to_string())];
     let new_values = vec![NormalValue::String("bob".to_string())];
 
-    index.save(&mut txn, "doc1", &old_values).await.unwrap();
+    index.save(&mut txn, 1, &old_values).await.unwrap();
     index
-        .update(&mut txn, "doc1", &old_values, &new_values)
+        .update(&mut txn, 1, &old_values, &new_values)
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -259,7 +262,10 @@ async fn test_unique_index_update() {
     let prefix = IndexDataStoreKey::index_prefix(1, 1);
     let entries = get_entries(txn.as_ref(), &prefix).await;
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].1, "doc1".as_bytes());
+    assert_eq!(
+        entries[0].1,
+        crate::keys::doc_id_index::encode_doc_short_id(1)
+    );
 }
 
 #[tokio::test]
@@ -270,8 +276,8 @@ async fn test_unique_index_delete() {
     let index = UniqueIndex::new(1, test_index_description(true));
     let values = vec![NormalValue::String("alice".to_string())];
 
-    index.save(&mut txn, "doc1", &values).await.unwrap();
-    index.delete(&mut txn, "doc1", &values).await.unwrap();
+    index.save(&mut txn, 1, &values).await.unwrap();
+    index.delete(&mut txn, 1, &values).await.unwrap();
     txn.commit().await.unwrap();
 
     // Verify no entries exist
@@ -292,7 +298,7 @@ async fn test_composite_index() {
         NormalValue::Int(1705000000),
     ];
 
-    index.save(&mut txn, "doc1", &values).await.unwrap();
+    index.save(&mut txn, 1, &values).await.unwrap();
     txn.commit().await.unwrap();
 
     let txn = store.new_txn(true).await.unwrap();
@@ -322,23 +328,15 @@ async fn test_index_sort_order() {
 
     // Insert in non-sorted order
     index
-        .save(
-            &mut txn,
-            "doc3",
-            &[NormalValue::String("charlie".to_string())],
-        )
+        .save(&mut txn, 3, &[NormalValue::String("charlie".to_string())])
         .await
         .unwrap();
     index
-        .save(
-            &mut txn,
-            "doc1",
-            &[NormalValue::String("alice".to_string())],
-        )
+        .save(&mut txn, 1, &[NormalValue::String("alice".to_string())])
         .await
         .unwrap();
     index
-        .save(&mut txn, "doc2", &[NormalValue::String("bob".to_string())])
+        .save(&mut txn, 2, &[NormalValue::String("bob".to_string())])
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -365,15 +363,11 @@ async fn test_unique_index_update_to_existing_value_fails() {
 
     // Save two documents with different values
     index
-        .save(
-            &mut txn,
-            "doc1",
-            &[NormalValue::String("alice".to_string())],
-        )
+        .save(&mut txn, 1, &[NormalValue::String("alice".to_string())])
         .await
         .unwrap();
     index
-        .save(&mut txn, "doc2", &[NormalValue::String("bob".to_string())])
+        .save(&mut txn, 2, &[NormalValue::String("bob".to_string())])
         .await
         .unwrap();
 
@@ -381,7 +375,7 @@ async fn test_unique_index_update_to_existing_value_fails() {
     let result = index
         .update(
             &mut txn,
-            "doc1",
+            1,
             &[NormalValue::String("alice".to_string())],
             &[NormalValue::String("bob".to_string())],
         )
@@ -410,7 +404,7 @@ async fn test_composite_index_sort_order() {
     index
         .save(
             &mut txn,
-            "doc1",
+            1,
             &[
                 NormalValue::String("electronics".to_string()),
                 NormalValue::Int(100),
@@ -421,7 +415,7 @@ async fn test_composite_index_sort_order() {
     index
         .save(
             &mut txn,
-            "doc2",
+            2,
             &[
                 NormalValue::String("electronics".to_string()),
                 NormalValue::Int(300),
@@ -432,7 +426,7 @@ async fn test_composite_index_sort_order() {
     index
         .save(
             &mut txn,
-            "doc3",
+            3,
             &[
                 NormalValue::String("electronics".to_string()),
                 NormalValue::Int(200),

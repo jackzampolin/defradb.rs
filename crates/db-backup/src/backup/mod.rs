@@ -4,11 +4,8 @@ mod import;
 pub use export::export_database;
 pub use import::{import_database, ImportStats};
 
-use std::collections::HashMap;
+use serde_json::Value as JsonValue;
 
-use serde_json::{Map, Value as JsonValue};
-
-use document::Document;
 use schema::{CollectionVersion, FieldKind};
 
 /// Classified field information from a collection schema.
@@ -76,41 +73,6 @@ pub fn classify_schema_fields(schema: &CollectionVersion) -> Vec<FieldInfo> {
         }
     }
     result
-}
-
-/// Compute `_docIDNew` from current field values.
-///
-/// Creates a Document from the field values (minus FK fields),
-/// sets the collection, and generates the content-addressed ID.
-pub fn compute_doc_id_new(
-    doc_map: &Map<String, JsonValue>,
-    fk_names: &[String],
-    schema: &CollectionVersion,
-) -> Result<String, String> {
-    let mut fields: HashMap<String, JsonValue> = HashMap::new();
-
-    for (key, value) in doc_map {
-        if key == "_docID" || key == "_docIDNew" {
-            continue;
-        }
-        if fk_names.contains(key) {
-            continue;
-        }
-        if value.is_null() {
-            continue;
-        }
-        fields.insert(key.clone(), value.clone());
-    }
-
-    let mut doc =
-        Document::from_map(fields).map_err(|e| format!("failed to create document: {}", e))?;
-    doc.set_collection(schema.clone());
-
-    let doc_id = doc
-        .generate_doc_id()
-        .map_err(|e| format!("failed to generate doc ID: {}", e))?;
-
-    Ok(doc_id.to_string())
 }
 
 /// Convert a JSON value to GraphQL input syntax.

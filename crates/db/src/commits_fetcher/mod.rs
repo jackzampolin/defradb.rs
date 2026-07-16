@@ -85,23 +85,47 @@ impl<S: Store> CommitsFetcher<S> {
         })?;
 
         let block = self.load_block(txn, &cid).await?;
-        let commit_doc = self.block_to_commit_doc(txn, &cid, &block).await?;
-
-        if let Some(ref expected_doc_id) = options.doc_id {
-            if let Some(actual_doc_id) = commit_doc.get("docID").and_then(|v| v.as_str()) {
-                if actual_doc_id != expected_doc_id {
-                    return Err(Error::Serialization(
-                        "cid either does not exist or belong to document".to_string(),
-                    ));
-                }
+        let owners = self.get_doc_ids(txn, &cid, &block).await?;
+        let canonical_expected = match options.doc_id.as_deref() {
+            Some(doc_id) => Some(self.canonical_doc_id(txn, doc_id).await?),
+            None => None,
+        };
+        let selected_owners: Vec<Option<String>> = match (&canonical_expected, owners) {
+            (Some(expected), Some(owners)) if owners.iter().any(|owner| owner == expected) => {
+                vec![Some(expected.clone())]
             }
-        }
+            (Some(_), _) => {
+                return Err(Error::Serialization(
+                    "cid either does not exist or belong to document".to_string(),
+                ));
+            }
+            (None, Some(owners)) if !owners.is_empty() => owners.into_iter().map(Some).collect(),
+            (None, Some(_)) => vec![None],
+            (None, None) => {
+                return Err(Error::Serialization(
+                    "cid either does not exist or belong to document".to_string(),
+                ));
+            }
+        };
 
-        let mut commits = vec![commit_doc];
-        if let Some(depth) = options.depth {
-            if depth > 0 {
-                self.traverse_depth(txn, &block, depth - 1, &mut commits, options)
+        let mut commits = Vec::new();
+        for owner in selected_owners {
+            commits.push(
+                self.block_to_commit_doc(txn, &cid, &block, owner.as_deref())
+                    .await?,
+            );
+            if let Some(depth) = options.depth {
+                if depth > 0 {
+                    self.traverse_depth(
+                        txn,
+                        &block,
+                        depth - 1,
+                        &mut commits,
+                        options,
+                        owner.as_deref(),
+                    )
                     .await?;
+                }
             }
         }
 
@@ -117,21 +141,20 @@ impl<S: Store> CommitsFetcher<S> {
         let head_cids = self.get_head_cids(txn, options).await?;
 
         let mut commits = Vec::new();
-        let mut visited: HashSet<Cid> = HashSet::new();
+        let mut visited: HashSet<(Cid, Option<String>)> = HashSet::new();
 
-        for cid in head_cids {
-            if visited.contains(&cid) {
+        for (cid, doc_id) in head_cids {
+            if visited.contains(&(cid, doc_id.clone())) {
                 continue;
             }
 
-            let mut stack: Vec<(Cid, u64)> = Vec::new();
-            stack.push((cid, 0));
+            let mut stack: Vec<(Cid, u64, Option<String>)> = Vec::new();
+            stack.push((cid, 0, doc_id));
 
-            while let Some((current_cid, current_depth)) = stack.pop() {
-                if visited.contains(&current_cid) {
+            while let Some((current_cid, current_depth, doc_id)) = stack.pop() {
+                if !visited.insert((current_cid, doc_id.clone())) {
                     continue;
                 }
-                visited.insert(current_cid);
 
                 let block = match self.load_block(txn, &current_cid).await {
                     Ok(b) => b,
@@ -145,7 +168,9 @@ impl<S: Store> CommitsFetcher<S> {
                     }
                 }
 
-                let commit_doc = self.block_to_commit_doc(txn, &current_cid, &block).await?;
+                let commit_doc = self
+                    .block_to_commit_doc(txn, &current_cid, &block, doc_id.as_deref())
+                    .await?;
                 commits.push(commit_doc);
 
                 let should_traverse = match options.depth {
@@ -156,7 +181,7 @@ impl<S: Store> CommitsFetcher<S> {
                 if should_traverse {
                     if let Some(ref heads) = block.heads {
                         for head_cid in heads {
-                            stack.push((*head_cid, current_depth + 1));
+                            stack.push((*head_cid, current_depth + 1, doc_id.clone()));
                         }
                     }
                 }
@@ -178,17 +203,30 @@ impl<S: Store> CommitsFetcher<S> {
             Error::Serialization("doc_id is required for height range scans".to_string())
         })?;
         let headstore = txn.headstore()?;
+        let systemstore = txn.systemstore()?;
 
-        let prefix = HeadstorePriorityKey::document_prefix(doc_id);
+        let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+            return Ok(Vec::new());
+        };
+        let doc_short_id = doc_ref.doc_short_id;
+        let canonical_doc_id = crate::doc_id_map::get_doc_id(&systemstore, doc_short_id)
+            .await?
+            .ok_or_else(|| {
+                Error::InvalidDocument(format!(
+                    "document short ID {doc_short_id} has no canonical DocID"
+                ))
+            })?;
+
+        let prefix = HeadstorePriorityKey::document_prefix(doc_short_id);
         let start =
-            HeadstorePriorityKey::priority_prefix(doc_id, options.height_start.unwrap_or(0));
+            HeadstorePriorityKey::priority_prefix(doc_short_id, options.height_start.unwrap_or(0));
 
         let mut opts = IterOptions::new().with_prefix(prefix).with_start(start);
         if let Some(end) = options.height_end {
-            opts = opts.with_end(HeadstorePriorityKey::priority_prefix(doc_id, end));
+            opts = opts.with_end(HeadstorePriorityKey::priority_prefix(doc_short_id, end));
         }
 
-        let cid_offset = HeadstorePriorityKey::cid_offset(doc_id);
+        let cid_offset = HeadstorePriorityKey::cid_offset(doc_short_id);
         let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
         let mut commits = Vec::new();
         let mut visited = HashSet::new();
@@ -216,7 +254,9 @@ impl<S: Store> CommitsFetcher<S> {
                 }
             }
 
-            let commit_doc = self.block_to_commit_doc(txn, &cid, &block).await?;
+            let commit_doc = self
+                .block_to_commit_doc(txn, &cid, &block, Some(&canonical_doc_id))
+                .await?;
             commits.push(commit_doc);
         }
         iter.close().await.map_err(Error::Storage)?;
@@ -260,6 +300,7 @@ impl<S: Store> CommitsFetcher<S> {
         remaining_depth: u64,
         commits: &mut Vec<Document>,
         options: &CommitsQueryOptions,
+        doc_id: Option<&str>,
     ) -> Result<()> {
         if remaining_depth == 0 {
             return Ok(());
@@ -279,7 +320,9 @@ impl<S: Store> CommitsFetcher<S> {
                     }
                 }
 
-                let commit_doc = self.block_to_commit_doc(txn, head_cid, &head_block).await?;
+                let commit_doc = self
+                    .block_to_commit_doc(txn, head_cid, &head_block, doc_id)
+                    .await?;
                 commits.push(commit_doc);
 
                 Box::pin(self.traverse_depth(
@@ -288,6 +331,7 @@ impl<S: Store> CommitsFetcher<S> {
                     remaining_depth - 1,
                     commits,
                     options,
+                    doc_id,
                 ))
                 .await?;
             }
@@ -301,7 +345,7 @@ impl<S: Store> CommitsFetcher<S> {
         &self,
         txn: &mut DbTxn<S>,
         options: &CommitsQueryOptions,
-    ) -> Result<Vec<Cid>> {
+    ) -> Result<Vec<(Cid, Option<String>)>> {
         let headstore = txn.headstore()?;
         let mut cids = Vec::new();
 
@@ -314,28 +358,58 @@ impl<S: Store> CommitsFetcher<S> {
                 let parts: Vec<&str> = key_str.split('/').collect();
                 if parts.len() >= 4 {
                     if let Ok(cid) = Cid::from_str(parts[3]) {
-                        cids.push(cid);
+                        cids.push((cid, None));
                     }
                 }
             }
             col_iter.close().await.map_err(Error::Storage)?;
         }
 
-        let doc_prefix = if let Some(ref doc_id) = options.doc_id {
-            format!("/d/{}/", doc_id).into_bytes()
+        let (doc_prefix, fixed_doc_id) = if let Some(ref doc_id) = options.doc_id {
+            let systemstore = txn.systemstore()?;
+            let Some(doc_ref) = crate::doc_id_map::get_doc_ref(&systemstore, doc_id).await? else {
+                return Ok(cids);
+            };
+            let canonical_doc_id =
+                crate::doc_id_map::get_doc_id(&systemstore, doc_ref.doc_short_id)
+                    .await?
+                    .ok_or_else(|| {
+                        Error::InvalidDocument(format!(
+                            "document short ID {} has no canonical DocID",
+                            doc_ref.doc_short_id
+                        ))
+                    })?;
+            (
+                storage::keys::headstore::HeadstoreDocKey::document_prefix(doc_ref.doc_short_id),
+                Some(canonical_doc_id),
+            )
         } else {
-            b"/d/".to_vec()
+            (b"/d/".to_vec(), None)
         };
 
         let opts = IterOptions::new().with_prefix(doc_prefix);
         let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
 
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+            // Key: /d/{short_id uvarint}/{field}/{cid} — the short-ID segment
+            // is binary, so only the trailing CID segment is parseable.
             let key_str = String::from_utf8_lossy(&pair.key);
-            let parts: Vec<&str> = key_str.split('/').collect();
-            if parts.len() >= 5 {
-                if let Ok(cid) = Cid::from_str(parts[4]) {
-                    cids.push(cid);
+            if let Some(cid_str) = key_str.rsplit('/').next() {
+                if let Ok(cid) = Cid::from_str(cid_str) {
+                    let doc_id = if let Some(doc_id) = fixed_doc_id.as_ref() {
+                        Some(doc_id.clone())
+                    } else {
+                        let Ok((_, doc_short_id)) =
+                            storage::keys::doc_id_index::decode_doc_short_id_prefix(&pair.key[3..])
+                        else {
+                            continue;
+                        };
+                        let systemstore = txn.systemstore()?;
+                        crate::doc_id_map::get_doc_id(&systemstore, doc_short_id).await?
+                    };
+                    if doc_id.is_some() {
+                        cids.push((cid, doc_id));
+                    }
                 }
             }
         }

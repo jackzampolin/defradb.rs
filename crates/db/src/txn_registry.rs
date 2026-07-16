@@ -890,8 +890,15 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                 .expect("collection loaded above");
             let doc_id_typed = document::DocID::from_string(&doc_id)
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+            let Some(doc_short_id) = collection
+                .resolve_doc_short_id(systemstore, &doc_id_typed)
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?
+            else {
+                continue;
+            };
             let Some(mut doc) = collection
-                .get_with_datastore(datastore, &doc_id_typed)
+                .get_with_datastore(datastore, doc_short_id, &doc_id_typed)
                 .await
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?
             else {
@@ -902,7 +909,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                 doc.set(field, value);
             }
             collection
-                .update_with_indexes(datastore, &doc, index_manager)
+                .update_with_indexes(datastore, &doc, doc_short_id, index_manager)
                 .await
                 .map_err(|e| match e {
                     crate::error::Error::DocumentNotFound(id) => {

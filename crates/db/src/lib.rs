@@ -35,9 +35,9 @@
 /// // Create a collection
 /// let col = Collection::new(schema);
 ///
-/// // Create a document
-/// let doc = Document::from_json_str(r#"{"name": "Alice"}"#)?;
-/// col.create(&txn, &doc).await?;
+/// // Documents are written through the mutator APIs, which allocate the
+/// // node-local short ID and derive the public DocID from the genesis
+/// // composite block CID.
 ///
 /// // Commit
 /// txn.commit().await?;
@@ -48,6 +48,7 @@ pub mod auto_commit_mutator;
 // import directly from `db_backup::*`.
 // Block builder extracted to standalone db-blocks crate for parallel compilation.
 pub(crate) use db_blocks as block_builder;
+pub(crate) mod block_cleanup;
 pub mod block_reader;
 pub mod block_verify;
 pub mod collection;
@@ -67,6 +68,7 @@ pub mod database;
 // dense_search and embedding extracted to standalone db-search crate (Phase 6 of #796).
 pub use db_search as dense_search;
 pub(crate) mod doc_fetcher;
+pub mod doc_id_map;
 pub(crate) mod doc_mutator;
 pub mod doc_write_queue;
 pub mod downsample;
@@ -100,8 +102,6 @@ pub(crate) mod view_ops;
 // Re-export commonly used types
 pub use auto_commit_fetcher::AutoCommitFetcher;
 pub use auto_commit_mutator::AutoCommitMutator;
-#[allow(deprecated)]
-pub use block_builder::build_block_from_document;
 pub use block_builder::{build_blocks_from_document, BlockResult};
 #[allow(deprecated)]
 pub use collection::{collection_short_id, Collection};
@@ -129,7 +129,9 @@ pub use doc_mutator::DbDocMutator;
 pub use downsample::GcDownsampleHistoriesOptions;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
-pub use kms_adapters::{DbDocCollectionLookup, DbEncBlockStore, DbNodeAcpRead};
+pub use kms_adapters::{
+    DbBlockDocIDResolver, DbDocCollectionLookup, DbEncBlockStore, DbNodeAcpRead,
+};
 pub use lensed_auto_commit_fetcher::LensedAutoCommitFetcher;
 pub use lensed_fetcher::LensedDocFetcher;
 pub use node_access_checker::{node_access_checker, NodeAccessChecker};

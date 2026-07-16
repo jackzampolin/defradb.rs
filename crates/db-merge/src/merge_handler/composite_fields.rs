@@ -61,7 +61,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 .collection
                 .as_ref()
                 .unwrap()
-                .get_with_datastore_include_deleted(datastore, &doc_id, false)
+                .get_with_datastore_include_deleted(datastore, context.doc_short_id, &doc_id, false)
                 .await
                 .map_err(MergeError::Database)?
                 .map(|(doc, _)| doc)
@@ -88,6 +88,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             };
             let linked_block = Block::from_dag_cbor(&linked_block_data)
                 .map_err(|e| MergeError::BlockDecode(e.to_string()))?;
+            state.owned_field_cids.push(*link_cid);
+            if let Some(encryption_cid) = &linked_block.encryption {
+                state.linked_encryption_cids.push(*encryption_cid);
+            }
 
             if let Some(heads) = &linked_block.heads {
                 state
@@ -124,6 +128,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             &link_cid,
                             &lww_payload,
                             context.metadata.collection_id,
+                            context.doc_id_str,
+                            context.doc_short_id,
                         )
                         .await?;
                     if result.applied {
@@ -139,9 +145,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     let result = self
                         .process_counter_delta_in_txn(
                             datastore,
+                            headstore,
                             &link_cid,
                             &counter_payload,
                             context.metadata.collection_id,
+                            context.doc_id_str,
+                            context.doc_short_id,
                         )
                         .await?;
                     if result.applied {

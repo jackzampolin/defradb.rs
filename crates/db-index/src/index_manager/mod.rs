@@ -76,6 +76,16 @@ fn is_valid_index_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Reject the unset doc short ID (0): index maintenance requires a mapped document.
+fn require_doc_short_id(doc_short_id: u64) -> Result<()> {
+    if doc_short_id == 0 {
+        return Err(Error::InvalidDocument(
+            "document must have a doc short ID".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Generate the internal map key used for full-text indexes.
 ///
 /// This key is intentionally invalid for public index creation APIs because
@@ -313,20 +323,19 @@ impl IndexManager {
     /// Bulk index all existing documents in a collection.
     ///
     /// This should be called after creating a new index to populate it with
-    /// existing document data.
+    /// existing document data. Each document is paired with its node-local
+    /// doc short ID.
     ///
     /// # Returns
     ///
     /// Returns a `BulkIndexResult` containing:
     /// - `indexed`: Number of documents successfully indexed.
-    /// - `skipped`: Number of documents skipped (e.g., documents without an ID).
-    ///
-    /// Documents without an ID are skipped with a warning logged.
+    /// - `skipped`: Number of documents skipped (unset short ID).
     pub async fn bulk_index(
         &self,
         datastore: &NamespaceView,
         index_name: &str,
-        documents: &[Document],
+        documents: &[(u64, Document)],
         schema: &CollectionVersion,
     ) -> Result<BulkIndexResult> {
         let index = self
@@ -338,20 +347,17 @@ impl IndexManager {
         let mut skipped_count = 0;
         let mut mutable_datastore = datastore.clone();
 
-        for doc in documents {
-            let doc_id = match doc.id() {
-                Some(id) => id.to_string(),
-                None => {
-                    skipped_count += 1;
-                    continue;
-                }
-            };
+        for (doc_short_id, doc) in documents {
+            if *doc_short_id == 0 {
+                skipped_count += 1;
+                continue;
+            }
 
             let value_sets = self.extract_index_values(doc, index.description(), schema)?;
 
             for values in &value_sets {
                 index
-                    .save(&mut mutable_datastore, &doc_id, values)
+                    .save(&mut mutable_datastore, *doc_short_id, values)
                     .await
                     .map_err(Error::Storage)?;
             }
@@ -381,10 +387,10 @@ impl IndexManager {
         &self,
         datastore: &mut NamespaceView,
         index: &IndexType,
-        doc_id: &str,
+        doc_short_id: u64,
         values: &[document::NormalValue],
     ) -> std::result::Result<(), storage::corekv::Error> {
-        match index.save(datastore, doc_id, values).await {
+        match index.save(datastore, doc_short_id, values).await {
             Err(storage::corekv::Error::UniqueConstraintViolation) => {
                 let IndexType::Unique(unique) = index else {
                     return Err(storage::corekv::Error::UniqueConstraintViolation);
@@ -395,23 +401,23 @@ impl IndexManager {
                 let Some(holder) = unique.conflicting_doc_id(datastore, values).await? else {
                     return Err(storage::corekv::Error::UniqueConstraintViolation);
                 };
-                if holder == doc_id {
+                if holder == doc_short_id {
                     // Re-indexing the same document with the same values is
                     // idempotent, not a conflict (content-addressed docIDs make
                     // identical-content recreates land on the same id).
-                    return unique.save_blind(datastore, doc_id, values).await;
+                    return unique.save_blind(datastore, doc_short_id, values).await;
                 }
-                if doc_is_live(datastore, &self.collection_id, &holder).await? {
+                if doc_is_live(datastore, &self.collection_id, holder).await? {
                     return Err(storage::corekv::Error::UniqueConstraintViolation);
                 }
                 tracing::info!(
                     collection_id = %self.collection_id,
                     index = %index.description().name,
-                    stale_doc_id = %holder,
-                    new_doc_id = %doc_id,
+                    stale_doc_short_id = holder,
+                    new_doc_short_id = doc_short_id,
                     "reclaimed stale unique index entry pointing at a deleted or missing document"
                 );
-                unique.save_blind(datastore, doc_id, values).await
+                unique.save_blind(datastore, doc_short_id, values).await
             }
             other => other,
         }
@@ -438,12 +444,14 @@ impl IndexManager {
     async fn save_resolving_unique_conflict(
         &self,
         datastore: &mut NamespaceView,
+        systemstore: &NamespaceView,
         index: &IndexType,
+        doc_short_id: u64,
         doc_id: &str,
         values: &[document::NormalValue],
     ) -> std::result::Result<MergeConflictOutcome, storage::corekv::Error> {
         match self
-            .save_healing_stale_unique(datastore, index, doc_id, values)
+            .save_healing_stale_unique(datastore, index, doc_short_id, values)
             .await
         {
             Ok(()) => Ok(MergeConflictOutcome::Clean),
@@ -454,13 +462,21 @@ impl IndexManager {
                 let Some(holder) = unique.conflicting_doc_id(datastore, values).await? else {
                     return Err(storage::corekv::Error::UniqueConstraintViolation);
                 };
-                if doc_id < holder.as_str() {
-                    unique.save_blind(datastore, doc_id, values).await?;
+                // The deterministic winner is decided on the PUBLIC DocID, which
+                // is byte-identical on every replica. The holder is stored as a
+                // node-local short id (different per node), so it must be resolved
+                // back to its public DocID before comparison — comparing short ids
+                // would let replicas pick different winners and silently diverge.
+                let Some(holder_doc_id) = holder_public_doc_id(systemstore, holder).await? else {
+                    return Err(storage::corekv::Error::UniqueConstraintViolation);
+                };
+                if doc_id < holder_doc_id.as_str() {
+                    unique.save_blind(datastore, doc_short_id, values).await?;
                     tracing::error!(
                         collection_id = %self.collection_id,
                         index = %index.description().name,
                         winner_doc_id = %doc_id,
-                        unindexed_doc_id = %holder,
+                        unindexed_doc_id = %holder_doc_id,
                         "unique index conflict during merge: incoming document wins the \
                          deterministic pick; the previous holder is no longer indexed"
                     );
@@ -469,7 +485,7 @@ impl IndexManager {
                     tracing::error!(
                         collection_id = %self.collection_id,
                         index = %index.description().name,
-                        winner_doc_id = %holder,
+                        winner_doc_id = %holder_doc_id,
                         unindexed_doc_id = %doc_id,
                         "unique index conflict during merge: existing holder wins the \
                          deterministic pick; the incoming document is persisted unindexed"
@@ -486,9 +502,12 @@ impl IndexManager {
     pub async fn on_document_create_merge(
         &self,
         datastore: &NamespaceView,
+        systemstore: &NamespaceView,
         doc: &Document,
+        doc_short_id: u64,
         schema: &CollectionVersion,
     ) -> Result<()> {
+        require_doc_short_id(doc_short_id)?;
         let doc_id = doc
             .id()
             .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
@@ -497,9 +516,16 @@ impl IndexManager {
         for index in self.indexes.values() {
             let value_sets = self.extract_index_values(doc, index.description(), schema)?;
             for values in &value_sets {
-                self.save_resolving_unique_conflict(&mut mutable_datastore, index, &doc_id, values)
-                    .await
-                    .map_err(Error::Storage)?;
+                self.save_resolving_unique_conflict(
+                    &mut mutable_datastore,
+                    systemstore,
+                    index,
+                    doc_short_id,
+                    &doc_id,
+                    values,
+                )
+                .await
+                .map_err(Error::Storage)?;
             }
         }
         Ok(())
@@ -510,10 +536,13 @@ impl IndexManager {
     pub async fn on_document_update_merge(
         &self,
         datastore: &NamespaceView,
+        systemstore: &NamespaceView,
         old_doc: &Document,
         new_doc: &Document,
+        doc_short_id: u64,
         schema: &CollectionVersion,
     ) -> Result<()> {
+        require_doc_short_id(doc_short_id)?;
         let doc_id = new_doc
             .id()
             .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
@@ -525,14 +554,16 @@ impl IndexManager {
             if old_value_sets != new_value_sets {
                 for old_values in &old_value_sets {
                     index
-                        .delete(&mut mutable_datastore, &doc_id, old_values)
+                        .delete(&mut mutable_datastore, doc_short_id, old_values)
                         .await
                         .map_err(Error::Storage)?;
                 }
                 for new_values in &new_value_sets {
                     self.save_resolving_unique_conflict(
                         &mut mutable_datastore,
+                        systemstore,
                         index,
+                        doc_short_id,
                         &doc_id,
                         new_values,
                     )
@@ -549,50 +580,19 @@ impl IndexManager {
         &self,
         datastore: &NamespaceView,
         doc: &Document,
+        doc_short_id: u64,
         schema: &CollectionVersion,
     ) -> Result<()> {
-        let doc_id = doc
-            .id()
-            .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
-            .to_string();
+        require_doc_short_id(doc_short_id)?;
 
         let mut mutable_datastore = datastore.clone();
 
         for index in self.indexes.values() {
             let value_sets = self.extract_index_values(doc, index.description(), schema)?;
             for values in &value_sets {
-                self.save_healing_stale_unique(&mut mutable_datastore, index, &doc_id, values)
-                    .await
-                    .map_err(Error::Storage)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Update indexes when a document is created via blind create.
-    ///
-    /// "Blind" means the document existence check was skipped (content-addressed IDs
-    /// are unique by construction). However, unique index constraints on field values
-    /// are still enforced — two different documents can share a content-addressed ID
-    /// scheme but have duplicate field values.
-    pub async fn on_document_create_blind(
-        &self,
-        datastore: &NamespaceView,
-        doc: &Document,
-        schema: &CollectionVersion,
-    ) -> Result<()> {
-        let doc_id = doc
-            .id()
-            .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
-            .to_string();
-
-        let mut mutable_datastore = datastore.clone();
-
-        for index in self.indexes.values() {
-            let value_sets = self.extract_index_values(doc, index.description(), schema)?;
-            for values in &value_sets {
-                self.save_healing_stale_unique(&mut mutable_datastore, index, &doc_id, values)
+                // Local creates stay strict but self-heal stale unique entries
+                // pointing at a deleted or missing document (#1111/#700).
+                self.save_healing_stale_unique(&mut mutable_datastore, index, doc_short_id, values)
                     .await
                     .map_err(Error::Storage)?;
             }
@@ -611,12 +611,10 @@ impl IndexManager {
         datastore: &NamespaceView,
         old_doc: &Document,
         new_doc: &Document,
+        doc_short_id: u64,
         schema: &CollectionVersion,
     ) -> Result<()> {
-        let doc_id = new_doc
-            .id()
-            .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
-            .to_string();
+        require_doc_short_id(doc_short_id)?;
 
         let mut mutable_datastore = datastore.clone();
 
@@ -627,7 +625,7 @@ impl IndexManager {
             if old_value_sets != new_value_sets {
                 for old_values in &old_value_sets {
                     index
-                        .delete(&mut mutable_datastore, &doc_id, old_values)
+                        .delete(&mut mutable_datastore, doc_short_id, old_values)
                         .await
                         .map_err(Error::Storage)?;
                 }
@@ -635,7 +633,7 @@ impl IndexManager {
                     self.save_healing_stale_unique(
                         &mut mutable_datastore,
                         index,
-                        &doc_id,
+                        doc_short_id,
                         new_values,
                     )
                     .await
@@ -652,12 +650,10 @@ impl IndexManager {
         &self,
         datastore: &NamespaceView,
         doc: &Document,
+        doc_short_id: u64,
         schema: &CollectionVersion,
     ) -> Result<()> {
-        let doc_id = doc
-            .id()
-            .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
-            .to_string();
+        require_doc_short_id(doc_short_id)?;
 
         let mut mutable_datastore = datastore.clone();
 
@@ -665,7 +661,7 @@ impl IndexManager {
             let value_sets = self.extract_index_values(doc, index.description(), schema)?;
             for values in &value_sets {
                 index
-                    .delete(&mut mutable_datastore, &doc_id, values)
+                    .delete(&mut mutable_datastore, doc_short_id, values)
                     .await
                     .map_err(Error::Storage)?;
             }
@@ -692,12 +688,33 @@ impl IndexManager {
 async fn doc_is_live(
     datastore: &NamespaceView,
     collection_id: &str,
-    doc_id: &str,
+    doc_short_id: u64,
 ) -> std::result::Result<bool, storage::corekv::Error> {
-    let body = storage::keys::doc_key(collection_id, doc_id);
+    let body = storage::keys::doc_key(collection_id, doc_short_id);
     if !datastore.has(&body).await? {
         return Ok(false);
     }
-    let deleted = storage::keys::deleted_doc_key(collection_id, doc_id);
+    let deleted = storage::keys::deleted_doc_key(collection_id, doc_short_id);
     Ok(!datastore.has(&deleted).await?)
+}
+
+/// Resolve a unique entry holder's node-local short ID to its public DocID via
+/// the systemstore doc-ID index.
+///
+/// The deterministic merge winner MUST be chosen on this public DocID, which is
+/// byte-identical on every replica; the short id is node-local and differs per
+/// node, so comparing short ids would break cross-replica convergence.
+async fn holder_public_doc_id(
+    systemstore: &NamespaceView,
+    doc_short_id: u64,
+) -> std::result::Result<Option<String>, storage::corekv::Error> {
+    let key = storage::keys::DocShortIDToDocIDKey::new(doc_short_id).bytes();
+    match systemstore.get(&key).await? {
+        Some(bytes) => {
+            Ok(Some(String::from_utf8(bytes).map_err(|e| {
+                storage::corekv::Error::Other(e.to_string())
+            })?))
+        }
+        None => Ok(None),
+    }
 }

@@ -51,7 +51,7 @@ pub struct ViewAddArgs {
 #[derive(Args, Debug)]
 pub struct ViewRefreshArgs {
     /// Collection name to refresh (refreshes all if not specified)
-    #[arg(long)]
+    #[arg(long = "collection-name")]
     pub name: Option<String>,
 }
 

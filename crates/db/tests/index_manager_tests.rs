@@ -10,6 +10,15 @@ use schema::{
 use storage::backends::MemoryStore;
 use storage::index::IndexIterator;
 
+/// Allocate a distinct doc short ID for index-layer tests. Index entries are
+/// keyed by node-local short IDs; these tests only need identity, not the
+/// full allocation/mapping flow of the create path.
+fn next_test_doc_short_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 const RESERVED_FULLTEXT_INDEX_NAME_FOR_NAME: &str = "__fulltext__:name";
 
 fn test_schema() -> CollectionVersion {
@@ -352,12 +361,12 @@ async fn test_on_document_create() {
             .unwrap();
 
         let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
+        let doc_short_id = next_test_doc_short_id();
         doc.set("name", NormalValue::String("Alice".to_string()));
         doc.set("age", NormalValue::Int(30));
 
         manager
-            .on_document_create(&datastore, &doc, &schema)
+            .on_document_create(&datastore, &doc, doc_short_id, &schema)
             .await
             .unwrap();
     }
@@ -456,24 +465,23 @@ async fn test_on_document_update_changes_index_entry() {
 
         // Create initial document
         let mut old_doc = Document::new();
-        old_doc.generate_and_set_doc_id().unwrap();
-        let doc_id = old_doc.id().unwrap().clone();
+        let old_doc_short_id = next_test_doc_short_id();
         old_doc.set("name", NormalValue::String("Alice".to_string()));
         old_doc.set("age", NormalValue::Int(30));
 
         manager
-            .on_document_create(&datastore, &old_doc, &schema)
+            .on_document_create(&datastore, &old_doc, old_doc_short_id, &schema)
             .await
             .unwrap();
 
         // Create updated document with new name
-        let mut new_doc = Document::with_id(doc_id);
+        let mut new_doc = Document::new();
         new_doc.set("name", NormalValue::String("Alice Smith".to_string()));
         new_doc.set("age", NormalValue::Int(31));
 
         // Update should succeed
         manager
-            .on_document_update(&datastore, &old_doc, &new_doc, &schema)
+            .on_document_update(&datastore, &old_doc, &new_doc, old_doc_short_id, &schema)
             .await
             .unwrap();
 
@@ -540,24 +548,23 @@ async fn test_on_document_update_no_change_when_values_same() {
 
         // Create document
         let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
-        let doc_id = doc.id().unwrap().clone();
+        let doc_short_id = next_test_doc_short_id();
         doc.set("name", NormalValue::String("Alice".to_string()));
         doc.set("age", NormalValue::Int(30));
 
         manager
-            .on_document_create(&datastore, &doc, &schema)
+            .on_document_create(&datastore, &doc, doc_short_id, &schema)
             .await
             .unwrap();
 
         // Update with same indexed value but different non-indexed value
-        let mut new_doc = Document::with_id(doc_id);
+        let mut new_doc = Document::new();
         new_doc.set("name", NormalValue::String("Alice".to_string())); // Same
         new_doc.set("age", NormalValue::Int(31)); // Different but not indexed
 
         // Should succeed (optimization path - no actual index write)
         manager
-            .on_document_update(&datastore, &doc, &new_doc, &schema)
+            .on_document_update(&datastore, &doc, &new_doc, doc_short_id, &schema)
             .await
             .unwrap();
     }
@@ -594,12 +601,12 @@ async fn test_on_document_delete_removes_index_entries() {
 
         // Create document
         let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
+        let doc_short_id = next_test_doc_short_id();
         doc.set("name", NormalValue::String("Alice".to_string()));
         doc.set("age", NormalValue::Int(30));
 
         manager
-            .on_document_create(&datastore, &doc, &schema)
+            .on_document_create(&datastore, &doc, doc_short_id, &schema)
             .await
             .unwrap();
 
@@ -614,7 +621,7 @@ async fn test_on_document_delete_removes_index_entries() {
 
         // Delete document
         manager
-            .on_document_delete(&datastore, &doc, &schema)
+            .on_document_delete(&datastore, &doc, doc_short_id, &schema)
             .await
             .unwrap();
 
@@ -664,9 +671,8 @@ async fn test_bulk_index_indexes_all_documents() {
         let mut docs = Vec::new();
         for name in ["Alice", "Bob", "Charlie"] {
             let mut doc = Document::new();
-            doc.generate_and_set_doc_id().unwrap();
             doc.set("name", NormalValue::String(name.to_string()));
-            docs.push(doc);
+            docs.push((next_test_doc_short_id(), doc));
         }
 
         // Bulk index them
@@ -694,7 +700,7 @@ async fn test_bulk_index_indexes_all_documents() {
 }
 
 #[tokio::test]
-async fn test_bulk_index_skips_documents_without_id() {
+async fn test_bulk_index_skips_documents_without_short_id() {
     let store = MemoryStore::new();
     let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
@@ -720,16 +726,14 @@ async fn test_bulk_index_skips_documents_without_id() {
             .await
             .unwrap();
 
-        // Create documents - some with IDs, some without
+        // Create documents - one with a short ID, one with the unset marker (0)
         let mut doc_with_id = Document::new();
-        doc_with_id.generate_and_set_doc_id().unwrap();
         doc_with_id.set("name", NormalValue::String("Alice".to_string()));
 
         let mut doc_without_id = Document::new();
         doc_without_id.set("name", NormalValue::String("Bob".to_string()));
-        // No ID set
 
-        let docs = vec![doc_with_id, doc_without_id];
+        let docs = vec![(next_test_doc_short_id(), doc_with_id), (0, doc_without_id)];
 
         let result = manager
             .bulk_index(&datastore, "idx_name", &docs, &schema)
@@ -766,7 +770,7 @@ async fn test_bulk_index_nonexistent_index_fails() {
 }
 
 #[tokio::test]
-async fn test_on_document_create_without_id_fails() {
+async fn test_on_document_create_without_short_id_fails() {
     let store = MemoryStore::new();
     let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
@@ -792,57 +796,12 @@ async fn test_on_document_create_without_id_fails() {
             .await
             .unwrap();
 
-        // Document without ID
+        // Unset short ID (0) marks a document without storage identity
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("Alice".to_string()));
-        // No ID set
-
-        let result = manager.on_document_create(&datastore, &doc, &schema).await;
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::InvalidDocument(_)));
-    }
-}
-
-#[tokio::test]
-async fn test_on_document_update_without_id_fails() {
-    let store = MemoryStore::new();
-    let db = DB::new(store).unwrap();
-    let txn = db.new_txn(false).await.unwrap();
-
-    let schema = test_schema();
-    let mut manager = IndexManager::new(1);
-
-    {
-        let datastore = txn.datastore().unwrap();
-
-        manager
-            .create_index(
-                &datastore,
-                "users",
-                "idx_name".to_string(),
-                vec![IndexedFieldDescription {
-                    name: "name".to_string(),
-                    descending: false,
-                }],
-                false,
-                &[],
-            )
-            .await
-            .unwrap();
-
-        // Old doc with ID
-        let mut old_doc = Document::new();
-        old_doc.generate_and_set_doc_id().unwrap();
-        old_doc.set("name", NormalValue::String("Alice".to_string()));
-
-        // New doc without ID
-        let mut new_doc = Document::new();
-        new_doc.set("name", NormalValue::String("Alice Smith".to_string()));
-        // No ID set
 
         let result = manager
-            .on_document_update(&datastore, &old_doc, &new_doc, &schema)
+            .on_document_create(&datastore, &doc, 0, &schema)
             .await;
 
         assert!(result.is_err());
@@ -851,7 +810,7 @@ async fn test_on_document_update_without_id_fails() {
 }
 
 #[tokio::test]
-async fn test_on_document_delete_without_id_fails() {
+async fn test_on_document_update_without_short_id_fails() {
     let store = MemoryStore::new();
     let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
@@ -877,12 +836,56 @@ async fn test_on_document_delete_without_id_fails() {
             .await
             .unwrap();
 
-        // Document without ID
+        let mut old_doc = Document::new();
+        old_doc.set("name", NormalValue::String("Alice".to_string()));
+
+        let mut new_doc = Document::new();
+        new_doc.set("name", NormalValue::String("Alice Smith".to_string()));
+
+        // Unset short ID (0) marks a document without storage identity
+        let result = manager
+            .on_document_update(&datastore, &old_doc, &new_doc, 0, &schema)
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::InvalidDocument(_)));
+    }
+}
+
+#[tokio::test]
+async fn test_on_document_delete_without_short_id_fails() {
+    let store = MemoryStore::new();
+    let db = DB::new(store).unwrap();
+    let txn = db.new_txn(false).await.unwrap();
+
+    let schema = test_schema();
+    let mut manager = IndexManager::new(1);
+
+    {
+        let datastore = txn.datastore().unwrap();
+
+        manager
+            .create_index(
+                &datastore,
+                "users",
+                "idx_name".to_string(),
+                vec![IndexedFieldDescription {
+                    name: "name".to_string(),
+                    descending: false,
+                }],
+                false,
+                &[],
+            )
+            .await
+            .unwrap();
+
+        // Unset short ID (0) marks a document without storage identity
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("Alice".to_string()));
-        // No ID set
 
-        let result = manager.on_document_delete(&datastore, &doc, &schema).await;
+        let result = manager
+            .on_document_delete(&datastore, &doc, 0, &schema)
+            .await;
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::InvalidDocument(_)));
@@ -951,8 +954,7 @@ async fn test_multi_index_update() {
 
         // Create document
         let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
-        let doc_id = doc.id().unwrap().clone();
+        let doc_short_id = next_test_doc_short_id();
         doc.set("name", NormalValue::String("Alice".to_string()));
         doc.set(
             "email",
@@ -960,7 +962,7 @@ async fn test_multi_index_update() {
         );
 
         manager
-            .on_document_create(&datastore, &doc, &schema)
+            .on_document_create(&datastore, &doc, doc_short_id, &schema)
             .await
             .unwrap();
 
@@ -986,7 +988,7 @@ async fn test_multi_index_update() {
         assert_eq!(email_results.len(), 1);
 
         // Update both indexed fields
-        let mut new_doc = Document::with_id(doc_id);
+        let mut new_doc = Document::new();
         new_doc.set("name", NormalValue::String("Alice Smith".to_string()));
         new_doc.set(
             "email",
@@ -994,7 +996,7 @@ async fn test_multi_index_update() {
         );
 
         manager
-            .on_document_update(&datastore, &doc, &new_doc, &schema)
+            .on_document_update(&datastore, &doc, &new_doc, doc_short_id, &schema)
             .await
             .unwrap();
 
@@ -1093,31 +1095,31 @@ async fn test_composite_index_through_manager() {
         doc1.set("category", NormalValue::String("electronics".to_string()));
         doc1.set("price", NormalValue::Int(100));
         doc1.set("name", NormalValue::String("Widget".to_string()));
-        doc1.generate_and_set_doc_id().unwrap();
+        let doc1_short_id = next_test_doc_short_id();
 
         let mut doc2 = Document::new();
         doc2.set("category", NormalValue::String("electronics".to_string()));
         doc2.set("price", NormalValue::Int(200));
         doc2.set("name", NormalValue::String("Gadget".to_string()));
-        doc2.generate_and_set_doc_id().unwrap();
+        let doc2_short_id = next_test_doc_short_id();
 
         let mut doc3 = Document::new();
         doc3.set("category", NormalValue::String("books".to_string()));
         doc3.set("price", NormalValue::Int(50));
         doc3.set("name", NormalValue::String("Novel".to_string()));
-        doc3.generate_and_set_doc_id().unwrap();
+        let doc3_short_id = next_test_doc_short_id();
 
         // Index all documents
         manager
-            .on_document_create(&datastore, &doc1, &schema)
+            .on_document_create(&datastore, &doc1, doc1_short_id, &schema)
             .await
             .unwrap();
         manager
-            .on_document_create(&datastore, &doc2, &schema)
+            .on_document_create(&datastore, &doc2, doc2_short_id, &schema)
             .await
             .unwrap();
         manager
-            .on_document_create(&datastore, &doc3, &schema)
+            .on_document_create(&datastore, &doc3, doc3_short_id, &schema)
             .await
             .unwrap();
 
@@ -1185,11 +1187,11 @@ async fn test_missing_field_indexed_as_null() {
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("Alice".to_string()));
         // Note: email field is NOT set
-        doc.generate_and_set_doc_id().unwrap();
+        let doc_short_id = next_test_doc_short_id();
 
         // Should succeed - missing field indexed as NULL
         manager
-            .on_document_create(&datastore, &doc, &schema)
+            .on_document_create(&datastore, &doc, doc_short_id, &schema)
             .await
             .unwrap();
 
@@ -1208,10 +1210,10 @@ async fn test_missing_field_indexed_as_null() {
         let mut doc2 = Document::new();
         doc2.set("name", NormalValue::String("Bob".to_string()));
         doc2.set("email", NormalValue::Null); // Explicit NULL
-        doc2.generate_and_set_doc_id().unwrap();
+        let doc2_short_id = next_test_doc_short_id();
 
         manager
-            .on_document_create(&datastore, &doc2, &schema)
+            .on_document_create(&datastore, &doc2, doc2_short_id, &schema)
             .await
             .unwrap();
 
@@ -1260,10 +1262,10 @@ async fn test_unique_index_allows_multiple_nulls() {
         // Set fields BEFORE generating doc_id
         let mut doc1 = Document::new();
         doc1.set("name", NormalValue::String("Alice".to_string()));
-        doc1.generate_and_set_doc_id().unwrap();
+        let doc1_short_id = next_test_doc_short_id();
 
         manager
-            .on_document_create(&datastore, &doc1, &schema)
+            .on_document_create(&datastore, &doc1, doc1_short_id, &schema)
             .await
             .unwrap();
 
@@ -1272,9 +1274,11 @@ async fn test_unique_index_allows_multiple_nulls() {
         // Set fields BEFORE generating doc_id
         let mut doc2 = Document::new();
         doc2.set("name", NormalValue::String("Bob".to_string()));
-        doc2.generate_and_set_doc_id().unwrap();
+        let doc2_short_id = next_test_doc_short_id();
 
-        let result = manager.on_document_create(&datastore, &doc2, &schema).await;
+        let result = manager
+            .on_document_create(&datastore, &doc2, doc2_short_id, &schema)
+            .await;
         assert!(
             result.is_ok(),
             "Multiple NULL values should be allowed in unique index"
@@ -1314,11 +1318,11 @@ async fn test_unique_constraint_violation_returns_error() {
 
         // First save through NamespaceView
         let mut ds1 = datastore.clone();
-        index.save(&mut ds1, "doc1", &values).await.unwrap();
+        index.save(&mut ds1, 1, &values).await.unwrap();
 
         // Second save - should fail
         let mut ds2 = datastore.clone();
-        let result = index.save(&mut ds2, "doc2", &values).await;
+        let result = index.save(&mut ds2, 2, &values).await;
 
         assert!(
             result.is_err(),
@@ -1369,10 +1373,10 @@ async fn test_unique_constraint_violation_returns_error() {
             "email",
             NormalValue::String("alice@example.com".to_string()),
         );
-        doc1.generate_and_set_doc_id().unwrap();
+        let doc1_short_id = next_test_doc_short_id();
 
         manager
-            .on_document_create(&datastore, &doc1, &schema)
+            .on_document_create(&datastore, &doc1, doc1_short_id, &schema)
             .await
             .unwrap();
 
@@ -1384,9 +1388,11 @@ async fn test_unique_constraint_violation_returns_error() {
             "email",
             NormalValue::String("alice@example.com".to_string()),
         ); // Duplicate email!
-        doc2.generate_and_set_doc_id().unwrap();
+        let doc2_short_id = next_test_doc_short_id();
 
-        let result = manager.on_document_create(&datastore, &doc2, &schema).await;
+        let result = manager
+            .on_document_create(&datastore, &doc2, doc2_short_id, &schema)
+            .await;
         let error = result.expect_err("duplicate value should fail through IndexManager");
         assert!(
             matches!(
@@ -1428,11 +1434,13 @@ async fn test_index_field_not_in_schema_fails() {
 
         // Create a document
         let mut doc = Document::new();
-        doc.generate_and_set_doc_id().unwrap();
+        let doc_short_id = next_test_doc_short_id();
         doc.set("name", NormalValue::String("Alice".to_string()));
 
         // Indexing should fail because the field doesn't exist in schema
-        let result = manager.on_document_create(&datastore, &doc, &schema).await;
+        let result = manager
+            .on_document_create(&datastore, &doc, doc_short_id, &schema)
+            .await;
         assert!(
             result.is_err(),
             "Indexing with non-schema field should fail"
@@ -1477,15 +1485,15 @@ async fn test_index_idempotence_create_same_document_twice() {
         // Set fields BEFORE generating doc_id
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("Alice".to_string()));
-        doc.generate_and_set_doc_id().unwrap();
+        let doc_short_id = next_test_doc_short_id();
 
         // Index the same document twice
         manager
-            .on_document_create(&datastore, &doc, &schema)
+            .on_document_create(&datastore, &doc, doc_short_id, &schema)
             .await
             .unwrap();
         manager
-            .on_document_create(&datastore, &doc, &schema)
+            .on_document_create(&datastore, &doc, doc_short_id, &schema)
             .await
             .unwrap();
 
@@ -1539,10 +1547,10 @@ async fn test_delete_then_recreate_same_value() {
         let mut doc1 = Document::new();
         doc1.set("name", NormalValue::String("Alice".to_string()));
         doc1.set("age", NormalValue::Int(30)); // Add unique field for different ID
-        doc1.generate_and_set_doc_id().unwrap();
+        let doc1_short_id = next_test_doc_short_id();
 
         manager
-            .on_document_create(&datastore, &doc1, &schema)
+            .on_document_create(&datastore, &doc1, doc1_short_id, &schema)
             .await
             .unwrap();
 
@@ -1557,7 +1565,7 @@ async fn test_delete_then_recreate_same_value() {
 
         // Delete document
         manager
-            .on_document_delete(&datastore, &doc1, &schema)
+            .on_document_delete(&datastore, &doc1, doc1_short_id, &schema)
             .await
             .unwrap();
 
@@ -1574,10 +1582,10 @@ async fn test_delete_then_recreate_same_value() {
         let mut doc2 = Document::new();
         doc2.set("name", NormalValue::String("Alice".to_string()));
         doc2.set("age", NormalValue::Int(31)); // Different age for different ID
-        doc2.generate_and_set_doc_id().unwrap();
+        let doc2_short_id = next_test_doc_short_id();
 
         manager
-            .on_document_create(&datastore, &doc2, &schema)
+            .on_document_create(&datastore, &doc2, doc2_short_id, &schema)
             .await
             .unwrap();
 
@@ -1597,9 +1605,12 @@ async fn test_delete_then_recreate_same_value() {
 /// sourcenetwork/defra-agent#700).
 mod unique_boundaries {
     use super::*;
+    use datastore::NamespaceView;
+    use document::DocID;
     use storage::corekv::Writer;
 
     const COLLECTION_ID: &str = "col-users";
+    const COLLECTION_SHORT_ID: u32 = 1;
 
     fn unique_email_schema() -> CollectionVersion {
         let mut schema = test_schema();
@@ -1616,29 +1627,57 @@ mod unique_boundaries {
         schema
     }
 
+    /// A test document plus the node-local short ID it is stored under.
+    ///
+    /// Documents and index entries are keyed by short IDs (#4838), but the
+    /// deterministic merge winner is decided on the PUBLIC DocID, so each doc
+    /// carries a distinct DocID whose short ID is registered in the systemstore.
+    struct Doc {
+        doc: Document,
+        short_id: u64,
+    }
+
     fn doc_with_email(email: &str) -> Document {
-        // Distinct `name` per doc: docIDs are content-addressed, so identical
+        // Distinct seed per doc: DocIDs are content-addressed, so identical
         // content would collapse "two docs" into one id and the conflict under
         // test would evaporate.
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let mut doc = Document::new();
-        doc.set(
-            "name",
-            NormalValue::String(format!("doc-{}", SEQ.fetch_add(1, Ordering::SeqCst))),
-        );
         doc.set("email", NormalValue::String(email.to_string()));
-        doc.generate_and_set_doc_id().unwrap();
+        doc.set_id(DocID::new_v0_from_seed(&format!(
+            "doc-{}",
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        )));
         doc
     }
 
-    async fn write_doc_body(datastore: &mut datastore::NamespaceView, doc: &Document) {
-        let key = storage::keys::doc_key(COLLECTION_ID, &doc.id().unwrap().to_string());
-        datastore.set(&key, &doc.to_cbor().unwrap()).await.unwrap();
+    /// Allocate a short ID for a doc and register the short ID -> DocID mapping
+    /// the merge winner resolution reads back.
+    async fn register(systemstore: &NamespaceView, email: &str) -> Doc {
+        let doc = doc_with_email(email);
+        let short_id = next_test_doc_short_id();
+        db::doc_id_map::set_doc_id_mapping(
+            systemstore,
+            COLLECTION_SHORT_ID,
+            short_id,
+            &doc.id().unwrap().to_string(),
+        )
+        .await
+        .unwrap();
+        Doc { doc, short_id }
     }
 
-    async fn write_tombstone(datastore: &mut datastore::NamespaceView, doc: &Document) {
-        let key = storage::keys::deleted_doc_key(COLLECTION_ID, &doc.id().unwrap().to_string());
+    async fn write_doc_body(datastore: &mut NamespaceView, entry: &Doc) {
+        let key = storage::keys::doc_key(COLLECTION_ID, entry.short_id);
+        datastore
+            .set(&key, &entry.doc.to_cbor().unwrap())
+            .await
+            .unwrap();
+    }
+
+    async fn write_tombstone(datastore: &mut NamespaceView, entry: &Doc) {
+        let key = storage::keys::deleted_doc_key(COLLECTION_ID, entry.short_id);
         datastore.set(&key, &[1u8]).await.unwrap();
     }
 
@@ -1650,27 +1689,28 @@ mod unique_boundaries {
         let db = DB::new(store).unwrap();
         let txn = db.new_txn(false).await.unwrap();
         let mut datastore = txn.datastore().unwrap();
+        let systemstore = txn.systemstore().unwrap();
 
         let schema = unique_email_schema();
-        let manager = IndexManager::from_collection(1, &schema).unwrap();
+        let manager = IndexManager::from_collection(COLLECTION_SHORT_ID, &schema).unwrap();
 
-        let first = doc_with_email("a@x");
+        let first = register(&systemstore, "a@x").await;
         write_doc_body(&mut datastore, &first).await;
         manager
-            .on_document_create(&datastore, &first, &schema)
+            .on_document_create(&datastore, &first.doc, first.short_id, &schema)
             .await
             .unwrap();
 
         manager
-            .on_document_delete(&datastore, &first, &schema)
+            .on_document_delete(&datastore, &first.doc, first.short_id, &schema)
             .await
             .unwrap();
         write_tombstone(&mut datastore, &first).await;
 
-        let second = doc_with_email("a@x");
+        let second = register(&systemstore, "a@x").await;
         write_doc_body(&mut datastore, &second).await;
         manager
-            .on_document_create(&datastore, &second, &schema)
+            .on_document_create(&datastore, &second.doc, second.short_id, &schema)
             .await
             .expect("a tombstone must not hold the unique slot");
     }
@@ -1684,25 +1724,26 @@ mod unique_boundaries {
         let db = DB::new(store).unwrap();
         let txn = db.new_txn(false).await.unwrap();
         let mut datastore = txn.datastore().unwrap();
+        let systemstore = txn.systemstore().unwrap();
 
         let schema = unique_email_schema();
-        let manager = IndexManager::from_collection(1, &schema).unwrap();
+        let manager = IndexManager::from_collection(COLLECTION_SHORT_ID, &schema).unwrap();
 
         // Wound the store: holder is indexed, then tombstoned WITHOUT index
         // cleanup (exactly what pre-maintenance eras and out-of-order merges
         // left behind).
-        let holder = doc_with_email("a@x");
+        let holder = register(&systemstore, "a@x").await;
         write_doc_body(&mut datastore, &holder).await;
         manager
-            .on_document_create(&datastore, &holder, &schema)
+            .on_document_create(&datastore, &holder.doc, holder.short_id, &schema)
             .await
             .unwrap();
         write_tombstone(&mut datastore, &holder).await;
 
-        let newcomer = doc_with_email("a@x");
+        let newcomer = register(&systemstore, "a@x").await;
         write_doc_body(&mut datastore, &newcomer).await;
         manager
-            .on_document_create(&datastore, &newcomer, &schema)
+            .on_document_create(&datastore, &newcomer.doc, newcomer.short_id, &schema)
             .await
             .expect("a stale unique entry pointing at a tombstone must be reclaimed");
     }
@@ -1715,21 +1756,22 @@ mod unique_boundaries {
         let db = DB::new(store).unwrap();
         let txn = db.new_txn(false).await.unwrap();
         let mut datastore = txn.datastore().unwrap();
+        let systemstore = txn.systemstore().unwrap();
 
         let schema = unique_email_schema();
-        let manager = IndexManager::from_collection(1, &schema).unwrap();
+        let manager = IndexManager::from_collection(COLLECTION_SHORT_ID, &schema).unwrap();
 
-        let ghost = doc_with_email("a@x");
+        let ghost = register(&systemstore, "a@x").await;
         // Index the ghost WITHOUT writing its body.
         manager
-            .on_document_create(&datastore, &ghost, &schema)
+            .on_document_create(&datastore, &ghost.doc, ghost.short_id, &schema)
             .await
             .unwrap();
 
-        let newcomer = doc_with_email("a@x");
+        let newcomer = register(&systemstore, "a@x").await;
         write_doc_body(&mut datastore, &newcomer).await;
         manager
-            .on_document_create(&datastore, &newcomer, &schema)
+            .on_document_create(&datastore, &newcomer.doc, newcomer.short_id, &schema)
             .await
             .expect("a unique entry pointing at a missing doc must be reclaimed");
     }
@@ -1741,21 +1783,22 @@ mod unique_boundaries {
         let db = DB::new(store).unwrap();
         let txn = db.new_txn(false).await.unwrap();
         let mut datastore = txn.datastore().unwrap();
+        let systemstore = txn.systemstore().unwrap();
 
         let schema = unique_email_schema();
-        let manager = IndexManager::from_collection(1, &schema).unwrap();
+        let manager = IndexManager::from_collection(COLLECTION_SHORT_ID, &schema).unwrap();
 
-        let holder = doc_with_email("a@x");
+        let holder = register(&systemstore, "a@x").await;
         write_doc_body(&mut datastore, &holder).await;
         manager
-            .on_document_create(&datastore, &holder, &schema)
+            .on_document_create(&datastore, &holder.doc, holder.short_id, &schema)
             .await
             .unwrap();
 
-        let challenger = doc_with_email("a@x");
+        let challenger = register(&systemstore, "a@x").await;
         write_doc_body(&mut datastore, &challenger).await;
         let result = manager
-            .on_document_create(&datastore, &challenger, &schema)
+            .on_document_create(&datastore, &challenger.doc, challenger.short_id, &schema)
             .await;
         assert!(
             result.is_err(),
@@ -1764,22 +1807,25 @@ mod unique_boundaries {
     }
 
     /// #1111: the merge path resolves a live conflict deterministically —
-    /// the lexicographically smallest docID wins — instead of failing the
-    /// merge and wedging the document's history in permanent retry. Both
-    /// orders must land on the same winner.
+    /// the lexicographically smallest PUBLIC DocID wins — instead of failing
+    /// the merge and wedging the document's history in permanent retry. The
+    /// winner is decided on the public DocID (identical on every replica), not
+    /// the node-local short id, so both orders land on the same winner.
     #[tokio::test]
     async fn merge_conflict_resolves_to_the_smallest_doc_id_in_both_orders() {
         let store = MemoryStore::new();
         let db = DB::new(store).unwrap();
         let txn = db.new_txn(false).await.unwrap();
         let mut datastore = txn.datastore().unwrap();
+        let systemstore = txn.systemstore().unwrap();
 
         let schema = unique_email_schema();
-        let manager = IndexManager::from_collection(1, &schema).unwrap();
+        let manager = IndexManager::from_collection(COLLECTION_SHORT_ID, &schema).unwrap();
 
-        let a = doc_with_email("a@x");
-        let b = doc_with_email("a@x");
-        let (smaller, larger) = if a.id().unwrap().to_string() < b.id().unwrap().to_string() {
+        let a = register(&systemstore, "a@x").await;
+        let b = register(&systemstore, "a@x").await;
+        let (smaller, larger) = if a.doc.id().unwrap().to_string() < b.doc.id().unwrap().to_string()
+        {
             (a, b)
         } else {
             (b, a)
@@ -1789,23 +1835,29 @@ mod unique_boundaries {
         // incoming doc wins and takes the entry.
         write_doc_body(&mut datastore, &larger).await;
         manager
-            .on_document_create(&datastore, &larger, &schema)
+            .on_document_create(&datastore, &larger.doc, larger.short_id, &schema)
             .await
             .unwrap();
         write_doc_body(&mut datastore, &smaller).await;
         manager
-            .on_document_create_merge(&datastore, &smaller, &schema)
+            .on_document_create_merge(
+                &datastore,
+                &systemstore,
+                &smaller.doc,
+                smaller.short_id,
+                &schema,
+            )
             .await
             .expect("merge must not fail on a live unique conflict");
 
         // The winner (smaller) now holds the entry: a fresh local challenger
         // conflicts, and after tombstoning the LOSER nothing changes (the
         // loser holds no entry).
-        let challenger = doc_with_email("a@x");
+        let challenger = register(&systemstore, "a@x").await;
         write_doc_body(&mut datastore, &challenger).await;
         assert!(
             manager
-                .on_document_create(&datastore, &challenger, &schema)
+                .on_document_create(&datastore, &challenger.doc, challenger.short_id, &schema)
                 .await
                 .is_err(),
             "the winner must hold the unique entry after resolution"
@@ -1817,37 +1869,45 @@ mod unique_boundaries {
         let db2 = DB::new(store2).unwrap();
         let txn2 = db2.new_txn(false).await.unwrap();
         let mut datastore2 = txn2.datastore().unwrap();
-        let manager2 = IndexManager::from_collection(1, &schema).unwrap();
+        let systemstore2 = txn2.systemstore().unwrap();
+        let manager2 = IndexManager::from_collection(COLLECTION_SHORT_ID, &schema).unwrap();
 
-        let a2 = doc_with_email("a@x");
-        let b2 = doc_with_email("a@x");
-        let (smaller2, larger2) = if a2.id().unwrap().to_string() < b2.id().unwrap().to_string() {
-            (a2, b2)
-        } else {
-            (b2, a2)
-        };
+        let a2 = register(&systemstore2, "a@x").await;
+        let b2 = register(&systemstore2, "a@x").await;
+        let (smaller2, larger2) =
+            if a2.doc.id().unwrap().to_string() < b2.doc.id().unwrap().to_string() {
+                (a2, b2)
+            } else {
+                (b2, a2)
+            };
         write_doc_body(&mut datastore2, &smaller2).await;
         manager2
-            .on_document_create(&datastore2, &smaller2, &schema)
+            .on_document_create(&datastore2, &smaller2.doc, smaller2.short_id, &schema)
             .await
             .unwrap();
         write_doc_body(&mut datastore2, &larger2).await;
         manager2
-            .on_document_create_merge(&datastore2, &larger2, &schema)
+            .on_document_create_merge(
+                &datastore2,
+                &systemstore2,
+                &larger2.doc,
+                larger2.short_id,
+                &schema,
+            )
             .await
             .expect("merge must not fail when the incoming doc loses the pick");
 
         // The entry still belongs to smaller2: deleting larger2 (the loser,
         // unindexed) must leave the slot occupied.
         manager2
-            .on_document_delete(&datastore2, &larger2, &schema)
+            .on_document_delete(&datastore2, &larger2.doc, larger2.short_id, &schema)
             .await
             .unwrap();
-        let challenger2 = doc_with_email("a@x");
+        let challenger2 = register(&systemstore2, "a@x").await;
         write_doc_body(&mut datastore2, &challenger2).await;
         assert!(
             manager2
-                .on_document_create(&datastore2, &challenger2, &schema)
+                .on_document_create(&datastore2, &challenger2.doc, challenger2.short_id, &schema)
                 .await
                 .is_err(),
             "the winner must still hold the unique entry after the loser is deleted"

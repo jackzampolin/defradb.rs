@@ -14,7 +14,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         &self,
         collection_name: &str,
     ) -> query::error::Result<Vec<Document>> {
-        let (collection, datastore) =
+        let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         // Check if collection has migrations by loading full version history (matching Go)
@@ -30,7 +30,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         }
 
         let docs = collection
-            .get_all_with_datastore(&datastore)
+            .get_all_with_datastore(&datastore, &systemstore)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 
@@ -74,14 +74,14 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         collection_name: &str,
         show_deleted: bool,
     ) -> query::error::Result<Vec<(Document, bool)>> {
-        let (collection, datastore) =
+        let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         // Check if collection has migrations by loading full version history (matching Go)
         let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
 
         let docs_with_status = collection
-            .get_all_with_datastore_include_deleted(&datastore, show_deleted)
+            .get_all_with_datastore_include_deleted(&datastore, &systemstore, show_deleted)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 
@@ -102,7 +102,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         collection_name: &str,
         doc_ids: &[String],
     ) -> query::error::Result<FetchByIdsResult> {
-        let (collection, datastore) =
+        let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         // Check if collection has migrations by loading full version history (matching Go)
@@ -125,7 +125,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
             };
 
             match collection
-                .get_with_datastore(&datastore, &doc_id)
+                .get_by_doc_id(&datastore, &systemstore, &doc_id)
                 .await
                 .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?
             {
@@ -179,7 +179,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         field_name: &str,
         value: &str,
     ) -> query::error::Result<Vec<Document>> {
-        let (collection, datastore) =
+        let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         // Check if collection has migrations by loading full version history (matching Go)
@@ -187,7 +187,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         let target_version_id = &collection.schema().version_id;
 
         let all_docs = collection
-            .get_all_with_datastore(&datastore)
+            .get_all_with_datastore(&datastore, &systemstore)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 

@@ -28,8 +28,8 @@ pub struct InIterator {
     desc: IndexDescription,
     /// Whether this is a unique index
     is_unique: bool,
-    /// Set of already-seen doc_ids for deduplication
-    seen_doc_ids: HashSet<String>,
+    /// Set of already-seen doc short IDs for deduplication
+    seen_doc_ids: HashSet<u64>,
     /// Whether the iterator has been exhausted
     exhausted: bool,
     /// Cached results since we can't hold a reference to the transaction
@@ -109,8 +109,8 @@ impl InIterator {
             };
 
             while let Some(entry) = iter.next().await? {
-                // Deduplicate by doc_id
-                if self.seen_doc_ids.insert(entry.doc_id.clone()) {
+                // Deduplicate by doc short ID
+                if self.seen_doc_ids.insert(entry.doc_short_id) {
                     self.cached_results.push(entry);
                 }
             }

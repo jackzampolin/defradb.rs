@@ -11,6 +11,7 @@ description = "P2P networking for DefraDB using libp2p"
 [dependencies]
 # Internal crates
 defra-core = { path = "../defra-core" }
+document = { path = "../document" }
 crypto = { path = "../crypto" }
 blockstore = { path = "../blockstore" }
 crdt = { path = "../crdt" }

@@ -14,8 +14,6 @@ mod compute;
 mod tests;
 mod write;
 
-#[allow(deprecated)]
-pub use build::build_block_from_document;
 pub use build::build_blocks_from_document;
 pub use collection::write_collection_block;
 pub use compute::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
@@ -33,9 +31,40 @@ use defra_core::block::{
 };
 use defra_core::encryption::EncryptionConfig;
 use defra_core::signing::SigningConfig;
-use document::{Document, NormalValue};
+use document::{DocID, Document, NormalValue};
 use storage::corekv::Key;
+use storage::keys::doc_id_index::DocRef;
 use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey, HeadstorePriorityKey};
+
+/// Node-local storage identity of a document.
+///
+/// Storage keys are built from the doc short ID; the public DocID exists
+/// only after the genesis composite block CID is known.
+#[derive(Debug, Clone, Copy)]
+pub struct DocStorageIdentity {
+    pub collection_short_id: u32,
+    pub doc_short_id: u64,
+}
+
+impl DocStorageIdentity {
+    pub fn new(collection_short_id: u32, doc_short_id: u64) -> Self {
+        Self {
+            collection_short_id,
+            doc_short_id,
+        }
+    }
+
+    /// Encoded DocRef, used as the encryption key derivation identity
+    /// (mirrors Go's `EncodeDocRef` encryptor cache key).
+    pub fn doc_ref_bytes(&self) -> Vec<u8> {
+        DocRef::new(self.collection_short_id, self.doc_short_id).encode()
+    }
+}
+
+/// Derive the public DocID string from the genesis composite block CID.
+pub fn derive_doc_id(genesis_cid: &Cid) -> String {
+    DocID::new_v0(*genesis_cid).to_string()
+}
 
 pub(crate) fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
     let (ciphertext, _nonce) = crypto::encryption::aes::encrypt_aes(plaintext, key, &[], true)
@@ -162,6 +191,9 @@ pub struct BlockResult {
     pub doc_id: String,
     /// CIDs of all field blocks created
     pub field_cids: Vec<Cid>,
+    /// CIDs of all Encryption blocks created (mapped to the owning DocID
+    /// alongside composite + field blocks, mirroring Go's save()).
+    pub encryption_cids: Vec<Cid>,
 }
 
 /// Encode a NormalValue as CBOR bytes.
@@ -201,8 +233,8 @@ pub fn decode_priority_varint(buf: &[u8]) -> u64 {
     n
 }
 
-pub(crate) fn priority_index_key(doc_id: &str, priority: u64, cid: Cid) -> Vec<u8> {
-    HeadstorePriorityKey::new(doc_id, priority, cid).bytes()
+pub(crate) fn priority_index_key(doc_short_id: u64, priority: u64, cid: Cid) -> Vec<u8> {
+    HeadstorePriorityKey::new(doc_short_id, priority, cid).bytes()
 }
 
 /// A single head entry for a document field.
@@ -221,12 +253,13 @@ pub struct FieldHeadEntry {
 /// representation to match Go's deterministic head ordering.
 pub async fn get_all_field_heads(
     headstore: &NamespaceView,
-    doc_id: &str,
+    doc_short_id: u64,
     field_id: &str,
 ) -> Result<Vec<FieldHeadEntry>, String> {
     use storage::corekv::IterOptions;
 
-    let prefix = HeadstoreDocKey::field_prefix(doc_id, field_id);
+    let prefix = HeadstoreDocKey::field_prefix(doc_short_id, field_id);
+    let prefix_len = prefix.len();
     let opts = IterOptions::new().with_prefix(prefix);
 
     let mut iter = headstore
@@ -240,16 +273,15 @@ pub async fn get_all_field_heads(
         .await
         .map_err(|e| format!("Failed to iterate headstore: {}", e))?
     {
-        // Parse CID from key: /d/{doc_id}/{field_id}/{cid}
-        let key_str = String::from_utf8_lossy(&kv_pair.key);
-        let parts: Vec<&str> = key_str.split('/').collect();
-        if let Some(cid_str) = parts.last() {
-            if let Ok(cid) = cid_str.parse::<Cid>() {
-                entries.push(FieldHeadEntry {
-                    cid,
-                    key: kv_pair.key.clone(),
-                });
-            }
+        // Key: /d/{doc_short_id}/{field_id}/{cid} — the CID is the suffix
+        // after the scanned prefix (the short ID segment is binary, so the
+        // key cannot be split on '/').
+        let cid_str = String::from_utf8_lossy(&kv_pair.key[prefix_len..]);
+        if let Ok(cid) = cid_str.parse::<Cid>() {
+            entries.push(FieldHeadEntry {
+                cid,
+                key: kv_pair.key.clone(),
+            });
         }
     }
 
@@ -269,10 +301,11 @@ pub struct DocHeadsSnapshot {
 
 impl DocHeadsSnapshot {
     /// Load all heads for a document in a single headstore scan.
-    pub async fn load(headstore: &NamespaceView, doc_id: &str) -> Result<Self, String> {
+    pub async fn load(headstore: &NamespaceView, doc_short_id: u64) -> Result<Self, String> {
         use storage::corekv::IterOptions;
 
-        let prefix = HeadstoreDocKey::document_prefix(doc_id);
+        let prefix = HeadstoreDocKey::document_prefix(doc_short_id);
+        let prefix_len = prefix.len();
         let opts = IterOptions::new().with_prefix(prefix);
 
         let mut iter = headstore
@@ -293,15 +326,13 @@ impl DocHeadsSnapshot {
                 max_priority = priority;
             }
 
-            // Parse key: /d/{doc_id}/{field_id}/{cid}
-            let key_str = String::from_utf8_lossy(&kv_pair.key);
-            let parts: Vec<&str> = key_str.split('/').collect();
-            // parts: ["", "d", doc_id, field_id, cid]
-            if parts.len() >= 5 {
-                let field_id = parts[3].to_string();
-                if let Ok(cid) = parts[4].parse::<Cid>() {
+            // Key: /d/{doc_short_id}/{field_id}/{cid} — parse the suffix
+            // after the scanned prefix (the short ID segment is binary).
+            let suffix = String::from_utf8_lossy(&kv_pair.key[prefix_len..]);
+            if let Some((field_id, cid_str)) = suffix.split_once('/') {
+                if let Ok(cid) = cid_str.parse::<Cid>() {
                     entries_by_field
-                        .entry(field_id)
+                        .entry(field_id.to_string())
                         .or_default()
                         .push(FieldHeadEntry {
                             cid,

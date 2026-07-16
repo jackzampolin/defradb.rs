@@ -43,9 +43,12 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         let datastore = txn.datastore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get datastore: {}", e))
         })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
 
         let docs = collection
-            .get_all_with_datastore(&datastore)
+            .get_all_with_datastore(&datastore, &systemstore)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 
@@ -102,9 +105,12 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         let datastore = txn.datastore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get datastore: {}", e))
         })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
 
         let docs_with_status = collection
-            .get_all_with_datastore_include_deleted(&datastore, show_deleted)
+            .get_all_with_datastore_include_deleted(&datastore, &systemstore, show_deleted)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 
@@ -141,6 +147,9 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         let datastore = txn.datastore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get datastore: {}", e))
         })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
 
         let mut docs = Vec::new();
         let mut missing_ids = Vec::new();
@@ -155,7 +164,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             };
 
             match collection
-                .get_with_datastore(&datastore, &doc_id)
+                .get_by_doc_id(&datastore, &systemstore, &doc_id)
                 .await
                 .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?
             {
@@ -198,9 +207,12 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         let datastore = txn.datastore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get datastore: {}", e))
         })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
 
         let all_docs = collection
-            .get_all_with_datastore(&datastore)
+            .get_all_with_datastore(&datastore, &systemstore)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 

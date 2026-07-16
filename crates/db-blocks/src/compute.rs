@@ -18,24 +18,24 @@ pub struct ComputedBlocks {
 /// The entire computation is a pure function of the inputs.
 ///
 /// For each field: CBOR encode -> optional encrypt -> build Block -> optional sign ->
-/// serialize -> CID. Then builds composite block the same way.
+/// serialize -> CID. Then builds composite block the same way. The public
+/// DocID is derived from the genesis composite block CID and returned in
+/// `block_result.doc_id`; the caller persists the short-ID mappings.
 /// Accumulates all (key, value) pairs instead of writing to storage.
 pub fn compute_document_blocks(
     doc: &Document,
     schema_version_id: &str,
+    identity: DocStorageIdentity,
     encryption_config: Option<&EncryptionConfig>,
     signing_config: Option<&SigningConfig>,
 ) -> Result<ComputedBlocks, String> {
-    let doc_id = doc
-        .id()
-        .ok_or_else(|| "Document must have an ID".to_string())?;
-    let doc_id_str = doc_id.to_string();
-    let doc_id_bytes = doc_id_str.as_bytes().to_vec();
+    let doc_ref_bytes = identity.doc_ref_bytes();
 
     let mut blockstore_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut headstore_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
+    let mut encryption_cids: Vec<Cid> = Vec::new();
 
     let priority: u64 = 1; // Always 1 for creates
 
@@ -62,16 +62,12 @@ pub fn compute_document_blocks(
                     None
                 };
                 let key = defra_core::encryption::generate_encryption_key_for(
-                    &doc_id_str,
+                    &doc_ref_bytes,
                     key_field_name,
                 );
                 let encrypted = encrypt_delta(&value_bytes, &key)?;
 
-                let enc_block = Encryption {
-                    doc_id: doc_id_bytes.clone(),
-                    field_name: key_field_name.map(ToOwned::to_owned),
-                    key: key.to_vec(),
-                };
+                let enc_block = Encryption { key: key.to_vec() };
                 let enc_bytes = enc_block
                     .to_dag_cbor()
                     .map_err(|e| format!("Failed to encode encryption block: {}", e))?;
@@ -87,6 +83,10 @@ pub fn compute_document_blocks(
             (value_bytes, None)
         };
 
+        if let Some(enc_cid) = encryption_cid {
+            encryption_cids.push(enc_cid);
+        }
+
         let is_counter = doc
             .fields()
             .get(field_name)
@@ -99,7 +99,6 @@ pub fn compute_document_blocks(
 
         let delta = if is_counter {
             CrdtDelta::Counter(CounterDeltaPayload {
-                doc_id: doc_id_bytes.clone(),
                 field_name: field_name.clone(),
                 priority,
                 nonce,
@@ -108,7 +107,6 @@ pub fn compute_document_blocks(
             })
         } else {
             CrdtDelta::Lww(LwwDeltaPayload {
-                doc_id: doc_id_bytes.clone(),
                 field_name: field_name.clone(),
                 priority,
                 schema_version_id: schema_version_id.to_string(),
@@ -134,11 +132,14 @@ pub fn compute_document_blocks(
 
         blockstore_entries.push((field_cid.to_bytes(), field_block_bytes));
 
-        // Head entry: /d/{doc_id}/{field_name}/{cid} -> priority
-        let head_key = HeadstoreDocKey::new(&doc_id_str, field_name, field_cid);
+        // Head entry: /d/{doc_short_id}/{field_name}/{cid} -> priority
+        let head_key = HeadstoreDocKey::new(identity.doc_short_id, field_name, field_cid);
         let priority_bytes = encode_priority_varint(priority);
         headstore_entries.push((head_key.bytes(), priority_bytes));
-        headstore_entries.push((priority_index_key(&doc_id_str, priority, field_cid), vec![]));
+        headstore_entries.push((
+            priority_index_key(identity.doc_short_id, priority, field_cid),
+            vec![],
+        ));
 
         field_links.push(DAGLink::new(field_name.clone(), field_cid));
         field_cids.push(field_cid);
@@ -147,12 +148,8 @@ pub fn compute_document_blocks(
     // Composite encryption CID for doc-level encryption
     let composite_encryption_cid = if let Some(enc) = encryption_config {
         if enc.encrypt_doc {
-            let key = defra_core::encryption::generate_encryption_key_for(&doc_id_str, None);
-            let enc_block = Encryption {
-                doc_id: doc_id_str.as_bytes().to_vec(),
-                field_name: None,
-                key: key.to_vec(),
-            };
+            let key = defra_core::encryption::generate_encryption_key_for(&doc_ref_bytes, None);
+            let enc_block = Encryption { key: key.to_vec() };
             let enc_bytes = enc_block
                 .to_dag_cbor()
                 .map_err(|e| format!("Failed to encode composite encryption block: {}", e))?;
@@ -167,8 +164,11 @@ pub fn compute_document_blocks(
         None
     };
 
+    if let Some(enc_cid) = composite_encryption_cid {
+        encryption_cids.push(enc_cid);
+    }
+
     let composite_payload = CompositeDeltaPayload {
-        doc_id: doc_id_bytes,
         schema_version_id: schema_version_id.to_string(),
         priority,
         status: 1,
@@ -197,11 +197,11 @@ pub fn compute_document_blocks(
 
     blockstore_entries.push((composite_cid.to_bytes(), composite_bytes.clone()));
 
-    let composite_head_key = HeadstoreDocKey::new(&doc_id_str, "C", composite_cid);
+    let composite_head_key = HeadstoreDocKey::new(identity.doc_short_id, "C", composite_cid);
     let priority_bytes = encode_priority_varint(priority);
     headstore_entries.push((composite_head_key.bytes(), priority_bytes));
     headstore_entries.push((
-        priority_index_key(&doc_id_str, priority, composite_cid),
+        priority_index_key(identity.doc_short_id, priority, composite_cid),
         vec![],
     ));
 
@@ -211,8 +211,9 @@ pub fn compute_document_blocks(
         block_result: BlockResult {
             cid: composite_cid,
             block: composite_bytes,
-            doc_id: doc_id_str,
+            doc_id: derive_doc_id(&composite_cid),
             field_cids,
+            encryption_cids,
         },
     })
 }

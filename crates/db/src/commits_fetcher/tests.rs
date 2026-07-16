@@ -64,3 +64,82 @@ mod additional_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod shared_owner_tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use async_lock::Mutex;
+    use defra_core::{Block, CrdtDelta, LwwDeltaPayload};
+    use document::{DocID, NormalValue};
+    use storage::backends::MemoryStore;
+
+    use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
+    use crate::{VersionedFetcher, DB};
+
+    #[tokio::test]
+    async fn shared_field_cid_fans_out_to_every_owner() {
+        let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+        let mut data = Vec::new();
+        ciborium::into_writer(&NormalValue::String("shared".to_string()), &mut data).unwrap();
+        let block = Block::new(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                field_name: "name".to_string(),
+                schema_version_id: "v1".to_string(),
+                priority: 1,
+                data,
+            }),
+            vec![],
+            vec![],
+        );
+        let cid = block.generate_cid().unwrap();
+        let owners = [
+            DocID::new_v0(defra_core::block::generate_cid_from_bytes(b"owner-a").unwrap())
+                .to_string(),
+            DocID::new_v0(defra_core::block::generate_cid_from_bytes(b"owner-b").unwrap())
+                .to_string(),
+        ];
+
+        let txn = db.new_txn(false).await.unwrap();
+        {
+            let blockstore = txn.blockstore().unwrap();
+            let systemstore = txn.systemstore().unwrap();
+            blockstore
+                .set(&cid.to_bytes(), &block.to_dag_cbor().unwrap())
+                .await
+                .unwrap();
+            for owner in &owners {
+                crate::doc_id_map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), owner)
+                    .await
+                    .unwrap();
+            }
+        }
+        txn.commit().await.unwrap();
+
+        let commits_txn = db.new_txn(true).await.unwrap();
+        let commits = CommitsFetcher::new(Arc::new(Mutex::new(Some(commits_txn))))
+            .fetch_commits(&CommitsQueryOptions {
+                cid: Some(cid.to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let commit_owners: HashSet<_> = commits
+            .iter()
+            .filter_map(|commit| commit.get("docID").and_then(|value| value.as_str()))
+            .collect();
+        assert_eq!(commit_owners, owners.iter().map(String::as_str).collect());
+
+        let version_txn = db.new_txn(true).await.unwrap();
+        let documents = VersionedFetcher::new(Arc::new(Mutex::new(Some(version_txn))))
+            .get_documents_at_cid(&cid.to_string(), None)
+            .await
+            .unwrap();
+        let document_owners: HashSet<_> = documents
+            .iter()
+            .filter_map(|document| document.id().map(ToString::to_string))
+            .collect();
+        assert_eq!(document_owners, owners.into_iter().collect());
+    }
+}

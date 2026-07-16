@@ -7,9 +7,9 @@ use serde_json::Value;
 const SIMPLE_USERS_SCHEMA: &str = "type Users { name: String }";
 const COMMIT_USERS_SCHEMA: &str = "type Users { name: String  age: Int  verified: Boolean }";
 
-const SIMPLE_JOHN_CID: &str = "bafyreifldhofx6cwi6ashk24rcefsuiqje5a2rziwcyte54z27wmgv4pey";
-const SIMPLE_FRED_CID: &str = "bafyreihufziq5m2i6sgw2ls45uratin7eudhjplfg23qtj2lv6g6knevha";
-const SIMPLE_JOHNNN_CID: &str = "bafyreiecis4aqmvr4effzlb74cwflphkykfnibpdnnftdyp6o2cneqy57q";
+const SIMPLE_JOHN_CID: &str = "bafyreig4cg2rztvuy6tniqwggwg4hrpda52utpe25c5or2wysw4o2hsbhe";
+const SIMPLE_FRED_CID: &str = "bafyreicsfygsshp22gmxyz6t2mvzwjjqgn6v7si3uihgvsg6i6okxmagom";
+const SIMPLE_JOHNNN_CID: &str = "bafyreigg5b765ggvus7lpp2e2rqpcksonj63jsin5oyuhw3ks672gziota";
 
 const USERS_ACP_POLICY: &str = r#"description: a test policy which marks a collection in a database as a resource
 name: test

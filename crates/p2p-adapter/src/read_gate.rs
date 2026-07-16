@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use cid::Cid;
 use defra_core::{is_lens_block, Block as DefraBlock, Signature};
 use p2p::bitswap::{BlockAcpMeta, BlockClass, BlockClassifier, BlockReadGate};
-use storage::corekv::{IterOptions, Store};
+use storage::corekv::Store;
 
 pub struct DbBlockClassifier<S: Store + 'static> {
     db: Arc<db::DB<S>>,
@@ -22,80 +22,21 @@ impl<S: Store + 'static> DbBlockClassifier<S> {
     }
 
     async fn doc_ids_for_block(&self, cid: &Cid, block: &DefraBlock) -> Option<Vec<String>> {
-        let Some(doc_id_bytes) = block.delta.doc_id() else {
-            return Some(Vec::new());
-        };
-
-        let mut doc_ids = self.doc_ids_for_cid_from_headstore(cid).await?;
-        if !doc_ids.is_empty() {
-            doc_ids.sort();
-            doc_ids.dedup();
-            return Some(doc_ids);
-        }
-
-        let no_heads = block.heads.as_ref().is_none_or(Vec::is_empty);
-        if matches!(block.delta, defra_core::CrdtDelta::Composite(_))
-            && block.delta.priority() == 1
-            && no_heads
-        {
-            return Some(vec![String::from_utf8_lossy(doc_id_bytes).to_string()]);
-        }
-
-        None
-    }
-
-    async fn doc_ids_for_cid_from_headstore(&self, cid: &Cid) -> Option<Vec<String>> {
         let txn = self.db.new_txn(true).await.ok()?;
-        let headstore = match txn.headstore() {
-            Ok(headstore) => headstore,
+        let systemstore = match txn.systemstore() {
+            Ok(systemstore) => systemstore,
             Err(_) => {
                 let _ = txn.discard();
                 return None;
             }
         };
-        let mut iter = match headstore
-            .iterator(IterOptions::new().with_prefix(b"/p/".to_vec()))
+        let doc_ids = db::doc_id_map::resolve_block_doc_ids(&systemstore, cid, block)
             .await
-        {
-            Ok(iter) => iter,
-            Err(_) => {
-                let _ = txn.discard();
-                return None;
-            }
-        };
-
-        let target = cid.to_bytes();
-        let mut doc_ids = Vec::new();
-        loop {
-            let pair = match iter.next().await {
-                Ok(Some(pair)) => pair,
-                Ok(None) => break,
-                Err(_) => {
-                    let _ = iter.close().await;
-                    let _ = txn.discard();
-                    return None;
-                }
-            };
-
-            if !pair.key.ends_with(&target) {
-                continue;
-            }
-            if let Some(doc_id) = parse_priority_doc_id(&pair.key) {
-                doc_ids.push(doc_id);
-            }
-        }
-
-        let _ = iter.close().await;
+            .ok()
+            .flatten();
         let _ = txn.discard();
-        Some(doc_ids)
+        doc_ids
     }
-}
-
-fn parse_priority_doc_id(key: &[u8]) -> Option<String> {
-    let rest = key.strip_prefix(b"/p/")?;
-    let doc_end = rest.iter().position(|b| *b == b'/')?;
-    let doc_id = std::str::from_utf8(&rest[..doc_end]).ok()?;
-    Some(doc_id.to_string())
 }
 
 #[async_trait]
@@ -217,19 +158,10 @@ impl BlockReadGate for DbBlockReadGate {
 mod tests {
     use std::sync::Arc;
 
-    use super::{parse_priority_doc_id, DbBlockClassifier};
+    use super::DbBlockClassifier;
     use p2p::bitswap::{BlockClass, BlockClassifier};
     use schema::{CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
     use storage::backends::MemoryStore;
-    use storage::corekv::Key;
-
-    #[test]
-    fn parses_doc_id_from_priority_headstore_key() {
-        let cid = defra_core::block::generate_cid_from_bytes(b"block").unwrap();
-        let key = storage::keys::HeadstorePriorityKey::new("doc-1", 42, cid).bytes();
-
-        assert_eq!(parse_priority_doc_id(&key).as_deref(), Some("doc-1"));
-    }
 
     fn test_collection() -> CollectionVersion {
         CollectionVersion::new(
@@ -245,10 +177,9 @@ mod tests {
         .as_branchable()
     }
 
-    fn data_block(doc_id: &str) -> (cid::Cid, Vec<u8>) {
+    fn data_block(_doc_id: &str) -> (cid::Cid, Vec<u8>) {
         let block = defra_core::Block::new(
             defra_core::CrdtDelta::Lww(defra_core::LwwDeltaPayload {
-                doc_id: doc_id.as_bytes().to_vec(),
                 field_name: "name".to_string(),
                 priority: 1,
                 schema_version_id: "version-1".to_string(),
@@ -269,14 +200,16 @@ mod tests {
         let (cid, bytes) = data_block("doc-from-delta");
 
         let txn = db.new_txn(false).await.unwrap();
-        txn.headstore()
-            .unwrap()
-            .set(
-                &storage::keys::HeadstorePriorityKey::new("doc-from-index", 1, cid).bytes(),
-                &[],
+        {
+            let systemstore = txn.systemstore().unwrap();
+            db::doc_id_map::set_block_doc_id_mapping(
+                &systemstore,
+                &cid.to_string(),
+                "doc-from-index",
             )
             .await
             .unwrap();
+        }
         txn.commit().await.unwrap();
 
         let classifier = DbBlockClassifier::new(db);

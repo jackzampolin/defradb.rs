@@ -15,7 +15,7 @@ async fn test_datastore_basic() {
     let store = Arc::new(MemoryStore::new());
     let datastore = Datastore::new(store);
 
-    let key = DataStoreKey::new(1, InstanceType::Value, "doc1", "field1");
+    let key = DataStoreKey::new(1, InstanceType::Value, 1, "field1");
 
     // Write
     let mut txn = datastore.new_txn(false).await.unwrap();
@@ -37,7 +37,7 @@ async fn test_datastore_chunking() {
     let store = Arc::new(MemoryStore::new());
     let datastore = Datastore::new(store);
 
-    let key = DataStoreKey::new(1, InstanceType::Value, "doc1", "large_field");
+    let key = DataStoreKey::new(1, InstanceType::Value, 1, "large_field");
 
     // Create a 2.5MB value
     let large_value = vec![0xAB; CHUNK_SIZE * 2 + CHUNK_SIZE / 2];
@@ -62,7 +62,7 @@ async fn test_datastore_delete_chunked() {
     let store = Arc::new(MemoryStore::new());
     let datastore = Datastore::new(store);
 
-    let key = DataStoreKey::new(1, InstanceType::Value, "doc1", "large_field");
+    let key = DataStoreKey::new(1, InstanceType::Value, 1, "large_field");
 
     // Create a 2MB value
     let large_value = vec![0xCD; CHUNK_SIZE * 2];
@@ -119,7 +119,7 @@ async fn test_datastore_exact_chunk_size() {
     let store = Arc::new(MemoryStore::new());
     let datastore = Datastore::new(store);
 
-    let key = DataStoreKey::new(1, InstanceType::Value, "doc1", "exact_field");
+    let key = DataStoreKey::new(1, InstanceType::Value, 1, "exact_field");
 
     // Exactly CHUNK_SIZE bytes (should NOT be chunked, since > not >=)
     let exact_value = vec![0xAB; CHUNK_SIZE];
@@ -145,7 +145,7 @@ async fn test_datastore_chunk_size_plus_one() {
     let store = Arc::new(MemoryStore::new());
     let datastore = Datastore::new(store);
 
-    let key = DataStoreKey::new(1, InstanceType::Value, "doc1", "plus_one_field");
+    let key = DataStoreKey::new(1, InstanceType::Value, 1, "plus_one_field");
 
     // CHUNK_SIZE + 1 bytes (should be chunked into 2 chunks)
     let value = vec![0xCD; CHUNK_SIZE + 1];
@@ -171,7 +171,7 @@ async fn test_datastore_chunk_update_cleanup() {
     let store = Arc::new(MemoryStore::new());
     let datastore = Datastore::new(store);
 
-    let key = DataStoreKey::new(1, InstanceType::Value, "doc1", "shrink_field");
+    let key = DataStoreKey::new(1, InstanceType::Value, 1, "shrink_field");
 
     // First, write a 3-chunk value (2.5 MB)
     let large_value = vec![0xEF; CHUNK_SIZE * 2 + CHUNK_SIZE / 2];

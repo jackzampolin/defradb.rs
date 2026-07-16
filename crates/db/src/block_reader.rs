@@ -28,8 +28,6 @@ pub async fn read_document_for_se<S: storage::corekv::Store>(
 
     let parsed_doc_id =
         DocID::from_string(doc_id).map_err(|e| format!("invalid doc id '{doc_id}': {e}"))?;
-    let doc_key = collection.doc_key(&parsed_doc_id);
-    let version_key = collection.version_key(&parsed_doc_id);
 
     let txn = db
         .new_txn(true)
@@ -38,16 +36,34 @@ pub async fn read_document_for_se<S: storage::corekv::Store>(
     let datastore = txn
         .datastore()
         .map_err(|e| format!("failed to get datastore: {e}"))?;
+    let systemstore = txn
+        .systemstore()
+        .map_err(|e| format!("failed to get systemstore: {e}"))?;
+
+    let (doc_short_id, canonical_doc_id) = match collection
+        .resolve_doc_identity(&systemstore, &parsed_doc_id)
+        .await
+        .map_err(|e| format!("failed to resolve doc short id: {e}"))?
+    {
+        Some(id) => id,
+        None => {
+            drop(datastore);
+            drop(systemstore);
+            let _ = txn.force_discard();
+            return Ok(None);
+        }
+    };
 
     let doc_bytes = datastore
-        .get(&doc_key)
+        .get(&collection.doc_key(doc_short_id))
         .await
         .map_err(|e| format!("failed to read document: {e}"))?;
     let version_bytes = datastore
-        .get(&version_key)
+        .get(&collection.version_key(doc_short_id))
         .await
         .map_err(|e| format!("failed to read document version: {e}"))?;
     drop(datastore);
+    drop(systemstore);
     let _ = txn.force_discard();
 
     let Some(doc_bytes) = doc_bytes else {
@@ -55,7 +71,7 @@ pub async fn read_document_for_se<S: storage::corekv::Store>(
     };
     let mut document =
         Document::from_cbor(&doc_bytes).map_err(|e| format!("failed to decode document: {e}"))?;
-    document.set_id(parsed_doc_id);
+    document.set_id(canonical_doc_id);
     if let Some(version_bytes) = version_bytes {
         if let Ok(version) = String::from_utf8(version_bytes) {
             document.set_schema_version_id(version);
@@ -86,8 +102,17 @@ pub async fn read_latest_composite_block<S: storage::corekv::Store>(
     let headstore = txn
         .headstore()
         .map_err(|e| format!("Failed to get headstore: {}", e))?;
+    let systemstore = txn
+        .systemstore()
+        .map_err(|e| format!("Failed to get systemstore: {}", e))?;
 
-    let composite_heads = get_all_field_heads(&headstore, doc_id, "C").await?;
+    let doc_short_id = crate::doc_id_map::get_doc_ref(&systemstore, doc_id)
+        .await
+        .map_err(|e| format!("Failed to resolve doc ref: {}", e))?
+        .map(|doc_ref| doc_ref.doc_short_id)
+        .ok_or_else(|| format!("No doc-ID mapping found for doc {}", doc_id))?;
+
+    let composite_heads = get_all_field_heads(&headstore, doc_short_id, "C").await?;
 
     let composite_cid = composite_heads
         .first()
@@ -111,5 +136,6 @@ pub async fn read_latest_composite_block<S: storage::corekv::Store>(
         block: block_bytes,
         doc_id: doc_id.to_string(),
         field_cids: vec![],
+        encryption_cids: vec![],
     })
 }

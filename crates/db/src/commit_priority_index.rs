@@ -47,9 +47,17 @@ impl<S: Store> DB<S> {
                 .await
                 .map_err(Error::Storage)?;
 
-            let mut root_heads = Vec::new();
+            // Deltas no longer carry docIDs (Go #4838): the doc short ID is
+            // recovered from the head key ("/d/{short_id uvarint}/...") and
+            // inherited by every ancestor reached through that head.
+            let mut root_heads: Vec<(Cid, u64)> = Vec::new();
             let mut seen_root_heads = HashSet::new();
             while let Some(pair) = head_iter.next().await.map_err(Error::Storage)? {
+                let Ok((_, doc_short_id)) =
+                    storage::keys::doc_id_index::decode_doc_short_id_prefix(&pair.key[3..])
+                else {
+                    continue;
+                };
                 let key_str = String::from_utf8_lossy(&pair.key);
                 let Some(cid_str) = key_str.rsplit('/').next() else {
                     continue;
@@ -57,8 +65,8 @@ impl<S: Store> DB<S> {
                 let Ok(cid) = Cid::from_str(cid_str) else {
                     continue;
                 };
-                if seen_root_heads.insert(cid) {
-                    root_heads.push(cid);
+                if seen_root_heads.insert((cid, doc_short_id)) {
+                    root_heads.push((cid, doc_short_id));
                 }
             }
             head_iter.close().await.map_err(Error::Storage)?;
@@ -67,8 +75,8 @@ impl<S: Store> DB<S> {
             let mut visited = HashSet::new();
             let mut indexed_count = 0u64;
 
-            while let Some(cid) = stack.pop() {
-                if !visited.insert(cid) {
+            while let Some((cid, doc_short_id)) = stack.pop() {
+                if !visited.insert((cid, doc_short_id)) {
                     continue;
                 }
 
@@ -83,19 +91,16 @@ impl<S: Store> DB<S> {
                     continue;
                 };
 
-                if let Some(doc_id_bytes) = block.delta.doc_id() {
-                    let doc_id = String::from_utf8_lossy(doc_id_bytes).to_string();
-                    let key = HeadstorePriorityKey::new(&doc_id, block.delta.priority(), cid);
-                    headstore
-                        .set(&key.bytes(), &[])
-                        .await
-                        .map_err(Error::Storage)?;
-                    indexed_count += 1;
-                }
+                let key = HeadstorePriorityKey::new(doc_short_id, block.delta.priority(), cid);
+                headstore
+                    .set(&key.bytes(), &[])
+                    .await
+                    .map_err(Error::Storage)?;
+                indexed_count += 1;
 
                 if let Some(heads) = &block.heads {
                     for parent in heads {
-                        stack.push(*parent);
+                        stack.push((*parent, doc_short_id));
                     }
                 }
             }
@@ -155,6 +160,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backfill_indexes_a_shared_cid_for_each_document() {
+        let db = DB::new(MemoryStore::new()).unwrap();
+        let block = Block::new(
+            defra_core::CrdtDelta::Lww(defra_core::LwwDeltaPayload {
+                field_name: "name".to_string(),
+                schema_version_id: "v1".to_string(),
+                priority: 1,
+                data: vec![1],
+            }),
+            vec![],
+            vec![],
+        );
+        let cid = block.generate_cid().unwrap();
+
+        let txn = db.new_txn(false).await.unwrap();
+        {
+            let blockstore = txn.blockstore().unwrap();
+            let headstore = txn.headstore().unwrap();
+            blockstore
+                .set(&cid.to_bytes(), &block.to_dag_cbor().unwrap())
+                .await
+                .unwrap();
+            for doc_short_id in [1, 2] {
+                headstore
+                    .set(
+                        &storage::keys::HeadstoreDocKey::new(doc_short_id, "name", cid).bytes(),
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        txn.commit().await.unwrap();
+
+        db.backfill_commit_priority_index().await.unwrap();
+
+        let txn = db.new_txn(true).await.unwrap();
+        let headstore = txn.headstore().unwrap();
+        for doc_short_id in [1, 2] {
+            assert!(headstore
+                .has(&HeadstorePriorityKey::new(doc_short_id, 1, cid).bytes())
+                .await
+                .unwrap());
+        }
+    }
+
+    #[tokio::test]
     async fn test_backfill_commit_priority_index_rebuilds_field_and_composite_history() {
         let store = Arc::new(MemoryStore::new());
         let seed_db = DB::from_arc(store.clone()).unwrap();
@@ -164,18 +216,19 @@ mod tests {
             let doc_id = {
                 let blockstore = write_txn.blockstore().unwrap();
                 let headstore = write_txn.headstore().unwrap();
+                let systemstore = write_txn.systemstore().unwrap();
 
+                let identity = db_blocks::DocStorageIdentity::new(1, 1);
                 let mut doc = Document::new();
-                doc.generate_and_set_doc_id().unwrap();
                 doc.set("name", NormalValue::String("Alice".to_string()));
                 doc.set("age", NormalValue::Int(30));
 
-                let doc_id = doc.id().unwrap().to_string();
-                write_document_blocks(
+                let result = write_document_blocks(
                     &blockstore,
                     &headstore,
                     &doc,
                     "schema-v1",
+                    identity,
                     None,
                     None,
                     None,
@@ -183,6 +236,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                let doc_id = result.doc_id.clone();
+                doc.set_id(document::DocID::from_string(&doc_id).unwrap());
+                crate::doc_id_map::set_doc_id_mapping(&systemstore, 1, 1, &doc_id)
+                    .await
+                    .unwrap();
 
                 doc.set("age", NormalValue::Int(31));
                 let age_only = std::iter::once("age".to_string()).collect();
@@ -191,6 +249,7 @@ mod tests {
                     &headstore,
                     &doc,
                     "schema-v1",
+                    identity,
                     Some(&age_only),
                     None,
                     None,
@@ -206,6 +265,7 @@ mod tests {
                     &headstore,
                     &doc,
                     "schema-v1",
+                    identity,
                     Some(&name_only),
                     None,
                     None,
@@ -308,16 +368,17 @@ mod tests {
                 let blockstore = write_txn.blockstore().unwrap();
                 let headstore = write_txn.headstore().unwrap();
 
+                let identity = db_blocks::DocStorageIdentity::new(1, 1);
                 let mut doc = Document::new();
-                doc.generate_and_set_doc_id().unwrap();
                 doc.set("name", NormalValue::String("Alice".to_string()));
                 doc.set("age", NormalValue::Int(30));
 
-                write_document_blocks(
+                let result = write_document_blocks(
                     &blockstore,
                     &headstore,
                     &doc,
                     "schema-v1",
+                    identity,
                     None,
                     None,
                     None,
@@ -325,6 +386,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                doc.set_id(document::DocID::from_string(&result.doc_id).unwrap());
 
                 doc.set("age", NormalValue::Int(31));
                 let age_only = std::iter::once("age".to_string()).collect();
@@ -333,6 +395,7 @@ mod tests {
                     &headstore,
                     &doc,
                     "schema-v1",
+                    identity,
                     Some(&age_only),
                     None,
                     None,

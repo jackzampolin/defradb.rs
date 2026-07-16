@@ -3638,7 +3638,7 @@ dependencies = [
 [[package]]
 name = "defra-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d#adaf59db7aaea3e8d48a9b5e14846c24e59d2456"
 dependencies = [
  "eyre",
  "futures",
@@ -5514,7 +5514,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 [[package]]
 name = "hub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d#adaf59db7aaea3e8d48a9b5e14846c24e59d2456"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8849,6 +8849,7 @@ dependencies = [
  "crdt",
  "crypto",
  "defra-core",
+ "document",
  "futures",
  "hex",
  "identity",
@@ -11881,7 +11882,7 @@ dependencies = [
 [[package]]
 name = "sourcehub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d#adaf59db7aaea3e8d48a9b5e14846c24e59d2456"
 dependencies = [
  "cosmrs",
  "eyre",
@@ -12438,7 +12439,7 @@ dependencies = [
 [[package]]
 name = "test-infra"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/backbone.git?branch=feat%2Fshared-se-key-harness#68838b3bb03a1b60f5927184bd5feab9dd3f1d20"
+source = "git+https://github.com/sourcenetwork/backbone.git?rev=adaf59d#adaf59db7aaea3e8d48a9b5e14846c24e59d2456"
 dependencies = [
  "eyre",
  "futures",

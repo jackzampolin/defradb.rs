@@ -26,8 +26,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         &self,
         blocks: &[MergeBlock],
     ) -> Vec<Result<MergeOutcome, MergeError>> {
-        const MAX_MERGE_RETRIES: usize = 5;
-
         let mut results = Vec::with_capacity(blocks.len());
         for block in blocks {
             if let Err(error) = self
@@ -50,40 +48,13 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
             )
             .with_explicit_replay_authorization(block.explicit_replay_authorization.clone());
 
-            let mut last_result = None;
-            for attempt in 0..MAX_MERGE_RETRIES {
-                let result = self
-                    .handle_block(&block.cid, &block.block_data, metadata.clone())
-                    .await;
-                match &result {
-                    Err(e) if e.is_txn_conflict() => {
-                        tracing::debug!(
-                            attempt,
-                            doc_id = %block.doc_id,
-                            cid = %block.cid,
-                            "Merge conflict, retrying"
-                        );
-                        last_result = Some(result);
-                        continue;
-                    }
-                    _ => {
-                        last_result = Some(result);
-                        break;
-                    }
-                }
-            }
-            let final_result = last_result.unwrap();
-            if let Err(ref e) = final_result {
-                if e.is_txn_conflict() {
-                    tracing::warn!(
-                        doc_id = %block.doc_id,
-                        cid = %block.cid,
-                        max_retries = MAX_MERGE_RETRIES,
-                        "Merge conflict retries exhausted — document merge failed"
-                    );
-                }
-            }
-            results.push(final_result);
+            // Conflict retry lives inside `handle_block` (Go's MaxTxnRetries
+            // parity), so every caller — including the parallel replication
+            // workers — gets it, not just this batch fallback.
+            results.push(
+                self.handle_block(&block.cid, &block.block_data, metadata)
+                    .await,
+            );
         }
         results
     }
@@ -194,6 +165,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         {
             let datastore = txn.datastore()?;
             let headstore = txn.headstore()?;
+            let systemstore = txn.systemstore()?;
 
             for block in blocks {
                 self.validate_explicit_replay_authorization(
@@ -214,6 +186,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     .process_block_in_txn(
                         &datastore,
                         &headstore,
+                        &systemstore,
                         &block.cid,
                         &block.block_data,
                         &metadata,
@@ -301,6 +274,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         &self,
         datastore: &NamespaceView,
         headstore: &NamespaceView,
+        systemstore: &NamespaceView,
         cid: &Cid,
         block_data: &[u8],
         metadata: &BlockMetadata<'_>,
@@ -320,6 +294,28 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         if !metadata.is_recovery {
             let verified = self.verify_block_signature(cid, &block, block_data).await?;
             metadata.verified_creator = verified;
+        }
+
+        // Same ownership-before-decryption gate as the non-batch dispatch in
+        // `mod.rs::handle_block`: a standalone encrypted field block can only
+        // merge once the ownership index names it a single owner, so check
+        // that before paying for a (possibly cross-network) KMS fetch whose
+        // result would just be discarded by the dispatch below.
+        if block.encryption.is_some()
+            && matches!(block.delta, CrdtDelta::Lww(_) | CrdtDelta::Counter(_))
+            && self
+                .resolve_field_block_identity(systemstore, cid)
+                .await?
+                .is_none()
+        {
+            // Still REQUEST the DEK (detached) — see the twin gate in
+            // `mod.rs::handle_block` for the Go-parity rationale.
+            if let Some(enc_cid) = block.encryption {
+                self.spawn_dek_prefetch(enc_cid, &metadata);
+            }
+            return Ok(MergeOutcome::terminal_skip(
+                "field block has no unambiguous owner; merged via its composite",
+            ));
         }
 
         // Decrypt delta data if the block has encryption
@@ -386,6 +382,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 self.process_composite_delta_in_txn(
                     datastore,
                     headstore,
+                    systemstore,
                     cid,
                     &block,
                     payload,
@@ -404,6 +401,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 self.process_collection_delta_in_txn(
                     datastore,
                     headstore,
+                    systemstore,
                     cid,
                     &block,
                     payload,
@@ -418,6 +416,13 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 .await
             }
             CrdtDelta::Lww(payload) => {
+                let Some((doc_id_str, doc_short_id)) =
+                    self.resolve_field_block_identity(systemstore, cid).await?
+                else {
+                    return Ok(MergeOutcome::terminal_skip(
+                        "field block has no unambiguous owner; merged via its composite",
+                    ));
+                };
                 let mut ds = datastore.clone();
                 let result = self
                     .process_lww_delta_in_txn(
@@ -426,6 +431,8 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                         cid,
                         payload,
                         metadata.collection_id,
+                        &doc_id_str,
+                        doc_short_id,
                     )
                     .await;
                 match result {
@@ -435,9 +442,24 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 }
             }
             CrdtDelta::Counter(payload) => {
+                let Some((doc_id_str, doc_short_id)) =
+                    self.resolve_field_block_identity(systemstore, cid).await?
+                else {
+                    return Ok(MergeOutcome::terminal_skip(
+                        "field block has no unambiguous owner; merged via its composite",
+                    ));
+                };
                 let mut ds = datastore.clone();
                 let result = self
-                    .process_counter_delta_in_txn(&mut ds, cid, payload, metadata.collection_id)
+                    .process_counter_delta_in_txn(
+                        &mut ds,
+                        headstore,
+                        cid,
+                        payload,
+                        metadata.collection_id,
+                        &doc_id_str,
+                        doc_short_id,
+                    )
                     .await;
                 match result {
                     Ok(r) if r.applied => {

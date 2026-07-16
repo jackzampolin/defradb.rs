@@ -165,6 +165,9 @@ jobs:
       # Pin the child-node filter so an inherited runner-level RUST_LOG=warn
       # cannot make healthy nodes look unready.
       RUST_LOG: info
+      # Retain per-test node dirs (target/e2e/**) so the failure-only artifact
+      # upload below can capture node logs; Cleanup removes them afterwards.
+      DEFRA_E2E_KEEP: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -187,12 +190,24 @@ jobs:
       - name: Run conformance tests
         run: cargo test -p conformance -- --test-threads=1
 
+      # Node logs are the only forensics for a poll-timeout failure; without
+      # this upload a red run leaves nothing to diagnose.
+      - name: Upload harness node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-e2e-logs
+          path: target/e2e/**/logs/*.log
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Cleanup
         if: always()
         run: |
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- .
           git clean -fd
+          rm -rf target/e2e
           pkill -f "target/release/defra" || true
           pkill -f "target/debug/defra" || true
 
@@ -473,6 +488,9 @@ jobs:
       # The harness waits on INFO-level p2p_listening / readiness log lines; pin
       # the child filter so an inherited RUST_LOG=warn can't hide readiness.
       RUST_LOG: info
+      # Retain per-test node dirs (target/e2e/**) so the failure-only artifact
+      # upload below can capture node logs; Cleanup removes them afterwards.
+      DEFRA_E2E_KEEP: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -516,12 +534,24 @@ jobs:
           --test p2p
           -- --test-threads=1 --skip ::go_
 
+      # Node logs are the only forensics for a poll-timeout failure; without
+      # this upload a red run leaves nothing to diagnose.
+      - name: Upload harness node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2p-linux-e2e-logs
+          path: target/e2e/**/logs/*.log
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Cleanup
         if: always()
         run: |
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- .
           git clean -fd
+          rm -rf target/e2e
           pkill -f "target/(debug|ci)/defra" || true
 
   artifacts:
