@@ -18,9 +18,38 @@
 //! does (Go is the parity target). They stay `#[ignore]` (the default no-Go
 //! conformance run skips them) and are exercised manually unless the go-compat CI
 //! step opts into them.
+//!
+//! `parity_unique_twins_*` (#1134) is a KNOWN-DIVERGENCE pin, not a
+//! convergence contract: `parity_unique_twins_rust_rust` asserts #1126's
+//! canonical-pick semantics (both twins persist, smallest docID owns the
+//! unique slot). `parity_unique_twins_go_go` asserts current upstream Go
+//! behavior — a unique-index twin merge is rejected atomically inside the
+//! merge transaction (`internal/db/index.go` `saveUniqueKey` /
+//! `internal/db/merge.go`), and the sender silently treats the rejection as
+//! success because `message.Send` checks the request's `GetErrMessage()`
+//! instead of the response's (`internal/db/p2p/message/message.go`), so the
+//! two replicas disagree permanently on scan membership and indexed
+//! ownership. The go_go probe is an intentionally asserting
+//! known-Go-divergence test: it must FAIL the moment upstream Go starts
+//! converging, forcing this pin to be updated/removed rather than letting
+//! the compatibility contract drift silently. The mixed Rust<->Go topology
+//! does NOT reduce to the atomic-rejection model:
+//! `parity_unique_twins_mixed_partial_materialization` CHARACTERIZES the
+//! observed third outcome (Rust's pre-#1116-stage-3 block-by-block PushLog
+//! replay lands field-delta blocks on the Go peer before the composite is
+//! rejected, leaving a scan-visible unindexed partial document on Go at the
+//! compat pin 6c874754, pre-#4838). This window is CLOSED on Go v1.0.0 and
+//! current develop by #4838's composite-parent guard. It is
+//! a runnable repro artifact for the upstream report, deliberately NOT in
+//! the go-compat CI allowlist — see its doc comment. Upstream Go tracking
+//! issues: sourcenetwork/defradb#5059 (unique-index x CRDT-merge
+//! convergence — the divergence these probes pin) and
+//! sourcenetwork/defradb#5058 (sender never sees error replies — why the Go
+//! mode is silent). See defradb.rs#1134.
 
 use crate::support;
 use defra_harness::{DefraClient, NodeKind, TestCluster};
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 fn node_addr(cluster: &TestCluster, i: usize) -> String {
@@ -1254,4 +1283,497 @@ async fn parity_counter_storm_mixed() {
         .await
         .expect("mixed 3-node cluster");
     support::run_counter_storm(&cluster, "pcounter", "Int", &[1.0, 1.0, 1.0], 3, 4).await;
+}
+
+// ---- #1134: unique-index twin merge divergence pin ----
+//
+// Fixed schema + fixed fixture `seed` values, chosen so the resulting
+// content-addressed docIDs sort deterministically: node0 always seeds
+// TWIN_SEED_SMALL, node1 always seeds TWIN_SEED_LARGE, and
+// id(TWIN_SEED_SMALL) < id(TWIN_SEED_LARGE) is re-verified at runtime by an
+// ordering fence in `setup_unique_twins` rather than assumed blindly. This
+// keeps the fixture assignment (node0 = smaller docID) deterministic across
+// runs instead of branching on whichever docID happens to sort first — see
+// #1134.
+const UNIQUE_TWIN_SCHEMA: &str = "type Account { handle: String @index(unique: true)  seed: Int }";
+const TWIN_SEED_SMALL: i64 = 5;
+const TWIN_SEED_LARGE: i64 = 6;
+
+fn account_create_fields(node: &DefraClient) -> [&'static str; 2] {
+    match node.kind() {
+        NodeKind::Rust => ["add_Account", "create_Account"],
+        NodeKind::Go => ["create_Account", "add_Account"],
+    }
+}
+
+fn create_account(node: &DefraClient, label: &str, handle: &str, seed: i64) -> String {
+    let mut attempts = Vec::new();
+    for create_field in account_create_fields(node) {
+        match node.query(&format!(
+            r#"mutation {{ {create_field}(input: {{handle: "{handle}", seed: {seed}}}) {{ _docID }} }}"#
+        )) {
+            Ok(created) => {
+                if let Some(id) = created_user_doc_id(&created, create_field) {
+                    return id.to_string();
+                }
+                attempts.push(format!("{create_field}: {created}"));
+            }
+            Err(err) => attempts.push(format!("{create_field}: {err:#}")),
+        }
+    }
+    panic!(
+        "[{label}] no Account create mutation returned _docID in expected shape; attempts: {}",
+        attempts.join(" | ")
+    );
+}
+
+/// Full collection scan (docID-level presence — bypasses the unique index
+/// entirely, so it proves whether a twin persisted at all, independent of
+/// which one the index resolved to).
+fn account_scan_ids(node: &DefraClient) -> Vec<String> {
+    node.query("query { Account { _docID } }")
+        .unwrap_or_default()["Account"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|d| d["_docID"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Unique-indexed lookup on the shared `handle` value — the resolved
+/// owner(s) of the unique slot, as opposed to everything physically present
+/// (`account_scan_ids`).
+fn account_indexed_owner(node: &DefraClient) -> Vec<String> {
+    node.query(r#"query { Account(filter: {handle: {_eq: "twin"}}) { _docID } }"#)
+        .unwrap_or_default()["Account"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|d| d["_docID"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `account_scan_ids` as an order-insensitive set (scan row order is not part
+/// of any pin here — membership is).
+fn account_scan_set(node: &DefraClient) -> BTreeSet<String> {
+    account_scan_ids(node).into_iter().collect()
+}
+
+/// DocIDs resolved through the unique index for an arbitrary `handle` value.
+fn account_ids_by_handle(node: &DefraClient, handle: &str) -> Vec<String> {
+    node.query(&format!(
+        r#"query {{ Account(filter: {{handle: {{_eq: "{handle}"}}}}) {{ _docID }} }}"#
+    ))
+    .unwrap_or_default()["Account"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|d| d["_docID"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn poll_account_scan_count(node: &DefraClient, want: usize, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if account_scan_ids(node).len() == want {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// Every configured replicator on `node` reports `Status: 0`
+/// (`client.ReplicatorStatusActive` in Go — the type has no json tags, so the
+/// wire field is the Go field name and the value the raw uint8).
+fn replicators_all_active(node: &DefraClient) -> bool {
+    node.p2p_replicator_list()
+        .unwrap_or_default()
+        .as_array()
+        .map(|reps| !reps.is_empty() && reps.iter().all(|r| r["Status"].as_i64() == Some(0)))
+        .unwrap_or(false)
+}
+
+async fn poll_replicators_all_active(node: &DefraClient, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if replicators_all_active(node) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// Honesty check mirroring `run_indexed_lww_parity`'s `rust_explain_node`:
+/// confirm the Rust node actually plans an index scan on the unique field, so
+/// a full-scan fallback can't make the indexed-owner assertions vacuous.
+fn assert_rust_explain_uses_index(node: &DefraClient, label: &str) {
+    let index_used = node
+        .query(
+            r#"query @explain(type: simple) { Account(filter: {handle: {_eq: "twin"}}) { seed } }"#,
+        )
+        .map(|v| v.to_string().to_lowercase().contains("index"))
+        .unwrap_or(false);
+    assert!(
+        index_used,
+        "[{label}] Rust node must plan an index scan on the unique field, else the index assertions prove nothing"
+    );
+}
+
+fn wire_account_bidirectional(cluster: &TestCluster) {
+    let (a0, a1) = (node_addr(cluster, 0), node_addr(cluster, 1));
+    cluster
+        .client(0)
+        .p2p_connect(&[a1.as_str()])
+        .expect("connect 0->1");
+    cluster
+        .client(1)
+        .p2p_connect(&[a0.as_str()])
+        .expect("connect 1->0");
+    cluster
+        .client(0)
+        .p2p_collection_add(&["Account"])
+        .expect("subscribe node0");
+    cluster
+        .client(1)
+        .p2p_collection_add(&["Account"])
+        .expect("subscribe node1");
+    cluster
+        .client(0)
+        .p2p_replicator_set(&["Account"], &a1)
+        .expect("replicator 0->1");
+    cluster
+        .client(1)
+        .p2p_replicator_set(&["Account"], &a0)
+        .expect("replicator 1->0");
+}
+
+/// #1134 steps 1-3, shared by both topologies: independent schema +
+/// unique index on isolated nodes, distinct twins holding the identical
+/// unique value created BEFORE any P2P wiring (fixed fixtures, ordering
+/// fenced at runtime), then bidirectional collection subscriptions +
+/// replicators. Returns (node0's docID, node1's docID).
+async fn setup_unique_twins(cluster: &TestCluster, label: &str) -> (String, String) {
+    cluster
+        .client(0)
+        .schema_add(UNIQUE_TWIN_SCHEMA)
+        .expect("schema node0");
+    cluster
+        .client(1)
+        .schema_add(UNIQUE_TWIN_SCHEMA)
+        .expect("schema node1");
+
+    let id0 = create_account(&cluster.client(0), label, "twin", TWIN_SEED_SMALL);
+    let id1 = create_account(&cluster.client(1), label, "twin", TWIN_SEED_LARGE);
+    assert_ne!(
+        id0, id1,
+        "[{label}] distinct docIDs required for a real twin conflict"
+    );
+    assert!(
+        id0 < id1,
+        "[{label}] ordering fence: node0's fixture (seed={TWIN_SEED_SMALL}) must stay \
+         the lexicographically smaller docID — content-addressing appears to have \
+         changed (got node0={id0} node1={id1}); recompute the fixed TWIN_SEED_* \
+         fixtures rather than adjusting downstream assertions"
+    );
+
+    wire_account_bidirectional(cluster);
+    (id0, id1)
+}
+
+/// Rust<->Rust control (#1134): pins #1126's canonical-pick semantics for
+/// this exact scenario shape — both independently-created twins persist, and
+/// the unique slot converges to the lexicographically smallest docID
+/// identically on both replicas. This is the "Rust is internally consistent"
+/// anchor the `_go_go` divergence pin is measured against. (The mixed
+/// Rust<->Go topology is characterized separately by
+/// `parity_unique_twins_mixed_partial_materialization` — see the module
+/// header.)
+#[ignore = "parity (asserting); run with --ignored"]
+#[tokio::test]
+async fn parity_unique_twins_rust_rust() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_store("redb")
+        .with_keyring()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("rust-rust cluster");
+    let label = "unique_twins_rust_rust";
+    let (id0, _id1) = setup_unique_twins(&cluster, label).await;
+
+    for n in [0usize, 1] {
+        assert!(
+            poll_account_scan_count(&cluster.client(n), 2, Duration::from_secs(40)).await,
+            "[{label}] node{n} did not converge to both twins scan-visible; ids={:?}",
+            account_scan_ids(&cluster.client(n))
+        );
+    }
+
+    for n in [0usize, 1] {
+        assert_eq!(
+            account_indexed_owner(&cluster.client(n)),
+            vec![id0.clone()],
+            "[{label}] node{n} unique index must resolve to the smallest docID (#1126 canonical pick)"
+        );
+    }
+
+    assert_rust_explain_uses_index(&cluster.client(0), label);
+}
+
+/// Go<->Go KNOWN-DIVERGENCE pin (#1134): current upstream Go behavior for
+/// this exact scenario shape. `saveUniqueKey` performs a bare existence
+/// check inside the merge transaction (`internal/db/index.go`), so the
+/// incoming twin's merge is rejected and the whole merge transaction
+/// (including `MarkAsMerged` and the head update) is discarded
+/// (`internal/db/merge.go`). The push sender then treats the rejection as
+/// success because `message.Send` checks the request's error field instead
+/// of the response's (`internal/db/p2p/message/message.go`), deletes its
+/// retry record, and reports the replicator `Active`. Net effect: each
+/// replica permanently retains ONLY its own local twin, and reconnection /
+/// ordinary replicator retry never repairs it (there is nothing left in
+/// either retry queue to re-drive).
+///
+/// This test MUST start failing the moment upstream Go changes this
+/// behavior — that failure is the signal to update or remove this pin, not
+/// to patch the assertions blind. (The mixed Rust<->Go topology is
+/// characterized separately by
+/// `parity_unique_twins_mixed_partial_materialization` — see the module
+/// header.)
+///
+/// Anti-vacuity witness (mirrors the fork characterization
+/// `TestIndexP2P_UniqueConflictIsDroppedByReplicatorRetryQueue`, which pairs
+/// the poison doc with a healthy one in the same batch): the pinned end
+/// state is identical to each node's pre-wiring initial state, so a broken
+/// or never-started push would pass a bare sleep-then-assert vacuously.
+/// After wiring, each node therefore creates a NON-conflicting canary doc
+/// (distinct unique values) and the test blocks until both canaries cross in
+/// BOTH directions — proving replication is live over the same collection
+/// and replicator wiring. The twin-attempt ordering holds by generous timing
+/// margin (the twin's catch-up push is dispatched at wiring time, long before
+/// the canaries exist), NOT by protocol-level serialization: Go's catch-up
+/// (`pushHeadsForAllDocs`, async OnSuccessAsync) and live pushes (spawned
+/// goroutines) are concurrent and not ordered. The post-witness settle
+/// re-check below mitigates a still-in-flight twin before asserting divergence.
+/// The replicator-`Active` assertion at the end is the #5058 silent-ack
+/// signature: the sender drained its retry queue believing the rejected push
+/// succeeded.
+#[ignore = "parity (asserting); needs Go binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_unique_twins_go_go() {
+    let cluster = TestCluster::builder()
+        .go_nodes(2)
+        .with_p2p()
+        .with_store("badger")
+        .with_development()
+        .build()
+        .await
+        .expect("go-go cluster");
+    let label = "unique_twins_go_go";
+    let (id0, id1) = setup_unique_twins(&cluster, label).await;
+
+    // Positive delivery witness: canaries created AFTER wiring must cross in
+    // both directions through the live replicator/subscription channels.
+    let canary0 = create_account(&cluster.client(0), label, "canary-node0", 100);
+    let canary1 = create_account(&cluster.client(1), label, "canary-node1", 101);
+    let witness_deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let crossed_0 =
+            account_ids_by_handle(&cluster.client(0), "canary-node1") == vec![canary1.clone()];
+        let crossed_1 =
+            account_ids_by_handle(&cluster.client(1), "canary-node0") == vec![canary0.clone()];
+        if crossed_0 && crossed_1 {
+            break;
+        }
+        assert!(
+            Instant::now() < witness_deadline,
+            "[{label}] canary witness failed: replication is not live in both directions \
+             (node0 sees canary1: {crossed_0}, node1 sees canary0: {crossed_1}) — the \
+             twin-absence pin below would be vacuous"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    // The divergence pin, asserted only now that the witness proves the
+    // channel delivered: the remote twin is still absent on each node, and
+    // each node's unique index resolves its own twin. Re-checked after a
+    // short settle so a merely-in-flight twin can't sneak past the witness.
+    let expect_scan_0: BTreeSet<String> = [id0.clone(), canary0.clone(), canary1.clone()].into();
+    let expect_scan_1: BTreeSet<String> = [id1.clone(), canary0.clone(), canary1.clone()].into();
+    for pass in 0..2 {
+        if pass == 1 {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+        assert_eq!(
+            account_scan_set(&cluster.client(0)),
+            expect_scan_0,
+            "[{label}] (pass {pass}) node0 must hold its own twin + both canaries, and NOT \
+             the peer's twin — Go silently drops the rejected twin push"
+        );
+        assert_eq!(
+            account_scan_set(&cluster.client(1)),
+            expect_scan_1,
+            "[{label}] (pass {pass}) node1 must hold its own twin + both canaries, and NOT \
+             the peer's twin — Go silently drops the rejected twin push"
+        );
+        assert_eq!(
+            account_indexed_owner(&cluster.client(0)),
+            vec![id0.clone()],
+            "[{label}] (pass {pass}) node0's unique index must resolve to its own local twin"
+        );
+        assert_eq!(
+            account_indexed_owner(&cluster.client(1)),
+            vec![id1.clone()],
+            "[{label}] (pass {pass}) node1's unique index must resolve to its own local twin"
+        );
+    }
+
+    // #5058 silent-ack signature: despite the rejected twin push, each sender
+    // reports its replicator Active (retry record deleted as if successful).
+    for n in [0usize, 1] {
+        assert!(
+            poll_replicators_all_active(&cluster.client(n), Duration::from_secs(15)).await,
+            "[{label}] node{n} replicator must report Active (the #5058 silent-ack \
+             signature); got {:?}",
+            cluster.client(n).p2p_replicator_list()
+        );
+    }
+}
+
+/// CHARACTERIZATION of an upstream Go finding (#1134) — NOT a parity
+/// contract, and deliberately NOT in the go-compat CI allowlist: this test is
+/// a runnable repro artifact for the upstream report (cite it by name and run
+/// it with the pinned Go binary on PATH plus `--ignored`). The decision on
+/// whether to CI-enforce this pin is intentionally held until #1116 stage 3
+/// changes the Rust sender's delivery shape.
+///
+/// Mechanism (observed at Go pin 6c874754, Rust pre-#1116-stage-3): Rust's
+/// replicator replay pushes an existing document's DAG block-by-block, one
+/// PushLog request per block (2 field deltas + 1 composite for this
+/// fixture). Go runs one merge transaction per PushLog. At the pin a
+/// field-delta block is a valid merge root (its delta carries the DocID),
+/// and `syncIndexedDoc` no-ops on those merges because the document's
+/// object marker does not exist yet (only the composite merge writes it),
+/// so the field-delta transactions COMMIT, materializing the field values.
+/// The final composite merge then rejects on the unique index and only THAT
+/// transaction rolls back. Net result on the Go peer: a scan-visible (the
+/// fetcher iterates committed datastore value keys), unindexed partial
+/// document with no composite in `_commits` — and `ExistsDocument` false —
+/// that no retry repairs. A third outcome distinct from both #1126
+/// canonical-pick and go_go's atomic drop. NOTE for pin bumps: on Go
+/// develop past #4838 (genesis-CID docIDs), a standalone field-delta merge
+/// root is REJECTED (`initCRDTForType` requires a composite parent), so
+/// this exact window closes there — re-characterize when the pin advances.
+/// Pin-bump implications tracked in defradb.rs#1136.
+///
+/// The assertions are positive pins of the observed state, so ANY behavior
+/// change breaks this test loudly: an upstream Go fix (rollback or
+/// acceptance of the partial doc) breaks the scan/commit-subset pins, and
+/// the #1116 stage-3 sender change (single-DAG delivery) breaks the
+/// partial-materialization signature — both are signals to revisit this
+/// characterization, not to patch it blind.
+///
+/// Tracking: defradb.rs#1134; upstream context sourcenetwork/defradb#5058 /
+/// sourcenetwork/defradb#5059 (Go tracking issue: filed as follow-up to
+/// #5058/#5059 — number added when filed).
+#[ignore = "characterization repro (upstream Go partial-materialization finding, #1134); needs Go binary on PATH; intentionally not CI-enforced; run with --ignored"]
+#[tokio::test]
+async fn parity_unique_twins_mixed_partial_materialization() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .go_nodes(1)
+        .with_p2p()
+        .with_development()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("mixed cluster");
+    let label = "unique_twins_mixed_partial_materialization(rust0,go1)";
+    let (id0, id1) = setup_unique_twins(&cluster, label).await;
+
+    // Rust (node0) accepts Go's twin per #1126: both twins scan-visible.
+    assert!(
+        poll_account_scan_count(&cluster.client(0), 2, Duration::from_secs(40)).await,
+        "[{label}] Rust node0 did not converge to both twins scan-visible; ids={:?}",
+        account_scan_ids(&cluster.client(0))
+    );
+
+    // Go (node1) partial materialization: the Rust twin's field deltas landed
+    // in committed per-block merge txns, so it becomes scan-visible on Go too
+    // even though its composite merge was rejected.
+    assert!(
+        poll_account_scan_count(&cluster.client(1), 2, Duration::from_secs(40)).await,
+        "[{label}] Go node1 did not materialize the partial Rust twin (scan count != 2); \
+         ids={:?} — if this is the ATOMIC-drop outcome instead, the delivery shape has \
+         changed (post-#1116-stage-3 sender?) and this characterization must be revisited",
+        account_scan_ids(&cluster.client(1))
+    );
+
+    // The stable end state, re-checked after a settle window (observed stable
+    // for >= 40s in the original reproduction; not a transition artifact).
+    let expect_scan: BTreeSet<String> = [id0.clone(), id1.clone()].into();
+    for pass in 0..2 {
+        if pass == 1 {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+        assert_eq!(
+            account_scan_set(&cluster.client(0)),
+            expect_scan,
+            "[{label}] (pass {pass}) Rust node0 must hold both twins (#1126 canonical pick)"
+        );
+        assert_eq!(
+            account_scan_set(&cluster.client(1)),
+            expect_scan,
+            "[{label}] (pass {pass}) Go node1 must hold both twins scan-visible — the \
+             partial-materialization signature"
+        );
+        assert_eq!(
+            account_indexed_owner(&cluster.client(0)),
+            vec![id0.clone()],
+            "[{label}] (pass {pass}) Rust node0's unique index must resolve the smallest \
+             docID (its own local twin)"
+        );
+        assert_eq!(
+            account_indexed_owner(&cluster.client(1)),
+            vec![id1.clone()],
+            "[{label}] (pass {pass}) Go node1's unique index must resolve ONLY its own \
+             local twin — the partial doc is scan-visible but unindexed"
+        );
+    }
+
+    // Partial-DAG pin: Go holds the field-delta commits for the Rust twin but
+    // NOT its composite (that merge txn rolled back), while Rust merged the
+    // Go twin's DAG completely.
+    let rust_id0_cids = support::commit_cids(&cluster.client(0), &id0);
+    let go_id0_cids = support::commit_cids(&cluster.client(1), &id0);
+    assert!(
+        !go_id0_cids.is_empty()
+            && go_id0_cids.is_subset(&rust_id0_cids)
+            && go_id0_cids.len() < rust_id0_cids.len(),
+        "[{label}] Go node1 must hold a non-empty strict subset of the Rust twin's commit \
+         DAG (field deltas committed, composite rejected); rust={rust_id0_cids:?} \
+         go={go_id0_cids:?}"
+    );
+    let rust_id1_cids = support::commit_cids(&cluster.client(0), &id1);
+    let go_id1_cids = support::commit_cids(&cluster.client(1), &id1);
+    assert!(
+        !go_id1_cids.is_empty() && rust_id1_cids == go_id1_cids,
+        "[{label}] the Go twin's DAG must be identical on both nodes (Rust merged it \
+         completely); rust={rust_id1_cids:?} go={go_id1_cids:?}"
+    );
+
+    assert_rust_explain_uses_index(&cluster.client(0), label);
 }
