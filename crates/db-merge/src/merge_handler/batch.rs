@@ -325,6 +325,23 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
             metadata.verified_creator = verified;
         }
 
+        // Same ownership-before-decryption gate as the non-batch dispatch in
+        // `mod.rs::handle_block`: a standalone encrypted field block can only
+        // merge once the ownership index names it a single owner, so check
+        // that before paying for a (possibly cross-network) KMS fetch whose
+        // result would just be discarded by the dispatch below.
+        if block.encryption.is_some()
+            && matches!(block.delta, CrdtDelta::Lww(_) | CrdtDelta::Counter(_))
+            && self
+                .resolve_field_block_identity(systemstore, cid)
+                .await?
+                .is_none()
+        {
+            return Ok(MergeOutcome::terminal_skip(
+                "field block has no unambiguous owner; merged via its composite",
+            ));
+        }
+
         // Decrypt delta data if the block has encryption
         let decrypted_block;
         let effective_block = if block.encryption.is_some() {

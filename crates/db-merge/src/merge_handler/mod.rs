@@ -521,6 +521,24 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
             metadata.verified_creator = verified;
         }
 
+        // A standalone encrypted field block can only be merged once the
+        // block-CID -> DocID ownership index names a single owner (recorded
+        // by the composite merge that links it); otherwise it is merged via
+        // its composite instead (see `process_lww_delta`/`process_counter_delta`).
+        // Check that BEFORE attempting decryption: decrypting requires a KMS
+        // fetch that may cross the network, and paying for that round trip
+        // only to discard the result when ownership turns out to be unknown
+        // wastes a fetch the composite merge will redundantly repeat moments
+        // later (and, under load, can blow the caller's retry/poll budget).
+        if block.encryption.is_some()
+            && matches!(block.delta, CrdtDelta::Lww(_) | CrdtDelta::Counter(_))
+            && self.resolve_field_block_doc_id(cid).await?.is_none()
+        {
+            return Ok(MergeOutcome::terminal_skip(
+                "field block has no unambiguous owner; merged via its composite",
+            ));
+        }
+
         // Decrypt delta data if the block has encryption.
         // If decryption fails (encryption key block unavailable), skip the
         // standalone field merge -- the composite merge will re-attempt
