@@ -131,14 +131,22 @@ async fn test_redb_concurrent_read_modify_write_preserves_every_commit() {
     txn.set(b"counter", &0u64.to_be_bytes()).await.unwrap();
     txn.commit().await.unwrap();
 
-    let mut handles = Vec::new();
-    for _ in 0..20 {
+    let writer_count = 20;
+    let first_snapshot_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(writer_count));
+    let mut handles = Vec::with_capacity(writer_count);
+    for _ in 0..writer_count {
         let store = store.clone();
+        let first_snapshot_barrier = std::sync::Arc::clone(&first_snapshot_barrier);
         handles.push(tokio::spawn(async move {
+            let mut first_attempt = true;
             loop {
                 let mut txn = store.new_txn(false).await.unwrap();
                 let value = txn.get(b"counter").await.unwrap().unwrap();
                 let current = u64::from_be_bytes(value.try_into().unwrap());
+                if first_attempt {
+                    first_snapshot_barrier.wait().await;
+                    first_attempt = false;
+                }
                 txn.set(b"counter", &(current + 1).to_be_bytes())
                     .await
                     .unwrap();
@@ -158,7 +166,10 @@ async fn test_redb_concurrent_read_modify_write_preserves_every_commit() {
 
     let txn = store.new_txn(true).await.unwrap();
     let value = txn.get(b"counter").await.unwrap().unwrap();
-    assert_eq!(u64::from_be_bytes(value.try_into().unwrap()), 20);
+    assert_eq!(
+        u64::from_be_bytes(value.try_into().unwrap()),
+        writer_count as u64
+    );
 }
 
 #[tokio::test]
