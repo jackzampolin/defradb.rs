@@ -969,15 +969,15 @@ async fn convergence_encrypted_lww_restart_merge() {
 
 /// Concurrent PNCounter updates must accumulate signed deltas, not just positive
 /// increments. node0 contributes `+50` while node1 contributes `-30`; after
-/// merging, both materialized documents must show `20`.
+/// merging, both materialized documents must show `20`, including when node1
+/// restarts before applying its decrement.
 ///
 /// This extends the PCounter two-store regression guard above to the
 /// decrement-capable counter variant. A merge path that clamps, drops, or
 /// re-materializes from a stale accumulation store would converge to the wrong
 /// value even if both replicas agree.
-#[tokio::test]
-async fn convergence_concurrent_pncounter_signed_deltas_sum() {
-    let cluster = TestCluster::builder()
+async fn run_pncounter_signed_deltas(restart: bool) {
+    let mut cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
         .with_store("redb")
@@ -1004,6 +1004,13 @@ async fn convergence_concurrent_pncounter_signed_deltas_sum() {
         "seed document must replicate to node1 before the signed counter updates"
     );
 
+    if restart {
+        cluster
+            .restart_node(1, Duration::from_secs(30))
+            .await
+            .expect("restart node1");
+    }
+
     cluster
         .client(0)
         .query(&format!(
@@ -1017,6 +1024,23 @@ async fn convergence_concurrent_pncounter_signed_deltas_sum() {
         ))
         .expect("node1 decrement");
 
+    if restart {
+        rewire_bidirectional(&cluster, "Tally");
+    }
+
+    assert!(
+        support::poll_dags_converged(
+            &cluster.client(0),
+            &cluster.client(1),
+            &id,
+            Duration::from_secs(30),
+        )
+        .await,
+        "PNCounter DAGs did not converge; node0={:?} node1={:?}",
+        support::commit_cids(&cluster.client(0), &id),
+        support::commit_cids(&cluster.client(1), &id),
+    );
+
     if !poll_hits(&cluster.client(0), 20, Duration::from_secs(30)).await {
         panic!(
             "node0 did not converge to 20; hits = {}",
@@ -1029,6 +1053,16 @@ async fn convergence_concurrent_pncounter_signed_deltas_sum() {
             tally_hits(&cluster.client(1))
         );
     }
+}
+
+#[tokio::test]
+async fn convergence_concurrent_pncounter_signed_deltas_sum() {
+    run_pncounter_signed_deltas(false).await;
+}
+
+#[tokio::test]
+async fn convergence_restart_pncounter_signed_deltas_sum() {
+    run_pncounter_signed_deltas(true).await;
 }
 
 async fn run_mixed_lww_counter_merge(restart_node: Option<usize>) {

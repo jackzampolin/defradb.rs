@@ -72,12 +72,15 @@ pub const PROPERTIES: &[Property] = &[
         // Generic CrdtField core (DefraConvergence.CrdtField): comm+assoc => the merge
         // fold is order-independent (every field). Idempotence is the dividing line:
         // LWW (lwwMerge) is idempotent => a join-semilattice, re-delivery-safe, no dedup
-        // (lww_dup_safe); the counter (Int +) is NOT idempotent (counter_not_idempotent)
-        // => it must apply each delta exactly once, the algebraic root of the #4935
-        // double-apply. Counter, LWW, and the mixed Counter×LWW product fully
-        // instantiate the core (counterCM / lwwCM / mixedCM). The mixed product's
-        // cross-field materialization hazard is checked by MixedFieldMaterialization.
-        name: "CrdtField: comm+assoc => order-independent; mixed Counter×LWW inherits counter dedup obligation",
+        // (lww_dup_safe); the counter (Int +, including PNCounter negative deltas)
+        // is NOT idempotent (counter_not_idempotent) => it must apply each delta
+        // exactly once, the algebraic root of the #4935 double-apply. Counter, LWW,
+        // and the mixed Counter×LWW product fully instantiate the core (counterCM /
+        // lwwCM / mixedCM). PNCounter is the same signed-delta algebra with
+        // decrement enabled, covered by singleStore_pncounter_converges and exact
+        // live/restart/storm behavioral tests. The mixed product's cross-field
+        // materialization hazard is checked by MixedFieldMaterialization.
+        name: "CrdtField: comm+assoc => order-independent; PNCounter refines to signed Counter; mixed Counter×LWW inherits dedup",
         axis: Lean,
         anchor: "crates/crdt/src/lww.rs set_value; crates/crdt/src/counter.rs; crates/crdt/src/composite.rs componentwise field merge",
         model_ref: "DefraConvergence.MixedField (lake build); MC_MixedFieldMaterialization_Green.cfg",
