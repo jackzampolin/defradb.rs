@@ -20,7 +20,7 @@ Status of the effort across the 40-crate surface, from the per-crate survey in
 are plumbing covered by integration tests / Go-FFI parity / unit tests. The point of this
 section is the **diff**: what is proven vs. the accepted gap.
 
-### Modeled — 19 families (proven)
+### Modeled — 20 families (proven)
 | Family | Tool | Crates it covers |
 |---|---|---|
 | B3 filtered replication | TLA+ | p2p, db-merge |
@@ -30,6 +30,7 @@ section is the **diff**: what is proven vs. the accepted gap.
 | Multi-instance claim | TLA+ | defra-agent |
 | Block integrity / signatures | TLA+ | db-merge, defra-core, blockstore |
 | KMS key distribution | TLA+ | kms, db-merge |
+| Encrypted LWW restart/replay | TLA+ + existing LWW Lean law | kms, p2p, db-merge, crdt |
 | Management-channel auth (NAC gate) | TLA+ | http, db-nac, pg-compat |
 | ACP soundness + revocation + dual-path commits | TLA+ & Lean | acp, zanzibar, sourcehub, query, db |
 | Storage SSI serializability (point + range/scan carve-out) | TLA+ | storage |
@@ -85,7 +86,7 @@ shipped code, on two axes matching the two tools:
 | Axis | What it checks | Needs a binary? | Entry |
 |---|---|---|---|
 | **Lean (auto)** | `lean/Conformance.lean` emits a JSON contract (vocabularies derived from the Lean models); the live Rust types are asserted to still match — anti-drift | no | `tests/lean_conformance.rs` |
-| **TLA (behavioral)** | each family's invariant is driven against the **running release binary** via the backbone `defra-harness` | yes | `tests/tla_conformance.rs` |
+| **TLA (behavioral)** | each family's invariant is driven against the **running DefraDB binary** via the backbone `defra-harness` | yes | `tests/tla_conformance.rs` |
 
 [`src/registry.rs`] (`PROPERTIES`) is the spine: every *Modeled* family above maps
 to its headline invariant, source anchor, the model that proves it, and its
@@ -95,9 +96,9 @@ substrate) — so a green run never reads as "this was proven against the
 artifact." `matrix::every_modeled_family_is_bound` fails if a model lands without
 a binding.
 
-### Realized status — all 19 families bound
+### Realized status — all 20 families bound
 
-**19 behavioral tests** (driven against `target/release/defra`, each break-tested
+**19 behavioral tests** (driven against fresh `target/debug/defra`, each break-tested
 for non-vacuity), **2 Lean-axis contract bindings**, **6 honest Boundaries** (one,
 Transaction & merge-queue concurrency, is now both — a Behavioral no-loss/no-double-apply
 storm leg plus a Boundary internal-serialization leg). One
@@ -122,6 +123,7 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 | CID determinism | Behavioral | `cid.rs` |
 | Index-maintenance | Behavioral | `index.rs` (single-node create/update/delete + indexed LWW restart/merge reconciliation); `MC_IndexReconciliation_{Red_SaveOnly,Green}` |
 | KMS key distribution | Behavioral | `kms.rs` (node0 denies the DEK to unauthorized node1) |
+| Encrypted LWW restart/replay | Behavioral | `partition::convergence_encrypted_lww_restart_merge` (encrypted siblings cross a real restart; identical DAGs and decrypted LWW winner asserted); `MC_EncryptedLwwReplay_{Green,Red_*}`; reuses `PriorityReconcile.lwwCM` |
 | CRDT merge laws | Contract | `MergeResult` vocab; `DefraConvergence.MixedField` product proof; `MixedFieldMaterialization.tla` |
 | Multi-instance claim | Boundary | defra-agent substrate, not this binary |
 | Block integrity / signatures | Boundary | needs adversarial peer; Rust verify mandatory |
@@ -131,7 +133,7 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 
 ```bash
 proofs/verify-all.sh                 # TLA + Lean + conformance (behavioral if binary present)
-cargo build --release -p cli         # produce target/release/defra (the artifact under test)
+cargo build -p cli                   # produce fresh target/debug/defra
 cargo test -p conformance            # Lean axis + behavioral; DEFRA_CONFORMANCE_BINARY overrides target
 ```
 
@@ -179,6 +181,6 @@ Read this before trusting a verdict; it states the model's honest reach.
 - **Model ≠ code.** These prove properties of the *models*. They are anchored to source by
   the `*_DESIGN.md` docs and bound to the implementation by the `conformance` crate (see
   *Conformance* above) — the Lean axis asserts model vocabularies against live Rust types,
-  the TLA axis drives the real release binary. What conformance does **not** reach is marked
+  the TLA axis drives the selected DefraDB binary. What conformance does **not** reach is marked
   `Boundary` in the registry (crypto, eventual connectivity, bounded-N, the defra-agent
   claim substrate): assumed, never asserted against the artifact.

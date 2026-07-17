@@ -841,6 +841,8 @@ async fn poll_vault_secret(node: &DefraClient, want: &str, timeout: Duration) ->
 /// the winning ciphertext can't be decrypted — diverges here. Convergence
 /// requires both the LWW store reconcile AND correct key delivery over the
 /// restart.
+/// Model: `MC_EncryptedLwwReplay_Green`; algebra:
+/// `DefraConvergence.PriorityReconcile.lwwCM`.
 #[tokio::test]
 async fn convergence_encrypted_lww_restart_merge() {
     let mut cluster = TestCluster::builder()

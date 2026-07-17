@@ -136,6 +136,18 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral, Boundary],
     },
     Property {
+        // Encryption reuses PriorityReconcile.lwwCM unchanged: ciphertext and
+        // key timing affect when a value can materialize, not which value wins.
+        // The behavioral leg receives both encrypted siblings across a real
+        // restart, proves identical DAGs, and asserts the decrypted winner.
+        family: "Encrypted LWW restart/replay",
+        name: "INV_AckBacked / INV_NoFilteredLoss / INV_LwwWinner — encrypted replay remains complete and convergent",
+        axis: Tla,
+        anchor: "crates/db-merge/src/merge_handler/composite_fields.rs; crates/db-merge/src/push_docs.rs; crates/db-merge/src/push_docs_transport.rs; crates/p2p/src/sync/pending_store.rs; crates/crdt/src/lww.rs",
+        model_ref: "MC_EncryptedLwwReplay_Green.cfg",
+        tiers: &[Behavioral],
+    },
+    Property {
         family: "Management-channel auth (NAC gate)",
         name: "INV_OnlyAuthorizedManages — management ops require a valid scoped token",
         axis: Tla,
