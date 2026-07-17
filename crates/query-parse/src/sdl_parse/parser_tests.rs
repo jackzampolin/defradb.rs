@@ -353,7 +353,7 @@ fn test_relation_directive_explicit_name() {
 fn test_default_directive_string() {
     let sdl = r#"
         type User {
-            role: String @default(string: "member")
+            role: String @default(value: "member")
         }
     "#;
 
@@ -371,7 +371,7 @@ fn test_default_directive_string() {
 fn test_default_directive_int() {
     let sdl = r#"
         type Counter {
-            count: Int @default(int: 0)
+            count: Int @default(value: 0)
         }
     "#;
 
@@ -389,7 +389,7 @@ fn test_default_directive_int() {
 fn test_default_directive_bool() {
     let sdl = r#"
         type Settings {
-            enabled: Boolean @default(bool: true)
+            enabled: Boolean @default(value: true)
         }
     "#;
 
@@ -873,10 +873,10 @@ fn test_default_directive_missing_value_returns_error() {
 }
 
 #[test]
-fn test_default_directive_unknown_argument_returns_error() {
+fn test_default_directive_legacy_argument_returns_error() {
     let sdl = r#"
         type User {
-            role: String @default(invalid_arg: "test")
+            role: String @default(string: "test")
         }
     "#;
     let result = parse_sdl(sdl);
@@ -893,7 +893,7 @@ fn test_default_directive_unknown_argument_returns_error() {
 fn test_default_directive_invalid_json_returns_error() {
     let sdl = r#"
         type Config {
-            settings: JSON @default(json: "{ invalid json }")
+            settings: JSON @default(value: "{ invalid json }")
         }
     "#;
     let result = parse_sdl(sdl);
@@ -927,7 +927,7 @@ fn test_constraints_directive_negative_size_returns_error() {
 fn test_default_directive_float() {
     let sdl = r#"
         type Measurement {
-            value: Float @default(float: 3.15)
+            value: Float @default(value: 3.15)
         }
     "#;
     let collections = parse_sdl(sdl).unwrap();
@@ -945,7 +945,7 @@ fn test_default_directive_float() {
 fn test_default_directive_json() {
     let sdl = r#"
         type Config {
-            settings: JSON @default(json: "{\"key\": \"value\"}")
+            settings: JSON @default(value: "{\"key\": \"value\"}")
         }
     "#;
     let collections = parse_sdl(sdl).unwrap();
@@ -964,7 +964,7 @@ fn test_default_directive_json() {
 fn test_default_directive_float32() {
     let sdl = r#"
         type Sensor {
-            temp: Float32 @default(float32: 25.5)
+            temp: Float32 @default(value: 25.5)
         }
     "#;
     let collections = parse_sdl(sdl).unwrap();
@@ -982,7 +982,7 @@ fn test_default_directive_float32() {
 fn test_default_directive_datetime() {
     let sdl = r#"
         type Event {
-            created: DateTime @default(dateTime: "2024-01-15T10:30:00Z")
+            created: DateTime @default(value: "2024-01-15T10:30:00Z")
         }
     "#;
     let collections = parse_sdl(sdl).unwrap();
@@ -1000,7 +1000,7 @@ fn test_default_directive_datetime() {
 fn test_default_directive_blob() {
     let sdl = r#"
         type Document {
-            data: Blob @default(blob: "SGVsbG8gV29ybGQ=")
+            data: Blob @default(value: "SGVsbG8gV29ybGQ=")
         }
     "#;
     let collections = parse_sdl(sdl).unwrap();
@@ -1140,7 +1140,7 @@ fn test_known_directives_no_warnings() {
         type User @materialized @branchable {
             name: String @index(unique: true)
             age: Int @crdt(type: "pncounter")
-            role: String @default(string: "user")
+            role: String @default(value: "user")
             agent_did: String @immutable
         }
     "#;
@@ -1483,7 +1483,7 @@ fn test_encrypted_index_unknown_argument_emits_warning() {
 fn test_default_float32_wrong_type_returns_error() {
     let sdl = r#"
         type Sensor {
-            temp: Float32 @default(float32: "not a float")
+            temp: Float32 @default(value: "not a float")
         }
     "#;
 
@@ -1501,7 +1501,7 @@ fn test_default_float32_wrong_type_returns_error() {
 fn test_default_datetime_wrong_type_returns_error() {
     let sdl = r#"
         type Event {
-            created: DateTime @default(dateTime: 12345)
+            created: DateTime @default(value: 12345)
         }
     "#;
 
@@ -1519,7 +1519,7 @@ fn test_default_datetime_wrong_type_returns_error() {
 fn test_default_blob_wrong_type_returns_error() {
     let sdl = r#"
         type Document {
-            data: Blob @default(blob: 12345)
+            data: Blob @default(value: 12345)
         }
     "#;
 
@@ -1534,19 +1534,73 @@ fn test_default_blob_wrong_type_returns_error() {
 }
 
 #[test]
-fn test_default_directive_value_alias() {
+fn test_default_directive_value_for_all_scalar_types() {
     let sdl = r#"
-        type User {
-            role: String @default(value: "member")
+        type Defaults {
+            active: Boolean @default(value: true)
+            age: Int @default(value: 40)
+            points: Float @default(value: 10)
+            points32: Float32 @default(value: 11.5)
+            points64: Float64 @default(value: 12)
+            name: String @default(value: "Bob")
+            created: DateTime @default(value: "2000-07-23T03:00:00-00:00")
+            metadata: JSON @default(value: "{\"one\":1}")
+            image: Blob @default(value: "ff0099")
         }
     "#;
 
     let collections = parse_sdl(sdl).unwrap();
-    let user = &collections[0];
-    let role = user.field_by_name("role").unwrap();
-    assert_eq!(
-        role.default_value,
-        Some(serde_json::Value::String("member".to_string()))
+    let defaults = &collections[0];
+    for (field, expected) in [
+        ("active", serde_json::json!(true)),
+        ("age", serde_json::json!(40)),
+        ("points", serde_json::json!(10)),
+        ("points32", serde_json::json!(11.5)),
+        ("points64", serde_json::json!(12)),
+        ("name", serde_json::json!("Bob")),
+        ("created", serde_json::json!("2000-07-23T03:00:00Z")),
+        ("metadata", serde_json::json!("{\"one\":1}")),
+        ("image", serde_json::json!("ff0099")),
+    ] {
+        assert_eq!(
+            defaults.field_by_name(field).unwrap().default_value,
+            Some(expected),
+            "unexpected default for {field}"
+        );
+    }
+}
+
+#[test]
+fn test_default_directive_value_uses_field_type_coercion() {
+    let result = parse_sdl(
+        r#"
+            type Defaults {
+                age: Int @default(value: "forty")
+            }
+        "#,
+    );
+
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains(r#"Argument "value" has invalid value "forty""#),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_default_directive_value_rejects_unsupported_field_type() {
+    let result = parse_sdl(
+        r#"
+            type Defaults {
+                externalID: ID @default(value: "bae-example")
+            }
+        "#,
+    );
+
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("default value is not allowed for this field type"),
+        "unexpected error: {err}"
     );
 }
 
