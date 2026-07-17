@@ -42,6 +42,7 @@
 /// // Commit
 /// txn.commit().await?;
 /// ```
+mod action;
 pub(crate) mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
 // Backup extracted to standalone db-backup crate (#789). Callers now
@@ -118,6 +119,7 @@ pub use collection_snapshot::CollectionSnapshot;
 pub use commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
 pub use database::{DbOptions, EmbeddingClientConfig, DB};
 pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
+pub use defra_core::{Action, ActionExecution, ActionStatus};
 pub use doc_write_queue::DocWriteQueue;
 // dense_search items re-exported transparently from db-search
 pub use db_search::{

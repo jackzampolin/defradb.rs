@@ -236,6 +236,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/schema", get(handlers::schema))
         .route("/schema", post(handlers::schema::add_schema))
         .route("/version", get(handlers::version))
+        .route("/actions", get(handlers::actions::list_actions))
         // Transaction endpoints
         .nest("/tx", tx_routes)
         // REST collection endpoints

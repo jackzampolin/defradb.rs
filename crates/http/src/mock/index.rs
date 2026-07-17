@@ -39,8 +39,10 @@ impl MockIndexOperations {
     /// Create with a pre-existing index.
     pub fn with_index(self, collection: &str, name: &str, fields: Vec<&str>, unique: bool) -> Self {
         self.indexes.write().unwrap().push(IndexInfo {
+            id: 0,
             name: name.to_string(),
             collection: collection.to_string(),
+            collection_id: collection.to_string(),
             fields: fields
                 .into_iter()
                 .map(|f| IndexFieldInfo {
@@ -74,8 +76,10 @@ impl IndexOperations for MockIndexOperations {
         };
 
         let index = IndexInfo {
+            id: 0,
             name: index_name,
             collection: collection.to_string(),
+            collection_id: collection.to_string(),
             fields: fields
                 .into_iter()
                 .map(|f| IndexFieldInfo {

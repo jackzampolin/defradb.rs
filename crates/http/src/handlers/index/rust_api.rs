@@ -219,8 +219,10 @@ mod tests {
     #[test]
     fn test_index_info_serialize() {
         let info = IndexInfo {
+            id: 0,
             name: "idx_name".to_string(),
             collection: "Users".to_string(),
+            collection_id: "collection-id".to_string(),
             fields: vec![
                 IndexFieldInfo {
                     name: "name".to_string(),

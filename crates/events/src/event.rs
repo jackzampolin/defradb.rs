@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use cid::Cid;
+use defra_core::ActionExecution;
 
 /// Event names that can be subscribed to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,6 +29,8 @@ pub enum EventName {
     /// A pending-DAG root was quarantined after a deterministic merge
     /// rejection (#1128) — the operator-facing forensics signal.
     PendingDagQuarantined,
+    /// A long-running database action changed state.
+    ActionExecution,
 }
 
 impl EventName {
@@ -53,6 +56,7 @@ impl std::fmt::Display for EventName {
             EventName::AcpHeightAdvanced => write!(f, "acp-height-advanced"),
             EventName::AcpCacheInvalidated => write!(f, "acp-cache-invalidated"),
             EventName::PendingDagQuarantined => write!(f, "pending-dag-quarantined"),
+            EventName::ActionExecution => write!(f, "action-execution"),
         }
     }
 }
@@ -224,6 +228,8 @@ pub enum MessageData {
     AcpCacheInvalidated(AcpCacheInvalidatedData),
     /// Pending-DAG root quarantined after a deterministic merge rejection.
     PendingDagQuarantined(PendingDagQuarantinedData),
+    /// Long-running database action changed state.
+    ActionExecution(ActionExecution),
 }
 
 impl Message {
@@ -299,6 +305,14 @@ impl Message {
         }
     }
 
+    /// Create a new ActionExecution message.
+    pub fn action_execution(data: ActionExecution) -> Self {
+        Self {
+            name: EventName::ActionExecution,
+            data: MessageData::ActionExecution(data),
+        }
+    }
+
     /// Get the SEArtifactReceivedData if this is an SEArtifactReceived message.
     pub fn as_se_artifact_received(&self) -> Option<&SEArtifactReceivedData> {
         match &self.data {
@@ -351,6 +365,14 @@ impl Message {
     pub fn as_pending_dag_quarantined(&self) -> Option<&PendingDagQuarantinedData> {
         match &self.data {
             MessageData::PendingDagQuarantined(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Get the ActionExecution data if this is an ActionExecution message.
+    pub fn as_action_execution(&self) -> Option<&ActionExecution> {
+        match &self.data {
+            MessageData::ActionExecution(data) => Some(data),
             _ => None,
         }
     }

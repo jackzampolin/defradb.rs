@@ -4416,6 +4416,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cid",
+ "defra-core",
  "parking_lot 0.12.5",
  "thiserror 2.0.18",
  "tokio",

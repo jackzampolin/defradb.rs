@@ -184,22 +184,50 @@ impl<S: Store> crate::database::DB<S> {
         let collection_id = collection.collection_id().to_string();
         let short_id = collection.resolved_root_id();
 
-        // Phase 1: Collect all doc short IDs in a read-only txn
-        let doc_ids = self.collect_doc_short_ids(&collection).await?;
+        self.register_action(&collection_id, crate::Action::TRUNCATE)
+            .await?;
 
-        // Phase 2: Delete document data in chunks
-        for chunk in doc_ids.chunks(TRUNCATE_CHUNK_SIZE) {
-            self.truncate_chunk(&collection, chunk).await?;
+        let result: Result<usize> = async {
+            // Phase 1: Collect all doc short IDs in a read-only txn
+            let doc_ids = self.collect_doc_short_ids(&collection).await?;
+
+            // Phase 2: Delete document data in chunks
+            for chunk in doc_ids.chunks(TRUNCATE_CHUNK_SIZE) {
+                self.truncate_chunk(&collection, chunk).await?;
+            }
+
+            // Phase 3: Delete collection-level metadata (indexes, collection heads)
+            self.truncate_collection_metadata(&collection_id, short_id)
+                .await?;
+
+            Ok(doc_ids.len())
         }
+        .await;
 
-        // Phase 3: Delete collection-level metadata (indexes, collection heads)
-        self.truncate_collection_metadata(&collection_id, short_id)
+        let doc_count = match result {
+            Ok(doc_count) => doc_count,
+            Err(error) => {
+                if let Err(action_error) = self
+                    .fail_action(&collection_id, crate::Action::TRUNCATE, &error.to_string())
+                    .await
+                {
+                    tracing::error!(
+                        error = %action_error,
+                        collection_id = %collection_id,
+                        "Failed to record truncate action error"
+                    );
+                }
+                return Err(error);
+            }
+        };
+
+        self.complete_action(&collection_id, crate::Action::TRUNCATE)
             .await?;
 
         tracing::info!(
             collection_id = %collection_id,
             short_id = short_id,
-            doc_count = doc_ids.len(),
+            doc_count,
             "Truncated collection"
         );
 

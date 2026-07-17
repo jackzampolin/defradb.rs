@@ -172,6 +172,12 @@ pub enum NodePermission {
     LensList,
 
     // =========================================================================
+    // Action Operations
+    // =========================================================================
+    /// List incomplete actions (used by GET /api/v0/actions)
+    ActionList,
+
+    // =========================================================================
     // View Operations
     // =========================================================================
     /// Refresh materialized views (used by POST /api/v0/views/refresh)
@@ -255,6 +261,9 @@ impl NodePermission {
             Self::LensCreate => "add-lens",
             Self::LensList => "list-lens",
 
+            // Action
+            Self::ActionList => "list-action",
+
             // View
             Self::ViewRefresh => "refresh-view",
             Self::ViewGc => "gc-view",
@@ -321,6 +330,8 @@ impl NodePermission {
             // Lens
             Self::LensCreate,
             Self::LensList,
+            // Action
+            Self::ActionList,
             // View
             Self::ViewRefresh,
             Self::ViewGc,
@@ -386,6 +397,8 @@ impl NodePermission {
             // Lens
             "add-lens" => Self::LensCreate,
             "list-lens" => Self::LensList,
+            // Action
+            "list-action" => Self::ActionList,
             // View
             "refresh-view" => Self::ViewRefresh,
             "gc-view" => Self::ViewGc,
@@ -417,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_all_permissions_count() {
-        assert_eq!(NodePermission::all().len(), 49);
+        assert_eq!(NodePermission::all().len(), 50);
     }
 
     #[test]

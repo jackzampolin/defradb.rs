@@ -3,6 +3,7 @@
 //! This crate defines the fundamental types, traits, and interfaces
 //! used throughout the DefraDB ecosystem.
 
+pub mod action;
 pub mod batch_signing;
 pub mod block;
 pub mod block_delta;
@@ -22,6 +23,7 @@ pub mod thread_bounds;
 pub mod transaction;
 pub mod types;
 
+pub use action::{Action, ActionExecution, ActionStatus};
 pub use block::{
     Block, CollectionDefinitionDeltaPayload, CollectionDeltaPayload, CollectionSetDeltaPayload,
     CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink, DocumentStatus, Encryption,

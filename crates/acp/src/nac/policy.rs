@@ -3,7 +3,7 @@
 //! The NAC policy uses the Zanzibar permission model with:
 //! - `owner` relation: the node identity that enabled NAC
 //! - `admin` relation: identities with admin access (can manage other relations)
-//! - 48 permission relations: one for each NodePermission
+//! - One permission relation for each NodePermission
 //!
 //! All permissions have expression: `owner + admin` meaning either the owner
 //! or any admin can perform any operation.
@@ -26,7 +26,7 @@ pub const ADMIN_RELATION: &str = "admin";
 /// This policy defines:
 /// - `owner`: Direct relation for the node identity
 /// - `admin`: Computed relation (owner + direct admin), can manage all non-owner relations
-/// - All 48 permissions with expression `owner + admin`
+/// - All node permissions with expression `owner + admin`
 ///
 /// The admin relation has `manages` set to all permission relation names,
 /// allowing admins to grant/revoke any permission (except owner).
@@ -54,7 +54,7 @@ pub fn create_node_policy() -> Policy {
 
     resource = resource.with_relation(admin_relation);
 
-    // Add a relation for each of the 48 permissions
+    // Add a relation for each node permission.
     // Each permission has expression: owner + admin
     for perm in NodePermission::all() {
         let perm_relation = Relation::computed(
@@ -119,8 +119,8 @@ mod tests {
 
         let resource = policy.get_resource(NODE_RESOURCE_NAME).unwrap();
 
-        // Should have owner, admin, and 49 permission relations = 51 total
-        assert_eq!(resource.relations.len(), 51);
+        // Owner and admin plus one relation per permission.
+        assert_eq!(resource.relations.len(), 52);
     }
 
     #[test]
@@ -142,8 +142,7 @@ mod tests {
         let resource = policy.get_resource(NODE_RESOURCE_NAME).unwrap();
         let admin = resource.get_relation(ADMIN_RELATION).unwrap();
 
-        // Admin should manage all 49 permissions
-        assert_eq!(admin.manages.len(), 49);
+        assert_eq!(admin.manages.len(), 50);
     }
 
     #[test]

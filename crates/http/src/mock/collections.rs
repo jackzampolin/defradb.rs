@@ -26,6 +26,10 @@ impl MockCollectionManagementOperations {
 
 #[async_trait]
 impl CollectionManagementOperations for MockCollectionManagementOperations {
+    async fn list_actions(&self) -> Result<Vec<defra_core::ActionExecution>, String> {
+        Ok(Vec::new())
+    }
+
     async fn patch_collection(
         &self,
         collection_name: &str,

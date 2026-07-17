@@ -96,13 +96,16 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
 
         txn.commit().await.map_err(|e| format!("{}", e))?;
 
+        let collection_id = updated_schema.collection_id.clone();
         self.database
             .add_collection_to_cache(updated_schema)
             .map_err(|e| format!("{}", e))?;
 
         Ok(IndexInfo {
+            id: index_desc.id,
             name: index_desc.name,
             collection: collection.to_string(),
+            collection_id,
             fields: index_desc
                 .fields
                 .into_iter()
@@ -153,8 +156,10 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
         for col in &collections {
             for idx in col.get_indexes() {
                 result.push(IndexInfo {
+                    id: idx.id,
                     name: idx.name.clone(),
                     collection: col.name().to_string(),
+                    collection_id: col.collection_id().to_string(),
                     fields: idx
                         .fields
                         .iter()

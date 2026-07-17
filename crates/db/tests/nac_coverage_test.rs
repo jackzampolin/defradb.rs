@@ -20,6 +20,7 @@ use acp::nac::NodePermission::{self, *};
 ///   `set_active_collection_version`/`patch_collection` in `collection_ops/` +
 ///   `patch/mod.rs`); `add_schema_in_txn` also gates on the registry.
 /// - `CollectionTruncate`: `truncate_collection` (`collection_ops/delete.rs`).
+/// - `ActionList`: `list_actions` (`action.rs`).
 /// - `MigrationSet`: raw `set_migration` (`migration/set_migration.rs`) +
 ///   `set_migration_in_txn` (registry).
 /// - `DocumentUpdate`: `doc_mutator` create/update, `auto_commit_mutator`
@@ -28,6 +29,7 @@ use acp::nac::NodePermission::{self, *};
 const DB_METHOD_GATED: &[NodePermission] = &[
     CollectionPatch,
     CollectionTruncate,
+    ActionList,
     MigrationSet,
     DocumentUpdate, // Go uses update-document for both create and update
     DocumentDelete,

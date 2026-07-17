@@ -390,6 +390,8 @@ impl HttpClient {
         Ok(response.text().await?)
     }
 
+    endpoint!(action_list, GET "/api/v0/actions" => Vec<defra_core::ActionExecution>);
+
     // P2P
     endpoint!(p2p_info,            GET  "/api/v0/p2p/info"           => Vec<String>);
     endpoint!(p2p_peers_list,      GET  "/api/v0/p2p/peers"          => Vec<P2pPeerInfo>);

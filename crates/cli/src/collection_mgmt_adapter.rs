@@ -27,6 +27,13 @@ impl<S: Store + 'static> CollectionManagementAdapter<S> {
 
 #[async_trait]
 impl<S: Store + 'static> CollectionManagementOperations for CollectionManagementAdapter<S> {
+    async fn list_actions(&self) -> Result<Vec<defra_core::ActionExecution>, String> {
+        self.database
+            .list_actions()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     async fn patch_collection(
         &self,
         collection_name: &str,

@@ -9,6 +9,7 @@ fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
 
 #[test]
 fn new_cli_rename_surface_parses() {
+    assert!(parse(&["client", "action", "list"]).is_ok());
     assert!(parse(&["client", "collection", "add", "type User { name: String }"]).is_ok());
     assert!(parse(&[
         "client",
