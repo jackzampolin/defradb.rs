@@ -33,6 +33,8 @@ pub struct RedbStore {
     db_path: std::path::PathBuf,
     /// Conflict tracker for write-write conflict detection
     conflict_tracker: Arc<ConflictTracker>,
+    /// Keeps transaction snapshots aligned with committed conflict versions.
+    commit_gate: Arc<tokio::sync::RwLock<()>>,
     /// Durability mode for write transactions
     durability: DurabilityMode,
     /// Group commit buffer for coalescing write transactions
@@ -146,6 +148,7 @@ impl RedbStore {
 
         let db = Arc::new(db);
         let conflict_tracker = Arc::new(ConflictTracker::new());
+        let commit_gate = Arc::new(tokio::sync::RwLock::new(()));
 
         // Create group commit buffer if a tokio runtime is available.
         // This coalesces multiple transaction commits into single redb writes.
@@ -154,6 +157,7 @@ impl RedbStore {
                 Arc::clone(&db),
                 opts.durability(),
                 Arc::clone(&conflict_tracker),
+                Arc::clone(&commit_gate),
             ))
         });
 
@@ -164,6 +168,7 @@ impl RedbStore {
             close_timeout: opts.close_timeout(),
             db_path,
             conflict_tracker,
+            commit_gate,
             durability: opts.durability(),
             group_commit,
         })
@@ -301,11 +306,13 @@ impl Store for RedbStore {
         }
         let mut guard = NewTxnGuard(&self.active_txn_count, false);
 
-        // Record version before taking snapshot for conflict detection
-        let read_version = self.conflict_tracker.current_version();
-
-        // Use redb's MVCC ReadTransaction for snapshot isolation (O(1) creation)
-        let read_txn = self.db.begin_read()?;
+        let (read_version, read_txn) = {
+            // Pair the conflict version and Redb snapshot without a commit between them.
+            let _commit_guard = self.commit_gate.read().await;
+            let read_version = self.conflict_tracker.current_version();
+            let read_txn = self.db.begin_read()?;
+            (read_version, read_txn)
+        };
 
         // Defuse the guard - transaction will manage its own count via its Drop impl
         guard.1 = true;
@@ -314,6 +321,7 @@ impl Store for RedbStore {
             db: Arc::clone(&self.db),
             active_txn_count: Arc::clone(&self.active_txn_count),
             conflict_tracker: Arc::clone(&self.conflict_tracker),
+            commit_gate: Arc::clone(&self.commit_gate),
             read_version,
             read_txn,
             pending: Mutex::new(BTreeMap::new()),
