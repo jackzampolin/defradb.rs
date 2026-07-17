@@ -386,7 +386,7 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
                         // consumed by this delivery, so forward it and finish
                         // (also prevents a concurrent republish tick from
                         // re-registering a request that was already answered).
-                        let _ = tx.send((reply, resp.from)).await;
+                        let _ = tx.send(Ok((reply, resp.from))).await;
                         break;
                     }
                     _ = tokio::time::sleep_until(republish_at) => {
@@ -396,6 +396,7 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
                                 timeout = ?RESPONSE_TIMEOUT,
                                 "KMS fetch got no reply within the response timeout; giving up"
                             );
+                            let _ = tx.send(Err(kms::Error::KeyUnavailable)).await;
                             break;
                         }
                         // Re-register BEFORE dropping the old handle: identical
@@ -712,7 +713,8 @@ mod tests {
         let (got_reply, responder_id) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("reply must arrive within timeout")
-            .expect("reply present");
+            .expect("reply present")
+            .expect("reply must succeed");
         assert_eq!(got_reply, reply);
         assert_eq!(
             responder_id,
@@ -776,15 +778,16 @@ mod tests {
         let (got, _) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("reply within timeout")
-            .expect("reply present");
+            .expect("reply present")
+            .expect("reply must succeed");
         assert_eq!(got, reply);
     }
 
     /// Go parity (`fetchEncryptionKeyResponseTimeout`): with no reply at all,
-    /// the reply stream must CLOSE once the response timeout elapses, so
-    /// `get_keys`' `wait_all` resolves instead of hanging the merge forever.
+    /// the reply stream must report unavailability once the response timeout
+    /// elapses, so callers can retry instead of treating silence as denial.
     #[tokio::test(start_paused = true)]
-    async fn request_with_no_reply_times_out_and_closes_stream() {
+    async fn request_with_no_reply_reports_unavailable() {
         let transport = RacyTransport::new(0);
         let kt = PubsubKeyTransport::new(transport).await.unwrap();
 
@@ -794,10 +797,13 @@ mod tests {
         };
         let mut rx = kt.send_request(req).await.expect("send_request");
 
-        let got = tokio::time::timeout(RESPONSE_TIMEOUT + Duration::from_secs(1), rx.recv())
+        let error = tokio::time::timeout(RESPONSE_TIMEOUT + Duration::from_secs(1), rx.recv())
             .await
-            .expect("stream must close at the response timeout, not hang");
-        assert!(got.is_none(), "no reply means the stream closes empty");
+            .expect("stream must resolve at the response timeout, not hang")
+            .expect("timeout result present")
+            .expect_err("no reply must be retryable unavailability");
+        assert!(matches!(error, kms::Error::KeyUnavailable));
+        assert!(rx.recv().await.is_none());
     }
 
     /// An inbound request on the base topic must be answered by publishing an

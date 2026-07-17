@@ -29,13 +29,14 @@ pub struct EncodedFetchRequest {
 
 /// Receiver channel for incoming replies to a fetch request.
 ///
-/// Each item carries the reply plus the responder's peer id, needed to
-/// reconstruct the ECIES AAD (which binds the responder peer id per Go's
-/// `makeAssociatedData`).
+/// Each successful item carries the reply plus the responder's peer id, needed
+/// to reconstruct the ECIES AAD (which binds the responder peer id per Go's
+/// `makeAssociatedData`). Transport failures are surfaced in-band so callers
+/// can distinguish a timeout from an explicit empty reply.
 ///
 /// Closes when the transport stops listening for replies (timeout
 /// elapsed, peer set exhausted). Callers drain until close.
-pub type TransportReplyStream = mpsc::Receiver<(FetchEncryptionKeyReply, String)>;
+pub type TransportReplyStream = mpsc::Receiver<Result<(FetchEncryptionKeyReply, String)>>;
 
 /// Handler invoked by a transport when an inbound request arrives.
 /// `DefraKms` installs itself as the handler at startup.

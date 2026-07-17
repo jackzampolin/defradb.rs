@@ -100,11 +100,11 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// the same document are processed one at a time, preventing read-modify-write
     /// races on the CRDT accumulation store (#1021).
     pub(crate) merge_queue: Arc<db::DocWriteQueue>,
-    /// Encryption CIDs for which a background DEK prefetch was already
-    /// spawned, so repeated deliveries of the same deferred field block
+    /// Encryption CIDs with a background DEK prefetch currently in flight, so
+    /// repeated deliveries of the same deferred field block
     /// (pushlog + gossip + retries) don't fan out duplicate cross-peer
     /// fetches.
-    prefetched_dek_cids: std::sync::Mutex<HashSet<Cid>>,
+    prefetched_dek_cids: Arc<std::sync::Mutex<HashSet<Cid>>>,
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
@@ -120,7 +120,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             se_enc_key: std::sync::OnceLock::new(),
             kms: std::sync::OnceLock::new(),
             merge_queue,
-            prefetched_dek_cids: std::sync::Mutex::new(HashSet::new()),
+            prefetched_dek_cids: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
 
@@ -144,16 +144,15 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
         let ctx = Self::kms_request_context(Some(metadata));
+        let prefetched_dek_cids = Arc::clone(&self.prefetched_dek_cids);
         tokio::spawn(async move {
-            match kms.get_keys(&ctx, std::slice::from_ref(&enc_cid)).await {
-                Ok(results) => {
-                    // Drain so the reply (if granted) is cached; a denial or
-                    // timeout resolves the stream without a key.
-                    let _ = results.wait_all().await;
-                }
-                Err(e) => {
-                    tracing::debug!(enc_cid = %enc_cid, error = %e, "DEK prefetch failed to send");
-                }
+            let result = match kms.get_keys(&ctx, std::slice::from_ref(&enc_cid)).await {
+                Ok(results) => results.wait_all().await.map(|_| ()),
+                Err(error) => Err(error),
+            };
+            prefetched_dek_cids.lock().unwrap().remove(&enc_cid);
+            if let Err(error) = result {
+                tracing::debug!(enc_cid = %enc_cid, error = %error, "DEK prefetch failed");
             }
         });
     }
@@ -305,19 +304,27 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // plaintext key; we then AES-GCM decrypt the block data.
         if let Some(kms) = self.kms() {
             let ctx = Self::kms_request_context(metadata);
-            let results = kms
-                .get_keys(&ctx, std::slice::from_ref(enc_cid))
-                .await
-                .map_err(|e| MergeError::Storage(format!("kms get_keys: {e}")))?;
-            let map = results
-                .wait_all()
-                .await
-                .map_err(|e| MergeError::Storage(format!("kms wait_all: {e}")))?;
-            let key = map
-                .get(enc_cid)
-                .ok_or_else(|| MergeError::Storage(format!("kms returned no key for {enc_cid}")))?;
-            return crypto::encryption::aes::decrypt_aes(None, data, key, &[])
-                .map_err(|e| MergeError::MergeFailed(format!("kms-keyed decryption failed: {e}")));
+            let results = kms.get_keys(&ctx, std::slice::from_ref(enc_cid)).await?;
+            let mut receiver = results.into_receiver();
+            let mut denied = None;
+            let mut unavailable = None;
+            while let Some(result) = receiver.recv().await {
+                match result {
+                    Ok((cid, key)) if cid == *enc_cid => {
+                        return crypto::encryption::aes::decrypt_aes(None, data, &key, &[])
+                            .map_err(|e| {
+                                MergeError::MergeFailed(format!("kms-keyed decryption failed: {e}"))
+                            });
+                    }
+                    Ok(_) => {}
+                    Err(error @ kms::Error::AccessDenied { .. }) => denied = Some(error),
+                    Err(error) => unavailable = Some(error),
+                }
+            }
+            return Err(unavailable
+                .or(denied)
+                .unwrap_or(kms::Error::KeyUnavailable)
+                .into());
         }
 
         // Legacy path (unchanged): read the raw key directly from the
@@ -671,10 +678,21 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                             };
                             &decrypted_block
                         }
-                        Err(e) => {
+                        Err(error @ MergeError::Kms(kms::Error::AccessDenied { .. })) => {
                             tracing::debug!(
                                 cid = %cid,
-                                error = %e,
+                                error = %error,
+                                "Cannot decrypt standalone LWW block, skipping (canRead=false)"
+                            );
+                            return Ok(MergeOutcome::terminal_skip(
+                                "encryption key unavailable for standalone field block",
+                            ));
+                        }
+                        Err(error @ MergeError::Kms(_)) => return Err(error),
+                        Err(error) => {
+                            tracing::debug!(
+                                cid = %cid,
+                                error = %error,
                                 "Cannot decrypt standalone LWW block, skipping (canRead=false)"
                             );
                             return Ok(MergeOutcome::terminal_skip(
@@ -704,10 +722,21 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                             };
                             &decrypted_block
                         }
-                        Err(e) => {
+                        Err(error @ MergeError::Kms(kms::Error::AccessDenied { .. })) => {
                             tracing::debug!(
                                 cid = %cid,
-                                error = %e,
+                                error = %error,
+                                "Cannot decrypt standalone Counter block, skipping (canRead=false)"
+                            );
+                            return Ok(MergeOutcome::terminal_skip(
+                                "encryption key unavailable for standalone field block",
+                            ));
+                        }
+                        Err(error @ MergeError::Kms(_)) => return Err(error),
+                        Err(error) => {
+                            tracing::debug!(
+                                cid = %cid,
+                                error = %error,
                                 "Cannot decrypt standalone Counter block, skipping (canRead=false)"
                             );
                             return Ok(MergeOutcome::terminal_skip(
@@ -2991,8 +3020,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn composite_skip_field_does_not_mark_unreadable_linked_counter_merged() {
+    async fn composite_access_denial_does_not_mark_unreadable_linked_counter_merged() {
         let (handler, blockstore) = make_handler_with_counter_schema().await;
+        handler.set_kms(Arc::new(StubKms::access_denied()));
 
         let encryption = Encryption::new(b"wrong-key".to_vec());
         let encryption_cid = encryption.generate_cid().unwrap();
@@ -3082,9 +3112,38 @@ mod tests {
             .unwrap());
     }
 
-    /// Stub KMS that returns a fixed key for every requested CID.
+    enum StubKmsResponse {
+        Key([u8; 32]),
+        AccessDenied,
+        UnavailableThenKey([u8; 32]),
+    }
+
     struct StubKms {
-        key: [u8; 32],
+        response: StubKmsResponse,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl StubKms {
+        fn fixed_key(key: [u8; 32]) -> Self {
+            Self {
+                response: StubKmsResponse::Key(key),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn access_denied() -> Self {
+            Self {
+                response: StubKmsResponse::AccessDenied,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn unavailable_then_key(key: [u8; 32]) -> Self {
+            Self {
+                response: StubKmsResponse::UnavailableThenKey(key),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
     }
 
     #[async_trait]
@@ -3095,8 +3154,28 @@ mod tests {
             cids: &[kms::EncryptionCid],
         ) -> kms::Result<kms::KeyResults> {
             let (results, tx) = kms::KeyResults::new(cids.len().max(1));
-            for cid in cids {
-                let _ = tx.send(Ok((*cid, self.key))).await;
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match &self.response {
+                StubKmsResponse::Key(key) => {
+                    for cid in cids {
+                        let _ = tx.send(Ok((*cid, *key))).await;
+                    }
+                }
+                StubKmsResponse::AccessDenied => {
+                    let _ = tx
+                        .send(Err(kms::Error::AccessDenied {
+                            reason: "test policy denied".into(),
+                        }))
+                        .await;
+                }
+                StubKmsResponse::UnavailableThenKey(_) if call == 0 => {
+                    let _ = tx.send(Err(kms::Error::KeyUnavailable)).await;
+                }
+                StubKmsResponse::UnavailableThenKey(key) => {
+                    for cid in cids {
+                        let _ = tx.send(Ok((*cid, *key))).await;
+                    }
+                }
             }
             drop(tx);
             Ok(results)
@@ -3120,6 +3199,165 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn composite_kms_unavailable_rolls_back_and_retries() {
+        let (handler, blockstore, _bus) = make_handler_with_schema_and_bus().await;
+        let key = [7u8; 32];
+        handler.set_kms(Arc::new(StubKms::unavailable_then_key(key)));
+
+        let mut plaintext = Vec::new();
+        ciborium::into_writer(&NormalValue::String("Alice".to_string()), &mut plaintext).unwrap();
+        let (ciphertext, _) =
+            crypto::encryption::aes::encrypt_aes(&plaintext, &key, &[], true).unwrap();
+
+        let encryption = Encryption::new(key.to_vec());
+        let encryption_cid = encryption.generate_cid().unwrap();
+        blockstore
+            .put(&encryption_cid, &encryption.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+
+        let field_block = Block {
+            delta: CrdtDelta::Lww(LwwDeltaPayload {
+                field_name: "name".to_string(),
+                schema_version_id: "v1".to_string(),
+                priority: 1,
+                data: ciphertext,
+            }),
+            heads: None,
+            links: None,
+            encryption: Some(encryption_cid),
+            signature: None,
+        };
+        let field_cid = field_block.generate_cid().unwrap();
+        blockstore
+            .put(&field_cid, &field_block.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+
+        let composite_payload = CompositeDeltaPayload {
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            status: 0,
+        };
+        let composite_block = Block {
+            delta: CrdtDelta::Composite(composite_payload.clone()),
+            heads: None,
+            links: Some(vec![DAGLink::new("name", field_cid)]),
+            encryption: None,
+            signature: None,
+        };
+        let composite_cid = composite_block.generate_cid().unwrap();
+        let doc_id = db_blocks::derive_doc_id(&composite_cid);
+        let metadata = BlockMetadata::normal(
+            &doc_id,
+            "col-users",
+            "did:key:z6MkrKmsTimeoutRetry",
+            None,
+            false,
+        );
+
+        let first = handler
+            .process_composite_delta(
+                &composite_cid,
+                &composite_block,
+                &composite_payload,
+                &metadata,
+                false,
+                0,
+            )
+            .await;
+        assert!(matches!(
+            first,
+            Err(MergeError::Kms(kms::Error::KeyUnavailable))
+        ));
+
+        {
+            let txn = handler.db.new_txn(true).await.unwrap();
+            let systemstore = txn.systemstore().unwrap();
+            assert!(db::doc_id_map::get_doc_ref(&systemstore, &doc_id)
+                .await
+                .unwrap()
+                .is_none());
+        }
+
+        let outcome = handler
+            .process_composite_delta(
+                &composite_cid,
+                &composite_block,
+                &composite_payload,
+                &metadata,
+                false,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, MergeOutcome::Merged);
+
+        let collection = handler
+            .db
+            .find_collection_by_id("col-users")
+            .unwrap()
+            .unwrap();
+        let txn = handler.db.new_txn(true).await.unwrap();
+        let systemstore = txn.systemstore().unwrap();
+        let doc_ref = db::doc_id_map::get_doc_ref(&systemstore, &doc_id)
+            .await
+            .unwrap()
+            .expect("successful retry registers document identity");
+        let datastore = txn.datastore().unwrap();
+        let stored = collection
+            .get_with_datastore_include_deleted(
+                &datastore,
+                doc_ref.doc_short_id,
+                &DocID::from_string(&doc_id).unwrap(),
+                false,
+            )
+            .await
+            .unwrap()
+            .expect("successful retry materializes document")
+            .0;
+        assert_eq!(
+            stored.get("name"),
+            Some(&NormalValue::String("Alice".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn dek_prefetch_can_restart_after_completion() {
+        let (handler, _blockstore) = make_handler();
+        let kms = Arc::new(StubKms::unavailable_then_key([7u8; 32]));
+        handler.set_kms(kms.clone());
+        let enc_cid = Encryption::new(vec![7u8; 32]).generate_cid().unwrap();
+        let metadata = BlockMetadata::normal(
+            "bafyreic6n5r4s3gjg6wdfbts6ijx6hnqc6qkver5msv2qzuqchh2u6w6sm",
+            "col-users",
+            "did:key:z6MkrKmsPrefetchRetry",
+            None,
+            false,
+        );
+
+        for expected_calls in 1..=2 {
+            handler.spawn_dek_prefetch(enc_cid, &metadata);
+            timeout(Duration::from_secs(1), async {
+                loop {
+                    let calls = kms.calls.load(std::sync::atomic::Ordering::SeqCst);
+                    let finished = !handler
+                        .prefetched_dek_cids
+                        .lock()
+                        .unwrap()
+                        .contains(&enc_cid);
+                    if calls == expected_calls && finished {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("DEK prefetch should complete");
+        }
+    }
+
+    #[tokio::test]
     async fn decrypt_block_data_routes_through_kms_when_set() {
         let (handler, _blockstore) = make_handler();
 
@@ -3133,7 +3371,7 @@ mod tests {
         let enc_cid =
             Cid::try_from("bafyreidykglsfhoixmivffc5uwhcgshx4j465xwqntbmu43nb2dzqwfvae").unwrap();
 
-        handler.set_kms(Arc::new(StubKms { key }));
+        handler.set_kms(Arc::new(StubKms::fixed_key(key)));
 
         let decrypted = handler
             .decrypt_block_data(&ciphertext, Some(&enc_cid), None)

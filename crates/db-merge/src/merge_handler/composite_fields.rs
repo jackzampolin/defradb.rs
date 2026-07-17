@@ -241,9 +241,17 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         decrypted_payload.data = decrypted;
                         CrdtDelta::Lww(decrypted_payload)
                     }
-                    Err(e) => {
+                    Err(error @ MergeError::Kms(kms::Error::AccessDenied { .. })) => {
                         tracing::debug!(
-                            error = %e,
+                            error = %error,
+                            "Cannot decrypt LWW field block, skipping field (canRead=false)"
+                        );
+                        return Ok(EffectiveLinkedDelta::SkipField);
+                    }
+                    Err(error @ MergeError::Kms(_)) => return Err(error),
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
                             "Cannot decrypt LWW field block, skipping field (canRead=false)"
                         );
                         return Ok(EffectiveLinkedDelta::SkipField);
@@ -264,9 +272,17 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         decrypted_payload.data = decrypted;
                         CrdtDelta::Counter(decrypted_payload)
                     }
-                    Err(e) => {
+                    Err(error @ MergeError::Kms(kms::Error::AccessDenied { .. })) => {
                         tracing::debug!(
-                            error = %e,
+                            error = %error,
+                            "Cannot decrypt Counter field block, skipping field (canRead=false)"
+                        );
+                        return Ok(EffectiveLinkedDelta::SkipField);
+                    }
+                    Err(error @ MergeError::Kms(_)) => return Err(error),
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
                             "Cannot decrypt Counter field block, skipping field (canRead=false)"
                         );
                         return Ok(EffectiveLinkedDelta::SkipField);

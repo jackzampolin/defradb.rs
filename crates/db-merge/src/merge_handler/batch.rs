@@ -343,6 +343,12 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                             };
                             &decrypted_block
                         }
+                        Err(MergeError::Kms(kms::Error::AccessDenied { .. })) => {
+                            return Ok(MergeOutcome::terminal_skip(
+                                "encryption key unavailable for standalone field block",
+                            ));
+                        }
+                        Err(error @ MergeError::Kms(_)) => return Err(error),
                         Err(_) => &block,
                     }
                 }
@@ -367,6 +373,12 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                             };
                             &decrypted_block
                         }
+                        Err(MergeError::Kms(kms::Error::AccessDenied { .. })) => {
+                            return Ok(MergeOutcome::terminal_skip(
+                                "encryption key unavailable for standalone field block",
+                            ));
+                        }
+                        Err(error @ MergeError::Kms(_)) => return Err(error),
                         Err(_) => &block,
                     }
                 }

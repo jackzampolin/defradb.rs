@@ -241,7 +241,14 @@ impl KmsService for DefraKms {
                         .as_bytes()
                         .to_vec();
                     spawn_task(async move {
-                        while let Some((reply, responder_peer_id)) = rx.recv().await {
+                        while let Some(transport_result) = rx.recv().await {
+                            let (reply, responder_peer_id) = match transport_result {
+                                Ok(reply) => reply,
+                                Err(error) => {
+                                    let _ = tx.send(Err(error)).await;
+                                    continue;
+                                }
+                            };
                             tracing::debug!(
                                 responder = %responder_peer_id,
                                 links = reply.links.len(),
@@ -255,6 +262,7 @@ impl KmsService for DefraKms {
                                 &our_eph_pub,
                                 &responder_peer_id,
                             );
+                            let mut returned = std::collections::HashSet::new();
                             for (cid_bytes, block_env) in
                                 reply.links.iter().zip(reply.blocks.iter())
                             {
@@ -271,6 +279,7 @@ impl KmsService for DefraKms {
                                     );
                                     continue;
                                 }
+                                returned.insert(cid);
                                 let block_bytes = match crate::ecies_envelope::unwrap_with_private(
                                     block_env,
                                     &eph_clone,
@@ -323,6 +332,14 @@ impl KmsService for DefraKms {
                                     "KMS get_keys: DEK unwrapped and delivered to caller"
                                 );
                                 let _ = tx.send(Ok((cid, key))).await;
+                            }
+                            if returned.len() < remote_set.len() {
+                                let _ = tx
+                                    .send(Err(Error::AccessDenied {
+                                        reason: "peer did not release one or more requested keys"
+                                            .into(),
+                                    }))
+                                    .await;
                             }
                         }
                     });
@@ -616,7 +633,9 @@ mod tests {
     }
 
     struct FakeTransport {
-        reply: tokio::sync::Mutex<Option<(crate::wire::FetchEncryptionKeyReply, String)>>,
+        reply: tokio::sync::Mutex<
+            Option<crate::Result<(crate::wire::FetchEncryptionKeyReply, String)>>,
+        >,
     }
     #[async_trait::async_trait]
     impl KeyTransport for FakeTransport {
@@ -682,7 +701,7 @@ mod tests {
         // Local empty KMS with a fake transport carrying the reply + the
         // responder peer id (same one the serve side bound into the AAD).
         let fake = FakeTransport {
-            reply: tokio::sync::Mutex::new(Some((reply, "peer".to_string()))),
+            reply: tokio::sync::Mutex::new(Some(Ok((reply, "peer".to_string())))),
         };
         let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
         let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
@@ -699,5 +718,70 @@ mod tests {
         let map = results.wait_all().await.unwrap();
         assert_eq!(map.len(), 1);
         assert!(map.contains_key(&peer_cid));
+    }
+
+    #[tokio::test]
+    async fn get_keys_propagates_transport_timeout() {
+        let fake = FakeTransport {
+            reply: tokio::sync::Mutex::new(Some(Err(crate::Error::KeyUnavailable))),
+        };
+        let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+        let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
+        let kms = DefraKms::new(
+            store,
+            vec![Arc::new(fake)],
+            policy,
+            any_doc_resolver(),
+            node_did(),
+        );
+        let cid: crate::EncryptionCid =
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+                .parse()
+                .unwrap();
+
+        let result = kms
+            .get_keys(&RequestContext::anonymous(), &[cid])
+            .await
+            .unwrap()
+            .wait_all()
+            .await;
+
+        assert!(matches!(result, Err(crate::Error::KeyUnavailable)));
+    }
+
+    #[tokio::test]
+    async fn get_keys_maps_empty_peer_reply_to_access_denied() {
+        let fake = FakeTransport {
+            reply: tokio::sync::Mutex::new(Some(Ok((
+                crate::FetchEncryptionKeyReply {
+                    links: vec![],
+                    blocks: vec![],
+                    ephemeral_public_key: vec![],
+                },
+                "peer".to_string(),
+            )))),
+        };
+        let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+        let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
+        let kms = DefraKms::new(
+            store,
+            vec![Arc::new(fake)],
+            policy,
+            any_doc_resolver(),
+            node_did(),
+        );
+        let cid: crate::EncryptionCid =
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+                .parse()
+                .unwrap();
+
+        let result = kms
+            .get_keys(&RequestContext::anonymous(), &[cid])
+            .await
+            .unwrap()
+            .wait_all()
+            .await;
+
+        assert!(matches!(result, Err(crate::Error::AccessDenied { .. })));
     }
 }
