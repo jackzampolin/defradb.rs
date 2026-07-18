@@ -173,10 +173,27 @@ fn user_name_commits(node: &DefraClient, doc_id: &str) -> serde_json::Value {
     .unwrap_or_default()
 }
 
-fn wire_user_bidirectional(cluster: &TestCluster) {
+fn peer_id_from_addr(addr: &str) -> &str {
+    addr.rsplit_once("/p2p/")
+        .map_or(addr, |(_, peer_id)| peer_id)
+}
+
+fn has_active_peer(node: &DefraClient, peer_id: &str) -> bool {
+    node.p2p_active_peers()
+        .ok()
+        .and_then(|peers| {
+            peers.as_array().map(|peers| {
+                peers.iter().any(|peer| {
+                    peer.as_str()
+                        .is_some_and(|addr| peer_id_from_addr(addr) == peer_id)
+                })
+            })
+        })
+        .unwrap_or(false)
+}
+
+async fn wire_user_bidirectional(cluster: &TestCluster) {
     let (a0, a1) = (node_addr(cluster, 0), node_addr(cluster, 1));
-    cluster.client(0).p2p_connect(&[a1.as_str()]).ok();
-    cluster.client(1).p2p_connect(&[a0.as_str()]).ok();
     cluster
         .client(0)
         .p2p_collection_add(&["User"])
@@ -193,6 +210,41 @@ fn wire_user_bidirectional(cluster: &TestCluster) {
         .client(1)
         .p2p_replicator_set(&["User"], &a0)
         .expect("replicator node1");
+
+    let (peer0, peer1) = (peer_id_from_addr(&a0), peer_id_from_addr(&a1));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut last_dial0, mut last_dial1) =
+        ("not attempted".to_string(), "not attempted".to_string());
+    loop {
+        let (node0_connected, node1_connected) = (
+            has_active_peer(&cluster.client(0), peer1),
+            has_active_peer(&cluster.client(1), peer0),
+        );
+        if node0_connected && node1_connected {
+            return;
+        }
+
+        if !node0_connected {
+            last_dial0 = cluster
+                .client(0)
+                .p2p_connect(&[a1.as_str()])
+                .map(|_| "ok".to_string())
+                .unwrap_or_else(|err| format!("{err:#}"));
+        }
+        if !node1_connected {
+            last_dial1 = cluster
+                .client(1)
+                .p2p_connect(&[a0.as_str()])
+                .map(|_| "ok".to_string())
+                .unwrap_or_else(|err| format!("{err:#}"));
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "P2P heal timed out: node0->{peer1} last dial={last_dial0}; node1->{peer0} last dial={last_dial1}"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
 }
 
 /// Controlled equal-priority LWW probe: the nodes are intentionally not wired
@@ -236,7 +288,7 @@ async fn run_lww_tie_partition_probe(cluster: TestCluster, label: &str, expected
         user_name_commits(&cluster.client(1), &id),
     );
 
-    wire_user_bidirectional(&cluster);
+    wire_user_bidirectional(&cluster).await;
     assert!(
         support::poll_dags_converged(
             &cluster.client(0),
