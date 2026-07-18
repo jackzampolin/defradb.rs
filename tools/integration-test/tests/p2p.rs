@@ -2,6 +2,8 @@
 mod connection_manager;
 #[path = "p2p/document.rs"]
 mod document;
+#[path = "p2p/feature_binaries.rs"]
+mod feature_binaries;
 #[path = "p2p/filtered_replication.rs"]
 mod filtered_replication;
 #[path = "p2p/idempotent_replay.rs"]

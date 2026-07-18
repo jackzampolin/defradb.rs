@@ -1,5 +1,9 @@
 use std::path::PathBuf;
 
+mod feature_binaries;
+
+pub use feature_binaries::build_cli_variant;
+
 // Re-export modules from defra-harness
 pub use defra_harness::client;
 pub use defra_harness::cluster;
