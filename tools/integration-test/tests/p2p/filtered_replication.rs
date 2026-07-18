@@ -460,14 +460,16 @@ async fn rust_filtered_replicator_cli_requires_filter_field() {
 }
 
 /// #8: the filter must gate the encrypted (SE-artifact) push path too. A
-/// non-matching encrypted document must not reach the filtered peer; a matching
-/// one must (its `_docID` is observable even without the decryption key).
+/// non-matching encrypted document must not reach the filtered peer; matching
+/// documents must arrive with decrypted secrets, proving their field blocks
+/// triggered DEK resolution.
 #[tokio::test]
 async fn rust_filtered_replication_encrypted_respects_filter() {
     const SECRET_SCHEMA: &str = "type SecretDoc { agent_did: String @immutable  secret: String }";
     let cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_p2p()
+        .with_encryption()
         .build()
         .await
         .unwrap();
@@ -513,17 +515,21 @@ async fn rust_filtered_replication_encrypted_respects_filter() {
     poll_until(
         || {
             let result = node1_for_poll
-                .query("query { SecretDoc { _docID } }")
+                .query("query { SecretDoc { _docID secret } }")
                 .unwrap_or_default();
             let Some(rows) = result["SecretDoc"].as_array() else {
                 return false;
             };
-            let ids: Vec<&str> = rows.iter().filter_map(|r| r["_docID"].as_str()).collect();
-            ids.contains(&matching_id_poll.as_str()) && ids.contains(&matching2_id_poll.as_str())
+            let has_decrypted = |id: &str, secret: &str| {
+                rows.iter().any(|row| {
+                    row["_docID"].as_str() == Some(id) && row["secret"].as_str() == Some(secret)
+                })
+            };
+            has_decrypted(&matching_id_poll, "s") && has_decrypted(&matching2_id_poll, "s2")
         },
         P2P_TIMEOUT,
         P2P_POLL_INTERVAL,
-        "matching encrypted documents did not replicate to filtered peer",
+        "matching encrypted documents did not replicate and decrypt on filtered peer",
     )
     .await;
 

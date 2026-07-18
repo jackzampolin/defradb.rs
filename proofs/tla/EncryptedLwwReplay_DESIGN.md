@@ -47,6 +47,7 @@ stored, and replay against a newer local write.
 drives two encrypted siblings across a real node restart, first proves identical
 commit DAGs, then asserts both nodes decrypt and materialize the LWW winner.
 `tools/integration-test/tests/p2p/filtered_replication.rs` asserts matching
-encrypted documents retain their complete delivery path. The merge/KMS unit
-tests exercise the deterministic timeout-to-retry classification that is hard
-to schedule reliably through the external harness.
+encrypted documents decrypt on the filtered peer, proving their field heads
+survive selection and trigger DEK resolution. The merge/KMS unit tests exercise
+the deterministic timeout-to-retry classification that is hard to schedule
+reliably through the external harness.
