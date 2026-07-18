@@ -44,7 +44,7 @@ zeroize = "1.8"
 rand = { workspace = true }
 uuid = { workspace = true }
 cid = { workspace = true }
-tokio = { version = "1.35", default-features = false, features = ["rt", "sync"] }
+tokio = { version = "1.35", default-features = false, features = ["rt", "sync", "macros"] }
 futures = { workspace = true }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 
