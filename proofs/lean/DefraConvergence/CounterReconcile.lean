@@ -37,6 +37,14 @@ converges; `Int` deltas ⇒ PNCounter decrements covered, no value-magnitude
 comparison). The concurrency axis — that the concurrent RMW realizes this fold
 without losing or double-applying a delta — is proven by `proofs/tla/TwoStoreCounter`.
 
+This also settles #1051's representation question: Rust's PNCounter is not a
+separate product-state `(positive, negative)` algebra. `CType::PnCounter` enables
+negative deltas on the same `Counter`, and both local writes and merges fold those
+signed deltas into the same authoritative value. Mapping a product PN history to
+its signed increments and decrements therefore refines directly to `counterCM`;
+there is no additional implementation state for a separate product model to
+describe.
+
 The `## Instantiating the generic CRDT-field core` section then plugs this merge
 into `DefraConvergence.CrdtField`, inheriting `{two,three}_converge`.
 
@@ -191,7 +199,9 @@ theorem singleStore_three_converge (s a b c : Int) :
 
 /-- **PNCounter (decrement) safety.** The fold is correct for negative deltas:
     `+50` then `-30` converges to `+20` in either order — no clamping, no
-    value-magnitude comparison. -/
+    value-magnitude comparison. This is the PNCounter refinement theorem: the
+    schema mode reuses the signed `Int` counter algebra rather than introducing a
+    separate product-state merge. -/
 theorem singleStore_pncounter_converges (s : Int) :
     applyAll s [50, -30] = applyAll s [-30, 50] ∧ applyAll 0 [50, -30] = 20 := by
   simp only [applyAll, sumList]; omega
