@@ -104,6 +104,40 @@ async fn batched_mutation_rollback_test(cluster: TestCluster) {
     );
 }
 
+async fn mutation_fragment_spread_order_test(cluster: TestCluster) {
+    let client = cluster.client(0);
+
+    client
+        .schema_add("type User { name: String }")
+        .expect("failed to add schema");
+
+    let data = client
+        .query(
+            r#"mutation {
+                ...AddFirst
+                ...AddFirst
+                skipped: add_User(input: {name: "Skipped"}) @skip(if: true) { name }
+                ... @include(if: false) {
+                    skippedInline: add_User(input: {name: "Skipped inline"}) { name }
+                }
+                second: add_User(input: {name: "Second"}) { name }
+            }
+
+            fragment AddFirst on Mutation {
+                first: add_User(input: {name: "First"}) { name }
+            }"#,
+        )
+        .expect("fragment mutations should be collected in request order");
+
+    assert_eq!(data["first"][0]["name"], "First");
+    assert_eq!(data["second"][0]["name"], "Second");
+
+    let users = client
+        .query("query { User { name } }")
+        .expect("query users after fragment mutations");
+    assert_eq!(users["User"].as_array().map(Vec::len), Some(2));
+}
+
 async fn batched_mutation_aliases_p2p_regression_test(cluster: TestCluster) {
     let client = cluster.client(0);
 
@@ -163,6 +197,10 @@ async fn batched_mutation_aliases_p2p_regression_test(cluster: TestCluster) {
 
 for_each_runtime!(batched_mutation_aliases, batched_mutation_aliases_test);
 for_each_runtime!(batched_mutation_rollback, batched_mutation_rollback_test);
+for_each_runtime!(
+    mutation_fragment_spread_order,
+    mutation_fragment_spread_order_test
+);
 for_each_runtime!(
     batched_mutation_aliases_p2p_regression,
     batched_mutation_aliases_p2p_regression_test,

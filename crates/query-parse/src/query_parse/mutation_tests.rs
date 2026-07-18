@@ -139,6 +139,110 @@ fn test_parse_multiple_mutations() {
 }
 
 #[test]
+fn test_parse_mutation_fragment_spread_in_request_order() {
+    let query = r#"
+        mutation {
+            ...AddFirst
+            second: add_User(input: {name: "Second"}) { name }
+        }
+
+        fragment AddFirst on Mutation {
+            first: add_User(input: {name: "First"}) { name }
+        }
+    "#;
+
+    let mutations = parse_mutations(query).unwrap();
+    let output_names: Vec<_> = mutations.iter().map(Mutation::output_name).collect();
+
+    assert_eq!(output_names, ["first", "second"]);
+}
+
+#[test]
+fn test_parse_mutation_inline_fragment_in_request_order() {
+    let query = r#"
+        mutation {
+            first: add_User(input: {name: "First"}) { name }
+            ... on Mutation {
+                second: add_User(input: {name: "Second"}) { name }
+            }
+            third: add_User(input: {name: "Third"}) { name }
+        }
+    "#;
+
+    let mutations = parse_mutations(query).unwrap();
+    let output_names: Vec<_> = mutations.iter().map(Mutation::output_name).collect();
+
+    assert_eq!(output_names, ["first", "second", "third"]);
+}
+
+#[test]
+fn test_parse_mutation_fragment_spread_only_once() {
+    let query = r#"
+        mutation {
+            ...AddUser
+            ...AddUser
+        }
+
+        fragment AddUser on Mutation {
+            user: add_User(input: {name: "Alice"}) { name }
+        }
+    "#;
+
+    let mutations = parse_mutations(query).unwrap();
+
+    assert_eq!(mutations.len(), 1);
+    assert_eq!(mutations[0].output_name(), "user");
+}
+
+#[test]
+fn test_parse_mutation_selection_directives() {
+    let query = r#"
+        mutation Run($includeFragment: Boolean!, $skipInline: Boolean!) {
+            skippedField: add_User(input: {name: "Skipped field"}) @skip(if: true) { name }
+            ...AddUser @include(if: $includeFragment)
+            ... @skip(if: $skipInline) {
+                skippedInline: add_User(input: {name: "Skipped inline"}) { name }
+            }
+        }
+
+        fragment AddUser on Mutation {
+            included: add_User(input: {name: "Included"}) { name }
+        }
+    "#;
+    let variables = HashMap::from([
+        ("includeFragment".to_string(), JsonValue::Bool(true)),
+        ("skipInline".to_string(), JsonValue::Bool(true)),
+    ]);
+
+    let mutations = parse_mutations_with_variables(query, Some(&variables)).unwrap();
+    let output_names: Vec<_> = mutations.iter().map(Mutation::output_name).collect();
+
+    assert_eq!(output_names, ["included"]);
+}
+
+#[test]
+fn test_parse_mutation_skips_nonmatching_fragment_types() {
+    let query = r#"
+        mutation {
+            ...QueryFields
+            ... on Query {
+                skippedInline: add_User(input: {name: "Skipped inline"}) { name }
+            }
+            included: add_User(input: {name: "Included"}) { name }
+        }
+
+        fragment QueryFields on Query {
+            skippedNamed: add_User(input: {name: "Skipped named"}) { name }
+        }
+    "#;
+
+    let mutations = parse_mutations(query).unwrap();
+
+    assert_eq!(mutations.len(), 1);
+    assert_eq!(mutations[0].output_name(), "included");
+}
+
+#[test]
 fn test_create_missing_input_error() {
     let query = r#"
         mutation {
