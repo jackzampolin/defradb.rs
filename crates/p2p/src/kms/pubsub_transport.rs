@@ -313,16 +313,18 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
         // Register correlation by request-CID, then publish the raw request on
         // the base topic. Go peers reply on `encryption/<self>/_response`,
         // which `dispatch_incoming` routes into the correlator.
-        // Single-response, matching Go's `PublishToTopic(..., withMultiResponse:
-        // false)` for the KMS topic. The correlator auto-removes the entry after
-        // the first reply, closing `prep.responses` so the adapter task below
-        // ends and drops its `KeyResults` sender — which is how `get_keys`'s
-        // `wait_all()` learns the fetch is complete (it drains until the channel
-        // closes). A multi-response entry would never close and would hang
-        // `wait_all` for the full timeout even after the key arrived.
-        let mut prep = self
-            .correlator
-            .publish(req.payload, PublishOptions::default());
+        // Multiple peers may answer, and an empty reply only means that peer
+        // did not supply a key. This layer cannot verify ECIES envelopes or
+        // content CIDs, so it keeps listening until the downstream KMS
+        // aggregator verifies all requested keys and closes the receiver, or
+        // until the bounded request deadline expires.
+        let mut prep = self.correlator.publish(
+            req.payload,
+            PublishOptions {
+                multi_response: true,
+                ..PublishOptions::default()
+            },
+        );
 
         self.wait_for_subscriber().await;
         if let Err(e) = self
@@ -360,10 +362,10 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
                     // republish tick — the tick's re-registration drops the
                     // old channel, and with it any buffered reply.
                     biased;
+                    _ = tx.closed() => break,
                     resp = prep.responses.recv() => {
                         let Some(resp) = resp else {
-                            // Channel closed: single-response entry consumed
-                            // (reply already forwarded) or cancelled. Done.
+                            // The correlation entry was cancelled or replaced.
                             break;
                         };
                         if let Some(err) = &resp.err {
@@ -382,12 +384,16 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
                                 continue;
                             }
                         };
-                        // Single-response semantics: the correlator entry is
-                        // consumed by this delivery, so forward it and finish
-                        // (also prevents a concurrent republish tick from
-                        // re-registering a request that was already answered).
-                        let _ = tx.send((reply, resp.from)).await;
-                        break;
+                        if reply.blocks.is_empty() {
+                            debug!(
+                                from = %resp.from,
+                                "KMS peer returned no key blocks; waiting for another peer"
+                            );
+                            continue;
+                        }
+                        if tx.send(Ok((reply, resp.from))).await.is_err() {
+                            break;
+                        }
                     }
                     _ = tokio::time::sleep_until(republish_at) => {
                         if tokio::time::Instant::now() >= deadline {
@@ -396,6 +402,7 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
                                 timeout = ?RESPONSE_TIMEOUT,
                                 "KMS fetch got no reply within the response timeout; giving up"
                             );
+                            let _ = tx.send(Err(kms::Error::KeyUnavailable)).await;
                             break;
                         }
                         // Re-register BEFORE dropping the old handle: identical
@@ -407,7 +414,13 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
                         let data = std::mem::take(&mut prep.data);
                         let id = prep.id;
                         drop(prep);
-                        prep = correlator.publish(data, PublishOptions::default());
+                        prep = correlator.publish(
+                            data,
+                            PublishOptions {
+                                multi_response: true,
+                                ..PublishOptions::default()
+                            },
+                        );
                         debug_assert_eq!(prep.id, id, "identical payload must re-derive the same request id");
                         if let Err(e) = transport
                             .publish_raw(ENCRYPTION_TOPIC.to_string(), prep.data.clone())
@@ -712,13 +725,194 @@ mod tests {
         let (got_reply, responder_id) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("reply must arrive within timeout")
-            .expect("reply present");
+            .expect("reply present")
+            .expect("reply must succeed");
         assert_eq!(got_reply, reply);
         assert_eq!(
             responder_id,
             responder.to_string(),
             "responder peer id must be the verified gossip source"
         );
+    }
+
+    #[tokio::test]
+    async fn empty_reply_does_not_hide_later_key_reply() {
+        let transport = RacyTransport::new(1);
+        let kt = PubsubKeyTransport::new(transport).await.unwrap();
+
+        let payload = b"multi-peer-key-request".to_vec();
+        let req = EncodedFetchRequest {
+            payload: payload.clone(),
+            request_id: "r1".to_string(),
+        };
+        let mut rx = kt.send_request(req).await.expect("send_request");
+        let request_id = crate::pubsub_rpc::derive_request_id(&payload);
+
+        let empty_reply = FetchEncryptionKeyReply {
+            links: vec![],
+            blocks: vec![],
+            ephemeral_public_key: vec![],
+        };
+        let empty_envelope = InternalResponse {
+            id: request_id.to_string(),
+            err: String::new(),
+            data: serde_cbor::to_vec(&empty_reply).unwrap(),
+            from: Vec::new(),
+        };
+        kt.dispatch_incoming(
+            a_libp2p_peer().to_string(),
+            kt.self_response_topic().to_string(),
+            empty_envelope.to_cbor().unwrap(),
+        )
+        .await;
+
+        let key_reply = FetchEncryptionKeyReply {
+            links: vec![vec![1, 2, 3]],
+            blocks: vec![vec![4, 5, 6]],
+            ephemeral_public_key: vec![7; 32],
+        };
+        let key_responder = a_libp2p_peer();
+        let key_envelope = InternalResponse {
+            id: request_id.to_string(),
+            err: String::new(),
+            data: serde_cbor::to_vec(&key_reply).unwrap(),
+            from: Vec::new(),
+        };
+        kt.dispatch_incoming(
+            key_responder.to_string(),
+            kt.self_response_topic().to_string(),
+            key_envelope.to_cbor().unwrap(),
+        )
+        .await;
+
+        let (got_reply, responder_id) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("key reply must arrive within timeout")
+            .expect("reply present")
+            .expect("reply must succeed");
+        assert_eq!(got_reply, key_reply);
+        assert_eq!(responder_id, key_responder.to_string());
+    }
+
+    #[tokio::test]
+    async fn partial_replies_are_collected_until_all_requested_links_arrive() {
+        let transport = RacyTransport::new(1);
+        let kt = PubsubKeyTransport::new(transport).await.unwrap();
+
+        let first_link = vec![1, 2, 3];
+        let second_link = vec![4, 5, 6];
+        let request = FetchEncryptionKeyRequest {
+            identity: b"did:key:zrequester".to_vec(),
+            links: vec![first_link.clone(), second_link.clone()],
+            ephemeral_public_key: vec![9; 32],
+        };
+        let payload = serde_cbor::to_vec(&request).unwrap();
+        let req = EncodedFetchRequest {
+            payload: payload.clone(),
+            request_id: "r1".to_string(),
+        };
+        let mut rx = kt.send_request(req).await.expect("send_request");
+        let request_id = crate::pubsub_rpc::derive_request_id(&payload);
+
+        for (link, block) in [
+            (first_link.clone(), vec![7]),
+            (second_link.clone(), vec![8]),
+        ] {
+            let reply = FetchEncryptionKeyReply {
+                links: vec![link],
+                blocks: vec![block],
+                ephemeral_public_key: vec![10; 32],
+            };
+            let envelope = InternalResponse {
+                id: request_id.to_string(),
+                err: String::new(),
+                data: serde_cbor::to_vec(&reply).unwrap(),
+                from: Vec::new(),
+            };
+            kt.dispatch_incoming(
+                a_libp2p_peer().to_string(),
+                kt.self_response_topic().to_string(),
+                envelope.to_cbor().unwrap(),
+            )
+            .await;
+        }
+
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("first partial reply must arrive")
+            .expect("first partial reply present")
+            .expect("first partial reply succeeds");
+        let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("second partial reply must arrive")
+            .expect("second partial reply present")
+            .expect("second partial reply succeeds");
+        assert_eq!(first.0.links, vec![first_link]);
+        assert_eq!(second.0.links, vec![second_link]);
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while kt.correlator.in_flight() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the downstream receiver must cancel correlation");
+    }
+
+    #[tokio::test]
+    async fn claimed_complete_reply_does_not_hide_later_verified_candidate() {
+        let transport = RacyTransport::new(1);
+        let kt = PubsubKeyTransport::new(transport).await.unwrap();
+
+        let requested_link = vec![1, 2, 3];
+        let request = FetchEncryptionKeyRequest {
+            identity: b"did:key:zrequester".to_vec(),
+            links: vec![requested_link.clone()],
+            ephemeral_public_key: vec![9; 32],
+        };
+        let payload = serde_cbor::to_vec(&request).unwrap();
+        let mut rx = kt
+            .send_request(EncodedFetchRequest {
+                payload: payload.clone(),
+                request_id: "r1".to_string(),
+            })
+            .await
+            .expect("send_request");
+        let request_id = crate::pubsub_rpc::derive_request_id(&payload);
+
+        for block in [vec![0], vec![7]] {
+            let reply = FetchEncryptionKeyReply {
+                links: vec![requested_link.clone()],
+                blocks: vec![block],
+                ephemeral_public_key: vec![10; 32],
+            };
+            let envelope = InternalResponse {
+                id: request_id.to_string(),
+                err: String::new(),
+                data: serde_cbor::to_vec(&reply).unwrap(),
+                from: Vec::new(),
+            };
+            kt.dispatch_incoming(
+                a_libp2p_peer().to_string(),
+                kt.self_response_topic().to_string(),
+                envelope.to_cbor().unwrap(),
+            )
+            .await;
+        }
+
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("first claimed reply must arrive")
+            .expect("first claimed reply present")
+            .expect("first claimed reply succeeds");
+        let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("later candidate must arrive")
+            .expect("later candidate present")
+            .expect("later candidate succeeds");
+        assert_eq!(first.0.blocks, vec![vec![0]]);
+        assert_eq!(second.0.blocks, vec![vec![7]]);
+        drop(rx);
     }
 
     /// Go parity (internal/kms/pubsub.go `fetchEncryptionKeyRetryInterval`):
@@ -776,15 +970,16 @@ mod tests {
         let (got, _) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("reply within timeout")
-            .expect("reply present");
+            .expect("reply present")
+            .expect("reply must succeed");
         assert_eq!(got, reply);
     }
 
     /// Go parity (`fetchEncryptionKeyResponseTimeout`): with no reply at all,
-    /// the reply stream must CLOSE once the response timeout elapses, so
-    /// `get_keys`' `wait_all` resolves instead of hanging the merge forever.
+    /// the reply stream must report unavailability once the response timeout
+    /// elapses, so callers can retry instead of treating silence as denial.
     #[tokio::test(start_paused = true)]
-    async fn request_with_no_reply_times_out_and_closes_stream() {
+    async fn request_with_no_reply_reports_unavailable() {
         let transport = RacyTransport::new(0);
         let kt = PubsubKeyTransport::new(transport).await.unwrap();
 
@@ -794,10 +989,13 @@ mod tests {
         };
         let mut rx = kt.send_request(req).await.expect("send_request");
 
-        let got = tokio::time::timeout(RESPONSE_TIMEOUT + Duration::from_secs(1), rx.recv())
+        let error = tokio::time::timeout(RESPONSE_TIMEOUT + Duration::from_secs(1), rx.recv())
             .await
-            .expect("stream must close at the response timeout, not hang");
-        assert!(got.is_none(), "no reply means the stream closes empty");
+            .expect("stream must resolve at the response timeout, not hang")
+            .expect("timeout result present")
+            .expect_err("no reply must be retryable unavailability");
+        assert!(matches!(error, kms::Error::KeyUnavailable));
+        assert!(rx.recv().await.is_none());
     }
 
     /// An inbound request on the base topic must be answered by publishing an

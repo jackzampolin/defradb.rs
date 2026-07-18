@@ -43,6 +43,10 @@ pub enum MergeError {
     #[error("storage error: {0}")]
     Storage(String),
 
+    /// KMS lookup or authorization error.
+    #[error("KMS error: {0}")]
+    Kms(#[from] kms::Error),
+
     /// Block signature verification failed — block MUST be rejected.
     #[error("block signature verification failed for cid={cid}: {reason}")]
     SignatureVerificationFailed { cid: Cid, reason: String },
