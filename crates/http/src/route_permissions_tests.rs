@@ -389,6 +389,11 @@ mod tests {
                 Method::DELETE,
                 RoutePermission::Required(NodePermission::DacRelationDelete),
             ),
+            (
+                "/api/v0/acp/document/relationships",
+                Method::POST,
+                RoutePermission::Required(NodePermission::DacRelationAdd),
+            ),
             // ACP Node
             (
                 "/api/v0/acp/node/status",
@@ -399,6 +404,11 @@ mod tests {
                 "/api/v0/acp/node/enable",
                 Method::POST,
                 RoutePermission::Dynamic,
+            ),
+            (
+                "/api/v0/acp/node/relationships",
+                Method::POST,
+                RoutePermission::Required(NodePermission::NacRelationAdd),
             ),
             (
                 "/api/v0/acp/node/disable",

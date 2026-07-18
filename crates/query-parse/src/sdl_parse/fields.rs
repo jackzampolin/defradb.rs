@@ -26,7 +26,8 @@ use super::warnings::{DirectiveLocation, ParseWarning};
 impl<'a> SdlParser<'a> {
     pub(super) fn parse_field(&mut self, field: &Field<'_, String>) -> Result<ParsedField> {
         let field_type = parse_graphql_type(&field.field_type);
-        let directives = self.parse_field_directives(&field.directives, &field.name)?;
+        let directives =
+            self.parse_field_directives(&field.directives, &field.name, &field_type.base_type)?;
 
         Ok(ParsedField {
             name: field.name.clone(),
@@ -39,6 +40,7 @@ impl<'a> SdlParser<'a> {
         &mut self,
         directives: &[Directive<'_, String>],
         field_name: &str,
+        field_type: &str,
     ) -> Result<ParsedDirectives> {
         let mut result = ParsedDirectives::default();
         let type_name = self.current_type.clone().unwrap_or_default();
@@ -57,10 +59,8 @@ impl<'a> SdlParser<'a> {
                 "index" => result.index = Some(self.parse_index_directive(directive, field_name)?),
                 "relation" => result.relation_name = get_directive_string(directive, "name"),
                 "default" => {
-                    let arg_name = directive.arguments.first().map(|(n, _)| n.clone());
                     result.default_value =
-                        Some(self.parse_default_directive(directive, field_name)?);
-                    result.default_arg_name = arg_name;
+                        Some(self.parse_default_directive(directive, field_name, field_type)?);
                 }
                 "constraints" => {
                     if let Some(size) =
@@ -511,8 +511,9 @@ impl<'a> SdlParser<'a> {
         &self,
         directive: &Directive<'_, String>,
         field_name: &str,
+        field_type: &str,
     ) -> Result<serde_json::Value> {
-        // Go supports: string, bool, int, float, float32, float64, dateTime, json, blob
+        // Match Go's supported scalar field types for @default(value:).
         let Some((name, value)) = directive.arguments.first() else {
             return Err(QueryError::parse(
                 "@default directive requires a value argument",
@@ -527,25 +528,34 @@ impl<'a> SdlParser<'a> {
             )));
         }
 
-        match name.as_str() {
-            "string" | "value" => match value {
-                graphql_parser::schema::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+        if name != "value" {
+            return Err(QueryError::parse(format!(
+                "unknown @default argument '{}'. Valid argument is: value",
+                name
+            )));
+        }
+
+        match field_type {
+            "String" => match value {
+                graphql_parser::schema::Value::String(s) => {
+                    Ok(serde_json::Value::String(s.clone()))
+                }
                 other => Err(default_type_error(name, "string", other)),
             },
-            "bool" => match value {
+            "Boolean" => match value {
                 graphql_parser::schema::Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
-                other => Err(default_type_error("bool", "boolean", other)),
+                other => Err(default_type_error(name, "boolean", other)),
             },
-            "int" => match value {
+            "Int" => match value {
                 graphql_parser::schema::Value::Int(n) => {
                     let int_val = n.as_i64().ok_or_else(|| {
                         QueryError::parse("@default int value is out of i64 range")
                     })?;
                     Ok(serde_json::Value::Number(serde_json::Number::from(int_val)))
                 }
-                other => Err(default_type_error("int", "integer", other)),
+                other => Err(default_type_error(name, "integer", other)),
             },
-            "float" | "float64" => match value {
+            "Float" | "Float64" => match value {
                 graphql_parser::schema::Value::Float(f) => serde_json::Number::from_f64(*f)
                     .map(serde_json::Value::Number)
                     .ok_or_else(|| {
@@ -560,9 +570,9 @@ impl<'a> SdlParser<'a> {
                     })?;
                     Ok(serde_json::Value::Number(serde_json::Number::from(int_val)))
                 }
-                other => Err(default_type_error("float", "float", other)),
+                other => Err(default_type_error(name, "float", other)),
             },
-            "float32" => match value {
+            "Float32" => match value {
                 graphql_parser::schema::Value::Float(f) => {
                     let f32_val = *f as f32;
                     if f32_val.is_infinite() && !f.is_infinite() {
@@ -585,9 +595,9 @@ impl<'a> SdlParser<'a> {
                     })?;
                     Ok(serde_json::Value::Number(serde_json::Number::from(int_val)))
                 }
-                other => Err(default_type_error("float32", "float", other)),
+                other => Err(default_type_error(name, "float", other)),
             },
-            "dateTime" => match value {
+            "DateTime" => match value {
                 graphql_parser::schema::Value::String(s) => {
                     // Normalize to RFC3339 format to match Go's time.Time serialization.
                     // Go parses the datetime string into time.Time then formats it back,
@@ -598,9 +608,9 @@ impl<'a> SdlParser<'a> {
                 }
                 // Accept Enum for special values like UTC_NOW
                 graphql_parser::schema::Value::Enum(s) => Ok(serde_json::Value::String(s.clone())),
-                other => Err(default_type_error("dateTime", "string", other)),
+                other => Err(default_type_error(name, "string", other)),
             },
-            "json" => {
+            "JSON" => {
                 // JSON @default accepts various value types
                 match value {
                     // String containing JSON - validate but store as string literal
@@ -620,12 +630,16 @@ impl<'a> SdlParser<'a> {
                     }
                     graphql_parser::schema::Value::Float(f) => serde_json::Number::from_f64(*f)
                         .map(serde_json::Value::Number)
-                        .ok_or_else(|| QueryError::parse("@default json float is invalid (NaN or Infinity)")),
+                        .ok_or_else(|| {
+                            QueryError::parse("@default json float is invalid (NaN or Infinity)")
+                        }),
                     graphql_parser::schema::Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
                     graphql_parser::schema::Value::Null => {
                         Err(QueryError::parse("default value is invalid for type JSON"))
                     }
-                    graphql_parser::schema::Value::Enum(s) => Ok(serde_json::Value::String(s.clone())),
+                    graphql_parser::schema::Value::Enum(s) => {
+                        Ok(serde_json::Value::String(s.clone()))
+                    }
                     // JSON array/object defaults are stored as serialized strings to match Go behavior
                     graphql_parser::schema::Value::List(arr) => {
                         let items: Vec<serde_json::Value> = arr
@@ -633,7 +647,9 @@ impl<'a> SdlParser<'a> {
                             .map(|v| graphql_schema_value_to_json(v))
                             .collect();
                         let json_array = serde_json::Value::Array(items);
-                        Ok(serde_json::Value::String(serde_json::to_string(&json_array).unwrap_or_default()))
+                        Ok(serde_json::Value::String(
+                            serde_json::to_string(&json_array).unwrap_or_default(),
+                        ))
                     }
                     graphql_parser::schema::Value::Object(obj) => {
                         let items: serde_json::Map<String, serde_json::Value> = obj
@@ -641,18 +657,24 @@ impl<'a> SdlParser<'a> {
                             .map(|(k, v)| (k.clone(), graphql_schema_value_to_json(v)))
                             .collect();
                         let json_obj = serde_json::Value::Object(items);
-                        Ok(serde_json::Value::String(serde_json::to_string(&json_obj).unwrap_or_default()))
+                        Ok(serde_json::Value::String(
+                            serde_json::to_string(&json_obj).unwrap_or_default(),
+                        ))
                     }
-                    graphql_parser::schema::Value::Variable(v) => Ok(serde_json::Value::String(format!("${}", v))),
+                    graphql_parser::schema::Value::Variable(v) => {
+                        Ok(serde_json::Value::String(format!("${}", v)))
+                    }
                 }
             }
-            "blob" => match value {
-                graphql_parser::schema::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
-                other => Err(default_type_error("blob", "string", other)),
+            "Blob" => match value {
+                graphql_parser::schema::Value::String(s) => {
+                    Ok(serde_json::Value::String(s.clone()))
+                }
+                other => Err(default_type_error(name, "string", other)),
             },
-            unknown => Err(QueryError::parse(format!(
-                "unknown @default argument '{}'. Valid arguments are: string, value, bool, int, float, float32, float64, dateTime, json, blob",
-                unknown
+            _ => Err(QueryError::parse(format!(
+                "default value is not allowed for this field type. Name: {}, Type: {}",
+                field_name, field_type
             ))),
         }
     }

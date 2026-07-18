@@ -31,7 +31,7 @@ use super::super::queue::ProcessQueue;
 use super::config::SyncConfig;
 use super::diagnostics::SyncDiagnostics;
 use super::events::SyncEvent;
-use super::pending::PendingDag;
+use super::pending::PendingDagRegistry;
 
 /// Manager for P2P block synchronization.
 ///
@@ -75,9 +75,9 @@ pub struct SyncManager<B: Blockstore> {
     /// Peer state tracker for finding providers
     pub(super) peer_state: Arc<PeerStateTracker>,
 
-    /// Pending DAGs waiting for Bitswap to complete.
-    /// Maps root CID → pending DAG metadata.
-    pub(super) pending_dags: Arc<RwLock<HashMap<Cid, PendingDag>>>,
+    /// Pending DAGs waiting for Bitswap to complete, indexed by root and each
+    /// missing CID.
+    pub(super) pending_dags: Arc<RwLock<PendingDagRegistry>>,
 
     /// Maps Bitswap QueryId → root CID for tracking completions.
     pub(super) query_to_root: Arc<RwLock<HashMap<QueryId, Cid>>>,
@@ -147,7 +147,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             process_queue: ProcessQueue::new(),
             event_tx,
             peer_state,
-            pending_dags: Arc::new(RwLock::new(HashMap::new())),
+            pending_dags: Arc::new(RwLock::new(PendingDagRegistry::default())),
             query_to_root: Arc::new(RwLock::new(HashMap::new())),
             diagnostics: Arc::new(SyncDiagnostics::default()),
             // A zero cap would reject every missing-link push forever
