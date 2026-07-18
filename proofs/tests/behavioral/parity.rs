@@ -194,23 +194,6 @@ fn has_active_peer(node: &DefraClient, peer_id: &str) -> bool {
 
 async fn wire_user_bidirectional(cluster: &TestCluster) {
     let (a0, a1) = (node_addr(cluster, 0), node_addr(cluster, 1));
-    cluster
-        .client(0)
-        .p2p_collection_add(&["User"])
-        .expect("subscribe node0");
-    cluster
-        .client(1)
-        .p2p_collection_add(&["User"])
-        .expect("subscribe node1");
-    cluster
-        .client(0)
-        .p2p_replicator_set(&["User"], &a1)
-        .expect("replicator node0");
-    cluster
-        .client(1)
-        .p2p_replicator_set(&["User"], &a0)
-        .expect("replicator node1");
-
     let (peer0, peer1) = (peer_id_from_addr(&a0), peer_id_from_addr(&a1));
     let deadline = Instant::now() + Duration::from_secs(30);
     let (mut last_dial0, mut last_dial1) =
@@ -221,7 +204,7 @@ async fn wire_user_bidirectional(cluster: &TestCluster) {
             has_active_peer(&cluster.client(1), peer0),
         );
         if node0_connected && node1_connected {
-            return;
+            break;
         }
 
         if !node0_connected {
@@ -245,6 +228,23 @@ async fn wire_user_bidirectional(cluster: &TestCluster) {
         );
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
+
+    cluster
+        .client(0)
+        .p2p_collection_add(&["User"])
+        .expect("subscribe node0");
+    cluster
+        .client(1)
+        .p2p_collection_add(&["User"])
+        .expect("subscribe node1");
+    cluster
+        .client(0)
+        .p2p_replicator_set(&["User"], &a1)
+        .expect("replicator node0");
+    cluster
+        .client(1)
+        .p2p_replicator_set(&["User"], &a0)
+        .expect("replicator node1");
 }
 
 /// Controlled equal-priority LWW probe: the nodes are intentionally not wired
