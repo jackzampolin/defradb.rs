@@ -138,14 +138,26 @@ pub const PROPERTIES: &[Property] = &[
     Property {
         // Encryption reuses PriorityReconcile.lwwCM unchanged: ciphertext and
         // key timing affect when a value can materialize, not which value wins.
-        // The behavioral leg receives both encrypted siblings across a real
-        // restart, proves identical DAGs, and asserts the decrypted winner.
+        // The behavioral legs preserve encrypted fields selected for filtered
+        // replication and receive both encrypted siblings after a real restart,
+        // proving identical DAGs and the decrypted winner.
         family: "Encrypted LWW restart/replay",
-        name: "INV_AckBacked / INV_NoFilteredLoss / INV_LwwWinner — encrypted replay remains complete and convergent",
+        name: "INV_NoFilteredLoss / INV_LwwWinner — encrypted delivery remains complete and LWW-convergent",
         axis: Tla,
-        anchor: "crates/db-merge/src/merge_handler/composite_fields.rs; crates/db-merge/src/push_docs.rs; crates/db-merge/src/push_docs_transport.rs; crates/p2p/src/sync/pending_store.rs; crates/crdt/src/lww.rs",
+        anchor: "crates/db-merge/src/push_docs.rs; crates/db-merge/src/push_docs_transport.rs; crates/crdt/src/lww.rs",
         model_ref: "MC_EncryptedLwwReplay_Green.cfg",
         tiers: &[Behavioral],
+    },
+    Property {
+        // The model and focused KMS/merge unit tests cover the retry mechanics,
+        // but the external harness cannot deterministically hold a DEK request
+        // unavailable between ciphertext acknowledgement and receiver restart.
+        family: "Encrypted LWW restart/replay",
+        name: "INV_AckBacked — acknowledged encrypted replay remains re-drivable across transient KMS failure and restart",
+        axis: Tla,
+        anchor: "crates/db-merge/src/merge_handler/composite_fields.rs; crates/p2p/src/sync/pending_store.rs",
+        model_ref: "MC_EncryptedLwwReplay_Green.cfg",
+        tiers: &[Boundary],
     },
     Property {
         family: "Management-channel auth (NAC gate)",

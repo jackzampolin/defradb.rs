@@ -44,10 +44,14 @@ stored, and replay against a newer local write.
 ## Conformance fence
 
 `proofs/tests/behavioral/partition.rs::convergence_encrypted_lww_restart_merge`
-drives two encrypted siblings across a real node restart, first proves identical
-commit DAGs, then asserts both nodes decrypt and materialize the LWW winner.
+drives two encrypted siblings across a restart-induced partition, first proves
+identical commit DAGs, then asserts both nodes decrypt and materialize the LWW
+winner. Because those siblings are created after the restart, this binds
+`INV_LwwWinner`; it does not schedule a restart after ciphertext acknowledgement
+while the DEK is unavailable. `INV_AckBacked` therefore remains a conformance
+boundary.
 `tools/integration-test/tests/p2p/filtered_replication.rs` asserts matching
 encrypted documents decrypt on the filtered peer, proving their field heads
-survive selection and trigger DEK resolution. The merge/KMS unit tests exercise
-the deterministic timeout-to-retry classification that is hard to schedule
-reliably through the external harness.
+survive selection and trigger DEK resolution, binding `INV_NoFilteredLoss`. The
+merge/KMS unit tests exercise the deterministic timeout-to-retry classification
+that is hard to schedule reliably through the external harness.

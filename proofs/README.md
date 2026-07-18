@@ -123,7 +123,7 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 | CID determinism | Behavioral | `cid.rs` |
 | Index-maintenance | Behavioral | `index.rs` (single-node create/update/delete + indexed LWW restart/merge reconciliation); `MC_IndexReconciliation_{Red_SaveOnly,Green}` |
 | KMS key distribution | Behavioral | `kms.rs` (node0 denies the DEK to unauthorized node1) |
-| Encrypted LWW restart/replay | Behavioral | `partition::convergence_encrypted_lww_restart_merge` (encrypted siblings cross a real restart; identical DAGs and decrypted LWW winner asserted); `MC_EncryptedLwwReplay_{Green,Red_*}`; reuses `PriorityReconcile.lwwCM` |
+| Encrypted LWW restart/replay | Behavioral + Boundary | `partition::convergence_encrypted_lww_restart_merge` binds the decrypted LWW winner after a restart-induced partition; filtered replication binds encrypted-field preservation. Durable acknowledgement-backed retry through a receiver restart remains Boundary; `MC_EncryptedLwwReplay_{Green,Red_*}`; reuses `PriorityReconcile.lwwCM` |
 | CRDT merge laws | Contract | `MergeResult` vocab; `DefraConvergence.MixedField` product proof; `MixedFieldMaterialization.tla` |
 | Multi-instance claim | Boundary | defra-agent substrate, not this binary |
 | Block integrity / signatures | Boundary | needs adversarial peer; Rust verify mandatory |

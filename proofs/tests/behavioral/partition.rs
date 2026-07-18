@@ -815,12 +815,14 @@ async fn poll_vault_secret(node: &DefraClient, want: &str, timeout: Duration) ->
     }
 }
 
-/// ENCRYPTED-field LWW convergence across a restart-partition. An encrypted field
-/// routes its delta through the KMS write path (a random per-write key gossiped
-/// over the encryption topic) rather than the plain block path. node1 is
+/// ENCRYPTED-field LWW convergence after a restart-induced partition. An encrypted
+/// field routes its delta through the KMS write path (a random per-write key
+/// gossiped over the encryption topic) rather than the plain block path. node1 is
 /// restarted to sever the link, both nodes concurrently update the same encrypted
 /// field, then reconnect; both must materialize the same plaintext LWW winner
-/// ("zzz" > "aaa" on the equal-priority lexicographic tie-break).
+/// ("zzz" > "aaa" on the equal-priority lexicographic tie-break). The competing
+/// ciphertexts are created after the restart, so this test binds `INV_LwwWinner`,
+/// not acknowledgement-backed pending replay through a restart.
 ///
 /// The two replicas guard different halves, deliberately:
 /// - node0 (locally wrote the LOSER "aaa") is the end-to-end leg: to reach "zzz"
