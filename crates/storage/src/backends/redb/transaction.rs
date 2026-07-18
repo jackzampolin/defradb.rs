@@ -38,6 +38,9 @@ pub(crate) struct RedbTxn {
     /// Conflict tracker for write-write conflict detection
     pub(crate) conflict_tracker: Arc<ConflictTracker>,
 
+    /// Keeps transaction snapshots aligned with committed conflict versions.
+    pub(crate) commit_gate: Arc<tokio::sync::RwLock<()>>,
+
     /// Version at which this transaction's snapshot was taken
     pub(crate) read_version: u64,
 
@@ -351,24 +354,20 @@ impl Txn for RedbTxn {
                     .map_err(|_| Error::Other("group commit result channel dropped".into()))?;
             }
 
-            // Direct commit path: check conflicts eagerly
-            if let Err(e) =
-                self.conflict_tracker
-                    .check_and_record(self.read_version, pending.keys(), &read_set)
-            {
-                CallbackManager::execute_callbacks(self.callbacks.take_error());
-                CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
-                return Err(e);
-            }
-
             // Move blocking redb operations to a blocking thread so we don't
             // starve tokio worker threads while waiting for the exclusive write lock.
             let db = self.db.clone();
+            let conflict_tracker = self.conflict_tracker.clone();
+            let commit_gate = self.commit_gate.clone();
+            let read_version = self.read_version;
             let durability = self.durability;
             let error_callbacks = self.callbacks.take_error();
             let error_async_callbacks = self.callbacks.take_error_async();
 
             let write_result = tokio::task::spawn_blocking(move || -> Result<()> {
+                let _commit_guard = commit_gate.blocking_write();
+                conflict_tracker.check_and_record(read_version, pending.keys(), &read_set)?;
+
                 let mut write_txn = db.begin_write().map_err(|e| {
                     tracing::error!(error = %e, pending_changes = pending.len(),
                         "Failed to begin write transaction during commit");

@@ -4567,6 +4567,7 @@ dependencies = [
 name = "ffi-test"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "chrono",
  "clap",
  "colored",

@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 mod builder;
 mod commands;
 mod config;
+mod embedding_fixture;
 mod error;
 mod report;
 mod runner;

@@ -162,6 +162,10 @@ pub fn create_router_with_state(state: AppState) -> Router {
             post(handlers::acp::add_doc_relationship),
         )
         .route(
+            "/document/relationships",
+            post(handlers::acp::add_doc_relationships),
+        )
+        .route(
             "/document/relationship",
             delete(handlers::acp::remove_doc_relationship),
         );
@@ -211,6 +215,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/status", get(handlers::nac::get_status))
         .route("/enable", post(handlers::nac::enable))
         .route("/relationship", post(handlers::nac::go_add_relationship))
+        .route("/relationships", post(handlers::nac::go_add_relationships))
         .route(
             "/relationship",
             delete(handlers::nac::go_remove_relationship),

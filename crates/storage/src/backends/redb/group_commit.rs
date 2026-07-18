@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use redb::Database;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock as AsyncRwLock};
 
 use super::config::DurabilityMode;
 use super::KV_TABLE;
@@ -41,9 +41,16 @@ impl GroupCommitBuffer {
         db: Arc<Database>,
         durability: DurabilityMode,
         conflict_tracker: Arc<ConflictTracker>,
+        commit_gate: Arc<AsyncRwLock<()>>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let flush_handle = tokio::spawn(flush_loop(rx, db, durability, conflict_tracker));
+        let flush_handle = tokio::spawn(flush_loop(
+            rx,
+            db,
+            durability,
+            conflict_tracker,
+            commit_gate,
+        ));
         Self {
             sender: Mutex::new(Some(tx)),
             flush_handle: Mutex::new(Some(flush_handle)),
@@ -85,6 +92,7 @@ async fn flush_loop(
     db: Arc<Database>,
     durability: DurabilityMode,
     conflict_tracker: Arc<ConflictTracker>,
+    commit_gate: Arc<AsyncRwLock<()>>,
 ) {
     loop {
         // Block until at least one commit arrives
@@ -102,39 +110,43 @@ async fn flush_loop(
             }
         }
 
-        // Check conflicts and partition into passing/failing commits.
-        // This is done inside the flush loop so version tracking is atomic
-        // with the actual data write.
-        let mut passed = Vec::with_capacity(batch.len());
-        let mut failed: Vec<(PendingCommit, Error)> = Vec::new();
+        let (passed, failed, result) = {
+            // Keep version publication and the Redb flush indivisible to new snapshots.
+            let _commit_guard = commit_gate.write().await;
+            let mut passed = Vec::with_capacity(batch.len());
+            let mut failed: Vec<(PendingCommit, Error)> = Vec::new();
 
-        for commit in batch {
-            match conflict_tracker.check_and_record(
-                commit.read_version,
-                commit.changes.keys(),
-                &commit.read_set,
-            ) {
-                Ok(()) => passed.push(commit),
-                Err(e) => failed.push((commit, e)),
+            for commit in batch {
+                match conflict_tracker.check_and_record(
+                    commit.read_version,
+                    commit.changes.keys(),
+                    &commit.read_set,
+                ) {
+                    Ok(()) => passed.push(commit),
+                    Err(e) => failed.push((commit, e)),
+                }
             }
-        }
 
-        // Notify failed commits immediately
+            let result = if passed.is_empty() {
+                None
+            } else {
+                Some(flush_batch(&db, &passed, durability))
+            };
+            (passed, failed, result)
+        };
+
         for (commit, err) in failed {
             CallbackManager::execute_callbacks(commit.on_error);
             CallbackManager::execute_async_callbacks(commit.on_error_async).await;
             let _ = commit.result_tx.send(Err(err));
         }
 
-        if passed.is_empty() {
+        let Some(result) = result else {
             continue;
-        }
+        };
 
         let batch_size = passed.len();
         let total_changes: usize = passed.iter().map(|c| c.changes.len()).sum();
-
-        // Flush all non-conflicting commits in one redb write transaction
-        let result = flush_batch(&db, &passed, durability);
 
         if let Err(ref e) = result {
             tracing::error!(
