@@ -35,6 +35,41 @@ pub struct GoNacRelationshipRequest {
     pub target_actor: String,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct GoNacRelationshipResponse {
+    pub added: bool,
+}
+
+fn validate_add_relationship(body: &GoNacRelationshipRequest) -> Result<identity::Did, HttpError> {
+    if !is_valid_nac_relation(&body.relation) || body.relation == "owner" {
+        return Err(HttpError::BadRequest(
+            "relation not in resource".to_string(),
+        ));
+    }
+    if body.target_actor.is_empty() {
+        return Err(HttpError::BadRequest("actor must be a valid did".into()));
+    }
+    identity::Did::new(&body.target_actor)
+        .map_err(|e| HttpError::BadRequest(format!("invalid TargetActor DID: {}", e)))
+}
+
+async fn apply_add_relationship(
+    nac: &dyn crate::router::NodeAcpOperations,
+    requestor: &identity::Did,
+    target: &identity::Did,
+    relation: &str,
+) -> Result<GoNacRelationshipResponse, HttpError> {
+    let added = nac
+        .add_relationship(requestor, target, relation)
+        .await
+        .map_err(|e| {
+            let normalized = normalize_auth_error(e, "add-nac-relation");
+            tracing::warn!(error = %normalized, "NAC add_relationship operation failed");
+            http_error_from_backend_message(normalized)
+        })?;
+    Ok(GoNacRelationshipResponse { added })
+}
+
 /// Request body for enabling NAC (Go-compatible format).
 #[derive(Debug, serde::Deserialize)]
 pub struct EnableNacRequest {
@@ -234,31 +269,40 @@ pub async fn go_add_relationship(
         HttpError::Forbidden("authentication required to add relationship".into())
     })?;
 
-    // Validate relation name against NAC policy (matches FFI ordering: after auth, before target)
-    if !is_valid_nac_relation(&body.relation) || body.relation == "owner" {
-        return Err(HttpError::BadRequest(
-            "relation not in resource".to_string(),
-        ));
+    let target = validate_add_relationship(&body)?;
+    let result = apply_add_relationship(nac.as_ref(), &requestor, &target, &body.relation).await?;
+
+    Ok(Json(result).into_response())
+}
+
+/// POST /api/v0/acp/node/relationships
+///
+/// Add multiple NAC relationships in one request. The response array matches
+/// request order, and every entry is validated before writes begin. A backend
+/// error stops processing without rolling back earlier entries.
+pub async fn go_add_relationships(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Json(bodies): Json<Vec<GoNacRelationshipRequest>>,
+) -> Result<Json<Vec<GoNacRelationshipResponse>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::NacRelationAdd).await?;
+
+    let nac = state.require_nac()?;
+    let requestor = identity.did().cloned().ok_or_else(|| {
+        HttpError::Forbidden("authentication required to add relationship".into())
+    })?;
+
+    let targets = bodies
+        .iter()
+        .map(validate_add_relationship)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut results = Vec::with_capacity(bodies.len());
+    for (body, target) in bodies.iter().zip(&targets) {
+        results
+            .push(apply_add_relationship(nac.as_ref(), &requestor, target, &body.relation).await?);
     }
-
-    if body.target_actor.is_empty() {
-        return Err(HttpError::BadRequest("actor must be a valid did".into()));
-    }
-
-    // Parse target DID
-    let target = identity::Did::new(&body.target_actor)
-        .map_err(|e| HttpError::BadRequest(format!("invalid TargetActor DID: {}", e)))?;
-
-    let added = nac
-        .add_relationship(&requestor, &target, &body.relation)
-        .await
-        .map_err(|e| {
-            let normalized = normalize_auth_error(e, "add-nac-relation");
-            tracing::warn!(error = %normalized, "NAC add_relationship operation failed");
-            http_error_from_backend_message(normalized)
-        })?;
-
-    Ok(Json(serde_json::json!({"added": added})).into_response())
+    Ok(Json(results))
 }
 
 /// DELETE /api/v0/acp/node/relationship (Go-compatible)
@@ -354,4 +398,64 @@ pub async fn re_enable(
     })?;
 
     Ok(Json(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mock::{MockNodeAcpOperations, MockQueryExecutor};
+    use crate::router::{AppStateBuilder, NodeAcpOperations};
+    use query::executor::QueryExecutor;
+    use std::sync::Arc;
+
+    fn relationship(relation: &str, target_actor: &str) -> GoNacRelationshipRequest {
+        GoNacRelationshipRequest {
+            relation: relation.into(),
+            target_actor: target_actor.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn add_relationships_prevalidates_and_returns_ordered_results() {
+        let requestor = identity::Did::new("did:key:requestor").unwrap();
+        let target = identity::Did::new("did:key:target").unwrap();
+        let nac = Arc::new(MockNodeAcpOperations::enabled_with_owner(requestor.clone()));
+        let state =
+            AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
+                .with_nac(Arc::clone(&nac) as Arc<dyn NodeAcpOperations>)
+                .build();
+        let identity = ExtractIdentity::from_did(Some(requestor));
+
+        let result = go_add_relationships(
+            State(state.clone()),
+            identity.clone(),
+            Json(vec![
+                relationship("admin", target.as_str()),
+                relationship("owner", "did:key:other"),
+            ]),
+        )
+        .await;
+
+        assert!(matches!(result, Err(HttpError::BadRequest(_))));
+        assert!(!nac.is_admin(&target).await.unwrap());
+
+        let Json(results) = go_add_relationships(
+            State(state),
+            identity,
+            Json(vec![
+                relationship("admin", target.as_str()),
+                relationship("admin", target.as_str()),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.added)
+                .collect::<Vec<_>>(),
+            vec![true, false]
+        );
+    }
 }

@@ -167,17 +167,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             "Stored Bitswap block in blockstore"
         );
 
-        // Check if any pending DAGs can now proceed
-        // This is done by checking which pending DAGs were waiting for this CID
-        let pending = self.pending_dags.read().clone();
-        for (root_cid, pending_info) in pending {
-            if pending_info.missing.contains(cid) {
-                tracing::debug!(
-                    root_cid = %root_cid,
-                    received_cid = %cid,
-                    "Pending DAG received a missing block - will check completeness"
-                );
-            }
+        for root_cid in self.pending_dags.read().waiting_roots(cid) {
+            tracing::debug!(
+                root_cid = %root_cid,
+                received_cid = %cid,
+                "Pending DAG received a missing block - will check completeness"
+            );
         }
 
         Ok(true)
