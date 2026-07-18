@@ -10,6 +10,7 @@
 //! - Backup endpoints
 
 pub mod acp;
+pub mod actions;
 pub mod backup;
 pub mod batch;
 pub mod block;

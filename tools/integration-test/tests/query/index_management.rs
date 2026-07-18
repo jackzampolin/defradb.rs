@@ -17,12 +17,11 @@ fn extract_indexes(val: &Value) -> Vec<&Value> {
     vec![]
 }
 
-/// Check if any index in the list has the given name (handles both `name` and `Name` keys).
+/// Check if any index result has the given name.
 fn has_index_name(indexes: &[&Value], name: &str) -> bool {
     indexes.iter().any(|idx| {
-        // Go v1.0.0 wraps each index in the Action-system envelope
-        // ({"Description": {...}, "Execution": {...}}); the Rust node still
-        // returns the flat descriptor. Accept both shapes.
+        // The Rust-native CLI remains flat; Go v1 and the compatible HTTP
+        // surface wrap each descriptor with its action execution.
         let desc = idx.get("Description").unwrap_or(idx);
         desc.get("name")
             .or_else(|| desc.get("Name"))
@@ -30,6 +29,22 @@ fn has_index_name(indexes: &[&Value], name: &str) -> bool {
             .map(|n| n == name)
             .unwrap_or(false)
     })
+}
+
+fn assert_completed_index(index: &Value) {
+    let index_id = index["Description"]["ID"]
+        .as_u64()
+        .expect("Go v1 index description should include ID");
+    let execution = index
+        .get("Execution")
+        .expect("Go v1 index result should include Execution");
+    assert_eq!(execution["Action"], 0);
+    assert_eq!(execution["Status"], 3);
+    assert!(execution["CollectionID"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
+    assert_eq!(execution["Subject"], index_id.to_string());
+    assert_eq!(execution["Reason"], "");
 }
 
 async fn index_management_test(cluster: TestCluster) {
@@ -81,6 +96,23 @@ async fn index_management_test(cluster: TestCluster) {
         "idx_name_price not found in list"
     );
 
+    let compatible_list: Value = reqwest::get(format!(
+        "{}/api/v0/collections/Product/indexes",
+        cluster.api_url(0)
+    ))
+    .await
+    .expect("list Go-compatible indexes request")
+    .error_for_status()
+    .expect("list Go-compatible indexes status")
+    .json()
+    .await
+    .expect("list Go-compatible indexes response");
+    let compatible_indexes = extract_indexes(&compatible_list);
+    assert_eq!(compatible_indexes.len(), 3);
+    for index in &compatible_indexes {
+        assert_completed_index(index);
+    }
+
     // 5. Delete one index and verify removal
     node.index_delete("Product", "idx_name")
         .expect("delete idx_name");
@@ -106,6 +138,17 @@ async fn index_management_test(cluster: TestCluster) {
         .expect("query products with indexes");
     let arr = products["Product"].as_array().expect("products array");
     assert_eq!(arr.len(), 1, "should still have 1 product");
+
+    // Completed actions are removed rather than retained as terminal records.
+    node.collection_truncate("Product")
+        .expect("truncate Product");
+    let actions: Value = reqwest::get(format!("{}/api/v0/actions", cluster.api_url(0)))
+        .await
+        .expect("list actions request")
+        .json()
+        .await
+        .expect("list actions response");
+    assert_eq!(actions, serde_json::json!([]));
 }
 
 for_each_runtime!(index_management, index_management_test);

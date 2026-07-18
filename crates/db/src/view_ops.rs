@@ -100,8 +100,30 @@ impl<S: Store> crate::database::DB<S> {
             .collect();
 
         for view in views_to_refresh {
-            self.clear_view_cache(view.root_id).await?;
-            self.build_view_cache(view).await?;
+            let action_execution = self
+                .register_action(&view.collection_id, crate::Action::REFRESH_DATASTORE)
+                .await?;
+
+            let result: Result<()> = async {
+                self.clear_view_cache(view.root_id).await?;
+                self.build_view_cache(view).await
+            }
+            .await;
+
+            if let Err(error) = result {
+                if let Err(action_error) =
+                    self.fail_action(action_execution, &error.to_string()).await
+                {
+                    tracing::error!(
+                        error = %action_error,
+                        collection_id = %view.collection_id,
+                        "Failed to record view refresh action error"
+                    );
+                }
+                return Err(error);
+            }
+
+            self.complete_action(action_execution).await?;
         }
 
         Ok(())

@@ -49,6 +49,9 @@ pub enum Error {
     #[error("database is closed")]
     DatabaseClosed,
 
+    #[error("action already in progress. CollectionID: {collection_id}, Action: {action}")]
+    ActionInProgress { collection_id: String, action: u16 },
+
     #[error("transaction not active")]
     TxnNotActive,
 

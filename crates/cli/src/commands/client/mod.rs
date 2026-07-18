@@ -1,6 +1,7 @@
 //! Client commands for interacting with a running DefraDB node
 
 mod acp;
+mod action;
 mod backup;
 mod block;
 mod collection;
@@ -23,6 +24,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 
 pub use acp::AcpArgs;
+pub use action::ActionArgs;
 pub use backup::BackupArgs;
 pub use block::BlockArgs;
 pub use collection::CollectionArgs;
@@ -105,6 +107,8 @@ pub struct ClientArgs {
 #[derive(Subcommand, Debug)]
 #[non_exhaustive]
 pub enum ClientCommand {
+    /// Inspect long-running database actions
+    Action(ActionArgs),
     /// Interact with Access Control Policies
     Acp(AcpArgs),
     /// Manage database backups
@@ -171,6 +175,7 @@ impl ClientArgs {
         };
 
         match &self.command {
+            ClientCommand::Action(args) => args.execute(&ctx).await,
             ClientCommand::Acp(args) => args.execute(&ctx).await,
             ClientCommand::Backup(args) => args.execute(&ctx).await,
             ClientCommand::Block(args) => args.execute(&ctx).await,

@@ -18,11 +18,11 @@
 //! # Architecture
 //!
 //! NAC uses a local Zanzibar store (separate from DAC) with a built-in policy
-//! containing 34 permission relations. The policy has:
+//! containing one relation for each node permission. The policy has:
 //!
 //! - `owner` relation: the node identity that enabled NAC
 //! - `admin` relation: identities with admin access
-//! - 34 permission relations: one for each `NodePermission`
+//! - One permission relation for each `NodePermission`
 //!
 //! All permissions have expression `owner + admin`, meaning either the owner
 //! or any admin can perform any operation.

@@ -7,6 +7,114 @@
 /// - P2P tracking
 /// - Access control policies
 use crate::corekv::Key;
+use defra_core::Action;
+
+const ACTION_STATUS_PREFIX: &str = "/a/s";
+const ACTION_REASON_PREFIX: &str = "/a/r";
+
+fn action_key(prefix: &str, collection_id: &str, action: Action, subject: &str) -> Vec<u8> {
+    if subject.is_empty() {
+        format!("{prefix}/{collection_id}/{}", action.value()).into_bytes()
+    } else {
+        format!("{prefix}/{collection_id}/{}/{subject}", action.value()).into_bytes()
+    }
+}
+
+/// Current status of a long-running action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionStatusKey {
+    pub collection_id: String,
+    pub action: Action,
+    pub subject: String,
+}
+
+impl ActionStatusKey {
+    pub fn new(collection_id: impl Into<String>, action: Action) -> Self {
+        Self {
+            collection_id: collection_id.into(),
+            action,
+            subject: String::new(),
+        }
+    }
+
+    pub fn with_subject(
+        collection_id: impl Into<String>,
+        action: Action,
+        subject: impl Into<String>,
+    ) -> Self {
+        Self {
+            collection_id: collection_id.into(),
+            action,
+            subject: subject.into(),
+        }
+    }
+
+    pub fn prefix() -> Vec<u8> {
+        format!("{ACTION_STATUS_PREFIX}/").into_bytes()
+    }
+
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let value = std::str::from_utf8(bytes)
+            .ok()?
+            .strip_prefix(&format!("{ACTION_STATUS_PREFIX}/"))?;
+        let mut parts = value.split('/');
+        let collection_id = parts.next()?.to_string();
+        let action = Action::new(parts.next()?.parse().ok()?);
+        let subject = parts.next().unwrap_or_default().to_string();
+        if collection_id.is_empty() || parts.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            collection_id,
+            action,
+            subject,
+        })
+    }
+}
+
+impl Key for ActionStatusKey {
+    fn bytes(&self) -> Vec<u8> {
+        action_key(
+            ACTION_STATUS_PREFIX,
+            &self.collection_id,
+            self.action,
+            &self.subject,
+        )
+    }
+}
+
+/// Error reason retained for an action that did not complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionReasonKey {
+    collection_id: String,
+    action: Action,
+    subject: String,
+}
+
+impl ActionReasonKey {
+    pub fn new(
+        collection_id: impl Into<String>,
+        action: Action,
+        subject: impl Into<String>,
+    ) -> Self {
+        Self {
+            collection_id: collection_id.into(),
+            action,
+            subject: subject.into(),
+        }
+    }
+}
+
+impl Key for ActionReasonKey {
+    fn bytes(&self) -> Vec<u8> {
+        action_key(
+            ACTION_REASON_PREFIX,
+            &self.collection_id,
+            self.action,
+            &self.subject,
+        )
+    }
+}
 
 /// CollectionKey: Maps collection ID to full collection definition (JSON)
 ///
@@ -508,6 +616,21 @@ impl Key for IndexIDSequenceKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_status_key_round_trips_collection_and_subject_actions() {
+        let collection = ActionStatusKey::new("collection", Action::TRUNCATE);
+        assert_eq!(collection.bytes(), b"/a/s/collection/1");
+        assert_eq!(
+            ActionStatusKey::parse(&collection.bytes()),
+            Some(collection)
+        );
+
+        let subject =
+            ActionStatusKey::with_subject("collection", Action::BACKFILL_INDEX, "index_name");
+        assert_eq!(subject.bytes(), b"/a/s/collection/3/index_name");
+        assert_eq!(ActionStatusKey::parse(&subject.bytes()), Some(subject));
+    }
 
     #[test]
     fn test_collection_key() {

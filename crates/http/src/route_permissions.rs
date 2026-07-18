@@ -54,6 +54,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             _ => RoutePermission::Required(NodePermission::DocumentRead),
         },
         "/api/v0/events" => RoutePermission::Dynamic,
+        "/api/v0/actions" => RoutePermission::Required(NodePermission::ActionList),
         "/api/v0/schema" => match *method {
             Method::GET => RoutePermission::Required(NodePermission::CollectionGet),
             Method::POST => RoutePermission::Required(NodePermission::CollectionPatch),
@@ -338,6 +339,11 @@ mod tests {
                 RoutePermission::Required(NodePermission::DocumentRead),
             ),
             ("/api/v0/graphql", Method::POST, RoutePermission::Dynamic),
+            (
+                "/api/v0/actions",
+                Method::GET,
+                RoutePermission::Required(NodePermission::ActionList),
+            ),
             // Schema
             (
                 "/api/v0/schema",

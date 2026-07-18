@@ -9,6 +9,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use defra_core::{ActionExecution, ActionStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{http_error_from_backend_message, HttpError};
@@ -58,6 +59,41 @@ pub struct GoIndexDescription {
     /// Whether the index enforces uniqueness.
     #[serde(rename = "Unique")]
     pub unique: bool,
+}
+
+/// Go v1 index description paired with its lifecycle state.
+#[derive(Debug, Clone, Serialize)]
+pub struct GoListIndexesResult {
+    #[serde(rename = "Description")]
+    pub description: GoIndexDescription,
+    #[serde(rename = "Execution")]
+    pub execution: ActionExecution,
+}
+
+fn ready_index(index: crate::router::IndexInfo) -> GoListIndexesResult {
+    let execution = ActionExecution {
+        collection_id: index.collection_id.clone(),
+        subject: index.id.to_string(),
+        status: ActionStatus::COMPLETED,
+        ..Default::default()
+    };
+    let description = GoIndexDescription {
+        name: index.name,
+        id: index.id,
+        fields: index
+            .fields
+            .into_iter()
+            .map(|field| GoIndexedFieldDescription {
+                name: field.name,
+                descending: field.direction.as_deref() == Some("DESC"),
+            })
+            .collect(),
+        unique: index.unique,
+    };
+    GoListIndexesResult {
+        description,
+        execution,
+    }
 }
 
 /// Create an index (Go-compatible route).
@@ -123,7 +159,7 @@ pub async fn go_create_index(
     // Convert to Go-compatible response format
     let response = GoIndexDescription {
         name: index.name,
-        id: 0, // Go returns a local ID; we don't have this concept yet
+        id: index.id,
         fields: request.fields,
         unique: index.unique,
     };
@@ -140,7 +176,7 @@ pub async fn go_list_indexes(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path(collection): Path<String>,
-) -> Result<Json<Vec<GoIndexDescription>>, HttpError> {
+) -> Result<Json<Vec<GoListIndexesResult>>, HttpError> {
     require_permission(&state, &identity, NodePermission::IndexList).await?;
 
     let index_ops = state.require_index()?;
@@ -159,23 +195,7 @@ pub async fn go_list_indexes(
         .map_err(HttpError::Internal)?;
 
     // Convert to Go-compatible response format
-    let response: Vec<GoIndexDescription> = indexes
-        .into_iter()
-        .enumerate()
-        .map(|(i, idx)| GoIndexDescription {
-            name: idx.name,
-            id: i as u32,
-            fields: idx
-                .fields
-                .into_iter()
-                .map(|f| GoIndexedFieldDescription {
-                    name: f.name,
-                    descending: f.direction.as_deref() == Some("DESC"),
-                })
-                .collect(),
-            unique: idx.unique,
-        })
-        .collect();
+    let response = indexes.into_iter().map(ready_index).collect();
 
     Ok(Json(response))
 }
@@ -228,7 +248,7 @@ pub async fn go_delete_index(
 pub async fn go_list_all_indexes(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-) -> Result<Json<HashMap<String, Vec<GoIndexDescription>>>, HttpError> {
+) -> Result<Json<HashMap<String, Vec<GoListIndexesResult>>>, HttpError> {
     require_permission(&state, &identity, NodePermission::IndexList).await?;
 
     let index_ops = state.require_index()?;
@@ -238,23 +258,13 @@ pub async fn go_list_all_indexes(
         .await
         .map_err(HttpError::Internal)?;
 
-    let mut grouped: HashMap<String, Vec<GoIndexDescription>> = HashMap::new();
-    for (i, idx) in indexes.into_iter().enumerate() {
+    let mut grouped: HashMap<String, Vec<GoListIndexesResult>> = HashMap::new();
+    for idx in indexes {
         let collection = idx.collection.clone();
-        let desc = GoIndexDescription {
-            name: idx.name,
-            id: i as u32,
-            fields: idx
-                .fields
-                .into_iter()
-                .map(|f| GoIndexedFieldDescription {
-                    name: f.name,
-                    descending: f.direction.as_deref() == Some("DESC"),
-                })
-                .collect(),
-            unique: idx.unique,
-        };
-        grouped.entry(collection).or_default().push(desc);
+        grouped
+            .entry(collection)
+            .or_default()
+            .push(ready_index(idx));
     }
 
     Ok(Json(grouped))

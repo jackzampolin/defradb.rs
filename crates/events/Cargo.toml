@@ -13,6 +13,8 @@ default = ["channel"]
 channel = ["dep:tokio", "dep:tokio-stream", "dep:parking_lot"]
 
 [dependencies]
+defra-core = { path = "../defra-core" }
+
 # Async runtime
 async-trait.workspace = true
 

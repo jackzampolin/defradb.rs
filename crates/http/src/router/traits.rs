@@ -462,8 +462,12 @@ pub trait IndexOperations: Send + Sync {
 /// Index information for HTTP responses.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexInfo {
+    #[serde(skip)]
+    pub id: u32,
     pub name: String,
     pub collection: String,
+    #[serde(skip)]
+    pub collection_id: String,
     pub fields: Vec<IndexFieldInfo>,
     #[serde(default)]
     pub unique: bool,
@@ -664,6 +668,9 @@ pub trait SchemaOperations: Send + Sync {
 /// that operate at the collection level rather than the document level.
 #[async_trait::async_trait]
 pub trait CollectionManagementOperations: Send + Sync {
+    /// List actions that have not completed successfully.
+    async fn list_actions(&self) -> Result<Vec<defra_core::ActionExecution>, String>;
+
     /// Apply a JSON Patch (RFC 6902) to a collection schema.
     ///
     /// Creates a new schema version with the patched fields.
