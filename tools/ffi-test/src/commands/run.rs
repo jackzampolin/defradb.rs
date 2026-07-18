@@ -1,6 +1,7 @@
 use colored::Colorize;
 
 use crate::builder::build_ffi;
+use crate::embedding_fixture::EmbeddingFixture;
 use crate::error::Result;
 use crate::report::Report;
 use crate::runner::{discover_subpackages, run_tests, RunResult, TestStatus, TestSummary};
@@ -31,13 +32,6 @@ pub async fn execute(
     println!("  Go:   {}", ctx.go_path.display());
     println!();
 
-    // Build FFI library (unless skipped)
-    if !skip_build {
-        println!("{}", "Building FFI...".bold());
-        build_ffi(&ctx, verbose).await?;
-        println!();
-    }
-
     // Discover all subpackages under this package
     let packages = discover_subpackages(&ctx.go_path, package).await?;
 
@@ -48,6 +42,15 @@ pub async fn execute(
             package
         );
         return Ok(());
+    }
+
+    let _embedding_fixture = EmbeddingFixture::start_for(&packages).await?;
+
+    // Build FFI library (unless skipped)
+    if !skip_build {
+        println!("{}", "Building FFI...".bold());
+        build_ffi(&ctx, verbose).await?;
+        println!();
     }
 
     // Run tests for each package
