@@ -247,6 +247,56 @@ async fn wire_user_bidirectional(cluster: &TestCluster) {
         .expect("replicator node1");
 }
 
+async fn poll_user_dags_converged_after_heal(
+    cluster: &TestCluster,
+    doc_id: &str,
+    timeout: Duration,
+) -> bool {
+    let (a0, a1) = (node_addr(cluster, 0), node_addr(cluster, 1));
+    let (peer0, peer1) = (peer_id_from_addr(&a0), peer_id_from_addr(&a1));
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if !has_active_peer(&cluster.client(0), peer1) {
+            let _ = cluster.client(0).p2p_connect(&[a1.as_str()]);
+        }
+        if !has_active_peer(&cluster.client(1), peer0) {
+            let _ = cluster.client(1).p2p_connect(&[a0.as_str()]);
+        }
+
+        let last_sync0 = cluster
+            .client(0)
+            .p2p_document_sync("User", &[doc_id])
+            .map(|_| "ok".to_string())
+            .unwrap_or_else(|err| format!("{err:#}"));
+        let last_sync1 = cluster
+            .client(1)
+            .p2p_document_sync("User", &[doc_id])
+            .map(|_| "ok".to_string())
+            .unwrap_or_else(|err| format!("{err:#}"));
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            eprintln!(
+                "P2P document heal timed out: node0->{peer1} active={} last sync={last_sync0}; node1->{peer0} active={} last sync={last_sync1}",
+                has_active_peer(&cluster.client(0), peer1),
+                has_active_peer(&cluster.client(1), peer0),
+            );
+            return false;
+        }
+        if support::poll_dags_converged(
+            &cluster.client(0),
+            &cluster.client(1),
+            doc_id,
+            remaining.min(Duration::from_secs(5)),
+        )
+        .await
+        {
+            return true;
+        }
+    }
+}
+
 /// Controlled equal-priority LWW probe: the nodes are intentionally not wired
 /// until after they independently create the same seed document and write
 /// height-2 sibling values. This avoids the live-mesh artifact where one writer
@@ -290,13 +340,7 @@ async fn run_lww_tie_partition_probe(cluster: TestCluster, label: &str, expected
 
     wire_user_bidirectional(&cluster).await;
     assert!(
-        support::poll_dags_converged(
-            &cluster.client(0),
-            &cluster.client(1),
-            &id,
-            Duration::from_secs(45),
-        )
-        .await,
+        poll_user_dags_converged_after_heal(&cluster, &id, Duration::from_secs(45)).await,
         "[{label}] DAGs did not converge after heal"
     );
 
