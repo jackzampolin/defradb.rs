@@ -139,6 +139,43 @@ fn test_parse_multiple_mutations() {
 }
 
 #[test]
+fn test_parse_mutation_fragment_spread_in_request_order() {
+    let query = r#"
+        mutation {
+            ...AddFirst
+            second: add_User(input: {name: "Second"}) { name }
+        }
+
+        fragment AddFirst on Mutation {
+            first: add_User(input: {name: "First"}) { name }
+        }
+    "#;
+
+    let mutations = parse_mutations(query).unwrap();
+    let output_names: Vec<_> = mutations.iter().map(Mutation::output_name).collect();
+
+    assert_eq!(output_names, ["first", "second"]);
+}
+
+#[test]
+fn test_parse_mutation_inline_fragment_in_request_order() {
+    let query = r#"
+        mutation {
+            first: add_User(input: {name: "First"}) { name }
+            ... on Mutation {
+                second: add_User(input: {name: "Second"}) { name }
+            }
+            third: add_User(input: {name: "Third"}) { name }
+        }
+    "#;
+
+    let mutations = parse_mutations(query).unwrap();
+    let output_names: Vec<_> = mutations.iter().map(Mutation::output_name).collect();
+
+    assert_eq!(output_names, ["first", "second", "third"]);
+}
+
+#[test]
 fn test_create_missing_input_error() {
     let query = r#"
         mutation {

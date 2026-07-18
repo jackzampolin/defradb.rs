@@ -172,6 +172,45 @@ fn parse_selection_to_selects<'a>(
     Ok(())
 }
 
+/// Parse mutation selections in first-encounter order, expanding fragments at
+/// their spread position.
+fn parse_selection_to_mutations<'a>(
+    selection: &'a Selection<'a, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+    fragments: &FragmentMap<'a>,
+    mutations: &mut Vec<Mutation>,
+    visiting: &mut HashSet<String>,
+) -> Result<()> {
+    match selection {
+        Selection::Field(field) => {
+            mutations.push(parse_field_to_mutation(field, variables)?);
+        }
+        Selection::FragmentSpread(spread) => {
+            if !visiting.insert(spread.fragment_name.clone()) {
+                return Err(QueryError::parse(format!(
+                    "circular fragment reference detected: '{}'",
+                    spread.fragment_name
+                )));
+            }
+
+            let fragment = fragments.get(&spread.fragment_name).ok_or_else(|| {
+                QueryError::parse(format!("Unknown fragment \"{}\".", spread.fragment_name))
+            })?;
+
+            for selection in &fragment.selection_set.items {
+                parse_selection_to_mutations(selection, variables, fragments, mutations, visiting)?;
+            }
+            visiting.remove(&spread.fragment_name);
+        }
+        Selection::InlineFragment(fragment) => {
+            for selection in &fragment.selection_set.items {
+                parse_selection_to_mutations(selection, variables, fragments, mutations, visiting)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Parse a GraphQL query string into Select operations.
 ///
 /// Returns a vector of Select operations, one for each top-level field in the query.
@@ -462,11 +501,15 @@ pub fn parse_request_with_limits(
                             None
                         };
 
+                        let mut visiting = HashSet::new();
                         for selection in &m.selection_set.items {
-                            if let Selection::Field(field) = selection {
-                                let mutation = parse_field_to_mutation(field, effective_vars_ref)?;
-                                mutations.push(mutation);
-                            }
+                            parse_selection_to_mutations(
+                                selection,
+                                effective_vars_ref,
+                                &fragments,
+                                &mut mutations,
+                                &mut visiting,
+                            )?;
                         }
                     }
                     OperationDefinition::Subscription(s) => {
