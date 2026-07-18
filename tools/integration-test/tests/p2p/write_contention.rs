@@ -1,6 +1,27 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use integration_test::{for_each_p2p_topology, poll_until, TestCluster};
+use integration_test::{for_each_p2p_topology, poll_until, DefraClient, TestCluster};
+
+async fn write_with_conflict_retry(client: &DefraClient, query: &str, label: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match client.query(query) {
+            Ok(_) => return,
+            Err(error) => {
+                let message = format!("{error:#}");
+                assert!(
+                    message.contains("transaction conflict. Please retry"),
+                    "{label}: {message}"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "{label} remained conflicted until the retry deadline: {message}"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
 
 /// Set up a full P2P replication link between two nodes sharing given collections.
 /// Returns the multiaddr of the target node.
@@ -228,21 +249,27 @@ async fn burst_bidirectional_test(cluster: TestCluster) {
     // Node0 creates 10 documents rapidly
     const N0_COUNT: usize = 10;
     for i in 0..N0_COUNT {
-        node0
-            .query(&format!(
+        write_with_conflict_retry(
+            &node0,
+            &format!(
                 r#"mutation {{ add_Record(input: {{origin: "n0", idx: {i}}}) {{ _docID }} }}"#,
-            ))
-            .unwrap_or_else(|_| panic!("node0 burst write {}", i));
+            ),
+            &format!("node0 burst write {i}"),
+        )
+        .await;
     }
 
     // Node1 creates 5 documents in parallel
     const N1_COUNT: usize = 5;
     for i in 0..N1_COUNT {
-        node1
-            .query(&format!(
+        write_with_conflict_retry(
+            &node1,
+            &format!(
                 r#"mutation {{ add_Record(input: {{origin: "n1", idx: {i}}}) {{ _docID }} }}"#,
-            ))
-            .unwrap_or_else(|_| panic!("node1 burst write {}", i));
+            ),
+            &format!("node1 burst write {i}"),
+        )
+        .await;
     }
 
     let total = N0_COUNT + N1_COUNT;
@@ -260,9 +287,12 @@ async fn burst_bidirectional_test(cluster: TestCluster) {
     assert_eq!(count_docs(&cluster, 1, "Record"), total);
 
     // Post-burst health check: both nodes can still write and query
-    node0
-        .query(r#"mutation { add_Record(input: {origin: "post-burst", idx: 9999}) { _docID } }"#)
-        .expect("post-burst write on node0");
+    write_with_conflict_retry(
+        &node0,
+        r#"mutation { add_Record(input: {origin: "post-burst", idx: 9999}) { _docID } }"#,
+        "post-burst write on node0",
+    )
+    .await;
 
     poll_until(
         || count_docs(&cluster, 1, "Record") > total,
