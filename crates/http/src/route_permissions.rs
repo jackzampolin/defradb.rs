@@ -193,6 +193,9 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             Method::DELETE => RoutePermission::Required(NodePermission::DacRelationDelete),
             _ => RoutePermission::Required(NodePermission::DacRelationAdd),
         },
+        "/api/v0/acp/document/relationships" => {
+            RoutePermission::Required(NodePermission::DacRelationAdd)
+        }
 
         // =====================================================================
         // ACP Node (NAC via Go-compatible /acp/node/* routes)
@@ -204,6 +207,9 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             Method::DELETE => RoutePermission::Required(NodePermission::NacRelationDelete),
             _ => RoutePermission::Required(NodePermission::NacRelationAdd),
         },
+        "/api/v0/acp/node/relationships" => {
+            RoutePermission::Required(NodePermission::NacRelationAdd)
+        }
         "/api/v0/acp/node/disable" => RoutePermission::Dynamic,
         "/api/v0/acp/node/re-enable" => RoutePermission::Dynamic,
 
@@ -528,6 +534,11 @@ mod tests {
                 Method::DELETE,
                 RoutePermission::Required(NodePermission::DacRelationDelete),
             ),
+            (
+                "/api/v0/acp/document/relationships",
+                Method::POST,
+                RoutePermission::Required(NodePermission::DacRelationAdd),
+            ),
             // ACP Node
             (
                 "/api/v0/acp/node/status",
@@ -538,6 +549,11 @@ mod tests {
                 "/api/v0/acp/node/enable",
                 Method::POST,
                 RoutePermission::Dynamic,
+            ),
+            (
+                "/api/v0/acp/node/relationships",
+                Method::POST,
+                RoutePermission::Required(NodePermission::NacRelationAdd),
             ),
             (
                 "/api/v0/acp/node/disable",

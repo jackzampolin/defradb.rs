@@ -142,6 +142,46 @@ pub struct DocRelationshipResponse {
     pub existed_already: bool,
 }
 
+fn validate_add_doc_relationship(body: &DocRelationshipRequest) -> Result<(), HttpError> {
+    if body.collection.is_empty() {
+        return Err(HttpError::BadRequest(
+            "collection name can't be empty".into(),
+        ));
+    }
+    if body.target_actor.is_empty() || body.doc_id.is_empty() || body.relation.is_empty() {
+        return Err(HttpError::BadRequest(
+            "missing a required argument needed to add doc actor relationship.".into(),
+        ));
+    }
+    if body.relation == "owner" {
+        return Err(HttpError::BadRequest(
+            "OPERATION_FORBIDDEN: cannot add owner relation".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn apply_add_doc_relationship(
+    doc_acp: &dyn crate::router::DocumentAcpOperations,
+    requestor: &identity::Did,
+    body: &DocRelationshipRequest,
+) -> Result<DocRelationshipResponse, HttpError> {
+    let is_new = doc_acp
+        .add_doc_relationship(
+            requestor,
+            &body.target_actor,
+            &body.collection,
+            &body.doc_id,
+            &body.relation,
+        )
+        .await
+        .map_err(http_error_from_backend_message)?;
+
+    Ok(DocRelationshipResponse {
+        existed_already: !is_new,
+    })
+}
+
 /// Request body for document ACP decision preview operations.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DocDecisionRequest {
@@ -233,39 +273,41 @@ pub async fn add_doc_relationship(
         .did()
         .ok_or_else(|| HttpError::BadRequest("identity required for document ACP".into()))?;
 
-    if body.collection.is_empty() {
-        return Err(HttpError::BadRequest(
-            "collection name can't be empty".into(),
-        ));
-    }
-    if body.target_actor.is_empty() || body.doc_id.is_empty() || body.relation.is_empty() {
-        return Err(HttpError::BadRequest(
-            "missing a required argument needed to add doc actor relationship.".into(),
-        ));
-    }
+    validate_add_doc_relationship(&body)?;
+    let doc_acp = state.require_doc_acp()?;
+    Ok(Json(
+        apply_add_doc_relationship(doc_acp.as_ref(), requestor, &body).await?,
+    ))
+}
 
-    if body.relation == "owner" {
-        return Err(HttpError::BadRequest(
-            "OPERATION_FORBIDDEN: cannot add owner relation".into(),
-        ));
+/// Add multiple document ACP relationships in one request.
+///
+/// POST /api/v0/acp/document/relationships
+///
+/// The request and response arrays have matching order. All entries are validated
+/// before the first write. A backend error stops processing without rolling back
+/// earlier entries.
+pub async fn add_doc_relationships(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Json(bodies): Json<Vec<DocRelationshipRequest>>,
+) -> Result<Json<Vec<DocRelationshipResponse>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DacRelationAdd).await?;
+
+    let requestor = identity
+        .did()
+        .ok_or_else(|| HttpError::BadRequest("identity required for document ACP".into()))?;
+
+    for body in &bodies {
+        validate_add_doc_relationship(body)?;
     }
 
     let doc_acp = state.require_doc_acp()?;
-
-    let is_new = doc_acp
-        .add_doc_relationship(
-            requestor,
-            &body.target_actor,
-            &body.collection,
-            &body.doc_id,
-            &body.relation,
-        )
-        .await
-        .map_err(http_error_from_backend_message)?;
-
-    Ok(Json(DocRelationshipResponse {
-        existed_already: !is_new,
-    }))
+    let mut results = Vec::with_capacity(bodies.len());
+    for body in &bodies {
+        results.push(apply_add_doc_relationship(doc_acp.as_ref(), requestor, body).await?);
+    }
+    Ok(Json(results))
 }
 
 /// Remove a document ACP relationship.
@@ -322,6 +364,19 @@ pub async fn remove_doc_relationship(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mock::{MockDocumentAcpOperations, MockQueryExecutor};
+    use crate::router::{AppStateBuilder, DocumentAcpOperations};
+    use query::executor::QueryExecutor;
+    use std::sync::Arc;
+
+    fn doc_relationship(relation: &str, target_actor: &str) -> DocRelationshipRequest {
+        DocRelationshipRequest {
+            collection: "Users".into(),
+            doc_id: "bae-123".into(),
+            relation: relation.into(),
+            target_actor: target_actor.into(),
+        }
+    }
 
     #[test]
     fn test_add_policy_response_serialize() {
@@ -399,5 +454,44 @@ mod tests {
             parse_doc_permission("admin"),
             Err(HttpError::BadRequest(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn add_doc_relationships_validates_every_item_before_writing() {
+        let doc_acp = Arc::new(MockDocumentAcpOperations::new());
+        let state =
+            AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
+                .with_doc_acp(Arc::clone(&doc_acp) as Arc<dyn DocumentAcpOperations>)
+                .build();
+        let requestor = identity::Did::new("did:key:requestor").unwrap();
+        let identity = ExtractIdentity::from_did(Some(requestor));
+
+        let result = add_doc_relationships(
+            State(state.clone()),
+            identity.clone(),
+            Json(vec![
+                doc_relationship("reader", "did:key:first"),
+                doc_relationship("owner", "did:key:second"),
+            ]),
+        )
+        .await;
+
+        assert!(matches!(result, Err(HttpError::BadRequest(_))));
+        assert_eq!(doc_acp.add_count(), 0);
+
+        let Json(results) = add_doc_relationships(
+            State(state),
+            identity,
+            Json(vec![
+                doc_relationship("reader", "did:key:first"),
+                doc_relationship("writer", "did:key:second"),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| !result.existed_already));
+        assert_eq!(doc_acp.add_count(), 2);
     }
 }
