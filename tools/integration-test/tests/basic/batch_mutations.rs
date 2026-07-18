@@ -115,6 +115,11 @@ async fn mutation_fragment_spread_order_test(cluster: TestCluster) {
         .query(
             r#"mutation {
                 ...AddFirst
+                ...AddFirst
+                skipped: add_User(input: {name: "Skipped"}) @skip(if: true) { name }
+                ... @include(if: false) {
+                    skippedInline: add_User(input: {name: "Skipped inline"}) { name }
+                }
                 second: add_User(input: {name: "Second"}) { name }
             }
 
@@ -122,7 +127,7 @@ async fn mutation_fragment_spread_order_test(cluster: TestCluster) {
                 first: add_User(input: {name: "First"}) { name }
             }"#,
         )
-        .expect("fragment mutations should execute in request order");
+        .expect("fragment mutations should be collected in request order");
 
     assert_eq!(data["first"][0]["name"], "First");
     assert_eq!(data["second"][0]["name"], "Second");

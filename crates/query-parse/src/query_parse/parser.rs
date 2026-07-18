@@ -3,8 +3,8 @@
 //! Parses GraphQL query strings into Select and Mutation operations for execution.
 
 use graphql_parser::query::{
-    Definition, Document, Field, FragmentDefinition, OperationDefinition, Selection, SelectionSet,
-    Value,
+    Definition, Directive, Document, Field, FragmentDefinition, OperationDefinition, Selection,
+    SelectionSet, TypeCondition, Value,
 };
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
@@ -172,20 +172,67 @@ fn parse_selection_to_selects<'a>(
     Ok(())
 }
 
-/// Parse mutation selections in first-encounter order, expanding fragments at
-/// their spread position.
+fn should_include_selection(
+    directives: &[Directive<'_, String>],
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<bool> {
+    for directive in directives {
+        let excludes = match directive.name.as_str() {
+            "skip" => {
+                let value = directive
+                    .arguments
+                    .iter()
+                    .find_map(|(name, value)| (name == "if").then_some(value))
+                    .ok_or_else(|| QueryError::parse("@skip requires an 'if' argument"))?;
+                resolve_bool_value(value, variables, "if")?
+            }
+            "include" => {
+                let value = directive
+                    .arguments
+                    .iter()
+                    .find_map(|(name, value)| (name == "if").then_some(value))
+                    .ok_or_else(|| QueryError::parse("@include requires an 'if' argument"))?;
+                !resolve_bool_value(value, variables, "if")?
+            }
+            _ => false,
+        };
+        if excludes {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn matches_mutation_type(condition: Option<&TypeCondition<'_, String>>) -> bool {
+    match condition {
+        None => true,
+        Some(TypeCondition::On(name)) => name == "Mutation",
+    }
+}
+
 fn parse_selection_to_mutations<'a>(
     selection: &'a Selection<'a, String>,
     variables: Option<&HashMap<String, JsonValue>>,
     fragments: &FragmentMap<'a>,
     mutations: &mut Vec<Mutation>,
     visiting: &mut HashSet<String>,
+    visited: &mut HashSet<String>,
 ) -> Result<()> {
     match selection {
         Selection::Field(field) => {
-            mutations.push(parse_field_to_mutation(field, variables)?);
+            if should_include_selection(&field.directives, variables)? {
+                mutations.push(parse_field_to_mutation(field, variables)?);
+            }
         }
         Selection::FragmentSpread(spread) => {
+            let fragment = fragments.get(&spread.fragment_name).ok_or_else(|| {
+                QueryError::parse(format!("Unknown fragment \"{}\".", spread.fragment_name))
+            })?;
+            if !should_include_selection(&spread.directives, variables)?
+                || visited.contains(&spread.fragment_name)
+            {
+                return Ok(());
+            }
             if !visiting.insert(spread.fragment_name.clone()) {
                 return Err(QueryError::parse(format!(
                     "circular fragment reference detected: '{}'",
@@ -193,18 +240,25 @@ fn parse_selection_to_mutations<'a>(
                 )));
             }
 
-            let fragment = fragments.get(&spread.fragment_name).ok_or_else(|| {
-                QueryError::parse(format!("Unknown fragment \"{}\".", spread.fragment_name))
-            })?;
-
-            for selection in &fragment.selection_set.items {
-                parse_selection_to_mutations(selection, variables, fragments, mutations, visiting)?;
+            if matches_mutation_type(Some(&fragment.type_condition)) {
+                for selection in &fragment.selection_set.items {
+                    parse_selection_to_mutations(
+                        selection, variables, fragments, mutations, visiting, visited,
+                    )?;
+                }
             }
             visiting.remove(&spread.fragment_name);
+            visited.insert(spread.fragment_name.clone());
         }
         Selection::InlineFragment(fragment) => {
-            for selection in &fragment.selection_set.items {
-                parse_selection_to_mutations(selection, variables, fragments, mutations, visiting)?;
+            if should_include_selection(&fragment.directives, variables)?
+                && matches_mutation_type(fragment.type_condition.as_ref())
+            {
+                for selection in &fragment.selection_set.items {
+                    parse_selection_to_mutations(
+                        selection, variables, fragments, mutations, visiting, visited,
+                    )?;
+                }
             }
         }
     }
@@ -502,6 +556,7 @@ pub fn parse_request_with_limits(
                         };
 
                         let mut visiting = HashSet::new();
+                        let mut visited = HashSet::new();
                         for selection in &m.selection_set.items {
                             parse_selection_to_mutations(
                                 selection,
@@ -509,6 +564,7 @@ pub fn parse_request_with_limits(
                                 &fragments,
                                 &mut mutations,
                                 &mut visiting,
+                                &mut visited,
                             )?;
                         }
                     }
