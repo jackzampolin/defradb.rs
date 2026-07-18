@@ -11,6 +11,8 @@ grounded facts for B3 live in [DESIGN.md](DESIGN.md); each later slice has its o
   the Lean merge-algebra half under [`../lean/`](../lean/README.md).
 - **Multi-instance claim-uniqueness** (`Claim_DESIGN.md`).
 - **KMS key distribution** (`Kms_DESIGN.md`).
+- **Encrypted LWW restart/replay** (`EncryptedLwwReplay_DESIGN.md`) — durable
+  ciphertext and DEK re-drive preserve the existing LWW winner.
 - **Management-channel auth** (`Auth_DESIGN.md`).
 - **Replicator lifecycle** — backfill/live/resume delivery (`Replicator_DESIGN.md`).
 - **ACP-on-commits** — dual-path (User + Commits) access gating (`Commits_DESIGN.md`).

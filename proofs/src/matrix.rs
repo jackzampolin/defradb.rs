@@ -17,6 +17,7 @@ pub const MODELED_FAMILIES: &[&str] = &[
     "Multi-instance claim",
     "Block integrity / signatures",
     "KMS key distribution",
+    "Encrypted LWW restart/replay",
     "Management-channel auth (NAC gate)",
     "ACP soundness + revocation + dual-path commits",
     "Storage SSI serializability (point + range/scan carve-out)",
