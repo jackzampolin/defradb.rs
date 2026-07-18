@@ -176,6 +176,13 @@ pub struct DB<S: Store> {
     /// local writes and P2P merges that touch the same document never interleave
     /// their CRDT read-modify-write (#1021 counter convergence).
     doc_write_queue: Arc<crate::doc_write_queue::DocWriteQueue>,
+    /// Process-local claims for collection-wide actions.
+    ///
+    /// Persisted action statuses are observable lifecycle state, not locks: a
+    /// process can exit while an action is in progress and leave that state
+    /// behind. The registry provides cancellation-safe mutual exclusion for
+    /// operations running in this database instance.
+    pub(crate) active_actions: Arc<crate::action::ActionRegistry>,
 }
 
 impl<S: Store> DB<S> {
@@ -208,6 +215,7 @@ impl<S: Store> DB<S> {
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
             doc_write_queue: Arc::new(crate::doc_write_queue::DocWriteQueue::new()),
+            active_actions: Arc::new(crate::action::ActionRegistry::default()),
         })
     }
 
@@ -262,6 +270,7 @@ impl<S: Store> DB<S> {
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
             doc_write_queue: Arc::new(crate::doc_write_queue::DocWriteQueue::new()),
+            active_actions: Arc::new(crate::action::ActionRegistry::default()),
         })
     }
 

@@ -100,7 +100,8 @@ impl<S: Store> crate::database::DB<S> {
             .collect();
 
         for view in views_to_refresh {
-            self.register_action(&view.collection_id, crate::Action::REFRESH_DATASTORE)
+            let action_execution = self
+                .register_action(&view.collection_id, crate::Action::REFRESH_DATASTORE)
                 .await?;
 
             let result: Result<()> = async {
@@ -110,13 +111,8 @@ impl<S: Store> crate::database::DB<S> {
             .await;
 
             if let Err(error) = result {
-                if let Err(action_error) = self
-                    .fail_action(
-                        &view.collection_id,
-                        crate::Action::REFRESH_DATASTORE,
-                        &error.to_string(),
-                    )
-                    .await
+                if let Err(action_error) =
+                    self.fail_action(action_execution, &error.to_string()).await
                 {
                     tracing::error!(
                         error = %action_error,
@@ -127,8 +123,7 @@ impl<S: Store> crate::database::DB<S> {
                 return Err(error);
             }
 
-            self.complete_action(&view.collection_id, crate::Action::REFRESH_DATASTORE)
-                .await?;
+            self.complete_action(action_execution).await?;
         }
 
         Ok(())

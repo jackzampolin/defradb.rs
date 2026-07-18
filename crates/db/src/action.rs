@@ -1,4 +1,8 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use defra_core::{Action, ActionExecution, ActionStatus};
+use parking_lot::Mutex;
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::{ActionReasonKey, ActionStatusKey};
 
@@ -23,32 +27,78 @@ fn decode_status(bytes: &[u8]) -> Option<ActionStatus> {
         }
         value |= u32::from(byte & 0x7f) << (index * 7);
         if byte & 0x80 == 0 {
+            if index + 1 != bytes.len() {
+                return None;
+            }
             return u16::try_from(value).ok().map(ActionStatus::new);
         }
     }
     None
 }
 
-impl<S: Store> crate::database::DB<S> {
-    pub(crate) async fn register_action(&self, collection_id: &str, action: Action) -> Result<()> {
-        let txn = self.new_txn(false).await?;
-        let systemstore = txn.systemstore()?;
-        let status_key = ActionStatusKey::new(collection_id, action).bytes();
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ActionKey {
+    collection_id: String,
+    action: Action,
+}
 
-        let already_in_progress = systemstore
-            .get(&status_key)
-            .await
-            .map_err(Error::Storage)?
-            .and_then(|status| decode_status(&status))
-            == Some(ActionStatus::IN_PROGRESS);
-        if already_in_progress {
-            drop(systemstore);
-            txn.discard()?;
+#[derive(Debug, Default)]
+pub(crate) struct ActionRegistry {
+    active: Mutex<HashSet<ActionKey>>,
+}
+
+/// Owns the process-local claim for one collection-wide action.
+///
+/// Dropping the lease always releases the claim, including when the operation
+/// future is cancelled or persisting its terminal state fails. The status in
+/// the system store remains the externally visible lifecycle record and may be
+/// overwritten by the next execution after a restart or abandoned operation.
+pub(crate) struct ActionExecutionLease {
+    registry: Arc<ActionRegistry>,
+    key: ActionKey,
+}
+
+impl ActionExecutionLease {
+    fn acquire(registry: Arc<ActionRegistry>, collection_id: &str, action: Action) -> Result<Self> {
+        let key = ActionKey {
+            collection_id: collection_id.to_string(),
+            action,
+        };
+        if !registry.active.lock().insert(key.clone()) {
             return Err(Error::ActionInProgress {
                 collection_id: collection_id.to_string(),
                 action: action.value(),
             });
         }
+        Ok(Self { registry, key })
+    }
+
+    fn collection_id(&self) -> &str {
+        &self.key.collection_id
+    }
+
+    fn action(&self) -> Action {
+        self.key.action
+    }
+}
+
+impl Drop for ActionExecutionLease {
+    fn drop(&mut self) {
+        self.registry.active.lock().remove(&self.key);
+    }
+}
+
+impl<S: Store> crate::database::DB<S> {
+    pub(crate) async fn register_action(
+        &self,
+        collection_id: &str,
+        action: Action,
+    ) -> Result<ActionExecutionLease> {
+        let lease =
+            ActionExecutionLease::acquire(Arc::clone(&self.active_actions), collection_id, action)?;
+        let txn = self.new_txn(false).await?;
+        let systemstore = txn.systemstore()?;
+        let status_key = ActionStatusKey::new(collection_id, action).bytes();
 
         systemstore
             .set(&status_key, &encode_status(ActionStatus::IN_PROGRESS))
@@ -67,15 +117,16 @@ impl<S: Store> crate::database::DB<S> {
             status: ActionStatus::IN_PROGRESS,
             ..Default::default()
         });
-        Ok(())
+        Ok(lease)
     }
 
     pub(crate) async fn fail_action(
         &self,
-        collection_id: &str,
-        action: Action,
+        lease: ActionExecutionLease,
         reason: &str,
     ) -> Result<()> {
+        let collection_id = lease.collection_id();
+        let action = lease.action();
         let txn = self.new_txn(false).await?;
         let systemstore = txn.systemstore()?;
         systemstore
@@ -105,7 +156,9 @@ impl<S: Store> crate::database::DB<S> {
         Ok(())
     }
 
-    pub(crate) async fn complete_action(&self, collection_id: &str, action: Action) -> Result<()> {
+    pub(crate) async fn complete_action(&self, lease: ActionExecutionLease) -> Result<()> {
+        let collection_id = lease.collection_id();
+        let action = lease.action();
         let txn = self.new_txn(false).await?;
         let systemstore = txn.systemstore()?;
         systemstore
@@ -189,6 +242,15 @@ mod tests {
     use events::{Bus, ChannelBus, EventName};
     use storage::backends::MemoryStore;
 
+    #[test]
+    fn status_decoder_rejects_trailing_bytes() {
+        assert_eq!(
+            decode_status(&encode_status(ActionStatus::IN_PROGRESS)),
+            Some(ActionStatus::IN_PROGRESS)
+        );
+        assert_eq!(decode_status(&[1, 0xff]), None);
+    }
+
     #[tokio::test]
     async fn action_lifecycle_retains_only_incomplete_executions() {
         let bus: std::sync::Arc<dyn Bus> = std::sync::Arc::new(ChannelBus::new());
@@ -196,7 +258,8 @@ mod tests {
         db.set_event_bus(std::sync::Arc::clone(&bus));
         let mut events = bus.subscribe(&[EventName::ActionExecution]);
 
-        db.register_action("collection", Action::TRUNCATE)
+        let lease = db
+            .register_action("collection", Action::TRUNCATE)
             .await
             .unwrap();
         let actions = db.list_actions().await.unwrap();
@@ -218,9 +281,7 @@ mod tests {
         ));
         assert!(events.try_recv().is_err());
 
-        db.fail_action("collection", Action::TRUNCATE, "failed")
-            .await
-            .unwrap();
+        db.fail_action(lease, "failed").await.unwrap();
         let actions = db.list_actions().await.unwrap();
         assert_eq!(actions[0].status, ActionStatus::ERRORED);
         assert_eq!(actions[0].reason, "failed");
@@ -229,7 +290,8 @@ mod tests {
         assert_eq!(execution.status, ActionStatus::ERRORED);
         assert_eq!(execution.reason, "failed");
 
-        db.register_action("collection", Action::TRUNCATE)
+        let lease = db
+            .register_action("collection", Action::TRUNCATE)
             .await
             .unwrap();
         assert!(db.list_actions().await.unwrap()[0].reason.is_empty());
@@ -243,9 +305,7 @@ mod tests {
             ActionStatus::IN_PROGRESS
         );
 
-        db.complete_action("collection", Action::TRUNCATE)
-            .await
-            .unwrap();
+        db.complete_action(lease).await.unwrap();
         assert!(db.list_actions().await.unwrap().is_empty());
         assert_eq!(
             events
@@ -256,5 +316,45 @@ mod tests {
                 .status,
             ActionStatus::COMPLETED
         );
+    }
+
+    #[tokio::test]
+    async fn abandoned_execution_can_overwrite_stale_persisted_status() {
+        let store = MemoryStore::new();
+        let db = crate::DB::new(store.clone()).unwrap();
+
+        let abandoned = db
+            .register_action("collection", Action::TRUNCATE)
+            .await
+            .unwrap();
+        drop(abandoned);
+
+        let retry = db
+            .register_action("collection", Action::TRUNCATE)
+            .await
+            .expect("dropping a lease must release its process-local claim");
+        drop(retry);
+        drop(db);
+
+        let reopened = crate::DB::new(store).unwrap();
+        let recovered = reopened
+            .register_action("collection", Action::TRUNCATE)
+            .await
+            .expect("a persisted in-progress status from an earlier process is not a lock");
+        reopened.complete_action(recovered).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn finalization_failure_releases_process_local_claim() {
+        let store = MemoryStore::new();
+        let db = crate::DB::new(store.clone()).unwrap();
+        let lease = db
+            .register_action("collection", Action::TRUNCATE)
+            .await
+            .unwrap();
+
+        store.close().await.unwrap();
+        assert!(db.complete_action(lease).await.is_err());
+        assert!(db.active_actions.active.lock().is_empty());
     }
 }
