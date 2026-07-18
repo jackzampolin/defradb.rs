@@ -313,7 +313,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     Ok((cid, key)) if cid == *enc_cid => {
                         return crypto::encryption::aes::decrypt_aes(None, data, &key, &[])
                             .map_err(|e| {
-                                MergeError::MergeFailed(format!("kms-keyed decryption failed: {e}"))
+                                kms::Error::Crypto(format!("KMS-keyed decryption failed: {e}"))
+                                    .into()
                             });
                     }
                     Ok(_) => {}
@@ -3378,6 +3379,29 @@ mod tests {
             .await
             .expect("kms-keyed decryption should succeed");
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[tokio::test]
+    async fn decrypt_block_data_treats_wrong_kms_key_as_retryable() {
+        let (handler, _blockstore) = make_handler();
+        let correct_key = [7u8; 32];
+        let wrong_key = [8u8; 32];
+        let plaintext = b"secret field value";
+        let (ciphertext, _) =
+            crypto::encryption::aes::encrypt_aes(plaintext, &correct_key, &[], true).unwrap();
+        let enc_cid = Encryption::new(correct_key.to_vec())
+            .generate_cid()
+            .unwrap();
+        handler.set_kms(Arc::new(StubKms::fixed_key(wrong_key)));
+
+        let result = handler
+            .decrypt_block_data(&ciphertext, Some(&enc_cid), None)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(MergeError::Kms(kms::Error::Crypto(_)))
+        ));
     }
 
     #[tokio::test]

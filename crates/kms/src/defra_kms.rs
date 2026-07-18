@@ -91,6 +91,25 @@ impl DefraKms {
             .unwrap_or_else(|| crypto::generate_x25519().expect("OsRng"))
     }
 
+    fn verified_key(cid: &EncryptionCid, block_bytes: &[u8]) -> Result<[u8; 32]> {
+        let block = defra_core::Encryption::from_dag_cbor(block_bytes)
+            .map_err(|error| Error::Crypto(format!("decode encryption block: {error}")))?;
+        let computed_cid = block
+            .generate_cid()
+            .map_err(|error| Error::Crypto(format!("compute encryption block CID: {error}")))?;
+        if computed_cid != *cid {
+            return Err(Error::Crypto(format!(
+                "encryption block CID mismatch: expected {cid}, got {computed_cid}"
+            )));
+        }
+        block.key.as_slice().try_into().map_err(|_| {
+            Error::Crypto(format!(
+                "encryption block {cid} has invalid key length {}",
+                block.key.len()
+            ))
+        })
+    }
+
     /// Test hook: inject a deterministic ephemeral so a unit test can
     /// decrypt replies produced by a `FakeTransport`.
     #[cfg(test)]
@@ -178,12 +197,24 @@ impl KmsService for DefraKms {
         for cid in cids.iter().copied() {
             match self.store.get(&cid).await? {
                 Some(stored) => {
+                    let key = match Self::verified_key(&cid, &stored.block_bytes) {
+                        Ok(key) => key,
+                        Err(error) => {
+                            tracing::warn!(
+                                cid = %cid,
+                                error = %error,
+                                "Ignoring invalid locally stored encryption block"
+                            );
+                            remote.push(cid);
+                            continue;
+                        }
+                    };
                     match self
                         .local_release_decision(user_actor.as_ref(), &cid)
                         .await?
                     {
                         LocalRelease::Allow => {
-                            let _ = tx.send(Ok((cid, stored.key))).await;
+                            let _ = tx.send(Ok((cid, key))).await;
                         }
                         LocalRelease::Deny => {
                             let _ = tx
@@ -231,119 +262,164 @@ impl KmsService for DefraKms {
                 let remote_set: std::collections::HashSet<EncryptionCid> =
                     remote.iter().copied().collect();
 
+                let (transport_tx, mut transport_rx) =
+                    tokio::sync::mpsc::channel(self.transports.len().max(1) * 16);
                 for transport in &self.transports {
-                    let mut rx = transport.send_request(encoded.clone()).await?;
-                    let tx = tx.clone();
-                    let store = self.store.clone();
-                    let eph_clone = eph.clone();
-                    let remote_set = remote_set.clone();
-                    let our_eph_pub = x25519_dalek::PublicKey::from(&eph_clone)
-                        .as_bytes()
-                        .to_vec();
+                    let mut rx = match transport.send_request(encoded.clone()).await {
+                        Ok(rx) => rx,
+                        Err(error) => {
+                            let _ = transport_tx.send(Err(error)).await;
+                            continue;
+                        }
+                    };
+                    let transport_tx = transport_tx.clone();
                     spawn_task(async move {
-                        while let Some(transport_result) = rx.recv().await {
-                            let (reply, responder_peer_id) = match transport_result {
-                                Ok(reply) => reply,
-                                Err(error) => {
-                                    let _ = tx.send(Err(error)).await;
-                                    continue;
-                                }
-                            };
-                            tracing::debug!(
-                                responder = %responder_peer_id,
-                                links = reply.links.len(),
-                                blocks = reply.blocks.len(),
-                                resp_eph_len = reply.ephemeral_public_key.len(),
-                                "KMS get_keys: received reply from transport"
-                            );
-                            // AAD binds OUR (requester) ephemeral pubkey and the
-                            // RESPONDER's peer id, matching the serve side.
-                            let aad = crate::ecies_envelope::make_associated_data(
-                                &our_eph_pub,
-                                &responder_peer_id,
-                            );
-                            let mut returned = std::collections::HashSet::new();
-                            for (cid_bytes, block_env) in
-                                reply.links.iter().zip(reply.blocks.iter())
-                            {
-                                let Ok(cid) = cid::Cid::try_from(cid_bytes.as_slice()) else {
-                                    tracing::warn!("KMS reply contained malformed CID; skipping");
-                                    continue;
-                                };
-                                if !remote_set.contains(&cid) {
-                                    // Expected case — reply for a CID we
-                                    // didn't ask for. Silent skip.
-                                    tracing::debug!(
-                                        cid = %cid,
-                                        "KMS get_keys: reply CID not in requested set; skipping"
-                                    );
-                                    continue;
-                                }
-                                returned.insert(cid);
-                                let block_bytes = match crate::ecies_envelope::unwrap_with_private(
-                                    block_env,
-                                    &eph_clone,
-                                    &reply.ephemeral_public_key,
-                                    &aad,
-                                ) {
-                                    Ok(b) => b,
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            error = %e,
-                                            cid = %cid,
-                                            "ECIES unwrap failed on KMS reply"
-                                        );
-                                        continue;
-                                    }
-                                };
-                                let block =
-                                    match defra_core::Encryption::from_dag_cbor(&block_bytes) {
-                                        Ok(b) => b,
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                error = %e,
-                                                cid = %cid,
-                                                "Encryption block decode failed on KMS reply"
-                                            );
-                                            continue;
-                                        }
+                        loop {
+                            tokio::select! {
+                                _ = transport_tx.closed() => break,
+                                result = rx.recv() => {
+                                    let Some(result) = result else {
+                                        break;
                                     };
-                                if block.key.len() != 32 {
-                                    tracing::warn!(
-                                        cid = %cid,
-                                        len = block.key.len(),
-                                        "Encryption block has invalid key length; skipping"
-                                    );
-                                    continue;
+                                    if transport_tx.send(result).await.is_err() {
+                                        break;
+                                    }
                                 }
-                                let mut key = [0u8; 32];
-                                key.copy_from_slice(&block.key);
-                                let _ = store
-                                    .put(
-                                        cid,
-                                        StoredKey {
-                                            key,
-                                            block_bytes: block_bytes.clone(),
-                                        },
-                                    )
-                                    .await;
-                                tracing::debug!(
-                                    cid = %cid,
-                                    "KMS get_keys: DEK unwrapped and delivered to caller"
-                                );
-                                let _ = tx.send(Ok((cid, key))).await;
-                            }
-                            if returned.len() < remote_set.len() {
-                                let _ = tx
-                                    .send(Err(Error::AccessDenied {
-                                        reason: "peer did not release one or more requested keys"
-                                            .into(),
-                                    }))
-                                    .await;
                             }
                         }
                     });
                 }
+                drop(transport_tx);
+
+                let tx = tx.clone();
+                let store = self.store.clone();
+                let our_eph_pub = x25519_dalek::PublicKey::from(&eph).as_bytes().to_vec();
+                spawn_task(async move {
+                    let mut returned = std::collections::HashSet::new();
+                    let mut denied = None;
+                    let mut unavailable = None;
+                    while let Some(transport_result) = transport_rx.recv().await {
+                        let (reply, responder_peer_id) = match transport_result {
+                            Ok(reply) => reply,
+                            Err(error @ Error::AccessDenied { .. }) => {
+                                denied = Some(error);
+                                continue;
+                            }
+                            Err(error) => {
+                                unavailable = Some(error);
+                                continue;
+                            }
+                        };
+                        tracing::debug!(
+                            responder = %responder_peer_id,
+                            links = reply.links.len(),
+                            blocks = reply.blocks.len(),
+                            resp_eph_len = reply.ephemeral_public_key.len(),
+                            "KMS get_keys: received reply from transport"
+                        );
+                        if reply.links.len() != reply.blocks.len() {
+                            let error = Error::Crypto(format!(
+                                "KMS reply links/blocks length mismatch: {} links, {} blocks",
+                                reply.links.len(),
+                                reply.blocks.len()
+                            ));
+                            tracing::warn!(error = %error, "Rejecting malformed KMS reply");
+                            unavailable = Some(error);
+                            continue;
+                        }
+                        // AAD binds OUR (requester) ephemeral pubkey and the
+                        // RESPONDER's peer id, matching the serve side.
+                        let aad = crate::ecies_envelope::make_associated_data(
+                            &our_eph_pub,
+                            &responder_peer_id,
+                        );
+                        for (cid_bytes, block_env) in reply.links.iter().zip(reply.blocks.iter()) {
+                            let Ok(cid) = cid::Cid::try_from(cid_bytes.as_slice()) else {
+                                tracing::warn!("KMS reply contained malformed CID; skipping");
+                                unavailable =
+                                    Some(Error::Crypto("KMS reply contained malformed CID".into()));
+                                continue;
+                            };
+                            if !remote_set.contains(&cid) {
+                                // Expected case — reply for a CID we
+                                // didn't ask for. Silent skip.
+                                tracing::debug!(
+                                    cid = %cid,
+                                    "KMS get_keys: reply CID not in requested set; skipping"
+                                );
+                                continue;
+                            }
+                            if returned.contains(&cid) {
+                                continue;
+                            }
+                            let block_bytes = match crate::ecies_envelope::unwrap_with_private(
+                                block_env,
+                                &eph,
+                                &reply.ephemeral_public_key,
+                                &aad,
+                            ) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        cid = %cid,
+                                        "ECIES unwrap failed on KMS reply"
+                                    );
+                                    unavailable = Some(Error::Crypto(format!(
+                                        "unwrap encryption block {cid}: {e}"
+                                    )));
+                                    continue;
+                                }
+                            };
+                            let key = match Self::verified_key(&cid, &block_bytes) {
+                                Ok(key) => key,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        error = %error,
+                                        cid = %cid,
+                                        "Rejecting invalid encryption block from KMS peer"
+                                    );
+                                    unavailable = Some(error);
+                                    continue;
+                                }
+                            };
+                            if let Err(error) = store
+                                .put(
+                                    cid,
+                                    StoredKey {
+                                        key,
+                                        block_bytes: block_bytes.clone(),
+                                    },
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    error = %error,
+                                    cid = %cid,
+                                    "Failed to store verified encryption block from KMS peer"
+                                );
+                                unavailable = Some(error);
+                                continue;
+                            }
+                            returned.insert(cid);
+                            tracing::debug!(
+                                cid = %cid,
+                                "KMS get_keys: DEK unwrapped and delivered to caller"
+                            );
+                            if tx.send(Ok((cid, key))).await.is_err() {
+                                return;
+                            }
+                        }
+                        if returned.len() == remote_set.len() {
+                            break;
+                        }
+                    }
+                    if returned.len() < remote_set.len() {
+                        let _ = tx
+                            .send(Err(unavailable.or(denied).unwrap_or(Error::KeyUnavailable)))
+                            .await;
+                    }
+                });
             }
         }
 
@@ -721,6 +797,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_keys_ignores_failed_transport_when_another_resolves_key() {
+        let peer_store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+        let peer_policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
+        let peer_kms = DefraKms::new(
+            peer_store,
+            vec![],
+            peer_policy,
+            any_doc_resolver(),
+            node_did(),
+        );
+        peer_kms.set_local_peer_id("peer".into());
+        let ctx = RequestContext::anonymous();
+        let (peer_cid, _) = peer_kms
+            .generate_key(
+                &ctx,
+                KeyScope::Document {
+                    doc_id: "d1".into(),
+                    field: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let requester = crypto::generate_x25519().unwrap();
+        let req = crate::wire::FetchEncryptionKeyRequest {
+            identity: b"did:key:znode".to_vec(),
+            links: vec![peer_cid.to_bytes()],
+            ephemeral_public_key: x25519_dalek::PublicKey::from(&requester)
+                .as_bytes()
+                .to_vec(),
+        };
+        let reply = peer_kms
+            .serve_request(
+                crate::service::PeerIdentity {
+                    peer_id: "peer".into(),
+                },
+                req,
+            )
+            .await
+            .unwrap();
+        let failed = FakeTransport {
+            reply: tokio::sync::Mutex::new(Some(Err(crate::Error::KeyUnavailable))),
+        };
+        let resolved = FakeTransport {
+            reply: tokio::sync::Mutex::new(Some(Ok((reply, "peer".to_string())))),
+        };
+        let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+        let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
+        let kms = DefraKms::new(
+            store,
+            vec![Arc::new(failed), Arc::new(resolved)],
+            policy,
+            any_doc_resolver(),
+            node_did(),
+        );
+        kms.set_ephemeral_for_test(requester);
+
+        let map = kms
+            .get_keys(&ctx, &[peer_cid])
+            .await
+            .unwrap()
+            .wait_all()
+            .await
+            .unwrap();
+
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&peer_cid));
+    }
+
+    #[tokio::test]
     async fn get_keys_propagates_transport_timeout() {
         let fake = FakeTransport {
             reply: tokio::sync::Mutex::new(Some(Err(crate::Error::KeyUnavailable))),
@@ -750,7 +896,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_keys_maps_empty_peer_reply_to_access_denied() {
+    async fn get_keys_maps_empty_peer_reply_to_unavailable() {
         let fake = FakeTransport {
             reply: tokio::sync::Mutex::new(Some(Ok((
                 crate::FetchEncryptionKeyReply {
@@ -782,6 +928,90 @@ mod tests {
             .wait_all()
             .await;
 
-        assert!(matches!(result, Err(crate::Error::AccessDenied { .. })));
+        assert!(matches!(result, Err(crate::Error::KeyUnavailable)));
+    }
+
+    #[tokio::test]
+    async fn get_keys_rejects_reply_length_mismatch() {
+        let cid: crate::EncryptionCid =
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+                .parse()
+                .unwrap();
+        let fake = FakeTransport {
+            reply: tokio::sync::Mutex::new(Some(Ok((
+                crate::FetchEncryptionKeyReply {
+                    links: vec![cid.to_bytes()],
+                    blocks: vec![],
+                    ephemeral_public_key: vec![],
+                },
+                "peer".to_string(),
+            )))),
+        };
+        let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+        let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
+        let kms = DefraKms::new(
+            store,
+            vec![Arc::new(fake)],
+            policy,
+            any_doc_resolver(),
+            node_did(),
+        );
+
+        let result = kms
+            .get_keys(&RequestContext::anonymous(), &[cid])
+            .await
+            .unwrap()
+            .wait_all()
+            .await;
+
+        assert!(matches!(result, Err(crate::Error::Crypto(_))));
+    }
+
+    #[tokio::test]
+    async fn get_keys_rejects_encryption_block_with_mismatched_cid() {
+        let requester = crypto::generate_x25519().unwrap();
+        let requester_pub = x25519_dalek::PublicKey::from(&requester)
+            .as_bytes()
+            .to_vec();
+        let responder = crypto::generate_x25519().unwrap();
+        let actual_block = defra_core::Encryption::new(vec![7u8; 32]);
+        let actual_bytes = actual_block.to_dag_cbor().unwrap();
+        let requested_cid = defra_core::Encryption::new(vec![8u8; 32])
+            .generate_cid()
+            .unwrap();
+        let aad = crate::ecies_envelope::make_associated_data(&requester_pub, "peer");
+        let envelope =
+            crate::wrap_for_requester(&actual_bytes, &requester_pub, &responder, &aad).unwrap();
+        let reply = crate::FetchEncryptionKeyReply {
+            links: vec![requested_cid.to_bytes()],
+            blocks: vec![envelope],
+            ephemeral_public_key: x25519_dalek::PublicKey::from(&responder)
+                .as_bytes()
+                .to_vec(),
+        };
+        let fake = FakeTransport {
+            reply: tokio::sync::Mutex::new(Some(Ok((reply, "peer".to_string())))),
+        };
+        let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+        let inspect_store = Arc::clone(&store);
+        let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
+        let kms = DefraKms::new(
+            store,
+            vec![Arc::new(fake)],
+            policy,
+            any_doc_resolver(),
+            node_did(),
+        );
+        kms.set_ephemeral_for_test(requester);
+
+        let result = kms
+            .get_keys(&RequestContext::anonymous(), &[requested_cid])
+            .await
+            .unwrap()
+            .wait_all()
+            .await;
+
+        assert!(matches!(result, Err(crate::Error::Crypto(_))));
+        assert!(inspect_store.get(&requested_cid).await.unwrap().is_none());
     }
 }
