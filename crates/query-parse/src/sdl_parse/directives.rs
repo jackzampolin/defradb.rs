@@ -38,10 +38,7 @@ pub fn known_directive_arguments(directive_name: &str) -> &'static [&'static str
         "crdt" => &["type"],
         "index" => &["name", "unique", "direction", "fields", "includes"],
         "relation" => &["name"],
-        "default" => &[
-            "string", "value", "bool", "int", "float", "float32", "float64", "dateTime", "json",
-            "blob",
-        ],
+        "default" => &["value"],
         "constraints" => &["size"],
         "materialized" => &["if"],
         "downsample" => &["interval", "timeField", "retention"],
@@ -138,8 +135,6 @@ pub struct ParsedDirectives {
     pub relation_name: Option<String>,
     /// Default value from @default directive
     pub default_value: Option<serde_json::Value>,
-    /// The argument name used in @default (e.g., "int", "bool", "string")
-    pub default_arg_name: Option<String>,
     /// Array size constraint from @constraints directive
     pub size_constraint: Option<usize>,
     /// Whether this field has an encrypted index for searchable encryption

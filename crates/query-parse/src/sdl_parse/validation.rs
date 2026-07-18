@@ -56,34 +56,6 @@ impl<'a> SdlParser<'a> {
                             field.name
                         )));
                     }
-
-                    // Type mismatch: check @default argument name against field type
-                    if let Some(ref default_arg_name) = field.directives.default_arg_name {
-                        let expected = match base_type.as_str() {
-                            "Boolean" => Some("bool"),
-                            "Int" => Some("int"),
-                            "Float" | "Float64" => Some("float"),
-                            "Float32" => Some("float32"),
-                            "String" => Some("string"),
-                            "DateTime" => Some("dateTime"),
-                            "JSON" => Some("json"),
-                            "Blob" => Some("blob"),
-                            _ => None,
-                        };
-                        if let Some(expected_arg) = expected {
-                            // "value" is a generic alias for "string", always valid for String fields
-                            let arg = default_arg_name.as_str();
-                            if arg != expected_arg
-                                && !(arg == "value" && expected_arg == "string")
-                                && !(arg == "float64" && expected_arg == "float")
-                            {
-                                return Err(QueryError::parse(format!(
-                                    "default value type must match field type. Name: {}, Expected: {}, Actual: {}",
-                                    field.name, expected_arg, arg
-                                )));
-                            }
-                        }
-                    }
                 }
             }
         }
