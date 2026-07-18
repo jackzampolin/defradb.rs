@@ -1,6 +1,7 @@
 //! Pending DAG tracking for Bitswap synchronization.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 use std::time::{Duration, Instant};
 
 use cid::Cid;
@@ -54,6 +55,125 @@ pub struct PendingDag {
     pub next_retry_at: tokio::time::Instant,
     /// Fetch dispatches claimed for this root (drives the backoff rung).
     pub dispatches: u32,
+}
+
+/// Pending roots and the reverse index used to route arriving blocks only to
+/// roots that are waiting for them.
+#[derive(Debug, Default)]
+pub(super) struct PendingDagRegistry {
+    roots: HashMap<Cid, PendingDag>,
+    waiters: HashMap<Cid, HashSet<Cid>>,
+}
+
+impl Deref for PendingDagRegistry {
+    type Target = HashMap<Cid, PendingDag>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.roots
+    }
+}
+
+impl PendingDagRegistry {
+    pub(super) fn get_mut(&mut self, root_cid: &Cid) -> Option<&mut PendingDag> {
+        self.roots.get_mut(root_cid)
+    }
+
+    pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = (&Cid, &mut PendingDag)> {
+        self.roots.iter_mut()
+    }
+
+    pub(super) fn insert(&mut self, root_cid: Cid, dag: PendingDag) -> Option<PendingDag> {
+        let previous = self.remove(&root_cid);
+        for missing_cid in &dag.missing {
+            self.waiters
+                .entry(*missing_cid)
+                .or_default()
+                .insert(root_cid);
+        }
+        self.roots.insert(root_cid, dag);
+        previous
+    }
+
+    pub(super) fn remove(&mut self, root_cid: &Cid) -> Option<PendingDag> {
+        let dag = self.roots.remove(root_cid)?;
+        for missing_cid in &dag.missing {
+            self.remove_waiter(missing_cid, root_cid);
+        }
+        Some(dag)
+    }
+
+    pub(super) fn replace_missing(&mut self, root_cid: &Cid, missing: HashSet<Cid>) -> bool {
+        let Some(previous) = self.roots.get(root_cid).map(|dag| dag.missing.clone()) else {
+            return false;
+        };
+
+        for missing_cid in previous.difference(&missing) {
+            self.remove_waiter(missing_cid, root_cid);
+        }
+        for missing_cid in missing.difference(&previous) {
+            self.waiters
+                .entry(*missing_cid)
+                .or_default()
+                .insert(*root_cid);
+        }
+        self.roots
+            .get_mut(root_cid)
+            .expect("root checked above")
+            .missing = missing;
+        true
+    }
+
+    pub(super) fn waiting_roots(&self, missing_cid: &Cid) -> Vec<Cid> {
+        self.waiters
+            .get(missing_cid)
+            .map(|roots| roots.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    pub(super) fn has_waiters(&self, missing_cid: &Cid) -> bool {
+        self.waiters.contains_key(missing_cid)
+    }
+
+    pub(super) fn advance_waiters(
+        &mut self,
+        received_cid: &Cid,
+        newly_missing: &[Cid],
+    ) -> Vec<Cid> {
+        let waiting_roots = self.waiters.remove(received_cid).unwrap_or_default();
+        let mut emptied = Vec::new();
+
+        for root_cid in waiting_roots {
+            let Some(dag) = self.roots.get_mut(&root_cid) else {
+                continue;
+            };
+            if !dag.missing.remove(received_cid) {
+                continue;
+            }
+            for missing_cid in newly_missing {
+                if dag.missing.insert(*missing_cid) {
+                    self.waiters
+                        .entry(*missing_cid)
+                        .or_default()
+                        .insert(root_cid);
+                }
+            }
+            if dag.missing.is_empty() {
+                emptied.push(root_cid);
+            }
+        }
+
+        emptied
+    }
+
+    fn remove_waiter(&mut self, missing_cid: &Cid, root_cid: &Cid) {
+        let remove_entry = self.waiters.get_mut(missing_cid).is_some_and(|roots| {
+            roots.remove(root_cid);
+            roots.is_empty()
+        });
+        if remove_entry {
+            self.waiters.remove(missing_cid);
+        }
+    }
 }
 
 /// Base delay before the first scheduled re-dispatch of a pending root.

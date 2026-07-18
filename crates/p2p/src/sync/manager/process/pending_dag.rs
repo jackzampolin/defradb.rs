@@ -1,6 +1,6 @@
 //! Pending DAG registration and retry logic.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -26,7 +26,7 @@ pub struct PendingDagFetchFailure {
 }
 
 fn evict_expired_pending_dags(
-    pending: &mut HashMap<Cid, PendingDag>,
+    pending: &mut crate::sync::manager::pending::PendingDagRegistry,
     now: Instant,
 ) -> Vec<(Cid, PendingDag)> {
     let expired: Vec<_> = pending
@@ -187,14 +187,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// as pending before its linked field blocks arrive via later PushLog
     /// requests rather than Bitswap.
     pub async fn retry_pending_dags_waiting_on(&self, cid: &Cid) -> Result<Vec<Cid>> {
-        let waiting_roots: Vec<Cid> = {
-            let pending = self.pending_dags.read();
-            pending
-                .iter()
-                .filter_map(|(root_cid, dag)| dag.missing.contains(cid).then_some(*root_cid))
-                .collect()
-        };
-        if waiting_roots.is_empty() {
+        if !self.pending_dags.read().has_waiters(cid) {
             return Ok(Vec::new());
         }
 
@@ -213,20 +206,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         }
 
-        let emptied: Vec<Cid> = {
-            let mut pending = self.pending_dags.write();
-            let mut emptied = Vec::new();
-            for root_cid in &waiting_roots {
-                if let Some(dag) = pending.get_mut(root_cid) {
-                    dag.missing.remove(cid);
-                    dag.missing.extend(absent_links.iter().copied());
-                    if dag.missing.is_empty() {
-                        emptied.push(*root_cid);
-                    }
-                }
-            }
-            emptied
-        };
+        let emptied = self
+            .pending_dags
+            .write()
+            .advance_waiters(cid, &absent_links);
 
         let mut completed = Vec::new();
         for root_cid in emptied {
@@ -273,8 +256,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         if dag.inserted_at != inserted_at {
             return false;
         }
-        dag.missing = missing;
-        true
+        pending.replace_missing(root_cid, missing)
     }
 
     fn take_pending_dag_if_current(
@@ -1037,6 +1019,68 @@ mod tests {
                 .get(&root)
                 .map(|dag| dag.doc_id.as_str()),
             Some("replacement")
+        );
+    }
+
+    #[test]
+    fn pending_dag_reverse_index_tracks_frontier_lifecycle() {
+        let manager = test_manager();
+        let root_a = test_cid(0);
+        let root_b = test_cid(1);
+        let shared = test_cid(2);
+        let other = test_cid(3);
+        let next = test_cid(4);
+
+        let mut dag_a = pending_dag("a", Instant::now());
+        dag_a.missing.insert(shared);
+        let mut dag_b = pending_dag("b", Instant::now());
+        dag_b.missing.extend([shared, other]);
+        assert!(manager.insert_pending_dag(root_a, dag_a));
+        assert!(manager.insert_pending_dag(root_b, dag_b));
+
+        let waiting: HashSet<_> = manager
+            .pending_dags
+            .read()
+            .waiting_roots(&shared)
+            .into_iter()
+            .collect();
+        assert_eq!(waiting, [root_a, root_b].into_iter().collect());
+
+        assert!(manager
+            .pending_dags
+            .write()
+            .advance_waiters(&shared, &[next])
+            .is_empty());
+        assert!(manager
+            .pending_dags
+            .read()
+            .waiting_roots(&shared)
+            .is_empty());
+        assert_eq!(
+            manager
+                .pending_dags
+                .read()
+                .waiting_roots(&next)
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            [root_a, root_b].into_iter().collect()
+        );
+
+        assert!(manager.update_pending_dag_missing_if_current(
+            &root_a,
+            manager.pending_dag_snapshot(&root_a).unwrap().inserted_at,
+            [other].into_iter().collect(),
+        ));
+        assert_eq!(
+            manager.pending_dags.read().waiting_roots(&next).as_slice(),
+            &[root_b]
+        );
+
+        assert!(manager.clear_pending_dag(&root_b));
+        assert!(manager.pending_dags.read().waiting_roots(&next).is_empty());
+        assert_eq!(
+            manager.pending_dags.read().waiting_roots(&other).as_slice(),
+            &[root_a]
         );
     }
 

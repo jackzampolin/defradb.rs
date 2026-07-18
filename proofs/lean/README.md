@@ -81,10 +81,21 @@ Lean 4's core logic, not project-defined axioms. No theorem uses `sorry` or any
 custom (project-defined) axiom. Float32/Float64 counter laws are not claimed here
 because IEEE-754 addition is not generally associative.
 
+### PNCounter representation decision (#1051)
+
+Rust models PNCounter as the existing signed-delta counter with decrement enabled,
+not as separately stored positive and negative components. A product PN history
+refines to this representation by mapping increments to positive `Int` deltas and
+decrements to negative deltas. `CounterReconcile.counterCM` is therefore the
+authoritative algebra, `singleStore_pncounter_converges` covers the negative-delta
+case, and `TwoStoreCounter.tla` already covers the shared exactly-once concurrency
+obligation. A separate PN algebra or TLA+ model would not correspond to additional
+Rust state or behavior.
+
 ## Adding a new CRDT field
 
-This PR is the reference template. A new field's proof (composite, object,
-PN-counter) follows the same recipe — the canonical exemplars are the counter
+This PR is the reference template. A new field with a distinct merge algebra
+follows the same recipe — the canonical exemplars are the counter
 (op-based, `DefraConvergence/CounterReconcile.lean`), LWW (state-based,
 `DefraConvergence/PriorityReconcile.lean`), and the first follow-up product
 instance (`DefraConvergence/MixedField.lean`):
