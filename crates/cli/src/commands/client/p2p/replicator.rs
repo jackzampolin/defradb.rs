@@ -232,9 +232,9 @@ fn extract_public_peer_id(addr: &str) -> Result<String> {
 
     #[cfg(feature = "iroh")]
     {
-        return p2p::iroh::parse_public_peer_addr(addr)
+        p2p::iroh::parse_public_peer_addr(addr)
             .map(|(peer_id, _)| peer_id.to_string())
-            .map_err(|e| Error::Server(e.to_string()));
+            .map_err(|e| Error::Server(e.to_string()))
     }
 
     #[cfg(not(feature = "iroh"))]

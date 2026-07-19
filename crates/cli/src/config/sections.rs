@@ -312,6 +312,10 @@ pub struct NetConfig {
     /// LAN addresses to peers on different networks. None = 0.0.0.0 (all interfaces).
     #[serde(default)]
     pub iroh_bind_addr: Option<std::net::IpAddr>,
+    /// Maximum concurrent QUIC paths per iroh connection. None keeps iroh's
+    /// default; custom values must be at least 9.
+    #[serde(default)]
+    pub iroh_max_concurrent_multipath_paths: Option<u32>,
     /// Per-peer rate limit burst capacity (max tokens in bucket). Default: 500.
     #[serde(default = "default_rate_limit_burst")]
     pub p2p_rate_limit_burst: u32,
@@ -411,6 +415,7 @@ impl Default for NetConfig {
             iroh_pkarr_relay_url: None,
             iroh_bind_port: None,
             iroh_bind_addr: None,
+            iroh_max_concurrent_multipath_paths: None,
             p2p_rate_limit_burst: default_rate_limit_burst(),
             p2p_rate_limit_rate: default_rate_limit_rate(),
             p2p_max_doc_sync_request_doc_ids: default_max_doc_sync_request_doc_ids(),

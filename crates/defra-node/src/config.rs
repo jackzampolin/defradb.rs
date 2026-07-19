@@ -96,6 +96,8 @@ pub struct P2PConfig {
     pub relay_mode: p2p::iroh::IrohRelayModeConfig,
     /// Address publishing / lookup behavior.
     pub discovery: p2p::iroh::IrohDiscoveryConfig,
+    /// Maximum concurrent QUIC paths per connection. None keeps iroh's default.
+    pub max_concurrent_multipath_paths: Option<u32>,
     /// Path to persist secret key. None = ephemeral (new identity each restart).
     pub secret_key_path: Option<std::path::PathBuf>,
     /// Reload collection subscriptions persisted in the local store on startup.
