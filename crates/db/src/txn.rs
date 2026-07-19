@@ -255,6 +255,16 @@ impl<S: Store> DbTxn<S> {
             .ok_or(Error::TxnNotActive)
     }
 
+    /// Get the access-control policy store.
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn acpstore(&self) -> Result<NamespaceView> {
+        self.txn
+            .as_ref()
+            .map(|t| t.acpstore())
+            .ok_or(Error::TxnNotActive)
+    }
+
     /// Get the rootstore.
     ///
     /// Returns an error if the transaction has been committed or discarded.

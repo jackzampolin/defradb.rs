@@ -29,6 +29,29 @@ pub async fn next_doc_short_id(systemstore: &NamespaceView) -> Result<u64> {
     Ok(next)
 }
 
+/// Advance the document short-ID sequence to at least `minimum`.
+///
+/// Store migrations can encounter an already-created mapping after an
+/// interrupted or mixed-version upgrade. Keeping the allocator above every
+/// reused ID prevents a later document from overwriting that mapping.
+pub async fn ensure_doc_short_id_sequence_at_least(
+    systemstore: &NamespaceView,
+    minimum: u64,
+) -> Result<()> {
+    let key = DocShortIDSequenceKey::new().bytes();
+    let current: u64 = match systemstore.get(&key).await.map_err(Error::Storage)? {
+        Some(bytes) if bytes.len() == 8 => u64::from_be_bytes(bytes.as_slice().try_into().unwrap()),
+        _ => 0,
+    };
+    if current < minimum {
+        systemstore
+            .set(&key, &minimum.to_be_bytes())
+            .await
+            .map_err(Error::Storage)?;
+    }
+    Ok(())
+}
+
 /// Persist the bidirectional short-ID <-> DocID mapping for a document.
 pub async fn set_doc_id_mapping(
     systemstore: &NamespaceView,
@@ -361,6 +384,19 @@ mod tests {
         let store = systemstore().await;
         assert_eq!(next_doc_short_id(&store).await.unwrap(), 1);
         assert_eq!(next_doc_short_id(&store).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn sequence_floor_preserves_reused_short_ids() {
+        let store = systemstore().await;
+        ensure_doc_short_id_sequence_at_least(&store, 41)
+            .await
+            .unwrap();
+        ensure_doc_short_id_sequence_at_least(&store, 7)
+            .await
+            .unwrap();
+
+        assert_eq!(next_doc_short_id(&store).await.unwrap(), 42);
     }
 
     #[tokio::test]

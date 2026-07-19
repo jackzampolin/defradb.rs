@@ -228,8 +228,7 @@ impl<S: Store> DB<S> {
     pub async fn open_with_options(store: S, options: DbOptions) -> Result<Self> {
         let db = Self::with_options(store, options)?;
         db.load_collections().await?;
-        db.maybe_backfill_commit_priority_index().await?;
-        db.reload_lens_configs().await?;
+        db.initialize_migrations().await?;
         Ok(db)
     }
 
@@ -287,8 +286,7 @@ impl<S: Store> DB<S> {
     pub async fn open_from_arc_with_options(store: Arc<S>, options: DbOptions) -> Result<Self> {
         let db = Self::from_arc_with_options(store, options)?;
         db.load_collections().await?;
-        db.maybe_backfill_commit_priority_index().await?;
-        db.reload_lens_configs().await?;
+        db.initialize_migrations().await?;
         Ok(db)
     }
 

@@ -4230,6 +4230,7 @@ dependencies = [
  "acp",
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "blockstore",
  "bytes",
  "cid",
@@ -4261,6 +4262,7 @@ dependencies = [
  "tokio",
  "tracing",
  "zeroize",
+ "zstd",
 ]
 
 [[package]]
