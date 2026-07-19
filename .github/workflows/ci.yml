@@ -434,14 +434,13 @@ jobs:
       # `parity_unique_twins_*` probes (#1134) are a KNOWN-DIVERGENCE pin, not a
       # convergence contract: rust_rust asserts #1126 canonical-pick semantics
       # and go_go asserts upstream Go's atomic twin rejection + silent
-      # success-ack — go_go MUST fail (and force a pin update) the moment
-      # upstream Go starts converging. Note the exact-name selection below
-      # deliberately EXCLUDES `parity_unique_twins_mixed_partial_materialization`:
-      # it characterizes an upstream Go partial-materialization finding as a
-      # runnable repro artifact, and the decision to CI-enforce that pin is
-      # held until #1116 stage 3 changes the Rust sender's delivery shape
-      # (see the test's doc comment and #1134). DEFRA_CONFORMANCE_BINARY
-      # points the harness at the restored Rust binary (this job builds to target/ci).
+      # success-ack, while mixed pins the Go v1 asymmetry (Rust accepts both
+      # twins; Go atomically rejects Rust's). These probes MUST fail and force
+      # a pin update when upstream Go starts converging. The historical
+      # `characterize_unique_twins_pre_v1_partial_materialization` repro is
+      # excluded because Go #4838 closed that delivery artifact before v1.0.0.
+      # DEFRA_CONFORMANCE_BINARY points the harness at the restored Rust binary
+      # (this job builds to target/ci).
       - name: Run go-compat conformance parity
         if: matrix.suite == 'go-compat'
         env:
@@ -452,6 +451,7 @@ jobs:
           parity_counter_3node parity_counter_storm_go_go parity_indexed_lww
           parity_mixed_fields_3node parity_lww_tie_partition
           parity_unique_twins_rust_rust parity_unique_twins_go_go
+          parity_unique_twins_mixed
 
       - name: Run iroh integration tests
         if: matrix.suite == 'iroh'
