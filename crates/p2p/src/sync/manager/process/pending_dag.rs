@@ -16,6 +16,10 @@ use crate::sync::pending_store::{PersistedPendingDag, PersistedQuarantinedDag};
 
 use super::SyncManager;
 
+/// Match the outbound backlog's fairness policy: one peer may occupy at most
+/// one quarter of the global pending-DAG capacity.
+const PENDING_DAG_PEER_CAPACITY_DIVISOR: usize = 4;
+
 #[derive(Debug, Clone)]
 pub struct PendingDagFetchFailure {
     pub doc_id: String,
@@ -46,6 +50,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Get the pending DAGs count (for testing/monitoring).
     pub fn pending_dag_count(&self) -> usize {
         self.pending_dags.read().len()
+    }
+
+    pub(super) fn max_pending_dags_per_peer(&self) -> usize {
+        (self.max_pending_dags / PENDING_DAG_PEER_CAPACITY_DIVISOR).max(1)
     }
 
     pub(super) fn is_pending_dag_recovery_registered(&self, root_cid: &Cid) -> bool {
@@ -225,8 +233,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     ///
     /// Expired entries (older than `PENDING_DAG_TTL`) are removed before checking
     /// the capacity. If the map is still at `max_pending_dags` after eviction the
-    /// new entry is dropped and `false` is returned so callers can reject with a
-    /// backpressure nack (#1088 W1) instead of acking a discarded registration.
+    /// new entry is rejected so callers can return a backpressure nack (#1088
+    /// W1) instead of acking a discarded registration. A source peer may hold
+    /// at most one quarter of the global map so one noisy pusher cannot starve
+    /// every other peer (#1088 W2).
     /// TTL eviction frees the in-memory slot only: a push-originated entry's
     /// durable record survives (the recovery obligation is discharged solely
     /// by a successful merge) and is re-driven by restart or the durable
@@ -237,6 +247,18 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         if pending.len() >= self.max_pending_dags && !pending.contains_key(&root_cid) {
             return false;
+        }
+
+        if let Some(source_peer) = dag.source_peer.as_deref() {
+            let existing_source = pending
+                .get(&root_cid)
+                .and_then(|existing| existing.source_peer.as_deref());
+            let max_per_peer = self.max_pending_dags_per_peer();
+            if existing_source != Some(source_peer)
+                && pending.source_count(source_peer) >= max_per_peer
+            {
+                return false;
+            }
         }
 
         pending.insert(root_cid, dag);
@@ -373,6 +395,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 doc_id = %doc_id,
                 source_peer = %source_peer,
                 max = self.max_pending_dags,
+                max_per_peer = self.max_pending_dags_per_peer(),
                 "Pending DAGs at capacity, dropping DocSync registration"
             );
         }
@@ -419,6 +442,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 collection_id = %collection_id,
                 source_peer = %source_peer,
                 max = self.max_pending_dags,
+                max_per_peer = self.max_pending_dags_per_peer(),
                 "Pending DAGs at capacity, dropping branchable DAG registration"
             );
         }
@@ -739,6 +763,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     root_cid = %root_cid,
                     doc_id = %record.doc_id,
                     max = self.max_pending_dags,
+                    max_per_peer = self.max_pending_dags_per_peer(),
+                    source_peer = ?record.source_peer,
                     "Pending DAGs at capacity during resync; record kept for the next sweep"
                 );
                 continue;
@@ -969,21 +995,29 @@ mod tests {
         )
     }
 
-    fn test_manager() -> SyncManager<DefraBlockstore<MemoryStore>> {
+    fn test_manager_with_config(config: SyncConfig) -> SyncManager<DefraBlockstore<MemoryStore>> {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let peer_state = Arc::new(PeerStateTracker::new());
-        let (manager, _events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
+        let (manager, _events) = SyncManager::new(blockstore, peer_state, config);
         manager
     }
 
-    fn pending_dag(doc_id: &str, inserted_at: Instant) -> PendingDag {
+    fn test_manager() -> SyncManager<DefraBlockstore<MemoryStore>> {
+        test_manager_with_config(SyncConfig::default())
+    }
+
+    fn pending_dag_from(
+        doc_id: &str,
+        source_peer: Option<&str>,
+        inserted_at: Instant,
+    ) -> PendingDag {
         PendingDag {
             doc_id: doc_id.to_string(),
             collection_id: "collection".to_string(),
             creator: "creator".to_string(),
             missing: HashSet::new(),
-            source_peer: Some("peer".to_string()),
+            source_peer: source_peer.map(str::to_owned),
             is_explicit_replicator: false,
             explicit_replay_authorization: None,
             is_recovery_registered: false,
@@ -996,21 +1030,32 @@ mod tests {
         }
     }
 
+    fn pending_dag(doc_id: &str, inserted_at: Instant) -> PendingDag {
+        pending_dag_from(doc_id, Some("peer"), inserted_at)
+    }
+
     #[test]
     fn insert_pending_dag_replaces_existing_entry_at_capacity() {
         let manager = test_manager();
         let root = test_cid(0);
 
-        assert!(manager.insert_pending_dag(root, pending_dag("original", Instant::now())));
+        assert!(manager.insert_pending_dag(
+            root,
+            pending_dag_from("original", Some("peer-0"), Instant::now()),
+        ));
         for idx in 1..DEFAULT_MAX_PENDING_DAGS {
+            let source_peer = format!("peer-{}", idx % PENDING_DAG_PEER_CAPACITY_DIVISOR);
             assert!(manager.insert_pending_dag(
                 test_cid(idx),
-                pending_dag(&format!("doc-{idx}"), Instant::now()),
+                pending_dag_from(&format!("doc-{idx}"), Some(&source_peer), Instant::now(),),
             ));
         }
         assert_eq!(manager.pending_dag_count(), DEFAULT_MAX_PENDING_DAGS);
 
-        assert!(manager.insert_pending_dag(root, pending_dag("replacement", Instant::now())));
+        assert!(manager.insert_pending_dag(
+            root,
+            pending_dag_from("replacement", Some("peer-0"), Instant::now()),
+        ));
         assert_eq!(manager.pending_dag_count(), DEFAULT_MAX_PENDING_DAGS);
         assert_eq!(
             manager
@@ -1020,6 +1065,51 @@ mod tests {
                 .map(|dag| dag.doc_id.as_str()),
             Some("replacement")
         );
+    }
+
+    #[test]
+    fn pending_dag_peer_quota_preserves_capacity_for_other_sources() {
+        let manager = test_manager_with_config(SyncConfig {
+            max_pending_dags: 8,
+            ..Default::default()
+        });
+        let first = test_cid(0);
+        let second = test_cid(1);
+        let rejected = test_cid(2);
+
+        for (root, doc_id) in [(first, "first"), (second, "second")] {
+            assert!(manager.insert_pending_dag(
+                root,
+                pending_dag_from(doc_id, Some("noisy"), Instant::now()),
+            ));
+        }
+        assert!(!manager.insert_pending_dag(
+            rejected,
+            pending_dag_from("rejected", Some("noisy"), Instant::now()),
+        ));
+        assert!(manager.insert_pending_dag(
+            test_cid(3),
+            pending_dag_from("healthy", Some("healthy"), Instant::now()),
+        ));
+
+        assert!(manager.clear_pending_dag(&first));
+        assert!(manager.insert_pending_dag(
+            rejected,
+            pending_dag_from("retried", Some("noisy"), Instant::now()),
+        ));
+        assert!(manager.insert_pending_dag(
+            second,
+            pending_dag_from("replacement", Some("noisy"), Instant::now()),
+        ));
+        assert_eq!(manager.pending_dags.read().source_count("noisy"), 2);
+
+        assert!(manager.insert_pending_dag(
+            second,
+            pending_dag_from("transferred", Some("healthy"), Instant::now()),
+        ));
+        assert_eq!(manager.pending_dags.read().source_count("noisy"), 1);
+        assert_eq!(manager.pending_dags.read().source_count("healthy"), 2);
+        assert_eq!(manager.pending_dag_count(), 3);
     }
 
     #[test]

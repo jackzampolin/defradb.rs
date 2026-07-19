@@ -357,7 +357,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     // tracked. This must surface as an error: a success reply
                     // deletes the pusher's retry record, silently losing the
                     // document. The reply seams map this typed error to the
-                    // RATE_LIMITED_MESSAGE nack so the pusher re-pushes later.
+                    // at-capacity nack so the pusher retains and retries it.
                     tracing::warn!(
                         cid = %cid,
                         doc_id = %msg.doc_id,
@@ -365,6 +365,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         source_peer = ?sender_peer,
                         missing_count = missing.len(),
                         max = self.max_pending_dags,
+                        max_per_peer = self.max_pending_dags_per_peer(),
                         "Pending DAGs at capacity, rejecting PushLog DAG registration"
                     );
                     return Err(Error::PendingDagCapacity {
