@@ -424,6 +424,13 @@ pub(super) async fn send_ordered_pushlogs_via_transport<T: P2PTransport>(
                 }
                 Ok(Ok(reply)) => {
                     let Some(error_message) = reply.err_message.as_deref() else {
+                        tracing::debug!(
+                            target: "p2p::sync::restart_recovery",
+                            peer_id = %peer_id,
+                            cid = %cid,
+                            doc_id = %request.doc_id,
+                            "PushLog accepted by replicator"
+                        );
                         break;
                     };
 

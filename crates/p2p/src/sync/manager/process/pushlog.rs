@@ -448,6 +448,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     )));
                 }
                 self.mark_pending_dag_recovery_registered(cid, inserted_at);
+                tracing::debug!(
+                    target: "p2p::sync::restart_recovery",
+                    cid = %cid,
+                    doc_id = %msg.doc_id,
+                    "Persisted pending DAG registration"
+                );
                 true
             } else {
                 false
