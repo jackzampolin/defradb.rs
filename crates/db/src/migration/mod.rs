@@ -1,9 +1,10 @@
-//! Lens migration operations for schema versioning.
+//! Database migrations and lens operations for schema versioning.
 //!
-//! This module handles registration and execution of lens migrations
-//! between schema versions. Migrations allow documents stored with
-//! older schema versions to be transformed when fetched.
+//! Physical store-format migrations run first during database open so that
+//! older data is readable by the current storage layer. Lens migrations then
+//! provide document transforms between schema versions.
 
+mod doc_short_id;
 pub(crate) mod helpers;
 mod reindex;
 mod set_migration;
@@ -18,6 +19,16 @@ use crate::error::{Error, Result};
 use crate::DB;
 
 impl<S: Store> DB<S> {
+    /// Run the ordered database-open migration pipeline.
+    ///
+    /// Physical migrations must precede migrations that read current-format
+    /// documents or persisted lens configurations.
+    pub(crate) async fn initialize_migrations(&self) -> Result<()> {
+        self.maybe_migrate_v015_document_storage().await?;
+        self.maybe_backfill_commit_priority_index().await?;
+        self.reload_lens_configs().await
+    }
+
     /// Get a reference to the lens transform store.
     ///
     /// The lens store manages schema migration transforms that can be applied

@@ -57,9 +57,11 @@ redb = ["db/redb", "storage/redb"]
 iroh = ["p2p/iroh-transport", "defra-p2p-adapter/iroh"]
 
 [dev-dependencies]
+base64 = { workspace = true }
 tempfile = "3.17"
 tokio = { workspace = true, features = ["full"] }
 zeroize = "1"
+zstd = "0.13"
 
 [lints]
 workspace = true

@@ -120,6 +120,11 @@ impl BasicTxn {
         NamespaceView::new(self.shared_txn.clone(), Namespace::Systemstore)
     }
 
+    /// Get the access-control policy store (namespace 'a').
+    pub fn acpstore(&self) -> NamespaceView {
+        NamespaceView::new(self.shared_txn.clone(), Namespace::Acpstore)
+    }
+
     /// Get the rootstore (no namespace prefix).
     pub fn rootstore(&self) -> RootView {
         RootView::new(self.shared_txn.clone())
