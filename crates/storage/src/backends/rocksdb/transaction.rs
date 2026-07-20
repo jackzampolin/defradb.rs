@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use super::iterator::RocksDbMergingIterator;
 use crate::backends::shared::DurabilityMode;
-use crate::backends::shared::{CallbackCounts, CallbackManager, ConflictTracker, ReadSet};
+use crate::backends::shared::{
+    CallbackCounts, CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet,
+};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
@@ -64,6 +66,7 @@ pub(crate) struct RocksDbTxn {
     pub(crate) db: Arc<rocksdb::OptimisticTransactionDB>,
     snapshot: OwnedSnapshot,
     pub(crate) conflict_tracker: Arc<ConflictTracker>,
+    pub(crate) _conflict_snapshot: Option<ConflictSnapshot>,
     pub(crate) active_txn_count: Arc<AtomicUsize>,
     pub(crate) read_version: u64,
     /// Pending changes (Some(value) = set, None = delete)
@@ -114,13 +117,18 @@ impl RocksDbTxn {
         readonly: bool,
         durability: DurabilityMode,
     ) -> Self {
-        let read_version = conflict_tracker.current_version();
+        let conflict_snapshot = (!readonly).then(|| conflict_tracker.begin_snapshot());
+        let read_version = conflict_snapshot.as_ref().map_or_else(
+            || conflict_tracker.current_version(),
+            |snapshot| snapshot.version(),
+        );
         let snapshot = OwnedSnapshot::new(Arc::clone(&db));
 
         Self {
             db,
             snapshot,
             conflict_tracker,
+            _conflict_snapshot: conflict_snapshot,
             active_txn_count,
             read_version,
             pending: Mutex::new(BTreeMap::new()),

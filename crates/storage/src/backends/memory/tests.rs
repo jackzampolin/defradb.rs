@@ -145,4 +145,46 @@ mod memory_specific_tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn test_memory_long_lived_create_cannot_overwrite_committed_document() {
+        let store = Arc::new(MemoryStore::new());
+
+        let mut stale = store.new_txn(false).await.unwrap();
+        assert_eq!(stale.get(b"/seq/doc").await.unwrap(), None);
+
+        let mut winner = store.new_txn(false).await.unwrap();
+        winner.set(b"/seq/doc", &1_u64.to_be_bytes()).await.unwrap();
+        winner.set(b"/d/s/1", b"winner").await.unwrap();
+        winner.set(b"/d/p/winner", b"1").await.unwrap();
+        winner.set(b"/data/1", b"winner-body").await.unwrap();
+        winner.commit().await.unwrap();
+
+        for i in 0..1000 {
+            let mut txn = store.new_txn(false).await.unwrap();
+            txn.set(format!("unrelated-{i}").as_bytes(), b"value")
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+        }
+
+        stale.set(b"/seq/doc", &1_u64.to_be_bytes()).await.unwrap();
+        stale.set(b"/d/s/1", b"stale").await.unwrap();
+        stale.set(b"/d/p/stale", b"1").await.unwrap();
+        stale.set(b"/data/1", b"stale-body").await.unwrap();
+        assert!(matches!(
+            stale.commit().await,
+            Err(crate::corekv::Error::TxnConflict)
+        ));
+
+        let reader = store.new_txn(true).await.unwrap();
+        assert_eq!(
+            reader.get(b"/d/s/1").await.unwrap(),
+            Some(b"winner".to_vec())
+        );
+        assert_eq!(
+            reader.get(b"/data/1").await.unwrap(),
+            Some(b"winner-body".to_vec())
+        );
+    }
 }

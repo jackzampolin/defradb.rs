@@ -10,7 +10,9 @@ use super::config::DurabilityMode;
 use super::group_commit::{GroupCommitBuffer, PendingCommit};
 use super::iterator::MergingIterator;
 use super::{bound_as_ref, compute_range_bounds, KV_TABLE};
-use crate::backends::shared::{CallbackCounts, CallbackManager, ConflictTracker, ReadSet};
+use crate::backends::shared::{
+    CallbackCounts, CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet,
+};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
@@ -37,6 +39,9 @@ pub(crate) struct RedbTxn {
 
     /// Conflict tracker for write-write conflict detection
     pub(crate) conflict_tracker: Arc<ConflictTracker>,
+
+    /// Keeps conflict history alive for this write transaction's snapshot.
+    pub(crate) _conflict_snapshot: Option<ConflictSnapshot>,
 
     /// Keeps transaction snapshots aligned with committed conflict versions.
     pub(crate) commit_gate: Arc<tokio::sync::RwLock<()>>,
@@ -304,7 +309,7 @@ impl Writer for RedbTxn {
 #[async_trait]
 impl Txn for RedbTxn {
     #[instrument(level = "trace", skip(self))]
-    async fn commit(self: Box<Self>) -> Result<()> {
+    async fn commit(mut self: Box<Self>) -> Result<()> {
         // Note: active_txn_count is decremented by Drop impl when self is dropped
         // at the end of this function (on any exit path).
 
@@ -335,6 +340,10 @@ impl Txn for RedbTxn {
                     changes: pending,
                     read_version: self.read_version,
                     read_set,
+                    _conflict_snapshot: self
+                        ._conflict_snapshot
+                        .take()
+                        .expect("write transaction has a conflict snapshot"),
                     result_tx,
                     on_success: self.callbacks.take_success(),
                     on_success_async: self.callbacks.take_success_async(),
@@ -361,10 +370,15 @@ impl Txn for RedbTxn {
             let commit_gate = self.commit_gate.clone();
             let read_version = self.read_version;
             let durability = self.durability;
+            let conflict_snapshot = self
+                ._conflict_snapshot
+                .take()
+                .expect("write transaction has a conflict snapshot");
             let error_callbacks = self.callbacks.take_error();
             let error_async_callbacks = self.callbacks.take_error_async();
 
             let write_result = tokio::task::spawn_blocking(move || -> Result<()> {
+                let _conflict_snapshot = conflict_snapshot;
                 let _commit_guard = commit_gate.blocking_write();
                 conflict_tracker.check_and_record(read_version, pending.keys(), &read_set)?;
 

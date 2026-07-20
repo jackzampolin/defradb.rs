@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::iterator::MergingIterator;
 use crate::backends::shared::DurabilityMode;
-use crate::backends::shared::{CallbackManager, ConflictTracker, ReadSet};
+use crate::backends::shared::{CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
@@ -21,6 +21,7 @@ pub(crate) struct LarkTxn {
     db: Arc<lark_kv::Db>,
     snapshot: lark_kv::Snapshot,
     conflict_tracker: Arc<ConflictTracker>,
+    _conflict_snapshot: Option<ConflictSnapshot>,
     active_txn_count: Arc<AtomicUsize>,
     read_version: u64,
     pending: Mutex<PendingWrites>,
@@ -186,13 +187,18 @@ impl LarkTxn {
         readonly: bool,
         durability: DurabilityMode,
     ) -> Self {
-        let read_version = conflict_tracker.current_version();
+        let conflict_snapshot = (!readonly).then(|| conflict_tracker.begin_snapshot());
+        let read_version = conflict_snapshot.as_ref().map_or_else(
+            || conflict_tracker.current_version(),
+            |snapshot| snapshot.version(),
+        );
         let snapshot = db.snapshot();
 
         Self {
             db,
             snapshot,
             conflict_tracker,
+            _conflict_snapshot: conflict_snapshot,
             active_txn_count,
             read_version,
             pending: Mutex::new(PendingWrites::default()),
