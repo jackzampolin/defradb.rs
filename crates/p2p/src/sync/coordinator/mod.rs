@@ -158,6 +158,11 @@ pub struct SyncStatus {
 struct SyncShutdownState {
     is_shutting_down: AtomicBool,
     background_tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// Long-lived poll fetches keyed by pending-DAG root. The retry clock may
+    /// re-emit a root before its previous bounded fetch has exhausted all
+    /// providers, so these need root-level single-flight in addition to the
+    /// global/per-peer limiter (#1159).
+    pending_dag_fetch_tasks: Mutex<HashMap<Cid, JoinHandle<()>>>,
 }
 
 const BACKGROUND_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -232,6 +237,7 @@ impl SyncShutdownHandle {
             inner: Arc::new(SyncShutdownState {
                 is_shutting_down: AtomicBool::new(false),
                 background_tasks: Mutex::new(Vec::new()),
+                pending_dag_fetch_tasks: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -265,13 +271,32 @@ impl SyncShutdownHandle {
         }
     }
 
+    fn spawn_pending_dag_fetch<F>(&self, root_cid: Cid, future: F) -> bool
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut tasks = self.inner.pending_dag_fetch_tasks.lock();
+        tasks.retain(|_, task| !task.is_finished());
+        if self.is_shutting_down() || tasks.contains_key(&root_cid) {
+            return false;
+        }
+
+        tasks.insert(root_cid, tokio::spawn(future));
+        true
+    }
+
     /// Number of live retained background task handles. Prunes finished
     /// handles first so a burst of completed tasks does not overstate live
     /// work between registrations.
     pub fn retained_task_count(&self) -> usize {
         let mut tasks = self.inner.background_tasks.lock();
         tasks.retain(|task| !task.is_finished());
-        tasks.len()
+        let background_count = tasks.len();
+        drop(tasks);
+
+        let mut pending_dag_fetches = self.inner.pending_dag_fetch_tasks.lock();
+        pending_dag_fetches.retain(|_, task| !task.is_finished());
+        background_count + pending_dag_fetches.len()
     }
 
     async fn drain_background_tasks(&self, timeout: Duration) {
@@ -279,6 +304,10 @@ impl SyncShutdownHandle {
             let mut tasks = self.inner.background_tasks.lock();
             std::mem::take(&mut *tasks)
         };
+        handles.extend({
+            let mut tasks = self.inner.pending_dag_fetch_tasks.lock();
+            std::mem::take(&mut *tasks).into_values()
+        });
 
         let started = tokio::time::Instant::now();
 
@@ -614,6 +643,34 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         self.runtime.shutdown.register_task(handle);
     }
 
+    pub(crate) fn spawn_pending_dag_fetch_task<F>(
+        &self,
+        root_cid: Cid,
+        task_name: &'static str,
+        future: F,
+    ) -> bool
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        if self
+            .runtime
+            .shutdown
+            .spawn_pending_dag_fetch(root_cid, future)
+        {
+            true
+        } else {
+            self.manager
+                .diagnostics()
+                .record_pending_dag_retry_suppressed();
+            tracing::debug!(
+                task = task_name,
+                root_cid = %root_cid,
+                "Suppressing duplicate pending-DAG fetch task"
+            );
+            false
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn pending_dag_count(&self) -> usize {
         self.manager.pending_dag_count()
@@ -670,6 +727,8 @@ mod dag_fetch_limiter_tests {
 #[cfg(test)]
 mod shutdown_tests {
     use super::SyncShutdownHandle;
+    use cid::Cid;
+    use multihash_codetable::{Code, MultihashDigest};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -718,6 +777,38 @@ mod shutdown_tests {
             shutdown.retained_task_count() <= 2,
             "finished handles must be pruned on registration, retained {}",
             shutdown.retained_task_count()
+        );
+        shutdown.shutdown().await;
+    }
+
+    /// A retry-clock tick must not retain another multi-minute poll fetch for
+    /// a root whose previous fetch is still alive (#1159 production soak).
+    #[tokio::test]
+    async fn pending_dag_fetches_are_single_flight_per_root() {
+        let shutdown = SyncShutdownHandle::new();
+        let root = Cid::new_v1(0x55, Code::Sha2_256.digest(b"pending-root"));
+        let first_release = Arc::new(tokio::sync::Notify::new());
+        let first_release_for_task = Arc::clone(&first_release);
+
+        assert!(shutdown.spawn_pending_dag_fetch(root, async move {
+            first_release_for_task.notified().await;
+        }));
+        assert!(
+            !shutdown.spawn_pending_dag_fetch(root, async {}),
+            "a live fetch must suppress a second task for the same root"
+        );
+        assert_eq!(shutdown.retained_task_count(), 1);
+
+        first_release.notify_one();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while shutdown.retained_task_count() != 0 {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            shutdown.spawn_pending_dag_fetch(root, async {}),
+            "the root must become eligible after its prior fetch finishes"
         );
         shutdown.shutdown().await;
     }

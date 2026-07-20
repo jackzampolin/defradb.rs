@@ -134,7 +134,7 @@ where
             .with_explicit_replicator(is_explicit_replicator)
             .with_explicit_replay_authorization(explicit_replay_authorization);
 
-        coordinator.spawn_background_task("pushlog_fetch_dag", async move {
+        coordinator.spawn_pending_dag_fetch_task(root_cid, "pushlog_fetch_dag", async move {
             crate::sync::coordinator::dag_fetcher::poll_fetch_dag(
                 transport, blockstore, event_tx, root_cid, context, limiter,
             )
