@@ -90,7 +90,7 @@ async fn send_two_stream_request_and_capture_flag(
     events: &mut tokio::sync::mpsc::Receiver<p2p::HostEvent>,
     target_peer_id: PeerId,
     request: PushLogRequest,
-) -> bool {
+) -> (bool, Option<String>) {
     let sender_handle = sender.clone();
     let receiver_handle = receiver.clone();
     let send_task = tokio::spawn(async move {
@@ -101,7 +101,7 @@ async fn send_two_stream_request_and_capture_flag(
     });
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let is_explicit_replicator = loop {
+    let captured = loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         let event = timeout(remaining, events.recv())
             .await
@@ -121,14 +121,17 @@ async fn send_two_stream_request_and_capture_flag(
                     .send_two_stream_response(peer_id, reply)
                     .await
                     .unwrap();
-                break is_explicit_replicator;
+                break (
+                    is_explicit_replicator,
+                    request.explicit_replay_capability.clone(),
+                );
             }
             _ => continue,
         }
     };
 
     send_task.await.unwrap();
-    is_explicit_replicator
+    captured
 }
 
 fn explicit_replay_capability(
@@ -204,7 +207,7 @@ async fn test_two_stream_non_replicator_is_not_marked_explicit() {
     );
     sign_message(handle0.keypair(), &mut request).unwrap();
 
-    let is_explicit =
+    let (is_explicit, _) =
         send_two_stream_request_and_capture_flag(&handle0, &handle1, &mut events1, peer1, request)
             .await;
     assert!(
@@ -483,7 +486,7 @@ async fn test_two_stream_registered_replicator_without_capability_is_not_marked_
     );
     sign_message(handle0.keypair(), &mut request).unwrap();
 
-    let is_explicit =
+    let (is_explicit, _) =
         send_two_stream_request_and_capture_flag(&handle0, &handle1, &mut events1, peer1, request)
             .await;
     assert!(
@@ -534,12 +537,66 @@ async fn test_two_stream_registered_replicator_with_capability_is_marked_explici
     );
     sign_message(handle0.keypair(), &mut request).unwrap();
 
-    let is_explicit =
+    let (is_explicit, _) =
         send_two_stream_request_and_capture_flag(&handle0, &handle1, &mut events1, peer1, request)
             .await;
     assert!(
         is_explicit,
         "registered replicator with capability must get explicit trust"
+    );
+
+    handle0.shutdown().await.unwrap();
+    handle1.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_cached_capability_is_not_attached_to_public_push() {
+    let store0 = MockBitswapStore::new();
+    let store1 = MockBitswapStore::new();
+    let (host0, handle0, _events0, _replicators0) = P2PHost::new(store0).await.unwrap();
+    let (host1, handle1, mut events1, _replicators1) = P2PHost::new(store1).await.unwrap();
+
+    tokio::spawn(host0.run());
+    tokio::spawn(host1.run());
+
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr1 = handle1.listen_addresses().await.unwrap().remove(0);
+    let peer1 = handle1.local_peer_id_cached();
+    let peer0 = handle0.local_peer_id_cached();
+
+    handle0.dial(peer1, vec![addr1]).await.unwrap();
+    wait_until_connected(&handle0, peer1).await;
+    wait_until_connected(&handle1, peer0).await;
+
+    handle0
+        .create_replicator(peer1, vec!["collection1".to_string()])
+        .await
+        .unwrap();
+
+    let (_authorizer, capability) = explicit_replay_capability(&handle0, peer1, "collection1");
+    handle0.set_explicit_replay_capability(peer1, &["collection1".to_string()], &capability);
+
+    let request = PushLogRequest::new(
+        "public-doc".to_string(),
+        Bytes::from(vec![1, 2, 3]),
+        "collection1".to_string(),
+        peer0.to_string(),
+        Bytes::from(b"public-block-data".to_vec()),
+    );
+
+    let (is_explicit, attached_capability) =
+        send_two_stream_request_and_capture_flag(&handle0, &handle1, &mut events1, peer1, request)
+            .await;
+    assert!(
+        !is_explicit,
+        "a public push must stay on ordinary replicator admission"
+    );
+    assert!(
+        attached_capability.is_none(),
+        "a different-author capability must not taint a public push"
     );
 
     handle0.shutdown().await.unwrap();
@@ -579,7 +636,7 @@ async fn test_two_stream_capability_for_other_collection_is_rejected() {
     request.explicit_replay_capability = Some(capability);
     sign_message(handle0.keypair(), &mut request).unwrap();
 
-    let is_explicit =
+    let (is_explicit, _) =
         send_two_stream_request_and_capture_flag(&handle0, &handle1, &mut events1, peer1, request)
             .await;
     assert!(
@@ -640,7 +697,7 @@ async fn test_two_stream_expired_capability_is_rejected() {
     request.explicit_replay_capability = Some(capability);
     sign_message(handle0.keypair(), &mut request).unwrap();
 
-    let is_explicit =
+    let (is_explicit, _) =
         send_two_stream_request_and_capture_flag(&handle0, &handle1, &mut events1, peer1, request)
             .await;
     assert!(!is_explicit, "expired capability must be rejected");
@@ -699,7 +756,7 @@ async fn test_two_stream_invalid_authorizer_signature_is_rejected() {
     request.explicit_replay_capability = Some(capability);
     sign_message(handle0.keypair(), &mut request).unwrap();
 
-    let is_explicit =
+    let (is_explicit, _) =
         send_two_stream_request_and_capture_flag(&handle0, &handle1, &mut events1, peer1, request)
             .await;
     assert!(
@@ -748,7 +805,7 @@ async fn test_two_stream_capability_is_edge_scoped() {
     request.explicit_replay_capability = Some(capability_for_a_to_b);
     sign_message(handle1.keypair(), &mut request).unwrap();
 
-    let is_explicit =
+    let (is_explicit, _) =
         send_two_stream_request_and_capture_flag(&handle1, &handle2, &mut events2, peer2, request)
             .await;
     assert!(
