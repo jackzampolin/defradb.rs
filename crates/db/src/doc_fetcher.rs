@@ -212,7 +212,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         use std::collections::HashSet;
         use storage::index::IndexIterator;
 
-        let (_collection, datastore, systemstore, index_manager) =
+        let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
 
         // Get the index
@@ -359,7 +359,13 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
-                apply_cursor_seek_to_iterator(&mut iter, &params.cursor_seek).await?;
+                apply_cursor_seek_to_iterator(
+                    &mut iter,
+                    &params.cursor_seek,
+                    &systemstore,
+                    collection.resolved_root_id(),
+                )
+                .await?;
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::RangeScan {
@@ -380,7 +386,13 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
-                apply_cursor_seek_to_iterator(&mut iter, &params.cursor_seek).await?;
+                apply_cursor_seek_to_iterator(
+                    &mut iter,
+                    &params.cursor_seek,
+                    &systemstore,
+                    collection.resolved_root_id(),
+                )
+                .await?;
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::OrScan { branches } => {

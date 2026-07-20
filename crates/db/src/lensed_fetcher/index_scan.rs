@@ -166,7 +166,13 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
-                apply_cursor_seek_to_iterator(&mut iter, &params.cursor_seek).await?;
+                apply_cursor_seek_to_iterator(
+                    &mut iter,
+                    &params.cursor_seek,
+                    &systemstore,
+                    short_id,
+                )
+                .await?;
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::RangeScan {
@@ -187,7 +193,13 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
-                apply_cursor_seek_to_iterator(&mut iter, &params.cursor_seek).await?;
+                apply_cursor_seek_to_iterator(
+                    &mut iter,
+                    &params.cursor_seek,
+                    &systemstore,
+                    short_id,
+                )
+                .await?;
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::OrScan { branches } => {
