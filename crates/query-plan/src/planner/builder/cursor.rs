@@ -284,6 +284,7 @@ fn configure_scan_for_cursor(
 /// The key format matches the one used by `RangeIterator` bounds:
 ///   `IndexDataStoreKey::index_prefix(collection_short_id, index_id)`
 ///   + `encode_field_value(...)` for each ordered field.
+///
 /// The DB fetcher appends the boundary document's node-local short ID when
 /// the on-disk index key requires one.
 ///
