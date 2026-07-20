@@ -154,7 +154,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+        run: |
+          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+          git config --global --add url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "ssh://git@github.com/sourcenetwork/"
 
       - uses: dtolnay/rust-toolchain@stable
 
