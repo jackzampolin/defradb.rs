@@ -574,7 +574,18 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                 );
             }
         }
-        result
+        match result {
+            // Signature verification is a property of the block bytes. It
+            // cannot become valid on a later retry, so route it through the
+            // existing terminal-rejection outcome and pending-DAG quarantine
+            // instead of returning `Err` to the receiver retry clock (#1159).
+            Err(error @ MergeError::SignatureVerificationFailed { .. }) => {
+                Ok(MergeOutcome::Rejected {
+                    reason: error.to_string(),
+                })
+            }
+            other => other,
+        }
     }
 
     async fn handle_block_batch(
@@ -1242,6 +1253,19 @@ mod tests {
                 MergeError::SignatureVerificationFailed { .. }
             ),
             "expected SignatureVerificationFailed"
+        );
+
+        let outcome = handler
+            .handle_block(
+                &cid,
+                &block_data,
+                BlockMetadata::normal("doc1", "v1", "creator", None, false),
+            )
+            .await
+            .expect("a deterministic signature failure is a merge outcome, not a retry error");
+        assert!(
+            matches!(outcome, MergeOutcome::Rejected { .. }),
+            "tampered blocks must flow to pending-DAG quarantine"
         );
     }
 
