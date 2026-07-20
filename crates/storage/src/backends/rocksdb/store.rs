@@ -16,6 +16,7 @@ pub struct RocksDbStore {
     db: Arc<rocksdb::OptimisticTransactionDB>,
     closed: AtomicBool,
     conflict_tracker: Arc<ConflictTracker>,
+    commit_gate: Arc<tokio::sync::RwLock<()>>,
     db_path: std::path::PathBuf,
     active_txn_count: Arc<AtomicUsize>,
     close_timeout: std::time::Duration,
@@ -124,6 +125,7 @@ impl RocksDbStore {
             db: Arc::new(db),
             closed: AtomicBool::new(false),
             conflict_tracker: Arc::new(ConflictTracker::new()),
+            commit_gate: Arc::new(tokio::sync::RwLock::new(())),
             db_path,
             active_txn_count: Arc::new(AtomicUsize::new(0)),
             close_timeout: opts.close_timeout(),
@@ -156,13 +158,33 @@ impl Store for RocksDbStore {
             return Err(Error::DBClosed);
         }
 
-        Ok(Box::new(RocksDbTxn::new(
+        // Ensure cancellation while waiting for the commit gate does not leak
+        // the active transaction count and prevent store shutdown.
+        struct NewTxnGuard<'a>(&'a AtomicUsize, bool);
+        impl Drop for NewTxnGuard<'_> {
+            fn drop(&mut self) {
+                if !self.1 {
+                    self.0.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+        }
+        let mut guard = NewTxnGuard(&self.active_txn_count, false);
+
+        // Pair the conflict version and RocksDB snapshot without a commit
+        // becoming visible between them.
+        let _commit_guard = self.commit_gate.read().await;
+        let txn = RocksDbTxn::new(
             Arc::clone(&self.db),
             Arc::clone(&self.conflict_tracker),
+            Arc::clone(&self.commit_gate),
             Arc::clone(&self.active_txn_count),
             readonly,
             self.durability,
-        )))
+        );
+
+        // The transaction now owns the active-count decrement through Drop.
+        guard.1 = true;
+        Ok(Box::new(txn))
     }
 
     async fn close(&self) -> Result<()> {
@@ -229,5 +251,117 @@ impl Dropable for RocksDbStore {
         })?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backends::shared::ReadSet;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn snapshot_waits_for_physical_write_after_conflict_version_advances() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(RocksDbStore::open(temp_dir.path()).unwrap());
+        let sequence_key = b"/seq/doc".to_vec();
+        let sequence_value = 14_u64.to_be_bytes();
+
+        // Reproduce the critical interval inside commit: the logical conflict
+        // version has advanced, but the corresponding RocksDB batch has not
+        // yet been written. A new transaction must not snapshot in this gap.
+        let gate = Arc::clone(&store.commit_gate);
+        let commit_guard = gate.write().await;
+        store
+            .conflict_tracker
+            .check_and_record(
+                store.conflict_tracker.current_version(),
+                std::slice::from_ref(&sequence_key).iter(),
+                &ReadSet::default(),
+            )
+            .unwrap();
+
+        let snapshot_store = Arc::clone(&store);
+        let mut snapshot_task = tokio::spawn(async move { snapshot_store.new_txn(false).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut snapshot_task)
+                .await
+                .is_err(),
+            "new transaction took a snapshot during an in-flight physical commit"
+        );
+
+        store.db.put(&sequence_key, sequence_value).unwrap();
+        drop(commit_guard);
+
+        let snapshot = tokio::time::timeout(Duration::from_secs(1), snapshot_task)
+            .await
+            .expect("snapshot remained blocked after commit")
+            .expect("snapshot task panicked")
+            .expect("snapshot creation failed");
+        assert_eq!(
+            snapshot.get(&sequence_key).await.unwrap(),
+            Some(sequence_value.to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn physical_write_waits_for_snapshot_pairing() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(RocksDbStore::open(temp_dir.path()).unwrap());
+        let key = b"commit-gate-key".to_vec();
+
+        let mut writer = store.new_txn(false).await.unwrap();
+        writer.set(&key, b"committed").await.unwrap();
+
+        let gate = Arc::clone(&store.commit_gate);
+        let snapshot_guard = gate.read().await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut commit_task = tokio::spawn(async move {
+            started_tx.send(()).unwrap();
+            writer.commit().await
+        });
+        started_rx.await.unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut commit_task)
+                .await
+                .is_err(),
+            "physical commit did not wait for snapshot pairing"
+        );
+        assert_eq!(store.db.get(&key).unwrap(), None);
+
+        drop(snapshot_guard);
+        tokio::time::timeout(Duration::from_secs(1), commit_task)
+            .await
+            .expect("commit remained blocked after snapshot pairing")
+            .expect("commit task panicked")
+            .expect("commit failed");
+        assert_eq!(store.db.get(&key).unwrap(), Some(b"committed".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn cancelling_snapshot_wait_does_not_leak_active_transaction_count() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(RocksDbStore::open(temp_dir.path()).unwrap());
+        let gate = Arc::clone(&store.commit_gate);
+        let commit_guard = gate.write().await;
+
+        let snapshot_store = Arc::clone(&store);
+        let snapshot_task = tokio::spawn(async move { snapshot_store.new_txn(false).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while store.active_txn_count.load(Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("snapshot task did not reach the commit gate");
+
+        snapshot_task.abort();
+        match snapshot_task.await {
+            Err(error) => assert!(error.is_cancelled()),
+            Ok(_) => panic!("snapshot task completed instead of being cancelled"),
+        }
+        drop(commit_guard);
+        assert_eq!(store.active_txn_count.load(Ordering::Acquire), 0);
     }
 }
