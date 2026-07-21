@@ -26,6 +26,9 @@ pub(crate) struct MemoryTxn {
     /// Keeps conflict history alive for this write transaction's snapshot.
     pub(crate) _conflict_snapshot: Option<ConflictSnapshot>,
 
+    /// Keeps conflict versions aligned with physical snapshots and commits.
+    pub(crate) commit_gate: Arc<RwLock<()>>,
+
     /// Version at which this transaction's snapshot was taken
     pub(crate) read_version: u64,
 
@@ -205,24 +208,20 @@ impl Txn for MemoryTxn {
         let pending = self.pending.lock().clone();
         let read_set = self.read_set.lock().clone();
 
-        // Check for write-write conflicts before applying
         if !pending.is_empty() {
+            let commit_guard = self.commit_gate.write().await;
+            let mut store = self.store.write().await;
+
             if let Err(e) =
                 self.conflict_tracker
                     .check_and_record(self.read_version, pending.keys(), &read_set)
             {
+                drop(store);
+                drop(commit_guard);
                 CallbackManager::execute_callbacks(self.callbacks.take_error());
                 CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
                 return Err(e);
             }
-        }
-
-        // Mark as committed
-        self.committed.store(true, Ordering::Release);
-
-        // Apply pending changes to store
-        if !pending.is_empty() {
-            let mut store = self.store.write().await;
 
             for (key, value) in pending.iter() {
                 match value {
@@ -235,6 +234,9 @@ impl Txn for MemoryTxn {
                 }
             }
         }
+
+        // Mark as committed
+        self.committed.store(true, Ordering::Release);
 
         // Execute success callbacks
         CallbackManager::execute_callbacks(self.callbacks.take_success());
