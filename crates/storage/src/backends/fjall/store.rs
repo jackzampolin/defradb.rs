@@ -172,7 +172,11 @@ impl Store for FjallStore {
         }
         let mut guard = NewTxnGuard(&self.active_txn_count, false);
 
-        let read_version = self.conflict_tracker.current_version();
+        let conflict_snapshot = (!readonly).then(|| self.conflict_tracker.begin_snapshot());
+        let read_version = conflict_snapshot.as_ref().map_or_else(
+            || self.conflict_tracker.current_version(),
+            |snapshot| snapshot.version(),
+        );
         let snapshot = self.db.snapshot();
 
         // Defuse guard — transaction will manage its own count via Drop
@@ -182,6 +186,7 @@ impl Store for FjallStore {
             db: self.db.clone(),
             keyspace: self.keyspace.clone(),
             conflict_tracker: Arc::clone(&self.conflict_tracker),
+            _conflict_snapshot: conflict_snapshot,
             active_txn_count: Arc::clone(&self.active_txn_count),
             read_version,
             snapshot,

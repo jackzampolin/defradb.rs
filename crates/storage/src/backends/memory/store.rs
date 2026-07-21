@@ -52,8 +52,11 @@ impl Store for MemoryStore {
             return Err(Error::DBClosed);
         }
 
-        // Record version before taking snapshot for conflict detection
-        let read_version = self.conflict_tracker.current_version();
+        let conflict_snapshot = (!readonly).then(|| self.conflict_tracker.begin_snapshot());
+        let read_version = conflict_snapshot.as_ref().map_or_else(
+            || self.conflict_tracker.current_version(),
+            |snapshot| snapshot.version(),
+        );
 
         // Take a snapshot of current data for isolation
         let snapshot = self.data.read().await.clone();
@@ -61,6 +64,7 @@ impl Store for MemoryStore {
         Ok(Box::new(MemoryTxn {
             store: Arc::clone(&self.data),
             conflict_tracker: Arc::clone(&self.conflict_tracker),
+            _conflict_snapshot: conflict_snapshot,
             read_version,
             snapshot,
             pending: Mutex::new(BTreeMap::new()),

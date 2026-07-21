@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::iterator::MemoryIterator;
-use crate::backends::shared::{CallbackManager, ConflictTracker, ReadSet};
+use crate::backends::shared::{CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
@@ -22,6 +22,9 @@ pub(crate) struct MemoryTxn {
 
     /// Conflict tracker for write-write conflict detection
     pub(crate) conflict_tracker: Arc<ConflictTracker>,
+
+    /// Keeps conflict history alive for this write transaction's snapshot.
+    pub(crate) _conflict_snapshot: Option<ConflictSnapshot>,
 
     /// Version at which this transaction's snapshot was taken
     pub(crate) read_version: u64,

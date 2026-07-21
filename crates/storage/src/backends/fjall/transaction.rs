@@ -7,7 +7,9 @@ use std::sync::Arc;
 use super::compute_range_bounds;
 use super::iterator::MergingIterator;
 use crate::backends::shared::DurabilityMode;
-use crate::backends::shared::{CallbackCounts, CallbackManager, ConflictTracker, ReadSet};
+use crate::backends::shared::{
+    CallbackCounts, CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet,
+};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
@@ -17,6 +19,7 @@ pub(crate) struct FjallTxn {
     pub(crate) db: fjall::Database,
     pub(crate) keyspace: fjall::Keyspace,
     pub(crate) conflict_tracker: Arc<ConflictTracker>,
+    pub(crate) _conflict_snapshot: Option<ConflictSnapshot>,
     pub(crate) active_txn_count: Arc<AtomicUsize>,
     pub(crate) read_version: u64,
     pub(crate) snapshot: fjall::Snapshot,

@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, oneshot, RwLock as AsyncRwLock};
 
 use super::config::DurabilityMode;
 use super::KV_TABLE;
-use crate::backends::shared::{CallbackManager, ConflictTracker, ReadSet};
+use crate::backends::shared::{CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet};
 use crate::corekv::{AsyncTxnCallback, Error, Result, TxnCallback};
 
 /// Payload for a single transaction's pending commit.
@@ -15,6 +15,7 @@ pub(crate) struct PendingCommit {
     pub changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     pub read_version: u64,
     pub read_set: ReadSet,
+    pub _conflict_snapshot: ConflictSnapshot,
     pub result_tx: oneshot::Sender<Result<()>>,
     pub on_success: Vec<TxnCallback>,
     pub on_success_async: Vec<AsyncTxnCallback>,
