@@ -67,6 +67,7 @@ pub(crate) struct RocksDbTxn {
     snapshot: OwnedSnapshot,
     pub(crate) conflict_tracker: Arc<ConflictTracker>,
     pub(crate) _conflict_snapshot: Option<ConflictSnapshot>,
+    pub(crate) commit_gate: Arc<tokio::sync::RwLock<()>>,
     pub(crate) active_txn_count: Arc<AtomicUsize>,
     pub(crate) read_version: u64,
     /// Pending changes (Some(value) = set, None = delete)
@@ -113,6 +114,7 @@ impl RocksDbTxn {
     pub(crate) fn new(
         db: Arc<rocksdb::OptimisticTransactionDB>,
         conflict_tracker: Arc<ConflictTracker>,
+        commit_gate: Arc<tokio::sync::RwLock<()>>,
         active_txn_count: Arc<AtomicUsize>,
         readonly: bool,
         durability: DurabilityMode,
@@ -129,6 +131,7 @@ impl RocksDbTxn {
             snapshot,
             conflict_tracker,
             _conflict_snapshot: conflict_snapshot,
+            commit_gate,
             active_txn_count,
             read_version,
             pending: Mutex::new(BTreeMap::new()),
@@ -391,15 +394,11 @@ impl Txn for RocksDbTxn {
         let read_set = self.read_set.lock().clone();
 
         if !pending.is_empty() {
-            // Check conflicts
-            if let Err(e) =
-                self.conflict_tracker
-                    .check_and_record(self.read_version, pending.keys(), &read_set)
-            {
-                CallbackManager::execute_callbacks(self.callbacks.take_error());
-                CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
-                return Err(e);
-            }
+            // Keep the logical conflict version and physical RocksDB commit
+            // atomic with respect to new transaction snapshots. Without this,
+            // a transaction can observe the advanced conflict version while
+            // taking a RocksDB snapshot from before the corresponding write.
+            let commit_guard = self.commit_gate.write().await;
 
             // Apply via WriteBatch
             let mut batch = rocksdb::WriteBatchWithTransaction::<true>::default();
@@ -420,15 +419,27 @@ impl Txn for RocksDbTxn {
                 }
             }
 
-            if let Err(e) = self.db.write_opt(batch, &write_opts) {
-                tracing::error!(
-                    error = %e,
-                    pending_changes = pending.len(),
-                    "Failed to commit RocksDB batch"
-                );
+            let commit_result = match self.conflict_tracker.check_and_record(
+                self.read_version,
+                pending.keys(),
+                &read_set,
+            ) {
+                Ok(()) => self.db.write_opt(batch, &write_opts).map_err(Error::from),
+                Err(error) => Err(error),
+            };
+            drop(commit_guard);
+
+            if let Err(e) = commit_result {
+                if !matches!(e, Error::TxnConflict) {
+                    tracing::error!(
+                        error = %e,
+                        pending_changes = pending.len(),
+                        "Failed to commit RocksDB batch"
+                    );
+                }
                 CallbackManager::execute_callbacks(self.callbacks.take_error());
                 CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
-                return Err(e.into());
+                return Err(e);
             }
         }
 
