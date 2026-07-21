@@ -972,18 +972,27 @@ async fn poll_mixed_fields_dags_converged(
     cluster: &TestCluster,
     nodes: usize,
     doc_id: &str,
+    required_commits: &BTreeSet<String>,
     timeout: Duration,
 ) -> bool {
+    // Equal DAGs may still omit a writer, so keep pulling until every recorded commit arrives.
     let deadline = Instant::now() + timeout;
     loop {
         let commits: Vec<_> = (0..nodes)
             .map(|n| support::commit_cids(&cluster.client(n), doc_id))
             .collect();
-        if !commits.iter().any(|c| c.is_empty()) && commits.windows(2).all(|w| w[0] == w[1]) {
+        if commits.first().is_some_and(|first| {
+            !first.is_empty()
+                && first.is_superset(required_commits)
+                && commits.iter().all(|current| current == first)
+        }) {
             return true;
         }
         if Instant::now() >= deadline {
             return false;
+        }
+        for n in 0..nodes {
+            let _ = cluster.client(n).p2p_document_sync("Mixed", &[doc_id]);
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
@@ -1049,13 +1058,21 @@ async fn run_mixed_fields_3node_probe(
     }
 
     let id = create_mixed_seed(&cluster.client(0), label);
+    let mut required_commits = support::commit_cids(&cluster.client(0), &id);
 
     assert!(
         poll_all_mixed_fields_state(&cluster, 3, ("seed", 0), Duration::from_secs(30)).await,
         "[{label}] seed (name=seed, views=0) did not reach all three nodes"
     );
     assert!(
-        poll_mixed_fields_dags_converged(&cluster, 3, &id, Duration::from_secs(30)).await,
+        poll_mixed_fields_dags_converged(
+            &cluster,
+            3,
+            &id,
+            &required_commits,
+            Duration::from_secs(30),
+        )
+        .await,
         "[{label}] seed DAG did not converge before the mixed-field updates"
     );
 
@@ -1065,21 +1082,31 @@ async fn run_mixed_fields_3node_probe(
             r#"mutation {{ update_Mixed(docID: "{id}", input: {{name: "alice"}}) {{ _docID }} }}"#
         ))
         .expect("node0 name=alice");
+    required_commits.extend(support::commit_cids(&cluster.client(0), &id));
     cluster
         .client(1)
         .query(&format!(
             r#"mutation {{ update_Mixed(docID: "{id}", input: {{views: 10}}) {{ _docID }} }}"#
         ))
         .expect("node1 views=10");
+    required_commits.extend(support::commit_cids(&cluster.client(1), &id));
     cluster
         .client(2)
         .query(&format!(
             r#"mutation {{ update_Mixed(docID: "{id}", input: {{views: 7}}) {{ _docID }} }}"#
         ))
         .expect("node2 views=7");
+    required_commits.extend(support::commit_cids(&cluster.client(2), &id));
 
     assert!(
-        poll_mixed_fields_dags_converged(&cluster, 3, &id, Duration::from_secs(45)).await,
+        poll_mixed_fields_dags_converged(
+            &cluster,
+            3,
+            &id,
+            &required_commits,
+            Duration::from_secs(45),
+        )
+        .await,
         "[{label}] mixed-field DAGs did not converge, so final-state parity would be inert"
     );
 
