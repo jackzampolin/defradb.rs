@@ -1,7 +1,7 @@
 use super::*;
 use db_blocks::decode_priority_varint;
 
-impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
+impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     async fn current_field_priority(
         &self,
         headstore: &NamespaceView,

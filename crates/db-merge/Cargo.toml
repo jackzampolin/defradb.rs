@@ -18,7 +18,6 @@ wasmtime-runtime = ["db/wasmtime-runtime"]
 async-trait.workspace = true
 async-lock = "3"
 futures.workspace = true
-tokio = { workspace = true, features = ["sync"] }
 
 # Serialization
 serde.workspace = true
@@ -26,6 +25,7 @@ serde_json.workspace = true
 serde_cbor.workspace = true
 serde_bytes.workspace = true
 ciborium = "0.2"
+hex.workspace = true
 
 # Bytes
 bytes.workspace = true
@@ -45,9 +45,6 @@ cid.workspace = true
 # Synchronization
 parking_lot.workspace = true
 
-# P2P
-libp2p.workspace = true
-
 # Internal crates
 db = { path = "../db", default-features = false }
 db-blocks = { path = "../db-blocks" }
@@ -63,12 +60,18 @@ defra-core = { path = "../defra-core" }
 identity = { path = "../identity" }
 acp = { path = "../acp", default-features = false }
 events = { path = "../events", default-features = false }
-p2p = { path = "../p2p", features = ["libp2p-transport"] }
 kms = { path = "../kms" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["sync"] }
+libp2p.workspace = true
+p2p = { path = "../p2p", features = ["libp2p-transport"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-hex.workspace = true
 blst = "0.3"
 getrandom = "0.2"
 

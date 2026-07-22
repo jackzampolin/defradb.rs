@@ -9,7 +9,7 @@ fn build_deleted_key(collection_id: &str, doc_short_id: u64) -> Vec<u8> {
     storage::keys::deleted_doc_key(collection_id, doc_short_id)
 }
 
-impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
+impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     pub(crate) async fn persist_merged_document(
         &self,
         datastore: &mut NamespaceView,

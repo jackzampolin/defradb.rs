@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use async_channel::{Sender, TrySendError};
 use parking_lot::RwLock;
-use tokio::sync::mpsc;
 
 use crate::bus::Bus;
 use crate::event::{EventName, Message};
@@ -48,7 +48,7 @@ impl ChannelBusConfig {
 /// Subscriber entry with channel and event filter.
 struct Subscriber {
     /// Sender channel for messages.
-    sender: mpsc::Sender<Message>,
+    sender: Sender<Message>,
     /// Events this subscriber is interested in.
     events: Vec<EventName>,
     /// Shared count of messages dropped due to buffer overflow.
@@ -56,9 +56,9 @@ struct Subscriber {
     dropped_count: std::sync::Arc<AtomicU64>,
 }
 
-/// Channel-based event bus using tokio mpsc channels.
+/// Channel-based event bus using runtime-neutral async channels.
 ///
-/// This implementation uses bounded mpsc channels per subscriber.
+/// This implementation uses bounded channels per subscriber.
 /// Messages are fan-out to all matching subscribers.
 /// When a subscriber's buffer is full, messages are dropped (non-blocking).
 pub struct ChannelBus {
@@ -131,7 +131,7 @@ impl Bus for ChannelBus {
             // Try to send (non-blocking) - use try_send to avoid blocking
             match subscriber.sender.try_send(msg.clone()) {
                 Ok(()) => delivered += 1,
-                Err(mpsc::error::TrySendError::Full(_)) => {
+                Err(TrySendError::Full(_)) => {
                     // Buffer full - track dropped count for resync signaling
                     let prev_dropped = subscriber.dropped_count.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
@@ -142,7 +142,7 @@ impl Bus for ChannelBus {
                     );
                     buffer_full += 1;
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(TrySendError::Closed(_)) => {
                     // Subscriber channel closed, mark for cleanup
                     tracing::debug!(
                         sub_id = *id,
@@ -190,12 +190,12 @@ impl Bus for ChannelBus {
     fn subscribe(&self, events: &[EventName]) -> Subscription {
         if self.closed.load(Ordering::Acquire) {
             // Return a subscription with a closed channel
-            let (_tx, rx) = mpsc::channel(1);
+            let (_tx, rx) = async_channel::bounded(1);
             return Subscription::new(0, rx);
         }
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel(self.config.event_buffer_size);
+        let (tx, rx) = async_channel::bounded(self.config.event_buffer_size);
 
         // Create shared dropped counter for both Subscriber and Subscription
         let dropped_count = std::sync::Arc::new(AtomicU64::new(0));

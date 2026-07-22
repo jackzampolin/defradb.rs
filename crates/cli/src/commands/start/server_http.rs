@@ -212,6 +212,13 @@ impl Node {
         server = server.with_block_arc(block_adapter);
         info!("Block HTTP endpoints enabled");
 
+        let browser_sync_adapter = crate::browser_sync_adapter::BrowserSyncAdapter::new_arc(
+            database,
+            acp_setup.document_acp.clone(),
+        );
+        server = server.with_browser_sync_arc(browser_sync_adapter);
+        info!("Browser synchronization endpoint enabled");
+
         server = server.with_event_bus_arc(event_bus);
         info!("Subscription event bus enabled");
 

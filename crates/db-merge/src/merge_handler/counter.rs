@@ -1,6 +1,6 @@
 use super::*;
 
-impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
+impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// Process a Counter delta from a block (standalone, with its own transaction).
     pub(crate) async fn process_counter_delta(
         &self,
@@ -499,7 +499,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 /// DAG traversal, crash-recovery replay — gates on `is_merged(cid)` /
 /// `get_unmerged()` and skips blocks that are already merged. See #847 for
 /// the history of this contract.
-async fn mark_field_blocks_merged<B: blockstore::Blockstore + Send + Sync>(
+async fn mark_field_blocks_merged<B: blockstore::Blockstore>(
     blockstore: &Arc<B>,
     cids: &[Cid],
 ) -> Result<(), MergeError> {

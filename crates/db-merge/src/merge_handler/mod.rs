@@ -32,10 +32,13 @@ use datastore::NamespaceView;
 use defra_core::block::{
     Block, CollectionDefinitionDeltaPayload, CrdtDelta, Encryption, FieldDefinitionDeltaPayload,
 };
+use defra_core::merge::{
+    BlockMetadata, ExplicitReplayAuthorization, MergeBlock, MergeHandler, MergeOutcome,
+    RecoveredBlockMetadata,
+};
 use defra_core::types::DocId;
 use document::{DocID, Document, NormalValue};
 use events::{MergeCompleteData, Message, Update};
-use p2p::sync::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome, RecoveredBlockMetadata};
 use schema::{
     self, CType, CollectionSource, CollectionVersion, FieldDescription, FieldKind, QuerySource,
     ScalarKind,
@@ -48,6 +51,22 @@ use db::collection::Collection;
 use db::database::DB;
 use db::index_manager::IndexManager;
 use hook::CompositeMergeHook;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_task<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(future);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn spawn_task<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(future);
+}
 
 /// Maximum DAG recursion depth for merge operations.
 ///
@@ -107,7 +126,7 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     prefetched_dek_cids: Arc<std::sync::Mutex<HashSet<Cid>>>,
 }
 
-impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
+impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// Create a new database merge handler.
     pub fn new(db: Arc<DB<S>>, blockstore: Arc<B>) -> Self {
         let merge_queue = db.doc_write_queue();
@@ -145,7 +164,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         }
         let ctx = Self::kms_request_context(Some(metadata));
         let prefetched_dek_cids = Arc::clone(&self.prefetched_dek_cids);
-        tokio::spawn(async move {
+        spawn_task(async move {
             let result = match kms.get_keys(&ctx, std::slice::from_ref(&enc_cid)).await {
                 Ok(results) => results.wait_all().await.map(|_| ()),
                 Err(error) => Err(error),
@@ -193,7 +212,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
     pub(crate) async fn validate_explicit_replay_authorization(
         &self,
-        authorization: Option<&p2p::ExplicitReplayAuthorization>,
+        authorization: Option<&ExplicitReplayAuthorization>,
         block: &MergeBlock,
     ) -> Result<(), MergeError> {
         let Some(authorization) = authorization else {
@@ -513,14 +532,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> MergeHandler
+impl<S: Store + 'static, B: blockstore::Blockstore + 'static> MergeHandler
     for DbMergeHandler<S, B>
 {
     type Error = MergeError;
 
     async fn validate_authorization(
         &self,
-        authorization: Option<&p2p::ExplicitReplayAuthorization>,
+        authorization: Option<&ExplicitReplayAuthorization>,
         block: &MergeBlock,
     ) -> Result<(), Self::Error> {
         self.validate_explicit_replay_authorization(authorization, block)
@@ -600,7 +619,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
     }
 }
 
-impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMergeHandler<S, B> {
+impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, B> {
     /// One merge attempt for a single block. Conflict retry lives in the
     /// `MergeHandler::handle_block` wrapper above (Go's `executeMerge` split).
     pub(crate) async fn merge_block_attempt(

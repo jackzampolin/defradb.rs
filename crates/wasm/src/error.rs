@@ -30,6 +30,9 @@ pub enum WasmError {
     #[error("Serialization error: {0}")]
     Serialization(String),
 
+    #[error("Sync error: {0}")]
+    Sync(String),
+
     #[error("Client not initialized")]
     NotInitialized,
 

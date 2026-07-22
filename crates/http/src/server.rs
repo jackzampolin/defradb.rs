@@ -22,7 +22,7 @@ use query::QueryLimits;
 use crate::error::Result;
 use crate::router::{
     create_router_with_state, AcpOperations, AppStateBuilder, BackupOperations, BlockOperations,
-    CollectionManagementOperations, DocumentAcpOperations, DumpOperations,
+    BrowserSyncOperations, CollectionManagementOperations, DocumentAcpOperations, DumpOperations,
     EncryptedIndexOperations, IndexOperations, LensOperations, ManageRequester, NodeAcpOperations,
     P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
 };
@@ -76,6 +76,7 @@ pub struct Server {
     encrypted_index: Option<Arc<dyn EncryptedIndexOperations>>,
     backup: Option<Arc<dyn BackupOperations>>,
     block: Option<Arc<dyn BlockOperations>>,
+    browser_sync: Option<Arc<dyn BrowserSyncOperations>>,
     schema: Option<Arc<dyn SchemaOperations>>,
     lens: Option<Arc<dyn LensOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
@@ -103,6 +104,7 @@ impl Server {
             encrypted_index: None,
             backup: None,
             block: None,
+            browser_sync: None,
             schema: None,
             lens: None,
             nac: None,
@@ -130,6 +132,7 @@ impl Server {
             encrypted_index: None,
             backup: None,
             block: None,
+            browser_sync: None,
             schema: None,
             lens: None,
             nac: None,
@@ -157,6 +160,7 @@ impl Server {
             encrypted_index: None,
             backup: None,
             block: None,
+            browser_sync: None,
             schema: None,
             lens: None,
             nac: None,
@@ -184,6 +188,7 @@ impl Server {
             encrypted_index: None,
             backup: None,
             block: None,
+            browser_sync: None,
             schema: None,
             lens: None,
             nac: None,
@@ -276,6 +281,11 @@ impl Server {
     /// Set block operations from an Arc.
     pub fn with_block_arc(mut self, block: Arc<dyn BlockOperations>) -> Self {
         self.block = Some(block);
+        self
+    }
+
+    pub fn with_browser_sync_arc(mut self, browser_sync: Arc<dyn BrowserSyncOperations>) -> Self {
+        self.browser_sync = Some(browser_sync);
         self
     }
 
@@ -413,6 +423,9 @@ impl Server {
         }
         if let Some(ref block) = self.block {
             builder = builder.with_block(Arc::clone(block));
+        }
+        if let Some(ref browser_sync) = self.browser_sync {
+            builder = builder.with_browser_sync(Arc::clone(browser_sync));
         }
         if let Some(ref schema) = self.schema {
             builder = builder.with_schema(Arc::clone(schema));

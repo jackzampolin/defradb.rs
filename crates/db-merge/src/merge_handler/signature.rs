@@ -7,7 +7,7 @@ use storage::corekv::Store;
 use super::error::MergeError;
 use super::DbMergeHandler;
 
-impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
+impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// Verify block signature and return the verified creator identity.
     ///
     /// Returns:

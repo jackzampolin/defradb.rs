@@ -4,8 +4,11 @@ use std::sync::Arc;
 use acp::{DocumentACP, DocumentPermission, Identity};
 use async_trait::async_trait;
 use cid::Cid;
+use defra_core::merge::{
+    BlockMetadata, ExplicitReplayAuthorization, MergeBlock, MergeHandler, MergeOutcome,
+    RecoveredBlockMetadata,
+};
 use identity::Identity as _;
-use p2p::sync::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome, RecoveredBlockMetadata};
 use schema::CollectionVersion;
 use storage::corekv::Store;
 
@@ -22,7 +25,8 @@ struct RegisterReplicatedDocAction {
     doc_id: String,
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CompositePostCommitAction for RegisterReplicatedDocAction {
     async fn run(self: Box<Self>) -> Result<(), MergeError> {
         self.acp
@@ -66,7 +70,8 @@ impl AcpCompositeMergeHook {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CompositeMergeHook for AcpCompositeMergeHook {
     async fn on_protected_composite(
         &self,
@@ -203,7 +208,7 @@ pub struct AcpMergeHandler<S: Store, B: blockstore::Blockstore> {
     hook: Arc<AcpCompositeMergeHook>,
 }
 
-impl<S: Store, B: blockstore::Blockstore + Send + Sync> AcpMergeHandler<S, B> {
+impl<S: Store, B: blockstore::Blockstore> AcpMergeHandler<S, B> {
     pub fn new(inner: Arc<DbMergeHandler<S, B>>) -> Self {
         let local_identity = inner
             .db
@@ -232,17 +237,18 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> AcpMergeHandler<S, B> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S, B> MergeHandler for AcpMergeHandler<S, B>
 where
     S: Store + 'static,
-    B: blockstore::Blockstore + Send + Sync + 'static,
+    B: blockstore::Blockstore + 'static,
 {
     type Error = AcpMergeError;
 
     async fn validate_authorization(
         &self,
-        authorization: Option<&p2p::ExplicitReplayAuthorization>,
+        authorization: Option<&ExplicitReplayAuthorization>,
         block: &MergeBlock,
     ) -> Result<(), Self::Error> {
         self.inner

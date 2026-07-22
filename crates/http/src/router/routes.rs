@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{delete, get, patch, post},
     Router,
 };
@@ -242,6 +243,12 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/schema", post(handlers::schema::add_schema))
         .route("/version", get(handlers::version))
         .route("/actions", get(handlers::actions::list_actions))
+        .route(
+            "/sync",
+            post(handlers::browser_sync::sync).layer(DefaultBodyLimit::max(
+                defra_core::browser_sync::MAX_SYNC_BODY_BYTES,
+            )),
+        )
         // Transaction endpoints
         .nest("/tx", tx_routes)
         // REST collection endpoints

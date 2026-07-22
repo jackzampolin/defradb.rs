@@ -69,6 +69,10 @@ mod tests {
             route_permission("/api/v0/batch/sign", &Method::POST),
             RoutePermission::Dynamic
         );
+        assert_eq!(
+            route_permission("/api/v1/sync", &Method::POST),
+            RoutePermission::Dynamic
+        );
     }
 
     #[test]
@@ -208,6 +212,7 @@ mod tests {
                 RoutePermission::Required(NodePermission::DocumentRead),
             ),
             ("/api/v0/graphql", Method::POST, RoutePermission::Dynamic),
+            ("/api/v0/sync", Method::POST, RoutePermission::Dynamic),
             // Schema
             (
                 "/api/v0/schema",

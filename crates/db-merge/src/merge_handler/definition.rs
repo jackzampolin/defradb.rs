@@ -1,6 +1,6 @@
 use super::*;
 
-impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
+impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// Process a CollectionDefinition delta - register synced collection schema in systemstore.
     ///
     /// When a peer receives collection definition blocks via Bitswap sync, this method

@@ -3528,6 +3528,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "wasm-bindgen-futures",
  "zeroize",
 ]
 
@@ -3615,6 +3616,7 @@ name = "defra-core"
 version = "0.5.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "cid",
  "criterion 0.6.0",
  "ipld-core",
@@ -3779,10 +3781,13 @@ dependencies = [
  "console_error_panic_hook",
  "crypto",
  "db",
+ "db-merge",
  "defra-core",
  "document",
+ "events",
  "futures",
  "getrandom 0.2.17",
+ "gloo-timers",
  "hex",
  "js-sys",
  "query",
@@ -3796,6 +3801,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+ "wasm-streams 0.4.2",
  "web-sys",
 ]
 
@@ -4415,6 +4421,7 @@ dependencies = [
 name = "events"
 version = "0.5.0"
 dependencies = [
+ "async-channel 2.5.0",
  "async-trait",
  "bytes",
  "cid",
@@ -4422,7 +4429,6 @@ dependencies = [
  "parking_lot 0.12.5",
  "thiserror 2.0.18",
  "tokio",
- "tokio-stream",
  "tracing",
 ]
 
