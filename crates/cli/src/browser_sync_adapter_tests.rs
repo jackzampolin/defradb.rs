@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use acp::{DocumentACP, LocalDocumentACP, MemoryAcpStore};
-use crypto::{Key as _, PrivateKey as _, PublicKey as _};
+use crypto::{Key as _, PrivateKey as _};
 use defra_core::browser_sync::{BrowserSyncPull, BrowserSyncRequest};
 use defra_core::signing::{set_signing_config, SigningConfig, SigningKeyType};
 use document::{DocID, Document, NormalValue};
