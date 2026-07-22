@@ -209,11 +209,11 @@ pub trait DocFetcher: MaybeSendSync {
     ///
     /// The caller can then use `get_by_ids` to fetch the full documents.
     ///
-    /// When `params.cursor_seek` is `Some`, the implementation must position
-    /// the storage iterator at `cursor_seek.seek_key` before iterating, honoring
-    /// `inclusive` (skip the boundary if false) and `reversed` (iterate
-    /// descending if true). This is used by cursor pagination to seek directly
-    /// into an index without offset-scan.
+    /// When `params.cursor_seek` is `Some`, the implementation must resolve any
+    /// `boundary_doc_id` into its storage-local key suffix, then position the
+    /// iterator at `cursor_seek.seek_key`, honoring `inclusive` and `reversed`.
+    /// This is used by cursor pagination to seek directly into an index without
+    /// offset-scan.
     ///
     /// Default implementation returns an error - implementations that support
     /// index queries should override this.

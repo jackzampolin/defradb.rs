@@ -388,6 +388,7 @@ mod tests {
     fn make_seek() -> CursorSeek {
         CursorSeek {
             seek_key: vec![0, 1, 2],
+            boundary_doc_id: None,
             inclusive: false,
             reversed: false,
             expected_index_name: "idx_test".to_string(),
@@ -477,6 +478,7 @@ mod tests {
         });
         let seek = CursorSeek {
             seek_key: vec![0, 1, 2],
+            boundary_doc_id: None,
             inclusive: false,
             reversed: true, // cursor wants backward iteration
             expected_index_name: "idx_test".to_string(),
@@ -506,6 +508,7 @@ mod tests {
         });
         let seek = CursorSeek {
             seek_key: vec![0, 1, 2],
+            boundary_doc_id: None,
             inclusive: false,
             reversed: true, // cursor wants backward iteration
             expected_index_name: "idx_test".to_string(),
@@ -535,6 +538,7 @@ mod tests {
         });
         let seek = CursorSeek {
             seek_key: vec![0, 1, 2],
+            boundary_doc_id: None,
             inclusive: false,
             reversed: false,
             expected_index_name: "idx_different".to_string(), // does not match "idx_test"

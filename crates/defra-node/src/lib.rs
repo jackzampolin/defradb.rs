@@ -1346,6 +1346,7 @@ impl NodeBuilder {
             discovery: config.discovery.clone(),
             bind_port: Some(config.port),
             bind_addr: config.bind_addr,
+            max_concurrent_multipath_paths: config.max_concurrent_multipath_paths,
             gossip_heal: p2p::iroh::GossipHealConfig::from_env(),
         };
         let (command_tx, iroh_events, replicator_registry, endpoint_task) =

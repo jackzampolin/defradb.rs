@@ -6,6 +6,9 @@ use iroh::SecretKey;
 use super::config::{IrohDiscoveryConfig, IrohRelayModeConfig};
 use super::gossip_heal::GossipHealConfig;
 
+// iroh 1.0 silently ignores custom values below its internal default plus one.
+const MIN_CONCURRENT_MULTIPATH_PATHS: u32 = 9;
+
 /// Configuration for creating an `IrohEndpoint`.
 pub struct IrohEndpointConfig {
     pub secret_key: SecretKey,
@@ -19,6 +22,9 @@ pub struct IrohEndpointConfig {
     /// interface — prevents advertising unreachable LAN addresses to peers
     /// on different networks. None = 0.0.0.0 (all interfaces).
     pub bind_addr: Option<std::net::IpAddr>,
+    /// Maximum QUIC paths that may be open concurrently for one connection.
+    /// `None` keeps iroh's default; custom values must be at least 9.
+    pub max_concurrent_multipath_paths: Option<u32>,
     /// Gossip send-path healing (#1092).
     pub gossip_heal: GossipHealConfig,
 }
@@ -31,9 +37,32 @@ impl Default for IrohEndpointConfig {
             discovery: IrohDiscoveryConfig::default(),
             bind_port: None,
             bind_addr: None,
+            max_concurrent_multipath_paths: None,
             gossip_heal: GossipHealConfig::default(),
         }
     }
+}
+
+pub(super) fn apply_multipath_config(
+    builder: iroh::endpoint::Builder,
+    max_concurrent: Option<u32>,
+) -> crate::error::Result<iroh::endpoint::Builder> {
+    let Some(max_concurrent) = max_concurrent else {
+        return Ok(builder);
+    };
+
+    if max_concurrent < MIN_CONCURRENT_MULTIPATH_PATHS {
+        return Err(crate::error::Error::Transport(format!(
+            "iroh max concurrent multipath paths must be at least {}, got {}",
+            MIN_CONCURRENT_MULTIPATH_PATHS, max_concurrent
+        )));
+    }
+
+    let transport_config = iroh::endpoint::QuicTransportConfig::builder()
+        .max_concurrent_multipath_paths(max_concurrent)
+        .build();
+    tracing::info!(max_concurrent, "configured iroh multipath path limit");
+    Ok(builder.transport_config(transport_config))
 }
 
 pub(super) fn relay_mode_from_config(
@@ -118,4 +147,31 @@ pub(super) fn apply_bind_config(
     }
 
     Ok(builder)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multipath_limit_rejects_values_iroh_would_ignore() {
+        let builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal);
+        let result =
+            apply_multipath_config(builder, Some(super::MIN_CONCURRENT_MULTIPATH_PATHS - 1));
+
+        assert!(matches!(
+            result,
+            Err(crate::error::Error::Transport(message))
+                if message.contains("must be at least 9")
+        ));
+    }
+
+    #[test]
+    fn multipath_limit_accepts_iroh_minimum() {
+        let builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal);
+
+        assert!(
+            apply_multipath_config(builder, Some(super::MIN_CONCURRENT_MULTIPATH_PATHS),).is_ok()
+        );
+    }
 }

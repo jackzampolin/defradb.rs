@@ -34,8 +34,11 @@ pub struct IndexScanParams {
 /// `IndexScanParams` to the concrete fetcher.
 #[derive(Debug, Clone)]
 pub struct CursorSeek {
-    /// Raw bytes of the storage-encoded index key to seek to.
+    /// Raw bytes of the storage-encoded index field prefix to seek to.
     pub seek_key: Vec<u8>,
+    /// Public boundary DocID to resolve into the node-local short-ID suffix.
+    /// `None` for unique, non-null index entries whose key has no suffix.
+    pub boundary_doc_id: Option<String>,
     /// `true` for backward pagination (seek inclusive, then iterate);
     /// `false` for forward pagination (seek exclusive — skip the boundary).
     pub inclusive: bool,

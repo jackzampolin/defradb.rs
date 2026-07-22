@@ -96,6 +96,8 @@ pub struct P2PConfig {
     pub relay_mode: p2p::iroh::IrohRelayModeConfig,
     /// Address publishing / lookup behavior.
     pub discovery: p2p::iroh::IrohDiscoveryConfig,
+    /// Maximum concurrent QUIC paths per connection. None keeps iroh's default.
+    pub max_concurrent_multipath_paths: Option<u32>,
     /// Path to persist secret key. None = ephemeral (new identity each restart).
     pub secret_key_path: Option<std::path::PathBuf>,
     /// Reload collection subscriptions persisted in the local store on startup.
@@ -114,6 +116,7 @@ pub struct P2PConfig {
     /// Per-peer rate limit refill rate (tokens per second). Default: 50.
     pub rate_limit_rate: f64,
     /// Maximum pending-DAG registrations held while Bitswap completes missing
-    /// links; overflow is nacked back to the pusher. Default: 1000.
+    /// links; overflow is nacked back to the pusher. Each source peer may use
+    /// at most one quarter of this capacity. Default: 1000.
     pub max_pending_dags: usize,
 }

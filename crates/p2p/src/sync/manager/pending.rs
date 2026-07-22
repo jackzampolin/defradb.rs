@@ -63,6 +63,7 @@ pub struct PendingDag {
 pub(super) struct PendingDagRegistry {
     roots: HashMap<Cid, PendingDag>,
     waiters: HashMap<Cid, HashSet<Cid>>,
+    roots_by_source: HashMap<String, usize>,
 }
 
 impl Deref for PendingDagRegistry {
@@ -90,6 +91,9 @@ impl PendingDagRegistry {
                 .or_default()
                 .insert(root_cid);
         }
+        if let Some(source_peer) = &dag.source_peer {
+            *self.roots_by_source.entry(source_peer.clone()).or_default() += 1;
+        }
         self.roots.insert(root_cid, dag);
         previous
     }
@@ -99,7 +103,27 @@ impl PendingDagRegistry {
         for missing_cid in &dag.missing {
             self.remove_waiter(missing_cid, root_cid);
         }
+        if let Some(source_peer) = &dag.source_peer {
+            let remove_source = self
+                .roots_by_source
+                .get_mut(source_peer)
+                .is_some_and(|count| {
+                    debug_assert!(*count > 0);
+                    *count = count.saturating_sub(1);
+                    *count == 0
+                });
+            if remove_source {
+                self.roots_by_source.remove(source_peer);
+            }
+        }
         Some(dag)
+    }
+
+    pub(super) fn source_count(&self, source_peer: &str) -> usize {
+        self.roots_by_source
+            .get(source_peer)
+            .copied()
+            .unwrap_or_default()
     }
 
     pub(super) fn replace_missing(&mut self, root_cid: &Cid, missing: HashSet<Cid>) -> bool {

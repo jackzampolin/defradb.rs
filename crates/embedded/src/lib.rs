@@ -56,6 +56,7 @@ pub struct IrohConfig {
     pub bind_port: Option<u16>,
     pub relay_mode: p2p::iroh::IrohRelayModeConfig,
     pub discovery: p2p::iroh::IrohDiscoveryConfig,
+    pub max_concurrent_multipath_paths: Option<u32>,
     pub secret_key_path: Option<std::path::PathBuf>,
 }
 

@@ -286,6 +286,13 @@ impl Drop for ConflictSnapshot {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ConflictTrackerState {
+    fn committed_after(&self, version: u64) -> &[CommittedTxnRecord] {
+        let first = self
+            .committed
+            .partition_point(|(commit_version, _, _)| *commit_version <= version);
+        &self.committed[first..]
+    }
+
     fn prune(&mut self, current_version: u64) {
         let oldest_active = self
             .active_snapshots
@@ -356,22 +363,19 @@ impl ConflictTracker {
         let mut state = self.state.lock();
 
         // Check for conflicts against transactions committed after our snapshot.
-        for (commit_ver, committed_writes, committed_reads) in &state.committed {
-            if *commit_ver > read_version {
-                for write_key in &write_keys {
-                    if committed_writes.contains(*write_key)
-                        || committed_reads.conflicts_key(write_key)
-                    {
-                        return Err(crate::corekv::Error::TxnConflict);
-                    }
-                }
-
-                if committed_writes
-                    .iter()
-                    .any(|committed_write| read_set.conflicts_key(committed_write))
+        for (_, committed_writes, committed_reads) in state.committed_after(read_version) {
+            for write_key in &write_keys {
+                if committed_writes.contains(*write_key) || committed_reads.conflicts_key(write_key)
                 {
                     return Err(crate::corekv::Error::TxnConflict);
                 }
+            }
+
+            if committed_writes
+                .iter()
+                .any(|committed_write| read_set.conflicts_key(committed_write))
+            {
+                return Err(crate::corekv::Error::TxnConflict);
             }
         }
 
@@ -469,5 +473,47 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, crate::corekv::Error::TxnConflict));
+    }
+
+    #[test]
+    fn skips_retained_prefix_for_recent_snapshots() {
+        const RETAINED_PREFIX: usize = 64;
+
+        let tracker = Arc::new(ConflictTracker::new());
+        let old_snapshot = tracker.begin_snapshot();
+        let no_reads = ReadSet::default();
+
+        for index in 0..RETAINED_PREFIX {
+            let snapshot = tracker.begin_snapshot();
+            let writes = [format!("history/{index}").into_bytes()];
+            tracker
+                .check_and_record(snapshot.version(), writes.iter(), &no_reads)
+                .unwrap();
+        }
+
+        let recent_snapshot = tracker.begin_snapshot();
+        let suffix_snapshot = tracker.begin_snapshot();
+        let suffix_writes = [b"suffix/conflict".to_vec()];
+        tracker
+            .check_and_record(suffix_snapshot.version(), suffix_writes.iter(), &no_reads)
+            .unwrap();
+        drop(suffix_snapshot);
+
+        {
+            let state = tracker.state.lock();
+            assert_eq!(state.committed.len(), RETAINED_PREFIX + 1);
+            assert_eq!(state.committed_after(recent_snapshot.version()).len(), 1);
+        }
+
+        let old_writes = [b"history/0".to_vec()];
+        let old_err = tracker
+            .check_and_record(old_snapshot.version(), old_writes.iter(), &no_reads)
+            .unwrap_err();
+        assert!(matches!(old_err, crate::corekv::Error::TxnConflict));
+
+        let recent_err = tracker
+            .check_and_record(recent_snapshot.version(), suffix_writes.iter(), &no_reads)
+            .unwrap_err();
+        assert!(matches!(recent_err, crate::corekv::Error::TxnConflict));
     }
 }
