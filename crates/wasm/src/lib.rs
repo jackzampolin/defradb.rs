@@ -58,6 +58,8 @@ pub mod client;
 pub mod error;
 #[cfg(target_arch = "wasm32")]
 mod storage_tests;
+#[cfg(target_arch = "wasm32")]
+mod sync;
 pub mod verification;
 
 // Re-export the main client class

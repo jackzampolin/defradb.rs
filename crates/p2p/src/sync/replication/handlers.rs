@@ -360,6 +360,10 @@ where
                 reason,
             }
         }
+        Ok(_) => ReplicationResult::Failed {
+            cid,
+            error: "unsupported merge outcome".to_string(),
+        },
         Err(e) => ReplicationResult::Failed {
             cid,
             error: e.to_string(),
@@ -591,6 +595,12 @@ where
                     doc_id: block.doc_id.clone(),
                     collection_id: block.collection_id.clone(),
                     reason,
+                });
+            }
+            Ok(_) => {
+                results.push(ReplicationResult::Failed {
+                    cid: block.cid,
+                    error: "unsupported merge outcome".to_string(),
                 });
             }
             Err(e) => {

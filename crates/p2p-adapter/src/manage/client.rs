@@ -14,9 +14,9 @@ use p2p::message::{
 use p2p::transport::PeerId;
 use p2p::{Error, ManageCorrelator, ManageQueryCorrelator, P2PTransport};
 
-/// How long to wait for a peer's reply before giving up. The SE query requester
-/// uses a 10s per-replicator timeout; management requests can drive heavier work
-/// (collection/document mutations) and target a single peer, so we allow longer.
+/// How long to send a management request and receive its reply before giving up.
+/// The SE query requester uses a 10s per-replicator timeout; management requests
+/// can drive heavier work and target a single peer, so we allow longer.
 const MANAGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The sentinel `err_message` the serve side returns when authorization fails;
@@ -68,12 +68,12 @@ impl<T: P2PTransport> ManageClient<T> {
         p2p::signing::sign_with_transport(&self.transport, &mut req)?;
 
         let mut pending = self.correlator.register(req.message_id.clone());
-        self.transport.send_manage_request(peer_id, req).await?;
-
-        let reply = tokio::time::timeout(MANAGE_REQUEST_TIMEOUT, pending.recv())
-            .await
-            .map_err(|_| Error::ResponseTimeout)?
-            .map_err(|_| Error::ResponseTimeout)?;
+        let reply = tokio::time::timeout(MANAGE_REQUEST_TIMEOUT, async {
+            self.transport.send_manage_request(peer_id, req).await?;
+            pending.recv().await.map_err(|_| Error::ResponseTimeout)
+        })
+        .await
+        .map_err(|_| Error::ResponseTimeout)??;
 
         map_reply(reply)
     }
@@ -91,14 +91,14 @@ impl<T: P2PTransport> ManageClient<T> {
         p2p::signing::sign_with_transport(&self.transport, &mut req)?;
 
         let mut pending = self.query_correlator.register(req.message_id.clone());
-        self.transport
-            .send_manage_query_request(peer_id, req)
-            .await?;
-
-        let reply = tokio::time::timeout(MANAGE_REQUEST_TIMEOUT, pending.recv())
-            .await
-            .map_err(|_| Error::ResponseTimeout)?
-            .map_err(|_| Error::ResponseTimeout)?;
+        let reply = tokio::time::timeout(MANAGE_REQUEST_TIMEOUT, async {
+            self.transport
+                .send_manage_query_request(peer_id, req)
+                .await?;
+            pending.recv().await.map_err(|_| Error::ResponseTimeout)
+        })
+        .await
+        .map_err(|_| Error::ResponseTimeout)??;
 
         map_query_reply(reply)
     }

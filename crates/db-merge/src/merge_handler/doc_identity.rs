@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use super::*;
 
-impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
+impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// Resolve the owning DocID of a composite block.
     ///
     /// Mirrors Go's `resolveCompositeBlockDocRef`: prefer the recorded

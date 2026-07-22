@@ -2,6 +2,31 @@
 
 use thiserror::Error;
 
+pub use defra_core::browser_sync::{BrowserSyncRequest, BrowserSyncResponse};
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum BrowserSyncError {
+    #[error("invalid request: {0}")]
+    InvalidInput(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
+pub type BrowserSyncResult<T> = Result<T, BrowserSyncError>;
+
+#[async_trait::async_trait]
+pub trait BrowserSyncOperations: Send + Sync {
+    async fn sync(
+        &self,
+        request: BrowserSyncRequest,
+        caller_did: Option<&str>,
+        bypass_dac: bool,
+    ) -> BrowserSyncResult<BrowserSyncResponse>;
+}
+
 pub type ReplicationFilters = std::collections::BTreeMap<String, ReplicationFilter>;
 
 /// HTTP wire shape for a per-collection replication filter.

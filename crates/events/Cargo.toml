@@ -10,17 +10,14 @@ description = "Event bus for DefraDB subscriptions"
 
 [features]
 default = ["channel"]
-channel = ["dep:tokio", "dep:tokio-stream", "dep:parking_lot"]
+channel = ["dep:async-channel", "dep:parking_lot"]
 
 [dependencies]
 defra-core = { path = "../defra-core" }
 
-# Async runtime
+# Async channels
 async-trait.workspace = true
-
-# Channel bus dependencies (optional for wasm32)
-tokio = { workspace = true, optional = true }
-tokio-stream = { version = "0.1", optional = true }
+async-channel = { version = "2", optional = true }
 parking_lot = { workspace = true, optional = true }
 
 # Bytes

@@ -1,15 +1,16 @@
 //! HTTP-facing [`ManageRequester`] implementation for [`ManageClient`].
 //!
 //! Bridges the http-native `RemoteManage*` types (http does not depend on p2p)
-//! to the p2p wire ops: parse + dial the target's address via the transport,
-//! map the op, send via [`ManageClient`], then map the reply (including the
-//! `unauthorized` sentinel) back to an http-native result.
+//! to the p2p wire ops: parse + connect to the target via the transport, map the
+//! op, send via [`ManageClient`], then map the reply (including the `unauthorized`
+//! sentinel) back to an http-native result.
 
 use defra_http::{
     ManageRequester, RemoteManageDocRef, RemoteManageOp, RemoteManageQueryOp,
     RemoteManageQueryResult, MANAGE_UNAUTHORIZED,
 };
 use p2p::message::{ManageDocRef, ManageMutateOp, ManageQueryOp, ManageQueryResult};
+use p2p::transport::PeerId;
 use p2p::{Error, P2PTransport};
 
 use super::client::ManageClient;
@@ -17,6 +18,29 @@ use super::client::ManageClient;
 /// The error string the http layer matches to detect a remote NAC denial.
 /// Aliased to the shared http wire sentinel so there is one source of truth.
 const UNAUTHORIZED: &str = MANAGE_UNAUTHORIZED;
+
+const MANAGE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn connect<T: P2PTransport>(
+    client: &ManageClient<T>,
+    target_addr: &str,
+) -> Result<PeerId, String> {
+    let (peer_id, addrs) = client
+        .transport()
+        .parse_dial_addr(target_addr)
+        .map_err(|error| error.to_string())?;
+    client
+        .transport()
+        .dial(&peer_id, addrs)
+        .await
+        .map_err(|error| error.to_string())?;
+    client
+        .transport()
+        .poll_until_connected(&peer_id, MANAGE_CONNECT_TIMEOUT)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(peer_id)
+}
 
 #[async_trait::async_trait]
 impl<T: P2PTransport> ManageRequester for ManageClient<T> {
@@ -26,14 +50,7 @@ impl<T: P2PTransport> ManageRequester for ManageClient<T> {
         auth_token: Vec<u8>,
         op: RemoteManageOp,
     ) -> Result<(), String> {
-        let (peer_id, addrs) = self
-            .transport()
-            .parse_dial_addr(target_addr)
-            .map_err(|e| e.to_string())?;
-        self.transport()
-            .dial(&peer_id, addrs)
-            .await
-            .map_err(|e| e.to_string())?;
+        let peer_id = connect(self, target_addr).await?;
 
         match ManageClient::manage(self, &peer_id, to_mutate_op(op), auth_token).await {
             Ok(_reply) => Ok(()),
@@ -47,14 +64,7 @@ impl<T: P2PTransport> ManageRequester for ManageClient<T> {
         auth_token: Vec<u8>,
         op: RemoteManageQueryOp,
     ) -> Result<RemoteManageQueryResult, String> {
-        let (peer_id, addrs) = self
-            .transport()
-            .parse_dial_addr(target_addr)
-            .map_err(|e| e.to_string())?;
-        self.transport()
-            .dial(&peer_id, addrs)
-            .await
-            .map_err(|e| e.to_string())?;
+        let peer_id = connect(self, target_addr).await?;
 
         let reply = ManageClient::manage_query(self, &peer_id, to_query_op(op), auth_token)
             .await

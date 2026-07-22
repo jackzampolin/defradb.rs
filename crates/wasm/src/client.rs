@@ -8,6 +8,7 @@ use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
 use db::{AutoCommitMutator, DbCollectionProvider, LensedAutoCommitFetcher, DB};
+use events::Bus;
 use query::runner::QueryRunner;
 use storage::LevelDbStore;
 
@@ -48,6 +49,8 @@ use crate::error::{Result, WasmError};
 pub struct DefraClient {
     db: Option<Arc<DB<LevelDbStore>>>,
     runner: Option<WasmRunner>,
+    event_bus: Arc<events::ChannelBus>,
+    sync_task: Option<crate::sync::SyncTask>,
     closed: bool,
 }
 
@@ -154,6 +157,20 @@ impl DefraClient {
         self.persist_impl().await.map_err(|e| e.into())
     }
 
+    /// Start bidirectional synchronization with a DefraDB server.
+    ///
+    /// The optional token may be either a raw JWT or a `Bearer <JWT>` value.
+    #[wasm_bindgen]
+    pub async fn sync(
+        &mut self,
+        server_url: &str,
+        auth_token: Option<String>,
+    ) -> std::result::Result<(), JsValue> {
+        self.sync_impl(server_url, auth_token)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Close the client and release resources.
     ///
     /// After closing, the client cannot be used.
@@ -179,8 +196,10 @@ impl DefraClient {
             .map_err(|e| WasmError::Storage(format!("Failed to open LevelDB store: {}", e)))?;
 
         // Create the database
-        let db = DB::new(store)
+        let event_bus = Arc::new(events::ChannelBus::new());
+        let mut db = DB::new(store)
             .map_err(|e| WasmError::Storage(format!("Failed to create database: {}", e)))?;
+        db.set_event_bus(event_bus.clone());
 
         // Load existing collections from storage
         db.load_collections()
@@ -197,6 +216,8 @@ impl DefraClient {
         Ok(Self {
             db: Some(db),
             runner: Some(runner),
+            event_bus,
+            sync_task: None,
             closed: false,
         })
     }
@@ -320,6 +341,9 @@ impl DefraClient {
             return Ok(());
         }
 
+        self.stop_sync().await;
+        self.event_bus.close();
+
         // Drop runner first — it holds Arc<DB> refs via fetcher, mutator, and provider
         self.runner = None;
 
@@ -348,6 +372,20 @@ impl DefraClient {
 
         self.closed = true;
         Ok(())
+    }
+
+    async fn sync_impl(&mut self, server_url: &str, auth_token: Option<String>) -> Result<()> {
+        let database = Arc::clone(self.ensure_open()?);
+        self.stop_sync().await;
+        self.sync_task =
+            Some(crate::sync::start(database, &self.event_bus, server_url, auth_token).await?);
+        Ok(())
+    }
+
+    async fn stop_sync(&mut self) {
+        if let Some(task) = self.sync_task.take() {
+            task.stop().await;
+        }
     }
 }
 

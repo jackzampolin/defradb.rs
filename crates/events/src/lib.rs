@@ -38,4 +38,4 @@ pub use event::{
     PendingDagQuarantinedData, SEArtifactReceivedData, TopicPeerEventData, Update,
 };
 pub use noop_bus::NoOpBus;
-pub use subscription::Subscription;
+pub use subscription::{Subscription, TryRecvError};

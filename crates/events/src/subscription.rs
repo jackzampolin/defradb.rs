@@ -4,24 +4,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[cfg(feature = "channel")]
-use tokio::sync::mpsc;
+use async_channel::Receiver;
 
 #[cfg(feature = "channel")]
 use crate::event::Message;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryRecvError {
+    Empty,
+    Disconnected,
+}
 
 /// Subscription to events from the event bus.
 ///
 /// Provides access to a channel of messages and the subscription ID
 /// for unsubscribing. Uses bounded channels to prevent memory exhaustion.
 ///
-/// When the `channel` feature is disabled (e.g., wasm32), this is a
-/// stub that never receives messages.
+/// When the `channel` feature is disabled, this is a stub that never receives messages.
 pub struct Subscription {
     /// Unique subscription identifier.
     id: u64,
     /// Receiver channel for messages (bounded).
     #[cfg(feature = "channel")]
-    receiver: mpsc::Receiver<Message>,
+    receiver: Receiver<Message>,
     /// Shared counter tracking messages dropped due to buffer overflow.
     /// When non-zero, the client may need to resync to get consistent state.
     dropped_count: Arc<AtomicU64>,
@@ -30,7 +35,7 @@ pub struct Subscription {
 impl Subscription {
     /// Create a new subscription with the given ID and receiver.
     #[cfg(feature = "channel")]
-    pub(crate) fn new(id: u64, receiver: mpsc::Receiver<Message>) -> Self {
+    pub(crate) fn new(id: u64, receiver: Receiver<Message>) -> Self {
         Self {
             id,
             receiver,
@@ -38,7 +43,7 @@ impl Subscription {
         }
     }
 
-    /// Create a closed subscription (no-op, for wasm32).
+    /// Create a closed subscription for builds without channel support.
     #[cfg(not(feature = "channel"))]
     pub(crate) fn closed() -> Self {
         Self {
@@ -51,7 +56,7 @@ impl Subscription {
     #[cfg(feature = "channel")]
     pub(crate) fn with_dropped_counter(
         id: u64,
-        receiver: mpsc::Receiver<Message>,
+        receiver: Receiver<Message>,
         dropped_count: Arc<AtomicU64>,
     ) -> Self {
         Self {
@@ -71,7 +76,7 @@ impl Subscription {
     /// Returns `None` if the subscription is closed.
     #[cfg(feature = "channel")]
     pub async fn recv(&mut self) -> Option<Message> {
-        self.receiver.recv().await
+        self.receiver.recv().await.ok()
     }
 
     /// Try to receive a message without blocking.
@@ -80,13 +85,16 @@ impl Subscription {
     /// `Err(TryRecvError::Empty)` if no message is available,
     /// or `Err(TryRecvError::Disconnected)` if the subscription is closed.
     #[cfg(feature = "channel")]
-    pub fn try_recv(&mut self) -> Result<Message, mpsc::error::TryRecvError> {
-        self.receiver.try_recv()
+    pub fn try_recv(&mut self) -> Result<Message, TryRecvError> {
+        self.receiver.try_recv().map_err(|error| match error {
+            async_channel::TryRecvError::Empty => TryRecvError::Empty,
+            async_channel::TryRecvError::Closed => TryRecvError::Disconnected,
+        })
     }
 
     /// Convert into the underlying receiver for use with streams.
     #[cfg(feature = "channel")]
-    pub fn into_receiver(self) -> mpsc::Receiver<Message> {
+    pub fn into_receiver(self) -> Receiver<Message> {
         self.receiver
     }
 
@@ -121,7 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscription_recv() {
-        let (tx, rx) = mpsc::channel(10);
+        let (tx, rx) = async_channel::bounded(10);
         let mut sub = Subscription::new(1, rx);
 
         // Send a message
@@ -143,7 +151,7 @@ mod tests {
 
     #[test]
     fn test_subscription_try_recv() {
-        let (tx, rx) = mpsc::channel(10);
+        let (tx, rx) = async_channel::bounded(10);
         let mut sub = Subscription::new(1, rx);
 
         // No message yet
@@ -151,7 +159,7 @@ mod tests {
 
         // Send a message (blocking send in sync context)
         let msg = Message::merge();
-        tx.blocking_send(msg).unwrap();
+        tx.send_blocking(msg).unwrap();
 
         // Now we can receive
         let received = sub.try_recv();

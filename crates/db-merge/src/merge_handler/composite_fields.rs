@@ -7,7 +7,7 @@ enum EffectiveLinkedDelta {
     SkipField,
 }
 
-impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
+impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     pub(crate) async fn process_linked_field_blocks(
         &self,
         datastore: &mut NamespaceView,

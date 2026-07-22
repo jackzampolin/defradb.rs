@@ -19,7 +19,7 @@ enum CollectionMergeFrame {
     },
 }
 
-impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
+impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     fn has_merged_collection(&self, cid: &Cid) -> bool {
         self.merged_collections
             .lock()
