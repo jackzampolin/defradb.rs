@@ -20,6 +20,8 @@ pub(crate) struct FjallTxn {
     pub(crate) keyspace: fjall::Keyspace,
     pub(crate) conflict_tracker: Arc<ConflictTracker>,
     pub(crate) _conflict_snapshot: Option<ConflictSnapshot>,
+    /// Keeps conflict versions aligned with physical snapshots and commits.
+    pub(crate) commit_gate: Arc<tokio::sync::RwLock<()>>,
     pub(crate) active_txn_count: Arc<AtomicUsize>,
     pub(crate) read_version: u64,
     pub(crate) snapshot: fjall::Snapshot,
@@ -262,42 +264,48 @@ impl Txn for FjallTxn {
         let read_set = self.read_set.lock().clone();
 
         if !pending.is_empty() {
-            // Check conflicts
-            if let Err(e) =
-                self.conflict_tracker
-                    .check_and_record(self.read_version, pending.keys(), &read_set)
-            {
+            let commit_result = {
+                let _commit_guard = self.commit_gate.write().await;
+                match self.conflict_tracker.check_and_record(
+                    self.read_version,
+                    pending.keys(),
+                    &read_set,
+                ) {
+                    Err(error) => Err(error),
+                    Ok(()) => {
+                        let mut batch = self.db.batch();
+                        match self.durability {
+                            DurabilityMode::Immediate => {
+                                batch = batch.durability(Some(fjall::PersistMode::SyncAll));
+                            }
+                            DurabilityMode::Eventual => {
+                                batch = batch.durability(Some(fjall::PersistMode::Buffer));
+                            }
+                        }
+                        for (key, value) in &pending {
+                            match value {
+                                Some(v) => {
+                                    batch.insert(&self.keyspace, key.as_slice(), v.as_slice())
+                                }
+                                None => batch.remove(&self.keyspace, key.as_slice()),
+                            }
+                        }
+                        batch.commit().map_err(Error::from)
+                    }
+                }
+            };
+
+            if let Err(e) = commit_result {
+                if !matches!(e, Error::TxnConflict) {
+                    tracing::error!(
+                        error = %e,
+                        pending_changes = pending.len(),
+                        "Failed to commit fjall batch"
+                    );
+                }
                 CallbackManager::execute_callbacks(self.callbacks.take_error());
                 CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
                 return Err(e);
-            }
-
-            // Apply via WriteBatch (no global lock)
-            let mut batch = self.db.batch();
-            match self.durability {
-                DurabilityMode::Immediate => {
-                    batch = batch.durability(Some(fjall::PersistMode::SyncAll));
-                }
-                DurabilityMode::Eventual => {
-                    batch = batch.durability(Some(fjall::PersistMode::Buffer));
-                }
-            }
-            for (key, value) in &pending {
-                match value {
-                    Some(v) => batch.insert(&self.keyspace, key.as_slice(), v.as_slice()),
-                    None => batch.remove(&self.keyspace, key.as_slice()),
-                }
-            }
-
-            if let Err(e) = batch.commit() {
-                tracing::error!(
-                    error = %e,
-                    pending_changes = pending.len(),
-                    "Failed to commit fjall batch"
-                );
-                CallbackManager::execute_callbacks(self.callbacks.take_error());
-                CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
-                return Err(e.into());
             }
         }
 
