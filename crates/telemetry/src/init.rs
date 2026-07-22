@@ -10,10 +10,8 @@
 //!   `resource.WithOS()` + `resource.WithProcess()` (which we approximate
 //!   with `std::env::consts` + `std::process` to avoid an extra dep).
 //!
-//! Traces are always exported. Metrics export is off until the `metrics`
-//! feature is enabled — nothing in defradb.rs records metric instruments
-//! today, so leaving the metric pipeline running would burn an empty
-//! periodic export every 60 s.
+//! DefraDB currently exports traces only. Add a metrics pipeline alongside the
+//! first application metric rather than running an empty periodic exporter.
 
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
@@ -26,15 +24,8 @@ use tracing::Subscriber;
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::registry::LookupSpan;
 
-#[cfg(feature = "metrics")]
-use opentelemetry_otlp::MetricExporter;
-#[cfg(feature = "metrics")]
-use opentelemetry_otlp::WithHttpConfig;
-#[cfg(feature = "metrics")]
-use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-
 use crate::config::TelemetryConfig;
-use crate::handle::{OtelProviders, TelemetryHandle};
+use crate::handle::TelemetryHandle;
 
 pub use opentelemetry_sdk::trace::SdkTracer as Tracer;
 
@@ -42,9 +33,6 @@ pub use opentelemetry_sdk::trace::SdkTracer as Tracer;
 pub enum InitError {
     #[error("failed to build OTLP span exporter: {0}")]
     SpanExporter(#[source] Box<dyn std::error::Error + Send + Sync>),
-    #[cfg(feature = "metrics")]
-    #[error("failed to build OTLP metric exporter: {0}")]
-    MetricExporter(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Returns the lifecycle handle and a configured [`SdkTracer`]. The caller
@@ -54,9 +42,8 @@ pub enum InitError {
 ///
 /// Safe to call from any context (no Tokio runtime required): with the
 /// `reqwest-blocking-client` transport selected in this crate's `Cargo.toml`,
-/// both `BatchSpanProcessor` and `PeriodicReader` (opentelemetry_sdk 0.32)
-/// spawn dedicated OS threads via `std::thread`. No `Handle::current()`
-/// call happens at init.
+/// `BatchSpanProcessor` spawns a dedicated OS thread via `std::thread`. No
+/// `Handle::current()` call happens at init.
 ///
 /// By default `init` installs the providers in the process-wide
 /// `opentelemetry::global` slot. Set [`TelemetryConfig::install_global`] to
@@ -85,39 +72,10 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
         .with_attribute(KeyValue::new("process.executable.name", executable_name))
         .build();
 
-    // When both signals export (metrics feature on) they share one HTTP
-    // client — one connection pool / TLS context / worker instead of two,
-    // since both target the same OTLP endpoint. Without metrics there's a
-    // single exporter, so the default build keeps the transitive client and
-    // takes no direct reqwest dependency.
-    #[cfg(feature = "metrics")]
-    let http_client = reqwest::blocking::Client::new();
-
-    let span_exporter = {
-        let builder = SpanExporter::builder().with_http();
-        #[cfg(feature = "metrics")]
-        let builder = builder.with_http_client(http_client.clone());
-        builder
-            .build()
-            .map_err(|e| InitError::SpanExporter(Box::new(e)))?
-    };
-
-    // Build the meter provider first (when enabled) so the trace provider can
-    // take `resource` by value — avoids a clone-then-discard dance on the
-    // metrics-off path.
-    #[cfg(feature = "metrics")]
-    let meter_provider = {
-        let metric_exporter = MetricExporter::builder()
-            .with_http()
-            .with_http_client(http_client)
-            .build()
-            .map_err(|e| InitError::MetricExporter(Box::new(e)))?;
-        let reader = PeriodicReader::builder(metric_exporter).build();
-        SdkMeterProvider::builder()
-            .with_reader(reader)
-            .with_resource(resource.clone())
-            .build()
-    };
+    let span_exporter = SpanExporter::builder()
+        .with_http()
+        .build()
+        .map_err(|e| InitError::SpanExporter(Box::new(e)))?;
 
     let tracer_provider = SdkTracerProvider::builder()
         .with_batch_exporter(span_exporter)
@@ -126,18 +84,12 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
 
     if config.install_global {
         global::set_tracer_provider(tracer_provider.clone());
-        #[cfg(feature = "metrics")]
-        global::set_meter_provider(meter_provider.clone());
     }
 
     let tracer = tracer_provider.tracer(config.service_name);
 
     let handle = TelemetryHandle {
-        inner: Some(OtelProviders {
-            tracer_provider,
-            #[cfg(feature = "metrics")]
-            meter_provider,
-        }),
+        inner: Some(tracer_provider),
     };
 
     Ok((handle, tracer))

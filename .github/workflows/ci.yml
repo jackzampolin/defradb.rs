@@ -30,11 +30,8 @@ jobs:
 
       # OTel feature paths are opt-in (mirror Go's `//go:build telemetry`),
       # so the default clippy pass doesn't exercise them. These checks keep
-      # the feature-gated code from rotting silently. The `metrics` feature
-      # gates a whole separate code path (meter provider, metric exporter)
-      # that no other job builds. Issue #977.
+      # the feature-gated code from rotting silently. Issue #977.
       - run: cargo clippy -p telemetry --features otlp --all-targets -- -D warnings
-      - run: cargo clippy -p telemetry --features metrics --all-targets -- -D warnings
       - run: cargo clippy -p cli --features otel --all-targets -- -D warnings
       - run: cargo clippy -p defra-node --features otel --all-targets -- -D warnings
 
@@ -129,13 +126,11 @@ jobs:
           ln -sf "$CACHE_DIR/defra-iroh" "$HOME/.sourcenetwork/bin/defra-iroh"
 
       # OTel-only tests, run AFTER caching so the otel rebuild of target/debug/defra
-      # never pollutes the cached standard binary. The `metrics` build keeps the
-      # metric-exporter path compiling; the cli otel test spawns a real node
-      # against an unreachable collector and asserts the dedup hint fires exactly
-      # once — the Docker-free regression guard for the SDK's `internal-logs`
-      # feature. Issue #977 / #1004.
+      # never pollutes the cached standard binary. The cli otel test spawns a real
+      # node against an unreachable collector and asserts the dedup hint fires
+      # exactly once — the Docker-free regression guard for the SDK's
+      # `internal-logs` feature. Issue #977 / #1004.
       - run: cargo test -p telemetry --features otlp
-      - run: cargo test -p telemetry --features metrics
       - run: cargo test -p cli --features otel --test telemetry_dedup
 
       - name: Cleanup
