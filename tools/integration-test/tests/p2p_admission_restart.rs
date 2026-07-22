@@ -1,7 +1,9 @@
 //! #1099: hub restart must not lose success-acked pending-DAG registrations.
 //!
-//! Own binary: injects P2P limits that every node spawned by this process
-//! inherits.
+//! Own binary: `DEFRA_P2P_MAX_PENDING_DAGS`, `DEFRA_P2P_RATE_LIMIT_BURST`,
+//! and `RUST_LOG` are injected via process-global `set_var` — every node
+//! spawned by this process inherits them, and the burst limit is re-toggled
+//! mid-test around node restarts, so no other test may share this process.
 
 use std::time::{Duration, Instant};
 
@@ -151,7 +153,8 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
     assert_eq!(
         pending_dags(cluster.api_url(0)).await,
         1,
-        "source unexpectedly served the pending DAG before the crash"
+        "hub's pending-DAG count is not holding at 1: the source unexpectedly \
+         served the pending DAG before the crash"
     );
 
     cluster.nodes[0].process.kill();
