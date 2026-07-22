@@ -61,6 +61,30 @@ pub(crate) struct CompositeMergeState {
     pub(crate) is_branchable: bool,
 }
 
+enum CompositeMergePreparation {
+    Ready(Option<Box<Collection>>),
+    Complete(MergeOutcome),
+}
+
+enum CompositeMergeFrame {
+    Enter {
+        cid: Cid,
+        block: Option<Block>,
+        payload: Option<defra_core::block::CompositeDeltaPayload>,
+        child_cid: Option<Cid>,
+        depth: usize,
+        is_root: bool,
+    },
+    Exit {
+        cid: Cid,
+        block: Block,
+        payload: defra_core::block::CompositeDeltaPayload,
+        doc_id: String,
+        collection: Option<Box<Collection>>,
+        is_root: bool,
+    },
+}
+
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     /// Process a Composite delta from a block.
     ///
@@ -111,6 +135,122 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         .await
     }
 
+    fn has_merged_composite(&self, cid: &Cid) -> bool {
+        self.merged_composites
+            .lock()
+            .unwrap_or_else(|error| {
+                tracing::warn!("merged_composites lock poisoned, recovering");
+                error.into_inner()
+            })
+            .contains(cid)
+    }
+
+    fn has_batch_merged_composite(
+        batch_merged: &std::sync::Mutex<HashSet<Cid>>,
+        cid: &Cid,
+    ) -> bool {
+        batch_merged
+            .lock()
+            .unwrap_or_else(|error| {
+                tracing::warn!("batch_merged lock poisoned, recovering");
+                error.into_inner()
+            })
+            .contains(cid)
+    }
+
+    async fn load_parent_composite(&self, parent_cid: &Cid, child_cid: &Cid) -> Option<Block> {
+        let data = match self.blockstore.get(parent_cid).await {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                tracing::debug!(
+                    %parent_cid,
+                    %child_cid,
+                    "Parent composite not in blockstore, skipping"
+                );
+                return None;
+            }
+            Err(error) => {
+                tracing::debug!(
+                    %parent_cid,
+                    %child_cid,
+                    %error,
+                    "Failed to load parent composite, skipping"
+                );
+                return None;
+            }
+        };
+
+        Block::from_dag_cbor(&data).ok()
+    }
+
+    async fn prepare_composite_merge(
+        &self,
+        cid: &Cid,
+        block: &Block,
+        payload: &defra_core::block::CompositeDeltaPayload,
+        metadata: &BlockMetadata<'_>,
+        doc_id: &str,
+        mode: CompositeMergeMode,
+    ) -> std::result::Result<CompositeMergePreparation, MergeError> {
+        if mode.is_standalone() {
+            tracing::info!(
+                %cid,
+                %doc_id,
+                priority = payload.priority,
+                status = payload.status,
+                links = ?block.links,
+                heads = ?block.heads,
+                "Processing Composite delta (document-level)"
+            );
+        } else {
+            tracing::info!(
+                %cid,
+                %doc_id,
+                priority = payload.priority,
+                "Processing Composite delta in batch txn"
+            );
+        }
+
+        let collection = self
+            .db
+            .find_collection_by_id(&payload.schema_version_id)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                metadata
+                    .collection_id
+                    .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
+            });
+
+        if let Some(collection) = collection.as_ref() {
+            if let Some(reason) = self
+                .db
+                .replicated_downsample_source_skip_reason(collection.schema())?
+            {
+                tracing::warn!(
+                    collection = %collection.name(),
+                    %doc_id,
+                    %reason,
+                    "Skipping replicated write into local-only downsample source"
+                );
+                return Ok(CompositeMergePreparation::Complete(
+                    MergeOutcome::terminal_skip(reason),
+                ));
+            }
+
+            if let Some(hook) = self.composite_merge_hook() {
+                if let Some(outcome) = hook
+                    .on_protected_composite(doc_id, collection.schema(), metadata)
+                    .await?
+                {
+                    return Ok(CompositeMergePreparation::Complete(outcome));
+                }
+            }
+        }
+
+        Ok(CompositeMergePreparation::Ready(collection.map(Box::new)))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn process_composite_delta_locked(
         &self,
@@ -122,149 +262,147 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         depth: usize,
         doc_id_str: String,
     ) -> std::result::Result<MergeOutcome, MergeError> {
-        if depth >= super::MAX_MERGE_DEPTH {
-            return Err(MergeError::depth_exceeded(cid, depth));
-        }
+        let mut frames = vec![CompositeMergeFrame::Enter {
+            cid: *cid,
+            block: Some(block.clone()),
+            payload: Some(payload.clone()),
+            child_cid: None,
+            depth,
+            is_root: true,
+        }];
 
-        {
-            let merged = self.merged_composites.lock().unwrap_or_else(|e| {
-                tracing::warn!("merged_composites lock poisoned, recovering");
-                e.into_inner()
-            });
-            if merged.contains(cid) {
-                tracing::debug!(cid = %cid, "Composite already merged, skipping");
-                return Ok(MergeOutcome::terminal_skip("already merged"));
-            }
-        }
-
-        // Identity was resolved by the caller: `process_composite_delta` for the
-        // entry block, or the recursive head walk below for parents. A
-        // composite's heads are prior composites of the same document, so the
-        // DocID is invariant across the recursion.
-
-        tracing::info!(
-            cid = %cid,
-            doc_id = %doc_id_str,
-            priority = payload.priority,
-            status = payload.status,
-            links = ?block.links,
-            heads = ?block.heads,
-            "Processing Composite delta (document-level)"
-        );
-
-        let collection_lookup = self
-            .db
-            .find_collection_by_id(&payload.schema_version_id)
-            .ok()
-            .flatten()
-            .or_else(|| {
-                metadata
-                    .collection_id
-                    .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
-            });
-
-        if let Some(collection) = collection_lookup.as_ref() {
-            if let Some(reason) = self
-                .db
-                .replicated_downsample_source_skip_reason(collection.schema())?
-            {
-                tracing::warn!(
-                    collection = %collection.name(),
-                    doc_id = %doc_id_str,
-                    reason = %reason,
-                    "Skipping replicated write into local-only downsample source"
-                );
-                return Ok(MergeOutcome::terminal_skip(reason));
-            }
-
-            if let Some(hook) = self.composite_merge_hook() {
-                if let Some(outcome) = hook
-                    .on_protected_composite(&doc_id_str, collection.schema(), metadata)
-                    .await?
-                {
-                    return Ok(outcome);
-                }
-            }
-        }
-
-        // Recursively merge parent composites referenced in `heads` before
-        // processing this block.  This matches Go's processLog which walks
-        // the DAG backwards and merges from oldest to newest, ensuring all
-        // prior CRDT deltas are applied before the current one.
-        //
-        // Dedup guard: use merged_composites to skip parents already processed
-        // by another path. Go serializes merge events per-collection and checks
-        // `mt.heads` in loadComposites. In Rust, dual broadcast (doc topic +
-        // collection topic) can trigger concurrent recursive walks that
-        // temporarily re-add stale headstore entries. The guard prevents
-        // re-processing parents that were already merged.
-        if let Some(heads) = &block.heads {
-            for head_cid in heads {
-                {
-                    let merged = self.merged_composites.lock().unwrap_or_else(|e| {
-                        tracing::warn!("merged_composites lock poisoned, recovering");
-                        e.into_inner()
-                    });
-                    if merged.contains(head_cid) {
-                        tracing::debug!(
-                            parent_cid = %head_cid,
-                            child_cid = %cid,
-                            "Parent composite already merged, skipping recursive processing"
-                        );
+        while let Some(frame) = frames.pop() {
+            match frame {
+                CompositeMergeFrame::Enter {
+                    cid,
+                    block,
+                    payload,
+                    child_cid,
+                    depth,
+                    is_root,
+                } => {
+                    if depth >= super::MAX_MERGE_DEPTH {
+                        return Err(MergeError::depth_exceeded(&cid, depth));
+                    }
+                    if self.has_merged_composite(&cid) {
+                        if is_root {
+                            return Ok(MergeOutcome::terminal_skip("already merged"));
+                        }
                         continue;
                     }
-                }
-                let head_data = match self.blockstore.get(head_cid).await {
-                    Ok(Some(data)) => data,
-                    Ok(None) => {
-                        tracing::debug!(
-                            parent_cid = %head_cid,
-                            child_cid = %cid,
-                            "Parent composite not in blockstore, skipping"
-                        );
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            parent_cid = %head_cid,
-                            error = %e,
-                            "Failed to load parent composite, skipping"
-                        );
-                        continue;
-                    }
-                };
 
-                let head_block = match Block::from_dag_cbor(&head_data) {
-                    Ok(block) => block,
-                    Err(_) => continue,
-                };
+                    let block = match block {
+                        Some(block) => block,
+                        None => {
+                            let Some(block) = self
+                                .load_parent_composite(
+                                    &cid,
+                                    &child_cid.expect("parent frame has a child CID"),
+                                )
+                                .await
+                            else {
+                                continue;
+                            };
+                            block
+                        }
+                    };
+                    let payload = match payload {
+                        Some(payload) => payload,
+                        None => {
+                            let CrdtDelta::Composite(payload) = &block.delta else {
+                                continue;
+                            };
+                            payload.clone()
+                        }
+                    };
 
-                if let CrdtDelta::Composite(head_payload) = &head_block.delta {
-                    tracing::info!(
-                        parent_cid = %head_cid,
-                        child_cid = %cid,
-                        "Recursively merging parent composite before current"
-                    );
-                    match Box::pin(self.process_composite_delta_locked(
-                        head_cid,
-                        &head_block,
-                        head_payload,
-                        metadata,
-                        from_collection,
-                        depth + 1,
-                        doc_id_str.clone(),
-                    ))
-                    .await
+                    match self
+                        .prepare_composite_merge(
+                            &cid,
+                            &block,
+                            &payload,
+                            metadata,
+                            &doc_id_str,
+                            CompositeMergeMode::Standalone,
+                        )
+                        .await?
                     {
-                        Ok(MergeOutcome::Merged) => {}
-                        Ok(outcome) if outcome.is_terminal_skip() => {}
-                        Ok(outcome) => return Ok(outcome),
-                        Err(e) => return Err(e),
+                        CompositeMergePreparation::Ready(collection) => {
+                            let heads = block.heads.clone();
+                            frames.push(CompositeMergeFrame::Exit {
+                                cid,
+                                block,
+                                payload,
+                                doc_id: doc_id_str.clone(),
+                                collection,
+                                is_root,
+                            });
+                            if let Some(heads) = heads {
+                                for parent_cid in heads.into_iter().rev() {
+                                    frames.push(CompositeMergeFrame::Enter {
+                                        cid: parent_cid,
+                                        block: None,
+                                        payload: None,
+                                        child_cid: Some(cid),
+                                        depth: depth + 1,
+                                        is_root: false,
+                                    });
+                                }
+                            }
+                        }
+                        CompositeMergePreparation::Complete(outcome) => {
+                            if is_root || !outcome.is_terminal_skip() {
+                                return Ok(outcome);
+                            }
+                        }
+                    }
+                }
+                CompositeMergeFrame::Exit {
+                    cid,
+                    block,
+                    payload,
+                    doc_id,
+                    collection,
+                    is_root,
+                } => {
+                    if self.has_merged_composite(&cid) {
+                        if is_root {
+                            return Ok(MergeOutcome::terminal_skip("already merged"));
+                        }
+                        continue;
+                    }
+                    let outcome = self
+                        .process_composite_delta_body(
+                            &cid,
+                            &block,
+                            &payload,
+                            metadata,
+                            from_collection,
+                            &doc_id,
+                            collection.map(|collection| *collection),
+                        )
+                        .await?;
+                    if is_root || (!outcome.is_merged() && !outcome.is_terminal_skip()) {
+                        return Ok(outcome);
                     }
                 }
             }
         }
 
+        Ok(MergeOutcome::terminal_skip("already merged"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn process_composite_delta_body(
+        &self,
+        cid: &Cid,
+        block: &Block,
+        payload: &defra_core::block::CompositeDeltaPayload,
+        metadata: &BlockMetadata<'_>,
+        from_collection: bool,
+        doc_id_str: &str,
+        collection_lookup: Option<Collection>,
+    ) -> std::result::Result<MergeOutcome, MergeError> {
         let txn = self.db.new_txn(false).await?;
         let doc_short_id = {
             let collection = collection_lookup.as_ref().ok_or_else(|| {
@@ -283,7 +421,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             match db::doc_id_map::resolve_or_allocate_doc_short_id(
                 &systemstore,
                 collection.resolved_root_id(),
-                &doc_id_str,
+                doc_id_str,
             )
             .await
             {
@@ -299,7 +437,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             block,
             payload,
             metadata,
-            &doc_id_str,
+            doc_id_str,
             doc_short_id,
             collection_lookup.clone(),
             CompositeMergeMode::Standalone,
@@ -382,7 +520,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 if let Ok(systemstore) = txn.systemstore() {
                     self.record_block_ownership(
                         &systemstore,
-                        &doc_id_str,
+                        doc_id_str,
                         cid,
                         block,
                         &state.owned_field_cids,
@@ -415,7 +553,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     (context.collection.as_ref(), self.composite_merge_hook())
                 {
                     if let Some(action) =
-                        hook.post_commit_action(&doc_id_str, collection.schema(), metadata)
+                        hook.post_commit_action(doc_id_str, collection.schema(), metadata)
                     {
                         if let Err(e) = action.run().await {
                             tracing::warn!(
@@ -509,133 +647,166 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         pending_field_block_finalizations: &std::sync::Mutex<Vec<PendingFieldBlockFinalization>>,
         depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
-        if depth >= super::MAX_MERGE_DEPTH {
-            return Err(MergeError::depth_exceeded(cid, depth));
-        }
+        let mut frames = vec![CompositeMergeFrame::Enter {
+            cid: *cid,
+            block: Some(block.clone()),
+            payload: Some(payload.clone()),
+            child_cid: None,
+            depth,
+            is_root: true,
+        }];
 
-        {
-            let merged = self.merged_composites.lock().unwrap_or_else(|e| {
-                tracing::warn!("merged_composites lock poisoned, recovering");
-                e.into_inner()
-            });
-            if merged.contains(cid) {
-                tracing::debug!(cid = %cid, "Composite already merged in permanent dedup set, skipping");
-                return Ok(MergeOutcome::terminal_skip("already merged"));
-            }
-        }
-        {
-            let batch_merged_guard = batch_merged.lock().unwrap_or_else(|e| {
-                tracing::warn!("batch_merged lock poisoned, recovering");
-                e.into_inner()
-            });
-            if batch_merged_guard.contains(cid) {
-                tracing::debug!(cid = %cid, "Composite already merged in batch dedup set, skipping");
-                return Ok(MergeOutcome::terminal_skip("already merged"));
-            }
-        }
-
-        let doc_id_str = self.resolve_composite_doc_id(cid, block).await?;
-
-        tracing::info!(
-            cid = %cid,
-            doc_id = %doc_id_str,
-            priority = payload.priority,
-            "Processing Composite delta in batch txn"
-        );
-
-        let collection_lookup = self
-            .db
-            .find_collection_by_id(&payload.schema_version_id)
-            .ok()
-            .flatten()
-            .or_else(|| {
-                metadata
-                    .collection_id
-                    .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
-            });
-
-        if let Some(collection) = collection_lookup.as_ref() {
-            if let Some(reason) = self
-                .db
-                .replicated_downsample_source_skip_reason(collection.schema())?
-            {
-                tracing::warn!(
-                    collection = %collection.name(),
-                    doc_id = %doc_id_str,
-                    reason = %reason,
-                    "Skipping replicated write into local-only downsample source"
-                );
-                return Ok(MergeOutcome::terminal_skip(reason));
-            }
-
-            if let Some(hook) = self.composite_merge_hook() {
-                if let Some(outcome) = hook
-                    .on_protected_composite(&doc_id_str, collection.schema(), metadata)
-                    .await?
-                {
-                    return Ok(outcome);
-                }
-            }
-        }
-
-        if let Some(heads) = &block.heads {
-            for head_cid in heads {
-                {
-                    let merged = self.merged_composites.lock().unwrap_or_else(|e| {
-                        tracing::warn!("merged_composites lock poisoned, recovering");
-                        e.into_inner()
-                    });
-                    if merged.contains(head_cid) {
-                        continue;
+        while let Some(frame) = frames.pop() {
+            match frame {
+                CompositeMergeFrame::Enter {
+                    cid,
+                    block,
+                    payload,
+                    child_cid,
+                    depth,
+                    is_root,
+                } => {
+                    if depth >= super::MAX_MERGE_DEPTH {
+                        return Err(MergeError::depth_exceeded(&cid, depth));
                     }
-                }
-                {
-                    let batch_merged_guard = batch_merged.lock().unwrap_or_else(|e| {
-                        tracing::warn!("batch_merged lock poisoned, recovering");
-                        e.into_inner()
-                    });
-                    if batch_merged_guard.contains(head_cid) {
-                        continue;
-                    }
-                }
-                let head_data = match self.blockstore.get(head_cid).await {
-                    Ok(Some(data)) => data,
-                    _ => continue,
-                };
-
-                let head_block = match Block::from_dag_cbor(&head_data) {
-                    Ok(block) => block,
-                    Err(_) => continue,
-                };
-
-                if let CrdtDelta::Composite(head_payload) = &head_block.delta {
-                    match Box::pin(self.process_composite_delta_in_txn(
-                        datastore,
-                        headstore,
-                        systemstore,
-                        head_cid,
-                        &head_block,
-                        head_payload,
-                        metadata,
-                        from_collection,
-                        batch_merged,
-                        _batch_merged_collections,
-                        pending_events,
-                        pending_post_commit_actions,
-                        pending_field_block_finalizations,
-                        depth + 1,
-                    ))
-                    .await
+                    if self.has_merged_composite(&cid)
+                        || Self::has_batch_merged_composite(batch_merged, &cid)
                     {
-                        Ok(MergeOutcome::Merged) => {}
-                        Ok(outcome) if outcome.is_terminal_skip() => {}
-                        Ok(outcome) => return Ok(outcome),
-                        Err(e) => return Err(e),
+                        if is_root {
+                            return Ok(MergeOutcome::terminal_skip("already merged"));
+                        }
+                        continue;
+                    }
+
+                    let block = match block {
+                        Some(block) => block,
+                        None => {
+                            let Some(block) = self
+                                .load_parent_composite(
+                                    &cid,
+                                    &child_cid.expect("parent frame has a child CID"),
+                                )
+                                .await
+                            else {
+                                continue;
+                            };
+                            block
+                        }
+                    };
+                    let payload = match payload {
+                        Some(payload) => payload,
+                        None => {
+                            let CrdtDelta::Composite(payload) = &block.delta else {
+                                continue;
+                            };
+                            payload.clone()
+                        }
+                    };
+                    let doc_id = self.resolve_composite_doc_id(&cid, &block).await?;
+
+                    match self
+                        .prepare_composite_merge(
+                            &cid,
+                            &block,
+                            &payload,
+                            metadata,
+                            &doc_id,
+                            CompositeMergeMode::Batch,
+                        )
+                        .await?
+                    {
+                        CompositeMergePreparation::Ready(collection) => {
+                            let heads = block.heads.clone();
+                            frames.push(CompositeMergeFrame::Exit {
+                                cid,
+                                block,
+                                payload,
+                                doc_id,
+                                collection,
+                                is_root,
+                            });
+                            if let Some(heads) = heads {
+                                for parent_cid in heads.into_iter().rev() {
+                                    frames.push(CompositeMergeFrame::Enter {
+                                        cid: parent_cid,
+                                        block: None,
+                                        payload: None,
+                                        child_cid: Some(cid),
+                                        depth: depth + 1,
+                                        is_root: false,
+                                    });
+                                }
+                            }
+                        }
+                        CompositeMergePreparation::Complete(outcome) => {
+                            if is_root || !outcome.is_terminal_skip() {
+                                return Ok(outcome);
+                            }
+                        }
+                    }
+                }
+                CompositeMergeFrame::Exit {
+                    cid,
+                    block,
+                    payload,
+                    doc_id,
+                    collection,
+                    is_root,
+                } => {
+                    if self.has_merged_composite(&cid)
+                        || Self::has_batch_merged_composite(batch_merged, &cid)
+                    {
+                        if is_root {
+                            return Ok(MergeOutcome::terminal_skip("already merged"));
+                        }
+                        continue;
+                    }
+                    let outcome = self
+                        .process_composite_delta_in_txn_body(
+                            datastore,
+                            headstore,
+                            systemstore,
+                            &cid,
+                            &block,
+                            &payload,
+                            metadata,
+                            from_collection,
+                            batch_merged,
+                            pending_events,
+                            pending_post_commit_actions,
+                            pending_field_block_finalizations,
+                            &doc_id,
+                            collection.map(|collection| *collection),
+                        )
+                        .await?;
+                    if is_root || (!outcome.is_merged() && !outcome.is_terminal_skip()) {
+                        return Ok(outcome);
                     }
                 }
             }
         }
 
+        Ok(MergeOutcome::terminal_skip("already merged"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn process_composite_delta_in_txn_body(
+        &self,
+        datastore: &NamespaceView,
+        headstore: &NamespaceView,
+        systemstore: &NamespaceView,
+        cid: &Cid,
+        block: &Block,
+        payload: &defra_core::block::CompositeDeltaPayload,
+        metadata: &BlockMetadata<'_>,
+        from_collection: bool,
+        batch_merged: &std::sync::Mutex<HashSet<Cid>>,
+        pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
+        pending_post_commit_actions: &std::sync::Mutex<Vec<PendingPostCommitAction>>,
+        pending_field_block_finalizations: &std::sync::Mutex<Vec<PendingFieldBlockFinalization>>,
+        doc_id_str: &str,
+        collection_lookup: Option<Collection>,
+    ) -> std::result::Result<MergeOutcome, MergeError> {
         let doc_short_id = {
             let collection = collection_lookup.as_ref().ok_or_else(|| {
                 MergeError::MissingMetadata(format!(
@@ -646,7 +817,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             db::doc_id_map::resolve_or_allocate_doc_short_id(
                 systemstore,
                 collection.resolved_root_id(),
-                &doc_id_str,
+                doc_id_str,
             )
             .await
             .map_err(MergeError::Database)?
@@ -656,7 +827,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             block,
             payload,
             metadata,
-            &doc_id_str,
+            doc_id_str,
             doc_short_id,
             collection_lookup.clone(),
             CompositeMergeMode::Batch,
@@ -702,7 +873,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             Ok(Some(outcome)) => {
                 if outcome.is_terminal_skip() && !from_collection {
                     let merge_complete = MergeCompleteData {
-                        doc_id: doc_id_str.clone(),
+                        doc_id: doc_id_str.to_string(),
                         subject_doc_id: None,
                         cid: *cid,
                         collection_id: metadata
@@ -727,7 +898,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 self.update_heads(headstore, &context, &state).await;
                 self.record_block_ownership(
                     systemstore,
-                    &doc_id_str,
+                    doc_id_str,
                     cid,
                     block,
                     &state.owned_field_cids,
@@ -761,7 +932,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     (context.collection.as_ref(), self.composite_merge_hook())
                 {
                     if let Some(action) =
-                        hook.post_commit_action(&doc_id_str, collection.schema(), metadata)
+                        hook.post_commit_action(doc_id_str, collection.schema(), metadata)
                     {
                         pending_post_commit_actions
                             .lock()
@@ -782,7 +953,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     });
 
                     let update = Update::new(
-                        doc_id_str.clone(),
+                        doc_id_str.to_string(),
                         *cid,
                         payload.schema_version_id.clone(),
                         vec![],
@@ -795,7 +966,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
                     if !from_collection {
                         let merge_complete = MergeCompleteData {
-                            doc_id: doc_id_str.clone(),
+                            doc_id: doc_id_str.to_string(),
                             subject_doc_id: None,
                             cid: *cid,
                             collection_id: metadata
@@ -812,7 +983,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if state.is_branchable {
                         let merge_complete = MergeCompleteData {
                             doc_id: String::new(),
-                            subject_doc_id: Some(doc_id_str.clone()),
+                            subject_doc_id: Some(doc_id_str.to_string()),
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id
