@@ -326,7 +326,8 @@ pub struct NetConfig {
     #[serde(default = "default_max_doc_sync_request_doc_ids")]
     pub p2p_max_doc_sync_request_doc_ids: usize,
     /// Max pending-DAG registrations held while Bitswap completes missing
-    /// links; overflow is nacked back to the pusher. Default: 1000.
+    /// links; overflow is nacked back to the pusher. Each source peer may use
+    /// at most one quarter of this capacity. Default: 1000.
     #[serde(default = "default_max_pending_dags")]
     pub p2p_max_pending_dags: usize,
     /// Max queued outbound push jobs; overflow defers to the persisted retry

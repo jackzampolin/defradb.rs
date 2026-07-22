@@ -116,6 +116,7 @@ pub struct P2PConfig {
     /// Per-peer rate limit refill rate (tokens per second). Default: 50.
     pub rate_limit_rate: f64,
     /// Maximum pending-DAG registrations held while Bitswap completes missing
-    /// links; overflow is nacked back to the pusher. Default: 1000.
+    /// links; overflow is nacked back to the pusher. Each source peer may use
+    /// at most one quarter of this capacity. Default: 1000.
     pub max_pending_dags: usize,
 }
