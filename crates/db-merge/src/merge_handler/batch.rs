@@ -1,7 +1,7 @@
 use super::hook::CompositePostCommitAction;
 use super::*;
 
-use p2p::sync::MergeBlock;
+use defra_core::merge::MergeBlock;
 
 /// Event collected during batch processing, emitted after commit.
 pub(crate) struct PendingMergeEvent {
@@ -20,7 +20,7 @@ pub(crate) struct PendingFieldBlockFinalization {
     pub cids: Vec<Cid>,
 }
 
-impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMergeHandler<S, B> {
+impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, B> {
     /// Process blocks individually, each with its own transaction.
     pub(crate) async fn merge_blocks_individually(
         &self,
@@ -69,9 +69,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
     pub(crate) fn try_batch_merge_with_split<'a>(
         &'a self,
         blocks: &'a [MergeBlock],
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Vec<Result<MergeOutcome, MergeError>>> + Send + 'a>,
-    > {
+    ) -> defra_core::thread_bounds::MaybeBoxFuture<'a, Vec<Result<MergeOutcome, MergeError>>> {
         Box::pin(async move {
             if blocks.len() <= 1 {
                 return self.merge_blocks_individually(blocks).await;

@@ -1,7 +1,7 @@
 use super::composite::{CompositeMergeContext, CompositeMergeState};
 use super::*;
 
-impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
+impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     pub(crate) async fn update_heads(
         &self,
         headstore: &NamespaceView,

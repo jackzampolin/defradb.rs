@@ -1,4 +1,4 @@
-//! No-op event bus for environments without channel support (e.g., wasm32).
+//! No-op event bus for builds without channel support.
 
 use crate::bus::Bus;
 use crate::event::{EventName, Message};
@@ -6,7 +6,7 @@ use crate::subscription::Subscription;
 
 /// No-op event bus that silently discards all published messages.
 ///
-/// Used in wasm32 builds where tokio channels are not available.
+/// Used when the channel-backed event bus is not needed.
 pub struct NoOpBus;
 
 impl NoOpBus {
@@ -28,7 +28,7 @@ impl Bus for NoOpBus {
     fn subscribe(&self, _events: &[EventName]) -> Subscription {
         #[cfg(feature = "channel")]
         {
-            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            let (_tx, rx) = async_channel::bounded(1);
             Subscription::new(0, rx)
         }
         #[cfg(not(feature = "channel"))]

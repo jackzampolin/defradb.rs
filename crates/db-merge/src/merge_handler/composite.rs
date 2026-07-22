@@ -85,7 +85,7 @@ enum CompositeMergeFrame {
     },
 }
 
-impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
+impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// Process a Composite delta from a block.
     ///
     /// Composite deltas contain links to the actual field LWW/Counter blocks.

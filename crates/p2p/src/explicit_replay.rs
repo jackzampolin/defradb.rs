@@ -23,6 +23,8 @@ use std::sync::LazyLock;
 
 use crate::error::{Error, Result};
 
+pub use defra_core::merge::ExplicitReplayAuthorization;
+
 const CAPABILITY_VERSION: u8 = 1;
 const CAPABILITY_PURPOSE: &str = "explicit-replay";
 pub const DEFAULT_CAPABILITY_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60);
@@ -47,15 +49,6 @@ struct ExplicitReplayCapabilityEnvelope {
     claims: ExplicitReplayCapabilityClaims,
     #[serde(with = "serde_bytes")]
     signature: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExplicitReplayAuthorization {
-    pub source_peer_id: String,
-    pub target_peer_id: String,
-    pub collection_id: String,
-    pub authorizer_did: String,
-    pub expires_at: u64,
 }
 
 #[derive(Debug, Default)]

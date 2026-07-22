@@ -4,10 +4,12 @@ mod routes;
 mod state;
 mod traits;
 
+pub(crate) use routes::create_router_with_state_and_sync_body_limit;
 pub use routes::{create_router, create_router_with_rest, create_router_with_state};
 pub use state::{AppState, AppStateBuilder};
 pub use traits::{
-    AcpLightClientStatus, AcpOperations, BackupOperations, BlockOperations,
+    AcpLightClientStatus, AcpOperations, BackupOperations, BlockOperations, BrowserSyncError,
+    BrowserSyncOperations, BrowserSyncRequest, BrowserSyncResponse, BrowserSyncResult,
     CollectionManagementOperations, DocumentAcpOperations, DumpOperations, EncryptedIndexInfo,
     EncryptedIndexOperations, ExplicitReplayCapabilityInput, ImportResult, IndexFieldInfo,
     IndexInfo, IndexOperations, LensOperations, ManageRequester, NacStatus, NacStatusInfo,

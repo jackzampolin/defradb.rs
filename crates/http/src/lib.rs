@@ -9,6 +9,7 @@
 //! ## Core
 //! - `GET /health-check` - Health check
 //! - `GET /api/v1/version` - Get version info
+//! - `POST /api/v1/sync` - Exchange browser CRDT document updates
 //!
 //! ## GraphQL
 //! - `POST /api/v1/graphql` - Execute GraphQL queries
@@ -100,7 +101,8 @@ pub use error::{HttpError, Result};
 pub use identity_extractor::{ExtractIdentity, ExtractTokenIdentity, IdentityExtractionError};
 pub use router::{
     create_router, create_router_with_rest, create_router_with_state, AcpLightClientStatus,
-    AcpOperations, AppState, AppStateBuilder, BackupOperations, BlockOperations,
+    AcpOperations, AppState, AppStateBuilder, BackupOperations, BlockOperations, BrowserSyncError,
+    BrowserSyncOperations, BrowserSyncRequest, BrowserSyncResponse, BrowserSyncResult,
     DocumentAcpOperations, IndexFieldInfo, IndexInfo, IndexOperations, ManageRequester, NacStatus,
     NacStatusInfo, NodeAcpOperations, NodePermission, P2PError, P2POperations, P2PResult,
     PolicyInfo, RemoteManageDocRef, RemoteManageOp, RemoteManageQueryOp, RemoteManageQueryResult,

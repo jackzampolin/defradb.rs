@@ -58,10 +58,10 @@ pub extern "C" fn poll_subscription(subscription_handle: usize) -> PollSubscript
                         let json = message_to_json(&message);
                         return PollSubscriptionResult::event(json, dropped);
                     }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    Err(events::TryRecvError::Empty) => {
                         return PollSubscriptionResult::no_event(dropped);
                     }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    Err(events::TryRecvError::Disconnected) => {
                         return PollSubscriptionResult::closed();
                     }
                 }

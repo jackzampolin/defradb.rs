@@ -32,6 +32,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 
 # Async
 async-trait.workspace = true
+bytes.workspace = true
 
 # Logging
 tracing.workspace = true
