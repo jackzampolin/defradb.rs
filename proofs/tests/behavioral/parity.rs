@@ -32,16 +32,16 @@
 //! ownership. The go_go probe is an intentionally asserting
 //! known-Go-divergence test: it must FAIL the moment upstream Go starts
 //! converging, forcing this pin to be updated/removed rather than letting
-//! the compatibility contract drift silently. The mixed Rust<->Go topology
-//! does NOT reduce to the atomic-rejection model:
-//! `parity_unique_twins_mixed_partial_materialization` CHARACTERIZES the
-//! observed third outcome (Rust's pre-#1116-stage-3 block-by-block PushLog
-//! replay lands field-delta blocks on the Go peer before the composite is
-//! rejected, leaving a scan-visible unindexed partial document on Go at the
-//! compat pin 6c874754, pre-#4838). This window is CLOSED on Go v1.0.0 and
-//! current develop by #4838's composite-parent guard. It is
-//! a runnable repro artifact for the upstream report, deliberately NOT in
-//! the go-compat CI allowlist — see its doc comment. Upstream Go tracking
+//! the compatibility contract drift silently. `parity_unique_twins_mixed`
+//! pins the asymmetric Go v1.0.0 result: Rust accepts both twins and applies
+//! its canonical pick, while Go atomically rejects the Rust twin and retains
+//! only its local owner. The historical
+//! `characterize_unique_twins_pre_v1_partial_materialization` probe remains a
+//! runnable repro for the pre-v1 compat pin, where block-by-block PushLog
+//! replay could leave the rejected Rust twin scan-visible but unindexed on
+//! Go. Go #4838 closed that window before v1.0.0, so the historical probe is
+//! deliberately excluded from CI and requires its original Go binary.
+//! Upstream Go tracking
 //! issues: sourcenetwork/defradb#5059 (unique-index x CRDT-merge
 //! convergence — the divergence these probes pin) and
 //! sourcenetwork/defradb#5058 (sender never sees error replies — why the Go
@@ -1615,14 +1615,34 @@ async fn setup_unique_twins(cluster: &TestCluster, label: &str) -> (String, Stri
     (id0, id1)
 }
 
+async fn witness_account_replication(cluster: &TestCluster, label: &str) -> [String; 2] {
+    let canary0 = create_account(&cluster.client(0), label, "canary-node0", 100);
+    let canary1 = create_account(&cluster.client(1), label, "canary-node1", 101);
+    let deadline = Instant::now() + Duration::from_secs(60);
+
+    loop {
+        let crossed_0 =
+            account_ids_by_handle(&cluster.client(0), "canary-node1") == vec![canary1.clone()];
+        let crossed_1 =
+            account_ids_by_handle(&cluster.client(1), "canary-node0") == vec![canary0.clone()];
+        if crossed_0 && crossed_1 {
+            return [canary0, canary1];
+        }
+        assert!(
+            Instant::now() < deadline,
+            "[{label}] canary witness failed: replication is not live in both directions \
+             (node0 sees canary1: {crossed_0}, node1 sees canary0: {crossed_1}) — the \
+             twin-absence pin would be vacuous"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
 /// Rust<->Rust control (#1134): pins #1126's canonical-pick semantics for
 /// this exact scenario shape — both independently-created twins persist, and
 /// the unique slot converges to the lexicographically smallest docID
 /// identically on both replicas. This is the "Rust is internally consistent"
-/// anchor the `_go_go` divergence pin is measured against. (The mixed
-/// Rust<->Go topology is characterized separately by
-/// `parity_unique_twins_mixed_partial_materialization` — see the module
-/// header.)
+/// anchor the Go and mixed divergence pins are measured against.
 #[ignore = "parity (asserting); run with --ignored"]
 #[tokio::test]
 async fn parity_unique_twins_rust_rust() {
@@ -1672,10 +1692,9 @@ async fn parity_unique_twins_rust_rust() {
 ///
 /// This test MUST start failing the moment upstream Go changes this
 /// behavior — that failure is the signal to update or remove this pin, not
-/// to patch the assertions blind. (The mixed Rust<->Go topology is
-/// characterized separately by
-/// `parity_unique_twins_mixed_partial_materialization` — see the module
-/// header.)
+/// to patch the assertions blind. The Go v1.0.0 mixed topology is pinned by
+/// `parity_unique_twins_mixed`; the historical pre-v1 delivery artifact is
+/// retained separately — see the module header.
 ///
 /// Anti-vacuity witness (mirrors the fork characterization
 /// `TestIndexP2P_UniqueConflictIsDroppedByReplicatorRetryQueue`, which pairs
@@ -1710,25 +1729,7 @@ async fn parity_unique_twins_go_go() {
 
     // Positive delivery witness: canaries created AFTER wiring must cross in
     // both directions through the live replicator/subscription channels.
-    let canary0 = create_account(&cluster.client(0), label, "canary-node0", 100);
-    let canary1 = create_account(&cluster.client(1), label, "canary-node1", 101);
-    let witness_deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let crossed_0 =
-            account_ids_by_handle(&cluster.client(0), "canary-node1") == vec![canary1.clone()];
-        let crossed_1 =
-            account_ids_by_handle(&cluster.client(1), "canary-node0") == vec![canary0.clone()];
-        if crossed_0 && crossed_1 {
-            break;
-        }
-        assert!(
-            Instant::now() < witness_deadline,
-            "[{label}] canary witness failed: replication is not live in both directions \
-             (node0 sees canary1: {crossed_0}, node1 sees canary0: {crossed_1}) — the \
-             twin-absence pin below would be vacuous"
-        );
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
+    let [canary0, canary1] = witness_account_replication(&cluster, label).await;
 
     // The divergence pin, asserted only now that the witness proves the
     // channel delivered: the remote twin is still absent on each node, and
@@ -1776,6 +1777,78 @@ async fn parity_unique_twins_go_go() {
     }
 }
 
+/// Rust<->Go KNOWN-DIVERGENCE pin (#1134) at the Go v1.0.0 compatibility
+/// target. Rust accepts the Go-authored twin under #1126's canonical-pick
+/// semantics, so both twins persist and the smaller Rust docID owns its
+/// unique slot. Go rejects the Rust-authored twin atomically on its existing
+/// unique slot, so only the local Go twin persists there and owns the slot.
+/// Go #4838's composite-parent guard prevents the pre-v1 field-block partial
+/// materialization characterized by the historical probe below.
+///
+/// Bidirectional canaries prove the collection replication channels are live
+/// before absence is asserted. This test must fail when upstream Go #5059
+/// changes the merge semantics, prompting this compatibility pin to be
+/// updated rather than silently preserving obsolete behavior.
+#[ignore = "parity (asserting); needs Go v1.0.0 binary on PATH; run with --ignored"]
+#[tokio::test]
+async fn parity_unique_twins_mixed() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .go_nodes(1)
+        .with_p2p()
+        .with_development()
+        .with_rust_binary(support::release_binary())
+        .build()
+        .await
+        .expect("mixed cluster");
+    let label = "unique_twins_mixed(rust0,go1)";
+    let (id0, id1) = setup_unique_twins(&cluster, label).await;
+    let [canary0, canary1] = witness_account_replication(&cluster, label).await;
+
+    assert!(
+        poll_account_scan_count(&cluster.client(0), 4, Duration::from_secs(40)).await,
+        "[{label}] Rust node0 did not converge to both twins and both canaries; ids={:?}",
+        account_scan_ids(&cluster.client(0))
+    );
+
+    let rust_scan: BTreeSet<String> =
+        [id0.clone(), id1.clone(), canary0.clone(), canary1.clone()].into();
+    let go_scan: BTreeSet<String> = [id1.clone(), canary0, canary1].into();
+
+    for pass in 0..2 {
+        if pass == 1 {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+        assert_eq!(
+            account_scan_set(&cluster.client(0)),
+            rust_scan,
+            "[{label}] (pass {pass}) Rust node0 must retain both twins and both canaries"
+        );
+        assert_eq!(
+            account_scan_set(&cluster.client(1)),
+            go_scan,
+            "[{label}] (pass {pass}) Go node1 must atomically reject the Rust twin while \
+             retaining its local twin and both canaries"
+        );
+        assert_eq!(
+            account_indexed_owner(&cluster.client(0)),
+            vec![id0.clone()],
+            "[{label}] (pass {pass}) Rust node0's unique index must resolve the smaller Rust twin"
+        );
+        assert_eq!(
+            account_indexed_owner(&cluster.client(1)),
+            vec![id1.clone()],
+            "[{label}] (pass {pass}) Go node1's unique index must resolve its local twin"
+        );
+    }
+
+    assert!(
+        support::commit_cids(&cluster.client(1), &id0).is_empty(),
+        "[{label}] Go node1 must not expose merged commits for the atomically rejected Rust twin"
+    );
+    assert_rust_explain_uses_index(&cluster.client(0), label);
+}
+
 /// CHARACTERIZATION of an upstream Go finding (#1134) — NOT a parity
 /// contract, and deliberately NOT in the go-compat CI allowlist: this test is
 /// a runnable repro artifact for the upstream report (cite it by name and run
@@ -1812,9 +1885,9 @@ async fn parity_unique_twins_go_go() {
 /// Tracking: defradb.rs#1134; upstream context sourcenetwork/defradb#5058 /
 /// sourcenetwork/defradb#5059 (Go tracking issue: filed as follow-up to
 /// #5058/#5059 — number added when filed).
-#[ignore = "characterization repro (upstream Go partial-materialization finding, #1134); needs Go binary on PATH; intentionally not CI-enforced; run with --ignored"]
+#[ignore = "historical characterization; requires pre-v1 Go 6c874754 binary on PATH; intentionally not CI-enforced"]
 #[tokio::test]
-async fn parity_unique_twins_mixed_partial_materialization() {
+async fn characterize_unique_twins_pre_v1_partial_materialization() {
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .go_nodes(1)
