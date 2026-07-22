@@ -39,6 +39,9 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         let datastore = txn.datastore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get datastore: {}", e))
         })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
 
         let short_id = collection.resolved_root_id();
         let index_manager =
@@ -176,7 +179,13 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
-                apply_cursor_seek_to_iterator(&mut iter, &params.cursor_seek).await?;
+                apply_cursor_seek_to_iterator(
+                    &mut iter,
+                    &params.cursor_seek,
+                    &systemstore,
+                    short_id,
+                )
+                .await?;
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::RangeScan {
@@ -197,7 +206,13 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
-                apply_cursor_seek_to_iterator(&mut iter, &params.cursor_seek).await?;
+                apply_cursor_seek_to_iterator(
+                    &mut iter,
+                    &params.cursor_seek,
+                    &systemstore,
+                    short_id,
+                )
+                .await?;
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::OrScan { branches } => {
@@ -241,9 +256,6 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             .filter(|id| seen.insert(*id))
             .collect();
 
-        let systemstore = txn.systemstore().map_err(|e| {
-            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
-        })?;
         let doc_ids = crate::doc_id_map::resolve_doc_ids(&systemstore, &doc_short_ids)
             .await
             .map_err(|e| {

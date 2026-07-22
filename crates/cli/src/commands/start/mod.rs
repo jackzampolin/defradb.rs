@@ -218,7 +218,8 @@ pub struct StartArgs {
     pub p2p_max_doc_sync_request_doc_ids: Option<usize>,
 
     /// Max pending-DAG registrations awaiting Bitswap completion; overflow is
-    /// nacked back to the pusher. Default: 1000.
+    /// nacked back to the pusher. Each source peer may use at most one quarter.
+    /// Default: 1000.
     #[arg(long, env = "DEFRA_P2P_MAX_PENDING_DAGS")]
     pub p2p_max_pending_dags: Option<usize>,
 

@@ -30,11 +30,8 @@ jobs:
 
       # OTel feature paths are opt-in (mirror Go's `//go:build telemetry`),
       # so the default clippy pass doesn't exercise them. These checks keep
-      # the feature-gated code from rotting silently. The `metrics` feature
-      # gates a whole separate code path (meter provider, metric exporter)
-      # that no other job builds. Issue #977.
+      # the feature-gated code from rotting silently. Issue #977.
       - run: cargo clippy -p telemetry --features otlp --all-targets -- -D warnings
-      - run: cargo clippy -p telemetry --features metrics --all-targets -- -D warnings
       - run: cargo clippy -p cli --features otel --all-targets -- -D warnings
       - run: cargo clippy -p defra-node --features otel --all-targets -- -D warnings
 
@@ -129,13 +126,11 @@ jobs:
           ln -sf "$CACHE_DIR/defra-iroh" "$HOME/.sourcenetwork/bin/defra-iroh"
 
       # OTel-only tests, run AFTER caching so the otel rebuild of target/debug/defra
-      # never pollutes the cached standard binary. The `metrics` build keeps the
-      # metric-exporter path compiling; the cli otel test spawns a real node
-      # against an unreachable collector and asserts the dedup hint fires exactly
-      # once — the Docker-free regression guard for the SDK's `internal-logs`
-      # feature. Issue #977 / #1004.
+      # never pollutes the cached standard binary. The cli otel test spawns a real
+      # node against an unreachable collector and asserts the dedup hint fires
+      # exactly once — the Docker-free regression guard for the SDK's
+      # `internal-logs` feature. Issue #977 / #1004.
       - run: cargo test -p telemetry --features otlp
-      - run: cargo test -p telemetry --features metrics
       - run: cargo test -p cli --features otel --test telemetry_dedup
 
       - name: Cleanup
@@ -145,6 +140,41 @@ jobs:
           git checkout -- .
           git clean -fd
           pkill -f "target/debug/defra" || true
+
+  lean-conformance:
+    name: Lean Conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure private repo access
+        run: |
+          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+          git config --global --add url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "ssh://git@github.com/sourcenetwork/"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-ci"
+          shared-key: "lean-conformance"
+
+      - name: Build Lean proofs
+        uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9 # v1
+        with:
+          lake-package-directory: proofs/lean
+          auto-config: false
+          build: true
+          test: false
+          use-mathlib-cache: false
+
+      - name: Check Lean-to-Rust conformance
+        run: cargo test -p conformance --lib --test lean_conformance
+
+      - name: Cleanup
+        if: always()
+        run: git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
 
   conformance:
     name: Conformance
@@ -183,12 +213,12 @@ jobs:
           cargo build --release -p cli
           "$DEFRA_CONFORMANCE_BINARY" version --format json
 
-      # The conformance crate (proofs/) drives real `defra` subprocesses. Run it
-      # serially so concurrent node startup doesn't contend on ports/CPU and
-      # flake ("failed to start rust-0"). The Lean drift-check still skips when
-      # `lake` is absent; a Lean-equipped job can make that mandatory later.
+      # The behavioral conformance tests drive real `defra` subprocesses. Run
+      # them serially so concurrent node startup doesn't contend on ports/CPU
+      # and flake ("failed to start rust-0"). Lean is gated independently by
+      # the `lean-conformance` job above.
       - name: Run conformance tests
-        run: cargo test -p conformance -- --test-threads=1
+        run: cargo test -p conformance --lib --test tla_conformance -- --test-threads=1
 
       # Node logs are the only forensics for a poll-timeout failure; without
       # this upload a red run leaves nothing to diagnose.
@@ -233,15 +263,10 @@ jobs:
           # DEFRA_MULTIPLIERS=signed-docs so every cluster gets
           # .with_signing() auto-applied. Catches regressions in
           # unrelated features that only surface when blocks carry
-          # Signature links (mirrors Go DefraDB PR #4746). Non-blocking
-          # until in-tree .no_signing_multiplier() opt-outs land for
-          # known-incompatible tests; flip continue_on_error to false
-          # once the suite is green.
+          # Signature links (mirrors Go DefraDB PR #4746).
           - suite: signed-docs
             needs_go: false
             multipliers: signed-docs
-            continue_on_error: true
-    continue-on-error: ${{ matrix.continue_on_error == true }}
     env:
       DEFRA_RUST_BINARY: ${{ github.workspace }}/target/ci/defra
       DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
@@ -434,14 +459,13 @@ jobs:
       # `parity_unique_twins_*` probes (#1134) are a KNOWN-DIVERGENCE pin, not a
       # convergence contract: rust_rust asserts #1126 canonical-pick semantics
       # and go_go asserts upstream Go's atomic twin rejection + silent
-      # success-ack — go_go MUST fail (and force a pin update) the moment
-      # upstream Go starts converging. Note the exact-name selection below
-      # deliberately EXCLUDES `parity_unique_twins_mixed_partial_materialization`:
-      # it characterizes an upstream Go partial-materialization finding as a
-      # runnable repro artifact, and the decision to CI-enforce that pin is
-      # held until #1116 stage 3 changes the Rust sender's delivery shape
-      # (see the test's doc comment and #1134). DEFRA_CONFORMANCE_BINARY
-      # points the harness at the restored Rust binary (this job builds to target/ci).
+      # success-ack, while mixed pins the Go v1 asymmetry (Rust accepts both
+      # twins; Go atomically rejects Rust's). These probes MUST fail and force
+      # a pin update when upstream Go starts converging. The historical
+      # `characterize_unique_twins_pre_v1_partial_materialization` repro is
+      # excluded because Go #4838 closed that delivery artifact before v1.0.0.
+      # DEFRA_CONFORMANCE_BINARY points the harness at the restored Rust binary
+      # (this job builds to target/ci).
       - name: Run go-compat conformance parity
         if: matrix.suite == 'go-compat'
         env:
@@ -452,6 +476,7 @@ jobs:
           parity_counter_3node parity_counter_storm_go_go parity_indexed_lww
           parity_mixed_fields_3node parity_lww_tie_partition
           parity_unique_twins_rust_rust parity_unique_twins_go_go
+          parity_unique_twins_mixed
 
       - name: Run iroh integration tests
         if: matrix.suite == 'iroh'

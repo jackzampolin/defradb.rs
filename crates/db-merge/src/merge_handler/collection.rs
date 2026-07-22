@@ -1,13 +1,79 @@
 use super::batch::{PendingFieldBlockFinalization, PendingMergeEvent, PendingPostCommitAction};
 use super::*;
 
+enum CollectionMergeFrame {
+    Enter {
+        cid: Cid,
+        block: Option<Block>,
+        payload: Option<defra_core::block::CollectionDeltaPayload>,
+        child_cid: Option<Cid>,
+        depth: usize,
+        is_root: bool,
+    },
+    Exit {
+        cid: Cid,
+        block: Block,
+        payload: defra_core::block::CollectionDeltaPayload,
+        depth: usize,
+        is_root: bool,
+    },
+}
+
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
+    fn has_merged_collection(&self, cid: &Cid) -> bool {
+        self.merged_collections
+            .lock()
+            .unwrap_or_else(|error| {
+                tracing::warn!("merged_collections lock poisoned, recovering");
+                error.into_inner()
+            })
+            .contains(cid)
+    }
+
+    fn has_batch_merged_collection(
+        batch_merged_collections: &std::sync::Mutex<HashSet<Cid>>,
+        cid: &Cid,
+    ) -> bool {
+        batch_merged_collections
+            .lock()
+            .unwrap_or_else(|error| {
+                tracing::warn!("batch_merged_collections lock poisoned, recovering");
+                error.into_inner()
+            })
+            .contains(cid)
+    }
+
+    async fn load_parent_collection(&self, parent_cid: &Cid, child_cid: &Cid) -> Option<Block> {
+        let data = match self.blockstore.get(parent_cid).await {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                tracing::debug!(
+                    %parent_cid,
+                    %child_cid,
+                    "Parent collection block not in blockstore, skipping"
+                );
+                return None;
+            }
+            Err(error) => {
+                tracing::debug!(
+                    %parent_cid,
+                    %child_cid,
+                    %error,
+                    "Failed to load parent collection block, skipping"
+                );
+                return None;
+            }
+        };
+
+        Block::from_dag_cbor(&data).ok()
+    }
+
     /// Process a Collection delta from a block.
     ///
     /// Collection blocks are metadata containers that link to document composite
     /// blocks. The collection CRDT merge itself is a no-op (matching Go behavior).
     /// The real work is:
-    /// 1. Recursively process parent collection blocks from `heads`
+    /// 1. Process parent collection blocks from `heads`, oldest first
     /// 2. Process each linked document composite via `process_composite_delta`
     /// 3. Update the collection headstore with the new head CID
     pub(crate) async fn process_collection_delta(
@@ -18,89 +84,145 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         metadata: &BlockMetadata<'_>,
         depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
-        if depth >= super::MAX_MERGE_DEPTH {
-            return Err(MergeError::depth_exceeded(cid, depth));
-        }
+        let mut frames = vec![CollectionMergeFrame::Enter {
+            cid: *cid,
+            block: Some(block.clone()),
+            payload: Some(payload.clone()),
+            child_cid: None,
+            depth,
+            is_root: true,
+        }];
 
-        {
-            let merged = self.merged_collections.lock().unwrap_or_else(|e| {
-                tracing::warn!("merged_collections lock poisoned, recovering");
-                e.into_inner()
-            });
-            if merged.contains(cid) {
-                tracing::debug!(cid = %cid, "Collection block already merged, skipping replay");
-                return Ok(MergeOutcome::terminal_skip("collection already merged"));
-            }
-        }
-
-        tracing::debug!(
-            cid = %cid,
-            schema_version = %payload.schema_version_id,
-            priority = payload.priority,
-            links_count = block.links.as_ref().map(|l| l.len()).unwrap_or(0),
-            heads_count = block.heads.as_ref().map(|h| h.len()).unwrap_or(0),
-            "Processing Collection delta"
-        );
-
-        // Recursively process parent collection blocks from `heads` before
-        // this block, ensuring older documents are merged first.
-        if let Some(heads) = &block.heads {
-            for head_cid in heads {
-                let head_data = match self.blockstore.get(head_cid).await {
-                    Ok(Some(data)) => data,
-                    Ok(None) => {
+        while let Some(frame) = frames.pop() {
+            match frame {
+                CollectionMergeFrame::Enter {
+                    cid,
+                    block,
+                    payload,
+                    child_cid,
+                    depth,
+                    is_root,
+                } => {
+                    if depth >= super::MAX_MERGE_DEPTH {
+                        let error = MergeError::depth_exceeded(&cid, depth);
+                        if is_root {
+                            return Err(error);
+                        }
                         tracing::debug!(
-                            parent_cid = %head_cid,
-                            child_cid = %cid,
-                            "Parent collection block not in blockstore, skipping"
+                            parent_cid = %cid,
+                            %error,
+                            "Parent collection merge failed"
                         );
                         continue;
                     }
-                    Err(e) => {
-                        tracing::debug!(
-                            parent_cid = %head_cid,
-                            error = %e,
-                            "Failed to load parent collection block, skipping"
-                        );
+                    if self.has_merged_collection(&cid) {
+                        if is_root {
+                            return Ok(MergeOutcome::terminal_skip("collection already merged"));
+                        }
                         continue;
                     }
-                };
 
-                let head_block = match Block::from_dag_cbor(&head_data) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
+                    let block = match block {
+                        Some(block) => block,
+                        None => {
+                            let Some(block) = self
+                                .load_parent_collection(
+                                    &cid,
+                                    &child_cid.expect("parent frame has a child CID"),
+                                )
+                                .await
+                            else {
+                                continue;
+                            };
+                            block
+                        }
+                    };
+                    let payload = match payload {
+                        Some(payload) => payload,
+                        None => {
+                            let CrdtDelta::Collection(payload) = &block.delta else {
+                                continue;
+                            };
+                            payload.clone()
+                        }
+                    };
 
-                if let CrdtDelta::Collection(head_payload) = &head_block.delta {
-                    tracing::info!(
-                        parent_cid = %head_cid,
-                        child_cid = %cid,
-                        "Recursively merging parent collection block"
+                    tracing::debug!(
+                        %cid,
+                        schema_version = %payload.schema_version_id,
+                        priority = payload.priority,
+                        links_count = block.links.as_ref().map(|links| links.len()).unwrap_or(0),
+                        heads_count = block.heads.as_ref().map(|heads| heads.len()).unwrap_or(0),
+                        "Processing Collection delta"
                     );
-                    match Box::pin(self.process_collection_delta(
-                        head_cid,
-                        &head_block,
-                        head_payload,
-                        metadata,
-                        depth + 1,
-                    ))
-                    .await
+
+                    let heads = block.heads.clone();
+                    frames.push(CollectionMergeFrame::Exit {
+                        cid,
+                        block,
+                        payload,
+                        depth,
+                        is_root,
+                    });
+                    if let Some(heads) = heads {
+                        for parent_cid in heads.into_iter().rev() {
+                            frames.push(CollectionMergeFrame::Enter {
+                                cid: parent_cid,
+                                block: None,
+                                payload: None,
+                                child_cid: Some(cid),
+                                depth: depth + 1,
+                                is_root: false,
+                            });
+                        }
+                    }
+                }
+                CollectionMergeFrame::Exit {
+                    cid,
+                    block,
+                    payload,
+                    depth,
+                    is_root,
+                } => {
+                    if self.has_merged_collection(&cid) {
+                        if is_root {
+                            return Ok(MergeOutcome::terminal_skip("collection already merged"));
+                        }
+                        continue;
+                    }
+                    let outcome = match self
+                        .process_collection_delta_body(&cid, &block, &payload, metadata, depth)
+                        .await
                     {
-                        Ok(MergeOutcome::Merged) => {}
-                        Ok(outcome) if outcome.is_terminal_skip() => {}
-                        Ok(outcome) => return Ok(outcome),
-                        Err(e) => {
+                        Ok(outcome) => outcome,
+                        Err(error) if !is_root => {
                             tracing::debug!(
-                                parent_cid = %head_cid,
-                                error = %e,
+                                parent_cid = %cid,
+                                %error,
                                 "Parent collection merge failed"
                             );
+                            continue;
                         }
+                        Err(error) => return Err(error),
+                    };
+                    if is_root || (!outcome.is_merged() && !outcome.is_terminal_skip()) {
+                        return Ok(outcome);
                     }
                 }
             }
         }
 
+        Ok(MergeOutcome::terminal_skip("collection already merged"))
+    }
+
+    async fn process_collection_delta_body(
+        &self,
+        cid: &Cid,
+        block: &Block,
+        payload: &defra_core::block::CollectionDeltaPayload,
+        metadata: &BlockMetadata<'_>,
+        depth: usize,
+    ) -> std::result::Result<MergeOutcome, MergeError> {
         // Process linked document composites
         let mut any_merged = false;
         let mut retryable_skip: Option<MergeOutcome> = None;
@@ -338,83 +460,175 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         pending_field_block_finalizations: &std::sync::Mutex<Vec<PendingFieldBlockFinalization>>,
         depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
-        if depth >= super::MAX_MERGE_DEPTH {
-            return Err(MergeError::depth_exceeded(cid, depth));
-        }
+        let mut frames = vec![CollectionMergeFrame::Enter {
+            cid: *cid,
+            block: Some(block.clone()),
+            payload: Some(payload.clone()),
+            child_cid: None,
+            depth,
+            is_root: true,
+        }];
 
-        {
-            let merged = self.merged_collections.lock().unwrap_or_else(|e| {
-                tracing::warn!("merged_collections lock poisoned, recovering");
-                e.into_inner()
-            });
-            if merged.contains(cid) {
-                return Ok(MergeOutcome::terminal_skip("collection already merged"));
-            }
-        }
-        {
-            let batch_merged_guard = batch_merged_collections.lock().unwrap_or_else(|e| {
-                tracing::warn!("batch_merged_collections lock poisoned, recovering");
-                e.into_inner()
-            });
-            if batch_merged_guard.contains(cid) {
-                return Ok(MergeOutcome::terminal_skip(
-                    "collection already merged in batch",
-                ));
-            }
-        }
+        while let Some(frame) = frames.pop() {
+            match frame {
+                CollectionMergeFrame::Enter {
+                    cid,
+                    block,
+                    payload,
+                    child_cid,
+                    depth,
+                    is_root,
+                } => {
+                    if depth >= super::MAX_MERGE_DEPTH {
+                        let error = MergeError::depth_exceeded(&cid, depth);
+                        if is_root {
+                            return Err(error);
+                        }
+                        tracing::debug!(
+                            parent_cid = %cid,
+                            %error,
+                            "Parent collection merge failed in batch"
+                        );
+                        continue;
+                    }
+                    if self.has_merged_collection(&cid) {
+                        if is_root {
+                            return Ok(MergeOutcome::terminal_skip("collection already merged"));
+                        }
+                        continue;
+                    }
+                    if Self::has_batch_merged_collection(batch_merged_collections, &cid) {
+                        if is_root {
+                            return Ok(MergeOutcome::terminal_skip(
+                                "collection already merged in batch",
+                            ));
+                        }
+                        continue;
+                    }
 
-        tracing::debug!(
-            cid = %cid,
-            schema_version = %payload.schema_version_id,
-            "Processing Collection delta in batch txn"
-        );
+                    let block = match block {
+                        Some(block) => block,
+                        None => {
+                            let Some(block) = self
+                                .load_parent_collection(
+                                    &cid,
+                                    &child_cid.expect("parent frame has a child CID"),
+                                )
+                                .await
+                            else {
+                                continue;
+                            };
+                            block
+                        }
+                    };
+                    let payload = match payload {
+                        Some(payload) => payload,
+                        None => {
+                            let CrdtDelta::Collection(payload) = &block.delta else {
+                                continue;
+                            };
+                            payload.clone()
+                        }
+                    };
 
-        // Recursively process parent collection blocks
-        if let Some(heads) = &block.heads {
-            for head_cid in heads {
-                let head_data = match self.blockstore.get(head_cid).await {
-                    Ok(Some(data)) => data,
-                    _ => continue,
-                };
+                    tracing::debug!(
+                        %cid,
+                        schema_version = %payload.schema_version_id,
+                        "Processing Collection delta in batch txn"
+                    );
 
-                let head_block = match Block::from_dag_cbor(&head_data) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-
-                if let CrdtDelta::Collection(head_payload) = &head_block.delta {
-                    match Box::pin(self.process_collection_delta_in_txn(
-                        datastore,
-                        headstore,
-                        systemstore,
-                        head_cid,
-                        &head_block,
-                        head_payload,
-                        metadata,
-                        batch_merged,
-                        batch_merged_collections,
-                        pending_events,
-                        pending_post_commit_actions,
-                        pending_field_block_finalizations,
-                        depth + 1,
-                    ))
-                    .await
+                    let heads = block.heads.clone();
+                    frames.push(CollectionMergeFrame::Exit {
+                        cid,
+                        block,
+                        payload,
+                        depth,
+                        is_root,
+                    });
+                    if let Some(heads) = heads {
+                        for parent_cid in heads.into_iter().rev() {
+                            frames.push(CollectionMergeFrame::Enter {
+                                cid: parent_cid,
+                                block: None,
+                                payload: None,
+                                child_cid: Some(cid),
+                                depth: depth + 1,
+                                is_root: false,
+                            });
+                        }
+                    }
+                }
+                CollectionMergeFrame::Exit {
+                    cid,
+                    block,
+                    payload,
+                    depth,
+                    is_root,
+                } => {
+                    if self.has_merged_collection(&cid)
+                        || Self::has_batch_merged_collection(batch_merged_collections, &cid)
                     {
-                        Ok(MergeOutcome::Merged) => {}
-                        Ok(outcome) if outcome.is_terminal_skip() => {}
-                        Ok(outcome) => return Ok(outcome),
-                        Err(e) => {
+                        if is_root {
+                            return Ok(MergeOutcome::terminal_skip("collection already merged"));
+                        }
+                        continue;
+                    }
+                    let outcome = match self
+                        .process_collection_delta_in_txn_body(
+                            datastore,
+                            headstore,
+                            systemstore,
+                            &cid,
+                            &block,
+                            &payload,
+                            metadata,
+                            batch_merged,
+                            batch_merged_collections,
+                            pending_events,
+                            pending_post_commit_actions,
+                            pending_field_block_finalizations,
+                            depth,
+                        )
+                        .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) if !is_root => {
                             tracing::debug!(
-                                parent_cid = %head_cid,
-                                error = %e,
+                                parent_cid = %cid,
+                                %error,
                                 "Parent collection merge failed in batch"
                             );
+                            continue;
                         }
+                        Err(error) => return Err(error),
+                    };
+                    if is_root || (!outcome.is_merged() && !outcome.is_terminal_skip()) {
+                        return Ok(outcome);
                     }
                 }
             }
         }
 
+        Ok(MergeOutcome::terminal_skip("collection already merged"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn process_collection_delta_in_txn_body(
+        &self,
+        datastore: &NamespaceView,
+        headstore: &NamespaceView,
+        systemstore: &NamespaceView,
+        cid: &Cid,
+        block: &Block,
+        payload: &defra_core::block::CollectionDeltaPayload,
+        metadata: &BlockMetadata<'_>,
+        batch_merged: &std::sync::Mutex<HashSet<Cid>>,
+        batch_merged_collections: &std::sync::Mutex<HashSet<Cid>>,
+        pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
+        pending_post_commit_actions: &std::sync::Mutex<Vec<PendingPostCommitAction>>,
+        pending_field_block_finalizations: &std::sync::Mutex<Vec<PendingFieldBlockFinalization>>,
+        depth: usize,
+    ) -> std::result::Result<MergeOutcome, MergeError> {
         // Process linked document composites
         let mut any_merged = false;
         let mut retryable_skip: Option<MergeOutcome> = None;

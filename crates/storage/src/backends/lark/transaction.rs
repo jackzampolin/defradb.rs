@@ -22,6 +22,8 @@ pub(crate) struct LarkTxn {
     snapshot: lark_kv::Snapshot,
     conflict_tracker: Arc<ConflictTracker>,
     _conflict_snapshot: Option<ConflictSnapshot>,
+    /// Keeps conflict versions aligned with physical snapshots and commits.
+    commit_gate: Arc<tokio::sync::RwLock<()>>,
     active_txn_count: Arc<AtomicUsize>,
     read_version: u64,
     pending: Mutex<PendingWrites>,
@@ -183,6 +185,7 @@ impl LarkTxn {
     pub(crate) fn new(
         db: Arc<lark_kv::Db>,
         conflict_tracker: Arc<ConflictTracker>,
+        commit_gate: Arc<tokio::sync::RwLock<()>>,
         active_txn_count: Arc<AtomicUsize>,
         readonly: bool,
         durability: DurabilityMode,
@@ -199,6 +202,7 @@ impl LarkTxn {
             snapshot,
             conflict_tracker,
             _conflict_snapshot: conflict_snapshot,
+            commit_gate,
             active_txn_count,
             read_version,
             pending: Mutex::new(PendingWrites::default()),
@@ -437,29 +441,34 @@ impl Txn for LarkTxn {
         let read_set = self.read_set.lock().clone();
 
         if !pending.is_empty() {
-            // Check conflicts
-            if let Err(e) = pending.check_and_record_conflicts(
-                &self.conflict_tracker,
-                self.read_version,
-                &read_set,
-            ) {
+            let commit_result = {
+                let _commit_guard = self.commit_gate.write().await;
+                match pending.check_and_record_conflicts(
+                    &self.conflict_tracker,
+                    self.read_version,
+                    &read_set,
+                ) {
+                    Err(error) => Err(error),
+                    Ok(()) => {
+                        let batch = pending.into_write_batch();
+                        let durability = match self.durability {
+                            DurabilityMode::Immediate => lark_kv::DurabilityMode::Immediate,
+                            DurabilityMode::Eventual => lark_kv::DurabilityMode::Eventual,
+                        };
+                        self.db
+                            .write_with_durability(batch, durability)
+                            .map_err(|error| Error::Backend(error.to_string()))
+                    }
+                }
+            };
+
+            if let Err(e) = commit_result {
+                if !matches!(e, Error::TxnConflict) {
+                    tracing::error!(error = %e, "Failed to commit lark batch");
+                }
                 CallbackManager::execute_callbacks(self.callbacks.take_error());
                 CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
                 return Err(e);
-            }
-
-            // Apply via lark WriteBatch
-            let batch = pending.into_write_batch();
-            let durability = match self.durability {
-                DurabilityMode::Immediate => lark_kv::DurabilityMode::Immediate,
-                DurabilityMode::Eventual => lark_kv::DurabilityMode::Eventual,
-            };
-
-            if let Err(e) = self.db.write_with_durability(batch, durability) {
-                tracing::error!(error = %e, "Failed to commit lark batch");
-                CallbackManager::execute_callbacks(self.callbacks.take_error());
-                CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
-                return Err(Error::Backend(e.to_string()));
             }
         }
 

@@ -36,6 +36,7 @@ fn test_p2p_config() -> P2PConfig {
         bind_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         relay_mode: p2p::iroh::IrohRelayModeConfig::Disabled,
         discovery: p2p::iroh::IrohDiscoveryConfig::Disabled,
+        max_concurrent_multipath_paths: None,
         secret_key_path: None,
         load_persisted_collections: false,
         max_concurrent_dag_fetches: p2p::sync::DEFAULT_MAX_CONCURRENT_DAG_FETCHES,

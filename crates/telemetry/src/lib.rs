@@ -1,9 +1,9 @@
 //! OpenTelemetry exporter setup for DefraDB.
 //!
 //! Mirrors Go DefraDB's `internal/telemetry/otel.go`. The `otlp` feature
-//! compiles in OTLP/gRPC trace + metric exporters; without it the crate
-//! provides only a no-op [`TelemetryHandle`] and the [`OtelDedupFilter`]
-//! (always available, no-op when no `opentelemetry*` events exist).
+//! compiles in OTLP/HTTP trace export; without it the crate provides only a
+//! no-op [`TelemetryHandle`] and the [`OtelDedupFilter`] (always available,
+//! no-op when no `opentelemetry*` events exist).
 //!
 //! Connection-refused log spam from the OTEL SDK is deduped via
 //! [`OtelDedupFilter`] — the Rust equivalent of Go's `sync.Once`-guarded

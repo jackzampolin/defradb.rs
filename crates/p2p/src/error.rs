@@ -221,13 +221,13 @@ pub enum Error {
         collection_id: String,
     },
 
-    /// The pending-DAG map is at capacity, so an incoming push with missing
-    /// links could not be registered. Reply seams map this to the byte-exact
-    /// `RATE_LIMITED_MESSAGE` nack so the pusher retries instead of treating
-    /// the push as landed (#1088 W1).
+    /// The pending-DAG map or the source peer's share is at capacity, so an
+    /// incoming push with missing links could not be registered. Reply seams
+    /// map this to the byte-exact at-capacity nack so the pusher retries
+    /// instead of treating the push as landed (#1088 W1/W2).
     #[error("pending DAG registrations at capacity ({max}), retry later")]
     PendingDagCapacity {
-        /// The configured `SyncConfig::max_pending_dags` in effect.
+        /// The configured global pending-DAG capacity.
         max: usize,
     },
 
