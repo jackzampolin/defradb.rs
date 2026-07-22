@@ -263,15 +263,10 @@ jobs:
           # DEFRA_MULTIPLIERS=signed-docs so every cluster gets
           # .with_signing() auto-applied. Catches regressions in
           # unrelated features that only surface when blocks carry
-          # Signature links (mirrors Go DefraDB PR #4746). Non-blocking
-          # until in-tree .no_signing_multiplier() opt-outs land for
-          # known-incompatible tests; flip continue_on_error to false
-          # once the suite is green.
+          # Signature links (mirrors Go DefraDB PR #4746).
           - suite: signed-docs
             needs_go: false
             multipliers: signed-docs
-            continue_on_error: true
-    continue-on-error: ${{ matrix.continue_on_error == true }}
     env:
       DEFRA_RUST_BINARY: ${{ github.workspace }}/target/ci/defra
       DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
