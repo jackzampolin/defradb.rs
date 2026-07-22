@@ -19,7 +19,7 @@ pub struct BrowserSyncAdapter<S: Store + 'static> {
 struct PendingSyncDocument {
     document: db_merge::ValidatedBrowserSyncDocument,
     collection: db::Collection,
-    register_owner: bool,
+    register_owner: Option<identity::Did>,
 }
 
 impl<S: Store + 'static> BrowserSyncAdapter<S> {
@@ -109,10 +109,30 @@ impl<S: Store + 'static> BrowserSyncAdapter<S> {
             .await
             .map_err(map_engine_error)?
             .is_some();
+        // Ownership follows the replication convention (acp_merge_handler):
+        // only the creator cryptographically verified from the genesis block's
+        // signature may be registered — never the transport caller, who might
+        // be pushing someone else's DAG. An unsigned genesis has no verifiable
+        // author and stays unregistered (unregistered == public under Local
+        // ACP, matching Go's replication semantics).
+        let register_owner = if !existed && !was_registered {
+            document
+                .verified_genesis_creator()
+                .map(|creator| {
+                    identity::Did::try_from(creator.to_string()).map_err(|error| {
+                        BrowserSyncError::Internal(format!(
+                            "verified genesis creator DID is invalid: {error}"
+                        ))
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
         Ok(PendingSyncDocument {
             document,
             collection,
-            register_owner: !existed && !was_registered && identity.did().is_some(),
+            register_owner,
         })
     }
 
@@ -123,10 +143,10 @@ impl<S: Store + 'static> BrowserSyncAdapter<S> {
     ) -> BrowserSyncResult<()> {
         let doc_id = document.document.doc_id().to_string();
         let creator = identity.did().map_or("browser-sync", |did| did.as_str());
-        if document.register_owner {
+        if let Some(owner) = document.register_owner.as_ref() {
             db::collection_acp::register_doc_if_needed(
                 self.document_acp.as_ref(),
-                identity.did(),
+                Some(owner),
                 document.collection.schema(),
                 &doc_id,
             )

@@ -108,7 +108,7 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
         }
 
         let mut reachable = HashSet::new();
-        let mut genesis_doc_ids = HashSet::new();
+        let mut genesis_doc_ids = HashMap::new();
         let mut stack = roots
             .iter()
             .copied()
@@ -139,7 +139,7 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
             if block.heads.as_deref().is_none_or(<[Cid]>::is_empty)
                 && matches!(block.delta, CrdtDelta::Composite(_))
             {
-                genesis_doc_ids.insert(db_blocks::derive_doc_id(&cid));
+                genesis_doc_ids.insert(db_blocks::derive_doc_id(&cid), cid);
             }
             stack.extend(
                 block
@@ -260,12 +260,41 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
                 }
             }
         }
-        if genesis_doc_ids.len() != 1 || !genesis_doc_ids.contains(&document.doc_id) {
+        let Some(genesis_cid) = (genesis_doc_ids.len() == 1)
+            .then(|| genesis_doc_ids.get(&document.doc_id).copied())
+            .flatten()
+        else {
             return Err(BrowserSyncError::Invalid(format!(
                 "document ID {} does not match its genesis block",
                 document.doc_id
             )));
-        }
+        };
+
+        // Ownership registration must be anchored to the document's
+        // cryptographically verified author, never the transport caller
+        // (mirrors the replication path's `effective_creator()` convention).
+        // An unsigned genesis yields no verified creator; an invalid
+        // signature rejects the push outright.
+        let verified_genesis_creator = match decoded_blocks.get(&genesis_cid) {
+            Some(DecodedSyncBlock::Delta(block)) => match block.signature {
+                Some(sig_cid) => {
+                    let sig_data = blocks
+                        .iter()
+                        .find_map(|(cid, data)| (*cid == sig_cid).then_some(data.as_slice()))
+                        .ok_or_else(|| {
+                            BrowserSyncError::Invalid(format!(
+                                "genesis signature block {sig_cid} is missing"
+                            ))
+                        })?;
+                    Some(
+                        crate::merge_handler::verify_signature_data(&genesis_cid, block, sig_data)
+                            .map_err(|error| BrowserSyncError::Invalid(error.to_string()))?,
+                    )
+                }
+                None => None,
+            },
+            _ => None,
+        };
 
         for root in &roots {
             let Some(DecodedSyncBlock::Delta(block)) = decoded_blocks.get(root) else {
@@ -285,6 +314,7 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
             collection_id: document.collection_id.clone(),
             roots,
             blocks,
+            verified_genesis_creator,
         })
     }
 }

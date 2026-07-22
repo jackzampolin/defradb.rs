@@ -37,6 +37,7 @@ pub struct ValidatedBrowserSyncDocument {
     collection_id: String,
     roots: Vec<Cid>,
     blocks: Vec<(Cid, Vec<u8>)>,
+    verified_genesis_creator: Option<String>,
 }
 
 impl ValidatedBrowserSyncDocument {
@@ -46,6 +47,13 @@ impl ValidatedBrowserSyncDocument {
 
     pub fn collection_id(&self) -> &str {
         &self.collection_id
+    }
+
+    /// The DID cryptographically verified from the genesis block's signature,
+    /// if the genesis block is signed. This is the only identity that may be
+    /// registered as the document's ACP owner.
+    pub fn verified_genesis_creator(&self) -> Option<&str> {
+        self.verified_genesis_creator.as_deref()
     }
 }
 

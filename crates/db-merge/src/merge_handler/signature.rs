@@ -50,71 +50,85 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             }
         };
 
-        let signature = match defra_core::block::Signature::from_dag_cbor(&sig_data) {
-            Ok(sig) => sig,
-            Err(e) => {
-                return Err(MergeError::SignatureVerificationFailed {
-                    cid: *cid,
-                    reason: format!("failed to decode signature block: {}", e),
-                });
-            }
-        };
+        verify_signature_data(cid, block, &sig_data).map(Some)
+    }
+}
 
-        let sig_identity = String::from_utf8_lossy(&signature.header.identity).to_string();
-
-        // Verify the signature over the block data (block without signature field)
-        let mut block_to_verify = block.clone();
-        block_to_verify.signature = None;
-        let signed_bytes =
-            block_to_verify
-                .to_dag_cbor()
-                .map_err(|e| MergeError::SignatureVerificationFailed {
-                    cid: *cid,
-                    reason: format!("failed to serialize block for verification: {}", e),
-                })?;
-
-        let sig_type = signature.header.sig_type;
-        let key_type = match sig_type {
-            defra_core::block::SignatureType::ES256K => crypto::KeyType::Secp256k1,
-            defra_core::block::SignatureType::ES256 => crypto::KeyType::Secp256r1,
-            defra_core::block::SignatureType::EdDSA => crypto::KeyType::Ed25519,
-            defra_core::block::SignatureType::BLS => crypto::KeyType::Bls12381,
-        };
-
-        let pub_key = crypto::public_key_from_string(key_type, &sig_identity).map_err(|e| {
-            MergeError::SignatureVerificationFailed {
+/// Verify a signature block's raw bytes against a block and return the
+/// verified signer DID.
+///
+/// Shared by the merge-time verification above (signature loaded from the
+/// blockstore) and browser-sync validation (signature carried in the push
+/// payload).
+pub(crate) fn verify_signature_data(
+    cid: &Cid,
+    block: &Block,
+    sig_data: &[u8],
+) -> Result<String, MergeError> {
+    let signature = match defra_core::block::Signature::from_dag_cbor(sig_data) {
+        Ok(sig) => sig,
+        Err(e) => {
+            return Err(MergeError::SignatureVerificationFailed {
                 cid: *cid,
-                reason: format!("failed to parse public key from identity: {}", e),
-            }
-        })?;
-
-        match pub_key.verify(&signed_bytes, &signature.value) {
-            Ok(true) => {
-                // Convert the hex public key to a did:key: DID so that
-                // effective_creator() returns a format compatible with ACP
-                // registration (which checks for "did:key:" prefix).
-                let verified_did =
-                    pub_key
-                        .did()
-                        .map_err(|e| MergeError::SignatureVerificationFailed {
-                            cid: *cid,
-                            reason: format!("failed to derive DID from verified key: {}", e),
-                        })?;
-                tracing::debug!(
-                    cid = %cid,
-                    identity = %verified_did,
-                    "Block signature verified successfully"
-                );
-                Ok(Some(verified_did))
-            }
-            Err(e) => Err(MergeError::SignatureVerificationFailed {
-                cid: *cid,
-                reason: format!("signature verification error: {}", e),
-            }),
-            Ok(false) => Err(MergeError::SignatureVerificationFailed {
-                cid: *cid,
-                reason: "signature verification returned false unexpectedly".to_string(),
-            }),
+                reason: format!("failed to decode signature block: {}", e),
+            });
         }
+    };
+
+    let sig_identity = String::from_utf8_lossy(&signature.header.identity).to_string();
+
+    // Verify the signature over the block data (block without signature field)
+    let mut block_to_verify = block.clone();
+    block_to_verify.signature = None;
+    let signed_bytes =
+        block_to_verify
+            .to_dag_cbor()
+            .map_err(|e| MergeError::SignatureVerificationFailed {
+                cid: *cid,
+                reason: format!("failed to serialize block for verification: {}", e),
+            })?;
+
+    let sig_type = signature.header.sig_type;
+    let key_type = match sig_type {
+        defra_core::block::SignatureType::ES256K => crypto::KeyType::Secp256k1,
+        defra_core::block::SignatureType::ES256 => crypto::KeyType::Secp256r1,
+        defra_core::block::SignatureType::EdDSA => crypto::KeyType::Ed25519,
+        defra_core::block::SignatureType::BLS => crypto::KeyType::Bls12381,
+    };
+
+    let pub_key = crypto::public_key_from_string(key_type, &sig_identity).map_err(|e| {
+        MergeError::SignatureVerificationFailed {
+            cid: *cid,
+            reason: format!("failed to parse public key from identity: {}", e),
+        }
+    })?;
+
+    match pub_key.verify(&signed_bytes, &signature.value) {
+        Ok(true) => {
+            // Convert the hex public key to a did:key: DID so that
+            // effective_creator() returns a format compatible with ACP
+            // registration (which checks for "did:key:" prefix).
+            let verified_did =
+                pub_key
+                    .did()
+                    .map_err(|e| MergeError::SignatureVerificationFailed {
+                        cid: *cid,
+                        reason: format!("failed to derive DID from verified key: {}", e),
+                    })?;
+            tracing::debug!(
+                cid = %cid,
+                identity = %verified_did,
+                "Block signature verified successfully"
+            );
+            Ok(verified_did)
+        }
+        Err(e) => Err(MergeError::SignatureVerificationFailed {
+            cid: *cid,
+            reason: format!("signature verification error: {}", e),
+        }),
+        Ok(false) => Err(MergeError::SignatureVerificationFailed {
+            cid: *cid,
+            reason: "signature verification returned false unexpectedly".to_string(),
+        }),
     }
 }

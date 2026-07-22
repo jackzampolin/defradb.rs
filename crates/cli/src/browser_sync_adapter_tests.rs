@@ -2,13 +2,33 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use acp::{DocumentACP, LocalDocumentACP, MemoryAcpStore};
+use crypto::{Key as _, PrivateKey as _, PublicKey as _};
 use defra_core::browser_sync::{BrowserSyncPull, BrowserSyncRequest};
+use defra_core::signing::{set_signing_config, SigningConfig, SigningKeyType};
 use document::{DocID, Document, NormalValue};
 use query::mutator::DocMutator;
 use schema::{CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
 use storage::backends::MemoryStore;
 
 use crate::browser_sync_adapter::BrowserSyncAdapter;
+
+/// Generate an Ed25519 identity and install it as the thread-local block
+/// signing config, so documents created afterwards carry genesis blocks
+/// signed by this identity. Returns the signer's DID.
+fn install_signing_identity() -> String {
+    let private_key = crypto::generate_ed25519().unwrap();
+    let public_key = private_key.public_key();
+    let did = public_key.did().unwrap();
+    set_signing_config(Some(SigningConfig {
+        key_type: SigningKeyType::Ed25519,
+        private_key_bytes: SigningConfig::private_key_bytes_from_slice(private_key.raw()),
+        public_key_bytes: public_key.raw().to_vec(),
+        public_key_hex: hex::encode(public_key.raw()),
+        remote_signer: None,
+        signing_authorization: None,
+    }));
+    did
+}
 
 fn users_schema(policy: bool) -> CollectionVersion {
     let mut schema = CollectionVersion::new(
@@ -124,13 +144,15 @@ async fn pull_uses_advancing_cursor_pages() {
 }
 
 #[tokio::test]
-async fn sync_registers_only_new_authenticated_documents() {
+async fn sync_registers_only_new_signed_documents() {
     let source = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
     let target = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
     source.create_collection(users_schema(true)).await.unwrap();
     target.create_collection(users_schema(true)).await.unwrap();
     let public_document = create_document(&source, "Public").await;
+    let owner = install_signing_identity();
     let protected_document = create_document(&source, "Protected").await;
+    set_signing_config(None);
     let public_doc_id = public_document.doc_id.clone();
     let protected_doc_id = protected_document.doc_id.clone();
 
@@ -148,14 +170,13 @@ async fn sync_registers_only_new_authenticated_documents() {
         .await
         .unwrap();
 
-    let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
     adapter
         .sync(
             BrowserSyncRequest {
                 documents: vec![public_document, protected_document.clone()],
                 pull: None,
             },
-            Some(owner),
+            Some(&owner),
             false,
         )
         .await
@@ -174,8 +195,89 @@ async fn sync_registers_only_new_authenticated_documents() {
             .await
             .unwrap()
             .map(|did| did.to_string()),
-        Some(owner.to_string())
+        Some(owner)
     );
+}
+
+#[tokio::test]
+async fn foreign_signed_document_cannot_be_squatted_by_pushing_caller() {
+    let source = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let target = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    source.create_collection(users_schema(true)).await.unwrap();
+    target.create_collection(users_schema(true)).await.unwrap();
+
+    // Alice authors and signs the document in her browser node.
+    let alice = install_signing_identity();
+    let document = create_document(&source, "Alice").await;
+    set_signing_config(None);
+    let doc_id = document.doc_id.clone();
+
+    // Bob obtains Alice's DAG and pushes it to a server that has never seen
+    // the document. Bob must not become the registered ACP owner.
+    let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
+    let adapter = BrowserSyncAdapter::new_arc(target, acp.clone());
+    let bob = "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH";
+    adapter
+        .sync(
+            BrowserSyncRequest {
+                documents: vec![document],
+                pull: None,
+            },
+            Some(bob),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let owner = acp
+        .get_doc_owner("users-policy", "users", &doc_id)
+        .await
+        .unwrap()
+        .map(|did| did.to_string());
+    assert_ne!(
+        owner.as_deref(),
+        Some(bob),
+        "pushing caller must not squat ownership of a foreign-signed document"
+    );
+    assert_eq!(
+        owner.as_deref(),
+        Some(alice.as_str()),
+        "ownership must be registered to the verified genesis creator"
+    );
+}
+
+#[tokio::test]
+async fn unsigned_document_stays_unregistered_for_authenticated_caller() {
+    let source = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let target = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    source.create_collection(users_schema(true)).await.unwrap();
+    target.create_collection(users_schema(true)).await.unwrap();
+
+    // No signing config: the genesis block carries no verifiable creator.
+    let document = create_document(&source, "Unsigned").await;
+    let doc_id = document.doc_id.clone();
+
+    let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
+    let adapter = BrowserSyncAdapter::new_arc(target, acp.clone());
+    let caller = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+    adapter
+        .sync(
+            BrowserSyncRequest {
+                documents: vec![document],
+                pull: None,
+            },
+            Some(caller),
+            false,
+        )
+        .await
+        .unwrap();
+
+    // Matches the Local ACP replication convention: without a verified
+    // creator the document is not registered (unregistered == public).
+    assert!(!acp
+        .is_doc_registered("users-policy", "users", &doc_id)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -246,18 +348,19 @@ async fn protected_document_rejects_updates_from_another_identity() {
     let target = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
     source.create_collection(users_schema(true)).await.unwrap();
     target.create_collection(users_schema(true)).await.unwrap();
+    let owner = install_signing_identity();
     let document = create_document(&source, "Protected").await;
+    set_signing_config(None);
 
     let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
     let adapter = BrowserSyncAdapter::new_arc(target, acp);
-    let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
     adapter
         .sync(
             BrowserSyncRequest {
                 documents: vec![document.clone()],
                 pull: None,
             },
-            Some(owner),
+            Some(&owner),
             false,
         )
         .await

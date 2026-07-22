@@ -20,6 +20,7 @@ mod signature;
 
 pub use error::MergeError;
 pub(crate) use error::{CounterMergeResult, LwwMergeResult};
+pub(crate) use signature::verify_signature_data;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

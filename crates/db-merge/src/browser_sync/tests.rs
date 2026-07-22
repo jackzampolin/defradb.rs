@@ -249,6 +249,65 @@ async fn validation_accepts_reachable_signature_blocks() {
         .unwrap();
     let mut wire_document = sync.load_document(&document_ref).await.unwrap().unwrap();
 
+    use crypto::PrivateKey as _;
+    let old_root = wire_document.roots[0].clone();
+    let root = wire_document
+        .blocks
+        .iter_mut()
+        .find(|block| block.cid == old_root)
+        .unwrap();
+    let mut decoded_root = Block::from_dag_cbor(&hex::decode(&root.data).unwrap()).unwrap();
+    let private_key = crypto::generate_ed25519().unwrap();
+    let public_key = private_key.public_key();
+    let signer_did = public_key.did().unwrap();
+    let signed_bytes = decoded_root.to_dag_cbor().unwrap();
+    let signature = Signature::new(
+        SignatureHeader::new(
+            SignatureType::EdDSA,
+            hex::encode(public_key.raw()).into_bytes(),
+        ),
+        private_key.sign(&signed_bytes).unwrap(),
+    );
+    let signature_data = signature.to_dag_cbor().unwrap();
+    let signature_cid = generate_cid_from_bytes(&signature_data).unwrap();
+    decoded_root.signature = Some(signature_cid);
+    let root_data = decoded_root.to_dag_cbor().unwrap();
+    let root_cid = generate_cid_from_bytes(&root_data).unwrap();
+    root.cid = root_cid.to_string();
+    root.data = hex::encode(root_data);
+    wire_document.roots[0] = root_cid.to_string();
+    wire_document.doc_id = db_blocks::derive_doc_id(&root_cid);
+    wire_document.blocks.push(BrowserSyncBlock {
+        cid: signature_cid.to_string(),
+        data: hex::encode(signature_data),
+    });
+
+    let validated = sync.validate_document(&wire_document).unwrap();
+    assert_eq!(
+        validated.verified_genesis_creator(),
+        Some(signer_did.as_str()),
+        "validation must surface the verified genesis signer"
+    );
+}
+
+#[tokio::test]
+async fn validation_rejects_forged_genesis_signature() {
+    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    database.create_collection(users_schema()).await.unwrap();
+    let mut document = Document::new();
+    document.set("name", "Alice");
+    let created = db::AutoCommitMutator::new(database.clone())
+        .create("Users", document)
+        .await
+        .unwrap();
+    let sync = BrowserSyncEngine::new(database);
+    let document_ref = sync
+        .document_ref(&created.doc_id.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut wire_document = sync.load_document(&document_ref).await.unwrap().unwrap();
+
     let old_root = wire_document.roots[0].clone();
     let root = wire_document
         .blocks
@@ -271,5 +330,9 @@ async fn validation_accepts_reachable_signature_blocks() {
         data: hex::encode(signature_data),
     });
 
-    sync.validate_document(&wire_document).unwrap();
+    let error = sync
+        .validate_document(&wire_document)
+        .err()
+        .expect("an unverifiable genesis signature must reject the push");
+    assert!(matches!(error, BrowserSyncError::Invalid(_)));
 }
