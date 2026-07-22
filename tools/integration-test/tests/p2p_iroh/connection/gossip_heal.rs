@@ -30,6 +30,7 @@ async fn test_config(gossip_heal: GossipHealConfig) -> IrohEndpointConfig {
         discovery: IrohDiscoveryConfig::Disabled,
         bind_port: None,
         bind_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        max_concurrent_multipath_paths: None,
         gossip_heal,
     }
 }

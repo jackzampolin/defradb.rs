@@ -70,6 +70,7 @@ fn test_iroh_config() -> IrohConfig {
         bind_port: Some(0),
         relay_mode: p2p::iroh::IrohRelayModeConfig::Disabled,
         discovery: p2p::iroh::IrohDiscoveryConfig::Disabled,
+        max_concurrent_multipath_paths: None,
         secret_key_path: None,
     }
 }
