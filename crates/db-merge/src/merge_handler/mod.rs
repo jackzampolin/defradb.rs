@@ -49,11 +49,9 @@ use db::database::DB;
 use db::index_manager::IndexManager;
 use hook::CompositeMergeHook;
 
-/// Maximum DAG recursion depth for merge operations.
+/// Maximum parent-chain depth for merge operations.
 ///
-/// Prevents stack overflow from a malicious or corrupt DAG with deeply nested heads.
-/// Recursive async functions allocate a stack frame per level; 1024 is sufficient for
-/// legitimate replication chains while remaining well within typical stack limits.
+/// Bounds the work and heap used while traversing a malicious or corrupt DAG.
 pub(crate) const MAX_MERGE_DEPTH: usize = 1024;
 
 /// Encode a priority value as a varint (matches Go's binary.PutUvarint).
@@ -574,7 +572,18 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                 );
             }
         }
-        result
+        match result {
+            // Signature verification is a property of the block bytes. It
+            // cannot become valid on a later retry, so route it through the
+            // existing terminal-rejection outcome and pending-DAG quarantine
+            // instead of returning `Err` to the receiver retry clock (#1159).
+            Err(error @ MergeError::SignatureVerificationFailed { .. }) => {
+                Ok(MergeOutcome::Rejected {
+                    reason: error.to_string(),
+                })
+            }
+            other => other,
+        }
     }
 
     async fn handle_block_batch(
@@ -800,8 +809,9 @@ mod tests {
     use blockstore::{Blockstore as _, DefraBlockstore};
     use crypto::PrivateKey as _;
     use defra_core::block::{
-        Block, CollectionDefinitionDeltaPayload, CompositeDeltaPayload, CounterDeltaPayload,
-        CrdtDelta, DAGLink, Encryption, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
+        Block, CollectionDefinitionDeltaPayload, CollectionDeltaPayload, CompositeDeltaPayload,
+        CounterDeltaPayload, CrdtDelta, DAGLink, Encryption, LwwDeltaPayload, Signature,
+        SignatureHeader, SignatureType,
     };
     use events::{Bus, ChannelBus, EventName};
     use schema::{CType, CollectionVersion, FieldDescription, FieldKind};
@@ -1242,6 +1252,19 @@ mod tests {
                 MergeError::SignatureVerificationFailed { .. }
             ),
             "expected SignatureVerificationFailed"
+        );
+
+        let outcome = handler
+            .handle_block(
+                &cid,
+                &block_data,
+                BlockMetadata::normal("doc1", "v1", "creator", None, false),
+            )
+            .await
+            .expect("a deterministic signature failure is a merge outcome, not a retry error");
+        assert!(
+            matches!(outcome, MergeOutcome::Rejected { .. }),
+            "tampered blocks must flow to pending-DAG quarantine"
         );
     }
 
@@ -3017,6 +3040,163 @@ mod tests {
                 child_field_cid
             )
             .bytes()]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deep_composite_parent_chain_merges_on_worker_stack() {
+        let (handler, blockstore, _bus) = make_handler_with_schema_and_bus().await;
+        let collection = handler
+            .db
+            .find_collection_by_id("col-users")
+            .unwrap()
+            .expect("users collection should exist");
+
+        let mut doc = Document::new();
+        doc.set("name", NormalValue::String("initial".to_string()));
+        doc.set_schema_version_id("v1");
+
+        let (doc_id, _doc_short_id, local_blocks) =
+            create_doc_locally(&handler, &collection, &mut doc, "v1").await;
+        let doc_id_str = doc_id.to_string();
+        let mut field_heads = local_blocks.field_cids;
+        let mut composite_heads = vec![local_blocks.cid];
+        let mut latest = None;
+
+        for priority in 2..=257 {
+            let name = format!("name-{priority}");
+            let mut data = Vec::new();
+            ciborium::into_writer(&NormalValue::String(name), &mut data).unwrap();
+            let field_block = Block::new(
+                CrdtDelta::Lww(LwwDeltaPayload {
+                    field_name: "name".to_string(),
+                    schema_version_id: "v1".to_string(),
+                    priority,
+                    data,
+                }),
+                field_heads,
+                vec![],
+            );
+            let field_cid = field_block.generate_cid().unwrap();
+            blockstore
+                .put(&field_cid, &field_block.to_dag_cbor().unwrap())
+                .await
+                .unwrap();
+
+            let payload = CompositeDeltaPayload {
+                schema_version_id: "v1".to_string(),
+                priority,
+                status: 1,
+            };
+            let composite_block = Block::new(
+                CrdtDelta::Composite(payload.clone()),
+                composite_heads,
+                vec![DAGLink::new("name", field_cid)],
+            );
+            let composite_cid = composite_block.generate_cid().unwrap();
+            blockstore
+                .put(&composite_cid, &composite_block.to_dag_cbor().unwrap())
+                .await
+                .unwrap();
+
+            field_heads = vec![field_cid];
+            composite_heads = vec![composite_cid];
+            latest = Some((composite_cid, composite_block, payload));
+        }
+
+        let (latest_cid, latest_block, latest_payload) = latest.expect("chain is not empty");
+        let (handler, outcome) = tokio::spawn(async move {
+            let metadata = BlockMetadata::normal(
+                &doc_id_str,
+                "col-users",
+                "did:key:z6MkrDeepCompositeReplay",
+                None,
+                false,
+            );
+            let outcome = handler
+                .process_composite_delta(
+                    &latest_cid,
+                    &latest_block,
+                    &latest_payload,
+                    &metadata,
+                    false,
+                    0,
+                )
+                .await
+                .unwrap();
+            (handler, outcome)
+        })
+        .await
+        .expect("composite merge task should not overflow its worker stack");
+        assert_eq!(outcome, MergeOutcome::Merged);
+
+        let stored = {
+            let txn = handler.db.new_txn(true).await.unwrap();
+            let stored = {
+                let datastore = txn.datastore().unwrap();
+                let systemstore = txn.systemstore().unwrap();
+                collection
+                    .get_by_doc_id(&datastore, &systemstore, &doc_id)
+                    .await
+                    .unwrap()
+                    .expect("document should exist")
+            };
+            txn.force_discard().unwrap();
+            stored
+        };
+        assert_eq!(
+            stored.get("name"),
+            Some(&NormalValue::String("name-257".to_string()))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deep_collection_parent_chain_merges_on_worker_stack() {
+        let (handler, blockstore, _bus) = make_handler_with_schema_and_bus().await;
+        let mut heads = Vec::new();
+        let mut latest = None;
+
+        for priority in 1..=256 {
+            let payload = CollectionDeltaPayload {
+                schema_version_id: "v1".to_string(),
+                priority,
+            };
+            let block = Block::new(CrdtDelta::Collection(payload.clone()), heads, vec![]);
+            let cid = block.generate_cid().unwrap();
+            blockstore
+                .put(&cid, &block.to_dag_cbor().unwrap())
+                .await
+                .unwrap();
+            heads = vec![cid];
+            latest = Some((cid, block, payload));
+        }
+
+        let (latest_cid, latest_block, latest_payload) = latest.expect("chain is not empty");
+        let (handler, outcome) = tokio::spawn(async move {
+            let metadata = BlockMetadata::normal(
+                "collection-chain",
+                "col-users",
+                "did:key:z6MkrDeepCollectionReplay",
+                None,
+                false,
+            );
+            let outcome = handler
+                .process_collection_delta(&latest_cid, &latest_block, &latest_payload, &metadata, 0)
+                .await
+                .unwrap();
+            (handler, outcome)
+        })
+        .await
+        .expect("collection merge task should not overflow its worker stack");
+
+        assert!(outcome.is_terminal_skip());
+        assert_eq!(
+            handler
+                .merged_collections
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len(),
+            256
         );
     }
 

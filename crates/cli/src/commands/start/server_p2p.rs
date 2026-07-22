@@ -869,6 +869,7 @@ impl Node {
                 discovery: Self::iroh_discovery(config)?,
                 bind_port: config.net.iroh_bind_port,
                 bind_addr: config.net.iroh_bind_addr,
+                max_concurrent_multipath_paths: config.net.iroh_max_concurrent_multipath_paths,
                 gossip_heal: p2p::iroh::GossipHealConfig::from_env(),
             })
             .await

@@ -1,6 +1,13 @@
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::BTreeMap;
 use std::collections::HashSet;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use crate::corekv::{AsyncTxnCallback, IterOptions, TxnCallback};
 
@@ -246,27 +253,97 @@ type CommittedTxnRecord = (u64, HashSet<Vec<u8>>, ReadSet);
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct ConflictTracker {
-    /// Monotonically increasing version counter.
-    version: std::sync::atomic::AtomicU64,
-    /// Read/write sets from committed transactions.
-    /// Protected by a mutex since we only access it during commit (not hot path).
-    committed: Mutex<Vec<CommittedTxnRecord>>,
+    version: AtomicU64,
+    state: Mutex<ConflictTrackerState>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct ConflictTrackerState {
+    committed: Vec<CommittedTxnRecord>,
+    active_snapshots: BTreeMap<u64, usize>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct ConflictSnapshot {
+    tracker: Arc<ConflictTracker>,
+    version: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ConflictSnapshot {
+    pub(crate) fn version(&self) -> u64 {
+        self.version
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for ConflictSnapshot {
+    fn drop(&mut self) {
+        self.tracker.release_snapshot(self.version);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ConflictTrackerState {
+    fn committed_after(&self, version: u64) -> &[CommittedTxnRecord] {
+        let first = self
+            .committed
+            .partition_point(|(commit_version, _, _)| *commit_version <= version);
+        &self.committed[first..]
+    }
+
+    fn prune(&mut self, current_version: u64) {
+        let oldest_active = self
+            .active_snapshots
+            .first_key_value()
+            .map_or(current_version, |(version, _)| *version);
+        let drain_count = self
+            .committed
+            .partition_point(|(version, _, _)| *version <= oldest_active);
+        self.committed.drain(..drain_count);
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ConflictTracker {
     pub(crate) fn new() -> Self {
-        use std::sync::atomic::AtomicU64;
         Self {
             version: AtomicU64::new(0),
-            committed: Mutex::new(Vec::new()),
+            state: Mutex::new(ConflictTrackerState::default()),
         }
     }
 
     /// Get the current version for a new transaction's snapshot.
     pub(crate) fn current_version(&self) -> u64 {
-        use std::sync::atomic::Ordering;
         self.version.load(Ordering::SeqCst)
+    }
+
+    /// Register a write transaction snapshot until its transaction is finalized.
+    pub(crate) fn begin_snapshot(self: &Arc<Self>) -> ConflictSnapshot {
+        let version = {
+            let mut state = self.state.lock();
+            let version = self.current_version();
+            *state.active_snapshots.entry(version).or_default() += 1;
+            version
+        };
+        ConflictSnapshot {
+            tracker: Arc::clone(self),
+            version,
+        }
+    }
+
+    fn release_snapshot(&self, version: u64) {
+        let mut state = self.state.lock();
+        let count = state
+            .active_snapshots
+            .get_mut(&version)
+            .expect("registered conflict snapshot");
+        *count -= 1;
+        if *count == 0 {
+            state.active_snapshots.remove(&version);
+        }
+        state.prune(self.current_version());
     }
 
     /// Check for conflicts and record the read/write set if no conflict.
@@ -278,47 +355,37 @@ impl ConflictTracker {
         write_keys: impl Iterator<Item = &'a Vec<u8>>,
         read_set: &ReadSet,
     ) -> std::result::Result<(), crate::corekv::Error> {
-        use std::sync::atomic::Ordering;
-
         let write_keys: Vec<&Vec<u8>> = write_keys.collect();
         if write_keys.is_empty() {
             return Ok(());
         }
 
-        let mut committed = self.committed.lock();
+        let mut state = self.state.lock();
 
         // Check for conflicts against transactions committed after our snapshot.
-        for (commit_ver, committed_writes, committed_reads) in committed.iter() {
-            if *commit_ver > read_version {
-                for write_key in &write_keys {
-                    if committed_writes.contains(*write_key)
-                        || committed_reads.conflicts_key(write_key)
-                    {
-                        return Err(crate::corekv::Error::TxnConflict);
-                    }
-                }
-
-                if committed_writes
-                    .iter()
-                    .any(|committed_write| read_set.conflicts_key(committed_write))
+        for (_, committed_writes, committed_reads) in state.committed_after(read_version) {
+            for write_key in &write_keys {
+                if committed_writes.contains(*write_key) || committed_reads.conflicts_key(write_key)
                 {
                     return Err(crate::corekv::Error::TxnConflict);
                 }
+            }
+
+            if committed_writes
+                .iter()
+                .any(|committed_write| read_set.conflicts_key(committed_write))
+            {
+                return Err(crate::corekv::Error::TxnConflict);
             }
         }
 
         // No conflict - clone keys into storage (single clone per key)
         let new_version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
         let write_set = write_keys.into_iter().cloned().collect();
-        committed.push((new_version, write_set, read_set.clone()));
-
-        // Prune old entries that can no longer conflict (optional GC).
-        // Keep entries that are newer than the oldest possible active transaction.
-        // For simplicity, keep last 1000 entries.
-        if committed.len() > 1000 {
-            let drain_count = committed.len() - 1000;
-            committed.drain(..drain_count);
-        }
+        state
+            .committed
+            .push((new_version, write_set, read_set.clone()));
+        state.prune(new_version);
 
         Ok(())
     }
@@ -330,19 +397,25 @@ mod tests {
 
     #[test]
     fn detects_write_to_committed_read_prefix() {
-        let tracker = ConflictTracker::new();
-        let snapshot = tracker.current_version();
+        let tracker = Arc::new(ConflictTracker::new());
+        let first_snapshot = tracker.begin_snapshot();
+        let second_snapshot = tracker.begin_snapshot();
 
         let mut first_reads = ReadSet::default();
         first_reads.record_iter_options(&IterOptions::new().with_prefix(b"d/i/books/".to_vec()));
         let first_writes = [b"d/d/publishers/website".to_vec()];
         tracker
-            .check_and_record(snapshot, first_writes.iter(), &first_reads)
+            .check_and_record(first_snapshot.version(), first_writes.iter(), &first_reads)
             .unwrap();
+        drop(first_snapshot);
 
         let second_writes = [b"d/i/books/online-book".to_vec()];
         let err = tracker
-            .check_and_record(snapshot, second_writes.iter(), &ReadSet::default())
+            .check_and_record(
+                second_snapshot.version(),
+                second_writes.iter(),
+                &ReadSet::default(),
+            )
             .unwrap_err();
 
         assert!(matches!(err, crate::corekv::Error::TxnConflict));
@@ -350,39 +423,97 @@ mod tests {
 
     #[test]
     fn ignores_document_collection_scan_prefixes() {
-        let tracker = ConflictTracker::new();
-        let snapshot = tracker.current_version();
+        let tracker = Arc::new(ConflictTracker::new());
+        let first_snapshot = tracker.begin_snapshot();
+        let second_snapshot = tracker.begin_snapshot();
 
         let mut first_reads = ReadSet::default();
         first_reads.record_iter_options(&IterOptions::new().with_prefix(b"d/d/books/".to_vec()));
         let first_writes = [b"d/d/publishers/website".to_vec()];
         tracker
-            .check_and_record(snapshot, first_writes.iter(), &first_reads)
+            .check_and_record(first_snapshot.version(), first_writes.iter(), &first_reads)
             .unwrap();
+        drop(first_snapshot);
 
         let second_writes = [b"d/d/books/online-book".to_vec()];
         tracker
-            .check_and_record(snapshot, second_writes.iter(), &ReadSet::default())
+            .check_and_record(
+                second_snapshot.version(),
+                second_writes.iter(),
+                &ReadSet::default(),
+            )
             .unwrap();
     }
 
     #[test]
     fn detects_read_of_committed_write_key() {
-        let tracker = ConflictTracker::new();
-        let snapshot = tracker.current_version();
+        let tracker = Arc::new(ConflictTracker::new());
+        let first_snapshot = tracker.begin_snapshot();
+        let second_snapshot = tracker.begin_snapshot();
 
         let first_writes = [b"d/d/books/website-book".to_vec()];
         tracker
-            .check_and_record(snapshot, first_writes.iter(), &ReadSet::default())
+            .check_and_record(
+                first_snapshot.version(),
+                first_writes.iter(),
+                &ReadSet::default(),
+            )
             .unwrap();
+        drop(first_snapshot);
 
         let mut second_reads = ReadSet::default();
         second_reads.record_key(b"d/d/books/website-book");
         let second_writes = [b"d/d/publishers/online".to_vec()];
         let err = tracker
-            .check_and_record(snapshot, second_writes.iter(), &second_reads)
+            .check_and_record(
+                second_snapshot.version(),
+                second_writes.iter(),
+                &second_reads,
+            )
             .unwrap_err();
 
         assert!(matches!(err, crate::corekv::Error::TxnConflict));
+    }
+
+    #[test]
+    fn skips_retained_prefix_for_recent_snapshots() {
+        const RETAINED_PREFIX: usize = 64;
+
+        let tracker = Arc::new(ConflictTracker::new());
+        let old_snapshot = tracker.begin_snapshot();
+        let no_reads = ReadSet::default();
+
+        for index in 0..RETAINED_PREFIX {
+            let snapshot = tracker.begin_snapshot();
+            let writes = [format!("history/{index}").into_bytes()];
+            tracker
+                .check_and_record(snapshot.version(), writes.iter(), &no_reads)
+                .unwrap();
+        }
+
+        let recent_snapshot = tracker.begin_snapshot();
+        let suffix_snapshot = tracker.begin_snapshot();
+        let suffix_writes = [b"suffix/conflict".to_vec()];
+        tracker
+            .check_and_record(suffix_snapshot.version(), suffix_writes.iter(), &no_reads)
+            .unwrap();
+        drop(suffix_snapshot);
+
+        {
+            let state = tracker.state.lock();
+            assert_eq!(state.committed.len(), RETAINED_PREFIX + 1);
+            assert_eq!(state.committed_after(recent_snapshot.version()).len(), 1);
+        }
+
+        let old_writes = [b"history/0".to_vec()];
+        let old_err = tracker
+            .check_and_record(old_snapshot.version(), old_writes.iter(), &no_reads)
+            .unwrap_err();
+        assert!(matches!(old_err, crate::corekv::Error::TxnConflict));
+
+        let recent_err = tracker
+            .check_and_record(recent_snapshot.version(), suffix_writes.iter(), &no_reads)
+            .unwrap_err();
+        assert!(matches!(recent_err, crate::corekv::Error::TxnConflict));
     }
 }

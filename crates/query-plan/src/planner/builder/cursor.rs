@@ -255,9 +255,11 @@ fn configure_scan_for_cursor(
         return Ok((plan, false));
     }
 
-    let seek_key = build_cursor_seek_key(cursor_token, order_fields, collection, idx)?;
+    let (seek_key, boundary_doc_id) =
+        build_cursor_seek_key(cursor_token, order_fields, collection, idx)?;
     let seek = CursorSeek {
         seek_key,
+        boundary_doc_id,
         // Both `after` (forward) and `before` (backward) identify the boundary
         // row that should NOT appear in the page — both are exclusive.
         inclusive: false,
@@ -283,6 +285,9 @@ fn configure_scan_for_cursor(
 ///   `IndexDataStoreKey::index_prefix(collection_short_id, index_id)`
 ///   + `encode_field_value(...)` for each ordered field.
 ///
+/// The DB fetcher appends the boundary document's node-local short ID when
+/// the on-disk index key requires one.
+///
 /// Field values are extracted from `cursor.keys` in the order given by
 /// `order_fields` and encoded using the same direction (ascending/descending)
 /// as the matched index fields.
@@ -291,7 +296,7 @@ fn build_cursor_seek_key(
     order_fields: &[OrderCondition],
     collection: &CollectionVersion,
     idx: &IndexDescription,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, Option<String>)> {
     let collection_short_id = collection.resolved_root_id();
     let index_id = idx.id;
 
@@ -315,32 +320,31 @@ fn build_cursor_seek_key(
     }
 
     // On-disk key shape:
-    // - Non-unique:          [prefix][values][doc_id]   (doc_id always in key)
-    // - Unique non-null:     [prefix][values]           (doc_id in value)
-    // - Unique with any nil: [prefix][values][doc_id]   (per unique.rs:228 — has_nil_field)
+    // - Non-unique:          [prefix][values][doc short ID]   (short ID always in key)
+    // - Unique non-null:     [prefix][values]                 (short ID in value)
+    // - Unique with any nil: [prefix][values][doc short ID]   (per unique.rs:228 — has_nil_field)
     //
-    // Without the doc_id suffix for non-unique indexes, the seek key matches the
+    // Without the short-ID suffix for non-unique indexes, the seek key matches the
     // prefix of EVERY row sharing those field values. An exclusive forward seek at
     // that prefix would reject all of them — not just the boundary doc — causing
     // the query to skip every row with the same indexed values (the duplicate-keys bug).
     //
-    // For unique indexes with non-null values, the doc_id is stored in the VALUE so
+    // For unique indexes with non-null values, the short ID is stored in the VALUE so
     // the key alone identifies one row. But when any cursor key is null, the on-disk
-    // format appends doc_id to the key (same as non-unique), so we must include it.
+    // format appends the short ID to the key (same as non-unique), so the DB fetcher
+    // must resolve it from the cursor's public DocID.
     // Only consider the values that correspond to actual index fields.
     // Checking all cursor.keys.values() would be vulnerable to extra unrelated
-    // keys in a malicious or stale token triggering (or suppressing) the doc_id
+    // keys in a malicious or stale token triggering (or suppressing) the short-ID
     // suffix incorrectly.
     let has_null_value = idx
         .fields
         .iter()
         .filter_map(|f| cursor.keys.get(&f.name))
         .any(|v| v.is_null());
-    if !idx.unique || has_null_value {
-        key.extend_from_slice(cursor.doc_id.as_bytes());
-    }
+    let boundary_doc_id = (!idx.unique || has_null_value).then(|| cursor.doc_id.clone());
 
-    Ok(key)
+    Ok((key, boundary_doc_id))
 }
 
 #[cfg(test)]
@@ -484,7 +488,7 @@ mod tests {
         };
         let order = order_asc("score");
 
-        let key = build_cursor_seek_key(&cursor, &order, &coll, &idx).unwrap();
+        let (key, boundary_doc_id) = build_cursor_seek_key(&cursor, &order, &coll, &idx).unwrap();
 
         // Verify the key is non-empty and matches what a Float32-encoded value produces.
         let prefix = IndexDataStoreKey::index_prefix(coll.resolved_root_id(), idx.id);
@@ -494,6 +498,7 @@ mod tests {
             key, expected,
             "seek key must use Float32 encoding to match index bytes"
         );
+        assert!(boundary_doc_id.is_none());
     }
 
     #[test]
@@ -519,7 +524,7 @@ mod tests {
         };
         let order = order_asc("stamp");
 
-        let key = build_cursor_seek_key(&cursor, &order, &coll, &idx).unwrap();
+        let (key, boundary_doc_id) = build_cursor_seek_key(&cursor, &order, &coll, &idx).unwrap();
 
         let prefix = IndexDataStoreKey::index_prefix(coll.resolved_root_id(), idx.id);
         let expected = encode_field_value(
@@ -540,6 +545,7 @@ mod tests {
             key, time_encoded,
             "seek key must not use DateTime bytes for a String field"
         );
+        assert!(boundary_doc_id.is_none());
     }
 
     // Converse of the date-like-String case: a real DateTime field must seek
@@ -568,7 +574,7 @@ mod tests {
         };
         let order = order_asc("stamp");
 
-        let key = build_cursor_seek_key(&cursor, &order, &coll, &idx).unwrap();
+        let (key, boundary_doc_id) = build_cursor_seek_key(&cursor, &order, &coll, &idx).unwrap();
 
         let prefix = IndexDataStoreKey::index_prefix(coll.resolved_root_id(), idx.id);
         let parsed_time = chrono::DateTime::parse_from_rfc3339(stamp).unwrap();
@@ -586,6 +592,7 @@ mod tests {
             key, string_encoded,
             "seek key must not use String bytes for a DateTime field"
         );
+        assert!(boundary_doc_id.is_none());
     }
 
     #[test]
@@ -611,15 +618,15 @@ mod tests {
         };
         let order = order_asc("stamp");
 
-        let key = build_cursor_seek_key(&cursor, &order, &coll, &idx).unwrap();
+        let (key, boundary_doc_id) = build_cursor_seek_key(&cursor, &order, &coll, &idx).unwrap();
 
         let prefix = IndexDataStoreKey::index_prefix(coll.resolved_root_id(), idx.id);
-        let mut expected = encode_field_value(prefix, &NormalValue::Null, false).unwrap();
-        expected.extend_from_slice(doc_id.as_bytes());
+        let expected = encode_field_value(prefix, &NormalValue::Null, false).unwrap();
 
         assert_eq!(
             key, expected,
-            "null cursor keys remain valid and include doc_id for unique null entries"
+            "the planner must leave the node-local short-ID suffix to the DB fetcher"
         );
+        assert_eq!(boundary_doc_id.as_deref(), Some(doc_id));
     }
 }

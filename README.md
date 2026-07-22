@@ -52,7 +52,7 @@ cargo build --release -p cli --features otel
 
 Mirrors Go DefraDB's `//go:build telemetry` tag — when not compiled in, zero OTel dependencies and zero runtime cost. When compiled in, **traces** export to `http://localhost:4318` (OTLP/HTTP) by default, same endpoint as Go.
 
-Metrics are a separate opt-in (the `metrics` feature on the `telemetry` crate). They're off by default because nothing in defradb.rs records metric instruments yet — enabling the metric pipeline would just export empty batches every 60 s. Turn it on once instruments exist.
+Metrics export is planned alongside the first application metric.
 
 | Flag / env var | Effect |
 | --- | --- |
@@ -66,9 +66,9 @@ When no collector is reachable, the OTel SDK's repeated export errors are suppre
 
 ### Embedded usage
 
-Library consumers (via `defra-node`) own the OTel lifecycle and hand the resulting handle to the node. The node flushes it via `Drop` or via an explicit `shutdown()` — explicit is preferred because `Drop` blocks for up to ~5 s on the SDK's trace batch-thread join (double that if you also enable the `metrics` feature).
+Library consumers (via `defra-node`) own the OTel lifecycle and hand the resulting handle to the node. The node flushes it via `Drop` or via an explicit `shutdown()` — explicit is preferred because `Drop` blocks for up to ~5 s on the SDK's trace batch-thread join.
 
-Add `telemetry` to your `Cargo.toml` (add `"metrics"` alongside `"otlp"` if you record metric instruments):
+Add `telemetry` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -101,10 +101,10 @@ let node = EmbeddedNode::builder()
 // ... use the node ...
 
 // Explicit shutdown flushes the buffered batch. Drop is a safety net,
-// but blocks the calling thread on the SDK batch-thread join (~5 s for
-// traces, double with the metrics feature); call shutdown() explicitly
-// from an async-aware path when possible. Note that the node should not
-// be used after shutdown — subsequent spans go to a no-op tracer.
+// but blocks the calling thread on the SDK batch-thread join (~5 s);
+// call shutdown() explicitly from an async-aware path when possible.
+// Note that the node should not be used after shutdown — subsequent spans
+// go to a no-op tracer.
 node.shutdown().await;
 ```
 

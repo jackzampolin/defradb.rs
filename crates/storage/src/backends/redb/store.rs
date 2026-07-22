@@ -306,12 +306,16 @@ impl Store for RedbStore {
         }
         let mut guard = NewTxnGuard(&self.active_txn_count, false);
 
-        let (read_version, read_txn) = {
+        let (read_version, read_txn, conflict_snapshot) = {
             // Pair the conflict version and Redb snapshot without a commit between them.
             let _commit_guard = self.commit_gate.read().await;
-            let read_version = self.conflict_tracker.current_version();
+            let conflict_snapshot = (!readonly).then(|| self.conflict_tracker.begin_snapshot());
+            let read_version = conflict_snapshot.as_ref().map_or_else(
+                || self.conflict_tracker.current_version(),
+                |snapshot| snapshot.version(),
+            );
             let read_txn = self.db.begin_read()?;
-            (read_version, read_txn)
+            (read_version, read_txn, conflict_snapshot)
         };
 
         // Defuse the guard - transaction will manage its own count via its Drop impl
@@ -321,6 +325,7 @@ impl Store for RedbStore {
             db: Arc::clone(&self.db),
             active_txn_count: Arc::clone(&self.active_txn_count),
             conflict_tracker: Arc::clone(&self.conflict_tracker),
+            _conflict_snapshot: conflict_snapshot,
             commit_gate: Arc::clone(&self.commit_gate),
             read_version,
             read_txn,

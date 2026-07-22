@@ -7,27 +7,18 @@
 //! caller forgot, etc.).
 //!
 //! **Prefer explicit `shutdown`.** Drop is a safety net, not a primary path.
-//! The opentelemetry-sdk 0.32 batch span processor + periodic metric reader
-//! each spawn dedicated OS threads; `shutdown` joins them synchronously
-//! with up to a 5 s timeout per signal (~10 s combined). Dropping a handle
-//! on a Tokio worker stalls that worker for the duration; dropping on a
-//! current-thread runtime stalls the whole reactor. The Drop impl also
-//! wraps the join in `catch_unwind` so a panicked batch thread can't
-//! propagate a second panic during stack unwinding (which would abort the
-//! process).
+//! The opentelemetry-sdk 0.32 batch span processor spawns a dedicated OS
+//! thread; `shutdown` joins it synchronously with up to a 5 s timeout. Dropping
+//! a handle on a Tokio worker stalls that worker for the duration; dropping on
+//! a current-thread runtime stalls the whole reactor. The Drop impl also wraps
+//! the join in `catch_unwind` so a panicked batch thread can't propagate a
+//! second panic during stack unwinding (which would abort the process).
 //!
 //! [`shutdown`]: TelemetryHandle::shutdown
 
 pub struct TelemetryHandle {
     #[cfg(feature = "otlp")]
-    pub(crate) inner: Option<OtelProviders>,
-}
-
-#[cfg(feature = "otlp")]
-pub(crate) struct OtelProviders {
-    pub tracer_provider: opentelemetry_sdk::trace::SdkTracerProvider,
-    #[cfg(feature = "metrics")]
-    pub meter_provider: opentelemetry_sdk::metrics::SdkMeterProvider,
+    pub(crate) inner: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
 }
 
 impl TelemetryHandle {
@@ -54,15 +45,13 @@ impl TelemetryHandle {
     pub fn shutdown(mut self) {
         #[cfg(feature = "otlp")]
         if let Some(p) = self.inner.take() {
-            Self::shutdown_providers(p);
+            Self::shutdown_provider(p);
         }
     }
 
     #[cfg(feature = "otlp")]
-    fn shutdown_providers(p: OtelProviders) {
-        let _ = p.tracer_provider.shutdown();
-        #[cfg(feature = "metrics")]
-        let _ = p.meter_provider.shutdown();
+    fn shutdown_provider(provider: opentelemetry_sdk::trace::SdkTracerProvider) {
+        let _ = provider.shutdown();
     }
 }
 
@@ -84,7 +73,7 @@ impl Drop for TelemetryHandle {
             // the panic is swallowed — but we surface it so a dead batch
             // thread isn't completely silent.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                Self::shutdown_providers(p);
+                Self::shutdown_provider(p);
             }));
             if let Err(panic) = result {
                 let msg = panic

@@ -31,13 +31,6 @@ otlp = [
     "opentelemetry_sdk/internal-logs",
     "opentelemetry-otlp/internal-logs",
 ]
-# Also compile in the OTLP metric exporter. Off by default because nothing in
-# defradb.rs records metric instruments today — leaving the metric pipeline on
-# spawns a `PeriodicReader` background task that wakes every 60 s to export an
-# empty batch (wasted bandwidth + collector ingest). Turn this on alongside
-# `otlp` once application code starts emitting instruments.
-metrics = ["otlp", "opentelemetry_sdk/metrics", "opentelemetry-otlp/metrics", "dep:reqwest"]
-
 [dependencies]
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["registry", "std"] }
@@ -60,11 +53,6 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 # matching Go's `resource.WithSchemaURL(semconv.SchemaURL)`.
 opentelemetry-semantic-conventions = { version = "0.32", optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
-# Only used (under the `metrics` feature) to build a single blocking HTTP
-# client shared by the span + metric exporters. Pinned to 0.13 to match the
-# reqwest `opentelemetry-http` resolves; cargo unifies the `blocking` feature
-# with otlp's `reqwest-blocking-client`.
-reqwest = { version = "0.13", default-features = false, features = ["blocking"], optional = true }
 
 [lints]
 workspace = true
