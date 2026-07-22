@@ -155,6 +155,7 @@ impl AppState {
         })
     }
 
+    /// Get browser sync operations or return ServiceUnavailable error.
     pub fn require_browser_sync(
         &self,
     ) -> Result<&Arc<dyn BrowserSyncOperations>, crate::error::HttpError> {
@@ -357,6 +358,7 @@ impl AppStateBuilder {
         self
     }
 
+    /// Set browser sync operations.
     pub fn with_browser_sync(mut self, browser_sync: Arc<dyn BrowserSyncOperations>) -> Self {
         self.browser_sync = Some(browser_sync);
         self

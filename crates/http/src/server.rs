@@ -21,10 +21,10 @@ use query::QueryLimits;
 
 use crate::error::Result;
 use crate::router::{
-    create_router_with_state, AcpOperations, AppStateBuilder, BackupOperations, BlockOperations,
-    BrowserSyncOperations, CollectionManagementOperations, DocumentAcpOperations, DumpOperations,
-    EncryptedIndexOperations, IndexOperations, LensOperations, ManageRequester, NodeAcpOperations,
-    P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
+    create_router_with_state_and_sync_body_limit, AcpOperations, AppStateBuilder, BackupOperations,
+    BlockOperations, BrowserSyncOperations, CollectionManagementOperations, DocumentAcpOperations,
+    DumpOperations, EncryptedIndexOperations, IndexOperations, LensOperations, ManageRequester,
+    NodeAcpOperations, P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
 };
 
 /// Server configuration options.
@@ -284,6 +284,7 @@ impl Server {
         self
     }
 
+    /// Set browser sync operations from an Arc.
     pub fn with_browser_sync_arc(mut self, browser_sync: Arc<dyn BrowserSyncOperations>) -> Self {
         self.browser_sync = Some(browser_sync);
         self
@@ -462,7 +463,13 @@ impl Server {
         builder = builder.with_query_limits(self.config.query_limits);
         let state = builder.build();
         let state_for_middleware = state.clone();
-        let mut router = create_router_with_state(state);
+        let browser_sync_body_limit = if self.config.max_body_size == 0 {
+            defra_core::browser_sync::MAX_SYNC_BODY_BYTES
+        } else {
+            defra_core::browser_sync::MAX_SYNC_BODY_BYTES.min(self.config.max_body_size as usize)
+        };
+        let mut router =
+            create_router_with_state_and_sync_body_limit(state, browser_sync_body_limit);
 
         // Global auth middleware: enforces route-level permissions before handlers
         // run, and binds the caller's identity to the request task for DB-layer

@@ -36,6 +36,16 @@ pub fn create_router_with_rest(
 ///
 /// This allows configuring all optional components (REST, P2P, ACP, Index, Backup).
 pub fn create_router_with_state(state: AppState) -> Router {
+    create_router_with_state_and_sync_body_limit(
+        state,
+        defra_core::browser_sync::MAX_SYNC_BODY_BYTES,
+    )
+}
+
+pub(crate) fn create_router_with_state_and_sync_body_limit(
+    state: AppState,
+    sync_body_limit: usize,
+) -> Router {
     // Health check at root level (matches Go DefraDB)
     let root_routes = Router::new().route("/health-check", get(handlers::health_check));
 
@@ -245,9 +255,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/actions", get(handlers::actions::list_actions))
         .route(
             "/sync",
-            post(handlers::browser_sync::sync).layer(DefaultBodyLimit::max(
-                defra_core::browser_sync::MAX_SYNC_BODY_BYTES,
-            )),
+            post(handlers::browser_sync::sync).layer(DefaultBodyLimit::max(sync_body_limit)),
         )
         // Transaction endpoints
         .nest("/tx", tx_routes)

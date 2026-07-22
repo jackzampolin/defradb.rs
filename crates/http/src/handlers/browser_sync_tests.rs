@@ -9,12 +9,13 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use defra_core::browser_sync::{
-    BrowserSyncRequest, BrowserSyncResponse, MAX_SYNC_DOCUMENTS_PER_REQUEST,
+    BrowserSyncRequest, BrowserSyncResponse, MAX_SYNC_DOCUMENTS_PER_REQUEST, MAX_SYNC_PULL_DOC_IDS,
 };
 
 use crate::mock::MockQueryExecutor;
 use crate::router::{
-    create_router_with_state, AppStateBuilder, BrowserSyncOperations, BrowserSyncResult,
+    create_router_with_state, create_router_with_state_and_sync_body_limit, AppStateBuilder,
+    BrowserSyncOperations, BrowserSyncResult,
 };
 
 #[derive(Default)]
@@ -102,5 +103,55 @@ async fn sync_rejects_document_count_before_calling_adapter() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(sync.calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn sync_rejects_pull_document_count_before_calling_adapter() {
+    let sync = Arc::new(RecordingSync::default());
+    let doc_ids = vec!["bae-test"; MAX_SYNC_PULL_DOC_IDS + 1];
+    let response = router(sync.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/sync")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "documents": [],
+                        "pull": { "doc_ids": doc_ids }
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(sync.calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn sync_honors_stricter_body_limit() {
+    let sync = Arc::new(RecordingSync::default());
+    let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
+    let state = AppStateBuilder::new(executor)
+        .with_browser_sync(sync.clone())
+        .build();
+    let router = create_router_with_state_and_sync_body_limit(state, 15);
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/sync")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"documents":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(sync.calls.load(Ordering::Relaxed), 0);
 }

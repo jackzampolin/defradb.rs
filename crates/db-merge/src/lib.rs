@@ -31,7 +31,6 @@ pub mod se_query_transport;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod txn_broadcaster;
 
-// Re-export primary types
 pub use acp_merge_handler::{AcpMergeError, AcpMergeHandler};
 #[cfg(not(target_arch = "wasm32"))]
 pub use broadcast_mutator::{BroadcastMutator, BroadcastSeOptions, SeArtifactRepusher};

@@ -20,6 +20,7 @@ use super::sse::SseStream;
 
 const INITIAL_RECONNECT_DELAY_MS: u32 = 1_000;
 const MAX_RECONNECT_DELAY_MS: u32 = 30_000;
+const EMPTY_PUSH_REQUEST_BYTES: usize = b"{\"documents\":[]}".len();
 
 pub(crate) struct SyncTask {
     abort: AbortHandle,
@@ -100,6 +101,7 @@ impl SyncSession {
     async fn push_all_documents(&self) -> Result<()> {
         let refs = self.engine.document_refs().await.map_err(engine_error)?;
         let mut documents = Vec::new();
+        let mut serialized_size = EMPTY_PUSH_REQUEST_BYTES;
         for document_ref in refs {
             let Some(document) = self
                 .engine
@@ -109,21 +111,28 @@ impl SyncSession {
             else {
                 continue;
             };
-            documents.push(document);
 
-            if serialized_push_size(&documents)? > MAX_SYNC_BODY_BYTES {
-                let last = documents.pop().expect("a document was just pushed");
-                if documents.is_empty() {
-                    return Err(WasmError::Sync(format!(
-                        "document {} exceeds the sync request limit",
-                        last.doc_id
-                    )));
-                }
-                self.push_documents(std::mem::take(&mut documents)).await?;
-                documents.push(last);
+            let document_size = serde_json::to_vec(&document)?.len();
+            let single_document_size = EMPTY_PUSH_REQUEST_BYTES + document_size;
+            if single_document_size > MAX_SYNC_BODY_BYTES {
+                warn(&format!(
+                    "browser sync skipped document {} because it exceeds the sync request limit",
+                    document.doc_id
+                ));
+                continue;
             }
+
+            let next_size = serialized_size + document_size + usize::from(!documents.is_empty());
+            if next_size > MAX_SYNC_BODY_BYTES {
+                self.push_documents(std::mem::take(&mut documents)).await?;
+                serialized_size = EMPTY_PUSH_REQUEST_BYTES;
+            }
+
+            serialized_size += document_size + usize::from(!documents.is_empty());
+            documents.push(document);
             if documents.len() == MAX_SYNC_DOCUMENTS_PER_REQUEST {
                 self.push_documents(std::mem::take(&mut documents)).await?;
+                serialized_size = EMPTY_PUSH_REQUEST_BYTES;
             }
         }
         if !documents.is_empty() {
@@ -293,21 +302,53 @@ fn collect_local_update(message: &events::Message, doc_ids: &mut BTreeSet<String
     }
 }
 
-fn serialized_push_size(documents: &[BrowserSyncDocument]) -> Result<usize> {
-    #[derive(serde::Serialize)]
-    struct PushRequest<'a> {
-        documents: &'a [BrowserSyncDocument],
-    }
-
-    serde_json::to_vec(&PushRequest { documents })
-        .map(|body| body.len())
-        .map_err(Into::into)
-}
-
 fn engine_error(error: db_merge::BrowserSyncError) -> WasmError {
     WasmError::Sync(error.to_string())
 }
 
 fn warn(message: &str) {
     web_sys::console::warn_1(&message.into());
+}
+
+#[cfg(test)]
+mod tests {
+    use defra_core::browser_sync::{BrowserSyncBlock, BrowserSyncDocument, BrowserSyncRequest};
+
+    use super::EMPTY_PUSH_REQUEST_BYTES;
+
+    #[test]
+    fn incremental_push_size_matches_serialized_request() {
+        let documents = vec![
+            BrowserSyncDocument {
+                doc_id: "doc-one".into(),
+                collection_id: "collection".into(),
+                roots: vec!["root-one".into()],
+                blocks: vec![BrowserSyncBlock {
+                    cid: "block-one".into(),
+                    data: "data-one".into(),
+                }],
+            },
+            BrowserSyncDocument {
+                doc_id: "doc-two".into(),
+                collection_id: "collection".into(),
+                roots: vec![],
+                blocks: vec![],
+            },
+        ];
+        let incremental_size = documents.iter().enumerate().fold(
+            EMPTY_PUSH_REQUEST_BYTES,
+            |size, (index, document)| {
+                size + serde_json::to_vec(document).unwrap().len() + usize::from(index > 0)
+            },
+        );
+
+        let request = BrowserSyncRequest {
+            documents,
+            pull: None,
+        };
+        assert_eq!(
+            incremental_size,
+            serde_json::to_vec(&request).unwrap().len()
+        );
+    }
 }
