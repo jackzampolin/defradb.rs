@@ -141,6 +141,41 @@ jobs:
           git clean -fd
           pkill -f "target/debug/defra" || true
 
+  lean-conformance:
+    name: Lean Conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure private repo access
+        run: |
+          git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+          git config --global --add url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "ssh://git@github.com/sourcenetwork/"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-ci"
+          shared-key: "lean-conformance"
+
+      - name: Build Lean proofs
+        uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9 # v1
+        with:
+          lake-package-directory: proofs/lean
+          auto-config: false
+          build: true
+          test: false
+          use-mathlib-cache: false
+
+      - name: Check Lean-to-Rust conformance
+        run: cargo test -p conformance --lib --test lean_conformance
+
+      - name: Cleanup
+        if: always()
+        run: git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+
   conformance:
     name: Conformance
     # Serialized after `integration` (not just `build`) so it never co-runs
@@ -178,12 +213,12 @@ jobs:
           cargo build --release -p cli
           "$DEFRA_CONFORMANCE_BINARY" version --format json
 
-      # The conformance crate (proofs/) drives real `defra` subprocesses. Run it
-      # serially so concurrent node startup doesn't contend on ports/CPU and
-      # flake ("failed to start rust-0"). The Lean drift-check still skips when
-      # `lake` is absent; a Lean-equipped job can make that mandatory later.
+      # The behavioral conformance tests drive real `defra` subprocesses. Run
+      # them serially so concurrent node startup doesn't contend on ports/CPU
+      # and flake ("failed to start rust-0"). Lean is gated independently by
+      # the `lean-conformance` job above.
       - name: Run conformance tests
-        run: cargo test -p conformance -- --test-threads=1
+        run: cargo test -p conformance --lib --test tla_conformance -- --test-threads=1
 
       # Node logs are the only forensics for a poll-timeout failure; without
       # this upload a red run leaves nothing to diagnose.
