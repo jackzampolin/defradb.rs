@@ -171,8 +171,15 @@ impl Store for RocksDbStore {
         let mut guard = NewTxnGuard(&self.active_txn_count, false);
 
         // Pair the conflict version and RocksDB snapshot without a commit
-        // becoming visible between them.
-        let _commit_guard = self.commit_gate.read().await;
+        // becoming visible between them. Read-only transactions skip the
+        // gate: they never conflict-check, and commit() only returns to its
+        // caller after the physical write, so read-your-committed-writes
+        // holds without serializing readers behind in-flight commits.
+        let _commit_guard = if readonly {
+            None
+        } else {
+            Some(self.commit_gate.read().await)
+        };
         let txn = RocksDbTxn::new(
             Arc::clone(&self.db),
             Arc::clone(&self.conflict_tracker),
@@ -337,6 +344,84 @@ mod tests {
             .expect("commit task panicked")
             .expect("commit failed");
         assert_eq!(store.db.get(&key).unwrap(), Some(b"committed".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn readonly_txn_skips_commit_gate() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(RocksDbStore::open(temp_dir.path()).unwrap());
+        let gate = Arc::clone(&store.commit_gate);
+        let commit_guard = gate.write().await;
+
+        // A read-only transaction must not queue behind an in-flight commit.
+        let readonly = tokio::time::timeout(Duration::from_secs(1), store.new_txn(true))
+            .await
+            .expect("read-only transaction blocked behind the commit gate")
+            .expect("read-only transaction failed");
+        drop(readonly);
+
+        // Writers still pair version and snapshot behind the gate.
+        let writer_store = Arc::clone(&store);
+        let mut writer_task = tokio::spawn(async move { writer_store.new_txn(false).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut writer_task)
+                .await
+                .is_err(),
+            "write transaction skipped the commit gate"
+        );
+
+        drop(commit_guard);
+        tokio::time::timeout(Duration::from_secs(1), writer_task)
+            .await
+            .expect("write transaction remained blocked after gate release")
+            .expect("writer task panicked")
+            .expect("write transaction failed");
+    }
+
+    #[tokio::test]
+    async fn cancelled_commit_still_conflict_checks_against_pinned_records() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(RocksDbStore::open(temp_dir.path()).unwrap());
+        let key = b"contended-key".to_vec();
+
+        // Txn A snapshots at version 0 and stages a write to `key`.
+        let mut txn_a = store.new_txn(false).await.unwrap();
+        txn_a.set(&key, b"stale-A").await.unwrap();
+
+        // Txn B commits a write to the same key -> version 1 recorded.
+        let mut txn_b = store.new_txn(false).await.unwrap();
+        txn_b.set(&key, b"committed-B").await.unwrap();
+        txn_b.commit().await.unwrap();
+        assert_eq!(store.db.get(&key).unwrap(), Some(b"committed-B".to_vec()));
+
+        // Hold the gate so A's blocking commit task parks at blocking_write.
+        let gate = Arc::clone(&store.commit_gate);
+        let commit_guard = gate.write().await;
+
+        let commit_task = tokio::spawn(async move { txn_a.commit().await });
+        // Let the commit future run its first poll (dispatch spawn_blocking).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Cancel the commit future while the blocking thread waits for the
+        // gate. A's ConflictSnapshot moved into the closure, so B's record
+        // must stay pinned for the detached conflict check.
+        commit_task.abort();
+        let join = commit_task.await;
+        assert!(join.is_err(), "commit task should have been aborted");
+
+        // Release the gate; the detached blocking thread (queued ahead of
+        // us) runs check_and_record + physical write, so reacquiring the
+        // gate sequences after its completion.
+        drop(commit_guard);
+        drop(gate.write().await);
+
+        // Correct SSI behavior: A conflicts with B (same key, B committed
+        // after A's snapshot) so B's value must survive.
+        assert_eq!(
+            store.db.get(&key).unwrap(),
+            Some(b"committed-B".to_vec()),
+            "cancelled commit overwrote a conflicting committed write"
+        );
     }
 
     #[tokio::test]

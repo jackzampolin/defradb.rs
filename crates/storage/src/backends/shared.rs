@@ -348,16 +348,20 @@ impl ConflictTracker {
 
     /// Check for conflicts and record the read/write set if no conflict.
     /// Returns Err(TxnConflict) if the transaction conflicts with any
-    /// transaction that committed after `read_version`.
+    /// transaction that committed after `read_version`; otherwise returns the
+    /// recorded commit version (0 when the write set is empty and nothing was
+    /// recorded). If the physical write backing this record subsequently
+    /// fails, the caller must `unrecord` the returned version while still
+    /// holding the store's commit gate.
     pub(crate) fn check_and_record<'a>(
         &self,
         read_version: u64,
         write_keys: impl Iterator<Item = &'a Vec<u8>>,
         read_set: &ReadSet,
-    ) -> std::result::Result<(), crate::corekv::Error> {
+    ) -> std::result::Result<u64, crate::corekv::Error> {
         let write_keys: Vec<&Vec<u8>> = write_keys.collect();
         if write_keys.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         let mut state = self.state.lock();
@@ -387,7 +391,68 @@ impl ConflictTracker {
             .push((new_version, write_set, read_set.clone()));
         state.prune(new_version);
 
-        Ok(())
+        Ok(new_version)
+    }
+
+    /// Remove the record for `version` after its physical write failed.
+    ///
+    /// Without this, the recorded write-set describes data that never landed
+    /// and later writers get phantom `TxnConflict` errors against it. Must be
+    /// called while still holding the commit gate that covered the failed
+    /// `check_and_record`, so no other committer can observe the phantom
+    /// record. A version already pruned (or 0) is a no-op; the version
+    /// counter keeps its gap, which `committed_after` tolerates.
+    /// Prefer [`RecordGuard`], which also covers unwinds.
+    pub(crate) fn unrecord(&self, version: u64) {
+        if version == 0 {
+            return;
+        }
+        let mut state = self.state.lock();
+        if let Ok(index) = state
+            .committed
+            .binary_search_by_key(&version, |(v, _, _)| *v)
+        {
+            state.committed.remove(index);
+        }
+    }
+}
+
+/// Rolls back a `check_and_record` entry unless defused.
+///
+/// Armed right after a successful `check_and_record` and defused only once
+/// the physical write has succeeded, it converts BOTH error returns and
+/// panics during the write into an `unrecord`, so no phantom write-set can
+/// survive a failed commit. Hold it (and drop/defuse it) while the commit
+/// gate is still held.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct RecordGuard<'t> {
+    tracker: &'t ConflictTracker,
+    version: u64,
+    defused: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'t> RecordGuard<'t> {
+    pub(crate) fn new(tracker: &'t ConflictTracker, version: u64) -> Self {
+        Self {
+            tracker,
+            version,
+            defused: false,
+        }
+    }
+
+    /// The physical write succeeded; keep the record.
+    pub(crate) fn defuse(mut self) {
+        self.defused = true;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for RecordGuard<'_> {
+    fn drop(&mut self) {
+        if !self.defused {
+            self.tracker.unrecord(self.version);
+        }
     }
 }
 
@@ -473,6 +538,126 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, crate::corekv::Error::TxnConflict));
+    }
+
+    #[test]
+    fn unrecord_removes_phantom_record() {
+        let tracker = Arc::new(ConflictTracker::new());
+        let first_snapshot = tracker.begin_snapshot();
+        let second_snapshot = tracker.begin_snapshot();
+
+        let writes = [b"d/i/books/failed-write".to_vec()];
+        let version = tracker
+            .check_and_record(first_snapshot.version(), writes.iter(), &ReadSet::default())
+            .unwrap();
+        drop(first_snapshot);
+
+        // Simulate the physical write failing: without unrecord the second
+        // transaction would hit a phantom conflict against data that never
+        // landed.
+        tracker.unrecord(version);
+
+        tracker
+            .check_and_record(
+                second_snapshot.version(),
+                writes.iter(),
+                &ReadSet::default(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn unrecord_tolerates_pruned_and_empty_versions() {
+        let tracker = Arc::new(ConflictTracker::new());
+
+        // Version 0 marks "nothing recorded" (empty write set).
+        let empty_version = tracker
+            .check_and_record(0, [].iter(), &ReadSet::default())
+            .unwrap();
+        assert_eq!(empty_version, 0);
+        tracker.unrecord(empty_version);
+
+        // A record pruned before unrecord (no active snapshots pin it) is
+        // silently gone; unrecord must not panic or disturb later commits.
+        let snapshot = tracker.begin_snapshot();
+        let writes = [b"d/i/books/pruned".to_vec()];
+        let version = tracker
+            .check_and_record(snapshot.version(), writes.iter(), &ReadSet::default())
+            .unwrap();
+        drop(snapshot);
+        tracker.unrecord(version);
+        tracker.unrecord(version);
+
+        let survivor = tracker.begin_snapshot();
+        tracker
+            .check_and_record(survivor.version(), writes.iter(), &ReadSet::default())
+            .unwrap();
+    }
+
+    #[test]
+    fn record_guard_unrecords_on_drop() {
+        let tracker = Arc::new(ConflictTracker::new());
+        let loser_snapshot = tracker.begin_snapshot();
+        let writes = [b"d/i/books/guarded".to_vec()];
+
+        let version = tracker
+            .check_and_record(
+                tracker.current_version(),
+                writes.iter(),
+                &ReadSet::default(),
+            )
+            .unwrap();
+        drop(RecordGuard::new(&tracker, version));
+
+        // The dropped (armed) guard removed the record: no phantom conflict.
+        tracker
+            .check_and_record(loser_snapshot.version(), writes.iter(), &ReadSet::default())
+            .unwrap();
+    }
+
+    #[test]
+    fn record_guard_defuse_keeps_record() {
+        let tracker = Arc::new(ConflictTracker::new());
+        let loser_snapshot = tracker.begin_snapshot();
+        let writes = [b"d/i/books/kept".to_vec()];
+
+        let version = tracker
+            .check_and_record(
+                tracker.current_version(),
+                writes.iter(),
+                &ReadSet::default(),
+            )
+            .unwrap();
+        RecordGuard::new(&tracker, version).defuse();
+
+        let err = tracker
+            .check_and_record(loser_snapshot.version(), writes.iter(), &ReadSet::default())
+            .unwrap_err();
+        assert!(matches!(err, crate::corekv::Error::TxnConflict));
+    }
+
+    #[test]
+    fn record_guard_unrecords_on_panic() {
+        let tracker = Arc::new(ConflictTracker::new());
+        let loser_snapshot = tracker.begin_snapshot();
+        let writes = [b"d/i/books/panicked".to_vec()];
+
+        let version = tracker
+            .check_and_record(
+                tracker.current_version(),
+                writes.iter(),
+                &ReadSet::default(),
+            )
+            .unwrap();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = RecordGuard::new(&tracker, version);
+            panic!("physical write panicked");
+        }));
+        assert!(unwound.is_err());
+
+        tracker
+            .check_and_record(loser_snapshot.version(), writes.iter(), &ReadSet::default())
+            .unwrap();
     }
 
     #[test]

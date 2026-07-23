@@ -56,7 +56,14 @@ impl Store for MemoryStore {
             return Err(Error::DBClosed);
         }
 
-        let _commit_guard = self.commit_gate.read().await;
+        // Read-only transactions skip the gate: they never conflict-check,
+        // and the data read-lock below is what guarantees the snapshot is
+        // not torn by an in-flight commit's mutation.
+        let _commit_guard = if readonly {
+            None
+        } else {
+            Some(self.commit_gate.read().await)
+        };
         let data = self.data.read().await;
         let conflict_snapshot = (!readonly).then(|| self.conflict_tracker.begin_snapshot());
         let read_version = conflict_snapshot.as_ref().map_or_else(
@@ -179,6 +186,37 @@ mod pairing_tests {
             store.data.read().await.get(&key).cloned(),
             Some(b"committed".to_vec())
         );
+    }
+
+    #[tokio::test]
+    async fn readonly_txn_skips_commit_gate() {
+        let store = Arc::new(MemoryStore::new());
+        let gate = Arc::clone(&store.commit_gate);
+        let commit_guard = gate.write().await;
+
+        // A read-only transaction must not queue behind an in-flight commit.
+        let readonly = tokio::time::timeout(Duration::from_secs(1), store.new_txn(true))
+            .await
+            .expect("read-only transaction blocked behind the commit gate")
+            .expect("read-only transaction failed");
+        drop(readonly);
+
+        // Writers still pair version and snapshot behind the gate.
+        let writer_store = Arc::clone(&store);
+        let mut writer_task = tokio::spawn(async move { writer_store.new_txn(false).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut writer_task)
+                .await
+                .is_err(),
+            "write transaction skipped the commit gate"
+        );
+
+        drop(commit_guard);
+        tokio::time::timeout(Duration::from_secs(1), writer_task)
+            .await
+            .expect("write transaction remained blocked after gate release")
+            .expect("writer task panicked")
+            .expect("write transaction failed");
     }
 
     #[tokio::test]
