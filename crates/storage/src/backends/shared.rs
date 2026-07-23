@@ -403,6 +403,16 @@ impl ConflictTracker {
     /// record. A version already pruned (or 0) is a no-op; the version
     /// counter keeps its gap, which `committed_after` tolerates.
     /// Prefer [`RecordGuard`], which also covers unwinds.
+    ///
+    /// Only compiled for backends with fallible physical writes; the
+    /// memory backend's writes cannot fail after the conflict check.
+    #[cfg(any(
+        test,
+        feature = "redb",
+        feature = "fjall",
+        feature = "rocksdb",
+        feature = "lark"
+    ))]
     pub(crate) fn unrecord(&self, version: u64) {
         if version == 0 {
             return;
@@ -424,14 +434,32 @@ impl ConflictTracker {
 /// panics during the write into an `unrecord`, so no phantom write-set can
 /// survive a failed commit. Hold it (and drop/defuse it) while the commit
 /// gate is still held.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(
+        test,
+        feature = "redb",
+        feature = "fjall",
+        feature = "rocksdb",
+        feature = "lark"
+    )
+))]
 pub(crate) struct RecordGuard<'t> {
     tracker: &'t ConflictTracker,
     version: u64,
     defused: bool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(
+        test,
+        feature = "redb",
+        feature = "fjall",
+        feature = "rocksdb",
+        feature = "lark"
+    )
+))]
 impl<'t> RecordGuard<'t> {
     pub(crate) fn new(tracker: &'t ConflictTracker, version: u64) -> Self {
         Self {
@@ -447,7 +475,16 @@ impl<'t> RecordGuard<'t> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(
+        test,
+        feature = "redb",
+        feature = "fjall",
+        feature = "rocksdb",
+        feature = "lark"
+    )
+))]
 impl Drop for RecordGuard<'_> {
     fn drop(&mut self) {
         if !self.defused {
