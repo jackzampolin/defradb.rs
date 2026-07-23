@@ -14,6 +14,35 @@ use p2p::P2PTransport;
 type WireDocumentAcp = Option<Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>>;
 type WireKms = Option<Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Send>>;
 
+/// Redial a replicator target that dropped, using its stored addresses, so a
+/// stalled connection cannot strand the peer's persisted retry ledger after
+/// the target restarts (the connectivity gate below would otherwise skip it
+/// forever, while nothing else redials it).
+async fn redial_replicator<S: storage::corekv::Store>(
+    peerstore: &storage::stores::Peerstore<S>,
+    handle: &p2p::P2PHostHandle,
+    peer_id_str: &str,
+    peer_id: libp2p::PeerId,
+) {
+    let Ok(Some(bytes)) = peerstore.get_replicator(peer_id_str).await else {
+        return;
+    };
+    let Ok(info) = p2p::ReplicatorInfo::from_bytes(&bytes) else {
+        return;
+    };
+    let addrs: Vec<libp2p::Multiaddr> = info
+        .addresses
+        .iter()
+        .filter_map(|addr| addr.parse().ok())
+        .collect();
+    if addrs.is_empty() {
+        return;
+    }
+    if let Err(error) = handle.dial(peer_id, addrs).await {
+        tracing::debug!(peer_id = %peer_id, %error, "replicator retry redial failed");
+    }
+}
+
 async fn set_persisted_replicator_status<S: storage::corekv::Store>(
     peerstore: &storage::stores::Peerstore<S>,
     peer_id: &str,
@@ -618,6 +647,7 @@ impl Node {
                     };
                     let connected = retry_handle.connected_peers().await.unwrap_or_default();
                     if !connected.contains(&peer_id) {
+                        redial_replicator(&peerstore, &retry_handle, &peer_id_str, peer_id).await;
                         continue;
                     }
                     let mut docs = match peerstore.get_retry_documents(&peer_id_str).await {
