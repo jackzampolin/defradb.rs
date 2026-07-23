@@ -839,8 +839,8 @@ pub(super) mod tests {
         // rate-limit pacing ladder meant one logical push became 11 resends in
         // ~3.3s, each costing the receiver a block write plus a full DAG
         // traversal, all guaranteed to fail. The sender must stop at the first
-        // capacity nack, report it, and let the persisted retry ledger
-        // (exponential + jittered) own the replay.
+        // capacity nack, report it, and let the persisted retry sweep own the
+        // replay.
         let capacity_nack = crate::error::Error::PendingDagCapacity { max: 1 }
             .backpressure_reply_message()
             .expect("capacity error maps to the capacity sentinel");

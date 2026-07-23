@@ -404,10 +404,6 @@ impl<S: Store> Peerstore<S> {
         txn.commit().await
     }
 
-    /// Get each pending independently scheduled retry for a peer. Dormant
-    /// newest-head watermarks are omitted. Legacy raw collection-ID values
-    /// inherit the old peer-level schedule and are rewritten on their next
-    /// failure/update.
     /// The store key a retry record lives under, derived from its scope so
     /// document heads and collection commits round-trip to the right keyspace.
     fn retry_key_bytes(peer_id: &str, retry: &super::PersistedPushRetry) -> Vec<u8> {
@@ -418,6 +414,11 @@ impl<S: Store> Peerstore<S> {
         }
     }
 
+    /// Get each pending independently scheduled retry for a peer. Dormant
+    /// newest-head watermarks are omitted. Legacy raw collection-ID values
+    /// inherit the old peer-level schedule and are rewritten on their next
+    /// failure/update. Retries are returned in next-attempt order so bounded
+    /// consumers cannot starve later store keys.
     pub async fn get_retry_documents(
         &self,
         peer_id: &str,
@@ -471,6 +472,7 @@ impl<S: Store> Peerstore<S> {
                 results.push(retry);
             }
         }
+        results.sort_by_key(|retry| retry.retry_info.next_retry_unix);
         Ok(results)
     }
 
@@ -965,6 +967,43 @@ mod tests {
         // Still only one replicator
         let all = peerstore.list_replicators().await.unwrap();
         assert_eq!(all.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_documents_are_ordered_by_next_attempt() {
+        let store = Arc::new(MemoryStore::new());
+        let peerstore = Peerstore::new(store);
+        let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+        for doc_id in ["doc-a", "doc-b", "doc-c", "doc-d"] {
+            peerstore
+                .record_push_failure("peer", doc_id, "collection", doc_id, 1, &initial)
+                .await
+                .unwrap();
+        }
+
+        for mut retry in peerstore.get_retry_documents("peer").await.unwrap() {
+            retry.retry_info.next_retry_unix = match retry.doc_id.as_str() {
+                "doc-a" => 40,
+                "doc-b" => 10,
+                "doc-c" => 30,
+                "doc-d" => 20,
+                _ => unreachable!(),
+            };
+            peerstore
+                .update_retry_document("peer", &retry)
+                .await
+                .unwrap();
+        }
+
+        let doc_ids: Vec<_> = peerstore
+            .get_retry_documents("peer")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|retry| retry.doc_id)
+            .collect();
+        assert_eq!(doc_ids, ["doc-b", "doc-d", "doc-c", "doc-a"]);
     }
 
     #[tokio::test]

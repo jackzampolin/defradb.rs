@@ -189,7 +189,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         }
 
-        if !self.can_admit_pending_dag(cid) {
+        if !self.can_process_pushlog(cid) {
             self.diagnostics.record_pending_dag_capacity_shed();
             tracing::warn!(
                 cid = %cid,
@@ -449,6 +449,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     )));
                 }
                 self.mark_pending_dag_recovery_registered(cid, inserted_at);
+                tracing::debug!(
+                    target: "p2p::sync::restart_recovery",
+                    cid = %cid,
+                    doc_id = %msg.doc_id,
+                    "Persisted pending DAG registration"
+                );
                 true
             } else {
                 false
@@ -816,7 +822,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_capacity_sheds_before_block_verification() {
+    async fn pending_capacity_sheds_unrelated_blocks_but_accepts_missing_dependency() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
         let peer_state = Arc::new(PeerStateTracker::new());
@@ -826,7 +832,7 @@ mod tests {
         };
         let (manager, mut events) = SyncManager::new(blockstore.clone(), peer_state, config);
 
-        let (missing_cid, _missing_block) = create_lww_block("missing");
+        let (missing_cid, missing_block) = create_lww_block("missing");
         let (first_cid, first_block) = create_composite_block("doc123", "name", missing_cid);
         manager
             .process_pushlog(
@@ -868,5 +874,21 @@ mod tests {
             .await
             .expect("check rejected block"));
         assert_eq!(manager.pending_dag_count(), 1);
+
+        manager
+            .process_pushlog(
+                &make_broadcast("doc123", missing_cid, missing_block, "collection1"),
+                Some("peer-1"),
+                false,
+                None,
+            )
+            .await
+            .expect("missing dependency must bypass the full registry");
+
+        assert!(blockstore
+            .has(&missing_cid)
+            .await
+            .expect("check missing dependency"));
+        assert_eq!(manager.pending_dag_count(), 0);
     }
 }

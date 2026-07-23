@@ -588,7 +588,7 @@ pub async fn retry_doc<S: Store + 'static>(
         .await
         .map_err(|e| format!("encstore txn: {}", e))?;
 
-    let mut any_failed = false;
+    let mut successful_blocks = 0usize;
     for head_cid in load_latest_composite_head_cids(&*head_txn, &*block_txn, doc_short_id).await {
         let block_data = match block_txn.get(&head_cid.to_bytes()).await {
             Ok(Some(data)) => data,
@@ -621,22 +621,36 @@ pub async fn retry_doc<S: Store + 'static>(
             );
 
             if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {
-                any_failed = true;
-                continue;
+                return Err(format!(
+                    "failed to sign replay block after {successful_blocks} successful block(s)"
+                ));
             }
 
             match handle.send_two_stream_request(peer_id, request).await {
-                Ok(reply) if reply.err_message.is_some() => any_failed = true,
-                Ok(_) => {}
-                Err(_) => any_failed = true,
+                Ok(reply) if reply.err_message.is_some() => {
+                    return Err(format!(
+                        "peer rejected replay after {successful_blocks} successful block(s): {}",
+                        reply
+                            .err_message
+                            .as_deref()
+                            .unwrap_or("unknown pushlog error")
+                    ));
+                }
+                Ok(_) => successful_blocks += 1,
+                Err(error) => {
+                    let prefix = if error.is_connection_like() {
+                        "transport became unavailable"
+                    } else {
+                        "replay push failed"
+                    };
+                    return Err(format!(
+                        "{prefix} after {successful_blocks} successful block(s): {error}"
+                    ));
+                }
             }
         }
     }
-    if any_failed {
-        Err("some pushes failed".to_string())
-    } else {
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Replay a failed COLLECTION-COMMIT push by CID over a libp2p host handle

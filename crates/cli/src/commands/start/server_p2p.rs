@@ -600,7 +600,7 @@ impl Node {
                 warn!(error = %error, "Failed to reactivate push retries after restart");
             }
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
                 let peerstore = storage::stores::Peerstore::new(retry_store.clone());
                 let peers = match peerstore.get_all_retry_peers().await {
                     Ok(p) => p,
@@ -682,10 +682,12 @@ impl Node {
                                 let _ =
                                     peerstore.complete_retry_document(&peer_id_str, retry).await;
                             }
-                            Ok(Err(_)) => {
-                                retry
-                                    .retry_info
-                                    .bump_for(&format!("{peer_id_str}:{}", retry.cid));
+                            Ok(Err(error)) => {
+                                p2p::sync::reschedule_persisted_push_retry(
+                                    &mut retry.retry_info,
+                                    &format!("{peer_id_str}:{}", retry.cid),
+                                    &error,
+                                );
                                 let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                                 fast_failures += 1;
                                 if fast_failures >= 3 {
@@ -1223,7 +1225,7 @@ impl Node {
                 warn!(error = %error, "Failed to reactivate push retries after restart");
             }
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
                 let peerstore = storage::stores::Peerstore::new(retry_store.clone());
                 let peers = match peerstore.get_all_retry_peers().await {
                     Ok(p) => p,
@@ -1295,10 +1297,12 @@ impl Node {
                                 let _ =
                                     peerstore.complete_retry_document(&peer_id_str, retry).await;
                             }
-                            Ok(Err(_)) => {
-                                retry
-                                    .retry_info
-                                    .bump_for(&format!("{peer_id_str}:{}", retry.cid));
+                            Ok(Err(error)) => {
+                                p2p::sync::reschedule_persisted_push_retry(
+                                    &mut retry.retry_info,
+                                    &format!("{peer_id_str}:{}", retry.cid),
+                                    &error,
+                                );
                                 let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                                 fast_failures += 1;
                                 if fast_failures >= 3 {

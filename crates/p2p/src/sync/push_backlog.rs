@@ -506,8 +506,6 @@ impl PushBacklog {
             .retain(|_, retry| retry.until > now || live_keys.contains(&retry.job_key));
     }
 
-    /// Whether this exact head remains the newest live obligation for its
-    /// `(document, peer)` pair.
     /// Park every job for a peer whose receiver reported it is at capacity.
     ///
     /// The condition is structural and peer-wide: the receiver cannot accept any
@@ -544,6 +542,37 @@ impl PushBacklog {
         inner.peer_capacity_parks_total = inner.peer_capacity_parks_total.saturating_add(1);
     }
 
+    /// Remove a saturated peer's queued work so the durable retry ledger can
+    /// own it instead of leaving it parked in volatile memory.
+    pub(crate) fn take_queued_for_peer(&self, peer_id: &PeerId) -> Vec<PushJobSpec> {
+        let peer_key = peer_id.to_string();
+        let mut inner = self.inner.lock();
+        let Some(queue) = inner.queues.remove(&peer_key) else {
+            return Vec::new();
+        };
+        inner.ready.retain(|ready_peer| ready_peer != &peer_key);
+
+        let jobs: Vec<_> = queue.into_iter().collect();
+        for job in &jobs {
+            inner.queued_items -= 1;
+            inner.queued_bytes -= job.resident_bytes();
+            if inner
+                .latest
+                .get(job.key())
+                .is_some_and(|head| *head == job.live_head())
+            {
+                inner.latest.remove(job.key());
+            }
+            inner.retries.remove(&RetryKey {
+                peer_id: peer_key.clone(),
+                cid: job.root_cid,
+            });
+        }
+        jobs
+    }
+
+    /// Whether this exact head remains the newest live obligation for its
+    /// `(document, peer)` pair.
     pub fn is_current(&self, job: &PushJobSpec) -> bool {
         self.inner
             .lock()
