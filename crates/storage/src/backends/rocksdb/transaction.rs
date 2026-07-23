@@ -377,7 +377,7 @@ impl Writer for RocksDbTxn {
 
 #[async_trait]
 impl Txn for RocksDbTxn {
-    async fn commit(self: Box<Self>) -> Result<()> {
+    async fn commit(mut self: Box<Self>) -> Result<()> {
         if self.discarded.load(Ordering::Acquire) {
             tracing::warn!("Attempted to commit a discarded transaction");
             CallbackManager::execute_callbacks(self.callbacks.take_error());
@@ -394,46 +394,75 @@ impl Txn for RocksDbTxn {
         let read_set = self.read_set.lock().clone();
 
         if !pending.is_empty() {
+            let pending_changes = pending.len();
+
             // Keep the logical conflict version and physical RocksDB commit
-            // atomic with respect to new transaction snapshots. Without this,
-            // a transaction can observe the advanced conflict version while
-            // taking a RocksDB snapshot from before the corresponding write.
-            let commit_guard = self.commit_gate.write().await;
+            // atomic with respect to new transaction snapshots. The gate is
+            // acquired inside spawn_blocking (redb precedent): the blocking
+            // thread owns the guard, so cancelling the commit future cannot
+            // release the gate while the write is still in flight, and the
+            // fsync (WriteOptions::set_sync) no longer blocks a tokio worker.
+            // The conflict snapshot moves into the closure with it: if the
+            // future is dropped mid-await, the snapshot must keep pinning the
+            // records this commit conflict-checks against, or prune() could
+            // empty the history before check_and_record runs. The tradeoff:
+            // a cancelled future can leave a durable commit whose success
+            // callbacks never ran (same as redb's direct path).
+            let db = Arc::clone(&self.db);
+            let conflict_tracker = Arc::clone(&self.conflict_tracker);
+            let commit_gate = Arc::clone(&self.commit_gate);
+            let read_version = self.read_version;
+            let durability = self.durability;
+            let conflict_snapshot = self._conflict_snapshot.take();
 
-            // Apply via WriteBatch
-            let mut batch = rocksdb::WriteBatchWithTransaction::<true>::default();
-            for (key, value) in &pending {
-                match value {
-                    Some(v) => batch.put(key, v),
-                    None => batch.delete(key),
-                }
-            }
+            let write_result = tokio::task::spawn_blocking(move || -> Result<()> {
+                let _conflict_snapshot = conflict_snapshot;
+                let _commit_guard = commit_gate.blocking_write();
+                let version =
+                    conflict_tracker.check_and_record(read_version, pending.keys(), &read_set)?;
+                // Unrecords on error or panic before the write lands, so no
+                // phantom write-set survives a failed commit.
+                let record_guard =
+                    crate::backends::shared::RecordGuard::new(&conflict_tracker, version);
 
-            let mut write_opts = rocksdb::WriteOptions::default();
-            match self.durability {
-                DurabilityMode::Immediate => {
-                    write_opts.set_sync(true);
+                let mut batch = rocksdb::WriteBatchWithTransaction::<true>::default();
+                for (key, value) in &pending {
+                    match value {
+                        Some(v) => batch.put(key, v),
+                        None => batch.delete(key),
+                    }
                 }
-                DurabilityMode::Eventual => {
-                    write_opts.set_sync(false);
-                }
-            }
 
-            let commit_result = match self.conflict_tracker.check_and_record(
-                self.read_version,
-                pending.keys(),
-                &read_set,
-            ) {
-                Ok(()) => self.db.write_opt(batch, &write_opts).map_err(Error::from),
-                Err(error) => Err(error),
+                let mut write_opts = rocksdb::WriteOptions::default();
+                match durability {
+                    DurabilityMode::Immediate => {
+                        write_opts.set_sync(true);
+                    }
+                    DurabilityMode::Eventual => {
+                        write_opts.set_sync(false);
+                    }
+                }
+
+                db.write_opt(batch, &write_opts)?;
+                record_guard.defuse();
+                Ok(())
+            })
+            .await;
+
+            let commit_result = match write_result {
+                Ok(result) => result,
+                Err(join_err) => Err(Error::Other(if join_err.is_panic() {
+                    format!("commit task panicked: {join_err}")
+                } else {
+                    format!("commit task cancelled: {join_err}")
+                })),
             };
-            drop(commit_guard);
 
             if let Err(e) = commit_result {
                 if !matches!(e, Error::TxnConflict) {
                     tracing::error!(
                         error = %e,
-                        pending_changes = pending.len(),
+                        pending_changes,
                         "Failed to commit RocksDB batch"
                     );
                 }
