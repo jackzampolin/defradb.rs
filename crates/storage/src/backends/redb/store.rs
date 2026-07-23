@@ -307,8 +307,16 @@ impl Store for RedbStore {
         let mut guard = NewTxnGuard(&self.active_txn_count, false);
 
         let (read_version, read_txn, conflict_snapshot) = {
-            // Pair the conflict version and Redb snapshot without a commit between them.
-            let _commit_guard = self.commit_gate.read().await;
+            // Pair the conflict version and Redb snapshot without a commit
+            // between them. Read-only transactions skip the gate: they never
+            // conflict-check, and commit() only returns after the physical
+            // write, so read-your-committed-writes holds without serializing
+            // readers behind in-flight commits.
+            let _commit_guard = if readonly {
+                None
+            } else {
+                Some(self.commit_gate.read().await)
+            };
             let conflict_snapshot = (!readonly).then(|| self.conflict_tracker.begin_snapshot());
             let read_version = conflict_snapshot.as_ref().map_or_else(
                 || self.conflict_tracker.current_version(),
@@ -438,5 +446,77 @@ impl IntegrityReport {
     /// Check if the database passed the integrity check.
     pub fn is_valid(&self) -> bool {
         self.is_valid
+    }
+}
+
+#[cfg(test)]
+mod pairing_tests {
+    use super::*;
+    use crate::corekv::{Reader, Writer};
+    use std::time::Duration;
+
+    /// Open a store on a plain OS thread so no tokio runtime is present:
+    /// `group_commit` stays `None` and commits take the direct
+    /// spawn_blocking path, which no runtime-opened store ever exercises.
+    fn open_without_group_commit(path: std::path::PathBuf) -> RedbStore {
+        std::thread::spawn(move || RedbStore::open(path).unwrap())
+            .join()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn direct_commit_path_applies_writes_and_detects_conflicts() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(open_without_group_commit(
+            temp_dir.path().join("direct.redb"),
+        ));
+        assert!(store.group_commit.is_none(), "expected direct commit path");
+        let key = b"direct-key".to_vec();
+
+        // Two snapshots at version 0; the first commit wins, the second
+        // must hit the write-write conflict through the direct path.
+        let mut winner = store.new_txn(false).await.unwrap();
+        winner.set(&key, b"winner").await.unwrap();
+        let mut loser = store.new_txn(false).await.unwrap();
+        loser.set(&key, b"loser").await.unwrap();
+
+        winner.commit().await.unwrap();
+        let err = loser.commit().await.unwrap_err();
+        assert!(err.is_txn_conflict(), "expected TxnConflict, got: {err}");
+
+        let reader = store.new_txn(true).await.unwrap();
+        assert_eq!(reader.get(&key).await.unwrap(), Some(b"winner".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn readonly_txn_skips_commit_gate() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(RedbStore::open(temp_dir.path().join("gate.redb")).unwrap());
+        let gate = Arc::clone(&store.commit_gate);
+        let commit_guard = gate.write().await;
+
+        // A read-only transaction must not queue behind an in-flight commit.
+        let readonly = tokio::time::timeout(Duration::from_secs(1), store.new_txn(true))
+            .await
+            .expect("read-only transaction blocked behind the commit gate")
+            .expect("read-only transaction failed");
+        drop(readonly);
+
+        // Writers still pair version and snapshot behind the gate.
+        let writer_store = Arc::clone(&store);
+        let mut writer_task = tokio::spawn(async move { writer_store.new_txn(false).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut writer_task)
+                .await
+                .is_err(),
+            "write transaction skipped the commit gate"
+        );
+
+        drop(commit_guard);
+        tokio::time::timeout(Duration::from_secs(1), writer_task)
+            .await
+            .expect("write transaction remained blocked after gate release")
+            .expect("writer task panicked")
+            .expect("write transaction failed");
     }
 }

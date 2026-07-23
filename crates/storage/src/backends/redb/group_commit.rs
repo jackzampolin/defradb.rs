@@ -7,7 +7,9 @@ use tokio::sync::{mpsc, oneshot, RwLock as AsyncRwLock};
 
 use super::config::DurabilityMode;
 use super::KV_TABLE;
-use crate::backends::shared::{CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet};
+use crate::backends::shared::{
+    CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet, RecordGuard,
+};
 use crate::corekv::{AsyncTxnCallback, Error, Result, TxnCallback};
 
 /// Payload for a single transaction's pending commit.
@@ -111,19 +113,32 @@ async fn flush_loop(
             }
         }
 
-        let (passed, failed, result) = {
-            // Keep version publication and the Redb flush indivisible to new snapshots.
-            let _commit_guard = commit_gate.write().await;
+        // Keep version publication and the Redb flush indivisible to new
+        // snapshots. The gate is acquired inside spawn_blocking so the
+        // blocking thread owns it: aborting the flush loop (store drop)
+        // cannot release the gate mid-write, and the flush fsync no longer
+        // blocks a tokio worker.
+        let flush_db = Arc::clone(&db);
+        let flush_tracker = Arc::clone(&conflict_tracker);
+        let flush_gate = Arc::clone(&commit_gate);
+        let flush_result = tokio::task::spawn_blocking(move || {
+            let _commit_guard = flush_gate.blocking_write();
             let mut passed = Vec::with_capacity(batch.len());
+            let mut record_guards = Vec::with_capacity(batch.len());
             let mut failed: Vec<(PendingCommit, Error)> = Vec::new();
 
             for commit in batch {
-                match conflict_tracker.check_and_record(
+                match flush_tracker.check_and_record(
                     commit.read_version,
                     commit.changes.keys(),
                     &commit.read_set,
                 ) {
-                    Ok(()) => passed.push(commit),
+                    Ok(version) => {
+                        passed.push(commit);
+                        // Unrecords on flush error or panic, so no phantom
+                        // write-set survives a failed batch.
+                        record_guards.push(RecordGuard::new(&flush_tracker, version));
+                    }
                     Err(e) => failed.push((commit, e)),
                 }
             }
@@ -131,9 +146,27 @@ async fn flush_loop(
             let result = if passed.is_empty() {
                 None
             } else {
-                Some(flush_batch(&db, &passed, durability))
+                let result = flush_batch(&flush_db, &passed, durability);
+                if result.is_ok() {
+                    for guard in record_guards {
+                        guard.defuse();
+                    }
+                }
+                Some(result)
             };
             (passed, failed, result)
+        })
+        .await;
+
+        let (passed, failed, result) = match flush_result {
+            Ok(output) => output,
+            Err(join_err) => {
+                // A panicking flush (e.g. storage corruption) would repeat on
+                // every batch; shut the loop down so later commits fail fast
+                // at enqueue with "group commit channel closed" instead.
+                tracing::error!(error = %join_err, "Group commit flush task failed; stopping");
+                return;
+            }
         };
 
         for (commit, err) in failed {

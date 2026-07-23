@@ -109,7 +109,7 @@ impl PendingWrites {
         conflict_tracker: &ConflictTracker,
         read_version: u64,
         read_set: &ReadSet,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         if let Some(index) = &self.index {
             conflict_tracker.check_and_record(read_version, index.keys(), read_set)
         } else {
@@ -424,7 +424,7 @@ impl Writer for LarkTxn {
 
 #[async_trait]
 impl Txn for LarkTxn {
-    async fn commit(self: Box<Self>) -> Result<()> {
+    async fn commit(mut self: Box<Self>) -> Result<()> {
         if *self.discarded.lock() {
             tracing::warn!("Attempted to commit a discarded transaction");
             CallbackManager::execute_callbacks(self.callbacks.take_error());
@@ -441,25 +441,52 @@ impl Txn for LarkTxn {
         let read_set = self.read_set.lock().clone();
 
         if !pending.is_empty() {
-            let commit_result = {
-                let _commit_guard = self.commit_gate.write().await;
-                match pending.check_and_record_conflicts(
-                    &self.conflict_tracker,
-                    self.read_version,
-                    &read_set,
-                ) {
-                    Err(error) => Err(error),
-                    Ok(()) => {
-                        let batch = pending.into_write_batch();
-                        let durability = match self.durability {
-                            DurabilityMode::Immediate => lark_kv::DurabilityMode::Immediate,
-                            DurabilityMode::Eventual => lark_kv::DurabilityMode::Eventual,
-                        };
-                        self.db
-                            .write_with_durability(batch, durability)
-                            .map_err(|error| Error::Backend(error.to_string()))
-                    }
-                }
+            // The gate is acquired inside spawn_blocking (redb precedent):
+            // the blocking thread owns the guard, so cancelling the commit
+            // future cannot release the gate mid-write, and the write path
+            // (fsync under Immediate, write-capacity stalls even under
+            // Eventual) no longer blocks a tokio worker. The conflict
+            // snapshot moves into the closure with it: if the future is
+            // dropped mid-await, the snapshot must keep pinning the records
+            // this commit conflict-checks against, or prune() could empty
+            // the history before check_and_record runs. The tradeoff: a
+            // cancelled future can leave a durable commit whose success
+            // callbacks never ran (same as redb's direct path).
+            let db = Arc::clone(&self.db);
+            let conflict_tracker = Arc::clone(&self.conflict_tracker);
+            let commit_gate = Arc::clone(&self.commit_gate);
+            let read_version = self.read_version;
+            let durability = match self.durability {
+                DurabilityMode::Immediate => lark_kv::DurabilityMode::Immediate,
+                DurabilityMode::Eventual => lark_kv::DurabilityMode::Eventual,
+            };
+            let conflict_snapshot = self._conflict_snapshot.take();
+
+            let write_result = tokio::task::spawn_blocking(move || -> Result<()> {
+                let _conflict_snapshot = conflict_snapshot;
+                let _commit_guard = commit_gate.blocking_write();
+                // Unlike the other backends, a lark write error must NOT
+                // unrecord: lark can fail AFTER the batch is WAL-durable and
+                // memtable-visible (rotate_memtable on the same call), so an
+                // error is indeterminate. Keeping the record risks a phantom
+                // conflict (spurious retry); dropping it risks missing a real
+                // conflict against landed data (lost update).
+                pending.check_and_record_conflicts(&conflict_tracker, read_version, &read_set)?;
+
+                let batch = pending.into_write_batch();
+                db.write_with_durability(batch, durability)
+                    .map_err(|error| Error::Backend(error.to_string()))?;
+                Ok(())
+            })
+            .await;
+
+            let commit_result = match write_result {
+                Ok(result) => result,
+                Err(join_err) => Err(Error::Other(if join_err.is_panic() {
+                    format!("commit task panicked: {join_err}")
+                } else {
+                    format!("commit task cancelled: {join_err}")
+                })),
             };
 
             if let Err(e) = commit_result {

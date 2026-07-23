@@ -380,51 +380,62 @@ impl Txn for RedbTxn {
             let write_result = tokio::task::spawn_blocking(move || -> Result<()> {
                 let _conflict_snapshot = conflict_snapshot;
                 let _commit_guard = commit_gate.blocking_write();
-                conflict_tracker.check_and_record(read_version, pending.keys(), &read_set)?;
+                let version =
+                    conflict_tracker.check_and_record(read_version, pending.keys(), &read_set)?;
+                // Unrecords on error or panic before the write lands, so no
+                // phantom write-set survives a failed commit.
+                let record_guard =
+                    crate::backends::shared::RecordGuard::new(&conflict_tracker, version);
 
-                let mut write_txn = db.begin_write().map_err(|e| {
-                    tracing::error!(error = %e, pending_changes = pending.len(),
-                        "Failed to begin write transaction during commit");
-                    Error::from(e)
-                })?;
-
-                write_txn.set_durability(match durability {
-                    DurabilityMode::Immediate => redb::Durability::Immediate,
-                    DurabilityMode::Eventual => redb::Durability::Eventual,
-                });
-
-                {
-                    let mut table = write_txn.open_table(KV_TABLE).map_err(|e| {
-                        tracing::error!(error = %e, "Failed to open KV table during commit");
+                let write = || -> Result<()> {
+                    let mut write_txn = db.begin_write().map_err(|e| {
+                        tracing::error!(error = %e, pending_changes = pending.len(),
+                            "Failed to begin write transaction during commit");
                         Error::from(e)
                     })?;
 
-                    for (key, value) in pending.iter() {
-                        match value {
-                            Some(v) => {
-                                if let Err(e) = table.insert(key.as_slice(), v.as_slice()) {
-                                    tracing::error!(error = %e, key_len = key.len(),
-                                        value_len = v.len(), "Failed to insert key during commit");
-                                    return Err(e.into());
+                    write_txn.set_durability(match durability {
+                        DurabilityMode::Immediate => redb::Durability::Immediate,
+                        DurabilityMode::Eventual => redb::Durability::Eventual,
+                    });
+
+                    {
+                        let mut table = write_txn.open_table(KV_TABLE).map_err(|e| {
+                            tracing::error!(error = %e, "Failed to open KV table during commit");
+                            Error::from(e)
+                        })?;
+
+                        for (key, value) in pending.iter() {
+                            match value {
+                                Some(v) => {
+                                    if let Err(e) = table.insert(key.as_slice(), v.as_slice()) {
+                                        tracing::error!(error = %e, key_len = key.len(),
+                                            value_len = v.len(), "Failed to insert key during commit");
+                                        return Err(e.into());
+                                    }
                                 }
-                            }
-                            None => {
-                                if let Err(e) = table.remove(key.as_slice()) {
-                                    tracing::error!(error = %e, key_len = key.len(),
-                                        "Failed to delete key during commit");
-                                    return Err(e.into());
+                                None => {
+                                    if let Err(e) = table.remove(key.as_slice()) {
+                                        tracing::error!(error = %e, key_len = key.len(),
+                                            "Failed to delete key during commit");
+                                        return Err(e.into());
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                if let Err(e) = write_txn.commit() {
-                    tracing::error!(error = %e, pending_changes = pending.len(),
-                        "Failed to finalize commit");
-                    return Err(e.into());
-                }
+                    if let Err(e) = write_txn.commit() {
+                        tracing::error!(error = %e, pending_changes = pending.len(),
+                            "Failed to finalize commit");
+                        return Err(e.into());
+                    }
 
+                    Ok(())
+                };
+
+                write()?;
+                record_guard.defuse();
                 Ok(())
             })
             .await;
