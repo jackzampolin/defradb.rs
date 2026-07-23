@@ -496,6 +496,33 @@ pub(crate) fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
 /// regenerate/re-push their SE artifacts to each connected replicator with due
 /// (or, when `force`, any) retries. Shared by the background ticker loop and the
 /// on-demand `p2p_retry_replicators` FFI trigger.
+/// Redial a replicator target that dropped, using its stored addresses, so a
+/// stalled connection cannot strand the peer's persisted retry ledger.
+async fn redial_replicator<S: storage::corekv::Store>(
+    peerstore: &storage::stores::Peerstore<S>,
+    handle: &p2p::P2PHostHandle,
+    peer_id_str: &str,
+    peer_id: libp2p::PeerId,
+) {
+    let Ok(Some(bytes)) = peerstore.get_replicator(peer_id_str).await else {
+        return;
+    };
+    let Ok(info) = p2p::ReplicatorInfo::from_bytes(&bytes) else {
+        return;
+    };
+    let addrs: Vec<libp2p::Multiaddr> = info
+        .addresses
+        .iter()
+        .filter_map(|addr| addr.parse().ok())
+        .collect();
+    if addrs.is_empty() {
+        return;
+    }
+    if let Err(error) = handle.dial(peer_id, addrs).await {
+        tracing::debug!(peer_id = %peer_id, %error, "replicator retry redial failed");
+    }
+}
+
 pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
     store: &Arc<S>,
     handle: &p2p::P2PHostHandle,
@@ -527,6 +554,12 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
 
         let connected = handle.connected_peers().await.unwrap_or_default();
         if !connected.contains(&peer_id) {
+            // Nothing else redials a replicator target once it restarts, so
+            // without this the peer's entire persisted retry ledger stalls
+            // forever behind the connectivity gate (the iroh path dials on
+            // demand instead). Redial from the stored replicator addresses;
+            // a later pass drains the ledger once the connection is back.
+            redial_replicator(&peerstore, handle, &peer_id_str, peer_id).await;
             continue;
         }
 

@@ -20,6 +20,16 @@ use super::SyncManager;
 /// one quarter of the global pending-DAG capacity.
 const PENDING_DAG_PEER_CAPACITY_DIVISOR: usize = 4;
 
+/// Outcome of admitting a pending-DAG registration into the in-memory map.
+///
+/// The rejection variants carry the limit that tripped so the caller's nack
+/// reports the number the operator will see in logs (global vs per-peer).
+pub(super) enum PendingDagAdmission {
+    Admitted,
+    GlobalCapacity,
+    PeerQuota { max_per_peer: usize },
+}
+
 #[derive(Debug, Clone)]
 pub struct PendingDagFetchFailure {
     pub doc_id: String,
@@ -244,12 +254,26 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// durable record survives (the recovery obligation is discharged solely
     /// by a successful merge) and is re-driven by restart or the durable
     /// resync sweep.
+    /// Admit a registration into the in-memory map, reporting `true` on
+    /// success. Callers that need to distinguish the failing limit (to nack
+    /// with the right number) use [`Self::try_insert_pending_dag`].
     pub(super) fn insert_pending_dag(&self, root_cid: Cid, dag: PendingDag) -> bool {
+        matches!(
+            self.try_insert_pending_dag(root_cid, dag),
+            PendingDagAdmission::Admitted
+        )
+    }
+
+    pub(super) fn try_insert_pending_dag(
+        &self,
+        root_cid: Cid,
+        dag: PendingDag,
+    ) -> PendingDagAdmission {
         let mut pending = self.pending_dags.write();
         evict_expired_pending_dags(&mut pending, Instant::now());
 
         if pending.len() >= self.max_pending_dags && !pending.contains_key(&root_cid) {
-            return false;
+            return PendingDagAdmission::GlobalCapacity;
         }
 
         if let Some(source_peer) = dag.source_peer.as_deref() {
@@ -260,12 +284,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             if existing_source != Some(source_peer)
                 && pending.source_count(source_peer) >= max_per_peer
             {
-                return false;
+                return PendingDagAdmission::PeerQuota { max_per_peer };
             }
         }
 
         pending.insert(root_cid, dag);
-        true
+        PendingDagAdmission::Admitted
     }
 
     fn update_pending_dag_missing_if_current(
@@ -351,104 +375,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         }
         claimed
-    }
-
-    /// Register a pending DAG for DocSync.
-    ///
-    /// This is called when a DocSyncReply contains head CIDs that need to be
-    /// fetched via Bitswap. Unlike PushLog-initiated syncs, DocSync doesn't
-    /// have collection_id or creator in the message, so we use empty strings.
-    /// The merge handler will extract the actual metadata from the block data.
-    ///
-    /// # Arguments
-    ///
-    /// * `root_cid` - The head CID to fetch
-    /// * `doc_id` - Document ID from the DocSyncItem
-    pub fn register_docsync_dag(&self, root_cid: Cid, doc_id: String, source_peer: String) {
-        tracing::debug!(
-            cid = %root_cid,
-            doc_id = %doc_id,
-            source_peer = %source_peer,
-            "Registering DocSync pending DAG"
-        );
-
-        if !self.insert_pending_dag(
-            root_cid,
-            PendingDag {
-                doc_id: doc_id.clone(),
-                // DocSync protocol doesn't include collection_id or creator.
-                // The merge handler will extract these from the block data.
-                collection_id: String::new(),
-                creator: String::new(),
-                missing: std::iter::once(root_cid).collect(),
-                source_peer: Some(source_peer.clone()),
-                is_explicit_replicator: false,
-                explicit_replay_authorization: None,
-                is_recovery_registered: false,
-                inserted_at: Instant::now(),
-                attempts: 0,
-                fetch_failures: 0,
-                last_fetch_error: None,
-                next_retry_at: tokio::time::Instant::now(),
-                dispatches: 0,
-            },
-        ) {
-            tracing::warn!(
-                cid = %root_cid,
-                doc_id = %doc_id,
-                source_peer = %source_peer,
-                max = self.max_pending_dags,
-                max_per_peer = self.max_pending_dags_per_peer(),
-                "Pending DAGs at capacity, dropping DocSync registration"
-            );
-        }
-    }
-
-    /// Register a pending DAG for branchable collection sync.
-    ///
-    /// Unlike `register_docsync_dag` which stores the document ID,
-    /// this stores the collection ID so the merge handler can look up
-    /// the local collection for cross-schema-version merges.
-    pub fn register_branchable_dag(
-        &self,
-        root_cid: Cid,
-        collection_id: String,
-        source_peer: String,
-    ) {
-        tracing::debug!(
-            cid = %root_cid,
-            collection_id = %collection_id,
-            "Registering branchable sync pending DAG"
-        );
-
-        if !self.insert_pending_dag(
-            root_cid,
-            PendingDag {
-                doc_id: String::new(),
-                collection_id: collection_id.clone(),
-                creator: String::new(),
-                missing: std::iter::once(root_cid).collect(),
-                source_peer: Some(source_peer.clone()),
-                is_explicit_replicator: false,
-                explicit_replay_authorization: None,
-                is_recovery_registered: false,
-                inserted_at: Instant::now(),
-                attempts: 0,
-                fetch_failures: 0,
-                last_fetch_error: None,
-                next_retry_at: tokio::time::Instant::now(),
-                dispatches: 0,
-            },
-        ) {
-            tracing::warn!(
-                cid = %root_cid,
-                collection_id = %collection_id,
-                source_peer = %source_peer,
-                max = self.max_pending_dags,
-                max_per_peer = self.max_pending_dags_per_peer(),
-                "Pending DAGs at capacity, dropping branchable DAG registration"
-            );
-        }
     }
 
     /// Process a pending DAG after Bitswap blocks have been received.

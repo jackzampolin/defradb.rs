@@ -332,7 +332,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // Track this DAG as pending (enforces TTL eviction and capacity limit).
             let inserted_at = Instant::now();
             {
-                let inserted = self.insert_pending_dag(
+                use super::pending_dag::PendingDagAdmission;
+                let admission = self.try_insert_pending_dag(
                     *cid,
                     PendingDag {
                         doc_id: msg.doc_id.clone(),
@@ -351,7 +352,14 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         dispatches: 0,
                     },
                 );
-                if !inserted {
+                // Report the limit that actually tripped so the nack and its
+                // WARN log agree (the global cap vs the smaller per-peer quota).
+                let rejected_max = match admission {
+                    PendingDagAdmission::Admitted => None,
+                    PendingDagAdmission::GlobalCapacity => Some(self.max_pending_dags),
+                    PendingDagAdmission::PeerQuota { max_per_peer } => Some(max_per_peer),
+                };
+                if let Some(max) = rejected_max {
                     self.diagnostics.record_pending_dag_capacity_shed();
                     // The block is stored but its DAG completion is not
                     // tracked. This must surface as an error: a success reply
@@ -364,13 +372,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         collection_id = %msg.collection_id,
                         source_peer = ?sender_peer,
                         missing_count = missing.len(),
-                        max = self.max_pending_dags,
+                        max,
                         max_per_peer = self.max_pending_dags_per_peer(),
                         "Pending DAGs at capacity, rejecting PushLog DAG registration"
                     );
-                    return Err(Error::PendingDagCapacity {
-                        max: self.max_pending_dags,
-                    });
+                    return Err(Error::PendingDagCapacity { max });
                 }
             }
 
