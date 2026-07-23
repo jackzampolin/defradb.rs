@@ -2,7 +2,7 @@
 ///
 /// Tracks the number of retries and the next retry time using exponential
 /// backoff intervals matching Go DefraDB's replicator retry behavior.
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{hash::Hash, hash::Hasher};
 
 /// Exponential backoff intervals in seconds, matching Go's seconds-to-hours retry ladder.
@@ -161,6 +161,15 @@ impl RetryInfo {
         let delay = floor + hasher.finish() % (cap - floor + 1);
         self.next_retry_unix = now + delay;
         self.num_retries += 1;
+    }
+
+    /// Schedule another attempt without recording a delivery failure.
+    pub fn defer_for(&mut self, delay: Duration) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.next_retry_unix = now.saturating_add(delay.as_secs());
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {

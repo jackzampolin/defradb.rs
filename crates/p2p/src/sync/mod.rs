@@ -7,6 +7,8 @@
 //! - Applying CRDT merges to integrate remote changes
 //! - Broadcasting local changes to the network
 
+use std::time::Duration;
+
 mod broadcast_coalescer;
 mod broadcaster;
 pub(crate) mod car;
@@ -60,3 +62,50 @@ pub use push_backlog::{
 };
 pub use queue::ProcessQueue;
 pub use replication::{recover_unmerged, ReplicationConfig, ReplicationLoop, ReplicationResult};
+
+/// Cadence for draining persisted push retries.
+pub const PERSISTED_RETRY_SWEEP_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Reschedule a failed persisted push without treating receiver saturation as
+/// a document delivery failure.
+pub fn reschedule_persisted_push_retry(
+    retry_info: &mut storage::stores::RetryInfo,
+    retry_key: &str,
+    error_message: &str,
+) {
+    if error_message.contains(crate::error::AT_CAPACITY_MESSAGE) {
+        retry_info.defer_for(PERSISTED_RETRY_SWEEP_INTERVAL);
+    } else {
+        retry_info.bump_for(retry_key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capacity_backpressure_does_not_advance_the_failure_ladder() {
+        let mut retry_info = storage::stores::RetryInfo {
+            num_retries: 4,
+            next_retry_unix: 0,
+        };
+
+        reschedule_persisted_push_retry(
+            &mut retry_info,
+            "peer:cid",
+            &format!(
+                "peer rejected replay: {}",
+                crate::error::AT_CAPACITY_MESSAGE
+            ),
+        );
+
+        assert_eq!(retry_info.num_retries, 4);
+        assert!(!retry_info.is_due());
+
+        reschedule_persisted_push_retry(&mut retry_info, "peer:cid", "connection lost");
+
+        assert_eq!(retry_info.num_retries, 5);
+        assert!(!retry_info.is_due());
+    }
+}

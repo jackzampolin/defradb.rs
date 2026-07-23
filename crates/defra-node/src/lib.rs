@@ -1707,7 +1707,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
             tracing::warn!(error = %error, "failed to reactivate push retries after restart");
         }
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
             let peerstore = storage::stores::Peerstore::new(store.clone());
             let peers = match peerstore.get_all_retry_peers().await {
                 Ok(peers) => peers,
@@ -1814,9 +1814,11 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                                 error = %error,
                                 "retry push failed"
                             );
-                            retry
-                                .retry_info
-                                .bump_for(&format!("{peer_id_str}:{}", retry.cid));
+                            p2p::sync::reschedule_persisted_push_retry(
+                                &mut retry.retry_info,
+                                &format!("{peer_id_str}:{}", retry.cid),
+                                &error,
+                            );
                             let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                             fast_failures += 1;
                             if fast_failures >= 3 {

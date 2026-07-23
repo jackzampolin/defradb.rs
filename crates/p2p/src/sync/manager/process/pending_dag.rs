@@ -88,16 +88,19 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .min()
     }
 
-    /// Return whether a root can enter the pending-DAG registry without
-    /// decoding its pushed block.
-    pub(super) fn can_admit_pending_dag(&self, root_cid: &Cid) -> bool {
+    /// Return whether a PushLog can proceed without decoding its block. At
+    /// capacity, blocks awaited by existing roots must still enter so those
+    /// roots can complete and free their slots.
+    pub(super) fn can_process_pushlog(&self, cid: &Cid) -> bool {
         let mut pending = self.pending_dags.write();
         let expired = evict_expired_pending_dags(&mut pending, Instant::now());
         for _ in expired {
             self.diagnostics.record_pending_dag_expired();
         }
 
-        pending.len() < self.max_pending_dags || pending.contains_key(root_cid)
+        pending.len() < self.max_pending_dags
+            || pending.contains_key(cid)
+            || pending.has_waiters(cid)
     }
 
     /// Get CIDs of all pending DAGs.

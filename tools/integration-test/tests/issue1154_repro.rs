@@ -4,14 +4,8 @@
 //! (≥600 docs before the freeze hunt) so the pusher retry ladders carry
 //! hundreds of nacked pushes.
 //!
-//! Ignored: fails on this branch (691/2546 docs lost, 2026-07-22 — see PR
-//! #1157 discussion), matching #1154's baseline. The loss is a post-restart
-//! drain-throughput collapse, not retry ordering. Un-ignore once #1154's
-//! root cause is fixed; until then run it manually:
-//! `cargo test -p integration-test --test issue1154_repro -- --ignored`
-//!
-//! Own binary: injects `DEFRA_P2P_MAX_PENDING_DAGS`, which every node spawned
-//! by this process inherits.
+//! Own binary: injects process-wide node settings inherited by every spawned
+//! node.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -55,9 +49,9 @@ async fn pending_dags(hub_api: &str) -> u64 {
 /// then requires full completeness — with process-local registrations the doc
 /// occupying the slot at kill time is silently lost forever.
 #[tokio::test]
-#[ignore = "known-failing at-scale repro of #1154; run manually with -- --ignored"]
 async fn hub_restart_recovers_success_acked_pending_dags() {
     std::env::set_var("DEFRA_P2P_MAX_PENDING_DAGS", "1");
+    std::env::set_var("RUST_LOG", "info");
 
     // The hub must survive a restart with identity and state intact: the
     // harness defaults (memory store, no keyring => ephemeral peer key) would

@@ -260,6 +260,19 @@ where
     // is going to be rejected for the same reason (defradb#1112).
     if send_outcome.at_capacity {
         context.backlog.park_peer_at_capacity(&job.peer_id);
+        for queued_job in context.backlog.take_queued_for_peer(&job.peer_id) {
+            let peer_id = queued_job.peer_id.clone();
+            let head_priority = queued_job.head_priority();
+            report_push_failure(
+                &context.failure_tx,
+                &peer_id,
+                queued_job.doc_id,
+                queued_job.collection_id,
+                Some(queued_job.root_cid),
+                head_priority,
+            )
+            .await;
+        }
     }
     let send_failed = send_outcome.failed;
     let any_failed = root_missing || dependency_failed || send_failed;
@@ -441,7 +454,7 @@ pub(super) async fn send_ordered_pushlogs_via_transport<T: P2PTransport>(
                     // and because the failure cooldown is keyed per-CID, every
                     // other CID for that peer would start its own burst. Stop
                     // immediately, park the whole PEER, and let the persisted
-                    // retry ledger (exponential + jittered) own the replay
+                    // retry sweep resume once the receiver can drain
                     // (defradb#1112).
                     if is_at_capacity_message(error_message) {
                         tracing::debug!(
@@ -648,6 +661,54 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(backlog.snapshot().active_jobs, 0);
+        backlog.close();
+    }
+
+    #[tokio::test]
+    async fn capacity_nack_demotes_queued_peer_work_to_persisted_retry() {
+        let backlog = PushBacklog::new(64, usize::MAX, 1, 1);
+        let capacity_nack = crate::error::Error::PendingDagCapacity { max: 1 }
+            .backpressure_reply_message()
+            .expect("capacity error maps to the capacity sentinel");
+        let transport = TestTransport::new(vec![crate::message::PushLogReply::error(
+            "full",
+            capacity_nack,
+        )]);
+        let (context, mut failure_rx) =
+            test_context(transport, Arc::clone(&backlog), Duration::from_secs(1));
+
+        let active = job("peer", b"active");
+        let queued_a = job("peer", b"queued-a");
+        let queued_b = job("peer", b"queued-b");
+        let mut expected_docs = vec![
+            active.doc_id.clone(),
+            queued_a.doc_id.clone(),
+            queued_b.doc_id.clone(),
+        ];
+        for job in [active, queued_a, queued_b] {
+            assert_eq!(backlog.try_enqueue(job), EnqueueOutcome::Enqueued);
+        }
+        let active = backlog.next_job().await.expect("active job");
+
+        let completion = run_push_job(&context, &active).await;
+
+        assert_eq!(completion, JobCompletion::Failed);
+        let mut failed_docs = Vec::new();
+        for _ in 0..expected_docs.len() {
+            let failure = tokio::time::timeout(Duration::from_secs(1), failure_rx.recv())
+                .await
+                .expect("capacity failure must reach the retry recorder")
+                .expect("failure channel open");
+            assert!(failure.create_retry);
+            failed_docs.push(failure.doc_id);
+        }
+        expected_docs.sort();
+        failed_docs.sort();
+        assert_eq!(failed_docs, expected_docs);
+        assert_eq!(backlog.snapshot().queued_items, 0);
+        assert_eq!(backlog.snapshot().queued_bytes, 0);
+
+        backlog.job_done(&active, completion);
         backlog.close();
     }
 
