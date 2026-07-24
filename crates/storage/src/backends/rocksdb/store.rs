@@ -379,6 +379,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_commit_still_runs_success_callbacks() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(RocksDbStore::open(temp_dir.path()).unwrap());
+        let key = b"cancelled-callback-key".to_vec();
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let async_fired = Arc::new(AtomicBool::new(false));
+
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(&key, b"committed").await.unwrap();
+        {
+            let fired = Arc::clone(&fired);
+            txn.on_success(Box::new(move || fired.store(true, Ordering::Release)));
+        }
+        {
+            let async_fired = Arc::clone(&async_fired);
+            txn.on_success_async(Box::new(move || {
+                Box::pin(async move {
+                    async_fired.store(true, Ordering::Release);
+                })
+            }));
+        }
+
+        // Park the commit's blocking task before it writes.
+        let gate = Arc::clone(&store.commit_gate);
+        let commit_guard = gate.write().await;
+
+        let commit_task = tokio::spawn(async move { txn.commit().await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drop the caller's future while the write is still parked.
+        commit_task.abort();
+        assert!(
+            commit_task.await.is_err(),
+            "commit task should have been aborted"
+        );
+
+        // Releasing the gate lets the detached task finish the write and start
+        // the callbacks; they are spawned, so poll until they land.
+        drop(commit_guard);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !(fired.load(Ordering::Acquire) && async_fired.load(Ordering::Acquire)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "callbacks never ran for a commit that landed (sync={}, async={})",
+                fired.load(Ordering::Acquire),
+                async_fired.load(Ordering::Acquire)
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert_eq!(
+            store.db.get(&key).unwrap(),
+            Some(b"committed".to_vec()),
+            "cancelled commit lost a write it had already started"
+        );
+    }
+
+    #[tokio::test]
     async fn cancelled_commit_still_conflict_checks_against_pinned_records() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let store = Arc::new(RocksDbStore::open(temp_dir.path()).unwrap());
