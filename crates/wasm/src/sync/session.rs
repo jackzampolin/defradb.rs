@@ -103,12 +103,21 @@ impl SyncSession {
         let mut documents = Vec::new();
         let mut serialized_size = EMPTY_PUSH_REQUEST_BYTES;
         for document_ref in refs {
-            let Some(document) = self
-                .engine
-                .load_document(&document_ref)
-                .await
-                .map_err(engine_error)?
-            else {
+            let loaded = match self.engine.load_document(&document_ref).await {
+                Ok(loaded) => loaded,
+                // Too large to even load, so it can never be pushed. Failing
+                // here would abort the whole push and leave recover_full_sync
+                // retrying forever; skip it like the request-size check below.
+                Err(db_merge::browser_sync::BrowserSyncError::TooLarge(message)) => {
+                    warn(&format!(
+                        "browser sync skipped document {} because it exceeds the sync payload limit: {message}",
+                        document_ref.doc_id
+                    ));
+                    continue;
+                }
+                Err(error) => return Err(engine_error(error)),
+            };
+            let Some(document) = loaded else {
                 continue;
             };
 
