@@ -192,13 +192,18 @@ impl SyncSession {
             .await
             .map_err(engine_error)?
         {
-            if let Some(document) = self
-                .engine
-                .load_document(&document_ref)
-                .await
-                .map_err(engine_error)?
-            {
-                documents.push(document);
+            // Nothing to push for an over-large document, but the pull below
+            // still applies. Failing here would fall back to a full sync on
+            // every single update touching this document.
+            match self.engine.load_document(&document_ref).await {
+                Ok(Some(document)) => documents.push(document),
+                Ok(None) => {}
+                Err(db_merge::browser_sync::BrowserSyncError::TooLarge(message)) => {
+                    warn(&format!(
+                        "browser sync skipped document {doc_id} because it exceeds the sync payload limit: {message}"
+                    ));
+                }
+                Err(error) => return Err(engine_error(error)),
             }
         }
         self.exchange(BrowserSyncRequest {
