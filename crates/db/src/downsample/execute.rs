@@ -434,6 +434,8 @@ impl<S: Store + 'static> crate::database::DB<S> {
         Ok(())
     }
 
+    // Only the downsample task drives this, and that task is native-only.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) async fn process_downsample_update(
         self: &Arc<Self>,
         collection_id: &str,

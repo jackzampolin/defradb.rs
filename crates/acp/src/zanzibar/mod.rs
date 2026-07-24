@@ -11,4 +11,5 @@ mod acp;
 pub mod store;
 
 pub use acp::ZanzibarDocumentACP;
+#[cfg(not(target_arch = "wasm32"))]
 pub use store::PersistentZanzibarStore;

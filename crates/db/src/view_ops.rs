@@ -6,7 +6,9 @@
 use crate::error::{Error, Result};
 use datastore::NamespaceView;
 use schema::CollectionVersion;
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::{HashMap, HashSet};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 use std::time::Duration;
 use storage::corekv::{IterOptions, Key, Store};

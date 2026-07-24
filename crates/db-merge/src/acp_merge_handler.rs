@@ -214,6 +214,9 @@ impl<S: Store, B: blockstore::Blockstore> AcpMergeHandler<S, B> {
             .db
             .node_identity()
             .and_then(|identity| identity.did().ok().map(Identity::from));
+        // Non-Send on wasm32, where the ACP traits it holds drop their `Send`
+        // bounds for the single-threaded browser runtime.
+        #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
         let hook = Arc::new(AcpCompositeMergeHook::new(local_identity));
         inner.set_composite_merge_hook(hook.clone());
         Self { inner, hook }
