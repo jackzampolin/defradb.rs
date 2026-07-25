@@ -465,17 +465,22 @@ impl Txn for LarkTxn {
             let write_result = tokio::task::spawn_blocking(move || -> Result<()> {
                 let _conflict_snapshot = conflict_snapshot;
                 let _commit_guard = commit_gate.blocking_write();
-                // Unlike the other backends, a lark write error must NOT
-                // unrecord: lark can fail AFTER the batch is WAL-durable and
-                // memtable-visible (rotate_memtable on the same call), so an
-                // error is indeterminate. Keeping the record risks a phantom
-                // conflict (spurious retry); dropping it risks missing a real
-                // conflict against landed data (lost update).
-                pending.check_and_record_conflicts(&conflict_tracker, read_version, &read_set)?;
+                let version = pending.check_and_record_conflicts(
+                    &conflict_tracker,
+                    read_version,
+                    &read_set,
+                )?;
+                // Unrecords on error before the write lands. lark now reports
+                // write errors determinately (a failed rotate happens before
+                // the batch is applied), so an error means the batch did not
+                // land and the phantom write-set must not survive it.
+                let record_guard =
+                    crate::backends::shared::RecordGuard::new(&conflict_tracker, version);
 
                 let batch = pending.into_write_batch();
                 db.write_with_durability(batch, durability)
                     .map_err(|error| Error::Backend(error.to_string()))?;
+                record_guard.defuse();
                 Ok(())
             })
             .await;
