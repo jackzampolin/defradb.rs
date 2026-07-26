@@ -1,9 +1,9 @@
+use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
-use std::hint::black_box;
-use storage::backends::RedbStore;
 use storage::corekv::{IterOptions, Reader, Store, Writer};
 use tempfile::TempDir;
 
@@ -12,9 +12,15 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().unwrap())
 }
 
-struct BenchStore {
-    _temp_dir: TempDir,
-    store: Arc<RedbStore>,
+/// Fixture holding a seeded store plus the keys the benchmarks read against.
+///
+/// Generic over the backend so the same workload runs identically against
+/// every enabled store (`redb`, `lark`, `rocksdb`), giving a side-by-side
+/// comparison of the DefraDB transaction wrapper on each. Each backend
+/// honours its own `*_`-prefixed environment options at construction, so the
+/// harness measures a configured backend, not just its raw defaults (#1009).
+struct BenchStore<S: Store> {
+    store: Arc<S>,
     tree_key: Vec<u8>,
     pending_key: Vec<u8>,
     pending_value: Vec<u8>,
@@ -25,13 +31,8 @@ struct BenchStore {
     set_counter: AtomicUsize,
 }
 
-impl BenchStore {
-    fn new() -> Self {
-        let temp_dir = TempDir::new().unwrap();
-        let store = runtime().block_on(async {
-            Arc::new(RedbStore::open(temp_dir.path().join("bench.redb")).unwrap())
-        });
-
+impl<S: Store> BenchStore<S> {
+    fn new(store: Arc<S>) -> Self {
         let tree_key = b"tree:hot".to_vec();
         let pending_key = b"pending:hot".to_vec();
         let pending_value = b"pending-value".to_vec();
@@ -88,7 +89,6 @@ impl BenchStore {
         });
 
         Self {
-            _temp_dir: temp_dir,
             store,
             tree_key,
             pending_key,
@@ -110,14 +110,9 @@ impl BenchStore {
     }
 }
 
-fn fixture() -> &'static BenchStore {
-    static FIXTURE: OnceLock<BenchStore> = OnceLock::new();
-    FIXTURE.get_or_init(BenchStore::new)
-}
-
-fn bench_storage(c: &mut Criterion) {
-    let fixture = fixture();
-    let mut group = c.benchmark_group("storage");
+/// Run the full workload against one backend, grouped as `storage/<backend>`.
+fn bench_backend<S: Store>(c: &mut Criterion, backend: &str, fixture: &BenchStore<S>) {
+    let mut group = c.benchmark_group(format!("storage/{backend}"));
 
     group.bench_function(BenchmarkId::from_parameter("get_from_tree"), |b| {
         b.iter_batched(
@@ -272,6 +267,45 @@ fn bench_storage(c: &mut Criterion) {
     });
 
     group.finish();
+}
+
+fn bench_storage(c: &mut Criterion) {
+    // Each backend is gated on its feature; run
+    // `cargo bench -p storage --features "redb,lark,rocksdb"` for a full
+    // side-by-side. The temp dir for each store outlives its `bench_backend`
+    // call because that call measures synchronously before the block ends.
+    #[cfg(feature = "redb")]
+    {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(storage::RedbStore::open(dir.path().join("bench.redb")).unwrap());
+        bench_backend(c, "redb", &BenchStore::new(store));
+    }
+
+    #[cfg(feature = "lark")]
+    {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(
+            storage::LarkStore::open_with_options(
+                dir.path(),
+                storage::LarkStoreOptions::from_env(),
+            )
+            .unwrap(),
+        );
+        bench_backend(c, "lark", &BenchStore::new(store));
+    }
+
+    #[cfg(feature = "rocksdb")]
+    {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(
+            storage::RocksDbStore::open_with_options(
+                dir.path(),
+                storage::RocksDbStoreOptions::from_env(),
+            )
+            .unwrap(),
+        );
+        bench_backend(c, "rocksdb", &BenchStore::new(store));
+    }
 }
 
 criterion_group!(benches, bench_storage);
