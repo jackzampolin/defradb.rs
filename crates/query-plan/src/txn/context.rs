@@ -17,7 +17,6 @@ use crate::fetcher::CollectionProvider;
 use crate::fetcher::DocFetcher;
 use crate::mutator::DocMutator;
 
-#[cfg(not(target_arch = "wasm32"))]
 tokio::task_local! {
     static TXN_DEFERRED_ACP_MUTATIONS: Arc<DeferredAcpMutations>;
 }
@@ -264,7 +263,6 @@ impl Drop for RequestBearerTokenGuard {
 }
 
 /// Execute a future with the given deferred ACP mutation projection in scope.
-#[cfg(not(target_arch = "wasm32"))]
 pub async fn scope_deferred_acp_mutations<Fut, T>(
     mutations: Arc<DeferredAcpMutations>,
     future: Fut,
@@ -275,31 +273,11 @@ where
     TXN_DEFERRED_ACP_MUTATIONS.scope(mutations, future).await
 }
 
-/// Execute a future with the given deferred ACP mutation projection in scope.
-#[cfg(target_arch = "wasm32")]
-pub async fn scope_deferred_acp_mutations<Fut, T>(
-    _mutations: Arc<DeferredAcpMutations>,
-    future: Fut,
-) -> T
-where
-    Fut: Future<Output = T>,
-{
-    future.await
-}
-
 /// Return the current transaction's deferred ACP projection, if any.
 pub fn current_deferred_acp_mutations() -> Option<Arc<DeferredAcpMutations>> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        TXN_DEFERRED_ACP_MUTATIONS
-            .try_with(|mutations| mutations.clone())
-            .ok()
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        None
-    }
+    TXN_DEFERRED_ACP_MUTATIONS
+        .try_with(|mutations| mutations.clone())
+        .ok()
 }
 
 /// Check document registration while honoring any ACP mutations buffered in the current txn.
