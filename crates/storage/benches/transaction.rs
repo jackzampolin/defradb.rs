@@ -16,9 +16,10 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 ///
 /// Generic over the backend so the same workload runs identically against
 /// every enabled store (`redb`, `lark`, `rocksdb`), giving a side-by-side
-/// comparison of the DefraDB transaction wrapper on each. Each backend
-/// honours its own `*_`-prefixed environment options at construction, so the
-/// harness measures a configured backend, not just its raw defaults (#1009).
+/// comparison of the DefraDB transaction wrapper on each. Lark and RocksDB
+/// are constructed through their `*_`-prefixed environment options, so a
+/// configured backend is measured rather than just raw defaults; redb has no
+/// environment-configuration path and is built with its defaults (#1009).
 struct BenchStore<S: Store> {
     store: Arc<S>,
     tree_key: Vec<u8>,
