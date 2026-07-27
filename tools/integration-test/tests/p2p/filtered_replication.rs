@@ -282,7 +282,7 @@ async fn rust_filtered_replication_excludes_nonmatching() {
     filtered_excludes_nonmatching(cluster).await;
 }
 
-/// #7: identical guarantee must hold over the iroh transport (defra-agent's
+/// #7: identical guarantee must hold over the iroh transport (Gents'
 /// production transport).
 #[tokio::test]
 async fn rust_filtered_replication_excludes_nonmatching_iroh() {
@@ -2281,7 +2281,7 @@ async fn rust_filtered_replication_delete_stops_push() {
 }
 
 /// Iroh transport variant of `rust_filtered_replication_delete_stops_push`:
-/// deleting a filtered replicator over Iroh (defra-agent's production transport)
+/// deleting a filtered replicator over Iroh (Gents' production transport)
 /// must stop further filtered pushes. Exercises the iroh adapter's delete path
 /// end to end — name->CID resolution, coordinator/registry removal, and
 /// peerstore handling. A matching doc created BEFORE the delete replicates; a
@@ -2475,7 +2475,7 @@ async fn rust_filtered_replication_cli_list_renders_filter() {
 
 /// Iroh transport variant of `rust_filtered_replication_composite_and`: a
 /// composite `agent_did = alice AND kind = keep` predicate must gate the live
-/// push path over Iroh (defra-agent's production transport). A doc matching both
+/// push path over Iroh (Gents' production transport). A doc matching both
 /// arms replicates; a doc matching only one arm must be excluded.
 #[tokio::test]
 async fn rust_filtered_replication_composite_and_iroh() {

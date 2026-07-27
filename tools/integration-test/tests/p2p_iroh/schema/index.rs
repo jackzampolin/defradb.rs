@@ -317,7 +317,7 @@ async fn unique_conflict_from_peer_converges_instead_of_wedging() {
     );
 }
 
-/// sourcenetwork/defra-agent#700 at the replication level (mirrors Go's
+/// source-inc/gents#700 at the replication level (mirrors Go's
 /// delete-then-reinsert unique regression): after a replicated delete, the
 /// unique slot must be free on BOTH nodes — a tombstone never holds a value.
 #[tokio::test]

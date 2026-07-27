@@ -85,7 +85,7 @@ async fn report_push_event(
     // recorded in the ledger's collection-commit keyspace and replayed by CID
     // (defradb#1113). Dropping them here made a failed collection-commit push
     // permanent — the receiver kept heads whose parents never arrived, so its
-    // pending-DAG registrations could never complete (defra-agent#696).
+    // pending-DAG registrations could never complete (gents#696).
     //
     // A doc-less failure with no CID (the versionless SE-artifact path) still
     // has nothing to replay: no document to re-resolve and no CID to re-send.
@@ -1029,7 +1029,7 @@ mod tests {
 
         // defradb#1113: the obligation must reach the ledger. It is doc-less, so
         // it is keyed and replayed by CID; dropping it made failed
-        // collection-commit pushes permanent (defra-agent#696).
+        // collection-commit pushes permanent (gents#696).
         let failure = rx.try_recv().expect("commit failure must be recorded");
         assert_eq!(failure.doc_id, "");
         assert_eq!(failure.collection_id, "collection");

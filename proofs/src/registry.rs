@@ -105,7 +105,7 @@ pub const PROPERTIES: &[Property] = &[
         family: "Multi-instance claim",
         name: "INV_EventualUnique — claim CAS converges to a single winner",
         axis: Tla,
-        anchor: "defra-agent claim.rs (foreign substrate, not the defradb.rs binary)",
+        anchor: "gents claim.rs (foreign substrate, not the defradb.rs binary)",
         model_ref: "MC_Claim_Filtered_Eventual.cfg",
         tiers: &[Boundary],
     },

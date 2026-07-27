@@ -234,7 +234,7 @@ No outright **contradiction** between any two slices was found.
 
 ## (d) Harness-Readiness Assessment
 
-Target next step: a defra-agent-style **binary-conformance harness** binding each model's
+Target next step: a Gents-style **binary-conformance harness** binding each model's
 property to the real Rust binary.
 
 ### Ready now
@@ -280,5 +280,5 @@ property to the real Rust binary.
 prerequisites for a conformance harness — and the TLA regression sweep is already wired
 and broader than the audits credited. The remaining work is (a) fix 3 stale anchors,
 (b) re-key anchors from line numbers to symbols, (c) build the binary binding that turns
-each `INV_*`/theorem + anchor into an executable check against the real defra-agent node,
+each `INV_*`/theorem + anchor into an executable check against the real defradb.rs node,
 and (d) provide a single entry point invoking TLA + Lean + binary checks together.

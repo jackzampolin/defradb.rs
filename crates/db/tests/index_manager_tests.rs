@@ -1602,7 +1602,7 @@ async fn test_delete_then_recreate_same_value() {
 }
 
 /// Unique-index semantics at the deletion and merge boundaries (#1111 /
-/// sourcenetwork/defra-agent#700).
+/// source-inc/gents#700).
 mod unique_boundaries {
     use super::*;
     use datastore::NamespaceView;
@@ -1681,7 +1681,7 @@ mod unique_boundaries {
         datastore.set(&key, &[1u8]).await.unwrap();
     }
 
-    /// Go-parity regression (sourcenetwork/defra-agent#700): deleting the doc
+    /// Go-parity regression (source-inc/gents#700): deleting the doc
     /// that holds a unique value frees the slot for a new doc with that value.
     #[tokio::test]
     async fn recreate_after_delete_frees_the_unique_slot() {

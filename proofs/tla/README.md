@@ -81,7 +81,7 @@ a metadir collision.)
 |---|---|---|---|
 | `Converge` | all nodes eventually merge all blocks | GREEN run 1, RED run 2 | `crates/p2p/src/sync/coordinator/dag_fetcher.rs` ancestry walk |
 | `INV_DagComplete` | no merged block lacks a merged parent | holds under `Merge`; relaxed by Model B (by design) | `crates/db-merge/src/merge_handler/` `loadComposites` recursion |
-| `INV_SubsetConverge` | subscribed docs fully converge | GREEN run 3 | defra-agent watcher DID filter (`watcher/query.rs`) |
+| `INV_SubsetConverge` | subscribed docs fully converge | GREEN run 3 | Gents watcher DID filter (`watcher/query.rs`) |
 | `INV_RelRefSafe` | dropping a foreign-DID relational ref never blocks a merge | GREEN run 3 | scalar `String` FK; merge never derefs it |
 | `INV_NoSplitOwnership` | at most one DID owns a doc across all nodes | RED run 4 (mutable key), GREEN run 5 (immutable key) | `agent_request.graphql` `agent_did` (write-once by convention, unenforced) |
 | `INV_VisibleConverge` | every non-filtered visible block eventually merges | RED run 6 (Naive), GREEN run 8 (Model B) | GraphSync field-filter (future feature) |
@@ -129,7 +129,7 @@ requiring care: getting convergence right is non-trivial, and the relaxed
    - **(E2)** key the subscription filter on the content-addressed create-block
      value of `agent_did` (immutable by construction; no new DB feature needed).
    The model abstracts over E1/E2 — it proves immutability is necessary and
-   sufficient; the mechanism is an implementation choice for defradb.rs / defra-agent.
+   sufficient; the mechanism is an implementation choice for defradb.rs / Gents.
 
 4. **Model B only if field-level GraphSync filtering is built.** For today's
    whole-document filtering, Model A suffices. Model B earns its keep only when
