@@ -83,7 +83,7 @@ a metadir collision.)
 | `INV_DagComplete` | no merged block lacks a merged parent | holds under `Merge`; relaxed by Model B (by design) | `crates/db-merge/src/merge_handler/` `loadComposites` recursion |
 | `INV_SubsetConverge` | subscribed docs fully converge | GREEN run 3 | Gents watcher DID filter (`watcher/query.rs`) |
 | `INV_RelRefSafe` | dropping a foreign-DID relational ref never blocks a merge | GREEN run 3 | scalar `String` FK; merge never derefs it |
-| `INV_NoSplitOwnership` | at most one DID owns a doc across all nodes | RED run 4 (mutable key), GREEN run 5 (immutable key) | `agent_request.graphql` `agent_did` (write-once by convention, unenforced) |
+| `INV_NoSplitOwnership` | at most one DID owns a doc across all nodes | RED run 4 (mutable key), GREEN run 5 (immutable key) | `agent_request.graphql` `agent_did` (unenforced at model time; since `@immutable` + enforced) |
 | `INV_VisibleConverge` | every non-filtered visible block eventually merges | RED run 6 (Naive), GREEN run 8 (Model B) | GraphSync field-filter (future feature) |
 | `INV_NoFilteredFetch` | a node never fetches a block it filters out | RED run 7 (FullWalkA over-fetches), GREEN run 8 (Model B) | resource-savings goal of field-level filtering |
 
@@ -130,6 +130,10 @@ requiring care: getting convergence right is non-trivial, and the relaxed
      value of `agent_did` (immutable by construction; no new DB feature needed).
    The model abstracts over E1/E2 — it proves immutability is necessary and
    sufficient; the mechanism is an implementation choice for defradb.rs / Gents.
+   *[2026-07-27: implemented — `agent_did` is `@immutable` in the Gents schema,
+   and defradb.rs enforces it at update (`crates/db/src/collection/validation.rs`),
+   at merge (E1, `crates/db-merge/src/merge_handler/composite_fields.rs`), and in
+   replication filters (`crates/replication-filter/src/lib.rs`).]*
 
 4. **Model B only if field-level GraphSync filtering is built.** For today's
    whole-document filtering, Model A suffices. Model B earns its keep only when

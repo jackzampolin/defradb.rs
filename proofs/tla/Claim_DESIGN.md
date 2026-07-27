@@ -19,7 +19,7 @@ this repository.
 | `gents:crates/gents/src/lifecycle/claim.rs:287` | If the local update returns no row but the local re-check sees `processing`, the lifecycle still treats the request as claimed. |
 | `gents:crates/gents/src/lifecycle/claim.rs:306` | After claim, the local lifecycle state becomes `Claimed`. |
 | `gents:crates/gents/src/lifecycle/claim.rs:69` and `transition.rs:463` | Execution begins from local `Claimed` and performs a later transition to processing/execution state. |
-| `gents:crates/gents/src/watcher/query.rs:67` | The watcher selects `AgentRequest` rows for the local `agent_did` and `status in [pending, processing]`. |
+| `gents:crates/gents/src/watcher/query.rs:73` | The watcher selects `AgentRequest` rows for the local `agent_did` and `status in [pending, processing]`. |
 | `gents:crates/gents/src/watcher.rs:102` | Each watcher instance carries one `agent_did`; multiple instances can use the same value. |
 | `crates/db-merge/src/merge_handler/lww.rs:165` | LWW merge applies the highest-priority/tie-break delta and rejects lower-priority alternatives. |
 
@@ -88,7 +88,7 @@ Run from `proofs/tla/`:
 |---|---|---|---|
 | `INV_EventualClaimUnique` | Eventually, all same-DID contenders have the same merged claim-block set and, if any claim exists, exactly one LWW claimer. | GREEN for unfiltered; GREEN for DID-filtered with one same-DID replication set; RED for split same-DID filtering. | `claim.rs` guarded claim write plus `lww.rs` conflict resolution. |
 | `INV_ExecutionUnique` | At most one instance ever starts work. | RED for unfiltered; RED for DID-filtered with one same-DID replication set. | `claim.rs:306` local `Claimed` state and `claim.rs:69` `begin_execution` happen before remote claim convergence is guaranteed. |
-| `INV_FilterNeutral` | If the same-DID contention set remains mutually replicating, the eventual claim-uniqueness verdict is preserved. | GREEN for unfiltered and DID-filtered common-set configs. | `watcher/query.rs:67` filters claimable rows by `agent_did`; the P2P filter must preserve the whole same-DID contention set. |
+| `INV_FilterNeutral` | If the same-DID contention set remains mutually replicating, the eventual claim-uniqueness verdict is preserved. | GREEN for unfiltered and DID-filtered common-set configs. | `watcher/query.rs:73` filters claimable rows by `agent_did`; the P2P filter must preserve the whole same-DID contention set. |
 
 ## Result
 
