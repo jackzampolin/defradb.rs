@@ -73,7 +73,9 @@ jobs:
         # clang is needed because lz4-sys (transitive C dep) builds
         # wasm-shim C sources via cc-rs when the target is wasm32.
         # protoc is needed by prost-build.
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang
+        run: |
+          bash .github/scripts/apt-update-without-nodesource.sh
+          sudo apt-get install -y protobuf-compiler clang
 
       - name: Exclude tools with private deps from workspace
         run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
@@ -538,7 +540,9 @@ jobs:
       - name: Install system dependencies
         # protobuf-compiler: prost-build. clang/libclang-dev: bindgen (rocksdb).
         # cmake: librocksdb-sys. libdbus-1-dev: keyring secret-service backend.
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler clang libclang-dev cmake pkg-config libssl-dev libdbus-1-dev
+        run: |
+          bash .github/scripts/apt-update-without-nodesource.sh
+          sudo apt-get install -y --no-install-recommends protobuf-compiler clang libclang-dev cmake pkg-config libssl-dev libdbus-1-dev
 
       # Build both the standard and iroh-enabled binaries — the p2p suite's
       # `rust_*_iroh` filtered-replication tests spawn iroh-transport nodes via

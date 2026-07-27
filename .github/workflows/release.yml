@@ -99,7 +99,7 @@ jobs:
             APT_ARGS=(-o APT::Architecture=arm64 -o APT::Architectures=arm64)
           fi
 
-          sudo apt-get "${APT_ARGS[@]}" update
+          bash .github/scripts/apt-update-without-nodesource.sh "${APT_ARGS[@]}"
           sudo apt-get "${APT_ARGS[@]}" install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
           if [ "${{ matrix.variant }}" = "rocksdb" ]; then
             sudo apt-get "${APT_ARGS[@]}" install -y libclang-dev
@@ -163,7 +163,9 @@ jobs:
           shared-key: "wasm32"
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: |
+          bash .github/scripts/apt-update-without-nodesource.sh
+          sudo apt-get install -y protobuf-compiler
 
       - name: Exclude workspace members with private deps
         run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
@@ -283,7 +285,7 @@ jobs:
             APT_ARGS=(-o APT::Architecture=arm64 -o APT::Architectures=arm64)
           fi
 
-          sudo apt-get "${APT_ARGS[@]}" update
+          bash .github/scripts/apt-update-without-nodesource.sh "${APT_ARGS[@]}"
           sudo apt-get "${APT_ARGS[@]}" install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
           if [ "${{ matrix.variant }}" = "rocksdb" ]; then
             sudo apt-get "${APT_ARGS[@]}" install -y libclang-dev
