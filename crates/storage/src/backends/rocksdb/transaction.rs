@@ -405,52 +405,77 @@ impl Txn for RocksDbTxn {
             // The conflict snapshot moves into the closure with it: if the
             // future is dropped mid-await, the snapshot must keep pinning the
             // records this commit conflict-checks against, or prune() could
-            // empty the history before check_and_record runs. The tradeoff:
-            // a cancelled future can leave a durable commit whose success
-            // callbacks never ran (same as redb's direct path).
+            // empty the history before check_and_record runs. The callbacks
+            // move in for the same reason — a dropped future must not skip
+            // the events for a write that still lands (#1185).
             let db = Arc::clone(&self.db);
             let conflict_tracker = Arc::clone(&self.conflict_tracker);
             let commit_gate = Arc::clone(&self.commit_gate);
             let read_version = self.read_version;
             let durability = self.durability;
             let conflict_snapshot = self._conflict_snapshot.take();
+            let callbacks = crate::backends::shared::CommitCallbacks::drain(&self.callbacks);
 
-            let write_result = tokio::task::spawn_blocking(move || -> Result<()> {
-                let _conflict_snapshot = conflict_snapshot;
-                let _commit_guard = commit_gate.blocking_write();
-                let version =
-                    conflict_tracker.check_and_record(read_version, pending.keys(), &read_set)?;
-                // Unrecords on error or panic before the write lands, so no
-                // phantom write-set survives a failed commit.
-                let record_guard =
-                    crate::backends::shared::RecordGuard::new(&conflict_tracker, version);
+            let write_result = tokio::task::spawn_blocking(
+                move || -> (Result<()>, tokio::task::JoinHandle<()>) {
+                    let _conflict_snapshot = conflict_snapshot;
+                    // The gate covers only the write. Callbacks start after it
+                    // is released: one that opens a transaction would otherwise
+                    // deadlock against this thread's write lock, and holding it
+                    // across callback work would stall every new writer.
+                    let outcome = {
+                        let _commit_guard = commit_gate.blocking_write();
+                        (|| -> Result<()> {
+                            let version = conflict_tracker.check_and_record(
+                                read_version,
+                                pending.keys(),
+                                &read_set,
+                            )?;
+                            // Unrecords on error or panic before the write
+                            // lands, so no phantom write-set survives.
+                            let record_guard = crate::backends::shared::RecordGuard::new(
+                                &conflict_tracker,
+                                version,
+                            );
 
-                let mut batch = rocksdb::WriteBatchWithTransaction::<true>::default();
-                for (key, value) in &pending {
-                    match value {
-                        Some(v) => batch.put(key, v),
-                        None => batch.delete(key),
-                    }
-                }
+                            let mut batch = rocksdb::WriteBatchWithTransaction::<true>::default();
+                            for (key, value) in &pending {
+                                match value {
+                                    Some(v) => batch.put(key, v),
+                                    None => batch.delete(key),
+                                }
+                            }
 
-                let mut write_opts = rocksdb::WriteOptions::default();
-                match durability {
-                    DurabilityMode::Immediate => {
-                        write_opts.set_sync(true);
-                    }
-                    DurabilityMode::Eventual => {
-                        write_opts.set_sync(false);
-                    }
-                }
+                            let mut write_opts = rocksdb::WriteOptions::default();
+                            match durability {
+                                DurabilityMode::Immediate => {
+                                    write_opts.set_sync(true);
+                                }
+                                DurabilityMode::Eventual => {
+                                    write_opts.set_sync(false);
+                                }
+                            }
 
-                db.write_opt(batch, &write_opts)?;
-                record_guard.defuse();
-                Ok(())
-            })
+                            db.write_opt(batch, &write_opts)?;
+                            record_guard.defuse();
+                            Ok(())
+                        })()
+                    };
+                    let callbacks = callbacks.spawn(outcome.is_ok());
+                    (outcome, callbacks)
+                },
+            )
             .await;
 
             let commit_result = match write_result {
-                Ok(result) => result,
+                Ok((outcome, callbacks)) => {
+                    // Keep the guarantee that callbacks finish before commit()
+                    // returns (and that a callback panic still propagates); a
+                    // cancelled caller simply never gets here and the spawned
+                    // task runs on regardless.
+                    crate::backends::shared::join_commit_callbacks(callbacks).await;
+                    outcome
+                }
                 Err(join_err) => Err(Error::Other(if join_err.is_panic() {
                     format!("commit task panicked: {join_err}")
                 } else {
@@ -466,12 +491,14 @@ impl Txn for RocksDbTxn {
                         "Failed to commit RocksDB batch"
                     );
                 }
-                CallbackManager::execute_callbacks(self.callbacks.take_error());
-                CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
                 return Err(e);
             }
+
+            self.committed.store(true, Ordering::Release);
+            return Ok(());
         }
 
+        // Nothing was written, so there is no commit task to carry them.
         self.committed.store(true, Ordering::Release);
 
         CallbackManager::execute_callbacks(self.callbacks.take_success());

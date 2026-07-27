@@ -182,6 +182,11 @@ impl DefraClient {
 
 // Internal implementation methods
 impl DefraClient {
+    // The LevelDB-backed database and its mutator are not `Send`, since wasm
+    // drops those bounds for the single-threaded browser runtime. Sharing them
+    // by `Arc` is what the query runner expects, and there are no threads to
+    // send them across.
+    #[allow(clippy::arc_with_non_send_sync)]
     async fn new_impl(config: JsValue) -> Result<Self> {
         let config: ClientConfig = if config.is_undefined() || config.is_null() {
             ClientConfig::default()
@@ -444,7 +449,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_mutate_no_schema_fails() {
-        let mut client = DefraClient::create(test_config("test_mutate_no_schema"))
+        let client = DefraClient::create(test_config("test_mutate_no_schema"))
             .await
             .unwrap();
         let result = client
@@ -455,7 +460,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_empty_mutation_fails() {
-        let mut client = DefraClient::create(test_config("test_empty_mut"))
+        let client = DefraClient::create(test_config("test_empty_mut"))
             .await
             .unwrap();
         let result = client.mutate("").await;

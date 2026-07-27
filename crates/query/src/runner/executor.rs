@@ -328,23 +328,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        #[cfg(not(target_arch = "wasm32"))]
         let txn_provider = txn_ctx.collection_provider();
 
         // Validate that all referenced collections exist before execution.
         // Use the transaction-scoped provider if available so uncommitted schemas are visible.
         {
-            #[cfg(not(target_arch = "wasm32"))]
             let validation_provider: &dyn crate::fetcher::CollectionProvider =
                 if let Some(ref p) = txn_provider {
                     p.as_ref()
                 } else {
                     self.collection_provider.as_ref()
                 };
-
-            #[cfg(target_arch = "wasm32")]
-            let validation_provider: &dyn crate::fetcher::CollectionProvider =
-                self.collection_provider.as_ref();
 
             if let Err(e) = validate_parsed_operation(&parsed, validation_provider).await {
                 return QueryResponse {
@@ -443,10 +437,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
 
         let deferred_acp_mutations = txn_ctx.deferred_acp_mutations();
 
-        // If the transaction provides a collection provider or deferred ACP
-        // projection, set them as task-local overrides so this execution sees
-        // the transaction's uncommitted schema and ACP state.
-        #[cfg(not(target_arch = "wasm32"))]
+        // Scope both transaction overlays around execution so schema resolution
+        // and ACP checks see uncommitted state.
         let result = if let Some(provider) = txn_provider {
             if let Some(deferred_acp_mutations) = deferred_acp_mutations {
                 super::TXN_COLLECTION_PROVIDER
@@ -472,9 +464,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         } else {
             await_with_timeout(execution, self.query_timeout).await
         };
-
-        #[cfg(target_arch = "wasm32")]
-        let result = await_with_timeout(execution, self.query_timeout).await;
 
         match result {
             Ok(data) => QueryResponse {

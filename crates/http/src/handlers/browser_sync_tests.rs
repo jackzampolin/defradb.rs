@@ -12,10 +12,10 @@ use defra_core::browser_sync::{
     BrowserSyncRequest, BrowserSyncResponse, MAX_SYNC_DOCUMENTS_PER_REQUEST, MAX_SYNC_PULL_DOC_IDS,
 };
 
-use crate::mock::MockQueryExecutor;
+use crate::mock::{MockNodeAcpOperations, MockQueryExecutor};
 use crate::router::{
     create_router_with_state, create_router_with_state_and_sync_body_limit, AppStateBuilder,
-    BrowserSyncOperations, BrowserSyncResult,
+    BrowserSyncOperations, BrowserSyncResult, NodeAcpOperations,
 };
 
 #[derive(Default)]
@@ -45,6 +45,70 @@ fn router(sync: Arc<RecordingSync>) -> axum::Router {
         .with_browser_sync(sync)
         .build();
     create_router_with_state(state)
+}
+
+fn router_with_nac(sync: Arc<RecordingSync>, nac: Arc<MockNodeAcpOperations>) -> axum::Router {
+    let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
+    let state = AppStateBuilder::new(executor)
+        .with_browser_sync(sync)
+        .with_nac(nac as Arc<dyn NodeAcpOperations>)
+        .build();
+    create_router_with_state(state)
+}
+
+/// A request that neither pulls nor pushes still reaches the sync service,
+/// whose "not enabled" error would otherwise tell an unauthorized caller
+/// whether browser sync is turned on. It must be permission-checked like any
+/// other sync call.
+#[tokio::test]
+async fn empty_sync_request_is_permission_checked() {
+    let sync = Arc::new(RecordingSync::default());
+    let owner = identity::Did::new("did:key:owner").unwrap();
+    let nac = Arc::new(MockNodeAcpOperations::enabled_with_owner(owner));
+    let router = router_with_nac(sync.clone(), nac);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v0/sync")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"documents":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(sync.calls.load(Ordering::Relaxed), 0);
+}
+
+/// The same request from a caller that does hold document-read still works,
+/// so gating the probe does not turn a no-op sync into a hard failure.
+#[tokio::test]
+async fn empty_sync_request_is_allowed_for_permitted_caller() {
+    let sync = Arc::new(RecordingSync::default());
+    let owner = identity::Did::new("did:key:owner").unwrap();
+    let nac = Arc::new(MockNodeAcpOperations::enabled_with_owner(owner).with_grant(
+        identity::Did::wildcard(),
+        crate::router::NodePermission::DocumentRead,
+    ));
+    let router = router_with_nac(sync.clone(), nac);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v0/sync")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"documents":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(sync.calls.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

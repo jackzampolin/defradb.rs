@@ -238,9 +238,28 @@ impl Txn for MemoryTxn {
         // Mark as committed
         self.committed.store(true, Ordering::Release);
 
-        // Execute success callbacks
+        // Execute success callbacks. The sync ones cannot be skipped — nothing
+        // awaits between the mutation above and here — but the async ones sit
+        // behind an await, so a caller cancelled there would drop the events
+        // for a mutation that already landed (#1185). Spawn them so they
+        // survive that, and await the handle so they still finish before
+        // commit() returns. There is no blocking task here to carry them, and
+        // no guarantee of a runtime, so fall back to running them inline.
         CallbackManager::execute_callbacks(self.callbacks.take_success());
-        CallbackManager::execute_async_callbacks(self.callbacks.take_success_async()).await;
+        let success_async = self.callbacks.take_success_async();
+        if !success_async.is_empty() {
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    crate::backends::shared::join_commit_callbacks(
+                        handle.spawn(CallbackManager::execute_async_callbacks(success_async)),
+                    )
+                    .await;
+                }
+                Err(_) => {
+                    CallbackManager::execute_async_callbacks(success_async).await;
+                }
+            }
+        }
 
         Ok(())
     }

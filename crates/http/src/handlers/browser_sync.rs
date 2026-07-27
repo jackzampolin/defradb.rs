@@ -37,6 +37,14 @@ pub async fn sync(
     if !request.documents.is_empty() {
         require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
     }
+    if request.pull.is_none() && request.documents.is_empty() {
+        // A request that neither pulls nor pushes still reaches the sync
+        // service below, whose "browser sync is not enabled" error would
+        // otherwise tell an unauthenticated caller whether the feature is on.
+        // Gate it on the weakest document permission so the probe answers
+        // the same way for callers that may not use sync at all.
+        require_permission(&state, &identity, NodePermission::DocumentRead).await?;
+    }
 
     let bypass_dac = resolve_dac_bypass(&state, &identity).await;
     let response = state

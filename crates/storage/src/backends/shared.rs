@@ -2,6 +2,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{
@@ -9,7 +10,9 @@ use std::sync::{
     Arc,
 };
 
-use crate::corekv::{AsyncTxnCallback, IterOptions, TxnCallback};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::corekv::IterOptions;
+use crate::corekv::{AsyncTxnCallback, TxnCallback};
 
 /// Controls when data is flushed to disk after a commit.
 ///
@@ -179,12 +182,14 @@ impl CallbackCounts {
 /// writes data must conflict if another transaction committed after its snapshot
 /// and either wrote a key it read, or read a key/range it wrote. Tracking both
 /// point reads and iterator ranges gives the Rust backends the same behavior.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ReadSet {
     keys: HashSet<Vec<u8>>,
     ranges: Vec<ReadRange>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 enum ReadRange {
     Prefix(Vec<u8>),
@@ -194,6 +199,7 @@ enum ReadRange {
     },
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ReadSet {
     pub(crate) fn record_key(&mut self, key: &[u8]) {
         self.keys.insert(key.to_vec());
@@ -218,6 +224,7 @@ impl ReadSet {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn is_document_collection_scan_prefix(prefix: &[u8]) -> bool {
     // Namespaced datastore document scans use `d/d/...`; root datastore scans
     // use `/d/...`. Go's SSI conflict in the relation tests comes from FK index
@@ -229,6 +236,7 @@ fn is_document_collection_scan_prefix(prefix: &[u8]) -> bool {
         || prefix.starts_with(b"/del/")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ReadRange {
     fn contains(&self, key: &[u8]) -> bool {
         match self {
@@ -424,6 +432,103 @@ impl ConflictTracker {
         {
             state.committed.remove(index);
         }
+    }
+}
+
+/// Await spawned commit callbacks, re-raising a panic from one of them in the
+/// caller.
+///
+/// Callbacks run in a spawned task so they survive a cancelled commit future,
+/// which also isolates their panics. `commit()` is contractually required to
+/// propagate a panicking callback (see `test_suite::callbacks`), so the panic
+/// is resumed here. A caller that is already gone never reaches this, and the
+/// spawned task's panic is reported by the runtime instead.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn join_commit_callbacks(handle: tokio::task::JoinHandle<()>) {
+    if let Err(join_error) = handle.await {
+        if join_error.is_panic() {
+            std::panic::resume_unwind(join_error.into_panic());
+        }
+    }
+}
+
+/// A transaction's callback sets, drained before its commit is handed to the
+/// blocking task that performs the write.
+///
+/// The write runs on a `spawn_blocking` thread, which keeps running after the
+/// caller's commit future is dropped. Selecting and starting the callbacks
+/// from the async side after that await would skip them for a write that
+/// still lands, silently losing the subscription and P2P Update events
+/// registered through `on_success_async` (#1185).
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(
+        feature = "redb",
+        feature = "fjall",
+        feature = "rocksdb",
+        feature = "lark"
+    )
+))]
+pub(crate) struct CommitCallbacks {
+    success: Vec<TxnCallback>,
+    success_async: Vec<AsyncTxnCallback>,
+    error: Vec<TxnCallback>,
+    error_async: Vec<AsyncTxnCallback>,
+    handle: tokio::runtime::Handle,
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(
+        feature = "redb",
+        feature = "fjall",
+        feature = "rocksdb",
+        feature = "lark"
+    )
+))]
+impl CommitCallbacks {
+    /// Drain every set. Called from the async side, which is where the
+    /// runtime handle comes from.
+    pub(crate) fn drain(callbacks: &CallbackManager) -> Self {
+        Self {
+            success: callbacks.take_success(),
+            success_async: callbacks.take_success_async(),
+            error: callbacks.take_error(),
+            error_async: callbacks.take_error_async(),
+            handle: tokio::runtime::Handle::current(),
+        }
+    }
+
+    /// Start the success or error set on the runtime, returning its handle.
+    ///
+    /// Called from the blocking commit task once the write outcome is known.
+    /// The work is spawned rather than run inline on that thread because
+    /// these callbacks do real async work — P2P broadcasts, `tokio::fs`
+    /// reads, arbitrary post-commit hooks — and `tokio::fs` is itself backed
+    /// by the blocking pool, so occupying a pool thread while waiting on them
+    /// risks exhausting it. Spawning also detaches them from the caller,
+    /// which may already be gone.
+    ///
+    /// Callers await the returned handle on the normal path, preserving the
+    /// existing guarantee that callbacks finish before `commit()` returns.
+    #[must_use]
+    pub(crate) fn spawn(self, succeeded: bool) -> tokio::task::JoinHandle<()> {
+        let Self {
+            success,
+            success_async,
+            error,
+            error_async,
+            handle,
+        } = self;
+        handle.spawn(async move {
+            if succeeded {
+                CallbackManager::execute_callbacks(success);
+                CallbackManager::execute_async_callbacks(success_async).await;
+            } else {
+                CallbackManager::execute_callbacks(error);
+                CallbackManager::execute_async_callbacks(error_async).await;
+            }
+        })
     }
 }
 

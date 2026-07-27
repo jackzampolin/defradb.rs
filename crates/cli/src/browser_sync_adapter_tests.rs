@@ -94,6 +94,74 @@ async fn create_document(
     engine.load_document(&document_ref).await.unwrap().unwrap()
 }
 
+/// Create a document whose DAG cannot fit in a sync payload. Returns its
+/// doc id; it deliberately cannot be loaded through `load_document`.
+async fn create_oversized_document(database: &Arc<db::DB<MemoryStore>>) -> String {
+    let mut document = Document::new();
+    document.set(
+        "name",
+        "x".repeat(defra_core::browser_sync::MAX_SYNC_PAYLOAD_BYTES + 1024),
+    );
+    db::AutoCommitMutator::new(database.clone())
+        .create("Users", document)
+        .await
+        .unwrap()
+        .doc_id
+        .to_string()
+}
+
+/// A document too large to load must not fail the page it lands on. Before the
+/// per-document skip, every pull covering it returned 422 forever and the
+/// cursor could never advance past it, wedging the whole sync.
+#[tokio::test]
+async fn pull_skips_a_document_that_exceeds_the_payload_limit() {
+    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    database
+        .create_collection(users_schema(false))
+        .await
+        .unwrap();
+    let oversized = create_oversized_document(&database).await;
+    create_document(&database, "Alice").await;
+
+    let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
+    let adapter = BrowserSyncAdapter::new_arc(database, acp);
+
+    let mut cursor = None;
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..8 {
+        let page = adapter
+            .sync(
+                BrowserSyncRequest {
+                    documents: Vec::new(),
+                    pull: Some(BrowserSyncPull {
+                        doc_ids: Vec::new(),
+                        cursor: cursor.clone(),
+                        limit: Some(1),
+                    }),
+                },
+                None,
+                false,
+            )
+            .await
+            .expect("an oversized document must not fail the pull");
+        seen.extend(page.documents.iter().map(|doc| doc.doc_id.clone()));
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+
+    assert!(
+        !seen.contains(&oversized),
+        "oversized document should have been skipped, got {seen:?}"
+    );
+    assert_eq!(
+        seen.len(),
+        1,
+        "the loadable document should still be served, got {seen:?}"
+    );
+}
+
 #[tokio::test]
 async fn pull_uses_advancing_cursor_pages() {
     let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());

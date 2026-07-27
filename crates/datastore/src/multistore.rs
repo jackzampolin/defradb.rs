@@ -16,6 +16,11 @@ pub struct SharedTxn {
 
 impl SharedTxn {
     /// Create a new shared transaction.
+    // `Txn` drops its `Send + Sync` bounds on wasm32 (see `MaybeSendSync`), so
+    // there the Arc wraps a non-Send value. That is sound in the
+    // single-threaded browser runtime, and the return type has to stay `Arc`
+    // for native callers that share it across threads.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub fn new(txn: Box<dyn Txn>) -> Arc<Self> {
         Arc::new(Self {
             txn: RwLock::new(txn),
