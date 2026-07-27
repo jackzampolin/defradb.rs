@@ -83,7 +83,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 
         // A merged write onto a logically-deleted document must not touch the
         // indexes: the document is dead, and indexing it re-mints exactly the
-        // stale unique entry that blocks the value forever (gents#700's
+        // stale unique entry that blocks the value forever (source-inc/gents#700's
         // out-of-order create-after-delete arrival). Go skips index sync when
         // the merged doc reads back absent for the same reason.
         let deleted_marker_key =

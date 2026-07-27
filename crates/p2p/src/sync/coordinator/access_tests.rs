@@ -2028,7 +2028,7 @@ async fn gossip_controlled_mode_allows_subscribed_outbound_replicator_target() {
 /// have no document-topic fallback: the collection topic is their only delivery
 /// path. A symmetric mesh makes both peers each other's outbound replicator
 /// target, so if that closed the collection topic, collection commits could
-/// never be delivered at all (gents#696).
+/// never be delivered at all (source-inc/gents#696).
 #[tokio::test]
 async fn gossip_allows_doc_less_collection_commit_from_outbound_replicator_target() {
     let replicators = Arc::new(ReplicatorRegistry::new());

@@ -201,7 +201,7 @@ impl<S: Store> Peerstore<S> {
         // recorded under their own keyspace so they can be replayed by CID;
         // dropping them here made a failed collection-commit push permanent,
         // leaving receivers with heads whose parents never arrive
-        // (defradb#1113, gents#696).
+        // (defradb#1113, source-inc/gents#696).
         if doc_id.is_empty() {
             if cid.is_empty() {
                 // A versionless doc-less failure (SE artifact) has nothing to
@@ -1182,7 +1182,7 @@ mod tests {
     /// and replayable. It has no document id, so it is keyed by
     /// (peer, collection, CID). Dropping it made the failure permanent —
     /// receivers kept heads whose parents never arrived, and their pending-DAG
-    /// registrations could never complete (gents#696).
+    /// registrations could never complete (source-inc/gents#696).
     #[tokio::test]
     async fn collection_commit_push_failure_is_recorded_and_replayable() {
         let store = Arc::new(MemoryStore::new());
