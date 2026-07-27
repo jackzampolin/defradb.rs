@@ -98,13 +98,16 @@ impl Store for LarkStore {
         }
         let mut guard = NewTxnGuard(&self.active_txn_count, false);
 
-        // Unlike the other backends, read-only transactions must NOT skip
-        // the gate here: lark publishes `latest_seq` before applying batch
-        // ops to the memtable, so an ungated snapshot taken mid-commit can
-        // claim visibility of sequence numbers whose data has not landed
-        // (torn batch). The gate is what keeps snapshot acquisition atomic
-        // against in-flight commits until lark publishes after applying.
-        let _commit_guard = self.commit_gate.read().await;
+        // Pair the conflict version and lark snapshot without a commit
+        // becoming visible between them. Read-only transactions skip the
+        // gate: lark now publishes its read horizon only after a batch is
+        // applied, so an ungated snapshot can no longer observe a torn
+        // batch, and read-only transactions never conflict-check.
+        let _commit_guard = if readonly {
+            None
+        } else {
+            Some(self.commit_gate.read().await)
+        };
         let txn = LarkTxn::new(
             Arc::clone(&self.db),
             Arc::clone(&self.conflict_tracker),
@@ -265,30 +268,25 @@ mod pairing_tests {
     }
 
     #[tokio::test]
-    async fn readonly_txn_still_gated_against_torn_batches() {
+    async fn readonly_txn_skips_the_commit_gate() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let store = Arc::new(LarkStore::open(temp_dir.path()).unwrap());
         let gate = Arc::clone(&store.commit_gate);
         let commit_guard = gate.write().await;
 
-        // lark publishes its sequence counter before applying batch ops, so
-        // read-only snapshots must stay behind the gate (unlike the other
-        // backends) or they can observe a torn batch.
+        // lark now publishes its read horizon only after a batch is applied,
+        // so a read-only snapshot can no longer observe a torn batch and does
+        // not need the gate — matching rocksdb/redb/fjall/memory. It must
+        // acquire even while a writer holds the gate.
         let readonly_store = Arc::clone(&store);
-        let mut readonly_task = tokio::spawn(async move { readonly_store.new_txn(true).await });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(25), &mut readonly_task)
-                .await
-                .is_err(),
-            "read-only transaction skipped the commit gate on lark"
-        );
-
-        drop(commit_guard);
+        let readonly_task = tokio::spawn(async move { readonly_store.new_txn(true).await });
         tokio::time::timeout(Duration::from_secs(1), readonly_task)
             .await
-            .expect("read-only transaction remained blocked after gate release")
+            .expect("read-only transaction blocked on the commit gate")
             .expect("readonly task panicked")
             .expect("read-only transaction failed");
+
+        drop(commit_guard);
     }
 
     #[tokio::test]

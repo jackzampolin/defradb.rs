@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use storage::corekv::{IterOptions, Reader, Store, Writer};
 use storage::namespace::{Namespace, NamespacedStore};
-#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
+#[cfg(feature = "redb")]
 use storage::RedbStore;
 
 use identity::Did;
@@ -27,7 +27,7 @@ impl<S: Store> PersistentZanzibarStore<S> {
     }
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
+#[cfg(feature = "redb")]
 impl PersistentZanzibarStore<RedbStore> {
     /// Open a persistent store at the given path.
     pub fn open(path: &std::path::Path) -> Result<Self> {
@@ -62,9 +62,7 @@ impl<S: Store> PersistentZanzibarStore<S> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[async_trait]
 impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
     async fn store_policy(&self, policy: &Policy) -> Result<()> {
         let mut txn = self.store.new_txn(false).await.map_err(|e| {

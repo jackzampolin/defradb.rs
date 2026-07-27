@@ -937,6 +937,9 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             .new_txn(readonly)
             .await
             .map_err(|e| TransactionError::execution(format!("storage error: {}", e)))?;
+        // Non-Send on wasm32, where the callbacks it holds drop their `Send`
+        // bounds for the single-threaded browser runtime.
+        #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
         let deferred_acp_mutations = Arc::new(DeferredAcpMutations::new());
         let deferred_acp_mutations_for_commit = deferred_acp_mutations.clone();
         db_txn
