@@ -374,12 +374,20 @@ impl Txn for RedbTxn {
                 ._conflict_snapshot
                 .take()
                 .expect("write transaction has a conflict snapshot");
-            let error_callbacks = self.callbacks.take_error();
-            let error_async_callbacks = self.callbacks.take_error_async();
+            // Carried into the commit task so a dropped future does not skip
+            // the events for a write that still lands (#1185).
+            let callbacks = crate::backends::shared::CommitCallbacks::drain(&self.callbacks);
 
-            let write_result = tokio::task::spawn_blocking(move || -> Result<()> {
+            let write_result = tokio::task::spawn_blocking(
+                move || -> (Result<()>, tokio::task::JoinHandle<()>) {
                 let _conflict_snapshot = conflict_snapshot;
+                // The gate covers only the write. Callbacks start after it is
+                // released: one that opens a transaction would otherwise
+                // deadlock against this thread's write lock, and holding it
+                // across callback work would stall every new writer.
+                let outcome = {
                 let _commit_guard = commit_gate.blocking_write();
+                (|| -> Result<()> {
                 let version =
                     conflict_tracker.check_and_record(read_version, pending.keys(), &read_set)?;
                 // Unrecords on error or panic before the write lands, so no
@@ -437,19 +445,23 @@ impl Txn for RedbTxn {
                 write()?;
                 record_guard.defuse();
                 Ok(())
+                })()
+                };
+                let callbacks = callbacks.spawn(outcome.is_ok());
+                (outcome, callbacks)
             })
             .await;
 
             match write_result {
-                Ok(Ok(())) => {} // Success — fall through to callback execution
-                Ok(Err(e)) => {
-                    CallbackManager::execute_callbacks(error_callbacks);
-                    CallbackManager::execute_async_callbacks(error_async_callbacks).await;
-                    return Err(e);
+                Ok((outcome, callbacks)) => {
+                    // Keep the guarantee that callbacks finish before commit()
+                    // returns (and that a callback panic still propagates); a
+                    // cancelled caller simply never gets here and the spawned
+                    // task runs on regardless.
+                    crate::backends::shared::join_commit_callbacks(callbacks).await;
+                    outcome?;
                 }
                 Err(join_err) => {
-                    CallbackManager::execute_callbacks(error_callbacks);
-                    CallbackManager::execute_async_callbacks(error_async_callbacks).await;
                     let msg = if join_err.is_panic() {
                         let panic = join_err.into_panic();
                         if let Some(s) = panic.downcast_ref::<String>() {
@@ -465,12 +477,15 @@ impl Txn for RedbTxn {
                     return Err(Error::Other(msg));
                 }
             }
+
+            // Mark as committed AFTER successful database commit
+            self.committed.store(true, Ordering::Release);
+            return Ok(());
         }
 
-        // Mark as committed AFTER successful database commit
+        // Nothing was written, so there is no commit task to carry them.
         self.committed.store(true, Ordering::Release);
 
-        // Execute success callbacks
         CallbackManager::execute_callbacks(self.callbacks.take_success());
         CallbackManager::execute_async_callbacks(self.callbacks.take_success_async()).await;
 
