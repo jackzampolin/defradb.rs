@@ -224,6 +224,32 @@ impl ReadSet {
     }
 }
 
+/// Content-addressed blockstore data keys: the blockstore namespace byte
+/// followed by valid raw CID bytes.
+///
+/// The key is the hash of the value, so any two writers of the same key write
+/// identical bytes — blind write-write overlap on these keys is not a
+/// serializability hazard, and Go's badger likewise never conflicts blind
+/// writes (it only checks reads against committed writes). Without this
+/// carve-out, concurrent updates to DIFFERENT documents that produce
+/// byte-identical field deltas (e.g. both rewrite `status: "streaming"`)
+/// collide on the shared delta block and spuriously abort (#1194).
+///
+/// Merge-tracking keys under the blockstore namespace (`b` then `m` then
+/// CID, [`ToMergeIndexKey`](crate::keys::blockstore::ToMergeIndexKey)) are
+/// explicitly excluded: their presence is mutable state that must stay
+/// conflict-checked. Only the write-write check consults this predicate;
+/// read-vs-write conflicts apply to block keys like any other key.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_content_addressed_block_key(key: &[u8]) -> bool {
+    let Some((&namespace, cid_bytes)) = key.split_first() else {
+        return false;
+    };
+    namespace == crate::namespace::Namespace::Blockstore.prefix()
+        && !crate::keys::blockstore::ToMergeIndexKey::is_merge_key(cid_bytes)
+        && cid::Cid::try_from(cid_bytes).is_ok_and(|cid| cid.encoded_len() == cid_bytes.len())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn is_document_collection_scan_prefix(prefix: &[u8]) -> bool {
     // Namespaced datastore document scans use `d/d/...`; root datastore scans
@@ -377,7 +403,9 @@ impl ConflictTracker {
         // Check for conflicts against transactions committed after our snapshot.
         for (_, committed_writes, committed_reads) in state.committed_after(read_version) {
             for write_key in &write_keys {
-                if committed_writes.contains(*write_key) || committed_reads.conflicts_key(write_key)
+                if (committed_writes.contains(*write_key)
+                    && !is_content_addressed_block_key(write_key))
+                    || committed_reads.conflicts_key(write_key)
                 {
                     return Err(crate::corekv::Error::TxnConflict);
                 }
@@ -679,6 +707,152 @@ mod tests {
             )
             .unwrap_err();
 
+        assert!(matches!(err, crate::corekv::Error::TxnConflict));
+    }
+
+    fn cid_bytes(fill: u8) -> Vec<u8> {
+        // Valid CIDv1: version 1, dag-cbor codec, sha2-256 multihash.
+        let mut bytes = vec![0x01, 0x71, 0x12, 0x20];
+        bytes.extend(std::iter::repeat_n(fill, 32));
+        assert!(cid::Cid::try_from(bytes.as_slice()).is_ok());
+        bytes
+    }
+
+    fn block_key(fill: u8) -> Vec<u8> {
+        let mut key = vec![b'b'];
+        key.extend(cid_bytes(fill));
+        key
+    }
+
+    #[test]
+    fn identical_block_writes_do_not_conflict() {
+        let tracker = Arc::new(ConflictTracker::new());
+        let first_snapshot = tracker.begin_snapshot();
+        let second_snapshot = tracker.begin_snapshot();
+
+        // Two overlapping transactions write the same content-addressed block
+        // (same CID => byte-identical value). Both must commit (#1194).
+        let writes = [block_key(0xaa)];
+        tracker
+            .check_and_record(first_snapshot.version(), writes.iter(), &ReadSet::default())
+            .unwrap();
+        drop(first_snapshot);
+
+        tracker
+            .check_and_record(
+                second_snapshot.version(),
+                writes.iter(),
+                &ReadSet::default(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn merge_index_writes_still_conflict() {
+        let tracker = Arc::new(ConflictTracker::new());
+        let first_snapshot = tracker.begin_snapshot();
+        let second_snapshot = tracker.begin_snapshot();
+
+        // Blockstore merge-tracking keys ('b' + 'm' + CID) are mutable state,
+        // not content-addressed data: write-write stays a conflict even though
+        // the payload after the merge prefix is a valid CID.
+        let mut merge_key = vec![b'b', b'm'];
+        merge_key.extend(cid_bytes(0xaa));
+        let writes = [merge_key];
+        tracker
+            .check_and_record(first_snapshot.version(), writes.iter(), &ReadSet::default())
+            .unwrap();
+        drop(first_snapshot);
+
+        let err = tracker
+            .check_and_record(
+                second_snapshot.version(),
+                writes.iter(),
+                &ReadSet::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, crate::corekv::Error::TxnConflict));
+    }
+
+    #[test]
+    fn non_cid_blockstore_writes_still_conflict() {
+        let tracker = Arc::new(ConflictTracker::new());
+        let first_snapshot = tracker.begin_snapshot();
+        let second_snapshot = tracker.begin_snapshot();
+
+        // A blockstore-namespace key whose payload is not a valid CID is not
+        // content-addressed: write-write stays a conflict.
+        let mut bogus_key = vec![b'b', 0x01, 0x71];
+        bogus_key.extend(std::iter::repeat_n(0xaa, 34));
+        assert!(cid::Cid::try_from(&bogus_key[1..]).is_err());
+        let writes = [bogus_key];
+        tracker
+            .check_and_record(first_snapshot.version(), writes.iter(), &ReadSet::default())
+            .unwrap();
+        drop(first_snapshot);
+
+        let err = tracker
+            .check_and_record(
+                second_snapshot.version(),
+                writes.iter(),
+                &ReadSet::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, crate::corekv::Error::TxnConflict));
+    }
+
+    #[test]
+    fn cid_with_trailing_bytes_still_conflicts() {
+        let tracker = Arc::new(ConflictTracker::new());
+        let first_snapshot = tracker.begin_snapshot();
+        let second_snapshot = tracker.begin_snapshot();
+
+        // CID parsing accepts a valid prefix, so require the entire payload to
+        // be one CID before treating the key as immutable content-addressed data.
+        let mut key = block_key(0xaa);
+        key.push(0xff);
+        assert!(cid::Cid::try_from(&key[1..]).is_ok());
+        let writes = [key];
+        tracker
+            .check_and_record(first_snapshot.version(), writes.iter(), &ReadSet::default())
+            .unwrap();
+        drop(first_snapshot);
+
+        let err = tracker
+            .check_and_record(
+                second_snapshot.version(),
+                writes.iter(),
+                &ReadSet::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, crate::corekv::Error::TxnConflict));
+    }
+
+    #[test]
+    fn block_write_vs_committed_read_still_conflicts() {
+        let tracker = Arc::new(ConflictTracker::new());
+        let first_snapshot = tracker.begin_snapshot();
+        let second_snapshot = tracker.begin_snapshot();
+
+        // A committed transaction READ the block key; a later write to it is
+        // still an anti-dependency and must conflict.
+        let block = block_key(0xbb);
+        let mut first_reads = ReadSet::default();
+        first_reads.record_key(&block);
+        let first_writes = [b"d/d/books/other".to_vec()];
+        tracker
+            .check_and_record(first_snapshot.version(), first_writes.iter(), &first_reads)
+            .unwrap();
+        drop(first_snapshot);
+
+        let second_writes = [block];
+        let err = tracker
+            .check_and_record(
+                second_snapshot.version(),
+                second_writes.iter(),
+                &ReadSet::default(),
+            )
+            .unwrap_err();
         assert!(matches!(err, crate::corekv::Error::TxnConflict));
     }
 
