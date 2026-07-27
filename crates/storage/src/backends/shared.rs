@@ -235,10 +235,10 @@ impl ReadSet {
 /// byte-identical field deltas (e.g. both rewrite `status: "streaming"`)
 /// collide on the shared delta block and spuriously abort (#1194).
 ///
-/// Merge-tracking keys under the blockstore namespace
-/// ([`ToMergeIndexKey`](crate::keys::blockstore::ToMergeIndexKey), `b` + `m`
-/// + CID) are explicitly excluded: their presence is mutable state that must
-/// stay conflict-checked. Only the write-write check consults this predicate;
+/// Merge-tracking keys under the blockstore namespace (`b` then `m` then
+/// CID, [`ToMergeIndexKey`](crate::keys::blockstore::ToMergeIndexKey)) are
+/// explicitly excluded: their presence is mutable state that must stay
+/// conflict-checked. Only the write-write check consults this predicate;
 /// read-vs-write conflicts apply to block keys like any other key.
 #[cfg(not(target_arch = "wasm32"))]
 fn is_content_addressed_block_key(key: &[u8]) -> bool {
