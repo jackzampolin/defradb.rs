@@ -474,6 +474,12 @@ impl LarkStoreOptions {
                 DurabilityMode::Immediate => lark_kv::DurabilityMode::Immediate,
                 DurabilityMode::Eventual => lark_kv::DurabilityMode::Eventual,
             },
+            // `prefix_extractor` is intentionally left at lark's default
+            // (none): its only built-in extractor is fixed-length, but
+            // DefraDB keys are variable-length namespaced (e.g.
+            // `d/d/<collection>/<docID>`) with no stable fixed-length prefix,
+            // so a prefix bloom would not align with the collection/index
+            // boundaries point lookups and scans actually key on.
             ..Default::default()
         }
     }
