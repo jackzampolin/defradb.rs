@@ -239,8 +239,7 @@ impl<S: Store + 'static> BrowserSyncAdapter<S> {
                 // position — every retry re-reads the same document — so skip
                 // past it and keep the page moving. Storage errors are not
                 // included: those are transient and must still fail the page.
-                Err(error @ db_merge::browser_sync::BrowserSyncError::TooLarge(_))
-                | Err(error @ db_merge::browser_sync::BrowserSyncError::Invalid(_)) => {
+                Err(error @ db_merge::browser_sync::BrowserSyncError::TooLarge(_)) => {
                     tracing::warn!(
                         doc_id = %document_ref.doc_id,
                         collection_id = %document_ref.collection_id,

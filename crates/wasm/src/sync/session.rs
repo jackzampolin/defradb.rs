@@ -109,8 +109,7 @@ impl SyncSession {
                 // many blocks or roots — so it can never be pushed. Failing
                 // here would abort the whole push and leave recover_full_sync
                 // retrying forever; skip it like the request-size check below.
-                Err(error @ db_merge::browser_sync::BrowserSyncError::TooLarge(_))
-                | Err(error @ db_merge::browser_sync::BrowserSyncError::Invalid(_)) => {
+                Err(error @ db_merge::browser_sync::BrowserSyncError::TooLarge(_)) => {
                     warn(&format!(
                         "browser sync skipped document {} because it cannot be represented as a sync payload: {error}",
                         document_ref.doc_id
@@ -200,8 +199,7 @@ impl SyncSession {
             match self.engine.load_document(&document_ref).await {
                 Ok(Some(document)) => documents.push(document),
                 Ok(None) => {}
-                Err(error @ db_merge::browser_sync::BrowserSyncError::TooLarge(_))
-                | Err(error @ db_merge::browser_sync::BrowserSyncError::Invalid(_)) => {
+                Err(error @ db_merge::browser_sync::BrowserSyncError::TooLarge(_)) => {
                     warn(&format!(
                         "browser sync skipped document {doc_id} because it cannot be represented as a sync payload: {error}"
                     ));

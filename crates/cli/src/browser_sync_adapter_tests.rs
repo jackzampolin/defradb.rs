@@ -601,12 +601,11 @@ async fn pull_reaches_documents_ordered_after_an_oversized_document() {
     assert!(!seen.contains(&oversized));
 }
 
-/// A DAG exceeding `MAX_SYNC_BLOCKS_PER_DOCUMENT` fails validation as
-/// `Invalid`, not `TooLarge`. Before this skip was widened it propagated and
-/// wedged the page exactly as the oversized case used to. Block count grows at
-/// 2 blocks per single-field update, so the 4096 limit is reached after ~2047
-/// updates while the payload is still under 1 MB — a more reachable trigger
-/// than the 16 MiB cap.
+/// A DAG exceeding `MAX_SYNC_BLOCKS_PER_DOCUMENT` must be classified as
+/// `TooLarge` so the permanent-document skip handles it instead of wedging the
+/// page. Block count grows at 2 blocks per single-field update, so the 4096
+/// limit is reached after ~2047 updates while the payload is still under 1 MB
+/// — a more reachable trigger than the 16 MiB cap.
 ///
 /// Ignored by default: building the DAG takes ~50s. Run with
 /// `cargo test -p cli --lib block_heavy_document -- --ignored`.
@@ -635,7 +634,7 @@ async fn pull_skips_a_block_heavy_document_and_keeps_paginating() {
     let heavy_ref = engine.document_ref(&heavy).await.unwrap().unwrap();
     let load_error = engine.load_document(&heavy_ref).await.unwrap_err();
     assert!(
-        matches!(load_error, db_merge::BrowserSyncError::Invalid(ref m) if m.contains("block count")),
+        matches!(load_error, db_merge::BrowserSyncError::TooLarge(ref m) if m.contains("block count")),
         "fixture must trip the block-count limit, got {load_error:?}"
     );
 
