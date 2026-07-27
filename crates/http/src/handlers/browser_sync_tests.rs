@@ -219,3 +219,132 @@ async fn sync_honors_stricter_body_limit() {
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(sync.calls.load(Ordering::Relaxed), 0);
 }
+
+// =============================================================================
+// Contract coverage for the #1188 authorization gate (issue #1181).
+//
+// The tests above build the router without the global auth middleware and only
+// exercise anonymous callers. These add the three properties that pin the
+// deployed contract: the gate works for a real authenticated identity, it is
+// inert when NAC is disabled, and pushes that create documents are gated by
+// `DocumentUpdate` because no create permission exists in the model.
+// =============================================================================
+
+/// A bearer token that passes JWT verification against a `Host: localhost`
+/// audience, so tests can exercise the production middleware path.
+fn authenticated_caller() -> (identity::Did, String) {
+    let private_key = crypto::generate_ed25519().unwrap();
+    let raw = identity::RawIdentity::from_private_key(private_key).unwrap();
+    let did = identity::Identity::did(&raw).unwrap();
+    let token = identity::new_token(
+        &raw,
+        std::time::Duration::from_secs(3600),
+        Some("localhost".to_string()),
+        None,
+    )
+    .unwrap();
+    (did, format!("Bearer {}", String::from_utf8(token).unwrap()))
+}
+
+/// Mirrors `server.rs`: the auth middleware is applied via `route_layer`, so
+/// these tests prove what the middleware does and does not enforce for the
+/// Dynamic `/sync` route.
+fn router_with_middleware(
+    sync: Option<Arc<RecordingSync>>,
+    nac: Option<Arc<MockNodeAcpOperations>>,
+) -> axum::Router {
+    let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
+    let mut builder = AppStateBuilder::new(executor);
+    if let Some(sync) = sync {
+        builder = builder.with_browser_sync(sync);
+    }
+    if let Some(nac) = nac {
+        builder = builder.with_nac(nac as Arc<dyn NodeAcpOperations>);
+    }
+    let state = builder.build();
+    create_router_with_state(state.clone()).route_layer(axum::middleware::from_fn_with_state(
+        state,
+        crate::auth_middleware::auth_middleware,
+    ))
+}
+
+fn empty_sync_request(bearer: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/sync")
+        .header("content-type", "application/json")
+        .header("host", "localhost");
+    if let Some(bearer) = bearer {
+        builder = builder.header("authorization", bearer);
+    }
+    builder.body(Body::from(r#"{"documents":[]}"#)).unwrap()
+}
+
+/// The gate holds for a real authenticated identity on the production
+/// middleware path, not just for the anonymous wildcard fallback.
+#[tokio::test]
+async fn empty_sync_request_is_rejected_for_authenticated_caller_without_permission() {
+    let (owner, _) = authenticated_caller();
+    let (_, stranger_bearer) = authenticated_caller();
+    let nac = Arc::new(MockNodeAcpOperations::enabled_with_owner(owner));
+    let sync = Arc::new(RecordingSync::default());
+    let router = router_with_middleware(Some(sync.clone()), Some(nac));
+
+    let response = router
+        .oneshot(empty_sync_request(Some(&stranger_bearer)))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(sync.calls.load(Ordering::Relaxed), 0);
+}
+
+/// Known limit of the gate: `require_permission` is a no-op when NAC is not
+/// configured, so an empty request still distinguishes a node with browser
+/// sync enabled (200) from one without it (503). Acceptable because a node
+/// without NAC exposes its whole API unauthenticated anyway; this test exists
+/// so that reasoning stays explicit rather than assumed.
+#[tokio::test]
+async fn empty_sync_request_still_reveals_availability_without_nac() {
+    let sync = Arc::new(RecordingSync::default());
+    let enabled = router_with_middleware(Some(sync.clone()), None);
+    let response = enabled.oneshot(empty_sync_request(None)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(sync.calls.load(Ordering::Relaxed), 1);
+
+    let disabled = router_with_middleware(None, None);
+    let response = disabled.oneshot(empty_sync_request(None)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Pushing a document the server has never seen is a create, and it is
+/// authorized by the same `DocumentUpdate` permission as an update: the NAC
+/// model has no create variant, matching Go. Pinned so that adding one becomes
+/// a deliberate, Go-diverging decision rather than an accident.
+#[tokio::test]
+async fn push_creating_a_new_document_is_gated_by_document_update() {
+    let (owner, _) = authenticated_caller();
+    let (writer, writer_bearer) = authenticated_caller();
+    let nac = Arc::new(
+        MockNodeAcpOperations::enabled_with_owner(owner)
+            .with_grant(writer, crate::router::NodePermission::DocumentUpdate),
+    );
+    let sync = Arc::new(RecordingSync::default());
+    let router = router_with_middleware(Some(sync.clone()), Some(nac));
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/sync")
+        .header("content-type", "application/json")
+        .header("host", "localhost")
+        .header("authorization", &writer_bearer)
+        .body(Body::from(
+            r#"{"documents":[{"doc_id":"bae-new","collection_id":"c","roots":[],"blocks":[]}]}"#,
+        ))
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(sync.calls.load(Ordering::Relaxed), 1);
+    assert!(crate::router::NodePermission::parse("create-document").is_none());
+}
