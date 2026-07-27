@@ -4,6 +4,7 @@ use super::helpers::{
 use super::*;
 
 use db_blocks::DocStorageIdentity;
+use query::runner::DocFetcher;
 
 #[allow(clippy::type_complexity)]
 impl<S: Store + 'static> AutoCommitMutator<S> {
@@ -86,6 +87,34 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .acquire(&canonical_lock_id.to_string())
             .await;
 
+        // The query plan materializes `doc` before this mutator acquires the
+        // per-document write guard. A concurrent update can commit while this
+        // call is waiting, leaving `doc` stale. Reload through the lensed
+        // fetcher under the guard and rebase only the caller's declared patch;
+        // otherwise an unrelated field from the concurrent update is silently
+        // replaced by the stale snapshot.
+        let fresh_fetcher = crate::LensedAutoCommitFetcher::new(Arc::clone(&self.db));
+        let canonical_id = canonical_lock_id.to_string();
+        let mut current_doc = fresh_fetcher
+            .get_by_ids(collection_name, std::slice::from_ref(&canonical_id))
+            .await?
+            .into_docs()
+            .into_iter()
+            .next()
+            .ok_or_else(|| query::error::QueryError::document_not_found(canonical_id))?;
+        for field_name in &modified_fields {
+            if let Some(delta) = doc.get_counter_delta(field_name).cloned() {
+                // Counter inputs are deltas computed from the stale
+                // materialization. Carry the delta, not its provisional
+                // accumulated value; `write_local_update` applies it to the
+                // authoritative value below.
+                current_doc.set_counter_delta(field_name.clone(), delta);
+            } else if let Some(value) = doc.get(field_name).cloned() {
+                current_doc.set(field_name.clone(), value);
+            }
+        }
+        doc = current_doc;
+
         // Create a write transaction
         let txn = self.db.new_txn(false).await.map_err(|e| {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
@@ -114,17 +143,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     ))
                 })?;
 
-            self.db
-                .validate_downsample_write(
-                    &datastore,
-                    &systemstore,
-                    collection.schema(),
-                    &doc,
-                    Some(&modified_fields),
-                )
-                .await
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-
             let (doc_short_id, canonical_doc_id) = collection
                 .require_doc_identity(&systemstore, &input_doc_id)
                 .await
@@ -135,6 +153,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     other => query::error::QueryError::execution(other.to_string()),
                 })?;
             doc.set_id(canonical_doc_id);
+
+            self.db
+                .validate_downsample_write(
+                    &datastore,
+                    &systemstore,
+                    collection.schema(),
+                    &doc,
+                    Some(&modified_fields),
+                )
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
             // Bundle the counter RMW (#1021) with the doc blob + index write so
             // the authoritative CRDT accumulation store always advances before the
@@ -324,5 +353,76 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use document::{Document, NormalValue};
+    use query::mutator::DocMutator;
+    use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use storage::backends::MemoryStore;
+
+    use super::*;
+
+    fn test_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "Patch",
+            "v1",
+            "col-patch",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "left", FieldKind::int()),
+                FieldDescription::new("3", "right", FieldKind::int()),
+            ],
+        )
+    }
+
+    /// A query plan materializes the document before entering the auto-commit
+    /// mutator. Two concurrent plans can therefore hand the mutator separate
+    /// stale copies of the same document. `modified_fields` is the patch
+    /// boundary: applying the second copy must not replace an unrelated field
+    /// written by the first update.
+    #[tokio::test]
+    async fn stale_disjoint_field_update_preserves_committed_fields() {
+        let db = Arc::new(DB::new(MemoryStore::new()).expect("create db"));
+        db.create_collection(test_collection())
+            .await
+            .expect("schema");
+        let mutator = AutoCommitMutator::new(Arc::clone(&db));
+
+        let initial =
+            Document::from_json_str(r#"{"left": 0, "right": 0}"#).expect("initial document");
+        let created = mutator.create("Patch", initial).await.expect("create");
+
+        let mut stale_left = mutator
+            .get_for_update("Patch", &created.doc_id)
+            .await
+            .expect("fetch left copy")
+            .expect("left copy");
+        let mut stale_right = stale_left.clone();
+
+        stale_left.set("left", NormalValue::Int(1));
+        mutator
+            .update("Patch", stale_left, HashSet::from(["left".to_string()]))
+            .await
+            .expect("update left");
+
+        stale_right.set("right", NormalValue::Int(1));
+        mutator
+            .update("Patch", stale_right, HashSet::from(["right".to_string()]))
+            .await
+            .expect("update right");
+
+        let final_doc = mutator
+            .get_for_update("Patch", &created.doc_id)
+            .await
+            .expect("fetch final")
+            .expect("final document");
+        assert_eq!(final_doc.get("left"), Some(&NormalValue::Int(1)));
+        assert_eq!(final_doc.get("right"), Some(&NormalValue::Int(1)));
     }
 }
