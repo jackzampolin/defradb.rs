@@ -247,7 +247,7 @@ fn is_content_addressed_block_key(key: &[u8]) -> bool {
     };
     namespace == crate::namespace::Namespace::Blockstore.prefix()
         && !crate::keys::blockstore::ToMergeIndexKey::is_merge_key(cid_bytes)
-        && cid::Cid::try_from(cid_bytes).is_ok()
+        && cid::Cid::try_from(cid_bytes).is_ok_and(|cid| cid.encoded_len() == cid_bytes.len())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -786,6 +786,33 @@ mod tests {
         bogus_key.extend(std::iter::repeat_n(0xaa, 34));
         assert!(cid::Cid::try_from(&bogus_key[1..]).is_err());
         let writes = [bogus_key];
+        tracker
+            .check_and_record(first_snapshot.version(), writes.iter(), &ReadSet::default())
+            .unwrap();
+        drop(first_snapshot);
+
+        let err = tracker
+            .check_and_record(
+                second_snapshot.version(),
+                writes.iter(),
+                &ReadSet::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, crate::corekv::Error::TxnConflict));
+    }
+
+    #[test]
+    fn cid_with_trailing_bytes_still_conflicts() {
+        let tracker = Arc::new(ConflictTracker::new());
+        let first_snapshot = tracker.begin_snapshot();
+        let second_snapshot = tracker.begin_snapshot();
+
+        // CID parsing accepts a valid prefix, so require the entire payload to
+        // be one CID before treating the key as immutable content-addressed data.
+        let mut key = block_key(0xaa);
+        key.push(0xff);
+        assert!(cid::Cid::try_from(&key[1..]).is_ok());
+        let writes = [key];
         tracker
             .check_and_record(first_snapshot.version(), writes.iter(), &ReadSet::default())
             .unwrap();
