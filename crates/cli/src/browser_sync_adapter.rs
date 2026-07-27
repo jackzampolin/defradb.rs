@@ -230,12 +230,25 @@ impl<S: Store + 'static> BrowserSyncAdapter<S> {
                 continue;
             }
 
-            let Some(document) = self
-                .engine
-                .load_document(&document_ref)
-                .await
-                .map_err(map_engine_error)?
-            else {
+            let loaded = match self.engine.load_document(&document_ref).await {
+                Ok(loaded) => loaded,
+                // A document whose DAG cannot fit in a sync payload can never
+                // be pulled. Failing the page would wedge this cursor
+                // position permanently — every retry re-reads the same
+                // document — so skip past it and keep the page moving.
+                Err(db_merge::browser_sync::BrowserSyncError::TooLarge(message)) => {
+                    tracing::warn!(
+                        doc_id = %document_ref.doc_id,
+                        collection_id = %document_ref.collection_id,
+                        %message,
+                        "browser sync skipped a document that exceeds the sync payload limit"
+                    );
+                    resume_cursor = Some(document_ref.doc_id);
+                    continue;
+                }
+                Err(error) => return Err(map_engine_error(error)),
+            };
+            let Some(document) = loaded else {
                 resume_cursor = Some(document_ref.doc_id);
                 continue;
             };
