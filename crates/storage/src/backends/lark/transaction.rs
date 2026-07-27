@@ -473,22 +473,24 @@ impl Txn for LarkTxn {
                     let outcome = {
                         let _commit_guard = commit_gate.blocking_write();
                         (|| -> Result<()> {
-                            // Unlike the other backends, a lark write error
-                            // must NOT unrecord: lark can fail AFTER the batch
-                            // is WAL-durable and memtable-visible
-                            // (rotate_memtable on the same call), so an error
-                            // is indeterminate. Keeping the record risks a
-                            // phantom conflict (spurious retry); dropping it
-                            // risks missing a real conflict against landed data.
-                            pending.check_and_record_conflicts(
+                            let version = pending.check_and_record_conflicts(
                                 &conflict_tracker,
                                 read_version,
                                 &read_set,
                             )?;
+                            // Lark now reports write errors determinately: a
+                            // failed rotate happens before the batch is applied,
+                            // so an error means the conflict record must not
+                            // survive for data that never landed.
+                            let record_guard = crate::backends::shared::RecordGuard::new(
+                                &conflict_tracker,
+                                version,
+                            );
 
                             let batch = pending.into_write_batch();
                             db.write_with_durability(batch, durability)
                                 .map_err(|error| Error::Backend(error.to_string()))?;
+                            record_guard.defuse();
                             Ok(())
                         })()
                     };
