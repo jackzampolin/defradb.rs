@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use cid::Cid;
 use defra_core::block::generate_cid_from_bytes;
-use defra_core::browser_sync::{BrowserSyncBlock, BrowserSyncDocument};
+use defra_core::browser_sync::{
+    BrowserSyncBlock, BrowserSyncDocument, MAX_SYNC_BLOCKS_PER_DOCUMENT,
+    MAX_SYNC_ROOTS_PER_DOCUMENT,
+};
 use defra_core::{Block, CrdtDelta, Signature, SignatureHeader, SignatureType};
 use document::{DocID, Document, NormalValue};
 use query::mutator::DocMutator;
@@ -55,6 +58,46 @@ fn replace_wire_block(document: &mut BrowserSyncDocument, old_cid: &str, block: 
     wire_block.cid = cid.to_string();
     wire_block.data = hex::encode(data);
     cid
+}
+
+#[test]
+fn validation_distinguishes_empty_and_over_limit_counts() {
+    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    let sync = BrowserSyncEngine::new(database);
+    let block = BrowserSyncBlock {
+        cid: "cid".into(),
+        data: "data".into(),
+    };
+
+    let empty_roots = BrowserSyncDocument {
+        doc_id: "doc".into(),
+        collection_id: "collection".into(),
+        roots: Vec::new(),
+        blocks: vec![block.clone()],
+    };
+    assert!(matches!(
+        sync.validate_document(&empty_roots),
+        Err(BrowserSyncError::Invalid(_))
+    ));
+
+    let too_many_roots = BrowserSyncDocument {
+        roots: vec!["root".into(); MAX_SYNC_ROOTS_PER_DOCUMENT + 1],
+        ..empty_roots.clone()
+    };
+    assert!(matches!(
+        sync.validate_document(&too_many_roots),
+        Err(BrowserSyncError::TooLarge(_))
+    ));
+
+    let too_many_blocks = BrowserSyncDocument {
+        roots: vec!["root".into()],
+        blocks: vec![block; MAX_SYNC_BLOCKS_PER_DOCUMENT + 1],
+        ..empty_roots
+    };
+    assert!(matches!(
+        sync.validate_document(&too_many_blocks),
+        Err(BrowserSyncError::TooLarge(_))
+    ));
 }
 
 #[tokio::test]

@@ -29,18 +29,34 @@ impl<S: Store + 'static> BrowserSyncEngine<S> {
     ) -> Result<ValidatedBrowserSyncDocument, BrowserSyncError> {
         validate_id("doc_id", &document.doc_id)?;
         validate_id("collection_id", &document.collection_id)?;
-        if document.roots.is_empty() || document.roots.len() > MAX_SYNC_ROOTS_PER_DOCUMENT {
+        if document.roots.is_empty() {
             return Err(BrowserSyncError::Invalid(format!(
                 "document {} has invalid root count {}",
                 document.doc_id,
                 document.roots.len()
             )));
         }
-        if document.blocks.is_empty() || document.blocks.len() > MAX_SYNC_BLOCKS_PER_DOCUMENT {
+        if document.roots.len() > MAX_SYNC_ROOTS_PER_DOCUMENT {
+            return Err(BrowserSyncError::TooLarge(format!(
+                "document {} root count {} exceeds {}",
+                document.doc_id,
+                document.roots.len(),
+                MAX_SYNC_ROOTS_PER_DOCUMENT
+            )));
+        }
+        if document.blocks.is_empty() {
             return Err(BrowserSyncError::Invalid(format!(
                 "document {} has invalid block count {}",
                 document.doc_id,
                 document.blocks.len()
+            )));
+        }
+        if document.blocks.len() > MAX_SYNC_BLOCKS_PER_DOCUMENT {
+            return Err(BrowserSyncError::TooLarge(format!(
+                "document {} block count {} exceeds {}",
+                document.doc_id,
+                document.blocks.len(),
+                MAX_SYNC_BLOCKS_PER_DOCUMENT
             )));
         }
 

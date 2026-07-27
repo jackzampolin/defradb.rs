@@ -535,3 +535,155 @@ async fn concurrent_changes_converge_through_push_pull_exchange() {
         );
     }
 }
+
+/// #1188 skips the oversized document, but the property that matters is that
+/// pagination still reaches documents ordered *after* it. Doc IDs are
+/// content-derived, so this fixture asserts the oversized document actually
+/// sits between two loadable ones before checking that both are served.
+#[tokio::test]
+async fn pull_reaches_documents_ordered_after_an_oversized_document() {
+    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    database
+        .create_collection(users_schema(false))
+        .await
+        .unwrap();
+
+    let oversized = create_oversized_document(&database).await;
+    let mut loadable = Vec::new();
+    for name in ["Alice", "Bob", "Carol", "Dave", "Erin", "Frank"] {
+        loadable.push(create_document(&database, name).await.doc_id);
+    }
+    let before: Vec<_> = loadable.iter().filter(|id| **id < oversized).collect();
+    let after: Vec<_> = loadable.iter().filter(|id| **id > oversized).collect();
+    assert!(
+        !before.is_empty() && !after.is_empty(),
+        "fixture must straddle the oversized document: before={before:?} after={after:?}"
+    );
+
+    let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
+    let adapter = BrowserSyncAdapter::new_arc(database, acp);
+
+    let mut cursor = None;
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..32 {
+        let page = adapter
+            .sync(
+                BrowserSyncRequest {
+                    documents: Vec::new(),
+                    pull: Some(BrowserSyncPull {
+                        doc_ids: Vec::new(),
+                        cursor: cursor.clone(),
+                        limit: Some(1),
+                    }),
+                },
+                None,
+                false,
+            )
+            .await
+            .expect("an oversized document must not fail the pull");
+        seen.extend(page.documents.iter().map(|doc| doc.doc_id.clone()));
+        match page.next_cursor {
+            Some(next) => {
+                assert_ne!(Some(&next), cursor.as_ref(), "cursor must advance");
+                cursor = Some(next);
+            }
+            None => break,
+        }
+    }
+
+    seen.sort();
+    let mut expected = loadable.clone();
+    expected.sort();
+    assert_eq!(
+        seen, expected,
+        "every loadable document must be served, including those after the oversized one"
+    );
+    assert!(!seen.contains(&oversized));
+}
+
+/// A DAG exceeding `MAX_SYNC_BLOCKS_PER_DOCUMENT` must be classified as
+/// `TooLarge` so the permanent-document skip handles it instead of wedging the
+/// page. Block count grows at 2 blocks per single-field update, so the 4096
+/// limit is reached after ~2047 updates while the payload is still under 1 MB
+/// — a more reachable trigger than the 16 MiB cap.
+///
+/// Ignored by default: building the DAG takes ~50s. Run with
+/// `cargo test -p cli --lib block_heavy_document -- --ignored`.
+#[tokio::test]
+#[ignore]
+async fn pull_skips_a_block_heavy_document_and_keeps_paginating() {
+    let database = Arc::new(db::DB::new(MemoryStore::new()).unwrap());
+    database
+        .create_collection(users_schema(false))
+        .await
+        .unwrap();
+
+    let mut document = Document::new();
+    document.set("name", "seed");
+    let heavy = db::AutoCommitMutator::new(database.clone())
+        .create("Users", document)
+        .await
+        .unwrap()
+        .doc_id
+        .to_string();
+    for index in 0..2_100 {
+        update_document(&database, &heavy, "name", &format!("v{index}")).await;
+    }
+
+    let engine = db_merge::BrowserSyncEngine::new(database.clone());
+    let heavy_ref = engine.document_ref(&heavy).await.unwrap().unwrap();
+    let load_error = engine.load_document(&heavy_ref).await.unwrap_err();
+    assert!(
+        matches!(load_error, db_merge::BrowserSyncError::TooLarge(ref m) if m.contains("block count")),
+        "fixture must trip the block-count limit, got {load_error:?}"
+    );
+
+    let mut loadable = Vec::new();
+    for name in ["Alice", "Bob", "Carol", "Dave", "Erin", "Frank"] {
+        loadable.push(create_document(&database, name).await.doc_id);
+    }
+    assert!(
+        loadable.iter().any(|id| *id > heavy),
+        "fixture needs a document ordered after the block-heavy one"
+    );
+
+    let acp = Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
+    let adapter = BrowserSyncAdapter::new_arc(database, acp);
+
+    let mut cursor: Option<String> = None;
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..32 {
+        let page = adapter
+            .sync(
+                BrowserSyncRequest {
+                    documents: Vec::new(),
+                    pull: Some(BrowserSyncPull {
+                        doc_ids: Vec::new(),
+                        cursor: cursor.clone(),
+                        limit: Some(1),
+                    }),
+                },
+                None,
+                false,
+            )
+            .await
+            .expect("a block-heavy document must not fail the pull");
+        seen.extend(page.documents.iter().map(|doc| doc.doc_id.clone()));
+        match page.next_cursor {
+            Some(next) => {
+                assert_ne!(Some(&next), cursor.as_ref(), "cursor must advance");
+                cursor = Some(next);
+            }
+            None => break,
+        }
+    }
+
+    seen.sort();
+    let mut expected = loadable.clone();
+    expected.sort();
+    assert_eq!(
+        seen, expected,
+        "every loadable document must be served, including those after the block-heavy one"
+    );
+    assert!(!seen.contains(&heavy));
+}
