@@ -441,11 +441,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        let deferred_acp_mutations = txn_ctx.deferred_acp_mutations();
-
         // If the transaction provides a collection provider or deferred ACP
         // projection, set them as task-local overrides so this execution sees
-        // the transaction's uncommitted schema and ACP state.
+        // the transaction's uncommitted schema and ACP state. The task-local
+        // scoping is native-only, so wasm32 skips both overrides.
+        #[cfg(not(target_arch = "wasm32"))]
+        let deferred_acp_mutations = txn_ctx.deferred_acp_mutations();
+
         #[cfg(not(target_arch = "wasm32"))]
         let result = if let Some(provider) = txn_provider {
             if let Some(deferred_acp_mutations) = deferred_acp_mutations {

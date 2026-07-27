@@ -2,6 +2,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{
@@ -9,7 +10,9 @@ use std::sync::{
     Arc,
 };
 
-use crate::corekv::{AsyncTxnCallback, IterOptions, TxnCallback};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::corekv::IterOptions;
+use crate::corekv::{AsyncTxnCallback, TxnCallback};
 
 /// Controls when data is flushed to disk after a commit.
 ///
@@ -179,12 +182,14 @@ impl CallbackCounts {
 /// writes data must conflict if another transaction committed after its snapshot
 /// and either wrote a key it read, or read a key/range it wrote. Tracking both
 /// point reads and iterator ranges gives the Rust backends the same behavior.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ReadSet {
     keys: HashSet<Vec<u8>>,
     ranges: Vec<ReadRange>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 enum ReadRange {
     Prefix(Vec<u8>),
@@ -194,6 +199,7 @@ enum ReadRange {
     },
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ReadSet {
     pub(crate) fn record_key(&mut self, key: &[u8]) {
         self.keys.insert(key.to_vec());
@@ -218,6 +224,7 @@ impl ReadSet {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn is_document_collection_scan_prefix(prefix: &[u8]) -> bool {
     // Namespaced datastore document scans use `d/d/...`; root datastore scans
     // use `/d/...`. Go's SSI conflict in the relation tests comes from FK index
@@ -229,6 +236,7 @@ fn is_document_collection_scan_prefix(prefix: &[u8]) -> bool {
         || prefix.starts_with(b"/del/")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ReadRange {
     fn contains(&self, key: &[u8]) -> bool {
         match self {

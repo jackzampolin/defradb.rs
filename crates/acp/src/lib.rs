@@ -32,6 +32,9 @@ mod identity;
 mod local;
 pub mod nac;
 mod permission;
+// Both persistent stores require `S: Store + Send + Sync`, which the wasm
+// LevelDB store cannot satisfy, so they are native-only.
+#[cfg(not(target_arch = "wasm32"))]
 mod persistent;
 pub mod policy_yaml;
 pub mod read_access;
@@ -47,6 +50,7 @@ pub use error::{Error, Result};
 pub use identity::Identity;
 pub use local::{LocalDocumentACP, MemoryAcpStore};
 pub use permission::DocumentPermission;
+#[cfg(not(target_arch = "wasm32"))]
 pub use persistent::PersistentAcpStore;
 pub use read_access::{check_doc_read_access, DirectChecker, DocAccess, ObjectAccessChecker};
 pub use relation::{
@@ -57,6 +61,7 @@ pub use target_subject::parse_target_subject;
 pub use validation::{validate_resource_interface, REQUIRED_DOCUMENT_PERMISSIONS};
 
 // Re-export key zanzibar engine types from the standalone zanzibar crate
+#[cfg(not(target_arch = "wasm32"))]
 pub use zanzibar::PersistentZanzibarStore;
 pub use zanzibar::ZanzibarDocumentACP;
 
