@@ -164,7 +164,7 @@ impl Key for ReplicatorRetryDocIDKey {
 /// commit for a peer into one slot). Before this key existed, a failed
 /// collection-commit push had nowhere to be recorded and failed PERMANENTLY:
 /// receivers kept heads whose parents never arrived, so their pending-DAG
-/// registrations could never complete (defradb#1113, defra-agent#696).
+/// registrations could never complete (defradb#1113, source-inc/gents#696).
 ///
 /// One record per (peer, collection, CID): collection-commit DAGs chain, so a
 /// newer commit does NOT make an older undelivered one redundant.

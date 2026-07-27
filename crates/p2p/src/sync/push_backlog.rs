@@ -247,7 +247,7 @@ struct Inner {
 }
 
 /// Live per-peer occupancy so slot starvation is visible to operators
-/// (defra-agent#630: a dead peer monopolizing the slots was invisible in
+/// (source-inc/gents#630: a dead peer monopolizing the slots was invisible in
 /// connection-level diagnostics).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PeerBacklogSnapshot {
@@ -445,7 +445,7 @@ impl PushBacklog {
         }
         // One peer may hold at most a quarter of the item budget, so a dead
         // peer's parked jobs cannot squat the whole queue and starve healthy
-        // peers' admissions (defra-agent#630 req 1).
+        // peers' admissions (source-inc/gents#630 req 1).
         let peer_quota = (self.item_capacity / 4).max(1);
         if inner
             .queues
@@ -1215,7 +1215,7 @@ mod tests {
         assert_eq!(snap.queued_bytes, 0);
     }
 
-    /// Amy canary req 1 (defra-agent#630): one peer's backlog must not squat
+    /// Amy canary req 1 (source-inc/gents#630): one peer's backlog must not squat
     /// the whole global item budget.
     #[test]
     fn one_peer_cannot_fill_the_whole_queue() {

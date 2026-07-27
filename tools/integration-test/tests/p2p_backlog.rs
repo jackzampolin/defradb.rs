@@ -158,7 +158,7 @@ async fn outbound_backlog_bounded_under_fanout_with_dead_peer() {
     }
 
     // The dead peer's stall must become visible in the per-peer snapshot
-    // (defra-agent#630: slot starvation was invisible to diagnostics).
+    // (source-inc/gents#630: slot starvation was invisible to diagnostics).
     let visibility_deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let status = sync_status(&pusher_api).await;

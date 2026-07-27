@@ -457,7 +457,7 @@ async fn txn_commit_publishes_update_events(cluster: TestCluster) {
         );
 
         // The block field carries hex-encoded composite commit bytes. It
-        // must reach SSE subscribers so downstream consumers (e.g. defra-agent)
+        // must reach SSE subscribers so downstream consumers (e.g. Gents)
         // can traverse the DAG without an extra round-trip.
         let block_hex = event
             .pointer("/data/block")

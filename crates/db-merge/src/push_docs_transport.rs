@@ -631,7 +631,7 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
 /// document's composite heads. Before this existed, a failed collection-commit
 /// push had no replay path at all and failed permanently — receivers held heads
 /// whose parents never arrived, so their pending-DAG registrations could never
-/// complete (defra-agent#696).
+/// complete (source-inc/gents#696).
 ///
 /// Unlike the document replay, a missing block is an ERROR, not a silent
 /// success: acking an obligation we did not actually push would delete the

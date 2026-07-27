@@ -2,7 +2,7 @@
 EXTENDS Claim
 \* Two instances, i1 and i2, share DID X and contend for one AgentRequest owned by
 \* X. fy is a foreign DID-Y instance: unfiltered replication may deliver the doc
-\* to it, but it is not a contender because defra-agent's watcher only claims rows
+\* to it, but it is not a contender because the Gents watcher only claims rows
 \* where agent_did equals the local agent_did.
 
 mcInstances == {"i1", "i2", "fy"}

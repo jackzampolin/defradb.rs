@@ -16,7 +16,7 @@ Scope of this session: **M1 (convergence baseline) + M2 (the filter).** The
 
 ## Deployment target (why this model, not an abstraction in a vacuum)
 
-The consumer is **defra-agent**. Agents accept `AgentRequest` documents; remote
+The consumer is **Gents** (`source-inc/gents`). Agents accept `AgentRequest` documents; remote
 control happens by writing a request locally and gossiping it over P2P. Requests
 are handled per-DID. With many agents on one network, today **every agent
 replicates every other agent's request traffic** and filters by DID at query
@@ -26,19 +26,39 @@ the subscription/replication layer.
 
 ## Grounded facts (verified against source, 2026-06-02)
 
+`gents:` anchors were re-verified against the renamed consumer repository,
+`source-inc/gents` `main`, on 2026-07-27; table rows whose anchors no longer
+exist there are marked *historical*. Unprefixed consumer fragments in the
+narrative sections below the table are the 2026-06-02 snapshot. The
+immutability gap this design surfaced has since been closed — see *Post-design
+status (2026-07-27)* below the table.
+
 | Fact | Source | Status |
 |---|---|---|
-| `AgentRequest` is `@branchable`; multi-writer (requester creates, claimer updates `status`/`lifecycle_state`/`claimed_at`) | `defra-agent/.../schemas/agent/agent_request.graphql:1`; `lifecycle/claim.rs:239` | ✅ branching is real |
-| `agent_did` is the **sole** P2P relevance/filter key | `defra-agent/crates/defra-agent/src/watcher/query.rs:72` | ✅ confirmed |
-| Filtering today is **read/claim-time**, not P2P-level; every agent subscribes collection-wide | `watcher/query.rs`, `trigger_engine/subscription_source.rs:28`, `desktop-core/.../client/schema.rs:36` | ✅ the noise problem |
-| `agent_did` set **only at create time** in production (`create_AgentRequest`); the sole post-create mutation is a **test** helper | `toolset/delegate.rs:88,91` (create); `tests/r4_subagent_tools.rs:424` (`override_child_agent_did`, test-only) | ⚠️ write-once **by convention, not enforced** |
-| **No** schema/ACP immutability constraint on `agent_did` (just `String @index`) | `agent_request.graphql:3` | ⚠️ assumption is unguaranteed |
-| Multiple agent instances can share one `agent_did`; claim safety is **CRDT CAS** (`update where status=pending`), not FIFO/lock | `watcher.rs:92`, `lifecycle/claim.rs:239-287` | ✅ eventual-consistent claim |
-| Cross-request refs (`caused_by_parent_request_id`, `retry_parent_request`, `retry_root_request`, `superseded_by_request`) are bare `String @index` scalars, **not** `@relation` | `agent_request.graphql:6-8,30` | ✅ scalar FKs |
+| `AgentRequest` is `@branchable`; multi-writer (requester creates, claimer updates `status`/`lifecycle_state`/`claimed_at`) | `gents:crates/gents-schemas/schemas/agent/agent_request.graphql:1`; `lifecycle/claim.rs:258` | ✅ branching is real |
+| `agent_did` is the **sole** P2P relevance/filter key | `gents:crates/gents/src/watcher/query.rs:73` | ✅ confirmed |
+| Filtering today is **read/claim-time**, not P2P-level; every agent subscribes collection-wide | `watcher/query.rs`, `gents:crates/gents/src/trigger_engine/subscription_source.rs:25` (`subscribe_updates`), `gents:crates/gents-desktop-core/src/client/schema.rs:36` (`subscribe_all_collections`) | ✅ the noise problem |
+| `agent_did` set **only at create time** in production (`create_AgentRequest`); the sole post-create mutation is a **test** helper | *historical (2026-06-02):* `toolset/delegate.rs:88,91` (create); `override_child_agent_did` (test-only) — both since removed from `main` | ⚠️ write-once **by convention, not enforced** (2026-06-02; since enforced — see *Post-design status*) |
+| **No** schema/ACP immutability constraint on `agent_did` (just `String @index`) | `agent_request.graphql:3` | ⚠️ assumption is unguaranteed (2026-06-02; since closed — that line is now `String @index @immutable`, see *Post-design status*) |
+| Multiple agent instances can share one `agent_did`; claim safety is **CRDT CAS** (`update where status=pending`), not FIFO/lock | `watcher.rs:102`, `lifecycle/claim.rs:258-310` | ✅ eventual-consistent claim |
+| Cross-request refs (`caused_by_parent_request_id`, `retry_parent_request`, `retry_root_request`, `superseded_by_request`) are bare `String @index` scalars, **not** `@relation` | `gents:crates/gents-schemas/schemas/agent/agent_request.graphql:7-9,33` | ✅ scalar FKs |
 | Merge handler **never** dereferences a cross-doc ref; relations resolved only at query time; dangling ref → graceful "absent" | Rust `crates/db-merge/src/merge_handler/mod.rs:69`; Go `internal/db/merge.go:343`; `client/document.go:238` (format-only validation) | ✅ no merge dependency |
 | Delta-DAG is **per-document**; `Heads` links within-document; no cross-doc causal edges | Go `internal/core/block/block.go`; Rust `merge_handler/` | ✅ confirmed |
 | `#2721` hole = **branching + partial sync within one doc**; shipped fix = "walk the entire graph before merging" (Model A), already done in Rust | Go `#2721`, `merge_test.go:143` `TestMerge_DualBranchWithOneIncomplete_CouldNotFindCID`; Rust `coordinator/dag_fetcher.rs` | ✅ Model A is the proven fix |
 | Field-level filtering is a **future GraphSync** feature, not today's reality | Go `block.go` `DAGLink.Name` comment | ✅ future |
+
+### Post-design status (2026-07-27)
+
+Recommendation 3 has since been implemented. `agent_did` is
+`String @index @immutable` on Gents `main`
+(`gents:crates/gents-schemas/schemas/agent/agent_request.graphql:3`), and
+defradb.rs enforces `@immutable` on the paths this design demanded: local
+updates (`crates/db/src/collection/validation.rs`), peer-authored deltas at
+merge time — the E1 shape (`crates/db-merge/src/merge_handler/composite_fields.rs`)
+— and replication filters, which require every referenced field to be
+`@immutable` (`crates/replication-filter/src/lib.rs`). The Axis-2 "Mutable"
+scenarios and Recommendation 3 below are the 2026-06-02 analysis that motivated
+that work.
 
 ## Fresh-review findings (rev 1 → rev 2)
 
@@ -99,10 +119,11 @@ CRDT document. If that field is mutable, a request can change ownership, which:
 reassignment block (it filtered the doc out), so old and new owner disagree on
 who owns the request: **split ownership**.
 
-These compose. defra-agent is **WholeDoc filter scope** (the whole request is in
+These compose. Gents is **WholeDoc filter scope** (the whole request is in
 or out), so it never creates *within-doc* causal holes — Axis 1 is answered by
-Model A. But its filter key is **Mutable-by-default** (unenforced), so Axis 2 is
-live and was previously assumed away. The GraphSync future is **SubDoc scope**,
+Model A. But at design time its filter key was **Mutable-by-default**
+(unenforced — since closed, see *Post-design status*), so Axis 2 was live and
+had previously been assumed away. The GraphSync future is **SubDoc scope**,
 which *does* create within-doc holes and is where Model B (Axis 1) earns its
 keep.
 
@@ -150,7 +171,7 @@ The Naive / A / B difference is a single guard on the fetch action.
   via a **reference observer**: for each doc `d`, every node's merged head-set of
   `d` equals that of a hypothetical full-replication observer.
 
-### M2 — WholeDoc filter, key IMMUTABLE (the ideal defra-agent target)
+### M2 — WholeDoc filter, key IMMUTABLE (the ideal Gents target)
 - **`INV_SubsetConverge`**: for docs where `owner(d)=DID(a)`, agent `a`'s merged
   head-set for `d` equals the reference observer's. *Holds under Model A.*
 - **`INV_RelRefSafe`** ✅ verified true: dropping a cross-DID relational ref never
@@ -162,7 +183,7 @@ The Naive / A / B difference is a single guard on the fetch action.
   convergence is a pre-existing CRDT-CAS property, **not** introduced by B3; the
   model shows filtering is **claim-neutral**, neither causing nor fixing it.)
 
-### M2 — WholeDoc filter, key MUTABLE (the unenforced reality — the new finding)
+### M2 — WholeDoc filter, key MUTABLE (the then-unenforced reality — the new finding)
 - **`INV_NoSplitOwnership`** (safety): no request is simultaneously "owned"
   (filter-matched + actionable) by two distinct DIDs in their respective local
   views. *Expected to FAIL under Mutable + naive subscription:* the old owner
@@ -214,7 +235,8 @@ The Naive / A / B difference is a single guard on the fetch action.
 > construction). Without one of these, filtered replication admits a
 > split-ownership hazard (`INV_NoSplitOwnership`) that unfiltered replication
 > does not have. *This enforcement is downstream implementation (defradb.rs /
-> defra-agent), not TLA+ work — the model proves it is necessary+sufficient.*
+> Gents), not TLA+ work — the model proves it is necessary+sufficient.*
+> *[2026-07-27: implemented — see Post-design status.]*
 >
 > **4. Model B is needed only if/when field-level GraphSync filtering ships** for
 > resource-constrained peers (SubDoc scope). Not required for the `agent_did`

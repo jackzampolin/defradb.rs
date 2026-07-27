@@ -12,7 +12,7 @@ pub struct TelemetryConfig {
     /// process-wide globals via `opentelemetry::global::set_*`. Set to
     /// `false` for embedded use where the host process owns its own OTel
     /// globals and `init` would otherwise silently clobber them (e.g.
-    /// defra-agent runs its own OTel stack and just wants DefraDB-emitted
+    /// Gents runs its own OTel stack and just wants DefraDB-emitted
     /// spans flushed at shutdown).
     pub install_global: bool,
 }

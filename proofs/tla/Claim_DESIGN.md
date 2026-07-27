@@ -8,15 +8,19 @@ for CRDT-CAS claims, LWW convergence, and execution side effects.
 
 ## Grounding
 
+`gents:` anchors are files in the consumer repository, `source-inc/gents`,
+re-verified against its `main` branch on 2026-07-27. Bare `crates/...` paths are
+this repository.
+
 | Source | Fact used by the model |
 |---|---|
-| `../defra-agent/crates/defra-agent/src/lifecycle/claim.rs:239` | Claim is an `update_AgentRequest` guarded by local `_docID`, `status = pending`, and `lifecycle_state = pending`. |
-| `../defra-agent/crates/defra-agent/src/lifecycle/claim.rs:247` | A successful claim writes `status = processing`, `lifecycle_state = claimed`, `claimed_at`, `backend_id`, and related execution metadata. |
-| `../defra-agent/crates/defra-agent/src/lifecycle/claim.rs:264` | If the local update returns no row but the local re-check sees `processing`, the lifecycle still treats the request as claimed. |
-| `../defra-agent/crates/defra-agent/src/lifecycle/claim.rs:289` | After claim, the local lifecycle state becomes `Claimed`. |
-| `../defra-agent/crates/defra-agent/src/lifecycle/claim.rs:69` and `transition.rs:428` | Execution begins from local `Claimed` and performs a later transition to processing/execution state. |
-| `../defra-agent/crates/defra-agent/src/watcher/query.rs:66` | The watcher selects `AgentRequest` rows for the local `agent_did` and `status in [pending, processing]`. |
-| `../defra-agent/crates/defra-agent/src/watcher.rs:92` | Each watcher instance carries one `agent_did`; multiple instances can use the same value. |
+| `gents:crates/gents/src/lifecycle/claim.rs:258` | Claim is an `update_AgentRequest` guarded by local `_docID`, `status = pending`, and `lifecycle_state = pending`. |
+| `gents:crates/gents/src/lifecycle/claim.rs:264` | A successful claim writes `status = processing`, `lifecycle_state = claimed`, `claimed_at`, `backend_id`, and related execution metadata. |
+| `gents:crates/gents/src/lifecycle/claim.rs:287` | If the local update returns no row but the local re-check sees `processing`, the lifecycle still treats the request as claimed. |
+| `gents:crates/gents/src/lifecycle/claim.rs:306` | After claim, the local lifecycle state becomes `Claimed`. |
+| `gents:crates/gents/src/lifecycle/claim.rs:69` and `transition.rs:463` | Execution begins from local `Claimed` and performs a later transition to processing/execution state. |
+| `gents:crates/gents/src/watcher/query.rs:73` | The watcher selects `AgentRequest` rows for the local `agent_did` and `status in [pending, processing]`. |
+| `gents:crates/gents/src/watcher.rs:102` | Each watcher instance carries one `agent_did`; multiple instances can use the same value. |
 | `crates/db-merge/src/merge_handler/lww.rs:165` | LWW merge applies the highest-priority/tie-break delta and rejects lower-priority alternatives. |
 
 ## Brainstorming Outcome
@@ -83,8 +87,8 @@ Run from `proofs/tla/`:
 | Property | Plain English | TLC verdict | Source note |
 |---|---|---|---|
 | `INV_EventualClaimUnique` | Eventually, all same-DID contenders have the same merged claim-block set and, if any claim exists, exactly one LWW claimer. | GREEN for unfiltered; GREEN for DID-filtered with one same-DID replication set; RED for split same-DID filtering. | `claim.rs` guarded claim write plus `lww.rs` conflict resolution. |
-| `INV_ExecutionUnique` | At most one instance ever starts work. | RED for unfiltered; RED for DID-filtered with one same-DID replication set. | `claim.rs:289` local `Claimed` state and `claim.rs:69` `begin_execution` happen before remote claim convergence is guaranteed. |
-| `INV_FilterNeutral` | If the same-DID contention set remains mutually replicating, the eventual claim-uniqueness verdict is preserved. | GREEN for unfiltered and DID-filtered common-set configs. | `watcher/query.rs:66` filters claimable rows by `agent_did`; the P2P filter must preserve the whole same-DID contention set. |
+| `INV_ExecutionUnique` | At most one instance ever starts work. | RED for unfiltered; RED for DID-filtered with one same-DID replication set. | `claim.rs:306` local `Claimed` state and `claim.rs:69` `begin_execution` happen before remote claim convergence is guaranteed. |
+| `INV_FilterNeutral` | If the same-DID contention set remains mutually replicating, the eventual claim-uniqueness verdict is preserved. | GREEN for unfiltered and DID-filtered common-set configs. | `watcher/query.rs:73` filters claimable rows by `agent_did`; the P2P filter must preserve the whole same-DID contention set. |
 
 ## Result
 

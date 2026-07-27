@@ -4,7 +4,7 @@
 //! from the Lean models) between two sentinel lines. We run it via
 //! `lake env lean --run`, slice out the JSON, and deserialize it. Tests then
 //! assert the live Rust types still match — so a rename in the code breaks the
-//! proof's binding loudly. Mirrors defra-agent's `lean_vocab_test` pattern.
+//! proof's binding loudly. Mirrors the Gents `lean_vocab_test` pattern.
 
 use anyhow::{bail, Context, Result};
 use serde::de::DeserializeOwned;

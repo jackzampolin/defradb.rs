@@ -440,7 +440,7 @@ impl IndexManager {
     /// time and identical on every replica — no version/height state needed.
     /// The losing document remains fully readable by non-index (scan) queries
     /// and is reported loudly; applications keep their own reconcile policy
-    /// (sourcenetwork/defra-agent#694 already does).
+    /// (source-inc/gents#694 already does).
     async fn save_resolving_unique_conflict(
         &self,
         datastore: &mut NamespaceView,

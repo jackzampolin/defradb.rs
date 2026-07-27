@@ -27,7 +27,7 @@ section is the **diff**: what is proven vs. the accepted gap.
 | DAG convergence (partition / eviction / restart) | TLA+ | p2p, db-merge, blockstore |
 | CRDT merge laws | Lean | crdt, defra-core |
 | Replicator lifecycle (no-loss / resume) | TLA+ | p2p, db-merge, embedded |
-| Multi-instance claim | TLA+ | defra-agent |
+| Multi-instance claim | TLA+ | gents |
 | Block integrity / signatures | TLA+ | db-merge, defra-core, blockstore |
 | KMS key distribution | TLA+ | kms, db-merge |
 | Encrypted LWW restart/replay | TLA+ + existing LWW Lean law | kms, p2p, db-merge, crdt |
@@ -125,7 +125,7 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 | KMS key distribution | Behavioral | `kms.rs` (node0 denies the DEK to unauthorized node1) |
 | Encrypted LWW restart/replay | Behavioral + Boundary | `partition::convergence_encrypted_lww_restart_merge` binds the decrypted LWW winner after a restart-induced partition; filtered replication binds encrypted-field preservation. Durable acknowledgement-backed retry through a receiver restart remains Boundary; `MC_EncryptedLwwReplay_{Green,Red_*}`; reuses `PriorityReconcile.lwwCM` |
 | CRDT merge laws | Contract | `MergeResult` vocab; `DefraConvergence.MixedField` product proof; `MixedFieldMaterialization.tla` |
-| Multi-instance claim | Boundary | defra-agent substrate, not this binary |
+| Multi-instance claim | Boundary | gents substrate, not this binary |
 | Block integrity / signatures | Boundary | needs adversarial peer; Rust verify mandatory |
 | P2P capability replay gate | Boundary | P2P-wire internal |
 | JWT issuer / algorithm binding | Boundary | DID-binding via `acp.rs`; forge unreachable via CLI |
@@ -148,7 +148,7 @@ cargo test -p conformance            # Lean axis + behavioral; DEFRA_CONFORMANCE
 - **Naming:** invariants/safety `INV_*`; liveness as `<>[]...` properties; scenario
   wrappers `MC_<Family>_<Case>`.
 - **Source-anchored.** Every family has a `<Family>_DESIGN.md` grounding the abstraction
-  in specific defradb.rs / defra-agent source modules (file:line). Model the real code
+  in specific defradb.rs / gents source modules (file:line). Model the real code
   paths, not an abstraction in a vacuum.
 - **Lean:** mathlib-free, toolchain pinned, **no `sorry`/`admit`**, and `#print axioms`
   status recorded in `lean/README.md`.
@@ -182,5 +182,5 @@ Read this before trusting a verdict; it states the model's honest reach.
   the `*_DESIGN.md` docs and bound to the implementation by the `conformance` crate (see
   *Conformance* above) — the Lean axis asserts model vocabularies against live Rust types,
   the TLA axis drives the selected DefraDB binary. What conformance does **not** reach is marked
-  `Boundary` in the registry (crypto, eventual connectivity, bounded-N, the defra-agent
+  `Boundary` in the registry (crypto, eventual connectivity, bounded-N, the gents
   claim substrate): assumed, never asserted against the artifact.
