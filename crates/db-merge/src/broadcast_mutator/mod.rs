@@ -254,6 +254,143 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> SeArtifactRep
     }
 }
 
+impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, T> {
+    async fn broadcast_update_result(
+        &self,
+        collection_name: &str,
+        se_fields: Vec<String>,
+        result: UpdateResult,
+    ) -> query::error::Result<UpdateResult> {
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+        let collection_id = collection.collection_id().to_string();
+
+        let doc_id_for_broadcast = result
+            .document
+            .id()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        let (cid, block, doc_id_str) =
+            if let (Some(cid), Some(block)) = (result.commit_cid, result.commit_block.as_ref()) {
+                (cid, block.clone(), doc_id_for_broadcast)
+            } else {
+                match read_latest_composite_block(&self.db, &doc_id_for_broadcast).await {
+                    Ok(br) => (br.cid, br.block, br.doc_id),
+                    Err(e) => {
+                        tracing::error!(
+                            doc_id = %doc_id_for_broadcast,
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to read composite block for P2P broadcast"
+                        );
+                        return Ok(UpdateResult::with_broadcast(
+                            result.document,
+                            result.fields_modified,
+                            BroadcastStatus::Failed(format!("Block read failed: {}", e)),
+                        ));
+                    }
+                }
+            };
+
+        let block_result = BlockResult {
+            cid,
+            block,
+            doc_id: doc_id_str,
+            field_cids: vec![],
+            encryption_cids: vec![],
+        };
+        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let branchable_data = if let (Some(col_cid), Some(col_block)) =
+            (result.broadcast_cid, result.broadcast_block.as_ref())
+        {
+            Some(BlockResult {
+                cid: col_cid,
+                block: col_block.clone(),
+                doc_id: String::new(),
+                field_cids: vec![],
+                encryption_cids: vec![],
+            })
+        } else {
+            None
+        };
+        let se_artifacts = self.generate_se_artifacts(
+            collection.schema(),
+            &block_result.doc_id,
+            &result.document,
+            &se_fields,
+        );
+        let document_json = serde_json::Value::Object(
+            result
+                .document
+                .to_map()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+        );
+        let sync = self.sync.clone();
+        let collection_name_owned = collection_name.to_string();
+
+        tokio::spawn(async move {
+            let creator_ref = creator_did.as_deref();
+            sync.push_document_to_replicators_with_creator(
+                &block_result.cid,
+                &block_result.block,
+                &block_result.doc_id,
+                &collection_id,
+                &document_json,
+                creator_ref,
+            )
+            .await;
+            sync.push_se_artifacts_to_replicators_for_document(
+                &collection_id,
+                se_artifacts,
+                &document_json,
+            )
+            .await;
+            log_broadcast_failure(
+                &broadcast_with_retry_with_creator(
+                    &sync,
+                    &block_result,
+                    &collection_id,
+                    &collection_name_owned,
+                    creator_ref,
+                )
+                .await,
+            );
+
+            if let Some(col_block_result) = branchable_data {
+                sync.push_to_replicators_with_creator(
+                    &col_block_result.cid,
+                    &col_block_result.block,
+                    &col_block_result.doc_id,
+                    &collection_id,
+                    creator_ref,
+                )
+                .await;
+                log_broadcast_failure(
+                    &broadcast_with_retry_with_creator(
+                        &sync,
+                        &col_block_result,
+                        &collection_id,
+                        &collection_name_owned,
+                        creator_ref,
+                    )
+                    .await,
+                );
+            }
+        });
+
+        Ok(UpdateResult::with_broadcast(
+            result.document,
+            result.fields_modified,
+            BroadcastStatus::Pending,
+        ))
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
@@ -624,158 +761,29 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         doc: Document,
         modified_fields: std::collections::HashSet<String>,
     ) -> query::error::Result<UpdateResult> {
-        // Get collection ID for broadcast
-        let collection = self
-            .db
-            .get_collection(collection_name)
-            .map_err(|e| query::error::QueryError::execution(e.to_string()))?
-            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
-        let collection_id = collection.collection_id().to_string();
         let se_fields: Vec<String> = modified_fields.iter().cloned().collect();
-
-        // Execute the update mutation
         let result = self
             .inner
             .update(collection_name, doc, modified_fields)
             .await?;
+        self.broadcast_update_result(collection_name, se_fields, result)
+            .await
+    }
 
-        // Use the committed block directly when available (from ffi/query),
-        // falling back to reading from storage.
-        let doc_id_for_broadcast = result
-            .document
-            .id()
-            .map(|id| id.to_string())
-            .unwrap_or_default();
-        let (cid, block, doc_id_str) =
-            if let (Some(cid), Some(block)) = (result.commit_cid, result.commit_block.as_ref()) {
-                (cid, block.clone(), doc_id_for_broadcast)
-            } else {
-                // Fallback: read committed composite block from storage
-                match read_latest_composite_block(&self.db, &doc_id_for_broadcast).await {
-                    Ok(br) => (br.cid, br.block, br.doc_id),
-                    Err(e) => {
-                        tracing::error!(
-                            doc_id = %doc_id_for_broadcast,
-                            collection = %collection_name,
-                            error = %e,
-                            "Failed to read composite block for P2P broadcast"
-                        );
-                        return Ok(UpdateResult::with_broadcast(
-                            result.document,
-                            result.fields_modified,
-                            BroadcastStatus::Failed(format!("Block read failed: {}", e)),
-                        ));
-                    }
-                }
-            };
-
-        let block_result = BlockResult {
-            cid,
-            block,
-            doc_id: doc_id_str,
-            field_cids: vec![],
-            encryption_cids: vec![],
-        };
-
-        // Read broadcast creator DID before spawning (reads thread-local state).
-        let creator_did = defra_core::signing::get_broadcast_creator_did();
-
-        // Capture branchable collection broadcast data before spawning.
-        let branchable_data = if let (Some(col_cid), Some(col_block)) =
-            (result.broadcast_cid, result.broadcast_block.as_ref())
-        {
-            Some(BlockResult {
-                cid: col_cid,
-                block: col_block.clone(),
-                doc_id: String::new(),
-                field_cids: vec![],
-                encryption_cids: vec![],
-            })
-        } else {
-            None
-        };
-        let se_artifacts = self.generate_se_artifacts(
-            collection.schema(),
-            &block_result.doc_id,
-            &result.document,
-            &se_fields,
-        );
-        let document_json = serde_json::Value::Object(
-            result
-                .document
-                .to_map()
-                .unwrap_or_default()
-                .into_iter()
-                .collect(),
-        );
-
-        // Capture everything for the spawned task by value.
-        let sync = self.sync.clone();
-        let collection_name_owned = collection_name.to_string();
-
-        // Spawn broadcast work as a detached task -- the local transaction
-        // is already committed, so we return immediately.
-        tokio::spawn(async move {
-            let creator_ref = creator_did.as_deref();
-
-            // Match Go DefraDB's live replicator model: push the new head block
-            // and let the receiver resolve any missing links via DAG sync.
-            sync.push_document_to_replicators_with_creator(
-                &block_result.cid,
-                &block_result.block,
-                &block_result.doc_id,
-                &collection_id,
-                &document_json,
-                creator_ref,
-            )
-            .await;
-            sync.push_se_artifacts_to_replicators_for_document(
-                &collection_id,
-                se_artifacts,
-                &document_json,
-            )
-            .await;
-
-            // Broadcast composite via GossipSub with retry for InsufficientPeers
-            log_broadcast_failure(
-                &broadcast_with_retry_with_creator(
-                    &sync,
-                    &block_result,
-                    &collection_id,
-                    &collection_name_owned,
-                    creator_ref,
-                )
-                .await,
-            );
-
-            // For branchable collections, also broadcast the collection block.
-            if let Some(col_block_result) = branchable_data {
-                sync.push_to_replicators_with_creator(
-                    &col_block_result.cid,
-                    &col_block_result.block,
-                    &col_block_result.doc_id,
-                    &collection_id,
-                    creator_ref,
-                )
-                .await;
-                log_broadcast_failure(
-                    &broadcast_with_retry_with_creator(
-                        &sync,
-                        &col_block_result,
-                        &collection_id,
-                        &collection_name_owned,
-                        creator_ref,
-                    )
-                    .await,
-                );
-            }
-        });
-
-        Ok(UpdateResult::with_broadcast(
-            result.document,
-            result.fields_modified,
-            BroadcastStatus::Pending,
-        ))
+    async fn update_if_unchanged(
+        &self,
+        collection_name: &str,
+        expected: Document,
+        doc: Document,
+        modified_fields: std::collections::HashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        let se_fields: Vec<String> = modified_fields.iter().cloned().collect();
+        let result = self
+            .inner
+            .update_if_unchanged(collection_name, expected, doc, modified_fields)
+            .await?;
+        self.broadcast_update_result(collection_name, se_fields, result)
+            .await
     }
 
     async fn delete(

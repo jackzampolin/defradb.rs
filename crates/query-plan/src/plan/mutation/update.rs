@@ -387,6 +387,27 @@ impl PlanNode for UpdateNode {
                 let doc_opt = fetch_result.into_docs().into_iter().next();
 
                 if let Some(mut doc) = doc_opt {
+                    // Filter resolution and this point-in-time fetch can be
+                    // separated by permission checks and other async work.
+                    // Revalidate against the exact snapshot used for the
+                    // update so a document that stopped matching is skipped.
+                    if let Some(ref filter) = self.filter {
+                        let filter_mapping = if let Some(collection) = &self.collection {
+                            let mut mapping = DocumentMapping::new();
+                            for (index, field) in collection.fields.iter().enumerate() {
+                                mapping.add(index, &field.name);
+                            }
+                            mapping
+                        } else {
+                            self.document_mapping.clone()
+                        };
+                        let plan_doc = document_to_plan_doc(&doc, &filter_mapping)?;
+                        if !filter.matches(plan_doc.fields(), &filter_mapping)? {
+                            continue;
+                        }
+                    }
+                    let expected = doc.clone();
+
                     // Apply update input with schema-aware coercion and request time
                     self.input.apply_to_with_time(
                         &mut doc,
@@ -401,7 +422,7 @@ impl PlanNode for UpdateNode {
                     // Persist update with modified field tracking
                     let result = self
                         .mutator
-                        .update(&self.collection_name, doc, modified_fields)
+                        .update_if_unchanged(&self.collection_name, expected, doc, modified_fields)
                         .await?;
 
                     // Convert to plan Doc

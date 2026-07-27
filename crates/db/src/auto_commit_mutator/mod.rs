@@ -102,7 +102,18 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         doc: Document,
         modified_fields: std::collections::HashSet<String>,
     ) -> query::error::Result<UpdateResult> {
-        self.update_impl(collection_name, doc, modified_fields)
+        self.update_impl(collection_name, None, doc, modified_fields)
+            .await
+    }
+
+    async fn update_if_unchanged(
+        &self,
+        collection_name: &str,
+        expected: Document,
+        doc: Document,
+        modified_fields: std::collections::HashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_impl(collection_name, Some(expected), doc, modified_fields)
             .await
     }
 

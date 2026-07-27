@@ -11,6 +11,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
     pub(super) async fn update_impl(
         &self,
         collection_name: &str,
+        expected: Option<Document>,
         doc: Document,
         modified_fields: std::collections::HashSet<String>,
     ) -> query::error::Result<UpdateResult> {
@@ -102,6 +103,23 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .into_iter()
             .next()
             .ok_or_else(|| query::error::QueryError::document_not_found(canonical_id))?;
+        if let Some(expected) = expected {
+            let values_unchanged = expected.values().len() == current_doc.values().len()
+                && expected
+                    .values()
+                    .iter()
+                    .all(|(field_name, expected_value)| {
+                        current_doc.get(field_name) == Some(expected_value.value())
+                    });
+            if expected.id() != current_doc.id()
+                || expected.is_deleted() != current_doc.is_deleted()
+                || !values_unchanged
+            {
+                return Err(query::error::QueryError::execution(
+                    "transaction conflict. Please retry",
+                ));
+            }
+        }
         for field_name in &modified_fields {
             if let Some(delta) = doc.get_counter_delta(field_name).cloned() {
                 // Counter inputs are deltas computed from the stale
@@ -387,7 +405,7 @@ mod tests {
     /// boundary: applying the second copy must not replace an unrelated field
     /// written by the first update.
     #[tokio::test]
-    async fn stale_disjoint_field_update_preserves_committed_fields() {
+    async fn stale_disjoint_field_update_without_precondition_preserves_committed_fields() {
         let db = Arc::new(DB::new(MemoryStore::new()).expect("create db"));
         db.create_collection(test_collection())
             .await
@@ -424,5 +442,59 @@ mod tests {
             .expect("final document");
         assert_eq!(final_doc.get("left"), Some(&NormalValue::Int(1)));
         assert_eq!(final_doc.get("right"), Some(&NormalValue::Int(1)));
+    }
+
+    /// Query mutations carry the snapshot against which their filter was
+    /// validated. If that snapshot changes while the update waits for the
+    /// per-document guard, the mutation must conflict instead of applying a
+    /// predicate that is no longer known to hold.
+    #[tokio::test]
+    async fn stale_conditional_update_returns_conflict() {
+        let db = Arc::new(DB::new(MemoryStore::new()).expect("create db"));
+        db.create_collection(test_collection())
+            .await
+            .expect("schema");
+        let mutator = AutoCommitMutator::new(Arc::clone(&db));
+
+        let initial =
+            Document::from_json_str(r#"{"left": 0, "right": 0}"#).expect("initial document");
+        let created = mutator.create("Patch", initial).await.expect("create");
+
+        let mut first = mutator
+            .get_for_update("Patch", &created.doc_id)
+            .await
+            .expect("fetch first copy")
+            .expect("first copy");
+        let expected_second = first.clone();
+        let mut second = first.clone();
+
+        first.set("left", NormalValue::Int(1));
+        mutator
+            .update("Patch", first, HashSet::from(["left".to_string()]))
+            .await
+            .expect("update left");
+
+        second.set("right", NormalValue::Int(1));
+        let error = mutator
+            .update_if_unchanged(
+                "Patch",
+                expected_second,
+                second,
+                HashSet::from(["right".to_string()]),
+            )
+            .await
+            .expect_err("stale conditional update must conflict");
+        assert!(
+            error.to_string().contains("transaction conflict"),
+            "unexpected error: {error}"
+        );
+
+        let final_doc = mutator
+            .get_for_update("Patch", &created.doc_id)
+            .await
+            .expect("fetch final")
+            .expect("final document");
+        assert_eq!(final_doc.get("left"), Some(&NormalValue::Int(1)));
+        assert_eq!(final_doc.get("right"), Some(&NormalValue::Int(0)));
     }
 }

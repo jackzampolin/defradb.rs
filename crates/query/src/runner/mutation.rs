@@ -560,13 +560,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     node = node.with_doc_ids(doc_ids.clone());
                 }
 
-                // Pass the filter only when the node still needs to resolve it.
-                // If it was already resolved to doc IDs above, the filter must
-                // not be applied again to post-update document state.
-                if resolved_doc_ids.is_none() && mutation.doc_ids.is_none() {
-                    if let Some(ref filter) = mutation.filter {
-                        node = node.with_filter(filter.clone());
-                    }
+                // Keep the filter even when it was already resolved to IDs.
+                // UpdateNode revalidates it against the document snapshot that
+                // is passed to the mutator, closing the selection/write race
+                // without filtering the post-update result.
+                if let Some(ref filter) = mutation.filter {
+                    node = node.with_filter(filter.clone());
                 }
 
                 Box::new(node)
