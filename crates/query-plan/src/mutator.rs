@@ -436,6 +436,24 @@ pub trait DocMutator: MaybeSendSync {
         modified_fields: std::collections::HashSet<String>,
     ) -> Result<UpdateResult>;
 
+    /// Update a document only if its persisted state still matches the
+    /// snapshot used to select and materialize the mutation.
+    ///
+    /// Transaction-scoped mutators already read and write through one
+    /// snapshot, so the default delegates to [`Self::update`]. Auto-commit
+    /// mutators should override this method and validate `expected` after
+    /// acquiring their per-document serialization guard.
+    async fn update_if_unchanged(
+        &self,
+        collection_name: &str,
+        expected: Document,
+        doc: Document,
+        modified_fields: std::collections::HashSet<String>,
+    ) -> Result<UpdateResult> {
+        let _ = expected;
+        self.update(collection_name, doc, modified_fields).await
+    }
+
     /// Delete a document by ID.
     ///
     /// # Arguments

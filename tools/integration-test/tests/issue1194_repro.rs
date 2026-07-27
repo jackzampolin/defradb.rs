@@ -228,3 +228,49 @@ async fn issue1194_same_doc_txn_pair_still_conflicts() {
         "expected a transaction conflict, got: {msg}"
     );
 }
+
+/// Regression control for the same-document case when the concurrent updates
+/// touch different fields. The document body is a single stored value, so both
+/// mutations still write from overlapping snapshots and the second commit must
+/// abort instead of silently replacing the first update.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn issue1194_same_doc_disjoint_field_txn_pair_still_conflicts() {
+    let cluster = build_cluster().await;
+    let node = cluster.client(0);
+
+    node.schema_add("type Snap { status: String  content: String }")
+        .expect("schema add");
+
+    let data = node
+        .query(r#"mutation { add_Snap(input: {status: "streaming", content: "init"}) { _docID } }"#)
+        .expect("create doc");
+    let id = data["add_Snap"][0]["_docID"].as_str().unwrap().to_string();
+
+    let tx1 = node.tx_create().expect("tx1 create");
+    let tx2 = node.tx_create().expect("tx2 create");
+
+    node.query_with_tx(
+        &format!(
+            r#"mutation {{ update_Snap(docID: "{id}", input: {{content: "first"}}) {{ _docID }} }}"#
+        ),
+        &tx1,
+    )
+    .expect("tx1 update content");
+    node.query_with_tx(
+        &format!(
+            r#"mutation {{ update_Snap(docID: "{id}", input: {{status: "claimed"}}) {{ _docID }} }}"#
+        ),
+        &tx2,
+    )
+    .expect("tx2 update status");
+
+    node.tx_commit(&tx1).expect("tx1 commit");
+    let err = node
+        .tx_commit(&tx2)
+        .expect_err("tx2 commit must conflict: same document, overlapping snapshots");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("transaction conflict"),
+        "expected a transaction conflict, got: {msg}"
+    );
+}
