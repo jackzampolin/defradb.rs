@@ -232,16 +232,20 @@ impl<S: Store + 'static> BrowserSyncAdapter<S> {
 
             let loaded = match self.engine.load_document(&document_ref).await {
                 Ok(loaded) => loaded,
-                // A document whose DAG cannot fit in a sync payload can never
-                // be pulled. Failing the page would wedge this cursor
-                // position permanently — every retry re-reads the same
-                // document — so skip past it and keep the page moving.
-                Err(db_merge::browser_sync::BrowserSyncError::TooLarge(message)) => {
+                // A document that cannot be represented as a sync payload can
+                // never be pulled, whether it exceeds the size limit or the
+                // block and root counts. Both are permanent properties of the
+                // stored DAG. Failing the page would wedge this cursor
+                // position — every retry re-reads the same document — so skip
+                // past it and keep the page moving. Storage errors are not
+                // included: those are transient and must still fail the page.
+                Err(error @ db_merge::browser_sync::BrowserSyncError::TooLarge(_))
+                | Err(error @ db_merge::browser_sync::BrowserSyncError::Invalid(_)) => {
                     tracing::warn!(
                         doc_id = %document_ref.doc_id,
                         collection_id = %document_ref.collection_id,
-                        %message,
-                        "browser sync skipped a document that exceeds the sync payload limit"
+                        %error,
+                        "browser sync skipped a document that cannot be represented as a sync payload"
                     );
                     resume_cursor = Some(document_ref.doc_id);
                     continue;
@@ -274,11 +278,17 @@ impl<S: Store + 'static> BrowserSyncAdapter<S> {
                 has_more = true;
                 break;
             }
+            // Alone on the page and still over the response limit, so no page
+            // can ever carry it. Skip it for the same reason as an unloadable
+            // document: erroring here would wedge this cursor position.
             if exceeds_limit {
-                return Err(BrowserSyncError::Internal(format!(
-                    "document {} exceeds the sync response limit",
-                    document.doc_id
-                )));
+                tracing::warn!(
+                    doc_id = %document.doc_id,
+                    collection_id = %document_ref.collection_id,
+                    "browser sync skipped a document that exceeds the sync response limit"
+                );
+                resume_cursor = Some(document_ref.doc_id);
+                continue;
             }
             payload_bytes = payload_bytes.saturating_add(document_bytes);
             wire_bytes = wire_bytes.saturating_add(document_wire_bytes + 1);

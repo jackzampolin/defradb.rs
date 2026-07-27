@@ -105,12 +105,14 @@ impl SyncSession {
         for document_ref in refs {
             let loaded = match self.engine.load_document(&document_ref).await {
                 Ok(loaded) => loaded,
-                // Too large to even load, so it can never be pushed. Failing
+                // Cannot be represented as a sync payload — too large, or too
+                // many blocks or roots — so it can never be pushed. Failing
                 // here would abort the whole push and leave recover_full_sync
                 // retrying forever; skip it like the request-size check below.
-                Err(db_merge::browser_sync::BrowserSyncError::TooLarge(message)) => {
+                Err(error @ db_merge::browser_sync::BrowserSyncError::TooLarge(_))
+                | Err(error @ db_merge::browser_sync::BrowserSyncError::Invalid(_)) => {
                     warn(&format!(
-                        "browser sync skipped document {} because it exceeds the sync payload limit: {message}",
+                        "browser sync skipped document {} because it cannot be represented as a sync payload: {error}",
                         document_ref.doc_id
                     ));
                     continue;
@@ -198,9 +200,10 @@ impl SyncSession {
             match self.engine.load_document(&document_ref).await {
                 Ok(Some(document)) => documents.push(document),
                 Ok(None) => {}
-                Err(db_merge::browser_sync::BrowserSyncError::TooLarge(message)) => {
+                Err(error @ db_merge::browser_sync::BrowserSyncError::TooLarge(_))
+                | Err(error @ db_merge::browser_sync::BrowserSyncError::Invalid(_)) => {
                     warn(&format!(
-                        "browser sync skipped document {doc_id} because it exceeds the sync payload limit: {message}"
+                        "browser sync skipped document {doc_id} because it cannot be represented as a sync payload: {error}"
                     ));
                 }
                 Err(error) => return Err(engine_error(error)),
