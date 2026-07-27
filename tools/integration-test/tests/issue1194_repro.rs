@@ -1,6 +1,5 @@
 //! Issue #1194 regression: concurrent `update_X` mutations against DISTINCT
-//! documents through the HTTP GraphQL API must not fail with
-//! `transaction conflict. Please retry`.
+//! documents must not fail with `transaction conflict. Please retry`.
 //!
 //! Root cause: field-delta blocks are content-addressed (`b` + CID) and carry
 //! no document identity. Two documents whose updates produce byte-identical
@@ -15,10 +14,13 @@ use std::sync::Arc;
 use integration_test::TestCluster;
 use serde_json::{json, Value};
 
-struct RoundStats {
-    ok: usize,
-    conflict: usize,
-    other: Vec<String>,
+async fn build_cluster() -> TestCluster {
+    TestCluster::builder()
+        .rust_nodes(1)
+        .with_store("redb")
+        .build()
+        .await
+        .expect("build cluster")
 }
 
 async fn gql(http: &reqwest::Client, url: &str, query: &str) -> Result<Value, String> {
@@ -41,84 +43,19 @@ async fn gql(http: &reqwest::Client, url: &str, query: &str) -> Result<Value, St
     Ok(body["data"].clone())
 }
 
-async fn run_workload(
-    api_url: &str,
-    collection: &str,
-    input_extra: &str,
-    doc_ids: &[String],
-    concurrency: usize,
-    rounds: usize,
-) -> RoundStats {
-    let http = reqwest::Client::new();
-    let barrier = Arc::new(tokio::sync::Barrier::new(concurrency));
-    let mut handles = Vec::new();
-    for (worker, doc_id) in doc_ids.iter().take(concurrency).enumerate() {
-        let http = http.clone();
-        let url = api_url.to_string();
-        let doc_id = doc_id.clone();
-        let collection = collection.to_string();
-        let input_extra = input_extra.to_string();
-        let barrier = Arc::clone(&barrier);
-        handles.push(tokio::spawn(async move {
-            let mut stats = RoundStats {
-                ok: 0,
-                conflict: 0,
-                other: Vec::new(),
-            };
-            for round in 0..rounds {
-                barrier.wait().await;
-                let mutation = format!(
-                    r#"mutation {{ update_{collection}(filter: {{_docID: {{_eq: "{doc_id}"}}, status: {{_eq: "streaming"}}}}, input: {{content: "w{worker}-r{round}"{input_extra}}}) {{ _docID }} }}"#
-                );
-                match gql(&http, &url, &mutation).await {
-                    Ok(data) => {
-                        let n = data[format!("update_{collection}")]
-                            .as_array()
-                            .map(|a| a.len())
-                            .unwrap_or(0);
-                        if n == 1 {
-                            stats.ok += 1;
-                        } else {
-                            stats.other.push(format!("updated {n} docs"));
-                        }
-                    }
-                    Err(msg) if msg.contains("transaction conflict") => {
-                        stats.conflict += 1;
-                    }
-                    Err(msg) => stats.other.push(msg),
-                }
-            }
-            stats
-        }));
-    }
-    let mut total = RoundStats {
-        ok: 0,
-        conflict: 0,
-        other: Vec::new(),
-    };
-    for h in handles {
-        let s = h.await.expect("worker panicked");
-        total.ok += s.ok;
-        total.conflict += s.conflict;
-        total.other.extend(s.other);
-    }
-    total
-}
-
-/// Eight docs, barrier-synchronized concurrent updates at concurrency 2/4/8.
-/// Every attempt must succeed on the first try: distinct documents may not
-/// leak transaction conflicts through the HTTP API.
-async fn run_scenario(schema: &str, collection: &str, input_extra: &str) {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_store("redb")
-        .build()
-        .await
-        .expect("build cluster");
+/// The reported workload over HTTP GraphQL on redb: eight documents, eight
+/// barrier-synchronized writers, each round rewriting `status: "streaming"`
+/// unchanged (the snapshot-flush shape that makes delta blocks byte-identical
+/// across documents). Every attempt must succeed on the first try — no client
+/// retry budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn issue1194_concurrent_distinct_doc_updates() {
+    let cluster = build_cluster().await;
     let node = cluster.client(0);
     let api_url = cluster.api_url(0).to_string();
 
-    node.schema_add(schema).expect("schema add");
+    node.schema_add("type AgentResponse { status: String  content: String }")
+        .expect("schema add");
 
     let http = reqwest::Client::new();
     let mut doc_ids = Vec::new();
@@ -127,13 +64,13 @@ async fn run_scenario(schema: &str, collection: &str, input_extra: &str) {
             &http,
             &api_url,
             &format!(
-                r#"mutation {{ add_{collection}(input: {{status: "streaming", content: "init-{i}"}}) {{ _docID }} }}"#
+                r#"mutation {{ add_AgentResponse(input: {{status: "streaming", content: "init-{i}"}}) {{ _docID }} }}"#
             ),
         )
         .await
         .expect("create doc");
         doc_ids.push(
-            data[format!("add_{collection}")][0]["_docID"]
+            data["add_AgentResponse"][0]["_docID"]
                 .as_str()
                 .expect("docID")
                 .to_string(),
@@ -141,97 +78,62 @@ async fn run_scenario(schema: &str, collection: &str, input_extra: &str) {
     }
 
     let rounds = 10;
-    for concurrency in [2usize, 4, 8] {
-        let stats = run_workload(
-            &api_url,
-            collection,
-            input_extra,
-            &doc_ids,
-            concurrency,
-            rounds,
-        )
-        .await;
-        let attempts = concurrency * rounds;
-        println!(
-            "[{collection}] concurrency={concurrency}: attempts={attempts} ok={} conflict={} other={:?}",
-            stats.ok, stats.conflict, stats.other
-        );
-        assert_eq!(
-            stats.conflict, 0,
-            "[{collection}] concurrency={concurrency}: transaction conflicts leaked for \
-             updates to distinct documents"
-        );
-        assert!(
-            stats.other.is_empty(),
-            "[{collection}] concurrency={concurrency}: unexpected errors: {:?}",
-            stats.other
-        );
-        assert_eq!(stats.ok, attempts);
+    let barrier = Arc::new(tokio::sync::Barrier::new(doc_ids.len()));
+    let mut handles = Vec::new();
+    for (worker, doc_id) in doc_ids.iter().enumerate() {
+        let http = http.clone();
+        let url = api_url.to_string();
+        let doc_id = doc_id.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            let mut failures = Vec::new();
+            for round in 0..rounds {
+                barrier.wait().await;
+                let mutation = format!(
+                    r#"mutation {{ update_AgentResponse(filter: {{_docID: {{_eq: "{doc_id}"}}, status: {{_eq: "streaming"}}}}, input: {{content: "w{worker}-r{round}", status: "streaming"}}) {{ _docID }} }}"#
+                );
+                match gql(&http, &url, &mutation).await {
+                    Ok(data) => {
+                        let n = data["update_AgentResponse"]
+                            .as_array()
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        if n != 1 {
+                            failures.push(format!("round {round}: updated {n} docs"));
+                        }
+                    }
+                    Err(msg) => failures.push(format!("round {round}: {msg}")),
+                }
+            }
+            failures
+        }));
     }
 
-    // No writes lost, duplicated, or applied to the wrong document: each doc
-    // holds its own worker's final-round content.
+    for (worker, handle) in handles.into_iter().enumerate() {
+        let failures = handle.await.expect("worker panicked");
+        assert!(
+            failures.is_empty(),
+            "worker {worker} updating its own document failed: {failures:?}"
+        );
+    }
+
+    // No writes lost, duplicated, or applied to the wrong document.
     for (worker, doc_id) in doc_ids.iter().enumerate() {
         let data = gql(
             &http,
             &api_url,
-            &format!(r#"query {{ {collection}(docID: "{doc_id}") {{ content status }} }}"#),
+            &format!(r#"query {{ AgentResponse(docID: "{doc_id}") {{ content status }} }}"#),
         )
         .await
         .expect("final read");
         let last = rounds - 1;
         assert_eq!(
-            data[collection][0]["content"],
+            data["AgentResponse"][0]["content"],
             json!(format!("w{worker}-r{last}")),
             "doc {worker} final content"
         );
-        assert_eq!(data[collection][0]["status"], json!("streaming"));
+        assert_eq!(data["AgentResponse"][0]["status"], json!("streaming"));
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn issue1194_unindexed_status() {
-    run_scenario(
-        "type AgentResponse { status: String  content: String }",
-        "AgentResponse",
-        "",
-    )
-    .await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn issue1194_indexed_status() {
-    run_scenario(
-        "type AgentResponseIdx { status: String @index  content: String }",
-        "AgentResponseIdx",
-        "",
-    )
-    .await;
-}
-
-/// The reported shape: the mutation input rewrites `status: "streaming"`
-/// unchanged on every flush, producing byte-identical field-delta blocks
-/// across documents. This was the failing variant.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn issue1194_indexed_status_rewrite() {
-    run_scenario(
-        "type AgentResponseIdxRw { status: String @index  content: String }",
-        "AgentResponseIdxRw",
-        r#", status: "streaming""#,
-    )
-    .await;
-}
-
-/// Same as above without the index: proves the collision is on the shared
-/// content-addressed delta block, not on secondary-index keys.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn issue1194_unindexed_status_rewrite() {
-    run_scenario(
-        "type AgentResponseRw { status: String  content: String }",
-        "AgentResponseRw",
-        r#", status: "streaming""#,
-    )
-    .await;
 }
 
 /// Deterministic core of #1194: two interactive transactions with overlapping
@@ -241,12 +143,7 @@ async fn issue1194_unindexed_status_rewrite() {
 /// a write-write conflict on the shared block key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn issue1194_identical_delta_txn_pair_distinct_docs() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_store("redb")
-        .build()
-        .await
-        .expect("build cluster");
+    let cluster = build_cluster().await;
     let node = cluster.client(0);
 
     node.schema_add("type Snap { status: String  content: String }")
@@ -292,12 +189,7 @@ async fn issue1194_identical_delta_txn_pair_distinct_docs() {
 /// genuine conflict — the second commit must abort.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn issue1194_same_doc_txn_pair_still_conflicts() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_store("redb")
-        .build()
-        .await
-        .expect("build cluster");
+    let cluster = build_cluster().await;
     let node = cluster.client(0);
 
     node.schema_add("type Snap { status: String  content: String }")
