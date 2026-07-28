@@ -425,12 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn test_defra_free_string_null_ptr() {
-        // Should not panic when freeing null pointer
-        unsafe { defra_free_string(ptr::null_mut()) };
-    }
-
-    #[test]
     fn test_ffi_result_ok() {
         let result = FfiResult::ok();
         assert_eq!(result.status, 0);

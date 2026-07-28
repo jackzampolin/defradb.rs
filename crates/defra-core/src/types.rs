@@ -266,15 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cid_unsupported_hash() {
-        // Create a CID with non-SHA256 hash (this would need to be a real CID with different hash)
-        // For now, just verify the validation logic exists
-        let cid_str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
-        let cid = CID::from_string(cid_str);
-        assert!(cid.is_ok());
-    }
-
-    #[test]
     fn test_cid_to_bytes_roundtrip() {
         let cid_str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
         let cid = CID::from_string(cid_str).unwrap();

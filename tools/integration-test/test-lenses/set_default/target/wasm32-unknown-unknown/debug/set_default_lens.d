@@ -1,1 +1,0 @@
-/Users/johnzampolin/go/src/github.com/sourcenetwork/defradb.rs-iroh/tools/integration-test/test-lenses/set_default/target/wasm32-unknown-unknown/debug/set_default_lens.wasm: /Users/johnzampolin/go/src/github.com/sourcenetwork/defradb.rs-iroh/tools/integration-test/test-lenses/set_default/src/lib.rs

@@ -49,11 +49,3 @@ pub async fn add_schema(
 
     Ok(Json(collections))
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_schema_handler_exists() {
-        // Handler compiles correctly
-    }
-}

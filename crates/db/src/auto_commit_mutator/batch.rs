@@ -663,25 +663,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_create_publishes_no_event_when_block_write_fails() {
-        // Documents the invariant: BatchMutator MUST NOT publish an Update event
-        // when write_document_blocks returns Err.
-        //
-        // The post-refactor implementation guarantees this structurally:
-        // register_update_callback is only called inside the `Some(commit_result)`
-        // match arm in BatchMutator::create/update/delete.
-        //
-        // Triggering an actual block-write failure requires a faulty blockstore
-        // that returns Err from `put`. No such mock exists in the codebase today
-        // because the Store trait is sealed (only storage-crate types may implement
-        // it), so a faulty-store mock cannot be constructed in this crate.
-        //
-        // If the sealed constraint is relaxed in the future, replace this comment
-        // with a real assertion: subscribe to the bus, run a create against a
-        // faulty store, and assert no Update event arrives.
-    }
-
-    #[tokio::test]
     async fn batch_delete_missing_doc_publishes_no_event_and_writes_no_block() {
         // DeleteNode treats existed==false as a no-op; the mutator must not
         // create a tombstone commit or fire an Update event for a missing doc.
