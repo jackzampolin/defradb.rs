@@ -9,7 +9,9 @@ fn workspace_root() -> PathBuf {
 }
 
 fn defra_binary() -> PathBuf {
-    workspace_root().join("target/debug/defra")
+    std::env::var_os("DEFRA_RUST_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("target/debug/defra"))
 }
 
 fn is_rust_binary(binary: &Path) -> bool {
@@ -581,8 +583,8 @@ fn rust_import_stdin() {
 
 #[test]
 
-fn import_rust_export_go() {
-    let Some(go) = go_binary() else { return };
+fn go_rust_import_rust_export_go() {
+    let go = go_binary().expect("Go defradb not in PATH");
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
     let rust = defra_binary();
@@ -600,8 +602,8 @@ fn import_rust_export_go() {
 
 #[test]
 
-fn import_go_export_rust() {
-    let Some(go) = go_binary() else { return };
+fn go_rust_import_go_export_rust() {
+    let go = go_binary().expect("Go defradb not in PATH");
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
     let rust = defra_binary();
@@ -617,8 +619,8 @@ fn import_go_export_rust() {
 
 #[test]
 
-fn generate_go_list_rust() {
-    let Some(go) = go_binary() else { return };
+fn go_rust_generate_go_list_rust() {
+    let go = go_binary().expect("Go defradb not in PATH");
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
     let rust = defra_binary();
