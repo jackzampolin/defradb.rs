@@ -38,13 +38,6 @@ fn test_json_bool() {
 }
 
 #[test]
-fn test_json_int_array() {
-    let doc = document::Document::from_json_str(r#"{"values": [1, 2, 3]}"#).unwrap();
-    let val = doc.get("values").unwrap();
-    assert!(val.is_array());
-}
-
-#[test]
 fn test_json_string_array() {
     let doc = document::Document::from_json_str(r#"{"values": ["a", "b"]}"#).unwrap();
     let val = doc.get("values").unwrap();

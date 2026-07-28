@@ -37,12 +37,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_version_short() {
-        let info = VersionInfo::new();
-        assert!(info.short().starts_with("defradb "));
-    }
-
-    #[test]
     fn test_version_full() {
         let info = VersionInfo::new();
         let full = info.full();

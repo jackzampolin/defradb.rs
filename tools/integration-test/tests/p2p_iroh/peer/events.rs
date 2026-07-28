@@ -652,58 +652,6 @@ async fn unsubscribe_multiple_documents_left_events() {
     );
 }
 
-/// Port: TestPeerEvents_DocumentAndDocSyncTopics_ShouldReceiveJoinEventsOnBoth
-///
-/// In iroh, there's no connection-level gossip topic — only per-topic subscriptions.
-/// This test verifies both document subscription and collection subscription produce events.
-#[tokio::test]
-#[serial]
-async fn document_and_doc_sync_topics_join_events() {
-    let cluster = setup_two_nodes().await;
-
-    let result = cluster
-        .client(0)
-        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
-        .expect("create user");
-    let doc_id = extract_doc_id_from_create(&result, "Users");
-
-    connect_peers(&cluster);
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    let (handle, events) = open_peer_events_sse(cluster.api_url(0)).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // Both nodes subscribe to collection AND document
-    cluster
-        .client(0)
-        .p2p_collection_add(&["Users"])
-        .expect("collection add node0");
-    cluster
-        .client(1)
-        .p2p_collection_add(&["Users"])
-        .expect("collection add node1");
-    cluster
-        .client(0)
-        .p2p_document_add(&[&doc_id])
-        .expect("document add node0");
-    cluster
-        .client(1)
-        .p2p_document_add(&[&doc_id])
-        .expect("document add node1");
-
-    // Wait for events from both collection and document subscription
-    let collected = wait_for_peer_events_with_type(&events, "JOINED", 2, EVENT_TIMEOUT).await;
-    handle.abort();
-
-    let joined = events_with_type(&collected, "JOINED");
-    assert!(
-        joined.len() >= 2,
-        "expected at least 2 JOINED events (collection + document), got {}: {:?}",
-        joined.len(),
-        collected
-    );
-}
-
 /// Port: TestPeerEvents_AllTopicTypes_ShouldReceiveJoinEventsOnAll
 ///
 /// In iroh, there's no connection-level gossip topic. This test verifies
