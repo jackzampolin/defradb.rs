@@ -8,8 +8,6 @@
 //! - `parser`: Main SdlParser struct and parse logic
 //! - `directives`: Directive parsing
 //! - `warnings`: Warning types
-//! - `preprocess`: Schema preprocessing (placeholder)
-//! - `types`: Type parsing utilities (placeholder)
 //! - `fields`: Field parsing utilities (placeholder)
 //! - `validation`: Schema validation (placeholder)
 //! - `builder`: Collection building (placeholder)
@@ -22,8 +20,6 @@ mod directives;
 mod fields;
 mod helpers;
 mod parser;
-mod preprocess;
-mod types;
 mod validation;
 mod warnings;
 

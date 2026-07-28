@@ -28,9 +28,6 @@ chrono = { version = "0.4", features = ["serde"] }
 # Regex (SDL preprocessing)
 regex = "1"
 
-# Async
-async-trait.workspace = true
-
 # Internal crates
 query-types = { path = "../query-types" }
 schema = { path = "../schema" }
