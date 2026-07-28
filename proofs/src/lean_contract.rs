@@ -1,4 +1,4 @@
-//! Auto-generated Lean conformance vectors.
+//! Lean-generated conformance contract loader.
 //!
 //! `proofs/lean/Conformance.lean` emits a JSON contract (vocabularies derived
 //! from the Lean models) between two sentinel lines. We run it via

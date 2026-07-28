@@ -17,8 +17,8 @@
 //! - `mutation`: Mutation execution
 //! - `plan`: Plan execution utilities
 //! - `query`: Main query execution logic
-//! - `explain`: Explain functionality (placeholder for extraction)
-//! - `commits`: Commits query handling (placeholder for extraction)
+//! - `explain`: Explain query execution
+//! - `commits`: Commits query handling
 
 mod commits;
 mod commits_height;
