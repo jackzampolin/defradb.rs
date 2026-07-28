@@ -21,9 +21,6 @@ pub mod lww;
 pub mod priority;
 pub mod traits;
 
-#[cfg(test)]
-mod test_utils;
-
 pub use composite::{CompositeDAG, CompositeDelta, STATUS_ACTIVE, STATUS_DELETED};
 pub use counter::{Counter, CounterDelta, NumericKind};
 pub use lww::{Lww, LwwDelta};

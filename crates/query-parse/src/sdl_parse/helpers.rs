@@ -3,7 +3,7 @@
 //! Module-level helper functions used during SDL parsing:
 //! - Preprocessing: `preprocess_empty_types()`
 //! - Type parsing: `parse_graphql_type()`, `graphql_to_scalar_kind()`
-//! - ID generation: `generate_collection_id()`, `generate_field_id()`, `generate_version_id()`
+//! - ID generation: `generate_collection_id()`, `generate_field_id()`
 //! - Formatting: `format_graphql_value()`, `graphql_schema_value_to_json()`
 //! - Hashing: `hash_to_hex()`
 
@@ -390,16 +390,6 @@ pub(super) fn generate_field_id(field_name: &str, kind: &FieldKind, crdt_type: C
             format!("field_{}", hash_to_hex(&hasher.finalize()))
         }
     }
-}
-
-/// Generate a deterministic version ID from collection name and fields.
-///
-/// Uses the same CID format as Go DefraDB for interoperability.
-/// In Go, for a new schema the VersionID equals the CollectionID.
-#[allow(dead_code)]
-pub(super) fn generate_version_id(name: &str, fields: &[FieldDescription]) -> String {
-    // Version ID uses the same logic as collection ID (Go behavior for new schemas)
-    generate_collection_id(name, fields, &HashMap::new())
 }
 
 /// Generate a relation name following Go DefraDB conventions.
