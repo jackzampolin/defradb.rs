@@ -8,7 +8,7 @@
 
 use crdt::composite::{CompositeDAG, CompositeDelta, FieldDelta};
 use crdt::counter::NumericKind;
-use crdt::traits::{Context, ReplicatedData};
+use crdt::traits::{Context, MergeResult, ReplicatedData};
 use defra_core::types::DocId;
 use std::collections::HashMap;
 use std::f64;
@@ -67,6 +67,23 @@ async fn test_composite_multiple_fields() {
     let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
     let count = i64::from_be_bytes(count_bytes.try_into().unwrap());
     assert_eq!(count, 5);
+}
+
+#[tokio::test]
+async fn test_composite_empty_delta_is_applied() {
+    let store = MemoryStore::new();
+    let composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
+    let ctx = Context {
+        doc_id: DocId::new_unchecked("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+    let delta = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), 10).unwrap();
+
+    let mut txn = store.new_txn(false).await.unwrap();
+    let result = composite.merge(&mut *txn, &ctx, &delta).await.unwrap();
+
+    assert_eq!(result, MergeResult::Applied);
 }
 
 #[tokio::test]
