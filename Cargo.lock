@@ -9945,7 +9945,6 @@ dependencies = [
 name = "query-parse"
 version = "0.5.0"
 dependencies = [
- "async-trait",
  "chrono",
  "cid",
  "graphql-parser",
