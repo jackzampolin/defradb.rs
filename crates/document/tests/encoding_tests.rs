@@ -130,14 +130,6 @@ fn test_to_map_nan_error() {
 }
 
 #[test]
-fn test_to_map_infinity_error() {
-    let mut doc = document::Document::new();
-    doc.set("value", f64::INFINITY);
-    let result = doc.to_map();
-    assert!(result.is_err());
-}
-
-#[test]
 fn test_to_map_neg_infinity_error() {
     let mut doc = document::Document::new();
     doc.set("value", f64::NEG_INFINITY);

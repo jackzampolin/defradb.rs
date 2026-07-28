@@ -3,7 +3,7 @@
 //! Ported from Go: tests/integration/net/simple/peer/ (collection subscription tests)
 //!
 //! Run with:
-//!   cargo test -p integration-test --test p2p_iroh_collection_sub -- --ignored
+//!   cargo test -p integration-test --test p2p_iroh replication::collection_sub
 
 use std::time::Duration;
 
@@ -214,25 +214,24 @@ async fn collection_add_erroneous_id() {
     );
 }
 
-/// Port: TestP2PCollectionAddValidAndErroneousCollectionID
-/// Mix of valid and erroneous IDs: behavior depends on implementation.
+/// A mixed batch returns an error after preserving subscriptions completed
+/// before the invalid collection was encountered.
 #[tokio::test]
 #[serial]
-async fn collection_add_valid_and_erroneous() {
+async fn collection_add_mixed_batch_preserves_prior_subscription() {
     let cluster = setup_iroh_node().await;
     let node = cluster.client(0);
 
     let result = node.p2p_collection_add(&["Users", "NonExistent"]);
-    // The entire call may fail or partially succeed.
-    // In Go, this is atomic (neither added). In Rust, it may be non-atomic
-    // (Users gets added even though NonExistent fails).
-    if result.is_err() {
-        let cols = node.p2p_collection_list().expect("list");
-        let arr = cols.as_array().expect("not array");
-        if !arr.is_empty() {
-            eprintln!("NOTE: non-atomic collection_add — valid collection was added despite error");
-        }
-    }
+    assert!(result.is_err(), "mixed valid/invalid batch should error");
+
+    let cols = node.p2p_collection_list().expect("list");
+    let arr = cols.as_array().expect("not array");
+    assert_eq!(
+        arr.len(),
+        1,
+        "the valid collection subscribed before the error should remain"
+    );
 }
 
 /// Port: TestP2PCollectionAddValidThenErroneousCollectionID

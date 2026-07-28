@@ -559,15 +559,13 @@ mod tests {
     }
 
     #[test]
-    fn test_dac_actor_relationship() {
+    fn test_dac_actor_relationship_missing_collection_returns_error() {
         assert!(crate::runtime::init_runtime());
 
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0);
+        let result = new_node(NodeInitOptions::default());
+        assert_eq!(result.status, 0, "new_node should succeed");
         let node = result.node_ptr;
 
-        // Add DAC relationship (no document registered, but we test the API)
         let requestor_did = CString::new(test_did()).unwrap();
         let target_did = CString::new(test_did2()).unwrap();
         let collection_id = CString::new("test-collection").unwrap();
@@ -584,21 +582,21 @@ mod tests {
                 relation.as_ptr(),
             )
         };
-        // This may fail because the document isn't registered - but it tests the API
-        // The status code indicates the FFI function was called correctly
-        if result.status == 0 {
-            let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
-            assert!(
-                value.contains("added"),
-                "should have added field in response"
-            );
-            unsafe { crate::types::defra_free_string(result.value) };
-        } else {
-            // Expected - document not registered
-            unsafe { crate::types::defra_free_string(result.error) };
-        }
+        assert_eq!(result.status, 1, "missing collection should be an error");
+        assert!(
+            result.value.is_null(),
+            "error result should not contain a value"
+        );
+        assert!(
+            !result.error.is_null(),
+            "error result should contain a message"
+        );
+        let error = unsafe { CStr::from_ptr(result.error).to_string_lossy() };
+        assert_eq!(error, "collection 'test-collection' does not exist");
+        unsafe { crate::types::defra_free_string(result.error) };
 
-        node_close(node);
+        let close_result = node_close(node);
+        assert_eq!(close_result.status, 0, "node_close should succeed");
     }
 
     #[test]
