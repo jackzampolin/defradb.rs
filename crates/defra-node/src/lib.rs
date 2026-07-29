@@ -660,6 +660,8 @@ pub struct NodeBuilder {
     data_path: Option<PathBuf>,
     storage_backend: StorageBackend,
     storage_durability: storage::backends::DurabilityMode,
+    #[cfg(feature = "rocksdb")]
+    rocksdb_options: Option<storage::RocksDbStoreOptions>,
     embedding_url: Option<String>,
     embedding_model: Option<String>,
     embedding_api_key: Option<String>,
@@ -736,6 +738,17 @@ impl NodeBuilder {
         durability: storage::backends::DurabilityMode,
     ) -> Self {
         self.storage_durability = durability;
+        self
+    }
+
+    /// Set options for the RocksDB persistent storage backend.
+    ///
+    /// When omitted, RocksDB options are loaded from the `ROCKS_*`
+    /// environment variables. [`NodeBuilder::with_storage_durability`] always
+    /// supplies the final durability mode.
+    #[cfg(feature = "rocksdb")]
+    pub fn with_rocksdb_options(mut self, options: storage::RocksDbStoreOptions) -> Self {
+        self.rocksdb_options = Some(options);
         self
     }
 
@@ -893,6 +906,9 @@ impl NodeBuilder {
         let query_timeout = self.query_timeout;
         let query_limits = self.query_limits;
         let node_acp_enabled = self.node_acp_enabled;
+        #[cfg(feature = "rocksdb")]
+        let rocksdb_options =
+            resolve_rocksdb_options(self.rocksdb_options, self.storage_durability);
 
         // Telemetry handle (if any) was moved into the builder via
         // `with_telemetry`. Threaded through `StoreBuildArgs` to the
@@ -984,11 +1000,10 @@ impl NodeBuilder {
                     tracing::info!(
                         storage_backend = "rocksdb",
                         data_path = %path.display(),
+                        options = ?rocksdb_options,
                         "embedded node starting"
                     );
-                    let opts = storage::RocksDbStoreOptions::new()
-                        .with_durability(self.storage_durability);
-                    let store = storage::RocksDbStore::open_with_options(&path, opts)
+                    let store = storage::RocksDbStore::open_with_options(&path, rocksdb_options)
                         .map_err(|e| anyhow::anyhow!("failed to open rocksdb store: {}", e))?;
 
                     Self::build_with_persistent_store(
@@ -1876,6 +1891,16 @@ struct P2PSetupResult {
     txn_broadcaster: Arc<dyn db::event_emission::TxnBroadcaster>,
 }
 
+#[cfg(feature = "rocksdb")]
+fn resolve_rocksdb_options(
+    explicit: Option<storage::RocksDbStoreOptions>,
+    durability: storage::backends::DurabilityMode,
+) -> storage::RocksDbStoreOptions {
+    explicit
+        .unwrap_or_else(storage::RocksDbStoreOptions::from_env)
+        .with_durability(durability)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1894,6 +1919,9 @@ mod tests {
     use super::HttpConfig;
 
     static SIGNING_STORE_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    #[cfg(feature = "rocksdb")]
+    static ROCKS_ENV_GUARD: LazyLock<std::sync::Mutex<()>> =
+        LazyLock::new(|| std::sync::Mutex::new(()));
 
     #[cfg(feature = "http")]
     #[test]
@@ -1919,6 +1947,39 @@ mod tests {
         let builder = EmbeddedNode::builder().with_query_timeout(timeout);
 
         assert_eq!(builder.query_timeout, Some(timeout));
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn node_builder_accepts_explicit_rocksdb_options() {
+        let options = storage::RocksDbStoreOptions::new().with_block_cache_size(8 * 1024 * 1024);
+        let builder = EmbeddedNode::builder().with_rocksdb_options(options);
+
+        assert_eq!(
+            builder
+                .rocksdb_options
+                .expect("explicit RocksDB options should be retained")
+                .block_cache_size(),
+            8 * 1024 * 1024
+        );
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn embedded_rocksdb_options_load_environment_and_override_durability() {
+        use storage::backends::DurabilityMode;
+
+        let _guard = ROCKS_ENV_GUARD.lock().expect("environment guard poisoned");
+        let original = std::env::var_os("ROCKS_BLOCK_CACHE_MB");
+        std::env::set_var("ROCKS_BLOCK_CACHE_MB", "8192");
+        let options = super::resolve_rocksdb_options(None, DurabilityMode::Immediate);
+        match original {
+            Some(value) => std::env::set_var("ROCKS_BLOCK_CACHE_MB", value),
+            None => std::env::remove_var("ROCKS_BLOCK_CACHE_MB"),
+        }
+
+        assert_eq!(options.block_cache_size(), 8192 * 1024 * 1024);
+        assert_eq!(options.durability(), DurabilityMode::Immediate);
     }
 
     #[test]
