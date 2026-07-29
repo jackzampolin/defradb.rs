@@ -10,10 +10,11 @@ use storage::corekv::Store;
 use tracing::{debug, trace};
 
 use crate::collection::Collection;
-use crate::migration::helpers::{cache_migrated_document, lens_doc_to_document};
+use crate::lensed_auto_commit_fetcher::migration::MigrationWriteBack;
+use crate::migration::helpers::{cache_migrated_document_with_indexes, lens_doc_to_document};
 use crate::schema_loader::get_collections_by_collection_id;
 
-use super::LensedDocFetcher;
+use super::{LensedDocFetcher, PendingMigrationWriteBack};
 
 impl<S: Store> LensedDocFetcher<S> {
     /// Check if any version in a list of collection versions has migrations registered.
@@ -151,11 +152,12 @@ impl<S: Store> LensedDocFetcher<S> {
     ) -> query::error::Result<HashMap<String, TargetedHistoryLink>> {
         let collection_id = &collection.schema().collection_id;
         let target_version_id = &collection.schema().version_id;
+        let cache_key = format!("{}:{}", collection_id, target_version_id);
 
         // First check if history is cached
         {
             let cache = self.history_cache.read().await;
-            if let Some(history) = cache.get(collection_id) {
+            if let Some(history) = cache.get(&cache_key) {
                 return Ok(history.clone());
             }
         }
@@ -182,7 +184,7 @@ impl<S: Store> LensedDocFetcher<S> {
         // Cache the history
         {
             let mut cache = self.history_cache.write().await;
-            cache.insert(collection_id.clone(), history.clone());
+            cache.insert(cache_key, history.clone());
         }
 
         Ok(history)
@@ -303,7 +305,7 @@ impl<S: Store> LensedDocFetcher<S> {
         );
 
         let migrated_doc = lens_doc_to_document(migrated_lens_doc, &doc, collection);
-        self.update_datastore(datastore, collection, &migrated_doc)
+        self.update_datastore(datastore, collection, &doc, &migrated_doc)
             .await?;
 
         Ok(migrated_doc)
@@ -319,6 +321,7 @@ impl<S: Store> LensedDocFetcher<S> {
         &self,
         datastore: &NamespaceView,
         collection: &Collection,
+        source_doc: &Document,
         migrated_doc: &Document,
     ) -> query::error::Result<()> {
         let txn_guard = self.txn.lock().await;
@@ -331,10 +334,24 @@ impl<S: Store> LensedDocFetcher<S> {
                 e
             ))
         })? {
-            trace!(
-                doc_id = ?migrated_doc.id(),
-                "Skipping lens write-back in a read-only explicit transaction"
-            );
+            if self.defer_readonly_write_back {
+                self.pending_write_backs
+                    .lock()
+                    .await
+                    .push(PendingMigrationWriteBack {
+                        collection_name: collection.name().to_string(),
+                        write_back: MigrationWriteBack {
+                            source_document: source_doc.clone(),
+                            migrated_document: migrated_doc.clone(),
+                            migration_generation: self.db.migration_generation(),
+                        },
+                    });
+            } else {
+                trace!(
+                    doc_id = ?migrated_doc.id(),
+                    "Skipping lens write-back in a read-only explicit transaction"
+                );
+            }
             return Ok(());
         }
         let systemstore = txn.systemstore().map_err(|e| {
@@ -344,7 +361,7 @@ impl<S: Store> LensedDocFetcher<S> {
             ))
         })?;
 
-        cache_migrated_document(datastore, &systemstore, collection, migrated_doc)
+        cache_migrated_document_with_indexes(datastore, &systemstore, collection, migrated_doc)
             .await
             .map_err(|e| {
                 query::error::QueryError::execution(format!(

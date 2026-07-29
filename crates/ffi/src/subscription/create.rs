@@ -92,6 +92,10 @@ pub extern "C" fn create_merge_complete_subscription(node_ptr: usize) -> CreateS
 }
 
 /// Convert an event message to JSON.
+///
+/// Update-event `block` bytes use standard padded base64. This is the encoding
+/// consumed by the Go rust-FFI bridge; it intentionally differs from the HTTP
+/// event surface's hex representation.
 pub(crate) fn message_to_json(message: &events::Message) -> String {
     // Check if this is an Update event with data
     if let Some(update) = message.as_update() {

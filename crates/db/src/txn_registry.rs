@@ -451,6 +451,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             .await?;
         let transform_id = outcome.transform_id.clone();
         let updated_destination = outcome.updated_destination.clone();
+        ctx.invalidate_migration_cache().await;
 
         let db = self.db.clone();
         let transform_id_for_commit = transform_id.clone();
@@ -462,6 +463,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             let updated_destination = updated_destination.clone();
             let destination_version_id = destination_version_id.clone();
             Box::pin(async move {
+                db.bump_migration_generation();
                 if let Err(error) = db
                     .lens_store()
                     .add_with_id(transform_id.clone(), config)
@@ -921,14 +923,11 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
         Ok(())
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
-    async fn begin(
+    async fn begin_with_options(
         &self,
         readonly: bool,
+        defer_readonly_write_back: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
         let txn_id = self.id_counter.fetch_add(1, Ordering::SeqCst).to_string();
 
@@ -958,7 +957,6 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         // Transaction-scoped collection caching: collections are loaded lazily
         // from the SystemStore on first access within the transaction. Once loaded,
         // the collection metadata is cached for the transaction's duration.
-        // Use LensedDocFetcher to support lens migrations within transactions.
         let lens_store = Arc::new(TxnLensStore::new(self.db.lens_store().clone()).map_err(
             |e| {
                 TransactionError::execution(format!(
@@ -967,7 +965,12 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
                 ))
             },
         )?);
-        let fetcher = Arc::new(LensedDocFetcher::new(db_txn, lens_store));
+        let fetcher = Arc::new(LensedDocFetcher::new(
+            self.db.clone(),
+            db_txn,
+            lens_store,
+            defer_readonly_write_back,
+        ));
         let ctx = Arc::new(DbTransactionContext::new_with_broadcaster(
             self.db.clone(),
             txn_id.clone(),
@@ -983,6 +986,23 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             .insert(txn_id.clone(), ctx);
 
         Ok(TransactionHandle::new(txn_id))
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
+    async fn begin(
+        &self,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.begin_with_options(readonly, false).await
+    }
+
+    async fn begin_implicit_read(
+        &self,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.begin_with_options(true, true).await
     }
 
     fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
@@ -1068,6 +1088,52 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
                 handle, e
             ))
         })
+    }
+
+    async fn finish_implicit_read(
+        &self,
+        handle: &TransactionHandle,
+        apply_read_effects: bool,
+    ) -> std::result::Result<(), TransactionError> {
+        let ctx = self
+            .transactions
+            .write()
+            .map_err(|_| {
+                TransactionError::lock_poisoned(format!(
+                    "failed to acquire write lock while finalizing implicit read '{}'",
+                    handle
+                ))
+            })?
+            .remove(handle.as_str())
+            .ok_or_else(|| {
+                TransactionError::not_found(format!("transaction '{}' not found", handle))
+            })?;
+        let action_lock = ctx.action_lock();
+        let _action_guard = action_lock.lock().await;
+
+        let txn = ctx.take_txn().await.ok_or_else(|| {
+            TransactionError::already_finalized(format!(
+                "transaction '{}' was already consumed",
+                handle
+            ))
+        })?;
+        txn.force_discard().map_err(|e| {
+            TransactionError::execution(format!(
+                "failed to close implicit read transaction '{}': {}",
+                handle, e
+            ))
+        })?;
+
+        if apply_read_effects {
+            ctx.persist_pending_migrations().await.map_err(|error| {
+                TransactionError::execution(format!(
+                    "deferred lens write-back failed for transaction '{}': {}",
+                    handle, error
+                ))
+            })?;
+        }
+
+        Ok(())
     }
 }
 

@@ -94,7 +94,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // fetcher under the guard and rebase only the caller's declared patch;
         // otherwise an unrelated field from the concurrent update is silently
         // replaced by the stale snapshot.
-        let fresh_fetcher = crate::LensedAutoCommitFetcher::new(Arc::clone(&self.db));
+        let fresh_fetcher =
+            crate::LensedAutoCommitFetcher::new_without_write_back(Arc::clone(&self.db));
         let canonical_id = canonical_lock_id.to_string();
         let mut current_doc = fresh_fetcher
             .get_by_ids(collection_name, std::slice::from_ref(&canonical_id))

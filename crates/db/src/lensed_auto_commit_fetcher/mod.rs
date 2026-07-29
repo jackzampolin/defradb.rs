@@ -5,7 +5,7 @@
 
 mod fetcher;
 mod index_scan;
-mod migration;
+pub(crate) mod migration;
 
 #[cfg(test)]
 mod tests;
@@ -26,16 +26,23 @@ use crate::database::DB;
 /// Cached migration context for a collection.
 type MigrationContext = (bool, Option<HashMap<String, TargetedHistoryLink>>);
 
+#[derive(Default)]
+struct MigrationCache {
+    generation: u64,
+    contexts: HashMap<String, MigrationContext>,
+}
+
 /// Document fetcher that auto-commits and applies lens migrations.
 ///
 /// Combines the auto-commit behavior of AutoCommitFetcher with lens
 /// migration support from LensedDocFetcher.
 pub struct LensedAutoCommitFetcher<S: Store> {
     db: Arc<DB<S>>,
+    write_back_migrations: bool,
     /// Cache of migration contexts keyed by `"{collection_id}:{version_id}"`.
-    /// Only positive contexts are cached: a migration can be registered without
-    /// changing the active version ID, so negative entries would become stale.
-    migration_cache: Mutex<HashMap<String, MigrationContext>>,
+    /// The full cache is invalidated whenever the committed migration graph's
+    /// generation changes.
+    migration_cache: Mutex<MigrationCache>,
 }
 
 impl<S: Store> LensedAutoCommitFetcher<S> {
@@ -43,7 +50,22 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     pub fn new(db: Arc<DB<S>>) -> Self {
         Self {
             db,
-            migration_cache: Mutex::new(HashMap::new()),
+            write_back_migrations: true,
+            migration_cache: Mutex::new(MigrationCache::default()),
+        }
+    }
+
+    /// Create a lensed fetcher that returns transformed values without lazy
+    /// persistence.
+    ///
+    /// Used by mutation rebasing after the caller already holds the document's
+    /// write guard. The mutation itself persists the active-schema document,
+    /// and attempting lazy write-back here would recursively acquire that guard.
+    pub(crate) fn new_without_write_back(db: Arc<DB<S>>) -> Self {
+        Self {
+            db,
+            write_back_migrations: false,
+            migration_cache: Mutex::new(MigrationCache::default()),
         }
     }
 }

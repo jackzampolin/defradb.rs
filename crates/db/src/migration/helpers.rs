@@ -7,6 +7,7 @@ use schema::{CollectionVersion, FieldKind, ORPHAN_COLLECTION_ID};
 
 use crate::collection::Collection;
 use crate::error::{Error, Result};
+use crate::index_manager::IndexManager;
 
 /// Create an orphan placeholder collection version.
 ///
@@ -121,6 +122,12 @@ pub(crate) fn lens_doc_to_document(
                 &field.name,
                 json_to_native_value(&value, &field.name, collection.schema()),
             );
+        } else if original_doc.get(&field.name).is_some() {
+            // Go's updateDataStore treats a field removed by a lens as an
+            // explicit nil assignment. Rust omits nils from CBOR storage, but
+            // retaining Null in the returned in-memory document preserves the
+            // same clear semantics for the query that performed the migration.
+            doc.set(&field.name, document::NormalValue::Null);
         }
     }
 
@@ -152,6 +159,51 @@ pub(crate) async fn cache_migrated_document(
         .await
         .map_err(Error::Storage)?;
     collection.store_version(datastore, doc_short_id).await?;
+
+    Ok(true)
+}
+
+/// Persist a lazily migrated document and update its secondary indexes in the
+/// same transaction.
+///
+/// Unlike a user mutation, migration write-back deliberately creates no CRDT
+/// blocks or commits. It still has to remove index entries derived from the old
+/// stored blob and add entries derived from the migrated representation.
+pub(crate) async fn cache_migrated_document_with_indexes(
+    datastore: &NamespaceView,
+    systemstore: &NamespaceView,
+    collection: &Collection,
+    doc: &Document,
+) -> Result<bool> {
+    let Some(doc_id) = doc.id() else {
+        return Ok(false);
+    };
+    let Some(doc_short_id) = collection.resolve_doc_short_id(systemstore, doc_id).await? else {
+        return Ok(false);
+    };
+
+    let key = collection.doc_key(doc_short_id);
+    let Some(old_data) = datastore.get(&key).await.map_err(Error::Storage)? else {
+        return Ok(false);
+    };
+    let mut old_doc = Document::from_cbor(&old_data)?;
+    old_doc.set_id(doc_id.clone());
+
+    datastore
+        .set(&key, &doc.to_cbor()?)
+        .await
+        .map_err(Error::Storage)?;
+    collection.store_version(datastore, doc_short_id).await?;
+
+    // Deleted documents have already been removed from secondary indexes.
+    // Materializing their retained blob must not add those entries back.
+    if !collection.is_deleted(datastore, doc_short_id).await? {
+        let index_manager =
+            IndexManager::from_collection(collection.resolved_root_id(), collection.schema())?;
+        index_manager
+            .on_document_update(datastore, &old_doc, doc, doc_short_id, collection.schema())
+            .await?;
+    }
 
     Ok(true)
 }
@@ -259,6 +311,36 @@ mod tests {
         assert_eq!(
             json_to_native_value(&serde_json::json!("hi"), "name", &coll),
             document::NormalValue::String("hi".to_string())
+        );
+    }
+
+    #[test]
+    fn lens_removed_field_is_returned_as_explicit_null() {
+        let collection = Collection::new(CollectionVersion::new(
+            "Users",
+            "v2",
+            "users",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+            ],
+        ));
+        let mut original = Document::new();
+        original.set("name", document::NormalValue::String("Alice".to_string()));
+
+        let migrated = lens_doc_to_document(LensDoc::new(), &original, &collection);
+
+        assert_eq!(
+            migrated.get("name"),
+            Some(&document::NormalValue::Null),
+            "a lens omission must be observable as a clear in the current query"
+        );
+        assert_eq!(
+            Document::from_cbor(&migrated.to_cbor().unwrap())
+                .unwrap()
+                .get("name"),
+            None,
+            "nil fields remain omitted from persisted CBOR, matching Go"
         );
     }
 

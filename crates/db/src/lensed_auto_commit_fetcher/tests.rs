@@ -9,9 +9,6 @@ use super::LensedAutoCommitFetcher;
 async fn unknown_document_version_passes_through() {
     let db = Arc::new(crate::DB::new(storage::MemoryStore::new()).unwrap());
     let fetcher = LensedAutoCommitFetcher::new(db.clone());
-    let txn = db.new_txn(false).await.unwrap();
-    let datastore = txn.datastore().unwrap();
-    let systemstore = txn.systemstore().unwrap();
 
     let collection = crate::Collection::new(schema::CollectionVersion::new(
         "Users",
@@ -41,16 +38,16 @@ async fn unknown_document_version_passes_through() {
     doc.set_schema_version_id("foreign-v3");
 
     let returned = fetcher
-        .process_document(doc, &collection, &datastore, &systemstore, true, &history)
+        .process_document(doc, &collection, true, &history)
         .await
         .unwrap();
     assert_eq!(
-        returned.get("name").and_then(|value| value.as_str()),
+        returned
+            .document
+            .get("name")
+            .and_then(|value| value.as_str()),
         Some("Alice")
     );
-    assert_eq!(returned.schema_version_id(), Some("foreign-v3"));
-
-    drop(datastore);
-    drop(systemstore);
-    txn.discard().unwrap();
+    assert_eq!(returned.document.schema_version_id(), Some("foreign-v3"));
+    assert!(returned.source_document.is_none());
 }

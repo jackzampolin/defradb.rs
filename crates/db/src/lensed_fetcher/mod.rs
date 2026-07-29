@@ -35,6 +35,12 @@ use query::runner::{DocFetcher, FetchByIdsResult};
 use storage::corekv::Store;
 
 use crate::txn::DbTxn;
+use crate::{database::DB, lensed_auto_commit_fetcher::migration::MigrationWriteBack};
+
+pub(crate) struct PendingMigrationWriteBack {
+    pub(crate) collection_name: String,
+    pub(crate) write_back: MigrationWriteBack,
+}
 
 /// Document fetcher that applies lens migrations to documents.
 ///
@@ -42,7 +48,10 @@ use crate::txn::DbTxn;
 /// transformed to the current (target) schema version using registered
 /// lens migrations.
 pub struct LensedDocFetcher<S: Store> {
+    db: Arc<DB<S>>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+    defer_readonly_write_back: bool,
+    pending_write_backs: TokioMutex<Vec<PendingMigrationWriteBack>>,
     #[allow(dead_code)]
     lens_store: Arc<dyn TransformStore>,
     /// Cache of collection version histories keyed by collection name.
@@ -58,9 +67,17 @@ impl<S: Store> LensedDocFetcher<S> {
     /// * `txn` - The database transaction
     /// * `lens_store` - The lens transform store for applying migrations
     #[allow(dead_code)]
-    pub(crate) fn new(txn: DbTxn<S>, lens_store: Arc<dyn TransformStore>) -> Self {
+    pub(crate) fn new(
+        db: Arc<DB<S>>,
+        txn: DbTxn<S>,
+        lens_store: Arc<dyn TransformStore>,
+        defer_readonly_write_back: bool,
+    ) -> Self {
         Self {
+            db,
             txn: Arc::new(TokioMutex::new(Some(txn))),
+            defer_readonly_write_back,
+            pending_write_backs: TokioMutex::new(Vec::new()),
             lens_store,
             history_cache: async_lock::RwLock::new(HashMap::new()),
         }
@@ -85,6 +102,14 @@ impl<S: Store> LensedDocFetcher<S> {
 
     pub(crate) fn lens_store(&self) -> Arc<dyn TransformStore> {
         self.lens_store.clone()
+    }
+
+    pub(crate) async fn invalidate_migration_cache(&self) {
+        self.history_cache.write().await.clear();
+    }
+
+    pub(crate) async fn take_pending_write_backs(&self) -> Vec<PendingMigrationWriteBack> {
+        std::mem::take(&mut *self.pending_write_backs.lock().await)
     }
 }
 

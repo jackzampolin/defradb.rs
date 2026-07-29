@@ -224,6 +224,7 @@ impl<S: Store> DB<S> {
                 .map_err(Error::Storage)?;
         }
         txn.commit().await?;
+        self.bump_migration_generation();
 
         if !collection_name.is_empty() {
             let mut cache = self.collections.write().map_err(|e| {

@@ -191,18 +191,8 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 
-        let matching_docs: Vec<Document> = all_docs
-            .into_iter()
-            .filter(|doc| {
-                doc.get(field_name)
-                    .and_then(|v| v.as_str())
-                    .map(|v| v == value)
-                    .unwrap_or(false)
-            })
-            .collect();
-
         // Count documents needing migration for logging
-        let needs_migration_count = matching_docs
+        let needs_migration_count = all_docs
             .iter()
             .filter(|doc| Self::doc_needs_migration(doc, target_version_id, has_migrations))
             .count();
@@ -211,19 +201,26 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
             collection = %collection_name,
             field = %field_name,
             value = %value,
-            matches = matching_docs.len(),
+            candidates = all_docs.len(),
             needs_migration = needs_migration_count,
             has_migrations = has_migrations,
             "Fetched documents by field value"
         );
 
-        // Process each document, applying migration if needed
-        let mut processed_docs = Vec::with_capacity(matching_docs.len());
-        for doc in matching_docs {
+        // Migrations may create or change the filtered field, so apply them
+        // before evaluating the field value.
+        let mut processed_docs = Vec::new();
+        for doc in all_docs {
             let processed = self
                 .process_document(doc, &collection, &datastore, has_migrations)
                 .await?;
-            processed_docs.push(processed);
+            let is_match = processed
+                .get(field_name)
+                .and_then(|v| v.as_str())
+                .is_some_and(|field_value| field_value == value);
+            if is_match {
+                processed_docs.push(processed);
+            }
         }
 
         if needs_migration_count > 0 {

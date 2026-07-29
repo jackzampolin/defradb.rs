@@ -4,6 +4,7 @@ use query::fetcher::CollectionProvider;
 use query::mutator::DocMutator;
 use query::runner::DocFetcher;
 use query::txn::{DeferredAcpMutations, TransactionContext};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use storage::corekv::Store;
@@ -13,6 +14,7 @@ use crate::database::DB;
 use crate::doc_mutator::DbDocMutator;
 use crate::lensed_fetcher::LensedDocFetcher;
 use crate::txn::DbTxn;
+use crate::LensedAutoCommitFetcher;
 
 /// Transaction context for query execution.
 ///
@@ -104,6 +106,43 @@ impl<S: Store + 'static> DbTransactionContext<S> {
     pub async fn is_consumed(&self) -> bool {
         self.fetcher.is_consumed().await
     }
+
+    /// Persist lazy migrations collected by a successful implicit read.
+    ///
+    /// The caller must close the read snapshot first. Each collection is then
+    /// written through the same guarded, conflict-retrying path as direct
+    /// auto-commit reads.
+    pub(crate) async fn persist_pending_migrations(&self) -> query::error::Result<()> {
+        let mut by_collection = BTreeMap::new();
+        for pending in self.fetcher.take_pending_write_backs().await {
+            by_collection
+                .entry(pending.collection_name)
+                .or_insert_with(Vec::new)
+                .push(pending.write_back);
+        }
+
+        if by_collection.is_empty() {
+            return Ok(());
+        }
+
+        let fetcher = LensedAutoCommitFetcher::new(self.db.clone());
+        for (collection_name, write_backs) in by_collection {
+            let Some(collection) = self.db.get_collection(&collection_name).map_err(|error| {
+                query::error::QueryError::execution(format!(
+                    "failed to load collection for deferred lens write-back: {}",
+                    error
+                ))
+            })?
+            else {
+                continue;
+            };
+            fetcher
+                .persist_migrated_documents(&collection, write_backs)
+                .await?;
+        }
+
+        Ok(())
+    }
 }
 
 impl<S: Store + 'static> DbTransactionContext<S> {
@@ -134,6 +173,10 @@ impl<S: Store + 'static> DbTransactionContext<S> {
 
     pub(crate) fn lens_store(&self) -> Arc<dyn lens::TransformStore> {
         self.fetcher.lens_store()
+    }
+
+    pub(crate) async fn invalidate_migration_cache(&self) {
+        self.fetcher.invalidate_migration_cache().await;
     }
 
     pub(crate) fn action_lock(&self) -> Arc<async_lock::Mutex<()>> {

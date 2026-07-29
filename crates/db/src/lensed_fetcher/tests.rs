@@ -22,10 +22,11 @@ fn test_doc_to_lens_doc_conversion() {
 
 #[tokio::test]
 async fn unknown_document_version_passes_through() {
-    let db = crate::DB::new(storage::MemoryStore::new()).unwrap();
+    let db = Arc::new(crate::DB::new(storage::MemoryStore::new()).unwrap());
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
-    let fetcher = LensedDocFetcher::new(txn, Arc::new(lens::MemoryTransformStore::new()));
+    let fetcher =
+        LensedDocFetcher::new(db, txn, Arc::new(lens::MemoryTransformStore::new()), false);
 
     let collection = crate::Collection::new(schema::CollectionVersion::new(
         "Users",
@@ -53,7 +54,7 @@ async fn unknown_document_version_passes_through() {
         .history_cache
         .write()
         .await
-        .insert("users-collection".to_string(), history);
+        .insert("users-collection:v2".to_string(), history);
 
     let mut doc = Document::new();
     doc.set("name", "Alice");
