@@ -108,6 +108,8 @@ pub struct EmbeddedNode {
     schema_ops: Arc<dyn SchemaOps>,
     embedding_config: db::EmbeddingClientConfig,
     node_identity_did: Option<String>,
+    #[cfg(feature = "rocksdb")]
+    rocksdb_stats: Option<storage::RocksDbStatsHandle>,
     #[cfg(feature = "http")]
     txn_cleanup_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     #[cfg(feature = "p2p")]
@@ -303,6 +305,18 @@ impl EmbeddedNode {
     /// Access the resolved node-level embedding runtime config.
     pub fn embedding_config(&self) -> &db::EmbeddingClientConfig {
         &self.embedding_config
+    }
+
+    /// Capture RocksDB diagnostics when this node uses the RocksDB backend.
+    ///
+    /// Gauges are sampled at call time. Cumulative RocksDB counters are present
+    /// only when `ROCKS_STATISTICS=1` or explicit store options enable them.
+    #[cfg(feature = "rocksdb")]
+    pub fn rocksdb_stats(&self) -> storage::Result<Option<storage::RocksDbStatsSnapshot>> {
+        self.rocksdb_stats
+            .as_ref()
+            .map(storage::RocksDbStatsHandle::snapshot)
+            .transpose()
     }
 
     /// Access P2P operations (if P2P is enabled and configured).
@@ -857,13 +871,15 @@ impl NodeBuilder {
                     );
                     let store = storage::RocksDbStore::open_with_options(&path, rocksdb_options)
                         .map_err(|e| anyhow::anyhow!("failed to open rocksdb store: {}", e))?;
-
-                    Self::build_with_persistent_store(
+                    let stats = store.stats_handle();
+                    let mut node = Self::build_with_persistent_store(
                         store,
                         self.at_rest_encryption_key,
                         persistent_args,
                     )
-                    .await?
+                    .await?;
+                    node.rocksdb_stats = Some(stats);
+                    node
                 }
                 #[cfg(not(feature = "rocksdb"))]
                 StorageBackend::RocksDb => {
@@ -1189,6 +1205,8 @@ impl NodeBuilder {
             schema_ops,
             embedding_config,
             node_identity_did,
+            #[cfg(feature = "rocksdb")]
+            rocksdb_stats: None,
             #[cfg(feature = "http")]
             txn_cleanup_task: tokio::sync::Mutex::new(txn_cleanup_task),
             #[cfg(feature = "p2p")]
@@ -1281,15 +1299,49 @@ mod tests {
 
         let _guard = ROCKS_ENV_GUARD.lock().expect("environment guard poisoned");
         let original = std::env::var_os("ROCKS_BLOCK_CACHE_MB");
+        let original_statistics = std::env::var_os("ROCKS_STATISTICS");
         std::env::set_var("ROCKS_BLOCK_CACHE_MB", "8192");
+        std::env::set_var("ROCKS_STATISTICS", "true");
         let options = super::resolve_rocksdb_options(None, DurabilityMode::Immediate);
         match original {
             Some(value) => std::env::set_var("ROCKS_BLOCK_CACHE_MB", value),
             None => std::env::remove_var("ROCKS_BLOCK_CACHE_MB"),
         }
+        match original_statistics {
+            Some(value) => std::env::set_var("ROCKS_STATISTICS", value),
+            None => std::env::remove_var("ROCKS_STATISTICS"),
+        }
 
         assert_eq!(options.block_cache_size(), 8192 * 1024 * 1024);
+        assert!(options.statistics_enabled());
         assert_eq!(options.durability(), DurabilityMode::Immediate);
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[tokio::test]
+    async fn embedded_node_retains_rocksdb_stats_through_encryption_wrapper() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let node = EmbeddedNode::builder()
+            .data_path(temp_dir.path())
+            .with_storage_backend(super::StorageBackend::RocksDb)
+            .with_rocksdb_options(
+                storage::RocksDbStoreOptions::new()
+                    .with_block_cache_size(1024 * 1024)
+                    .with_statistics_enabled(true),
+            )
+            .with_at_rest_encryption_key([7; 32])
+            .build()
+            .await
+            .unwrap();
+
+        let stats = node
+            .rocksdb_stats()
+            .unwrap()
+            .expect("RocksDB node should expose a diagnostics snapshot");
+        assert_eq!(stats.block_cache.capacity_bytes, 1024 * 1024);
+        assert!(stats.counters.is_some());
+
+        node.shutdown().await;
     }
 
     #[test]
