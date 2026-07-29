@@ -29,7 +29,6 @@ chrono = { version = "0.4", features = ["serde"] }
 schema = { path = "../schema" }
 storage = { path = "../storage" }
 document = { path = "../document" }
-defra-core = { path = "../defra-core" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
