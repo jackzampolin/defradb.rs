@@ -267,6 +267,9 @@ fn prefix_iter_options(namespace: Namespace, opts: IterOptions) -> IterOptions {
     prefixed_opts = prefixed_opts
         .with_reverse(opts.reverse())
         .with_keys_only(opts.keys_only());
+    if opts.commutative_set() {
+        prefixed_opts = prefixed_opts.with_commutative_set();
+    }
 
     prefixed_opts
 }

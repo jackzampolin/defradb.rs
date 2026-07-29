@@ -369,6 +369,12 @@ macro_rules! generate_backend_concurrency_tests {
         }
 
         #[tokio::test]
+        async fn shared_test_commutative_set_transitions() {
+            let store = $arc_store_fn().await;
+            test_suite::test_commutative_set_transitions(store).await;
+        }
+
+        #[tokio::test]
         async fn shared_test_concurrent_writes_same_key() {
             let store = $arc_store_fn().await;
             test_suite::test_concurrent_writes_same_key(store).await;
