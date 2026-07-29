@@ -1,8 +1,12 @@
 //! Collection lookup for the database.
+//!
+//! Retained for backward compatibility. Prefer `DbDocPusher` for new code.
+//!
+//! Re-exports the shared `CollectionLookup` trait from `defra-p2p-adapter`.
 
 use std::sync::Arc;
 
-use crate::p2p_adapter::CollectionLookup;
+pub use defra_p2p_adapter::CollectionLookup;
 
 /// Implementation of CollectionLookup for the database.
 ///
