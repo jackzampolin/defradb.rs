@@ -1,12 +1,16 @@
 //! DocFetcher trait method implementations (non-index-scan).
 
+use std::collections::HashMap;
+
 use async_lock::Mutex as TokioMutex;
 use document::Document;
+use lens::TargetedHistoryLink;
 use query::fetcher::CommitsQueryOptions;
 use query::runner::FetchByIdsResult;
 use storage::corekv::Store;
 use tracing::{debug, trace};
 
+use crate::collection::Collection;
 use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
 use crate::txn::DbTxn;
 use crate::versioned_fetcher::VersionedFetcher;
@@ -14,11 +18,37 @@ use crate::versioned_fetcher::VersionedFetcher;
 use super::migration::MigrationWriteBack;
 use super::LensedAutoCommitFetcher;
 
-type ProcessedDocs = (Vec<Document>, Vec<MigrationWriteBack>);
-type ProcessedDocsWithStatus = (Vec<(Document, bool)>, Vec<MigrationWriteBack>);
-type ProcessedDocsById = (Vec<Document>, Vec<String>, Vec<MigrationWriteBack>);
-
 impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
+    async fn process_document_with_bounded_write_back(
+        &self,
+        doc: Document,
+        collection: &Collection,
+        migration_generation: u64,
+        has_migrations: bool,
+        preloaded_history: &Option<HashMap<String, TargetedHistoryLink>>,
+        write_backs: &mut Vec<MigrationWriteBack>,
+    ) -> query::error::Result<Document> {
+        let outcome = self
+            .process_document(doc, collection, has_migrations, preloaded_history)
+            .await?;
+
+        if self.write_back_migrations {
+            if let Some(source_document) = outcome.source_document {
+                write_backs.push(MigrationWriteBack {
+                    source_document,
+                    migrated_document: outcome.document.clone(),
+                    migration_generation,
+                });
+                if write_backs.len() >= self.db.options().migration_write_back_batch_size() {
+                    self.persist_migrated_documents(collection, std::mem::take(write_backs))
+                        .await?;
+                }
+            }
+        }
+
+        Ok(outcome.document)
+    }
+
     pub(super) async fn get_all_impl(
         &self,
         collection_name: &str,
@@ -53,38 +83,10 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
         })?;
 
-        let read_result: query::error::Result<ProcessedDocs> = async {
-            let docs = collection
-                .get_all_with_datastore(&datastore, &systemstore)
-                .await
-                .map_err(|e| {
-                    query::error::QueryError::execution(format!("storage error: {}", e))
-                })?;
-
-            trace!(
-                collection = %collection_name,
-                doc_count = docs.len(),
-                "Fetched documents"
-            );
-
-            let mut processed_docs = Vec::with_capacity(docs.len());
-            let mut write_backs = Vec::new();
-            for doc in docs {
-                let outcome = self
-                    .process_document(doc, &collection, has_migrations, &preloaded_history)
-                    .await?;
-                if let Some(source_document) = outcome.source_document {
-                    write_backs.push(MigrationWriteBack {
-                        source_document,
-                        migrated_document: outcome.document.clone(),
-                        migration_generation,
-                    });
-                }
-                processed_docs.push(outcome.document);
-            }
-            Ok((processed_docs, write_backs))
-        }
-        .await;
+        let read_result = collection
+            .get_all_with_datastore(&datastore, &systemstore)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)));
 
         drop(datastore);
         drop(systemstore);
@@ -94,7 +96,29 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                 e
             ))
         })?;
-        let (processed_docs, write_backs) = read_result?;
+        let docs = read_result?;
+        trace!(
+            collection = %collection_name,
+            doc_count = docs.len(),
+            "Fetched documents"
+        );
+
+        let mut processed_docs = Vec::with_capacity(docs.len());
+        let mut write_backs =
+            Vec::with_capacity(self.db.options().migration_write_back_batch_size());
+        for doc in docs {
+            let processed = self
+                .process_document_with_bounded_write_back(
+                    doc,
+                    &collection,
+                    migration_generation,
+                    has_migrations,
+                    &preloaded_history,
+                    &mut write_backs,
+                )
+                .await?;
+            processed_docs.push(processed);
+        }
         self.persist_migrated_documents(&collection, write_backs)
             .await?;
 
@@ -134,32 +158,10 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
         })?;
 
-        let read_result: query::error::Result<ProcessedDocsWithStatus> = async {
-            let docs_with_status = collection
-                .get_all_with_datastore_include_deleted(&datastore, &systemstore, show_deleted)
-                .await
-                .map_err(|e| {
-                    query::error::QueryError::execution(format!("storage error: {}", e))
-                })?;
-
-            let mut processed_docs = Vec::with_capacity(docs_with_status.len());
-            let mut write_backs = Vec::new();
-            for (doc, is_deleted) in docs_with_status {
-                let outcome = self
-                    .process_document(doc, &collection, has_migrations, &preloaded_history)
-                    .await?;
-                if let Some(source_document) = outcome.source_document {
-                    write_backs.push(MigrationWriteBack {
-                        source_document,
-                        migrated_document: outcome.document.clone(),
-                        migration_generation,
-                    });
-                }
-                processed_docs.push((outcome.document, is_deleted));
-            }
-            Ok((processed_docs, write_backs))
-        }
-        .await;
+        let read_result = collection
+            .get_all_with_datastore_include_deleted(&datastore, &systemstore, show_deleted)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)));
 
         drop(datastore);
         drop(systemstore);
@@ -169,7 +171,23 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                 e
             ))
         })?;
-        let (processed_docs, write_backs) = read_result?;
+        let docs_with_status = read_result?;
+        let mut processed_docs = Vec::with_capacity(docs_with_status.len());
+        let mut write_backs =
+            Vec::with_capacity(self.db.options().migration_write_back_batch_size());
+        for (doc, is_deleted) in docs_with_status {
+            let processed = self
+                .process_document_with_bounded_write_back(
+                    doc,
+                    &collection,
+                    migration_generation,
+                    has_migrations,
+                    &preloaded_history,
+                    &mut write_backs,
+                )
+                .await?;
+            processed_docs.push((processed, is_deleted));
+        }
         self.persist_migrated_documents(&collection, write_backs)
             .await?;
 
@@ -201,7 +219,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
         })?;
 
-        let read_result: query::error::Result<ProcessedDocsById> = async {
+        let read_result: query::error::Result<(Vec<Document>, Vec<String>)> = async {
             let mut docs = Vec::new();
             let mut missing_ids = Vec::new();
 
@@ -225,22 +243,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                 }
             }
 
-            let mut processed_docs = Vec::with_capacity(docs.len());
-            let mut write_backs = Vec::new();
-            for doc in docs {
-                let outcome = self
-                    .process_document(doc, &collection, has_migrations, &preloaded_history)
-                    .await?;
-                if let Some(source_document) = outcome.source_document {
-                    write_backs.push(MigrationWriteBack {
-                        source_document,
-                        migrated_document: outcome.document.clone(),
-                        migration_generation,
-                    });
-                }
-                processed_docs.push(outcome.document);
-            }
-            Ok((processed_docs, missing_ids, write_backs))
+            Ok((docs, missing_ids))
         }
         .await;
 
@@ -252,7 +255,23 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                 e
             ))
         })?;
-        let (processed_docs, missing_ids, write_backs) = read_result?;
+        let (docs, missing_ids) = read_result?;
+        let mut processed_docs = Vec::with_capacity(docs.len());
+        let mut write_backs =
+            Vec::with_capacity(self.db.options().migration_write_back_batch_size());
+        for doc in docs {
+            let processed = self
+                .process_document_with_bounded_write_back(
+                    doc,
+                    &collection,
+                    migration_generation,
+                    has_migrations,
+                    &preloaded_history,
+                    &mut write_backs,
+                )
+                .await?;
+            processed_docs.push(processed);
+        }
         self.persist_migrated_documents(&collection, write_backs)
             .await?;
 
@@ -285,39 +304,10 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
         })?;
 
-        let read_result: query::error::Result<ProcessedDocs> = async {
-            let all_docs = collection
-                .get_all_with_datastore(&datastore, &systemstore)
-                .await
-                .map_err(|e| {
-                    query::error::QueryError::execution(format!("storage error: {}", e))
-                })?;
-
-            let mut processed_docs = Vec::new();
-            let mut write_backs = Vec::new();
-            for doc in all_docs {
-                let outcome = self
-                    .process_document(doc, &collection, has_migrations, &preloaded_history)
-                    .await?;
-                if let Some(source_document) = outcome.source_document {
-                    write_backs.push(MigrationWriteBack {
-                        source_document,
-                        migrated_document: outcome.document.clone(),
-                        migration_generation,
-                    });
-                }
-                let is_match = outcome
-                    .document
-                    .get(field_name)
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|field_value| field_value == value);
-                if is_match {
-                    processed_docs.push(outcome.document);
-                }
-            }
-            Ok((processed_docs, write_backs))
-        }
-        .await;
+        let read_result = collection
+            .get_all_with_datastore(&datastore, &systemstore)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)));
 
         drop(datastore);
         drop(systemstore);
@@ -327,7 +317,29 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                 e
             ))
         })?;
-        let (processed_docs, write_backs) = read_result?;
+        let all_docs = read_result?;
+        let mut processed_docs = Vec::new();
+        let mut write_backs =
+            Vec::with_capacity(self.db.options().migration_write_back_batch_size());
+        for doc in all_docs {
+            let processed = self
+                .process_document_with_bounded_write_back(
+                    doc,
+                    &collection,
+                    migration_generation,
+                    has_migrations,
+                    &preloaded_history,
+                    &mut write_backs,
+                )
+                .await?;
+            let is_match = processed
+                .get(field_name)
+                .and_then(|v| v.as_str())
+                .is_some_and(|field_value| field_value == value);
+            if is_match {
+                processed_docs.push(processed);
+            }
+        }
         self.persist_migrated_documents(&collection, write_backs)
             .await?;
 

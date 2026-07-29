@@ -48,6 +48,11 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
             "Fetched documents"
         );
 
+        if needs_migration_count > 0 {
+            self.defer_full_scan_write_back(collection_name, false)
+                .await;
+        }
+
         // Process each document, applying migration if needed
         let mut processed_docs = Vec::with_capacity(docs.len());
         for doc in docs {
@@ -79,11 +84,21 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
 
         // Check if collection has migrations by loading full version history (matching Go)
         let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
+        let target_version_id = &collection.schema().version_id;
 
         let docs_with_status = collection
             .get_all_with_datastore_include_deleted(&datastore, &systemstore, show_deleted)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
+
+        let needs_migration_count = docs_with_status
+            .iter()
+            .filter(|(doc, _)| Self::doc_needs_migration(doc, target_version_id, has_migrations))
+            .count();
+        if needs_migration_count > 0 {
+            self.defer_full_scan_write_back(collection_name, show_deleted)
+                .await;
+        }
 
         // Process each document, applying migration if needed
         let mut processed_docs = Vec::with_capacity(docs_with_status.len());
@@ -206,6 +221,11 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
             has_migrations = has_migrations,
             "Fetched documents by field value"
         );
+
+        if needs_migration_count > 0 {
+            self.defer_full_scan_write_back(collection_name, false)
+                .await;
+        }
 
         // Migrations may create or change the filtered field, so apply them
         // before evaluating the field value.

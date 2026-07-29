@@ -19,15 +19,21 @@ use lens::TransformStore;
 #[cfg(feature = "wasmtime-runtime")]
 use lens::WasmTransformStore;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use storage::corekv::Store;
+
+/// Default maximum number of lazy migrations written in one transaction.
+pub const DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE: usize = 128;
 
 /// Database options.
 #[derive(Clone, Default)]
 pub struct DbOptions {
     /// Maximum number of transaction retries.
     pub max_txn_retries: Option<u32>,
+    /// Maximum number of lazy migrations written in one transaction.
+    pub migration_write_back_batch_size: Option<NonZeroUsize>,
     /// Chunk size for large values in the blockstore.
     pub chunk_size: Option<usize>,
     /// Node identity for this database instance.
@@ -49,6 +55,10 @@ impl std::fmt::Debug for DbOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DbOptions")
             .field("max_txn_retries", &self.max_txn_retries)
+            .field(
+                "migration_write_back_batch_size",
+                &self.migration_write_back_batch_size,
+            )
             .field("chunk_size", &self.chunk_size)
             .field(
                 "node_identity",
@@ -90,6 +100,19 @@ impl DbOptions {
     pub fn with_max_txn_retries(mut self, retries: u32) -> Self {
         self.max_txn_retries = Some(retries);
         self
+    }
+
+    /// Sets the maximum number of lazy migrations written in one transaction.
+    pub fn with_migration_write_back_batch_size(mut self, batch_size: NonZeroUsize) -> Self {
+        self.migration_write_back_batch_size = Some(batch_size);
+        self
+    }
+
+    /// Returns the maximum number of lazy migrations written in one transaction.
+    pub fn migration_write_back_batch_size(&self) -> usize {
+        self.migration_write_back_batch_size
+            .map(NonZeroUsize::get)
+            .unwrap_or(DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE)
     }
 
     /// Sets the chunk size for large values.

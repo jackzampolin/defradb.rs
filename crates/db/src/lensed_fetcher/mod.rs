@@ -42,6 +42,12 @@ pub(crate) struct PendingMigrationWriteBack {
     pub(crate) write_back: MigrationWriteBack,
 }
 
+#[derive(Default)]
+pub(crate) struct PendingMigrationWriteBacks {
+    pub(crate) documents: Vec<PendingMigrationWriteBack>,
+    pub(crate) full_scans: HashMap<String, bool>,
+}
+
 /// Document fetcher that applies lens migrations to documents.
 ///
 /// When documents are fetched from older schema versions, they are
@@ -51,7 +57,7 @@ pub struct LensedDocFetcher<S: Store> {
     db: Arc<DB<S>>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
     defer_readonly_write_back: bool,
-    pending_write_backs: TokioMutex<Vec<PendingMigrationWriteBack>>,
+    pending_write_backs: TokioMutex<PendingMigrationWriteBacks>,
     #[allow(dead_code)]
     lens_store: Arc<dyn TransformStore>,
     /// Cache of collection version histories keyed by collection name.
@@ -77,7 +83,7 @@ impl<S: Store> LensedDocFetcher<S> {
             db,
             txn: Arc::new(TokioMutex::new(Some(txn))),
             defer_readonly_write_back,
-            pending_write_backs: TokioMutex::new(Vec::new()),
+            pending_write_backs: TokioMutex::new(PendingMigrationWriteBacks::default()),
             lens_store,
             history_cache: async_lock::RwLock::new(HashMap::new()),
         }
@@ -108,7 +114,41 @@ impl<S: Store> LensedDocFetcher<S> {
         self.history_cache.write().await.clear();
     }
 
-    pub(crate) async fn take_pending_write_backs(&self) -> Vec<PendingMigrationWriteBack> {
+    pub(super) async fn defer_document_write_back(
+        &self,
+        collection_name: &str,
+        write_back: MigrationWriteBack,
+    ) {
+        let mut pending = self.pending_write_backs.lock().await;
+        if !pending.full_scans.contains_key(collection_name) {
+            pending.documents.push(PendingMigrationWriteBack {
+                collection_name: collection_name.to_string(),
+                write_back,
+            });
+        }
+    }
+
+    pub(super) async fn defer_full_scan_write_back(
+        &self,
+        collection_name: &str,
+        include_deleted: bool,
+    ) {
+        if !self.defer_readonly_write_back {
+            return;
+        }
+
+        let mut pending = self.pending_write_backs.lock().await;
+        pending
+            .full_scans
+            .entry(collection_name.to_string())
+            .and_modify(|current| *current |= include_deleted)
+            .or_insert(include_deleted);
+        pending
+            .documents
+            .retain(|candidate| candidate.collection_name != collection_name);
+    }
+
+    pub(crate) async fn take_pending_write_backs(&self) -> PendingMigrationWriteBacks {
         std::mem::take(&mut *self.pending_write_backs.lock().await)
     }
 }
