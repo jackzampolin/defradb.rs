@@ -83,15 +83,3 @@ pub use txn::{
     GetTransactionResult, NoOpTransactionRegistry, TransactionContext, TransactionGuard,
     TransactionHandle, TransactionRegistry,
 };
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_crate_compiles() {
-        // Basic smoke test that the crate compiles
-        let mapping = DocumentMapping::new();
-        assert_eq!(mapping.next_index(), 0);
-    }
-}

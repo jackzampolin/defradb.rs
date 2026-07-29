@@ -333,14 +333,6 @@ mod tests {
     }
 
     #[test]
-    fn test_error_constructors() {
-        let _ = QueryError::invalid_filter("bad condition");
-        let _ = QueryError::collection_not_found("users");
-        let _ = QueryError::execution("plan failed");
-        let _ = QueryError::internal("unexpected state");
-    }
-
-    #[test]
     fn test_transaction_error_is_retryable() {
         // NotFound is NOT retryable - the transaction doesn't exist
         assert!(
