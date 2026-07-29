@@ -1,4 +1,4 @@
-//! Lean axis: assert the auto-generated Lean contract still matches the live
+//! Lean axis: assert the Lean-generated contract still matches the live
 //! Rust types. A drift in either side fails here. No binary needed.
 
 use conformance::lean_contract::{load_contract, ContractSnapshot};

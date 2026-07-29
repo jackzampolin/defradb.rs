@@ -4,10 +4,11 @@
 //! - `builder`: Main Planner struct and plan building logic
 //! - `index_selection`: Index selection algorithms
 //! - `traits`: PlanNode trait and related types
-//! - `mapping`: Document mapping utilities (placeholder for extraction)
-//! - `aggregates`: Aggregate node building (placeholder for extraction)
-//! - `joins`: Join planning utilities (placeholder for extraction)
-//! - `views`: View planning utilities (placeholder for extraction)
+//! - `mapping`: Document mapping utilities
+//! - `aggregates`: Aggregate and similarity node building
+//! - `joins`: Join planning utilities
+//! - `cached_view_builder`: Materialized-view planning
+//! - `view_builder`: Non-materialized-view planning
 
 mod aggregates;
 mod builder;

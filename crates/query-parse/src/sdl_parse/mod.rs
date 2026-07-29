@@ -3,15 +3,17 @@
 //! This module parses GraphQL Schema Definition Language (SDL) and converts
 //! type definitions into DefraDB CollectionVersion schemas.
 //!
-//! # Module Organization (planned)
+//! # Module Organization
 //!
 //! - `parser`: Main SdlParser struct and parse logic
 //! - `directives`: Directive parsing
 //! - `warnings`: Warning types
-//! - `fields`: Field parsing utilities (placeholder)
-//! - `validation`: Schema validation (placeholder)
-//! - `builder`: Collection building (placeholder)
-//! - `helpers`: Helper utilities (placeholder)
+//! - `fields`: Field and directive parsing
+//! - `validation`: Schema validation
+//! - `builder`: Collection building
+//! - `builder_cycles`: Circular relation detection
+//! - `builder_field_kinds`: Field kind resolution
+//! - `helpers`: Shared parsing utilities
 
 mod builder;
 mod builder_cycles;
