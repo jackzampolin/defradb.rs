@@ -708,6 +708,81 @@ async fn field_value_fetch_filters_after_lens_transform() {
 }
 
 #[tokio::test]
+async fn concurrent_lazy_reads_of_same_document_are_idempotent() {
+    let transform_store = Arc::new(BlockingVerifiedStore::default());
+    let mut raw_db = DB::new(MemoryStore::new()).unwrap();
+    raw_db.lens_store = transform_store.clone();
+    let db = Arc::new(raw_db);
+
+    db.create_collection(indexed_users_schema()).await.unwrap();
+    let v1 = db
+        .get_collection("Users")
+        .unwrap()
+        .unwrap()
+        .version_id()
+        .to_string();
+    let v2 = add_placeholder_version(&db, "placeholder").await;
+    db.set_migration(
+        LensConfig::new(
+            &v1,
+            &v2,
+            LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+    let doc_id = seed_old_user(&db, &v1, "Concurrent").await;
+
+    transform_store.arm();
+    let first_db = db.clone();
+    let first_doc_id = doc_id.to_string();
+    let first = tokio::spawn(async move {
+        crate::LensedAutoCommitFetcher::new(first_db)
+            .get_by_ids("Users", &[first_doc_id])
+            .await
+    });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        transform_store.entered.notified(),
+    )
+    .await
+    .expect("first lensed read reached the transform");
+
+    let second_docs = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        crate::LensedAutoCommitFetcher::new(db.clone()).get_by_ids("Users", &[doc_id.to_string()]),
+    )
+    .await
+    .expect("second lensed read completed while the first was paused")
+    .unwrap()
+    .into_docs();
+
+    transform_store.release.notify_one();
+    let first_docs = first.await.unwrap().unwrap().into_docs();
+
+    for docs in [&first_docs, &second_docs] {
+        assert_eq!(
+            docs[0].get("verified"),
+            Some(&document::NormalValue::Bool(true))
+        );
+    }
+
+    let persisted = load_user(&db, &doc_id).await;
+    assert_eq!(
+        persisted.get("verified"),
+        Some(&document::NormalValue::Bool(true))
+    );
+    assert_eq!(persisted.schema_version_id(), Some(v2.as_str()));
+    assert_eq!(
+        verified_index_count(&db).await,
+        1,
+        "concurrent write-back must leave exactly one indexed document"
+    );
+}
+
+#[tokio::test]
 async fn concurrent_update_wins_over_stale_lazy_write_back() {
     let transform_store = Arc::new(BlockingVerifiedStore::default());
     let mut raw_db = DB::new(MemoryStore::new()).unwrap();
