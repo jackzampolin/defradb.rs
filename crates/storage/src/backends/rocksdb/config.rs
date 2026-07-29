@@ -259,8 +259,8 @@ impl RocksDbStoreOptions {
     /// | `ROCKS_L0_STOP` | l0_stop_writes_trigger | 36 |
     /// | `ROCKS_TARGET_FILE_MB` | target_file_size_base | 64 |
     /// | `ROCKS_LEVEL_BASE_MB` | max_bytes_for_level_base | 256 |
-    /// | `ROCKS_BLOCK_SIZE_KB` | block_size | 4 |
-    /// | `ROCKS_COMPRESSION` | compression | snappy |
+    /// | `ROCKS_BLOCK_SIZE_KB` | block_size | 16 |
+    /// | `ROCKS_COMPRESSION` | compression | lz4 |
     /// | `ROCKS_COMPACTION_STYLE` | compaction_style | level |
     /// | `ROCKS_BLOB_FILES` | enable_blob_files | false |
     /// | `ROCKS_MIN_BLOB_SIZE` | min_blob_size | 256 |
