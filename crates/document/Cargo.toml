@@ -11,7 +11,6 @@ description = "Runtime document types for DefraDB"
 [dependencies]
 # Internal dependencies
 schema = { path = "../schema" }
-crypto = { path = "../crypto" }
 defra-core = { path = "../defra-core" }
 
 # Serialization
@@ -21,9 +20,6 @@ ciborium = "0.2"
 
 # IPLD
 cid = { workspace = true }
-multihash = { workspace = true }
-multicodec = { workspace = true }
-sha2 = { workspace = true }
 
 # UUID for DocID
 uuid = { workspace = true, features = ["v5", "serde"] }
@@ -41,7 +37,9 @@ base64 = "0.22"
 thiserror = { workspace = true }
 
 [dev-dependencies]
-pretty_assertions = "1.4"
+multicodec = { workspace = true }
+multihash = { workspace = true }
+sha2 = { workspace = true }
 
 [lints]
 workspace = true
