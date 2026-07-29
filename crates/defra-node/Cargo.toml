@@ -63,6 +63,7 @@ telemetry = { path = "../telemetry", optional = true, default-features = false }
 axum.workspace = true
 crypto = { path = "../crypto" }
 hex.workspace = true
+tempfile = "3"
 
 [lints]
 workspace = true

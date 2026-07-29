@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::iterator::RocksDbMergingIterator;
+use super::metrics::RocksDbTransactionMetrics;
 use crate::backends::shared::DurabilityMode;
 use crate::backends::shared::{
     CallbackCounts, CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet,
@@ -79,6 +80,7 @@ pub(crate) struct RocksDbTxn {
     pub(crate) committed: AtomicBool,
     pub(crate) callbacks: CallbackManager,
     pub(crate) durability: DurabilityMode,
+    pub(crate) metrics: Arc<RocksDbTransactionMetrics>,
 }
 
 impl Drop for RocksDbTxn {
@@ -118,6 +120,7 @@ impl RocksDbTxn {
         active_txn_count: Arc<AtomicUsize>,
         readonly: bool,
         durability: DurabilityMode,
+        metrics: Arc<RocksDbTransactionMetrics>,
     ) -> Self {
         let conflict_snapshot = (!readonly).then(|| conflict_tracker.begin_snapshot());
         let read_version = conflict_snapshot.as_ref().map_or_else(
@@ -141,6 +144,7 @@ impl RocksDbTxn {
             committed: AtomicBool::new(false),
             callbacks: CallbackManager::new(),
             durability,
+            metrics,
         }
     }
 
@@ -413,6 +417,7 @@ impl Txn for RocksDbTxn {
             let commit_gate = Arc::clone(&self.commit_gate);
             let read_version = self.read_version;
             let durability = self.durability;
+            let metrics = Arc::clone(&self.metrics);
             let conflict_snapshot = self._conflict_snapshot.take();
             let callbacks = crate::backends::shared::CommitCallbacks::drain(&self.callbacks);
 
@@ -424,7 +429,9 @@ impl Txn for RocksDbTxn {
                     // deadlock against this thread's write lock, and holding it
                     // across callback work would stall every new writer.
                     let outcome = {
+                        let wait_started = std::time::Instant::now();
                         let _commit_guard = commit_gate.blocking_write();
+                        metrics.record_commit_gate_wait(wait_started.elapsed());
                         (|| -> Result<()> {
                             let version = conflict_tracker.check_and_record(
                                 read_version,
@@ -461,6 +468,9 @@ impl Txn for RocksDbTxn {
                             Ok(())
                         })()
                     };
+                    if matches!(outcome, Err(Error::TxnConflict)) {
+                        metrics.record_conflict();
+                    }
                     let callbacks = callbacks.spawn(outcome.is_ok());
                     (outcome, callbacks)
                 },

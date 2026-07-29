@@ -91,7 +91,12 @@ pub use redb::{IntegrityReport, RedbStore, RedbStoreOptions};
 pub use fjall::{FjallStore, FjallStoreOptions};
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-pub use rocksdb::{RocksDbStore, RocksDbStoreOptions};
+pub use rocksdb::{
+    RocksDbBlockCacheCounters, RocksDbBlockCacheStats, RocksDbBloomFilterCounters,
+    RocksDbCompactionCounters, RocksDbCumulativeStats, RocksDbFlushCounters, RocksDbHistogramStats,
+    RocksDbIoCounters, RocksDbLsmStats, RocksDbStatsHandle, RocksDbStatsSnapshot, RocksDbStore,
+    RocksDbStoreOptions, RocksDbTransactionStats, RocksDbWriteStallCounters,
+};
 
 #[cfg(all(feature = "lark", not(target_arch = "wasm32")))]
 pub use lark::{LarkStore, LarkStoreOptions};

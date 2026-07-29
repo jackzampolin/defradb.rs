@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::config::RocksDbStoreOptions;
+use super::metrics::{RocksDbStatsHandle, RocksDbStatsSnapshot, RocksDbTransactionMetrics};
 use super::transaction::RocksDbTxn;
 use crate::backends::shared::ConflictTracker;
 use crate::corekv::{Dropable, Error, Result, Store, Txn};
@@ -21,6 +22,7 @@ pub struct RocksDbStore {
     active_txn_count: Arc<AtomicUsize>,
     close_timeout: std::time::Duration,
     durability: crate::backends::shared::DurabilityMode,
+    stats: RocksDbStatsHandle,
 }
 
 impl RocksDbStore {
@@ -59,6 +61,11 @@ impl RocksDbStore {
         db_opts.set_level_zero_stop_writes_trigger(opts.l0_stop_writes_trigger());
         db_opts.set_target_file_size_base(opts.target_file_size_base());
         db_opts.set_max_bytes_for_level_base(opts.max_bytes_for_level_base());
+        if opts.statistics_enabled() {
+            db_opts.enable_statistics();
+            db_opts.set_statistics_level(rocksdb::statistics::StatsLevel::ExceptDetailedTimers);
+            db_opts.set_stats_dump_period_sec(0);
+        }
 
         use super::config::{CompactionStyle, CompressionType};
         let rocksdb_compression = match opts.compression() {
@@ -120,9 +127,18 @@ impl RocksDbStore {
                 let err: Error = e.into();
                 err
             })?;
+        let db = Arc::new(db);
+        let statistics = opts.statistics_enabled().then(|| Arc::new(db_opts));
+        let transaction_metrics = Arc::new(RocksDbTransactionMetrics::default());
+        let stats = RocksDbStatsHandle::new(
+            Arc::clone(&db),
+            cache,
+            statistics,
+            Arc::clone(&transaction_metrics),
+        );
 
         Ok(Self {
-            db: Arc::new(db),
+            db,
             closed: AtomicBool::new(false),
             conflict_tracker: Arc::new(ConflictTracker::new()),
             commit_gate: Arc::new(tokio::sync::RwLock::new(())),
@@ -130,12 +146,23 @@ impl RocksDbStore {
             active_txn_count: Arc::new(AtomicUsize::new(0)),
             close_timeout: opts.close_timeout(),
             durability: opts.durability(),
+            stats,
         })
     }
 
     /// Get the database file path.
     pub fn db_path(&self) -> &std::path::Path {
         &self.db_path
+    }
+
+    /// Return a cloneable diagnostics handle that remains valid for this store's lifetime.
+    pub fn stats_handle(&self) -> RocksDbStatsHandle {
+        self.stats.clone()
+    }
+
+    /// Capture current RocksDB gauges and process-lifetime counters.
+    pub fn stats(&self) -> Result<RocksDbStatsSnapshot> {
+        self.stats.snapshot()
     }
 
     fn is_closed(&self) -> bool {
@@ -178,7 +205,12 @@ impl Store for RocksDbStore {
         let _commit_guard = if readonly {
             None
         } else {
-            Some(self.commit_gate.read().await)
+            let started = std::time::Instant::now();
+            let guard = self.commit_gate.read().await;
+            self.stats
+                .transactions
+                .record_snapshot_gate_wait(started.elapsed());
+            Some(guard)
         };
         let txn = RocksDbTxn::new(
             Arc::clone(&self.db),
@@ -187,6 +219,7 @@ impl Store for RocksDbStore {
             Arc::clone(&self.active_txn_count),
             readonly,
             self.durability,
+            Arc::clone(&self.stats.transactions),
         );
 
         // The transaction now owns the active-count decrement through Drop.
@@ -507,5 +540,75 @@ mod tests {
         }
         drop(commit_guard);
         assert_eq!(store.active_txn_count.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn stats_keep_expensive_rocksdb_counters_opt_in() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = RocksDbStore::open_with_options(
+            temp_dir.path(),
+            RocksDbStoreOptions::new().with_block_cache_size(1024 * 1024),
+        )
+        .unwrap();
+
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.block_cache.capacity_bytes, 1024 * 1024);
+        assert!(stats.counters.is_none());
+        assert_eq!(stats.transactions.conflicts, 0);
+    }
+
+    #[tokio::test]
+    async fn stats_report_live_cache_and_cumulative_reads() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = RocksDbStore::open_with_options(
+            temp_dir.path(),
+            RocksDbStoreOptions::new()
+                .with_block_cache_size(1024 * 1024)
+                .with_statistics_enabled(true),
+        )
+        .unwrap();
+
+        store.db.put(b"stats-key", b"stats-value").unwrap();
+        store.db.flush().unwrap();
+        assert_eq!(
+            store.db.get(b"stats-key").unwrap(),
+            Some(b"stats-value".to_vec())
+        );
+        assert_eq!(
+            store.db.get(b"stats-key").unwrap(),
+            Some(b"stats-value".to_vec())
+        );
+
+        let stats = store.stats_handle().snapshot().unwrap();
+        let counters = stats
+            .counters
+            .as_ref()
+            .expect("explicitly enabled counters should be present");
+        assert!(counters.io.keys_read >= 2);
+        assert!(counters.block_cache.hits + counters.block_cache.misses >= 1);
+        assert!(stats.block_cache.usage_bytes <= stats.block_cache.capacity_bytes);
+        serde_json::to_value(stats).expect("diagnostics snapshot should serialize as JSON");
+    }
+
+    #[tokio::test]
+    async fn stats_count_gate_waits_and_transaction_conflicts() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = RocksDbStore::open(temp_dir.path()).unwrap();
+        let key = b"stats-conflict-key";
+
+        let mut stale = store.new_txn(false).await.unwrap();
+        stale.get(key).await.unwrap();
+        stale.set(key, b"stale").await.unwrap();
+
+        let mut winner = store.new_txn(false).await.unwrap();
+        winner.set(key, b"winner").await.unwrap();
+        winner.commit().await.unwrap();
+
+        assert!(matches!(stale.commit().await, Err(Error::TxnConflict)));
+
+        let stats = store.stats().unwrap().transactions;
+        assert_eq!(stats.conflicts, 1);
+        assert_eq!(stats.snapshot_gate_waits, 2);
+        assert_eq!(stats.commit_gate_waits, 2);
     }
 }
