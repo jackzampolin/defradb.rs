@@ -1,5 +1,7 @@
 use std::ffi::c_char;
 
+use base64::Engine;
+
 use crate::ffi_entry;
 use crate::state::{SubscriptionState, NODES, SUBSCRIPTIONS};
 use crate::types::c_str_to_string;
@@ -90,6 +92,10 @@ pub extern "C" fn create_merge_complete_subscription(node_ptr: usize) -> CreateS
 }
 
 /// Convert an event message to JSON.
+///
+/// Update-event `block` bytes use standard padded base64. This is the encoding
+/// consumed by the Go rust-FFI bridge; it intentionally differs from the HTTP
+/// event surface's hex representation.
 pub(crate) fn message_to_json(message: &events::Message) -> String {
     // Check if this is an Update event with data
     if let Some(update) = message.as_update() {
@@ -98,6 +104,7 @@ pub(crate) fn message_to_json(message: &events::Message) -> String {
             "doc_id": update.doc_id,
             "cid": update.cid.to_string(),
             "collection_id": update.collection_id,
+            "block": base64::engine::general_purpose::STANDARD.encode(&update.block),
             "is_retry": update.is_retry,
             "is_relay": update.is_relay
         })

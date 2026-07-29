@@ -4536,6 +4536,7 @@ version = "0.5.0"
 dependencies = [
  "acp",
  "async-trait",
+ "base64 0.22.1",
  "blockstore",
  "cbindgen",
  "cid",
@@ -4564,6 +4565,7 @@ dependencies = [
  "sha2 0.10.9",
  "sourcehub",
  "storage",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

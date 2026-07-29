@@ -138,6 +138,15 @@ impl From<db_index::Error> for Error {
 }
 
 impl Error {
+    pub fn is_txn_conflict(&self) -> bool {
+        matches!(self, Error::Storage(source) if source.is_txn_conflict())
+            || matches!(
+                self,
+                Error::Datastore(datastore::Error::Storage(source))
+                    if source.is_txn_conflict()
+            )
+    }
+
     pub fn is_unique_constraint_violation(&self) -> bool {
         matches!(self, Error::Storage(source) if source.is_unique_constraint_violation())
     }

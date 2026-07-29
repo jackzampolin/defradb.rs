@@ -39,6 +39,7 @@ serde_json.workspace = true
 serde_yaml = "0.9"
 serde_ipld_dagcbor.workspace = true
 serde_bytes.workspace = true
+base64.workspace = true
 
 # Memory zeroization for sensitive key material
 zeroize = "1"
@@ -89,6 +90,7 @@ cbindgen = "0.28"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = "3.17"
 
 [lints]
 workspace = true

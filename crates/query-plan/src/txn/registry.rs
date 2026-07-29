@@ -23,6 +23,16 @@ pub trait TransactionRegistry: MaybeSendSync {
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError>;
 
+    /// Begin the short-lived read-only transaction used for a standalone query.
+    ///
+    /// Registries that need to defer read side effects until the snapshot has
+    /// closed can override this separately from user-managed transactions.
+    async fn begin_implicit_read(
+        &self,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.begin(true).await
+    }
+
     /// Get an existing transaction by handle.
     ///
     /// Returns `Found(context)` if the transaction exists,
@@ -43,6 +53,18 @@ pub trait TransactionRegistry: MaybeSendSync {
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError>;
+
+    /// Close a standalone query's implicit read transaction.
+    ///
+    /// `apply_read_effects` is false when query execution failed. The default
+    /// implementation simply rolls the snapshot back.
+    async fn finish_implicit_read(
+        &self,
+        handle: &TransactionHandle,
+        _apply_read_effects: bool,
+    ) -> std::result::Result<(), TransactionError> {
+        self.rollback(handle).await
+    }
 }
 
 /// A no-op transaction registry that doesn't support transactions.

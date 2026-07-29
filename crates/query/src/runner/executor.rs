@@ -130,10 +130,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         };
 
         if matches!(&parsed, ParsedOperation::Query { .. }) {
-            match self.registry.begin(true).await {
+            match self.registry.begin_implicit_read().await {
                 Ok(handle) => {
                     let response = self.execute_in_txn(request.clone(), &handle).await;
-                    if let Err(error) = self.registry.rollback(&handle).await {
+                    let apply_read_effects = response.errors.is_empty();
+                    if let Err(error) = self
+                        .registry
+                        .finish_implicit_read(&handle, apply_read_effects)
+                        .await
+                    {
+                        if apply_read_effects {
+                            return QueryResponse::error(format!(
+                                "failed to finalize implicit read transaction: {}",
+                                error
+                            ));
+                        }
                         warn!(
                             txn_id = %handle,
                             error = %error,

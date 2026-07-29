@@ -64,7 +64,12 @@ impl<S: Store> AutoCommitMutator<S> {
         let txn = self.db.new_txn(false).await.map_err(|e| {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
         })?;
-        let fetcher = Arc::new(LensedDocFetcher::new(txn, self.db.lens_store.clone()));
+        let fetcher = Arc::new(LensedDocFetcher::new(
+            self.db.clone(),
+            txn,
+            self.db.lens_store.clone(),
+            false,
+        ));
         let batch = Arc::new(BatchMutator::new(self.db.clone(), fetcher.shared_txn()));
         Ok((batch, fetcher))
     }

@@ -307,6 +307,8 @@ pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
+        rt.block_on(state.background_tasks.shutdown());
+
         if let Some(ref p2p) = state.p2p {
             rt.block_on(async { p2p.system.shutdown().await });
         }
@@ -323,6 +325,8 @@ pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CString;
+
     use super::*;
 
     #[test]
@@ -365,5 +369,29 @@ mod tests {
 
         assert_eq!(node_close(result1.node_ptr).status, 0);
         assert_eq!(node_close(result2.node_ptr).status, 0);
+    }
+
+    #[cfg(feature = "lark")]
+    #[test]
+    fn test_persistent_node_can_reopen_after_close() {
+        assert!(crate::runtime::init_runtime());
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = CString::new(directory.path().to_string_lossy().as_bytes()).unwrap();
+        let backend = CString::new("lark").unwrap();
+        let options = || NodeInitOptions {
+            db_path: path.as_ptr(),
+            in_memory: 0,
+            datastore_backend: backend.as_ptr(),
+            ..NodeInitOptions::default()
+        };
+
+        let first = new_node(options());
+        assert_eq!(first.status, 0);
+        assert_eq!(node_close(first.node_ptr).status, 0);
+
+        let second = new_node(options());
+        assert_eq!(second.status, 0);
+        assert_eq!(node_close(second.node_ptr).status, 0);
     }
 }

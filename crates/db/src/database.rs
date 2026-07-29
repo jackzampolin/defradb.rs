@@ -135,6 +135,13 @@ pub struct DB<S: Store> {
     options: DbOptions,
     /// Counter for generating unique transaction IDs.
     txn_id_counter: AtomicU64,
+    /// Generation of the committed migration graph.
+    ///
+    /// Lensed fetchers include this in their history-cache validity checks so
+    /// registering another transform invalidates both positive and negative
+    /// cached migration contexts, even when the active schema version does not
+    /// change.
+    migration_generation: AtomicU64,
     /// Whether the database has been closed.
     closed: AtomicBool,
     /// In-memory collection cache (name -> Collection).
@@ -204,6 +211,7 @@ impl<S: Store> DB<S> {
             store: Arc::new(store),
             options,
             txn_id_counter: AtomicU64::new(0),
+            migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
@@ -258,6 +266,7 @@ impl<S: Store> DB<S> {
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
+            migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
@@ -308,6 +317,16 @@ impl<S: Store> DB<S> {
     /// document are mutually serialized (#1021).
     pub fn doc_write_queue(&self) -> Arc<crate::doc_write_queue::DocWriteQueue> {
         self.doc_write_queue.clone()
+    }
+
+    /// Return the generation of the committed migration graph.
+    pub(crate) fn migration_generation(&self) -> u64 {
+        self.migration_generation.load(Ordering::Acquire)
+    }
+
+    /// Invalidate migration-history caches after a migration commit.
+    pub(crate) fn bump_migration_generation(&self) {
+        self.migration_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Install the KMS service. First call wins (OnceLock); subsequent calls

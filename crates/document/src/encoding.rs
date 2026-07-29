@@ -185,6 +185,115 @@ pub fn json_to_normal_value_for_kind(
     }
 }
 
+/// Coerce a JSON array to a `NormalValue` according to its declared scalar-array kind.
+///
+/// This mirrors the mutation write path's array representation so materialized documents and
+/// rebuilt indexes do not fall back to `NormalValue::Json` and encode differently from fresh
+/// writes.
+pub fn json_to_normal_value_for_array_kind(
+    value: &serde_json::Value,
+    kind: &schema::ScalarArrayKind,
+) -> Option<NormalValue> {
+    use schema::ScalarArrayKind;
+    use serde_json::Value as JsonValue;
+
+    let values = value.as_array()?;
+
+    match kind {
+        ScalarArrayKind::BoolArray => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::Bool(value) => Some(*value),
+                JsonValue::Null => None,
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(NormalValue::BoolArray),
+        ScalarArrayKind::NillableBoolArray => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::Bool(value) => Some(Some(*value)),
+                JsonValue::Null => Some(None),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(NormalValue::NillableBoolElementArray),
+        ScalarArrayKind::IntArray => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::Number(value) => value.as_i64(),
+                JsonValue::Null => None,
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(NormalValue::IntArray),
+        ScalarArrayKind::NillableIntArray => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::Number(value) => value.as_i64().map(Some),
+                JsonValue::Null => Some(None),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(NormalValue::NillableIntElementArray),
+        ScalarArrayKind::Float64Array => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::Number(value) => value.as_f64(),
+                JsonValue::Null => None,
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(NormalValue::Float64Array),
+        ScalarArrayKind::NillableFloat64Array => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::Number(value) => value.as_f64().map(Some),
+                JsonValue::Null => Some(None),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(NormalValue::NillableFloat64ElementArray),
+        ScalarArrayKind::Float32Array => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::Number(value) => value.as_f64().map(|value| value as f32),
+                JsonValue::Null => None,
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(NormalValue::Float32Array),
+        ScalarArrayKind::NillableFloat32Array => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::Number(value) => value.as_f64().map(|value| Some(value as f32)),
+                JsonValue::Null => Some(None),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(NormalValue::NillableFloat32ElementArray),
+        ScalarArrayKind::StringArray => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::String(value) => Some(value.clone()),
+                JsonValue::Null => None,
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(NormalValue::StringArray),
+        ScalarArrayKind::NillableStringArray => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::String(value) => Some(Some(value.clone())),
+                JsonValue::Null => Some(None),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(NormalValue::NillableStringElementArray),
+        _ => None,
+    }
+}
+
 /// Re-type a value read back from document storage against its declared scalar
 /// kind, repairing the schema-blind CBOR round-trip.
 ///
@@ -321,7 +430,7 @@ pub fn canonical_cbor_key_order(a: &&str, b: &&str) -> std::cmp::Ordering {
 #[cfg(test)]
 mod json_to_normal_value_for_kind_tests {
     use super::*;
-    use schema::ScalarKind;
+    use schema::{ScalarArrayKind, ScalarKind};
     use serde_json::json;
 
     #[test]
@@ -364,6 +473,39 @@ mod json_to_normal_value_for_kind_tests {
         assert_eq!(
             json_to_normal_value_for_kind(&json!("hi"), &ScalarKind::String),
             Some(NormalValue::String("hi".to_string()))
+        );
+    }
+
+    #[test]
+    fn non_nillable_arrays_reject_null_elements() {
+        let cases = [
+            (json!([true, null]), ScalarArrayKind::BoolArray),
+            (json!([1, null]), ScalarArrayKind::IntArray),
+            (json!([1.5, null]), ScalarArrayKind::Float64Array),
+            (json!([1.5, null]), ScalarArrayKind::Float32Array),
+            (json!(["value", null]), ScalarArrayKind::StringArray),
+        ];
+
+        for (value, kind) in cases {
+            assert_eq!(
+                json_to_normal_value_for_array_kind(&value, &kind),
+                None,
+                "{kind:?} must not invent a default for a null element"
+            );
+        }
+    }
+
+    #[test]
+    fn nillable_array_preserves_null_elements() {
+        assert_eq!(
+            json_to_normal_value_for_array_kind(
+                &json!([true, null]),
+                &ScalarArrayKind::NillableBoolArray,
+            ),
+            Some(NormalValue::NillableBoolElementArray(vec![
+                Some(true),
+                None,
+            ]))
         );
     }
 
