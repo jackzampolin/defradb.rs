@@ -2,14 +2,14 @@
 
 use std::collections::HashMap;
 
+use datastore::NamespaceView;
 use document::Document;
-use lens::{
-    build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink, DOC_ID_FIELD,
-};
+use lens::{build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink};
 use storage::corekv::Store;
 use tracing::{debug, trace, warn};
 
 use crate::collection::Collection;
+use crate::migration::helpers::{cache_migrated_document, lens_doc_to_document};
 use crate::schema_loader::get_collections_by_collection_id;
 
 use super::LensedAutoCommitFetcher;
@@ -17,9 +17,8 @@ use super::LensedAutoCommitFetcher;
 impl<S: Store> LensedAutoCommitFetcher<S> {
     /// Load migration context for a collection, using cache when available.
     ///
-    /// The result is cached per collection_id since schema migrations don't
-    /// change during normal runtime. This eliminates a read transaction +
-    /// systemstore scan on every fetch operation.
+    /// Positive results are cached per collection and target version. Negative
+    /// results are reloaded because a transform can be registered in place.
     pub(super) async fn load_migration_context(
         &self,
         collection: &Collection,
@@ -35,7 +34,9 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
 
         if let Ok(cache) = self.migration_cache.lock() {
             if let Some(cached) = cache.get(&cache_key) {
-                return Ok(cached.clone());
+                if cached.0 {
+                    return Ok(cached.clone());
+                }
             }
         }
 
@@ -47,9 +48,12 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
 
         let result = (has_migrations, if has_migrations { history } else { None });
 
-        // Store in cache using version-aware key
-        if let Ok(mut cache) = self.migration_cache.lock() {
-            cache.insert(cache_key, result.clone());
+        // A transform can be registered without changing the active version ID, so a negative
+        // result must not be cached. Positive entries remain version-scoped.
+        if has_migrations {
+            if let Ok(mut cache) = self.migration_cache.lock() {
+                cache.insert(cache_key, result.clone());
+            }
         }
 
         Ok(result)
@@ -75,37 +79,6 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
             lens_doc.insert(key, value);
         }
         Some(lens_doc)
-    }
-
-    /// Convert a LensDoc back to a Document.
-    pub(super) fn lens_doc_to_doc(lens_doc: LensDoc, original_doc: &Document) -> Document {
-        use document::NormalValue;
-
-        let mut doc = Document::new();
-        if let Some(id) = original_doc.id() {
-            doc.set_id(id.clone());
-        }
-        for (field_name, value) in lens_doc {
-            if field_name != DOC_ID_FIELD {
-                let normal = match value {
-                    serde_json::Value::Null => NormalValue::Null,
-                    serde_json::Value::Bool(b) => NormalValue::Bool(b),
-                    serde_json::Value::Number(ref n) => {
-                        if let Some(i) = n.as_i64() {
-                            NormalValue::Int(i)
-                        } else if let Some(f) = n.as_f64() {
-                            NormalValue::Float64(f)
-                        } else {
-                            NormalValue::Json(value)
-                        }
-                    }
-                    serde_json::Value::String(s) => NormalValue::String(s),
-                    other => NormalValue::Json(other),
-                };
-                doc.set(&field_name, normal);
-            }
-        }
-        doc
     }
 
     /// Build collection history from versions.
@@ -255,6 +228,8 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         &self,
         doc: Document,
         collection: &Collection,
+        datastore: &NamespaceView,
+        systemstore: &NamespaceView,
         has_migrations: bool,
         preloaded_history: &Option<HashMap<String, TargetedHistoryLink>>,
     ) -> query::error::Result<Document> {
@@ -285,10 +260,13 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         };
 
         if !history.contains_key(&doc_version) {
-            return Err(query::error::QueryError::execution(format!(
-                "no migration path found for document {} from version {} to {}",
-                doc_id_str, doc_version, target_version_id
-            )));
+            warn!(
+                doc_id = %doc_id_str,
+                doc_version = %doc_version,
+                target_version = %target_version_id,
+                "Document version is unknown locally; returning it unchanged"
+            );
+            return Ok(doc);
         }
 
         let original_lens_doc = Self::doc_to_lens_doc(&doc).ok_or_else(|| {
@@ -333,8 +311,15 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
             "Document migration completed"
         );
 
-        let mut migrated_doc = Self::lens_doc_to_doc(migrated_lens_doc, &doc);
-        migrated_doc.set_schema_version_id(target_version_id);
+        let migrated_doc = lens_doc_to_document(migrated_lens_doc, &doc, collection);
+        cache_migrated_document(datastore, systemstore, collection, &migrated_doc)
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to cache migrated document: {}",
+                    e
+                ))
+            })?;
 
         Ok(migrated_doc)
     }

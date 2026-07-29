@@ -1,6 +1,12 @@
-//! Helper functions for migration placeholder creation and value conversion.
+//! Helper functions for migration placeholder creation and document materialization.
 
+use datastore::NamespaceView;
+use document::Document;
+use lens::{LensDoc, DOC_ID_FIELD};
 use schema::{CollectionVersion, FieldKind, ORPHAN_COLLECTION_ID};
+
+use crate::collection::Collection;
+use crate::error::{Error, Result};
 
 /// Create an orphan placeholder collection version.
 ///
@@ -50,11 +56,11 @@ pub(super) fn create_placeholder_with_source(
 /// This function converts them to the appropriate native type (Int, Float, Time, etc.)
 /// based on the field's declared type in the schema.
 ///
-/// The scalar coercion delegates to [`document::encoding::json_to_normal_value_for_kind`]
-/// — the same converter the mutation-create path uses — so reindexed index entries are
-/// byte-identical to freshly-written ones (notably DateTime → `Time`, not a raw string).
-/// Values that cannot be coerced to the declared kind fall back to a raw JSON value,
-/// preserving prior best-effort behavior.
+/// Scalar and scalar-array coercion delegates to the shared document converters, producing the
+/// same native representation as mutation writes. Reindexed entries are therefore byte-identical
+/// to freshly-written ones (notably DateTime → `Time`, and arrays → typed array variants rather
+/// than a JSON blob). Values that cannot be coerced fall back to raw JSON, preserving prior
+/// best-effort behavior.
 pub fn json_to_native_value(
     value: &serde_json::Value,
     field_name: &str,
@@ -70,13 +76,102 @@ pub fn json_to_native_value(
         .find(|f| f.name == field_name)
         .map(|f| &f.kind);
 
-    if let Some(FieldKind::Scalar(scalar)) = field_kind {
-        if let Some(nv) = document::encoding::json_to_normal_value_for_kind(value, scalar) {
-            return nv;
+    if let Some(field_kind) = field_kind {
+        match field_kind {
+            FieldKind::Scalar(scalar) => {
+                if let Some(nv) = document::encoding::json_to_normal_value_for_kind(value, scalar) {
+                    return nv;
+                }
+            }
+            FieldKind::ScalarArray(array) => {
+                if let Some(nv) =
+                    document::encoding::json_to_normal_value_for_array_kind(value, array)
+                {
+                    return nv;
+                }
+            }
+            _ => {}
         }
     }
 
     document::NormalValue::Json(value.clone())
+}
+
+/// Convert a transformed lens document to the active collection's storage representation.
+///
+/// Lens output is JSON-shaped, while document storage and indexes use schema-aware native
+/// values. Unknown output fields are ignored, matching Go's lensed fetcher.
+pub(crate) fn lens_doc_to_document(
+    mut lens_doc: LensDoc,
+    original_doc: &Document,
+    collection: &Collection,
+) -> Document {
+    let mut doc = Document::new();
+
+    if let Some(id) = original_doc.id() {
+        doc.set_id(id.clone());
+    }
+
+    for field in &collection.schema().fields {
+        if field.name == DOC_ID_FIELD {
+            continue;
+        }
+        if let Some(value) = lens_doc.remove(&field.name) {
+            doc.set(
+                &field.name,
+                json_to_native_value(&value, &field.name, collection.schema()),
+            );
+        }
+    }
+
+    doc.set_schema_version_id(collection.version_id());
+    doc
+}
+
+/// Persist a lensed document directly to the datastore without creating CRDT commits.
+///
+/// Rust stores document fields in one CBOR blob, so this is the current-layout equivalent of
+/// Go's per-field `updateDataStore`: replace the blob and update the real version key in the same
+/// transaction.
+pub(crate) async fn cache_migrated_document(
+    datastore: &NamespaceView,
+    systemstore: &NamespaceView,
+    collection: &Collection,
+    doc: &Document,
+) -> Result<bool> {
+    let Some(doc_id) = doc.id() else {
+        return Ok(false);
+    };
+    let Some(doc_short_id) = collection.resolve_doc_short_id(systemstore, doc_id).await? else {
+        return Ok(false);
+    };
+
+    let data = doc.to_cbor()?;
+    datastore
+        .set(&collection.doc_key(doc_short_id), &data)
+        .await
+        .map_err(Error::Storage)?;
+    collection.store_version(datastore, doc_short_id).await?;
+
+    Ok(true)
+}
+
+/// Advance only a document's stored schema version.
+pub(crate) async fn cache_document_version(
+    datastore: &NamespaceView,
+    systemstore: &NamespaceView,
+    collection: &Collection,
+    doc: &Document,
+) -> Result<bool> {
+    let Some(doc_id) = doc.id() else {
+        return Ok(false);
+    };
+    let Some(doc_short_id) = collection.resolve_doc_short_id(systemstore, doc_id).await? else {
+        return Ok(false);
+    };
+
+    collection.store_version(datastore, doc_short_id).await?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -164,6 +259,68 @@ mod tests {
         assert_eq!(
             json_to_native_value(&serde_json::json!("hi"), "name", &coll),
             document::NormalValue::String("hi".to_string())
+        );
+    }
+
+    #[test]
+    fn scalar_arrays_reindex_to_native_values() {
+        let coll = CollectionVersion::new(
+            "test",
+            "v1",
+            "coll_test_001",
+            vec![
+                FieldDescription::new("1", "bools", FieldKind::bool_array()),
+                FieldDescription::new("2", "ints", FieldKind::int_array()),
+                FieldDescription::new("3", "float64s", FieldKind::float64_array()),
+                FieldDescription::new("4", "float32s", FieldKind::float32_array()),
+                FieldDescription::new("5", "strings", FieldKind::string_array()),
+                FieldDescription::new("6", "maybe_bools", FieldKind::nillable_bool_array()),
+                FieldDescription::new("7", "maybe_ints", FieldKind::nillable_int_array()),
+                FieldDescription::new("8", "maybe_float64s", FieldKind::nillable_float64_array()),
+                FieldDescription::new("9", "maybe_float32s", FieldKind::nillable_float32_array()),
+                FieldDescription::new("10", "maybe_strings", FieldKind::nillable_string_array()),
+            ],
+        );
+
+        assert_eq!(
+            json_to_native_value(&serde_json::json!([true, false]), "bools", &coll),
+            document::NormalValue::BoolArray(vec![true, false])
+        );
+        assert_eq!(
+            json_to_native_value(&serde_json::json!([1, 2]), "ints", &coll),
+            document::NormalValue::IntArray(vec![1, 2])
+        );
+        assert_eq!(
+            json_to_native_value(&serde_json::json!([1, 2.5]), "float64s", &coll),
+            document::NormalValue::Float64Array(vec![1.0, 2.5])
+        );
+        assert_eq!(
+            json_to_native_value(&serde_json::json!([1, 2.5]), "float32s", &coll),
+            document::NormalValue::Float32Array(vec![1.0, 2.5])
+        );
+        assert_eq!(
+            json_to_native_value(&serde_json::json!(["a", "b"]), "strings", &coll),
+            document::NormalValue::StringArray(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            json_to_native_value(&serde_json::json!([true, null]), "maybe_bools", &coll),
+            document::NormalValue::NillableBoolElementArray(vec![Some(true), None])
+        );
+        assert_eq!(
+            json_to_native_value(&serde_json::json!([1, null]), "maybe_ints", &coll),
+            document::NormalValue::NillableIntElementArray(vec![Some(1), None])
+        );
+        assert_eq!(
+            json_to_native_value(&serde_json::json!([1, null]), "maybe_float64s", &coll),
+            document::NormalValue::NillableFloat64ElementArray(vec![Some(1.0), None])
+        );
+        assert_eq!(
+            json_to_native_value(&serde_json::json!([1, null]), "maybe_float32s", &coll),
+            document::NormalValue::NillableFloat32ElementArray(vec![Some(1.0), None])
+        );
+        assert_eq!(
+            json_to_native_value(&serde_json::json!(["a", null]), "maybe_strings", &coll),
+            document::NormalValue::NillableStringElementArray(vec![Some("a".to_string()), None])
         );
     }
 }

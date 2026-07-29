@@ -218,6 +218,19 @@ async fn set_migration_registers_lens_between_versions() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn materialize_collection_is_exposed_on_embedded_node() -> Result<()> {
+    let node = EmbeddedNode::builder().build().await?;
+    node.add_schema(USER_SDL).await?;
+
+    let patch =
+        r#"[{"op":"add","path":"/User/Fields/-","value":{"Name":"email","Kind":"String"}}]"#;
+    node.patch_collection("User", patch).await?;
+
+    assert_eq!(node.materialize_collection("User").await?, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn introspection_supports_idempotent_schema_ensure() -> Result<()> {
     // Demonstrates the idempotent bootstrap pattern the issue calls out:
     // the application checks whether a collection exists before falling

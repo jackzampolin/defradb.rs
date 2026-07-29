@@ -4,14 +4,13 @@ use std::collections::HashMap;
 
 use datastore::NamespaceView;
 use document::Document;
-use lens::{
-    build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink, DOC_ID_FIELD,
-};
+use lens::{build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink};
 use schema::CollectionVersion;
 use storage::corekv::Store;
 use tracing::{debug, trace, warn};
 
 use crate::collection::Collection;
+use crate::migration::helpers::{cache_migrated_document, lens_doc_to_document};
 use crate::schema_loader::get_collections_by_collection_id;
 
 use super::LensedDocFetcher;
@@ -203,43 +202,6 @@ impl<S: Store> LensedDocFetcher<S> {
         Some(lens_doc)
     }
 
-    /// Convert a LensDoc back to a Document.
-    #[allow(dead_code)]
-    fn lens_doc_to_doc(lens_doc: LensDoc, original_doc: &Document) -> Document {
-        use document::NormalValue;
-
-        let mut doc = Document::new();
-
-        // Preserve original ID
-        if let Some(id) = original_doc.id() {
-            doc.set_id(id.clone());
-        }
-
-        // Copy fields from lens doc, converting JSON primitives to native NormalValues
-        for (field_name, value) in lens_doc {
-            if field_name != DOC_ID_FIELD {
-                let normal = match value {
-                    serde_json::Value::Null => NormalValue::Null,
-                    serde_json::Value::Bool(b) => NormalValue::Bool(b),
-                    serde_json::Value::Number(ref n) => {
-                        if let Some(i) = n.as_i64() {
-                            NormalValue::Int(i)
-                        } else if let Some(f) = n.as_f64() {
-                            NormalValue::Float64(f)
-                        } else {
-                            NormalValue::Json(value)
-                        }
-                    }
-                    serde_json::Value::String(s) => NormalValue::String(s),
-                    other => NormalValue::Json(other),
-                };
-                doc.set(&field_name, normal);
-            }
-        }
-
-        doc
-    }
-
     /// Check if a document needs migration to the target version.
     pub(super) fn doc_needs_migration(
         doc: &Document,
@@ -286,10 +248,13 @@ impl<S: Store> LensedDocFetcher<S> {
 
         // Check if we have a migration path for this version
         if !history.contains_key(&doc_version) {
-            return Err(query::error::QueryError::execution(format!(
-                "no migration path found for document {} from version {} to {}",
-                doc_id_str, doc_version, target_version_id
-            )));
+            warn!(
+                doc_id = %doc_id_str,
+                doc_version = %doc_version,
+                target_version = %target_version_id,
+                "Document version is unknown locally; returning it unchanged"
+            );
+            return Ok(doc);
         }
 
         // Convert document to LensDoc
@@ -337,121 +302,56 @@ impl<S: Store> LensedDocFetcher<S> {
             "Document migration completed"
         );
 
-        // Convert back to Document
-        let mut migrated_doc = Self::lens_doc_to_doc(migrated_lens_doc.clone(), &doc);
-        migrated_doc.set_schema_version_id(target_version_id);
-
-        // Cache the migrated values in datastore
-        if let Err(e) = self
-            .update_datastore(
-                datastore,
-                &doc,
-                &original_lens_doc,
-                &migrated_lens_doc,
-                target_version_id,
-            )
-            .await
-        {
-            warn!(
-                doc_id = ?doc.id(),
-                error = %e,
-                "Failed to cache migrated document - migration still applied in memory"
-            );
-        }
+        let migrated_doc = lens_doc_to_document(migrated_lens_doc, &doc, collection);
+        self.update_datastore(datastore, collection, &migrated_doc)
+            .await?;
 
         Ok(migrated_doc)
     }
 
     /// Update the datastore with migrated document values.
     ///
-    /// This caches the migrated field values and updates the document's
-    /// schema version to the target version. Only modified fields are written.
+    /// Rust stores a document's fields in one CBOR blob, so this replaces that blob and updates
+    /// the real schema-version key in the caller's transaction.
     ///
     /// Matches Go's `updateDataStore` in internal/lens/fetcher.go.
     async fn update_datastore(
         &self,
         datastore: &NamespaceView,
-        doc: &Document,
-        original: &LensDoc,
-        migrated: &LensDoc,
-        target_version_id: &str,
+        collection: &Collection,
+        migrated_doc: &Document,
     ) -> query::error::Result<()> {
-        let doc_id = match doc.id() {
-            Some(id) => id.to_string(),
-            None => return Ok(()), // No ID, can't cache
-        };
-
-        // Find changed fields
-        let changed_fields: Vec<(&String, &serde_json::Value)> = migrated
-            .iter()
-            .filter(|(key, value)| {
-                // Skip special fields
-                if *key == DOC_ID_FIELD {
-                    return false;
-                }
-                // Include if field is new or value changed
-                match original.get(*key) {
-                    Some(orig_val) => orig_val != *value,
-                    None => true,
-                }
-            })
-            .collect();
-
-        if changed_fields.is_empty() && original.len() == migrated.len() {
-            // No changes, just update version
+        let txn_guard = self.txn.lock().await;
+        let txn = txn_guard.as_ref().ok_or_else(|| {
+            query::error::QueryError::execution("transaction not available for lens write-back")
+        })?;
+        if txn.is_readonly().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to inspect lens write-back transaction: {}",
+                e
+            ))
+        })? {
             trace!(
-                doc_id = %doc_id,
-                "No field changes, updating version only"
+                doc_id = ?migrated_doc.id(),
+                "Skipping lens write-back in a read-only explicit transaction"
             );
-        } else {
-            trace!(
-                doc_id = %doc_id,
-                changed_count = changed_fields.len(),
-                "Caching migrated field values"
-            );
+            return Ok(());
         }
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get systemstore for lens write-back: {}",
+                e
+            ))
+        })?;
 
-        // Write changed fields to datastore
-        // Note: In a full implementation, we would use the collection's field keys
-        // For now, we just update the version to mark the document as migrated
-        for (field_name, value) in &changed_fields {
-            // Build field key: /d/<collection_short_id>/<doc_id>/<field_id>
-            // This is simplified - full implementation needs collection metadata
-            let value_bytes = serde_json::to_vec(value).map_err(|e| {
-                query::error::QueryError::execution(format!("failed to serialize field: {}", e))
-            })?;
-
-            // Log what would be written (actual field key construction needs collection info)
-            trace!(
-                doc_id = %doc_id,
-                field = %field_name,
-                value_len = value_bytes.len(),
-                "Would cache migrated field value"
-            );
-        }
-
-        // Update the version field
-        // Key format: /d/<collection_short_id>/<doc_id>/v
-        // We need the collection short ID to build the proper key
-        // For now, use a simplified approach that updates just the version marker
-        let version_bytes = target_version_id.as_bytes();
-
-        // Build version key - simplified, using doc_id as a marker
-        // In full implementation, this would use Collection::version_key()
-        let version_key = format!("/v/{}", doc_id);
-        datastore
-            .set(version_key.as_bytes(), version_bytes)
+        cache_migrated_document(datastore, &systemstore, collection, migrated_doc)
             .await
             .map_err(|e| {
-                query::error::QueryError::execution(format!("failed to update version: {}", e))
+                query::error::QueryError::execution(format!(
+                    "failed to cache migrated document: {}",
+                    e
+                ))
             })?;
-
-        debug!(
-            doc_id = %doc_id,
-            target_version = %target_version_id,
-            changed_fields = changed_fields.len(),
-            "Cached migrated document"
-        );
 
         Ok(())
     }

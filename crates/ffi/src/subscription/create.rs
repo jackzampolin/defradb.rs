@@ -1,5 +1,7 @@
 use std::ffi::c_char;
 
+use base64::Engine;
+
 use crate::ffi_entry;
 use crate::state::{SubscriptionState, NODES, SUBSCRIPTIONS};
 use crate::types::c_str_to_string;
@@ -98,6 +100,7 @@ pub(crate) fn message_to_json(message: &events::Message) -> String {
             "doc_id": update.doc_id,
             "cid": update.cid.to_string(),
             "collection_id": update.collection_id,
+            "block": base64::engine::general_purpose::STANDARD.encode(&update.block),
             "is_retry": update.is_retry,
             "is_relay": update.is_relay
         })

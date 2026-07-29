@@ -176,6 +176,12 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
             .map_err(anyhow::Error::new)
     }
 
+    async fn materialize_collection(&self, collection_name: &str) -> anyhow::Result<usize> {
+        db::DB::materialize_collection(&self.database, collection_name)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
     fn list_collections(&self) -> anyhow::Result<Vec<String>> {
         db::DB::list_collections(&self.database).map_err(anyhow::Error::new)
     }

@@ -1,12 +1,10 @@
-//! Reindexing after migration registration.
+//! Datastore materialization and reindexing after schema migration.
 
-use std::collections::HashMap;
-
-use lens::{build_targeted_history, CollectionHistoryLink, Lens, LensDoc, DOC_ID_FIELD};
+use lens::Lens;
 use storage::corekv::Store;
-use tracing::instrument;
+use tracing::{instrument, warn};
 
-use super::helpers::json_to_native_value;
+use super::helpers::{cache_document_version, cache_migrated_document, lens_doc_to_document};
 use crate::error::{Error, Result};
 use crate::index_manager::IndexManager;
 use crate::schema_loader::get_collections_by_collection_id;
@@ -80,14 +78,38 @@ impl<S: Store> DB<S> {
 
     /// Rebuild secondary indexes for a collection using lens-migrated documents.
     ///
-    /// Fetches all documents, applies lens migration to any that need it,
-    /// drops existing index entries, and rebuilds them with migrated values.
+    /// Documents that cross a registered transform are also written back to the
+    /// datastore so the rebuilt indexes and cached values cannot diverge.
     pub async fn reindex_collection_with_migrations(&self, collection_name: &str) -> Result<()> {
-        let collection = match self.get_collection(collection_name)? {
-            Some(c) => c,
-            None => return Ok(()),
-        };
+        if self.get_collection(collection_name)?.is_none() {
+            return Ok(());
+        }
+        self.materialize_collection_inner(collection_name, false)
+            .await
+            .map(|_| ())
+    }
 
+    /// Eagerly advance every known-version document in a collection to its active version.
+    ///
+    /// This writes only the datastore blob, version key, and secondary indexes. It does not
+    /// create CRDT commits, update heads, emit mutation events, or gossip data to peers.
+    ///
+    /// Returns the number of documents whose stored version was advanced.
+    pub async fn materialize_collection(&self, collection_name: &str) -> Result<usize> {
+        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .await?;
+        self.materialize_collection_inner(collection_name, true)
+            .await
+    }
+
+    async fn materialize_collection_inner(
+        &self,
+        collection_name: &str,
+        materialize_identity_paths: bool,
+    ) -> Result<usize> {
+        let collection = self
+            .get_collection(collection_name)?
+            .ok_or_else(|| Error::CollectionNotFound(collection_name.to_string()))?;
         let collection_id = collection.collection_id().to_string();
         let target_version_id = collection.version_id().to_string();
         let short_id = collection.resolved_root_id();
@@ -97,44 +119,16 @@ impl<S: Store> DB<S> {
         let versions = get_collections_by_collection_id(&systemstore, &collection_id).await?;
         let _ = read_txn.discard();
 
-        let history = {
-            let mut full_history: HashMap<String, CollectionHistoryLink> = HashMap::new();
-            for version in &versions {
-                let mut link =
-                    CollectionHistoryLink::new(&version.version_id, &version.collection_id);
-                if let Some(ref prev) = version.previous_version {
-                    link = link.with_previous(&prev.source_collection_id);
-                    if let Some(ref transform_id) = prev.transform {
-                        link = link.with_transform(transform_id);
-                    }
-                }
-                full_history.insert(version.version_id.clone(), link);
-            }
-
-            let reverse_links: Vec<(String, String)> = full_history
-                .values()
-                .flat_map(|link| {
-                    link.previous
-                        .iter()
-                        .map(|prev_id| (prev_id.clone(), link.version_id.clone()))
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            for (parent_id, child_id) in reverse_links {
-                if let Some(parent_link) = full_history.get_mut(&parent_id) {
-                    if !parent_link.next.contains(&child_id) {
-                        parent_link.next.push(child_id);
-                    }
-                }
-            }
-
-            match build_targeted_history(&full_history, &target_version_id) {
-                Some(h) => h,
-                None => return Ok(()),
-            }
-        };
+        let history = crate::lens_utils::build_collection_history(&versions, &target_version_id)
+            .ok_or_else(|| {
+                Error::Lens(format!(
+                    "failed to build migration history for collection '{}'",
+                    collection_name
+                ))
+            })?;
 
         let write_txn = self.new_txn(false).await?;
+        let mut materialized_count = 0usize;
 
         {
             let datastore = write_txn.datastore()?;
@@ -146,82 +140,118 @@ impl<S: Store> DB<S> {
 
             let mut migrated_docs = Vec::with_capacity(raw_docs.len());
             for (doc_short_id, doc, _) in raw_docs {
-                let doc_version = doc
-                    .schema_version_id()
-                    .unwrap_or(&target_version_id)
-                    .to_string();
+                let Some(doc_version) = doc.schema_version_id().map(str::to_string) else {
+                    if materialize_identity_paths {
+                        let mut restamped = doc.clone();
+                        restamped.set_schema_version_id(&target_version_id);
+                        cache_document_version(&datastore, &txn_systemstore, &collection, &doc)
+                            .await?;
+                        materialized_count += 1;
+                        migrated_docs.push((doc_short_id, restamped));
+                    } else {
+                        migrated_docs.push((doc_short_id, doc));
+                    }
+                    continue;
+                };
 
                 if doc_version == target_version_id {
                     migrated_docs.push((doc_short_id, doc));
                     continue;
                 }
 
-                if let Ok(map) = doc.to_map() {
-                    let mut lens_doc = LensDoc::new();
-                    for (key, value) in map {
-                        lens_doc.insert(key, value);
-                    }
-
-                    let mut lens =
-                        Lens::new(self.lens_store.clone(), &target_version_id, history.clone());
-
-                    if let Ok(()) = lens.put(&doc_version, lens_doc).await {
-                        if let Some(Ok(migrated_lens_doc)) = lens.next().await {
-                            let mut migrated = document::Document::new();
-                            if let Some(id) = doc.id() {
-                                migrated.set_id(id.clone());
-                            }
-                            for (field_name, value) in migrated_lens_doc {
-                                if field_name != DOC_ID_FIELD {
-                                    let native_value = json_to_native_value(
-                                        &value,
-                                        &field_name,
-                                        collection.schema(),
-                                    );
-                                    migrated.set(&field_name, native_value);
-                                }
-                            }
-                            migrated.set_schema_version_id(&target_version_id);
-                            migrated_docs.push((doc_short_id, migrated));
-                            continue;
-                        }
-                    }
+                if !history.contains_key(&doc_version) {
+                    warn!(
+                        doc_id = ?doc.id(),
+                        doc_version = %doc_version,
+                        target_version = %target_version_id,
+                        "Skipping materialization for a document version unknown locally"
+                    );
+                    migrated_docs.push((doc_short_id, doc));
+                    continue;
                 }
 
-                migrated_docs.push((doc_short_id, doc));
+                let path_has_transform = crate::lens_utils::migration_path_has_transform(
+                    &history,
+                    &doc_version,
+                    &target_version_id,
+                );
+                if !path_has_transform {
+                    if materialize_identity_paths {
+                        cache_document_version(&datastore, &txn_systemstore, &collection, &doc)
+                            .await?;
+                        let mut restamped = doc;
+                        restamped.set_schema_version_id(&target_version_id);
+                        materialized_count += 1;
+                        migrated_docs.push((doc_short_id, restamped));
+                    } else {
+                        migrated_docs.push((doc_short_id, doc));
+                    }
+                    continue;
+                }
+
+                let lens_doc = crate::lens_utils::doc_to_lens_doc(&doc).ok_or_else(|| {
+                    Error::Lens(format!(
+                        "failed to convert document {:?} for materialization",
+                        doc.id()
+                    ))
+                })?;
+                let mut lens =
+                    Lens::new(self.lens_store.clone(), &target_version_id, history.clone());
+                lens.put(&doc_version, lens_doc)
+                    .await
+                    .map_err(|e| Error::Lens(e.to_string()))?;
+                let migrated_lens_doc = lens
+                    .next()
+                    .await
+                    .ok_or_else(|| {
+                        Error::Lens(format!(
+                            "lens produced no document while materializing {:?}",
+                            doc.id()
+                        ))
+                    })?
+                    .map_err(|e| Error::Lens(e.to_string()))?;
+                let migrated = lens_doc_to_document(migrated_lens_doc, &doc, &collection);
+                cache_migrated_document(&datastore, &txn_systemstore, &collection, &migrated)
+                    .await?;
+                materialized_count += 1;
+                migrated_docs.push((doc_short_id, migrated));
             }
 
-            let index_manager = IndexManager::from_collection(short_id, collection.schema())
-                .map_err(|e| Error::Other(format!("failed to create index manager: {}", e)))?;
+            if !collection.get_indexes().is_empty() {
+                let index_manager = IndexManager::from_collection(short_id, collection.schema())
+                    .map_err(|e| Error::Other(format!("failed to create index manager: {}", e)))?;
 
-            for index_desc in collection.get_indexes() {
-                if let Some(index) = index_manager.get_index(&index_desc.name) {
-                    index
-                        .remove_all(&mut datastore.clone())
-                        .await
-                        .map_err(Error::Storage)?;
+                for index_desc in collection.get_indexes() {
+                    if let Some(index) = index_manager.get_index(&index_desc.name) {
+                        index
+                            .remove_all(&mut datastore.clone())
+                            .await
+                            .map_err(Error::Storage)?;
+                    }
+
+                    index_manager
+                        .bulk_index(
+                            &datastore,
+                            &index_desc.name,
+                            &migrated_docs,
+                            collection.schema(),
+                        )
+                        .await?;
                 }
-
-                index_manager
-                    .bulk_index(
-                        &datastore,
-                        &index_desc.name,
-                        &migrated_docs,
-                        collection.schema(),
-                    )
-                    .await?;
             }
 
             tracing::debug!(
                 collection = %collection_name,
                 doc_count = migrated_docs.len(),
+                materialized_count,
                 index_count = collection.get_indexes().len(),
-                "Rebuilt indexes after version switch"
+                materialize_identity_paths,
+                "Materialized collection datastore and rebuilt indexes"
             );
         }
 
         write_txn.commit().await?;
 
-        Ok(())
+        Ok(materialized_count)
     }
 }

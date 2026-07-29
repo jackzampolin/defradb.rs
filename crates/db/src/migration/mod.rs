@@ -9,6 +9,9 @@ pub(crate) mod helpers;
 mod reindex;
 mod set_migration;
 
+#[cfg(test)]
+mod tests;
+
 use std::sync::Arc;
 
 use lens::{LensConfig, TransformId, TransformStore};

@@ -206,3 +206,50 @@ pub fn build_collection_history(
 
     result
 }
+
+/// Return whether the targeted path from `source_version_id` crosses a transform.
+///
+/// The walk mirrors the lens pipeline's forward-first navigation and is used by reindexing to
+/// avoid stamping transform-less paths before an application has explicitly requested eager
+/// identity materialization.
+pub fn migration_path_has_transform(
+    history: &HashMap<String, TargetedHistoryLink>,
+    source_version_id: &str,
+    target_version_id: &str,
+) -> bool {
+    if source_version_id == target_version_id {
+        return false;
+    }
+
+    let mut current = source_version_id;
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(current.to_string());
+    let mut has_transform = false;
+
+    while current != target_version_id {
+        let Some(link) = history.get(current) else {
+            return false;
+        };
+
+        if let Some(next) = link.next.as_deref().filter(|next| !visited.contains(*next)) {
+            let Some(next_link) = history.get(next) else {
+                return false;
+            };
+            has_transform |= next_link.transform.is_some();
+            current = next;
+        } else if let Some(previous) = link
+            .previous
+            .as_deref()
+            .filter(|previous| !visited.contains(*previous))
+        {
+            has_transform |= link.transform.is_some();
+            current = previous;
+        } else {
+            return false;
+        }
+
+        visited.insert(current.to_string());
+    }
+
+    has_transform
+}

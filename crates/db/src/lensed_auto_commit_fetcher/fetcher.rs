@@ -36,7 +36,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             );
         }
 
-        let txn = self.db.new_txn(true).await.map_err(|e| {
+        let txn = self.db.new_txn(!has_migrations).await.map_err(|e| {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
         })?;
 
@@ -51,8 +51,6 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             .get_all_with_datastore(&datastore, &systemstore)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
-
-        let _ = txn.discard();
 
         let needs_migration_count = docs
             .iter()
@@ -69,10 +67,31 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         let mut processed_docs = Vec::with_capacity(docs.len());
         for doc in docs {
             let processed = self
-                .process_document(doc, &collection, has_migrations, &preloaded_history)
+                .process_document(
+                    doc,
+                    &collection,
+                    &datastore,
+                    &systemstore,
+                    has_migrations,
+                    &preloaded_history,
+                )
                 .await?;
             processed_docs.push(processed);
         }
+
+        drop(datastore);
+        drop(systemstore);
+        if has_migrations {
+            txn.commit().await
+        } else {
+            txn.discard()
+        }
+        .map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to finish lensed fetch transaction: {}",
+                e
+            ))
+        })?;
 
         if needs_migration_count > 0 {
             debug!(
@@ -98,7 +117,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
 
         let (has_migrations, preloaded_history) = self.load_migration_context(&collection).await?;
 
-        let txn = self.db.new_txn(true).await.map_err(|e| {
+        let txn = self.db.new_txn(!has_migrations).await.map_err(|e| {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
         })?;
 
@@ -114,15 +133,34 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 
-        let _ = txn.discard();
-
         let mut processed_docs = Vec::with_capacity(docs_with_status.len());
         for (doc, is_deleted) in docs_with_status {
             let processed = self
-                .process_document(doc, &collection, has_migrations, &preloaded_history)
+                .process_document(
+                    doc,
+                    &collection,
+                    &datastore,
+                    &systemstore,
+                    has_migrations,
+                    &preloaded_history,
+                )
                 .await?;
             processed_docs.push((processed, is_deleted));
         }
+
+        drop(datastore);
+        drop(systemstore);
+        if has_migrations {
+            txn.commit().await
+        } else {
+            txn.discard()
+        }
+        .map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to finish lensed fetch transaction: {}",
+                e
+            ))
+        })?;
 
         Ok(processed_docs)
     }
@@ -140,7 +178,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
 
         let (has_migrations, preloaded_history) = self.load_migration_context(&collection).await?;
 
-        let txn = self.db.new_txn(true).await.map_err(|e| {
+        let txn = self.db.new_txn(!has_migrations).await.map_err(|e| {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
         })?;
 
@@ -173,15 +211,34 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             }
         }
 
-        let _ = txn.discard();
-
         let mut processed_docs = Vec::with_capacity(docs.len());
         for doc in docs {
             let processed = self
-                .process_document(doc, &collection, has_migrations, &preloaded_history)
+                .process_document(
+                    doc,
+                    &collection,
+                    &datastore,
+                    &systemstore,
+                    has_migrations,
+                    &preloaded_history,
+                )
                 .await?;
             processed_docs.push(processed);
         }
+
+        drop(datastore);
+        drop(systemstore);
+        if has_migrations {
+            txn.commit().await
+        } else {
+            txn.discard()
+        }
+        .map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to finish lensed fetch transaction: {}",
+                e
+            ))
+        })?;
 
         Ok(FetchByIdsResult::partial(processed_docs, missing_ids))
     }
@@ -200,7 +257,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
 
         let (has_migrations, preloaded_history) = self.load_migration_context(&collection).await?;
 
-        let txn = self.db.new_txn(true).await.map_err(|e| {
+        let txn = self.db.new_txn(!has_migrations).await.map_err(|e| {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
         })?;
 
@@ -216,8 +273,6 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 
-        let _ = txn.discard();
-
         let matching_docs: Vec<Document> = all_docs
             .into_iter()
             .filter(|doc| {
@@ -231,10 +286,31 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         let mut processed_docs = Vec::with_capacity(matching_docs.len());
         for doc in matching_docs {
             let processed = self
-                .process_document(doc, &collection, has_migrations, &preloaded_history)
+                .process_document(
+                    doc,
+                    &collection,
+                    &datastore,
+                    &systemstore,
+                    has_migrations,
+                    &preloaded_history,
+                )
                 .await?;
             processed_docs.push(processed);
         }
+
+        drop(datastore);
+        drop(systemstore);
+        if has_migrations {
+            txn.commit().await
+        } else {
+            txn.discard()
+        }
+        .map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to finish lensed fetch transaction: {}",
+                e
+            ))
+        })?;
 
         Ok(processed_docs)
     }

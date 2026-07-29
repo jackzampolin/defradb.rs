@@ -97,6 +97,7 @@ trait SchemaOps: Send + Sync {
     ) -> anyhow::Result<CollectionVersion>;
     async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()>;
     async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId>;
+    async fn materialize_collection(&self, collection_name: &str) -> anyhow::Result<usize>;
     fn list_collections(&self) -> anyhow::Result<Vec<String>>;
     fn get_collection(&self, name: &str) -> anyhow::Result<Option<CollectionVersion>>;
     async fn get_collection_by_version_id(
@@ -396,6 +397,15 @@ impl EmbeddedNode {
     /// yet materialized, allowing migrations to be registered ahead of patches.
     pub async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
         self.as_node_identity(self.schema_ops.set_migration(config))
+            .await
+    }
+
+    /// Eagerly migrate and cache every known-version document in a collection.
+    ///
+    /// Returns the number of documents advanced to the active version. This is a
+    /// datastore-only operation and does not create or broadcast document commits.
+    pub async fn materialize_collection(&self, collection_name: &str) -> anyhow::Result<usize> {
+        self.as_node_identity(self.schema_ops.materialize_collection(collection_name))
             .await
     }
 

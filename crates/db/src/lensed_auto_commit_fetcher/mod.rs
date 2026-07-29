@@ -7,6 +7,9 @@ mod fetcher;
 mod index_scan;
 mod migration;
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -30,9 +33,8 @@ type MigrationContext = (bool, Option<HashMap<String, TargetedHistoryLink>>);
 pub struct LensedAutoCommitFetcher<S: Store> {
     db: Arc<DB<S>>,
     /// Cache of migration contexts keyed by `"{collection_id}:{version_id}"`.
-    /// The version-aware key ensures the cache is automatically bypassed when
-    /// the active collection version changes (via set_active_collection_version
-    /// or patch_collection), avoiding stale `has_migrations=false` entries.
+    /// Only positive contexts are cached: a migration can be registered without
+    /// changing the active version ID, so negative entries would become stale.
     migration_cache: Mutex<HashMap<String, MigrationContext>>,
 }
 

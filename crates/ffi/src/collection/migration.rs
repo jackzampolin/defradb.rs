@@ -2,11 +2,55 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
+use crate::ffi_node_db_async_body;
 use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::FfiResult;
 use crate::{ffi_async, ffi_entry, try_ffi, ERR_INVALID_NODE_HANDLE};
+
+/// Eagerly migrate and cache every known-version document in a collection.
+///
+/// This advances datastore values, stored document-version keys, and secondary
+/// indexes without creating or broadcasting document commits.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `identity_did` - Optional DID for permission checks (null for anonymous)
+/// * `collection_name` - Name of the collection to materialize
+///
+/// # Returns
+///
+/// - Status 0: Success (value contains the number of documents advanced)
+/// - Status 1: Error (error field contains message)
+///
+/// # Safety
+///
+/// `identity_did` and `collection_name` must be valid null-terminated UTF-8
+/// strings when non-null.
+#[no_mangle]
+pub unsafe extern "C" fn materialize_collection(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    collection_name: *const c_char,
+) -> FfiResult {
+    ffi_node_db_async_body! {
+        node = node_ptr,
+        identity = identity_did,
+        database = database,
+        permission = NodePermission::CollectionPatch,
+        collection_name => collection_name_str: "collection_name";
+        {
+            let count = database
+                .materialize_collection(&collection_name_str)
+                .await
+                .map_err(|e| format!("failed to materialize collection: {}", e))?;
+
+            Ok(count.to_string())
+        }
+    }
+}
 
 /// Set migration for collection versions.
 ///

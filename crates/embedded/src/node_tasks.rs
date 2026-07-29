@@ -7,18 +7,42 @@ use p2p::P2PTransport;
 use crate::node::EmbeddedMergeHandler;
 
 pub struct BackgroundTasks {
-    downsample_task: Option<tokio::task::JoinHandle<()>>,
+    downsample_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl BackgroundTasks {
     pub(crate) fn new(downsample_task: Option<tokio::task::JoinHandle<()>>) -> Self {
-        Self { downsample_task }
+        Self {
+            downsample_task: std::sync::Mutex::new(downsample_task),
+        }
+    }
+
+    /// Stop and await all node-owned background tasks.
+    ///
+    /// Awaiting cancellation is important for persistent stores: an aborted
+    /// task can retain the final database handle until Tokio next polls it,
+    /// which otherwise leaves the on-disk database lock held after close.
+    pub async fn shutdown(&self) {
+        let task = self
+            .downsample_task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
     }
 }
 
 impl Drop for BackgroundTasks {
     fn drop(&mut self) {
-        if let Some(task) = self.downsample_task.take() {
+        let task = self
+            .downsample_task
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(task) = task {
             task.abort();
         }
     }

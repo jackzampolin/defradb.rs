@@ -27,6 +27,7 @@ use super::{CloseSubscriptionResult, PollSubscriptionResult};
 ///     "type": "update",
 ///     "doc_id": "bae-...",
 ///     "collection_id": "...",
+///     "block": "<base64-encoded composite block>",
 ///     "is_relay": false
 /// }
 /// ```
