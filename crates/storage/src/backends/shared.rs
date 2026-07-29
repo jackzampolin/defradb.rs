@@ -192,7 +192,10 @@ pub(crate) struct ReadSet {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 enum ReadRange {
-    Prefix(Vec<u8>),
+    Prefix {
+        prefix: Vec<u8>,
+        commutative_set: bool,
+    },
     Range {
         start: Option<Vec<u8>>,
         end: Option<Vec<u8>>,
@@ -210,7 +213,10 @@ impl ReadSet {
             if is_document_collection_scan_prefix(prefix) {
                 return;
             }
-            self.ranges.push(ReadRange::Prefix(prefix.to_vec()));
+            self.ranges.push(ReadRange::Prefix {
+                prefix: prefix.to_vec(),
+                commutative_set: opts.commutative_set(),
+            });
         } else {
             self.ranges.push(ReadRange::Range {
                 start: opts.start().map(Vec::from),
@@ -219,8 +225,18 @@ impl ReadSet {
         }
     }
 
-    fn conflicts_key(&self, key: &[u8]) -> bool {
-        self.keys.contains(key) || self.ranges.iter().any(|range| range.contains(key))
+    fn has_commutative_range(&self, key: &[u8]) -> bool {
+        self.ranges
+            .iter()
+            .any(|range| range.commutative_set() && range.contains(key))
+    }
+
+    fn conflicts_key(&self, key: &[u8], other: &Self) -> bool {
+        self.keys.contains(key)
+            || self.ranges.iter().any(|range| {
+                range.contains(key)
+                    && (!range.commutative_set() || !other.has_commutative_range(key))
+            })
     }
 }
 
@@ -266,13 +282,23 @@ fn is_document_collection_scan_prefix(prefix: &[u8]) -> bool {
 impl ReadRange {
     fn contains(&self, key: &[u8]) -> bool {
         match self {
-            Self::Prefix(prefix) => key.starts_with(prefix),
+            Self::Prefix { prefix, .. } => key.starts_with(prefix),
             Self::Range { start, end } => {
                 let after_start = start.as_ref().is_none_or(|start| key >= start.as_slice());
                 let before_end = end.as_ref().is_none_or(|end| key < end.as_slice());
                 after_start && before_end
             }
         }
+    }
+
+    fn commutative_set(&self) -> bool {
+        matches!(
+            self,
+            Self::Prefix {
+                commutative_set: true,
+                ..
+            }
+        )
     }
 }
 
@@ -403,9 +429,12 @@ impl ConflictTracker {
         // Check for conflicts against transactions committed after our snapshot.
         for (_, committed_writes, committed_reads) in state.committed_after(read_version) {
             for write_key in &write_keys {
+                let commutative_overlap = read_set.has_commutative_range(write_key)
+                    && committed_reads.has_commutative_range(write_key);
                 if (committed_writes.contains(*write_key)
-                    && !is_content_addressed_block_key(write_key))
-                    || committed_reads.conflicts_key(write_key)
+                    && !is_content_addressed_block_key(write_key)
+                    && !commutative_overlap)
+                    || committed_reads.conflicts_key(write_key, read_set)
                 {
                     return Err(crate::corekv::Error::TxnConflict);
                 }
@@ -413,7 +442,7 @@ impl ConflictTracker {
 
             if committed_writes
                 .iter()
-                .any(|committed_write| read_set.conflicts_key(committed_write))
+                .any(|committed_write| read_set.conflicts_key(committed_write, committed_reads))
             {
                 return Err(crate::corekv::Error::TxnConflict);
             }

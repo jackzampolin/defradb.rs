@@ -50,6 +50,96 @@ fn ignores_document_collection_scan_prefixes() {
         .unwrap();
 }
 
+fn collection_transition_reads() -> ReadSet {
+    let mut reads = ReadSet::default();
+    reads.record_iter_options(
+        &IterOptions::new()
+            .with_prefix(b"h/c/7/".to_vec())
+            .with_commutative_set(),
+    );
+    reads
+}
+
+#[test]
+fn commutative_set_transitions_do_not_conflict() {
+    let tracker = Arc::new(ConflictTracker::new());
+    let first_snapshot = tracker.begin_snapshot();
+    let second_snapshot = tracker.begin_snapshot();
+    let reads = collection_transition_reads();
+
+    let first_writes = [b"h/c/7/old".to_vec(), b"h/c/7/first".to_vec()];
+    tracker
+        .check_and_record(first_snapshot.version(), first_writes.iter(), &reads)
+        .unwrap();
+    drop(first_snapshot);
+
+    let second_writes = [b"h/c/7/old".to_vec(), b"h/c/7/second".to_vec()];
+    tracker
+        .check_and_record(second_snapshot.version(), second_writes.iter(), &reads)
+        .unwrap();
+}
+
+#[test]
+fn commutative_set_transition_conflicts_with_ordinary_scan_in_either_order() {
+    for ordinary_first in [false, true] {
+        let tracker = Arc::new(ConflictTracker::new());
+        let first_snapshot = tracker.begin_snapshot();
+        let second_snapshot = tracker.begin_snapshot();
+        let commutative_reads = collection_transition_reads();
+        let mut ordinary_reads = ReadSet::default();
+        ordinary_reads.record_iter_options(&IterOptions::new().with_prefix(b"h/c/7/".to_vec()));
+
+        let (first_reads, second_reads) = if ordinary_first {
+            (&ordinary_reads, &commutative_reads)
+        } else {
+            (&commutative_reads, &ordinary_reads)
+        };
+        let first_writes = [b"h/c/7/old".to_vec(), b"h/c/7/first".to_vec()];
+        tracker
+            .check_and_record(first_snapshot.version(), first_writes.iter(), first_reads)
+            .unwrap();
+        drop(first_snapshot);
+
+        let second_writes = [b"h/c/7/old".to_vec(), b"h/c/7/second".to_vec()];
+        let error = tracker
+            .check_and_record(
+                second_snapshot.version(),
+                second_writes.iter(),
+                second_reads,
+            )
+            .unwrap_err();
+        assert!(matches!(error, crate::corekv::Error::TxnConflict));
+    }
+}
+
+#[test]
+fn commutative_set_transition_does_not_hide_document_head_conflicts() {
+    let tracker = Arc::new(ConflictTracker::new());
+    let first_snapshot = tracker.begin_snapshot();
+    let second_snapshot = tracker.begin_snapshot();
+    let reads = collection_transition_reads();
+
+    let first_writes = [
+        b"h/c/7/old".to_vec(),
+        b"h/c/7/first".to_vec(),
+        b"h/d/1/C/old".to_vec(),
+    ];
+    tracker
+        .check_and_record(first_snapshot.version(), first_writes.iter(), &reads)
+        .unwrap();
+    drop(first_snapshot);
+
+    let second_writes = [
+        b"h/c/7/old".to_vec(),
+        b"h/c/7/second".to_vec(),
+        b"h/d/1/C/old".to_vec(),
+    ];
+    let error = tracker
+        .check_and_record(second_snapshot.version(), second_writes.iter(), &reads)
+        .unwrap_err();
+    assert!(matches!(error, crate::corekv::Error::TxnConflict));
+}
+
 #[test]
 fn detects_read_of_committed_write_key() {
     let tracker = Arc::new(ConflictTracker::new());
