@@ -447,10 +447,12 @@ impl Node {
                                             )
                                             .await
                                     }
-                                    Err(error) => Err(format!(
-                                        "unparseable collection-commit CID {}: {error}",
-                                        retry.cid
-                                    )),
+                                    Err(error) => {
+                                        Err(defra_http::router::P2PError::InvalidInput(format!(
+                                            "unparseable collection-commit CID {}: {error}",
+                                            retry.cid
+                                        )))
+                                    }
                                 }
                             } else {
                                 retry_pusher
@@ -468,7 +470,7 @@ impl Node {
                                 p2p::sync::reschedule_persisted_push_retry(
                                     &mut retry.retry_info,
                                     &format!("{peer_id_str}:{}", retry.cid),
-                                    &error,
+                                    &error.to_string(),
                                 );
                                 let _ = peerstore.update_retry_document(&peer_id_str, retry).await;
                                 fast_failures += 1;

@@ -403,32 +403,79 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         }
 
         let peer_id = parsed.peer_id;
-        for explicit in explicit_replay_capabilities {
-            let authorization = p2p::verify_explicit_replay_capability(
-                &explicit.capability,
-                &self.handle.local_peer_id_cached().to_string(),
-                &peer_id.to_string(),
-                &explicit.collection_id,
-            )
-            .map_err(|error| P2PError::invalid_input(error.to_string()))?;
-            if let Some(expected) = expected_authorizer_did {
-                if authorization.authorizer_did != expected {
+        let requested_collections: HashSet<String> = collection_cids.iter().cloned().collect();
+        let local_peer_id = self.handle.local_peer_id_cached().to_string();
+        let target_peer_id = peer_id.to_string();
+        let mut validated_capabilities = Vec::new();
+
+        if !explicit_replay_capabilities.is_empty() {
+            let expected_authorizer_did = expected_authorizer_did.ok_or_else(|| {
+                P2PError::invalid_input(
+                    "explicit replay capabilities require an authenticated identity",
+                )
+            })?;
+
+            for capability in explicit_replay_capabilities {
+                if !requested_collections.contains(&capability.collection_id) {
                     return Err(P2PError::invalid_input(format!(
-                        "explicit replay authorizer '{}' does not match expected '{}'",
-                        authorization.authorizer_did, expected
+                        "explicit replay capability collection '{}' was not requested",
+                        capability.collection_id
                     )));
                 }
+
+                let authorization = p2p::verify_explicit_replay_capability(
+                    &capability.capability,
+                    &local_peer_id,
+                    &target_peer_id,
+                    &capability.collection_id,
+                )
+                .map_err(|error| {
+                    P2PError::invalid_input(format!(
+                        "invalid explicit replay capability for collection '{}': {}",
+                        capability.collection_id, error
+                    ))
+                })?;
+
+                if authorization.authorizer_did != expected_authorizer_did {
+                    return Err(P2PError::invalid_input(format!(
+                        "explicit replay capability authorizer '{}' did not match authenticated identity '{}'",
+                        authorization.authorizer_did, expected_authorizer_did
+                    )));
+                }
+
+                validated_capabilities.push((capability.collection_id, capability.capability));
             }
+        }
+
+        let collections_with_changed_capabilities: HashSet<String> = validated_capabilities
+            .iter()
+            .filter_map(|(collection_id, capability)| {
+                let matches_existing = self.handle.explicit_replay_capability_matches(
+                    peer_id,
+                    collection_id.as_str(),
+                    capability,
+                );
+                if matches_existing {
+                    None
+                } else {
+                    Some(collection_id.clone())
+                }
+            })
+            .collect();
+
+        self.handle
+            .clear_explicit_replay_capability(peer_id, &collection_cids);
+        for (collection_id, capability) in validated_capabilities {
             self.handle.set_explicit_replay_capability(
                 peer_id,
-                &[explicit.collection_id],
-                &explicit.capability,
+                std::slice::from_ref(&collection_id),
+                &capability,
             );
         }
 
         // Check existing replicator state before creating/updating so we can
         // skip the expensive initial replay when the replicator already exists
-        // with the same collections (idempotent reconnect path).
+        // with the same collections and replay capability.
         let (existing_collection_ids, existing_filters): (
             HashSet<String>,
             p2p::ReplicationFilters,
@@ -511,15 +558,18 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             }
         }
 
-        // Only replay collections that weren't already replicated by this peer.
-        let new_collection_names: Vec<String> = effective_collections
-            .iter()
-            .zip(collection_cids.iter())
-            .filter(|(_, cid)| !existing_collection_ids.contains(*cid))
-            .map(|(name, _)| name.clone())
-            .collect();
+        // Replay new collections, plus collections whose explicit replay
+        // capability changed. The latter case matters for encrypted ACP
+        // replay where a previous configuration may have carried an invalid
+        // authorizer capability and therefore skipped storing the document.
+        let collection_names_requiring_replay = crate::collections_requiring_replay(
+            &effective_collections,
+            &collection_cids,
+            &existing_collection_ids,
+            &collections_with_changed_capabilities,
+        );
 
-        if !new_collection_names.is_empty() {
+        if !collection_names_requiring_replay.is_empty() {
             if let Some(ref pusher) = self.doc_pusher {
                 let push_handle = self.handle.clone();
                 let push_pusher = Arc::clone(pusher);
@@ -531,8 +581,8 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
                 tracing::info!(
                     peer_id = %peer_id,
-                    new_collections = ?new_collection_names,
-                    "Replaying existing docs for new collections only"
+                    replay_collections = ?collection_names_requiring_replay,
+                    "Replaying existing docs for collections requiring replay"
                 );
 
                 tokio::spawn(async move {
@@ -540,7 +590,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                         .push_existing_docs(
                             &push_handle,
                             peer_id,
-                            &new_collection_names,
+                            &collection_names_requiring_replay,
                             &push_filters,
                             push_se_key.as_ref().map(|key| key.as_slice()),
                             push_identity.as_deref(),
@@ -550,7 +600,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                         tracing::error!(error = %error, "Failed to push existing docs to replicator");
                     }
                     if let Some(bus) = push_event_bus {
+                        tracing::debug!("publishing ReplicatorCompleted event");
                         bus.publish(events::Message::replicator_completed());
+                        tracing::debug!("ReplicatorCompleted event published");
                     }
                 });
             } else if let Some(ref bus) = self.event_bus {
@@ -559,7 +611,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         } else {
             tracing::debug!(
                 peer_id = %peer_id,
-                "Replicator already exists with same collections, skipping initial replay"
+                "Replicator already exists with same collections and replay capability, skipping initial replay"
             );
             if let Some(ref bus) = self.event_bus {
                 bus.publish(events::Message::replicator_completed());
@@ -871,7 +923,11 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 break;
             }
 
-            let publish_result = if use_pubsub {
+            // Track whether any request was dispatched. If none were, further
+            // attempts cannot produce merges — exit like the historical CLI
+            // and iroh paths instead of burning the full overall timeout.
+            let mut any_sent = false;
+            if use_pubsub {
                 let coord = self
                     .sync_coordinator
                     .as_ref()
@@ -889,7 +945,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                         tracing::warn!(error = %error, "pubsub_rpc doc-sync publish failed");
                     }
                 });
-                Ok::<(), P2PError>(())
+                any_sent = true;
             } else {
                 let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
                 if let Err(error) = p2p::signing::sign_message(self.handle.keypair(), &mut request)
@@ -901,21 +957,32 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 }
 
                 for peer_id in &connected_peers {
-                    if let Err(error) = self
+                    match self
                         .handle
                         .send_doc_sync_request(*peer_id, request.clone())
                         .await
                     {
-                        tracing::warn!(peer_id = %peer_id, error = %error, "failed to send DocSync request");
+                        Ok(()) => any_sent = true,
+                        Err(error) => {
+                            tracing::warn!(peer_id = %peer_id, error = %error, "failed to send DocSync request");
+                        }
                     }
                 }
-                Ok(())
-            };
-            publish_result?;
+            }
 
+            if !any_sent {
+                break;
+            }
+
+            // Idle completion matches iroh/historical CLI: exit after
+            // `idle_timeout` with no MergeComplete events, even when zero
+            // merges arrived. Requiring a minimum merge count (the previous
+            // shared-adapter gate) held HTTP handlers for the full 30s when
+            // peers had nothing to contribute — e.g. source-side explicit
+            // sync while collection replication delivers the doc out of band.
             let mut last_merge = std::time::Instant::now();
             while total_received < total_expected && start.elapsed() < overall_timeout {
-                if total_received >= doc_ids.len() && last_merge.elapsed() > idle_timeout {
+                if last_merge.elapsed() > idle_timeout {
                     break;
                 }
 
