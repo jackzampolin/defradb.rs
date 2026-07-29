@@ -923,7 +923,11 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 break;
             }
 
-            let publish_result = if use_pubsub {
+            // Track whether any request was dispatched. If none were, further
+            // attempts cannot produce merges — exit like the historical CLI
+            // and iroh paths instead of burning the full overall timeout.
+            let mut any_sent = false;
+            if use_pubsub {
                 let coord = self
                     .sync_coordinator
                     .as_ref()
@@ -941,7 +945,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                         tracing::warn!(error = %error, "pubsub_rpc doc-sync publish failed");
                     }
                 });
-                Ok::<(), P2PError>(())
+                any_sent = true;
             } else {
                 let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
                 if let Err(error) = p2p::signing::sign_message(self.handle.keypair(), &mut request)
@@ -953,21 +957,32 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 }
 
                 for peer_id in &connected_peers {
-                    if let Err(error) = self
+                    match self
                         .handle
                         .send_doc_sync_request(*peer_id, request.clone())
                         .await
                     {
-                        tracing::warn!(peer_id = %peer_id, error = %error, "failed to send DocSync request");
+                        Ok(()) => any_sent = true,
+                        Err(error) => {
+                            tracing::warn!(peer_id = %peer_id, error = %error, "failed to send DocSync request");
+                        }
                     }
                 }
-                Ok(())
-            };
-            publish_result?;
+            }
 
+            if !any_sent {
+                break;
+            }
+
+            // Idle completion matches iroh/historical CLI: exit after
+            // `idle_timeout` with no MergeComplete events, even when zero
+            // merges arrived. Requiring a minimum merge count (the previous
+            // shared-adapter gate) held HTTP handlers for the full 30s when
+            // peers had nothing to contribute — e.g. source-side explicit
+            // sync while collection replication delivers the doc out of band.
             let mut last_merge = std::time::Instant::now();
             while total_received < total_expected && start.elapsed() < overall_timeout {
-                if total_received >= doc_ids.len() && last_merge.elapsed() > idle_timeout {
+                if last_merge.elapsed() > idle_timeout {
                     break;
                 }
 
