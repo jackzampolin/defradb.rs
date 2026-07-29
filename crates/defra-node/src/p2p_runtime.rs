@@ -59,23 +59,23 @@ impl P2PLifecycleInner {
 
         let retry_started = std::time::Instant::now();
         abort_background_task("iroh retry loop", retry_loop_task).await;
-        tracing::warn!(
+        tracing::warn!(target: "defra_node",
             elapsed_ms = retry_started.elapsed().as_millis(),
             "P2P shutdown: retry loop stopped"
         );
 
         let coordinator_started = std::time::Instant::now();
         coordinator.shutdown().await;
-        tracing::warn!(
+        tracing::warn!(target: "defra_node",
             elapsed_ms = coordinator_started.elapsed().as_millis(),
             "P2P shutdown: coordinator stopped"
         );
 
         let transport_started = std::time::Instant::now();
         if let Err(error) = transport.shutdown().await {
-            tracing::debug!(%error, "Iroh transport shutdown returned an error");
+            tracing::debug!(target: "defra_node", %error, "Iroh transport shutdown returned an error");
         }
-        tracing::warn!(
+        tracing::warn!(target: "defra_node",
             elapsed_ms = transport_started.elapsed().as_millis(),
             "P2P shutdown: transport stop requested"
         );
@@ -85,28 +85,28 @@ impl P2PLifecycleInner {
 
         let event_handler_started = std::time::Instant::now();
         abort_background_task("iroh event handler", event_handler_task).await;
-        tracing::warn!(
+        tracing::warn!(target: "defra_node",
             elapsed_ms = event_handler_started.elapsed().as_millis(),
             "P2P shutdown: event handler stopped"
         );
 
         let replication_started = std::time::Instant::now();
         abort_background_task("iroh replication loop", replication_task).await;
-        tracing::warn!(
+        tracing::warn!(target: "defra_node",
             elapsed_ms = replication_started.elapsed().as_millis(),
             "P2P shutdown: replication loop stopped"
         );
 
         let failure_started = std::time::Instant::now();
         abort_background_task("iroh failure recorder", failure_recorder_task).await;
-        tracing::warn!(
+        tracing::warn!(target: "defra_node",
             elapsed_ms = failure_started.elapsed().as_millis(),
             "P2P shutdown: failure recorder stopped"
         );
 
         let endpoint_started = std::time::Instant::now();
         await_endpoint_task(endpoint_task).await;
-        tracing::warn!(
+        tracing::warn!(target: "defra_node",
             elapsed_ms = endpoint_started.elapsed().as_millis(),
             total_elapsed_ms = shutdown_started.elapsed().as_millis(),
             "P2P shutdown: endpoint task stopped"
@@ -118,13 +118,13 @@ async fn await_endpoint_task(mut task: tokio::task::JoinHandle<()>) {
     match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) if error.is_cancelled() => {
-            tracing::debug!("Iroh endpoint task was already cancelled");
+            tracing::debug!(target: "defra_node", "Iroh endpoint task was already cancelled");
         }
         Ok(Err(error)) => {
-            tracing::warn!(%error, "Iroh endpoint task failed during shutdown");
+            tracing::warn!(target: "defra_node", %error, "Iroh endpoint task failed during shutdown");
         }
         Err(_) => {
-            tracing::warn!("Iroh endpoint task did not stop after graceful shutdown; aborting");
+            tracing::warn!(target: "defra_node", "Iroh endpoint task did not stop after graceful shutdown; aborting");
             task.abort();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
         }
@@ -137,10 +137,10 @@ async fn abort_background_task(task_name: &'static str, task: tokio::task::JoinH
         Ok(Ok(())) => {}
         Ok(Err(error)) if error.is_cancelled() => {}
         Ok(Err(error)) => {
-            tracing::debug!(task = task_name, %error, "P2P background task failed during shutdown");
+            tracing::debug!(target: "defra_node", task = task_name, %error, "P2P background task failed during shutdown");
         }
         Err(_) => {
-            tracing::debug!(
+            tracing::debug!(target: "defra_node",
                 task = task_name,
                 "P2P background task did not stop after abort"
             );
@@ -233,7 +233,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
             .await
             .ok();
     } else {
-        tracing::info!("skipping persisted P2P collection subscriptions");
+        tracing::info!(target: "defra_node", "skipping persisted P2P collection subscriptions");
     }
 
     // 8. Merge handler
@@ -307,7 +307,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     let restored_doc_ids = restore_iroh_p2p_state(store.clone(), &transport, &coordinator).await;
 
     let peer_id = transport.local_peer_id().to_string();
-    tracing::info!(peer_id = %peer_id, "P2P started (IROH/QUIC)");
+    tracing::info!(target: "defra_node", peer_id = %peer_id, "P2P started (IROH/QUIC)");
     let adapter = defra_p2p_adapter::IrohP2PAdapter::with_full_context(
         transport.clone(),
         coordinator.clone(),
@@ -359,11 +359,11 @@ async fn run_event_handler<B: blockstore::Blockstore + Send + Sync + 'static>(
         if event.requires_inline_ordering() {
             if let Err(e) = coordinator.handle_transport_event(event).await {
                 if e.is_rate_limited() {
-                    tracing::debug!(error = %e, "P2P rate-limited");
+                    tracing::debug!(target: "defra_node", error = %e, "P2P rate-limited");
                 } else if e.is_retriable() {
-                    tracing::warn!(error = %e, "P2P transport event failed after retries");
+                    tracing::warn!(target: "defra_node", error = %e, "P2P transport event failed after retries");
                 } else {
-                    tracing::error!(error = %e, "P2P event handler error");
+                    tracing::error!(target: "defra_node", error = %e, "P2P event handler error");
                 }
             }
             continue;
@@ -374,11 +374,11 @@ async fn run_event_handler<B: blockstore::Blockstore + Send + Sync + 'static>(
         tokio::spawn(async move {
             if let Err(e) = coord.handle_transport_event(event).await {
                 if e.is_rate_limited() {
-                    tracing::debug!(error = %e, "P2P rate-limited");
+                    tracing::debug!(target: "defra_node", error = %e, "P2P rate-limited");
                 } else if e.is_retriable() {
-                    tracing::warn!(error = %e, "P2P transport event failed after retries");
+                    tracing::warn!(target: "defra_node", error = %e, "P2P transport event failed after retries");
                 } else {
-                    tracing::error!(error = %e, "P2P event handler error");
+                    tracing::error!(target: "defra_node", error = %e, "P2P event handler error");
                 }
             }
             drop(permit);
@@ -403,7 +403,7 @@ where
                 let replicator = match p2p::ReplicatorInfo::from_bytes(&data) {
                     Ok(replicator) => replicator,
                     Err(error) => {
-                        tracing::warn!(
+                        tracing::warn!(target: "defra_node",
                             peer_id = %peer_id_str,
                             error = %error,
                             "failed to decode persisted P2P replicator"
@@ -416,7 +416,7 @@ where
                     .create_replicator(&peer_id, replicator.collections.clone(), false)
                     .await
                 {
-                    tracing::warn!(
+                    tracing::warn!(target: "defra_node",
                         peer_id = %peer_id,
                         error = %error,
                         "failed to restore persisted P2P replicator"
@@ -424,7 +424,9 @@ where
                 }
             }
         }
-        Err(error) => tracing::warn!(error = %error, "failed to load persisted P2P replicators"),
+        Err(error) => {
+            tracing::warn!(target: "defra_node", error = %error, "failed to load persisted P2P replicators")
+        }
     }
 
     let mut restored_doc_ids = std::collections::HashSet::new();
@@ -435,7 +437,7 @@ where
                     .subscribe(p2p::topics::DefraTopic::document(&doc_id))
                     .await
                 {
-                    tracing::warn!(
+                    tracing::warn!(target: "defra_node",
                         doc_id = %doc_id,
                         error = %error,
                         "failed to restore P2P document subscription"
@@ -445,7 +447,7 @@ where
             }
         }
         Err(error) => {
-            tracing::warn!(error = %error, "failed to load persisted P2P document subscriptions");
+            tracing::warn!(target: "defra_node", error = %error, "failed to load persisted P2P document subscriptions");
         }
     }
 
@@ -459,7 +461,7 @@ fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
     tokio::spawn(async move {
         while let Some(failure) = failure_rx.recv().await {
             if failure.create_retry {
-                tracing::warn!(
+                tracing::warn!(target: "defra_node",
                     peer_id = %failure.peer_id,
                     doc_id = %failure.doc_id,
                     collection_id = %failure.collection_id,
@@ -472,7 +474,7 @@ fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                 let info_bytes = match storage::stores::RetryInfo::new_initial().to_bytes() {
                     Ok(bytes) => bytes,
                     Err(error) => {
-                        tracing::warn!(error = %error, "failed to serialize retry info");
+                        tracing::warn!(target: "defra_node", error = %error, "failed to serialize retry info");
                         continue;
                     }
                 };
@@ -498,7 +500,7 @@ fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                     .await
             };
             if let Err(error) = result {
-                tracing::warn!(error = %error, "failed to record push failure");
+                tracing::warn!(target: "defra_node", error = %error, "failed to record push failure");
                 continue;
             }
             if !failure.create_retry {
@@ -511,7 +513,7 @@ fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
             )
             .await
             {
-                tracing::warn!(error = %error, "failed to mark replicator inactive");
+                tracing::warn!(target: "defra_node", error = %error, "failed to mark replicator inactive");
             }
         }
     })
@@ -525,7 +527,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
     tokio::spawn(async move {
         let peerstore = storage::stores::Peerstore::new(store.clone());
         if let Err(error) = peerstore.activate_dormant_push_retries().await {
-            tracing::warn!(error = %error, "failed to reactivate push retries after restart");
+            tracing::warn!(target: "defra_node", error = %error, "failed to reactivate push retries after restart");
         }
         loop {
             tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
@@ -533,7 +535,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
             let peers = match peerstore.get_all_retry_peers().await {
                 Ok(peers) => peers,
                 Err(error) => {
-                    tracing::debug!(error = %error, "failed to load retry peers");
+                    tracing::debug!(target: "defra_node", error = %error, "failed to load retry peers");
                     continue;
                 }
             };
@@ -542,7 +544,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                 let _legacy_retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
                     Ok(info) => info,
                     Err(error) => {
-                        tracing::warn!(peer_id = %peer_id_str, error = %error, "invalid retry info");
+                        tracing::warn!(target: "defra_node", peer_id = %peer_id_str, error = %error, "invalid retry info");
                         continue;
                     }
                 };
@@ -554,7 +556,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                 let mut docs = match peerstore.get_retry_documents(&peer_id_str).await {
                     Ok(docs) => docs,
                     Err(error) => {
-                        tracing::debug!(peer_id = %peer_id_str, error = %error, "failed to load retry docs");
+                        tracing::debug!(target: "defra_node", peer_id = %peer_id_str, error = %error, "failed to load retry docs");
                         continue;
                     }
                 };
@@ -629,7 +631,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                             let _ = peerstore.complete_retry_document(&peer_id_str, retry).await;
                         }
                         Ok(Err(error)) => {
-                            tracing::warn!(
+                            tracing::warn!(target: "defra_node",
                                 doc_id = %retry.doc_id,
                                 peer_id = %peer_id,
                                 error = %error,
@@ -647,7 +649,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
                             }
                         }
                         Err(_) => {
-                            tracing::warn!(
+                            tracing::warn!(target: "defra_node",
                                 doc_id = %retry.doc_id,
                                 peer_id = %peer_id,
                                 "retry push timed out"
