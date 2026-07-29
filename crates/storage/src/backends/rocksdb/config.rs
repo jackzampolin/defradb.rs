@@ -70,6 +70,7 @@ pub struct RocksDbStoreOptions {
     compaction_style: CompactionStyle,
     enable_blob_files: bool,
     min_blob_size: u64,
+    statistics_enabled: bool,
     close_timeout: Duration,
     durability: DurabilityMode,
 }
@@ -91,6 +92,7 @@ impl Default for RocksDbStoreOptions {
             compaction_style: CompactionStyle::Level,
             enable_blob_files: false,
             min_blob_size: 256,
+            statistics_enabled: false,
             close_timeout: Duration::from_secs(DEFAULT_CLOSE_TIMEOUT_SECS),
             durability: DurabilityMode::Eventual,
         }
@@ -228,6 +230,18 @@ impl RocksDbStoreOptions {
         self.min_blob_size
     }
 
+    /// Enable cumulative RocksDB counters and histograms.
+    ///
+    /// Disabled by default because RocksDB updates these counters on hot paths.
+    pub fn with_statistics_enabled(mut self, enabled: bool) -> Self {
+        self.statistics_enabled = enabled;
+        self
+    }
+
+    pub fn statistics_enabled(&self) -> bool {
+        self.statistics_enabled
+    }
+
     pub fn with_close_timeout(mut self, timeout: Duration) -> Self {
         self.close_timeout = timeout;
         self
@@ -264,6 +278,7 @@ impl RocksDbStoreOptions {
     /// | `ROCKS_COMPACTION_STYLE` | compaction_style | level |
     /// | `ROCKS_BLOB_FILES` | enable_blob_files | false |
     /// | `ROCKS_MIN_BLOB_SIZE` | min_blob_size | 256 |
+    /// | `ROCKS_STATISTICS` | statistics_enabled | false |
     pub fn from_env() -> Self {
         let mut opts = Self::default();
 
@@ -318,6 +333,9 @@ impl RocksDbStoreOptions {
         }
         if let Some(v) = env_u64("ROCKS_MIN_BLOB_SIZE") {
             opts.min_blob_size = v;
+        }
+        if let Ok(v) = std::env::var("ROCKS_STATISTICS") {
+            opts.statistics_enabled = v == "1" || v.eq_ignore_ascii_case("true");
         }
 
         opts

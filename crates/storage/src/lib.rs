@@ -120,7 +120,12 @@ pub use backends::{RedbStore, RedbStoreOptions};
 pub use backends::{FjallStore, FjallStoreOptions};
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-pub use backends::{RocksDbStore, RocksDbStoreOptions};
+pub use backends::{
+    RocksDbBlockCacheCounters, RocksDbBlockCacheStats, RocksDbBloomFilterCounters,
+    RocksDbCompactionCounters, RocksDbCumulativeStats, RocksDbFlushCounters, RocksDbHistogramStats,
+    RocksDbIoCounters, RocksDbLsmStats, RocksDbStatsHandle, RocksDbStatsSnapshot, RocksDbStore,
+    RocksDbStoreOptions, RocksDbTransactionStats, RocksDbWriteStallCounters,
+};
 
 #[cfg(all(feature = "lark", not(target_arch = "wasm32")))]
 pub use backends::{LarkStore, LarkStoreOptions};
