@@ -7,7 +7,7 @@ use document::Document;
 use lens::{build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink};
 use schema::CollectionVersion;
 use storage::corekv::Store;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::collection::Collection;
 use crate::migration::helpers::{cache_migrated_document, lens_doc_to_document};
@@ -248,7 +248,7 @@ impl<S: Store> LensedDocFetcher<S> {
 
         // Check if we have a migration path for this version
         if !history.contains_key(&doc_version) {
-            warn!(
+            debug!(
                 doc_id = %doc_id_str,
                 doc_version = %doc_version,
                 target_version = %target_version_id,

@@ -260,7 +260,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         };
 
         if !history.contains_key(&doc_version) {
-            warn!(
+            debug!(
                 doc_id = %doc_id_str,
                 doc_version = %doc_version,
                 target_version = %target_version_id,

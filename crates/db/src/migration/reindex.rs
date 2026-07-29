@@ -144,9 +144,11 @@ impl<S: Store> DB<S> {
                     if materialize_identity_paths {
                         let mut restamped = doc.clone();
                         restamped.set_schema_version_id(&target_version_id);
-                        cache_document_version(&datastore, &txn_systemstore, &collection, &doc)
-                            .await?;
-                        materialized_count += 1;
+                        if cache_document_version(&datastore, &txn_systemstore, &collection, &doc)
+                            .await?
+                        {
+                            materialized_count += 1;
+                        }
                         migrated_docs.push((doc_short_id, restamped));
                     } else {
                         migrated_docs.push((doc_short_id, doc));
@@ -177,11 +179,14 @@ impl<S: Store> DB<S> {
                 );
                 if !path_has_transform {
                     if materialize_identity_paths {
-                        cache_document_version(&datastore, &txn_systemstore, &collection, &doc)
-                            .await?;
+                        let cached =
+                            cache_document_version(&datastore, &txn_systemstore, &collection, &doc)
+                                .await?;
                         let mut restamped = doc;
                         restamped.set_schema_version_id(&target_version_id);
-                        materialized_count += 1;
+                        if cached {
+                            materialized_count += 1;
+                        }
                         migrated_docs.push((doc_short_id, restamped));
                     } else {
                         migrated_docs.push((doc_short_id, doc));
@@ -211,9 +216,11 @@ impl<S: Store> DB<S> {
                     })?
                     .map_err(|e| Error::Lens(e.to_string()))?;
                 let migrated = lens_doc_to_document(migrated_lens_doc, &doc, &collection);
-                cache_migrated_document(&datastore, &txn_systemstore, &collection, &migrated)
-                    .await?;
-                materialized_count += 1;
+                if cache_migrated_document(&datastore, &txn_systemstore, &collection, &migrated)
+                    .await?
+                {
+                    materialized_count += 1;
+                }
                 migrated_docs.push((doc_short_id, migrated));
             }
 

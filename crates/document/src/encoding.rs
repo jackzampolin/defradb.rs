@@ -204,7 +204,7 @@ pub fn json_to_normal_value_for_array_kind(
             .iter()
             .map(|value| match value {
                 JsonValue::Bool(value) => Some(*value),
-                JsonValue::Null => Some(false),
+                JsonValue::Null => None,
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()
@@ -222,7 +222,7 @@ pub fn json_to_normal_value_for_array_kind(
             .iter()
             .map(|value| match value {
                 JsonValue::Number(value) => value.as_i64(),
-                JsonValue::Null => Some(0),
+                JsonValue::Null => None,
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()
@@ -240,7 +240,7 @@ pub fn json_to_normal_value_for_array_kind(
             .iter()
             .map(|value| match value {
                 JsonValue::Number(value) => value.as_f64(),
-                JsonValue::Null => Some(0.0),
+                JsonValue::Null => None,
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()
@@ -258,7 +258,7 @@ pub fn json_to_normal_value_for_array_kind(
             .iter()
             .map(|value| match value {
                 JsonValue::Number(value) => value.as_f64().map(|value| value as f32),
-                JsonValue::Null => Some(0.0),
+                JsonValue::Null => None,
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()
@@ -276,7 +276,7 @@ pub fn json_to_normal_value_for_array_kind(
             .iter()
             .map(|value| match value {
                 JsonValue::String(value) => Some(value.clone()),
-                JsonValue::Null => Some(String::new()),
+                JsonValue::Null => None,
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()
@@ -430,7 +430,7 @@ pub fn canonical_cbor_key_order(a: &&str, b: &&str) -> std::cmp::Ordering {
 #[cfg(test)]
 mod json_to_normal_value_for_kind_tests {
     use super::*;
-    use schema::ScalarKind;
+    use schema::{ScalarArrayKind, ScalarKind};
     use serde_json::json;
 
     #[test]
@@ -473,6 +473,39 @@ mod json_to_normal_value_for_kind_tests {
         assert_eq!(
             json_to_normal_value_for_kind(&json!("hi"), &ScalarKind::String),
             Some(NormalValue::String("hi".to_string()))
+        );
+    }
+
+    #[test]
+    fn non_nillable_arrays_reject_null_elements() {
+        let cases = [
+            (json!([true, null]), ScalarArrayKind::BoolArray),
+            (json!([1, null]), ScalarArrayKind::IntArray),
+            (json!([1.5, null]), ScalarArrayKind::Float64Array),
+            (json!([1.5, null]), ScalarArrayKind::Float32Array),
+            (json!(["value", null]), ScalarArrayKind::StringArray),
+        ];
+
+        for (value, kind) in cases {
+            assert_eq!(
+                json_to_normal_value_for_array_kind(&value, &kind),
+                None,
+                "{kind:?} must not invent a default for a null element"
+            );
+        }
+    }
+
+    #[test]
+    fn nillable_array_preserves_null_elements() {
+        assert_eq!(
+            json_to_normal_value_for_array_kind(
+                &json!([true, null]),
+                &ScalarArrayKind::NillableBoolArray,
+            ),
+            Some(NormalValue::NillableBoolElementArray(vec![
+                Some(true),
+                None,
+            ]))
         );
     }
 
