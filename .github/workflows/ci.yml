@@ -87,7 +87,7 @@ jobs:
         run: cargo install wasm-pack --locked
 
       - name: Build WASM
-        run: wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
+        run: CARGO_PROFILE_RELEASE_OPT_LEVEL=z wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
 
       - name: Cleanup
         if: always()
