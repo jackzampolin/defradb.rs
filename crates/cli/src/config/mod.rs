@@ -201,17 +201,21 @@ impl Config {
         }
 
         // SourceHub
+        #[cfg(feature = "sourcehub")]
         if let Some(ref addr) = cli.source_hub_address {
             self.acp.sourcehub_address = addr.clone();
         }
+        #[cfg(feature = "sourcehub")]
         if let Some(ref addr) = cli.source_hub_comet_address {
             self.acp.sourcehub_comet_address = addr.clone();
         }
+        #[cfg(feature = "sourcehub")]
         if let Some(ref id) = cli.source_hub_chain_id {
             self.acp.sourcehub_chain_id = id.clone();
         }
 
         // hub.rs
+        #[cfg(feature = "sourcehub")]
         if let Some(ref addr) = cli.hub_rs_address {
             self.acp.hub_rs_address = addr.clone();
         }

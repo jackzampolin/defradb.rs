@@ -5,7 +5,9 @@ use std::sync::Arc;
 use tracing::info;
 
 use super::node::Node;
-use crate::config::{AcpDocumentType, Config};
+#[cfg(feature = "sourcehub")]
+use crate::config::AcpDocumentType;
+use crate::config::Config;
 use identity::Did;
 
 pub(super) struct QueryRunnerSetup<S: storage::corekv::Store + 'static> {
@@ -64,9 +66,12 @@ impl Node {
         }
 
         if let Some(did) = user_did {
-            if config.acp.document_type != AcpDocumentType::SourceHub
-                && config.acp.document_type != AcpDocumentType::HubRs
-            {
+            #[cfg(feature = "sourcehub")]
+            let remote_acp = config.acp.document_type == AcpDocumentType::SourceHub
+                || config.acp.document_type == AcpDocumentType::HubRs;
+            #[cfg(not(feature = "sourcehub"))]
+            let remote_acp = false;
+            if !remote_acp {
                 info!("Query runner configured with default identity for ACP");
                 query_runner = query_runner.with_default_identity(did.clone());
             }

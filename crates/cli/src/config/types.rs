@@ -195,7 +195,9 @@ pub enum AcpDocumentType {
     #[default]
     None,
     Local,
+    #[cfg(feature = "sourcehub")]
     SourceHub,
+    #[cfg(feature = "sourcehub")]
     HubRs,
 }
 
@@ -204,7 +206,9 @@ impl std::fmt::Display for AcpDocumentType {
         match self {
             AcpDocumentType::None => write!(f, "none"),
             AcpDocumentType::Local => write!(f, "local"),
+            #[cfg(feature = "sourcehub")]
             AcpDocumentType::SourceHub => write!(f, "source-hub"),
+            #[cfg(feature = "sourcehub")]
             AcpDocumentType::HubRs => write!(f, "hub-rs"),
         }
     }
@@ -217,7 +221,9 @@ impl std::str::FromStr for AcpDocumentType {
         match s.to_lowercase().replace('-', "").as_str() {
             "none" | "" => Ok(AcpDocumentType::None),
             "local" => Ok(AcpDocumentType::Local),
+            #[cfg(feature = "sourcehub")]
             "sourcehub" => Ok(AcpDocumentType::SourceHub),
+            #[cfg(feature = "sourcehub")]
             "hubrs" => Ok(AcpDocumentType::HubRs),
             _ => Err(Error::InvalidAcpType(s.to_string())),
         }

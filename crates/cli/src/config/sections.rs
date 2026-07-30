@@ -491,18 +491,22 @@ pub struct AcpConfig {
     pub document_type: AcpDocumentType,
 
     /// SourceHub gRPC/LCD endpoint (e.g., "http://localhost:1317")
+    #[cfg(feature = "sourcehub")]
     #[serde(default)]
     pub sourcehub_address: String,
 
     /// SourceHub CometBFT RPC endpoint (e.g., "http://localhost:26657")
+    #[cfg(feature = "sourcehub")]
     #[serde(default)]
     pub sourcehub_comet_address: String,
 
     /// SourceHub chain ID (e.g., "sourcehub-test")
+    #[cfg(feature = "sourcehub")]
     #[serde(default)]
     pub sourcehub_chain_id: String,
 
     /// hub.rs JSON-RPC endpoint (e.g., "http://localhost:8545")
+    #[cfg(feature = "sourcehub")]
     #[serde(default)]
     pub hub_rs_address: String,
 
@@ -548,9 +552,13 @@ impl Default for AcpConfig {
         Self {
             node_enable: false,
             document_type: AcpDocumentType::None,
+            #[cfg(feature = "sourcehub")]
             sourcehub_address: String::new(),
+            #[cfg(feature = "sourcehub")]
             sourcehub_comet_address: String::new(),
+            #[cfg(feature = "sourcehub")]
             sourcehub_chain_id: String::new(),
+            #[cfg(feature = "sourcehub")]
             hub_rs_address: String::new(),
             circuit_breaker_threshold: default_acp_cb_threshold(),
             circuit_breaker_reset_timeout: default_acp_cb_reset_timeout(),

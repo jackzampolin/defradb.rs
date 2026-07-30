@@ -5,7 +5,9 @@ use std::sync::Arc;
 use tracing::info;
 
 use super::node::Node;
-use crate::config::{AcpDocumentType, Config};
+#[cfg(feature = "sourcehub")]
+use crate::config::AcpDocumentType;
+use crate::config::Config;
 use crate::error::{Error, Result};
 use identity::Did;
 
@@ -15,6 +17,7 @@ pub(super) struct DocumentAcpSetup {
 }
 
 impl Node {
+    #[cfg_attr(not(feature = "sourcehub"), allow(unused_variables))]
     pub(super) async fn setup_document_acp(
         config: &Config,
         identity_key_bytes: Option<&[u8]>,
@@ -23,6 +26,7 @@ impl Node {
         event_bus: Arc<dyn events::Bus>,
         nac_checker: Arc<dyn db::NodeAccessChecker>,
     ) -> Result<DocumentAcpSetup> {
+        #[cfg(feature = "sourcehub")]
         if config.acp.document_type == AcpDocumentType::SourceHub {
             if config.acp.sourcehub_address.is_empty() {
                 return Err(Error::InvalidConfig(
@@ -77,11 +81,14 @@ impl Node {
             );
 
             info!("Document ACP configured (SourceHub)");
-            Ok(DocumentAcpSetup {
+            return Ok(DocumentAcpSetup {
                 document_acp,
                 http_adapter: Some(http_adapter),
-            })
-        } else if config.acp.document_type == AcpDocumentType::HubRs {
+            });
+        }
+
+        #[cfg(feature = "sourcehub")]
+        if config.acp.document_type == AcpDocumentType::HubRs {
             if config.acp.hub_rs_address.is_empty() {
                 return Err(Error::InvalidConfig(
                     "hub_rs_address required when document_type is hub-rs".into(),
@@ -133,21 +140,21 @@ impl Node {
             );
 
             info!("Document ACP configured (hub.rs)");
-            Ok(DocumentAcpSetup {
+            return Ok(DocumentAcpSetup {
                 document_acp,
                 http_adapter: Some(http_adapter),
-            })
-        } else {
-            info!("Document ACP configured (local)");
-            let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
-            Ok(DocumentAcpSetup {
-                document_acp,
-                http_adapter: Some(crate::acp_adapter::AcpAdapter::new_arc(
-                    zanzibar_store,
-                    nac_checker,
-                )),
-            })
+            });
         }
+
+        info!("Document ACP configured (local)");
+        let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
+        Ok(DocumentAcpSetup {
+            document_acp,
+            http_adapter: Some(crate::acp_adapter::AcpAdapter::new_arc(
+                zanzibar_store,
+                nac_checker,
+            )),
+        })
     }
 
     pub(super) async fn setup_nac_manager(
