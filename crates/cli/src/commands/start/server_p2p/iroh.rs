@@ -519,7 +519,7 @@ impl Node {
                     if let Ok(rep_info) = p2p::ReplicatorInfo::from_bytes(&data) {
                         let pid = p2p::transport::PeerId::new(rep_info.peer_id_str().to_string());
                         let _ = coordinator
-                            .create_replicator_info(&pid, rep_info.clone(), true)
+                            .create_replicator_info(&pid, rep_info.clone(), false)
                             .await;
                     }
                 }

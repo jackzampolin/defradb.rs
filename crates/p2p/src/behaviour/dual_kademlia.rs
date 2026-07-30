@@ -242,6 +242,11 @@ impl DualKademlia {
         (lan, wan)
     }
 
+    pub fn remove_peer(&mut self, peer: &PeerId) {
+        self.lan.remove_peer(peer);
+        self.wan.remove_peer(peer);
+    }
+
     pub fn bootstrap(&mut self) -> [(KademliaNetwork, Result<kad::QueryId, kad::NoKnownPeers>); 2] {
         [
             (KademliaNetwork::Lan, self.lan.bootstrap()),
