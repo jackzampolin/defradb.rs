@@ -146,20 +146,35 @@ impl Node {
         Ok(Some(key))
     }
 
+    /// Wrap a concrete backend in a type-erased [`storage::DynStore`],
+    /// applying at-rest encryption when configured. The erasure keeps the
+    /// whole node stack at a single `S = DynStore` instantiation.
+    fn wrap_store<S>(config: &Config, backend: S) -> Result<storage::DynStore>
+    where
+        S: storage::corekv::Store + 'static,
+    {
+        if config.datastore.at_rest_encryption {
+            info!("At-rest encryption enabled (value-only, AES-256-GCM)");
+            let key = Self::load_or_create_encryption_key(config)?;
+            Ok(storage::DynStore::new(Arc::new(
+                storage::encrypted_store::EncryptedStore::new(backend, key),
+            )))
+        } else {
+            Ok(storage::DynStore::new(Arc::new(backend)))
+        }
+    }
+
     /// Build the persistent ACP/Zanzibar stores from a shared store and start
-    /// the server. The store may be a bare backend or an [`EncryptedStore`];
+    /// the server. The store may wrap a bare backend or an [`EncryptedStore`];
     /// both DB and ACP share the same instance so they encrypt uniformly.
-    async fn init_persistent_store_and_server<S>(
-        store: Arc<S>,
+    async fn init_persistent_store_and_server(
+        store: Arc<storage::DynStore>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
         node_identity_did: Option<String>,
         se_key: Option<[u8; 32]>,
-    ) -> Result<ServerSetup>
-    where
-        S: storage::corekv::Store + 'static,
-    {
+    ) -> Result<ServerSetup> {
         info!("Using unified ACP store (namespace isolated in main database)");
         let acp_store: Arc<dyn acp::AcpStore> =
             Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
@@ -219,35 +234,18 @@ impl Node {
                     Arc::new(acp::MemoryZanzibarStore::new());
                 info!("Using in-memory ACP store");
                 let backend = storage::MemoryStore::new();
-                if config.datastore.at_rest_encryption {
-                    info!("At-rest encryption enabled (value-only, AES-256-GCM)");
-                    let key = Self::load_or_create_encryption_key(&config)?;
-                    let store =
-                        Arc::new(storage::encrypted_store::EncryptedStore::new(backend, key));
-                    Self::init_store_and_server(
-                        store,
-                        &config,
-                        peer_keypair,
-                        user_identity.clone(),
-                        acp_store,
-                        zanzibar_store,
-                        node_identity_did.clone(),
-                        se_key,
-                    )
-                    .await?
-                } else {
-                    Self::init_store_and_server(
-                        Arc::new(backend),
-                        &config,
-                        peer_keypair,
-                        user_identity.clone(),
-                        acp_store,
-                        zanzibar_store,
-                        node_identity_did.clone(),
-                        se_key,
-                    )
-                    .await?
-                }
+                let store = Self::wrap_store(&config, backend)?;
+                Self::init_store_and_server(
+                    Arc::new(store),
+                    &config,
+                    peer_keypair,
+                    user_identity.clone(),
+                    acp_store,
+                    zanzibar_store,
+                    node_identity_did.clone(),
+                    se_key,
+                )
+                .await?
             }
             #[cfg(feature = "redb")]
             DatastoreType::Redb => {
@@ -256,31 +254,16 @@ impl Node {
                     .with_durability(config.datastore.durability)
                     .with_cache_size(256 * 1024 * 1024);
                 let backend = storage::RedbStore::open_with_options(config.data_path(), opts)?;
-                if config.datastore.at_rest_encryption {
-                    info!("At-rest encryption enabled (value-only, AES-256-GCM)");
-                    let key = Self::load_or_create_encryption_key(&config)?;
-                    let store =
-                        Arc::new(storage::encrypted_store::EncryptedStore::new(backend, key));
-                    Self::init_persistent_store_and_server(
-                        store,
-                        &config,
-                        peer_keypair,
-                        user_identity.clone(),
-                        node_identity_did.clone(),
-                        se_key,
-                    )
-                    .await?
-                } else {
-                    Self::init_persistent_store_and_server(
-                        Arc::new(backend),
-                        &config,
-                        peer_keypair,
-                        user_identity.clone(),
-                        node_identity_did.clone(),
-                        se_key,
-                    )
-                    .await?
-                }
+                let store = Self::wrap_store(&config, backend)?;
+                Self::init_persistent_store_and_server(
+                    Arc::new(store),
+                    &config,
+                    peer_keypair,
+                    user_identity.clone(),
+                    node_identity_did.clone(),
+                    se_key,
+                )
+                .await?
             }
             #[cfg(not(feature = "redb"))]
             DatastoreType::Redb => {
@@ -293,31 +276,16 @@ impl Node {
                 info!("Using Fjall datastore at {}", config.data_path().display());
                 let opts = FjallStoreOptions::new().with_durability(config.datastore.durability);
                 let backend = storage::FjallStore::open_with_options(config.data_path(), opts)?;
-                if config.datastore.at_rest_encryption {
-                    info!("At-rest encryption enabled (value-only, AES-256-GCM)");
-                    let key = Self::load_or_create_encryption_key(&config)?;
-                    let store =
-                        Arc::new(storage::encrypted_store::EncryptedStore::new(backend, key));
-                    Self::init_persistent_store_and_server(
-                        store,
-                        &config,
-                        peer_keypair,
-                        user_identity.clone(),
-                        node_identity_did.clone(),
-                        se_key,
-                    )
-                    .await?
-                } else {
-                    Self::init_persistent_store_and_server(
-                        Arc::new(backend),
-                        &config,
-                        peer_keypair,
-                        user_identity.clone(),
-                        node_identity_did.clone(),
-                        se_key,
-                    )
-                    .await?
-                }
+                let store = Self::wrap_store(&config, backend)?;
+                Self::init_persistent_store_and_server(
+                    Arc::new(store),
+                    &config,
+                    peer_keypair,
+                    user_identity.clone(),
+                    node_identity_did.clone(),
+                    se_key,
+                )
+                .await?
             }
             #[cfg(not(feature = "fjall"))]
             DatastoreType::Fjall => {
@@ -334,31 +302,16 @@ impl Node {
                 let opts =
                     RocksDbStoreOptions::from_env().with_durability(config.datastore.durability);
                 let backend = storage::RocksDbStore::open_with_options(config.data_path(), opts)?;
-                if config.datastore.at_rest_encryption {
-                    info!("At-rest encryption enabled (value-only, AES-256-GCM)");
-                    let key = Self::load_or_create_encryption_key(&config)?;
-                    let store =
-                        Arc::new(storage::encrypted_store::EncryptedStore::new(backend, key));
-                    Self::init_persistent_store_and_server(
-                        store,
-                        &config,
-                        peer_keypair,
-                        user_identity.clone(),
-                        node_identity_did.clone(),
-                        se_key,
-                    )
-                    .await?
-                } else {
-                    Self::init_persistent_store_and_server(
-                        Arc::new(backend),
-                        &config,
-                        peer_keypair,
-                        user_identity.clone(),
-                        node_identity_did.clone(),
-                        se_key,
-                    )
-                    .await?
-                }
+                let store = Self::wrap_store(&config, backend)?;
+                Self::init_persistent_store_and_server(
+                    Arc::new(store),
+                    &config,
+                    peer_keypair,
+                    user_identity.clone(),
+                    node_identity_did.clone(),
+                    se_key,
+                )
+                .await?
             }
             #[cfg(not(feature = "rocksdb"))]
             DatastoreType::RocksDb => {
@@ -372,31 +325,16 @@ impl Node {
                 let opts =
                     LarkStoreOptions::from_env().with_durability(config.datastore.durability);
                 let backend = storage::LarkStore::open_with_options(config.data_path(), opts)?;
-                if config.datastore.at_rest_encryption {
-                    info!("At-rest encryption enabled (value-only, AES-256-GCM)");
-                    let key = Self::load_or_create_encryption_key(&config)?;
-                    let store =
-                        Arc::new(storage::encrypted_store::EncryptedStore::new(backend, key));
-                    Self::init_persistent_store_and_server(
-                        store,
-                        &config,
-                        peer_keypair,
-                        user_identity.clone(),
-                        node_identity_did.clone(),
-                        se_key,
-                    )
-                    .await?
-                } else {
-                    Self::init_persistent_store_and_server(
-                        Arc::new(backend),
-                        &config,
-                        peer_keypair,
-                        user_identity.clone(),
-                        node_identity_did.clone(),
-                        se_key,
-                    )
-                    .await?
-                }
+                let store = Self::wrap_store(&config, backend)?;
+                Self::init_persistent_store_and_server(
+                    Arc::new(store),
+                    &config,
+                    peer_keypair,
+                    user_identity.clone(),
+                    node_identity_did.clone(),
+                    se_key,
+                )
+                .await?
             }
             #[cfg(not(feature = "lark"))]
             DatastoreType::Lark => {

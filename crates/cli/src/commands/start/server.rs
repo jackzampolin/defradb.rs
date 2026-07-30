@@ -20,8 +20,8 @@ impl Node {
     /// Returns a [`ServerSetup`] holding the servers and background tasks
     /// tracked for graceful shutdown.
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn init_store_and_server<S>(
-        store: Arc<S>,
+    pub(super) async fn init_store_and_server(
+        store: Arc<storage::DynStore>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
@@ -29,10 +29,7 @@ impl Node {
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         node_identity_did: Option<String>,
         se_key: Option<[u8; 32]>,
-    ) -> Result<ServerSetup>
-    where
-        S: storage::corekv::Store + 'static,
-    {
+    ) -> Result<ServerSetup> {
         let user_did = match &user_identity {
             Some(identity) => Some(identity.did().map_err(|e| {
                 Error::InvalidIdentity(format!(

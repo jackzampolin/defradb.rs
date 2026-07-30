@@ -88,9 +88,9 @@ impl Node {
     ///
     /// Returns the handle, events receiver, and host task handle so that the caller
     /// can connect events to the sync coordinator and track the host task for shutdown.
-    pub(super) async fn start_p2p<S: p2p::BitswapStore>(
+    pub(super) async fn start_p2p(
         config: &Config,
-        bitswap_store: S,
+        bitswap_store: p2p::BitswapStoreAdapter<blockstore::DefraBlockstore<storage::DynStore>>,
         keypair: Option<p2p::Keypair>,
         enable_pubsub: bool,
         classifier: std::sync::Arc<dyn p2p::bitswap::BlockClassifier>,

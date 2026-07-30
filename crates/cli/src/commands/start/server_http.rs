@@ -12,11 +12,11 @@ use crate::config::{AcpDocumentType, Config, TransportType};
 use crate::error::{Error, Result};
 use identity::Did;
 
-pub(super) struct HttpServerArgs<'a, S: storage::corekv::Store + 'static> {
-    pub(super) database: Arc<db::DB<S>>,
+pub(super) struct HttpServerArgs<'a> {
+    pub(super) database: Arc<db::DB<storage::DynStore>>,
     pub(super) config: &'a Config,
     pub(super) event_bus: Arc<dyn events::Bus>,
-    pub(super) query_setup: &'a QueryRunnerSetup<S>,
+    pub(super) query_setup: &'a QueryRunnerSetup,
     pub(super) p2p_adapter: Option<Arc<dyn defra_http::router::P2POperations>>,
     pub(super) manage_requester: Option<Arc<dyn defra_http::router::ManageRequester>>,
     pub(super) nac_adapter: Option<Arc<crate::nac_adapter::NacAdapter>>,
@@ -27,10 +27,7 @@ pub(super) struct HttpServerArgs<'a, S: storage::corekv::Store + 'static> {
 }
 
 impl Node {
-    pub(super) fn build_http_server<S>(args: HttpServerArgs<'_, S>) -> Result<defra_http::Server>
-    where
-        S: storage::corekv::Store + 'static,
-    {
+    pub(super) fn build_http_server(args: HttpServerArgs<'_>) -> Result<defra_http::Server> {
         let HttpServerArgs {
             database,
             config,
@@ -231,16 +228,13 @@ impl Node {
     }
 
     #[cfg(feature = "postgres")]
-    pub(super) fn build_pg_server<S>(
-        database: Arc<db::DB<S>>,
+    pub(super) fn build_pg_server(
+        database: Arc<db::DB<storage::DynStore>>,
         config: &Config,
-        query_setup: &QueryRunnerSetup<S>,
+        query_setup: &QueryRunnerSetup,
         acp_setup: &DocumentAcpSetup,
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
-    ) -> Result<Option<pg_compat::PgServer>>
-    where
-        S: storage::corekv::Store + 'static,
-    {
+    ) -> Result<Option<pg_compat::PgServer>> {
         if config.api.pg_address.is_empty() {
             return Ok(None);
         }

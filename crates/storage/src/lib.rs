@@ -97,6 +97,7 @@
 /// - Architecture guides
 pub mod backends;
 pub mod corekv;
+pub mod dyn_store;
 pub mod encoding;
 pub mod encrypted_store;
 pub mod field_value;
@@ -139,3 +140,4 @@ pub use backends::OpfsEnv;
 pub use corekv::{
     Error, IterOptions, Iterator, KvPair, Reader, ReaderWriter, Result, Store, Txn, Writer,
 };
+pub use dyn_store::DynStore;
