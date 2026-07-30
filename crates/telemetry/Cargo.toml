@@ -14,6 +14,7 @@ default = []
 # runtime behavior is default-on (Go parity); use `--no-telemetry` to disable
 # at runtime.
 otlp = [
+    "dep:thiserror",
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
@@ -34,7 +35,7 @@ otlp = [
 [dependencies]
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["registry", "std"] }
-thiserror.workspace = true
+thiserror = { workspace = true, optional = true }
 
 opentelemetry = { version = "0.32", optional = true }
 # `experimental_async_runtime` (not `rt-tokio`) is all that's needed: with the
