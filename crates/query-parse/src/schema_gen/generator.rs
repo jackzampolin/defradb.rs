@@ -59,6 +59,17 @@ impl GqlType {
         GqlType::NonNull(Box::new(inner))
     }
 
+    fn into_mutation_input(self) -> Self {
+        match self {
+            GqlType::NonNull(inner) => *inner,
+            GqlType::List(inner) => match *inner {
+                GqlType::NonNull(element) => GqlType::List(element),
+                element => GqlType::list(element),
+            },
+            gql_type => gql_type,
+        }
+    }
+
     /// Convert to GraphQL SDL string representation
     pub fn to_sdl(&self) -> String {
         match self {
@@ -348,8 +359,9 @@ pub fn generate_schema(
 
         // Add to create input (skip _docID as it's auto-generated)
         if field.name != "_docID" {
-            create_input = create_input.with_field(GqlField::new(&field.name, gql_type.clone()));
-            update_input = update_input.with_field(GqlField::new(&field.name, gql_type.clone()));
+            let input_type = gql_type.into_mutation_input();
+            create_input = create_input.with_field(GqlField::new(&field.name, input_type.clone()));
+            update_input = update_input.with_field(GqlField::new(&field.name, input_type));
         }
 
         // Add to filter input (only scalars)
@@ -510,6 +522,33 @@ mod tests {
         // Check that name field is present
         let name_field = schema.object_type.fields.iter().find(|f| f.name == "name");
         assert!(name_field.is_some());
+    }
+
+    #[test]
+    fn test_mutation_input_fields_are_nullable() {
+        let collection = CollectionVersion::new(
+            "User",
+            "v1",
+            "coll-1",
+            vec![
+                FieldDescription::new(
+                    "1",
+                    "name",
+                    FieldKind::Scalar(ScalarKind::NonNillableString),
+                ),
+                FieldDescription::new("2", "tags", FieldKind::string_array()),
+            ],
+        );
+        let schema = generate_schema(&collection, &[&collection]).unwrap();
+
+        assert!(schema.object_type.to_sdl().contains("name: String!"));
+        assert!(schema.object_type.to_sdl().contains("tags: [String!]"));
+        for input in [&schema.create_input, &schema.update_input] {
+            let sdl = input.to_sdl();
+            assert!(sdl.contains("name: String"));
+            assert!(!sdl.contains("name: String!"));
+            assert!(sdl.contains("tags: [String]"));
+        }
     }
 
     #[test]

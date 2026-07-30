@@ -425,4 +425,48 @@ mod tests {
         assert_eq!(tags["type"]["ofType"]["kind"], "NON_NULL");
         assert_eq!(tags["type"]["ofType"]["ofType"]["name"], "String");
     }
+
+    #[tokio::test]
+    async fn mutation_input_fields_are_nullable() {
+        let collection = CollectionVersion::new(
+            "Users",
+            "v1",
+            "users",
+            vec![
+                FieldDescription::new(
+                    "1",
+                    "name",
+                    FieldKind::Scalar(schema::ScalarKind::NonNillableString),
+                ),
+                FieldDescription::new(
+                    "2",
+                    "tags",
+                    FieldKind::ScalarArray(ScalarArrayKind::StringArray),
+                ),
+            ],
+        );
+        let result = execute_introspection(
+            vec![collection],
+            r#"{
+                __type(name: "UsersMutationInputArg") {
+                    inputFields {
+                        name
+                        type { kind name ofType { kind name } }
+                    }
+                }
+            }"#,
+        )
+        .await
+        .expect("introspection execution should succeed");
+
+        let fields = result["__type"]["inputFields"].as_array().unwrap();
+        let name = fields.iter().find(|field| field["name"] == "name").unwrap();
+        assert_eq!(name["type"]["kind"], "SCALAR");
+        assert_eq!(name["type"]["name"], "String");
+
+        let tags = fields.iter().find(|field| field["name"] == "tags").unwrap();
+        assert_eq!(tags["type"]["kind"], "LIST");
+        assert_eq!(tags["type"]["ofType"]["kind"], "SCALAR");
+        assert_eq!(tags["type"]["ofType"]["name"], "String");
+    }
 }

@@ -180,19 +180,11 @@ pub(super) fn field_kind_to_input_type_ref(kind: &FieldKind) -> TypeRef {
     match kind {
         FieldKind::Scalar(scalar) => {
             let name = scalar_to_gql_name(scalar);
-            if scalar.is_nillable() {
-                TypeRef::named(name)
-            } else {
-                TypeRef::named_nn(name)
-            }
+            TypeRef::named(name)
         }
         FieldKind::ScalarArray(array) => {
             let element_type = scalar_to_gql_name(&array.element_kind());
-            if array.has_nillable_elements() {
-                TypeRef::named_list(element_type)
-            } else {
-                TypeRef::named_nn_list(element_type)
-            }
+            TypeRef::named_list(element_type)
         }
         FieldKind::Relation { .. } | FieldKind::SelfRef { .. } => {
             // For relations, mutation input takes ID
