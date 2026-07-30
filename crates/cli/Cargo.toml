@@ -113,7 +113,7 @@ version = "0.9"
 optional = true
 
 [features]
-default = ["lark", "rocksdb", "redb", "sourcehub", "orbis"]
+default = ["lark", "rocksdb", "redb"]
 lark = ["storage/lark"]
 # SourceHub/hub.rs on-chain document ACP (`--document-acp-type source-hub|hub-rs`).
 sourcehub = ["dep:sourcehub"]
