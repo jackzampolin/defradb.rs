@@ -26,7 +26,6 @@ defra-core = { path = "../defra-core" }
 crypto = { path = "../crypto" }
 acp = { path = "../acp" }
 identity = { path = "../identity" }
-blockstore = { path = "../blockstore" }
 
 # Optional backends — feature-gated until the corresponding milestone lands.
 orbis = { path = "../orbis", optional = true }
@@ -45,7 +44,6 @@ rand = { workspace = true }
 uuid = { workspace = true }
 cid = { workspace = true }
 tokio = { version = "1.35", default-features = false, features = ["rt", "sync", "macros"] }
-futures = { workspace = true }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[package.metadata.cargo-machete]
+ignored = ["serde_bytes"]
+
 [dependencies]
 # Core dependencies
 defra-core = { path = "../defra-core" }
@@ -33,7 +36,6 @@ serde_bytes.workspace = true  # Efficient byte serialization
 
 # IPLD
 cid.workspace = true      # Content identifiers
-multihash.workspace = true # Multihash for CID computation
 
 # DID support
 multibase = "0.9"         # Multibase encoding for DID keys
@@ -47,11 +49,8 @@ thiserror.workspace = true
 blst = "0.3"
 
 [dev-dependencies]
-proptest.workspace = true
 serde_json.workspace = true
 serial_test = "3.0"
-tokio.workspace = true    # Async runtime for tests
-multicodec.workspace = true
 multihash-codetable.workspace = true
 serde_ipld_dagcbor.workspace = true  # DAG-CBOR for Go interop serialization tests
 
