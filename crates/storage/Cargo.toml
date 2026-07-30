@@ -17,7 +17,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Async runtime
 async-trait.workspace = true
-futures.workspace = true
 
 # Storage backends
 redb = { workspace = true, optional = true }
@@ -75,6 +74,9 @@ js-sys = { version = "0.3", optional = true }
 # Tokio is only available on non-WASM targets
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+futures.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
