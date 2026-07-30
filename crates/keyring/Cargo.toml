@@ -10,7 +10,6 @@ description = "Keyring and key management for DefraDB"
 
 [dependencies]
 thiserror.workspace = true
-tracing.workspace = true
 base64 = "0.22"
 zeroize = "1.8"
 
@@ -25,6 +24,7 @@ keyring_crate = { package = "keyring", version = "3", features = ["apple-native"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring_crate = { package = "keyring", version = "3", features = ["sync-secret-service", "crypto-rust"] }
+tracing.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring_crate = { package = "keyring", version = "3", features = ["windows-native"] }
