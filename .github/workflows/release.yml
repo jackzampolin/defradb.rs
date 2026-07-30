@@ -138,6 +138,17 @@ jobs:
             sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"proofs"/d' Cargo.toml
           fi
 
+      # lld --icf=safe folds identical instantiations Apple's linker leaves
+      # (measured -3.5%; validated by the full basic/query/p2p integration
+      # suite against an ICF-linked binary). Darwin only until a Linux
+      # release dry-run confirms the ELF path.
+      - name: Configure ICF linker (darwin)
+        if: runner.os == 'macOS'
+        run: |
+          HOST="$(rustc -vV | sed -n 's/^host: //p')"
+          LLD="$(rustc --print sysroot)/lib/rustlib/${HOST}/bin/gcc-ld/ld64.lld"
+          echo "RUSTFLAGS=-C link-arg=-fuse-ld=${LLD} -C link-arg=-Wl,--icf=safe" >> "$GITHUB_ENV"
+
       - name: Build
         run: cargo build --release -p cli --target ${{ matrix.target }} ${{ matrix.features }}
 
