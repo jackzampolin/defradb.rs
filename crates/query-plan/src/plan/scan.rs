@@ -212,6 +212,15 @@ impl PlanNode for ScanNode {
                 continue;
             }
 
+            if let Some(doc_ids) = &self.doc_ids {
+                let Some(doc_id) = doc.doc_id() else {
+                    continue;
+                };
+                if !doc_ids.iter().any(|id| id == doc_id) {
+                    continue;
+                }
+            }
+
             // Apply filter if present
             if let Some(ref filter) = self.filter {
                 if !filter.matches(doc.fields(), &self.document_mapping)? {
@@ -325,7 +334,7 @@ mod tests {
     use serde_json::json;
 
     use super::ScanNode;
-    use crate::planner::PlanNode;
+    use crate::planner::{Doc, PlanNode};
     use query_types::document::DocumentMapping;
     use query_types::mapper::Filter;
 
@@ -385,5 +394,25 @@ mod tests {
             json!({"name": {"_eq": "Alice"}})
         );
         assert_eq!(explain["scanNode"]["prefixes"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn supplied_doc_ids_filter_preloaded_deleted_documents() {
+        let mut requested = Doc::new(2);
+        requested.set_doc_id("doc-1");
+        requested.mark_deleted();
+        let mut unrelated = Doc::new(2);
+        unrelated.set_doc_id("doc-2");
+        unrelated.mark_deleted();
+
+        let mut scan = ScanNode::new(make_collection(), make_mapping())
+            .with_docs(vec![unrelated, requested])
+            .with_doc_ids(vec!["doc-1".to_string()])
+            .with_show_deleted(true);
+        scan.init().await.unwrap();
+
+        assert!(scan.next().await.unwrap());
+        assert_eq!(scan.value().doc_id(), Some("doc-1"));
+        assert!(!scan.next().await.unwrap());
     }
 }
