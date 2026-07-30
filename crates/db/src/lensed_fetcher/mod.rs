@@ -234,7 +234,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
     ) -> query::error::Result<Document> {
         use crate::versioned_fetcher::VersionedFetcher;
 
-        let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
+        let versioned_fetcher = VersionedFetcher::with_kms(self.txn.clone(), self.db.kms());
         versioned_fetcher
             .get_document_at_cid(cid, expected_doc_id)
             .await
@@ -248,7 +248,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
     ) -> query::error::Result<Vec<Document>> {
         use crate::versioned_fetcher::VersionedFetcher;
 
-        let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
+        let versioned_fetcher = VersionedFetcher::with_kms(self.txn.clone(), self.db.kms());
         versioned_fetcher
             .get_documents_at_cid(cid, expected_doc_id)
             .await

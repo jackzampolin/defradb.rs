@@ -1,10 +1,9 @@
 use colored::Colorize;
 
-use crate::config::{GO_REPO_BASE, GO_WORKTREE_PREFIX, RUST_WORKTREE_PREFIX};
 use crate::error::Result;
 use crate::worktree::{
     check_uncommitted_changes, check_unpushed_commits, create_worktree_pair, list_rust_worktrees,
-    remove_worktree_pair, WorktreeContext,
+    remove_worktree_pair, worktree_pair_paths, WorktreeContext,
 };
 
 /// List all paired worktrees
@@ -58,10 +57,7 @@ pub async fn list() -> Result<()> {
 pub async fn create(suffix: &str) -> Result<()> {
     println!("{} {}", "Creating worktree pair:".bold(), suffix.cyan());
 
-    let rust_path =
-        std::path::PathBuf::from(GO_REPO_BASE).join(format!("{}-{}", RUST_WORKTREE_PREFIX, suffix));
-    let go_path =
-        std::path::PathBuf::from(GO_REPO_BASE).join(format!("{}-{}", GO_WORKTREE_PREFIX, suffix));
+    let (rust_path, go_path) = worktree_pair_paths(suffix).await?;
 
     // Check if either already exists
     if rust_path.exists() {
@@ -97,10 +93,7 @@ pub async fn create(suffix: &str) -> Result<()> {
 pub async fn remove(suffix: &str, force: bool, delete_branch: bool) -> Result<()> {
     println!("{} {}", "Removing worktree pair:".bold(), suffix.cyan());
 
-    let rust_path =
-        std::path::PathBuf::from(GO_REPO_BASE).join(format!("{}-{}", RUST_WORKTREE_PREFIX, suffix));
-    let go_path =
-        std::path::PathBuf::from(GO_REPO_BASE).join(format!("{}-{}", GO_WORKTREE_PREFIX, suffix));
+    let (rust_path, go_path) = worktree_pair_paths(suffix).await?;
 
     // Check for uncommitted changes
     if !force {

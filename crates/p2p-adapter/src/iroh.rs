@@ -357,7 +357,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
     }
 
     async fn disconnect_peer(&self, addr: &str) -> P2PResult<()> {
-        self.check_nac(acp::nac::NodePermission::P2pPeerConnect)
+        self.check_nac(acp::nac::NodePermission::P2pPeerDisconnect)
             .await?;
 
         let (peer_id, _direct_addrs) = parse_public_peer_addr(addr)

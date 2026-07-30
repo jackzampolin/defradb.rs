@@ -31,6 +31,17 @@ impl<'a> SdlParser<'a> {
                     QueryError::parse(format!("scalar type {} cannot be used in arrays", base))
                 });
             }
+            if parsed_type.is_non_null {
+                return scalar_kind
+                    .to_non_nillable()
+                    .map(FieldKind::Scalar)
+                    .ok_or_else(|| {
+                        QueryError::parse(format!(
+                            "NonNull variant for type {} is not supported",
+                            base
+                        ))
+                    });
+            }
             return Ok(FieldKind::Scalar(scalar_kind));
         }
 

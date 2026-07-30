@@ -48,7 +48,7 @@ const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
 const DHT_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Delay used to coalesce the one-time first-connection DHT bootstrap.
-const DHT_BOOTSTRAP_DEBOUNCE: Duration = Duration::from_secs(30);
+const DHT_BOOTSTRAP_DEBOUNCE: Duration = Duration::from_secs(10);
 
 /// Go libp2p connection manager grace period before pruning new connections.
 const DEFAULT_CONNECTION_MANAGER_GRACE_PERIOD: Duration = Duration::from_secs(20);

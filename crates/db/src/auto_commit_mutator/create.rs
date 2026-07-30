@@ -184,6 +184,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     )));
                 }
 
+                self.register_created_doc_with_acp(&collection, &doc_id.to_string())
+                    .await?;
+
                 // Emit update event for subscriptions
                 self.emit_update_events(
                     &collection,

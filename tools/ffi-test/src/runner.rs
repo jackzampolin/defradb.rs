@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::config::FFI_CRATE_PATH;
@@ -102,10 +102,18 @@ pub async fn run_tests(
         .spawn()?;
 
     let stdout = child.stdout.take().expect("Failed to capture stdout");
+    let stderr = child.stderr.take().expect("Failed to capture stderr");
+    let stderr_task = tokio::spawn(async move {
+        let mut stderr = BufReader::new(stderr);
+        let mut output = String::new();
+        stderr.read_to_string(&mut output).await?;
+        Ok::<_, std::io::Error>(output)
+    });
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
 
     // Accumulate test results
+    let mut package_output = Vec::new();
     let mut test_outputs: HashMap<String, Vec<String>> = HashMap::new();
     let mut test_results: HashMap<String, TestResult> = HashMap::new();
 
@@ -116,13 +124,23 @@ pub async fn run_tests(
 
         let event: GoTestEvent = match serde_json::from_str(&line) {
             Ok(e) => e,
-            Err(_) => continue, // Skip non-JSON lines
+            Err(_) => {
+                package_output.push(line);
+                continue;
+            }
         };
 
         // Only process events with test names (skip package-level events)
         let test_name = match &event.test {
             Some(name) => name.clone(),
-            None => continue,
+            None => {
+                if event.action == "output" {
+                    if let Some(output) = event.output {
+                        package_output.push(output);
+                    }
+                }
+                continue;
+            }
         };
 
         match event.action.as_str() {
@@ -191,13 +209,17 @@ pub async fn run_tests(
 
     // Wait for the command to complete
     let status = child.wait().await?;
+    let stderr = stderr_task.await.map_err(|e| {
+        FfiTestError::TestExecution(format!("failed to read go test stderr: {e}"))
+    })??;
     let duration_secs = start.elapsed().as_secs_f64();
 
     // If no tests ran and command failed, report error
     if test_results.is_empty() && !status.success() {
-        return Err(FfiTestError::TestExecution(
-            "No tests found or test execution failed".to_string(),
-        ));
+        return Err(FfiTestError::TestExecution(test_execution_error(
+            &package_output,
+            &stderr,
+        )));
     }
 
     // Build summary
@@ -219,6 +241,21 @@ pub async fn run_tests(
         tests,
         duration_secs,
     })
+}
+
+fn test_execution_error(package_output: &[String], stderr: &str) -> String {
+    let mut output = package_output.concat();
+    if !output.is_empty() && !output.ends_with('\n') && !stderr.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(stderr);
+
+    let output = output.trim();
+    if output.is_empty() {
+        "go test failed without output".to_string()
+    } else {
+        output.to_string()
+    }
 }
 
 /// Build environment variables for Go test
@@ -336,4 +373,22 @@ async fn collect_packages(base: &Path, current: &Path, packages: &mut Vec<String
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_package_level_test_failure() {
+        let output = test_execution_error(
+            &["./adapter.go:42: undefined: list_actions\n".to_string()],
+            "build failed\n",
+        );
+
+        assert_eq!(
+            output,
+            "./adapter.go:42: undefined: list_actions\nbuild failed"
+        );
+    }
 }

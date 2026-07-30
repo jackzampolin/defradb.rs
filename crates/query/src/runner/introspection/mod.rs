@@ -231,7 +231,7 @@ pub fn build_introspection_schema(
     // Add top-level aggregate fields to Query
     if !collections.is_empty() {
         // _count: takes one arg per non-embedded collection
-        let mut count_field = Field::new("COUNT", TypeRef::named("Int"), |_| {
+        let mut count_field = Field::new("COUNT", TypeRef::named_nn("Int"), |_| {
             FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
         });
         for collection in collections {
@@ -247,7 +247,7 @@ pub fn build_introspection_schema(
 
         // _sum, _avg: takes one arg per non-embedded collection
         for agg_name in &["SUM", "AVG"] {
-            let mut agg_field = Field::new(*agg_name, TypeRef::named("Float"), |_| {
+            let mut agg_field = Field::new(*agg_name, TypeRef::named_nn("Float"), |_| {
                 FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
             });
             for collection in collections {
@@ -321,6 +321,19 @@ pub async fn execute_introspection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use schema::{FieldDescription, FieldKind, ScalarArrayKind};
+
+    fn assert_non_null_aggregate(object: &JsonValue, field_name: &str, scalar_name: &str) {
+        let field = object["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["name"] == field_name)
+            .unwrap();
+        assert_eq!(field["type"]["kind"], "NON_NULL");
+        assert_eq!(field["type"]["ofType"]["kind"], "SCALAR");
+        assert_eq!(field["type"]["ofType"]["name"], scalar_name);
+    }
 
     /// A bare `{ __typename }` (e.g. a GraphQL health probe) must resolve to
     /// the root query type name via the introspection engine, not fail as an
@@ -331,5 +344,85 @@ mod tests {
             .await
             .expect("introspection execution should succeed");
         assert_eq!(result, serde_json::json!({ "__typename": "Query" }));
+    }
+
+    #[tokio::test]
+    async fn aggregate_nullability_matches_go() {
+        let collection = CollectionVersion::new("Users", "v1", "users", vec![]);
+        let result = execute_introspection(
+            vec![collection],
+            r#"query {
+                collection: __type(name: "Users") {
+                    fields { name type { kind name ofType { kind name } } }
+                }
+                query: __type(name: "Query") {
+                    fields { name type { kind name ofType { kind name } } }
+                }
+                commit: __type(name: "Commit") {
+                    fields { name type { kind name ofType { kind name } } }
+                }
+            }"#,
+        )
+        .await
+        .expect("introspection execution should succeed");
+
+        for type_name in ["collection", "query", "commit"] {
+            assert_non_null_aggregate(&result[type_name], "AVG", "Float");
+            assert_non_null_aggregate(&result[type_name], "COUNT", "Int");
+            assert_non_null_aggregate(&result[type_name], "SUM", "Float");
+        }
+    }
+
+    #[tokio::test]
+    async fn collection_count_and_array_types_match_go() {
+        let collection = CollectionVersion::new(
+            "Users",
+            "v1",
+            "users",
+            vec![FieldDescription::new(
+                "1",
+                "tags",
+                FieldKind::ScalarArray(ScalarArrayKind::StringArray),
+            )],
+        );
+        let result = execute_introspection(
+            vec![collection],
+            r#"query {
+                selector: __type(name: "Users__CountSelector") {
+                    inputFields {
+                        name
+                        type { kind name ofType { kind name ofType { kind name } } }
+                    }
+                }
+                collection: __type(name: "Users") {
+                    fields {
+                        name
+                        type { kind name ofType { kind name ofType { kind name } } }
+                    }
+                }
+            }"#,
+        )
+        .await
+        .expect("introspection execution should succeed");
+
+        let group_by = result["selector"]["inputFields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["name"] == "groupBy")
+            .unwrap();
+        assert_eq!(group_by["type"]["kind"], "LIST");
+        assert_eq!(group_by["type"]["ofType"]["kind"], "NON_NULL");
+        assert_eq!(group_by["type"]["ofType"]["ofType"]["name"], "UsersField");
+
+        let tags = result["collection"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["name"] == "tags")
+            .unwrap();
+        assert_eq!(tags["type"]["kind"], "LIST");
+        assert_eq!(tags["type"]["ofType"]["kind"], "NON_NULL");
+        assert_eq!(tags["type"]["ofType"]["ofType"]["name"], "String");
     }
 }

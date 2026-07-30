@@ -102,7 +102,7 @@ pub(super) fn build_collection_type(
             }
         }
         count_args.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut count_field = Field::new("COUNT", TypeRef::named("Int"), |_| {
+        let mut count_field = Field::new("COUNT", TypeRef::named_nn("Int"), |_| {
             FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
         });
         for (_, arg) in count_args {
@@ -152,7 +152,11 @@ pub(super) fn build_collection_type(
             }
         }
         agg_args.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut agg_field = Field::new(*agg_name, TypeRef::named(*agg_type), |_| {
+        let output_type = match *agg_name {
+            "SUM" | "AVG" => TypeRef::named_nn(*agg_type),
+            _ => TypeRef::named(*agg_type),
+        };
+        let mut agg_field = Field::new(*agg_name, output_type, |_| {
             FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
         });
         for (_, arg) in agg_args {
@@ -256,13 +260,13 @@ pub(super) fn build_commit_type() -> Object {
 
     Object::new("Commit")
         .field(
-            null_field!("AVG", TypeRef::named("Float")).argument(InputValue::new(
+            null_field!("AVG", TypeRef::named_nn("Float")).argument(InputValue::new(
                 "field",
                 TypeRef::named("commitNumericFieldArg"),
             )),
         )
         .field(
-            null_field!("COUNT", TypeRef::named("Int")).argument(InputValue::new(
+            null_field!("COUNT", TypeRef::named_nn("Int")).argument(InputValue::new(
                 "field",
                 TypeRef::named("commitCountFieldArg"),
             )),
@@ -281,7 +285,7 @@ pub(super) fn build_commit_type() -> Object {
             )),
         )
         .field(
-            null_field!("SUM", TypeRef::named("Float")).argument(InputValue::new(
+            null_field!("SUM", TypeRef::named_nn("Float")).argument(InputValue::new(
                 "field",
                 TypeRef::named("commitNumericFieldArg"),
             )),
@@ -312,10 +316,21 @@ pub(super) fn field_kind_to_type_ref(
     current_name: &str,
 ) -> TypeRef {
     match kind {
-        FieldKind::Scalar(scalar) => TypeRef::named(scalar_to_gql_name(scalar)),
+        FieldKind::Scalar(scalar) => {
+            let name = scalar_to_gql_name(scalar);
+            if scalar.is_nillable() {
+                TypeRef::named(name)
+            } else {
+                TypeRef::named_nn(name)
+            }
+        }
         FieldKind::ScalarArray(array) => {
             let element_type = scalar_to_gql_name(&array.element_kind());
-            TypeRef::named_list(element_type)
+            if array.has_nillable_elements() {
+                TypeRef::named_list(element_type)
+            } else {
+                TypeRef::named_nn_list(element_type)
+            }
         }
         FieldKind::Relation {
             collection_id,
@@ -369,7 +384,7 @@ pub(super) fn field_kind_to_type_ref(
 /// Go registers Float32 and Float64 as separate scalar types.
 /// Go maps unqualified `Float` in SDL to `Float64`.
 pub(super) fn scalar_to_gql_name(scalar: &ScalarKind) -> &'static str {
-    match scalar {
+    match scalar.base_kind() {
         ScalarKind::None => "String",
         ScalarKind::DocID => "ID",
         ScalarKind::Bool => "Boolean",

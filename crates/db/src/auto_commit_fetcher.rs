@@ -272,7 +272,7 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         // Wrap in Arc<Mutex<Option>> for VersionedFetcher
         let txn_holder: Arc<TokioMutex<Option<DbTxn<S>>>> = Arc::new(TokioMutex::new(Some(txn)));
 
-        let versioned_fetcher = VersionedFetcher::new(txn_holder.clone());
+        let versioned_fetcher = VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms());
         let result = versioned_fetcher
             .get_document_at_cid(cid, expected_doc_id)
             .await
@@ -297,7 +297,7 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
 
         let txn_holder: Arc<TokioMutex<Option<DbTxn<S>>>> = Arc::new(TokioMutex::new(Some(txn)));
 
-        let versioned_fetcher = VersionedFetcher::new(txn_holder.clone());
+        let versioned_fetcher = VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms());
         let result = versioned_fetcher
             .get_documents_at_cid(cid, expected_doc_id)
             .await

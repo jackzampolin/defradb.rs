@@ -293,7 +293,7 @@ pub fn field_kind_to_gql_type(
 
 /// Convert a ScalarKind to a GraphQL type
 pub fn scalar_to_gql_type(scalar: &ScalarKind) -> GqlType {
-    match scalar {
+    let gql_type = match scalar.base_kind() {
         ScalarKind::None => GqlType::named("Void"),
         ScalarKind::DocID => GqlType::id(),
         ScalarKind::Bool => GqlType::boolean(),
@@ -304,6 +304,11 @@ pub fn scalar_to_gql_type(scalar: &ScalarKind) -> GqlType {
         ScalarKind::Blob => GqlType::blob(),
         ScalarKind::Json => GqlType::json(),
         _ => GqlType::string(),
+    };
+    if scalar.is_nillable() {
+        gql_type
+    } else {
+        GqlType::non_null(gql_type)
     }
 }
 
@@ -365,13 +370,13 @@ pub fn generate_schema(
 }
 
 fn scalar_filter_type_name(kind: &FieldKind) -> &'static str {
-    match kind {
-        FieldKind::Scalar(ScalarKind::Bool) => "Boolean",
-        FieldKind::Scalar(ScalarKind::Int) => "Int",
-        FieldKind::Scalar(ScalarKind::Float64 | ScalarKind::Float32) => "Float",
-        FieldKind::Scalar(ScalarKind::String) => "String",
-        FieldKind::Scalar(ScalarKind::DateTime) => "DateTime",
-        FieldKind::Scalar(ScalarKind::DocID) => "ID",
+    match kind.as_scalar().map(ScalarKind::base_kind) {
+        Some(ScalarKind::Bool) => "Boolean",
+        Some(ScalarKind::Int) => "Int",
+        Some(ScalarKind::Float64 | ScalarKind::Float32) => "Float",
+        Some(ScalarKind::String) => "String",
+        Some(ScalarKind::DateTime) => "DateTime",
+        Some(ScalarKind::DocID) => "ID",
         _ => "Any",
     }
 }

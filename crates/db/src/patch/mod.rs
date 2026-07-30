@@ -175,6 +175,7 @@ impl<S: Store> crate::database::DB<S> {
             && new_schema.fields == old_schema.fields
             && new_schema.name == old_schema.name
             && new_schema.is_active == old_schema.is_active
+            && new_schema.query == old_schema.query
             && new_schema.previous_version == old_schema.previous_version;
 
         if is_deactivation

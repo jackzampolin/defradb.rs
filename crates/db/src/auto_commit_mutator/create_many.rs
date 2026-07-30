@@ -271,6 +271,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             )));
         }
 
+        for (doc_id, ..) in &results {
+            self.register_created_doc_with_acp(&collection, &doc_id.to_string())
+                .await?;
+        }
+
         // Emit events and build results
         let mut create_results = Vec::with_capacity(results.len());
         for (doc_id, doc, cid, block, col_data) in results {

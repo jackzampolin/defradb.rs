@@ -119,18 +119,15 @@ impl<S: Store> crate::database::DB<S> {
                 "collection name required: pass at least one name to delete".into(),
             ));
         }
+        if names.iter().any(String::is_empty) {
+            return Err(Error::InvalidPatch("collection name can't be empty".into()));
+        }
 
         let mut seen_names = std::collections::HashSet::new();
         let unique_names: Vec<String> = names
             .into_iter()
-            .filter(|n| !n.is_empty() && seen_names.insert(n.clone()))
+            .filter(|n| seen_names.insert(n.clone()))
             .collect();
-
-        if unique_names.is_empty() {
-            return Err(Error::InvalidPatch(
-                "collection name required: every supplied name was empty".into(),
-            ));
-        }
 
         let mut version_ids: Vec<String> = Vec::new();
         let mut seen_versions = std::collections::HashSet::new();

@@ -14,7 +14,7 @@ pub fn field_kind_to_pg_type(kind: &FieldKind) -> Type {
 }
 
 fn scalar_to_pg_type(kind: ScalarKind) -> Type {
-    match kind {
+    match kind.base_kind() {
         ScalarKind::None => Type::TEXT,
         ScalarKind::DocID => Type::TEXT,
         ScalarKind::Bool => Type::BOOL,

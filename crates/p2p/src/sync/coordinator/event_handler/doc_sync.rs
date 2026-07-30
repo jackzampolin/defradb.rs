@@ -382,41 +382,42 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             let blockstore = self.manager.blockstore().clone();
             let event_tx = self.manager.event_sender();
             let limiter = self.runtime.dag_fetch_limiter.clone();
+            let source_peer = peer_id.clone();
+            let explicit_replicator_collections =
+                self.access.replicators.get_collections(peer_id.as_str());
 
-            for (root_cid, doc_id) in cids_to_fetch {
-                tracing::debug!(
-                    cid = %root_cid,
-                    doc_id = %doc_id,
-                    "Spawning poll-based DAG fetcher for DocSync"
-                );
-
-                let transport = transport.clone();
-                let blockstore = blockstore.clone();
-                let event_tx = event_tx.clone();
-                let limiter = limiter.clone();
-                let source_peer = peer_id.clone();
-                let explicit_replicator_collections =
-                    self.access.replicators.get_collections(peer_id.as_str());
-
-                self.spawn_background_task("doc_sync_reply_fetch_dag", async move {
+            self.spawn_background_task("doc_sync_reply_fetch_dags", async move {
+                for (root_cid, doc_id) in cids_to_fetch {
+                    tracing::debug!(
+                        cid = %root_cid,
+                        doc_id = %doc_id,
+                        "Fetching DocSync DAG"
+                    );
                     let alternate_providers =
                         super::super::dag_fetcher::connected_alternate_providers(
                             &transport, &root_cid,
                         )
                         .await;
                     super::super::dag_fetcher::poll_fetch_dag(
-                        transport,
-                        blockstore,
-                        event_tx,
+                        transport.clone(),
+                        blockstore.clone(),
+                        event_tx.clone(),
                         root_cid,
-                        DagFetchContext::new(doc_id, String::new(), String::new(), source_peer)
-                            .with_alternate_providers(alternate_providers)
-                            .with_explicit_replicator_collections(explicit_replicator_collections),
-                        limiter,
+                        DagFetchContext::new(
+                            doc_id,
+                            String::new(),
+                            String::new(),
+                            source_peer.clone(),
+                        )
+                        .with_alternate_providers(alternate_providers)
+                        .with_explicit_replicator_collections(
+                            explicit_replicator_collections.clone(),
+                        ),
+                        limiter.clone(),
                     )
                     .await;
-                });
-            }
+                }
+            });
         } else {
             tracing::debug!("No blocks to fetch from DocSync reply (all local)");
         }

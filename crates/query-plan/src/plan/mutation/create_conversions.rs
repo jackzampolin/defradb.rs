@@ -141,37 +141,58 @@ pub fn json_to_normal_value_with_kind_and_time(
     // If we have schema information, use it for type coercion
     if let Some(kind) = field_kind {
         match kind {
-            // JSON fields: wrap ALL values as JSON
-            FieldKind::Scalar(ScalarKind::Json) => Ok(NormalValue::Json(value.clone())),
-            // DateTime fields: parse RFC 3339 strings or special values like UTC_NOW.
-            // The string/number → Time mapping is delegated to the shared `document`
-            // converter so the create and reindex paths cannot drift.
-            FieldKind::Scalar(ScalarKind::DateTime) => {
-                if let JsonValue::String(s) = value {
-                    if s == "UTC_NOW" {
-                        let time = request_time.unwrap_or_else(|| {
-                            let utc_offset = FixedOffset::east_opt(0).unwrap();
-                            Utc::now().with_timezone(&utc_offset)
-                        });
-                        return Ok(NormalValue::Time(time));
+            FieldKind::Scalar(scalar) => match scalar.base_kind() {
+                // JSON fields: wrap ALL values as JSON
+                ScalarKind::Json => Ok(NormalValue::Json(value.clone())),
+                // DateTime fields: parse RFC 3339 strings or special values like UTC_NOW.
+                // The string/number → Time mapping is delegated to the shared `document`
+                // converter so the create and reindex paths cannot drift.
+                ScalarKind::DateTime => {
+                    if let JsonValue::String(s) = value {
+                        if s == "UTC_NOW" {
+                            let time = request_time.unwrap_or_else(|| {
+                                let utc_offset = FixedOffset::east_opt(0).unwrap();
+                                Utc::now().with_timezone(&utc_offset)
+                            });
+                            return Ok(NormalValue::Time(time));
+                        }
                     }
+                    document::encoding::json_to_normal_value_for_kind(value, scalar).ok_or_else(
+                        || match value {
+                            JsonValue::String(s) => QueryError::execution(format!(
+                                "Invalid DateTime format '{}': expected RFC 3339 (e.g., '2024-01-15T10:30:00Z')",
+                                s
+                            )),
+                            JsonValue::Number(_) => QueryError::execution(format!(
+                                "Expected DateTime string or Unix timestamp, got: {:?}",
+                                value
+                            )),
+                            _ => QueryError::execution(format!(
+                                "Expected DateTime string, got: {:?}",
+                                value
+                            )),
+                        },
+                    )
                 }
-                document::encoding::json_to_normal_value_for_kind(value, &ScalarKind::DateTime)
-                    .ok_or_else(|| match value {
-                        JsonValue::String(s) => QueryError::execution(format!(
-                            "Invalid DateTime format '{}': expected RFC 3339 (e.g., '2024-01-15T10:30:00Z')",
-                            s
-                        )),
-                        JsonValue::Number(_) => QueryError::execution(format!(
-                            "Expected DateTime string or Unix timestamp, got: {:?}",
-                            value
-                        )),
-                        _ => QueryError::execution(format!(
-                            "Expected DateTime string, got: {:?}",
-                            value
-                        )),
-                    })
-            }
+                // Float fields: convert integers to the declared float representation.
+                ScalarKind::Float64 | ScalarKind::Float32 => {
+                    document::encoding::json_to_normal_value_for_kind(value, scalar).ok_or_else(
+                        || {
+                            QueryError::execution(format!(
+                                "Expected number for {} field, got: {:?}",
+                                if scalar.base_kind() == ScalarKind::Float64 {
+                                    "Float64"
+                                } else {
+                                    "Float32"
+                                },
+                                value
+                            ))
+                        },
+                    )
+                }
+                // For other scalar types, fall through to default conversion.
+                _ => json_to_normal_value(value),
+            },
             // ScalarArray fields
             FieldKind::ScalarArray(array_kind) => match value {
                 JsonValue::Array(arr) => json_array_to_normal_value_with_kind(arr, *array_kind),
@@ -180,27 +201,6 @@ pub fn json_to_normal_value_with_kind_and_time(
                     value
                 ))),
             },
-            // Float64 fields: convert integers to float64
-            FieldKind::Scalar(ScalarKind::Float64) => {
-                document::encoding::json_to_normal_value_for_kind(value, &ScalarKind::Float64)
-                    .ok_or_else(|| {
-                        QueryError::execution(format!(
-                            "Expected number for Float64 field, got: {:?}",
-                            value
-                        ))
-                    })
-            }
-            // Float32 fields: convert integers to float32
-            FieldKind::Scalar(ScalarKind::Float32) => {
-                document::encoding::json_to_normal_value_for_kind(value, &ScalarKind::Float32)
-                    .ok_or_else(|| {
-                        QueryError::execution(format!(
-                            "Expected number for Float32 field, got: {:?}",
-                            value
-                        ))
-                    })
-            }
-            // For other scalar types, fall through to default conversion
             _ => json_to_normal_value(value),
         }
     } else {
@@ -379,6 +379,47 @@ fn json_array_to_normal_value_with_kind(
             }
             Ok(NormalValue::NillableStringElementArray(strings))
         }
+        ScalarArrayKind::DateTimeArray => {
+            let times = arr
+                .iter()
+                .enumerate()
+                .map(|(i, value)| match value {
+                    JsonValue::String(value) => DateTime::parse_from_rfc3339(value).map_err(|_| {
+                        QueryError::execution(format!(
+                            "Array element at index {} is not a valid DateTime",
+                            i
+                        ))
+                    }),
+                    _ => Err(QueryError::execution(format!(
+                        "Array element at index {} is not a DateTime string (found {:?})",
+                        i, value
+                    ))),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(NormalValue::TimeArray(times))
+        }
+        ScalarArrayKind::NillableDateTimeArray => {
+            let times = arr
+                .iter()
+                .enumerate()
+                .map(|(i, value)| match value {
+                    JsonValue::String(value) => {
+                        DateTime::parse_from_rfc3339(value).map(Some).map_err(|_| {
+                            QueryError::execution(format!(
+                                "Array element at index {} is not a valid DateTime",
+                                i
+                            ))
+                        })
+                    }
+                    JsonValue::Null => Ok(None),
+                    _ => Err(QueryError::execution(format!(
+                        "Array element at index {} is not a DateTime string (found {:?})",
+                        i, value
+                    ))),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(NormalValue::NillableTimeElementArray(times))
+        }
         _ => Err(QueryError::Execution(format!(
             "unsupported array kind: {:?}",
             array_kind
@@ -475,6 +516,20 @@ pub fn normal_value_to_json(value: &document::NormalValue) -> JsonValue {
                 .map(|t| JsonValue::String(t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)))
                 .collect(),
         ),
+        NormalValue::NillableTimeArray(arr) => arr
+            .as_ref()
+            .map(|arr| {
+                JsonValue::Array(
+                    arr.iter()
+                        .map(|time| {
+                            JsonValue::String(
+                                time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .unwrap_or(JsonValue::Null),
         NormalValue::NillableBoolElementArray(arr) => JsonValue::Array(
             arr.iter()
                 .map(|opt| match opt {
@@ -528,6 +583,19 @@ pub fn normal_value_to_json(value: &document::NormalValue) -> JsonValue {
                 .map(|opt| match opt {
                     Some(s) => JsonValue::String(s.clone()),
                     None => JsonValue::Null,
+                })
+                .collect(),
+        ),
+        NormalValue::NillableTimeElementArray(arr) => JsonValue::Array(
+            arr.iter()
+                .map(|time| {
+                    time.as_ref()
+                        .map(|time| {
+                            JsonValue::String(
+                                time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+                            )
+                        })
+                        .unwrap_or(JsonValue::Null)
                 })
                 .collect(),
         ),

@@ -168,13 +168,14 @@ impl<S: Store> crate::database::DB<S> {
             .collect();
 
         // Generate new version_id from schema content with headstore heads and priority
-        let new_version_id = Self::generate_patch_version_id_with_heads(
-            &mut new_schema,
-            old_schema,
-            collection_priority,
-            &collection_heads,
-            &collection_id_map,
-        );
+        let (new_version_id, query_select, query_transform) =
+            Self::generate_patch_version_id_with_heads(
+                &mut new_schema,
+                old_schema,
+                collection_priority,
+                &collection_heads,
+                &collection_id_map,
+            );
 
         // Update new schema with version info
         new_schema.version_id = new_version_id.clone();
@@ -419,11 +420,13 @@ impl<S: Store> crate::database::DB<S> {
             } else {
                 None
             };
-            match schema::generate_collection_block_full(
+            match schema::generate_collection_block_full_with_query(
                 col_name,
                 &field_cids,
                 collection_priority,
                 &collection_heads,
+                query_select.as_deref(),
+                query_transform.as_ref(),
             ) {
                 Ok(block_with_cid) => {
                     blockstore
