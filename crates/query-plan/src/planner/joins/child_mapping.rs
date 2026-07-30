@@ -5,6 +5,30 @@ use schema::CollectionVersion;
 use query_types::document::DocumentMapping;
 use query_types::mapper::{Filter, Requestable, Select};
 
+pub(super) fn add_rendered_field(
+    mapping: &mut DocumentMapping,
+    collection: &CollectionVersion,
+    field_name: &str,
+) {
+    let Some(index) = collection
+        .fields
+        .iter()
+        .position(|field| field.name == field_name)
+    else {
+        return;
+    };
+    if mapping.first_index_of_name(field_name).is_none() {
+        mapping.add(index, field_name);
+    }
+    if !mapping
+        .render_keys
+        .iter()
+        .any(|render_key| render_key.key == field_name)
+    {
+        mapping.add_render_key(index, field_name);
+    }
+}
+
 /// Enrich child_scan_mapping with fields needed by aggregates that target this relation.
 ///
 /// For example, `_count(published: {filter: {rating: {_gt: 4.8}}})` needs the `rating`
@@ -70,6 +94,11 @@ pub(super) fn enrich_child_scan_mapping_from_aggregates(
                             {
                                 child_scan_mapping.add_render_key(idx, field_name);
                             }
+                        }
+                    }
+                    if let Some(ref group_by) = target.group_by {
+                        for field_name in &group_by.fields {
+                            add_rendered_field(child_scan_mapping, target_collection, field_name);
                         }
                     }
                 }

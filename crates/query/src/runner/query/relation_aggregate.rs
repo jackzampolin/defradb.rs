@@ -269,7 +269,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 // Step 4: Compute aggregate over final items
                                 match agg_type {
                                     AggregateType::Count => {
-                                        total_count += final_items.len() as i64;
+                                        if let Some(group_by) = &target.group_by {
+                                            let groups = final_items
+                                                .iter()
+                                                .map(|item| {
+                                                    JsonValue::Array(
+                                                        group_by
+                                                            .fields
+                                                            .iter()
+                                                            .map(|field| {
+                                                                item.as_object()
+                                                                    .and_then(|obj| obj.get(field))
+                                                                    .cloned()
+                                                                    .unwrap_or(JsonValue::Null)
+                                                            })
+                                                            .collect(),
+                                                    )
+                                                    .to_string()
+                                                })
+                                                .collect::<std::collections::HashSet<_>>();
+                                            total_count += groups.len() as i64;
+                                        } else {
+                                            total_count += final_items.len() as i64;
+                                        }
                                     }
                                     AggregateType::Sum | AggregateType::Average => {
                                         for item in &final_items {
