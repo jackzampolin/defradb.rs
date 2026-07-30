@@ -162,8 +162,30 @@ impl PlanNode for DeleteNode {
         // On first call, perform all deletions
         if !self.did_delete {
             if let Some(ref ids) = self.doc_ids {
+                let mut parsed_ids = Vec::with_capacity(ids.len());
+                for doc_id_str in ids {
+                    match DocID::from_string(doc_id_str) {
+                        Ok(doc_id) => parsed_ids.push((doc_id_str.clone(), doc_id)),
+                        Err(_) => {
+                            tracing::warn!(
+                                collection = %self.collection_name,
+                                doc_id = %doc_id_str,
+                                "Invalid DocID format - skipping"
+                            );
+                            self.not_found_ids.push(doc_id_str.clone());
+                        }
+                    }
+                }
+
                 // Explicit doc_ids: fetch documents first to populate result fields
-                let fetch_result = self.fetcher.get_by_ids(&self.collection_name, ids).await?;
+                let valid_ids = parsed_ids
+                    .iter()
+                    .map(|(doc_id, _)| doc_id.clone())
+                    .collect::<Vec<_>>();
+                let fetch_result = self
+                    .fetcher
+                    .get_by_ids(&self.collection_name, &valid_ids)
+                    .await?;
 
                 // Build a map from doc_id -> Document for lookup
                 let mut doc_map: std::collections::HashMap<String, document::Document> =
@@ -174,18 +196,14 @@ impl PlanNode for DeleteNode {
                     }
                 }
 
-                for doc_id_str in ids {
-                    let doc_id = DocID::from_string(doc_id_str).map_err(|e| {
-                        QueryError::execution(format!("Invalid DocID '{}': {}", doc_id_str, e))
-                    })?;
-
+                for (doc_id_str, doc_id) in parsed_ids {
                     let result = self.mutator.delete(&self.collection_name, &doc_id).await?;
 
                     if result.existed {
-                        let plan_doc = if let Some(storage_doc) = doc_map.get(doc_id_str) {
+                        let plan_doc = if let Some(storage_doc) = doc_map.get(&doc_id_str) {
                             self.create_deleted_doc_from_document(storage_doc)?
                         } else {
-                            self.create_deleted_doc(doc_id_str)
+                            self.create_deleted_doc(&doc_id_str)
                         };
                         self.deleted_docs.push(plan_doc);
                     } else {
