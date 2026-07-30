@@ -645,6 +645,8 @@ impl TypeJoinMany {
                 });
             }
 
+            self.record_child_limit_iterations(all_children.len());
+
             // Defer limit/offset to QueryRunner::apply_relation_limits so relation
             // aggregates (_count/_sum/etc.) and parent ordering can observe the full
             // ordered child scope, matching the cached TypeJoinMany path.

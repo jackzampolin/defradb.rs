@@ -33,7 +33,7 @@ pub struct ScanNode {
     document_mapping: DocumentMapping,
     /// Optional filter to apply during scan
     filter: Option<Filter>,
-    /// Optional document IDs to scan (for explain prefixes)
+    /// Optional document IDs supplied separately from the scan filter
     doc_ids: Option<Vec<String>>,
     /// Whether to show deleted documents
     show_deleted: bool,
@@ -90,7 +90,7 @@ impl ScanNode {
         self
     }
 
-    /// Set the document IDs for this scan (used in explain prefixes)
+    /// Set document IDs supplied separately from the scan filter.
     pub fn with_doc_ids(mut self, doc_ids: Vec<String>) -> Self {
         // Only set if non-empty; empty means scan entire collection
         if !doc_ids.is_empty() {
@@ -275,14 +275,10 @@ impl PlanNode for ScanNode {
             serde_json::Value::String(self.collection.version_id.clone()),
         );
 
-        // Go DefraDB format: always include prefixes
-        // When docIDs are provided, each prefix is "/<collection_prefix>/<docID>"
-        // Otherwise just "/<collection_prefix>"
-        let prefixes: Vec<String> = if let Some(ref doc_ids) = self.doc_ids {
-            doc_ids
-                .iter()
-                .map(|id| format!("/{}/{}", self.collection_prefix(), id))
-                .collect()
+        // Go keeps document IDs on the select node and hides the optimized
+        // per-document storage prefixes from the public explain result.
+        let prefixes = if self.doc_ids.is_some() {
+            Vec::new()
         } else {
             vec![format!("/{}", self.collection_prefix())]
         };
@@ -373,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn explain_strips_docid_filter_when_doc_id_prefix_scan_is_present() {
+    fn explain_strips_docid_filter_when_doc_ids_are_supplied_separately() {
         let filter = Filter::from_conditions(serde_json::Map::from_iter([
             ("_docID".to_string(), json!({"_eq": "doc-1"})),
             ("name".to_string(), json!({"_eq": "Alice"})),
@@ -388,6 +384,6 @@ mod tests {
             explain["scanNode"]["filter"],
             json!({"name": {"_eq": "Alice"}})
         );
-        assert!(explain["scanNode"]["prefixes"].is_array());
+        assert_eq!(explain["scanNode"]["prefixes"], json!([]));
     }
 }
