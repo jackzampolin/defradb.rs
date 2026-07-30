@@ -86,8 +86,9 @@ pub(super) fn parse_aggregate_target_obj(
     arg_name: &str,
     obj: &std::collections::BTreeMap<String, Value<'_, String>>,
     variables: Option<&HashMap<String, JsonValue>>,
-) -> Result<AggregateTarget> {
+) -> Result<(AggregateTarget, Option<GroupBy>)> {
     let mut target = AggregateTarget::new(arg_name.to_string());
+    let mut group_by = None;
     for (key, val) in obj {
         match key.as_str() {
             "field" => {
@@ -133,10 +134,13 @@ pub(super) fn parse_aggregate_target_obj(
                 };
                 target.order = Some(order);
             }
+            "groupBy" => {
+                group_by = Some(parse_group_by_value(val, variables)?);
+            }
             _ => {}
         }
     }
-    Ok(target)
+    Ok((target, group_by))
 }
 
 /// Parse an aggregate target from a resolved JSON variable value.
@@ -144,8 +148,9 @@ pub(super) fn parse_aggregate_target_from_json(
     arg_name: &str,
     json: &JsonValue,
     _variables: Option<&HashMap<String, JsonValue>>,
-) -> Result<AggregateTarget> {
+) -> Result<(AggregateTarget, Option<GroupBy>)> {
     let mut target = AggregateTarget::new(arg_name.to_string());
+    let mut group_by = None;
     if let JsonValue::Object(obj) = json {
         for (key, val) in obj {
             match key.as_str() {
@@ -177,11 +182,24 @@ pub(super) fn parse_aggregate_target_from_json(
                 "order" => {
                     target.order = Some(parse_order_from_json(val)?);
                 }
+                "groupBy" => {
+                    let fields =
+                        val.as_array()
+                            .ok_or_else(|| QueryError::parse("groupBy must be a list"))?
+                            .iter()
+                            .map(|field| {
+                                field.as_str().map(str::to_owned).ok_or_else(|| {
+                                    QueryError::parse("groupBy items must be strings")
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                    group_by = Some(GroupBy::new(fields));
+                }
                 _ => {}
             }
         }
     }
-    Ok(target)
+    Ok((target, group_by))
 }
 
 /// Parse an aggregate field into an Aggregate.
@@ -192,9 +210,10 @@ pub(super) fn parse_aggregate_field(
     field: &Field<'_, String>,
     agg_type: AggregateType,
     variables: Option<&HashMap<String, JsonValue>>,
-) -> Result<Aggregate> {
+) -> Result<(Aggregate, Vec<Option<GroupBy>>)> {
     let mut target_field: Option<String> = None;
     let mut relation_targets: Vec<AggregateTarget> = Vec::new();
+    let mut target_groups = Vec::new();
 
     // Parse arguments (e.g., `field: "age"` for _sum, or `books: {}` for relation aggregates)
     for (arg_name, arg_value) in &field.arguments {
@@ -232,8 +251,10 @@ pub(super) fn parse_aggregate_field(
                 // Also handle variables that resolve to objects.
                 match arg_value {
                     Value::Object(obj) => {
-                        let target = parse_aggregate_target_obj(arg_name, obj, variables)?;
+                        let (target, group_by) =
+                            parse_aggregate_target_obj(arg_name, obj, variables)?;
                         relation_targets.push(target);
+                        target_groups.push(group_by);
                     }
                     Value::Variable(name) => {
                         let vars = variables.ok_or_else(|| {
@@ -245,9 +266,10 @@ pub(super) fn parse_aggregate_field(
                         let json_val = vars.get(name).ok_or_else(|| {
                             QueryError::parse(format!("Variable \"${}\" was not provided", name))
                         })?;
-                        let target =
+                        let (target, group_by) =
                             parse_aggregate_target_from_json(arg_name, json_val, variables)?;
                         relation_targets.push(target);
+                        target_groups.push(group_by);
                     }
                     _ => {
                         return Err(QueryError::parse(format!(
@@ -308,7 +330,42 @@ pub(super) fn parse_aggregate_field(
         }
     };
 
-    Ok(aggregate)
+    Ok((aggregate, target_groups))
+}
+
+pub(super) fn grouped_relation_selects(
+    aggregate: &mut Aggregate,
+    target_groups: Vec<Option<GroupBy>>,
+) -> Vec<Requestable> {
+    let output_name = aggregate.output_name().to_string();
+    aggregate
+        .targets
+        .iter_mut()
+        .zip(target_groups)
+        .filter_map(|(target, group_by)| {
+            let group_by = group_by?;
+            let internal_key = format!("__agg_{}_{}", target.host_name, output_name);
+            target.internal_key = Some(internal_key.clone());
+
+            let mut select = Select::new(&target.host_name);
+            select.field = SelectField::with_alias(&target.host_name, internal_key);
+            select.filter = target.filter.clone();
+            select.limit = target.limit.clone();
+            select.order_by = target.order.clone();
+            select.group_by = Some(group_by.clone());
+
+            for field_name in group_by.fields {
+                let index = select.document_mapping.next_index();
+                select.document_mapping.add(index, &field_name);
+                select.document_mapping.add_render_key(index, &field_name);
+                select
+                    .fields
+                    .push(Requestable::Field(SelectField::new(field_name)));
+            }
+
+            Some(Requestable::Select(Box::new(select)))
+        })
+        .collect()
 }
 
 /// Parse a top-level aggregate query (e.g., `{ _avg(Users: {field: Age}) }`).
@@ -322,7 +379,7 @@ pub(super) fn parse_top_level_aggregate(
     agg_type: AggregateType,
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<Select> {
-    let mut aggregate = parse_aggregate_field(field, agg_type, variables)?;
+    let (mut aggregate, target_groups) = parse_aggregate_field(field, agg_type, variables)?;
 
     // Top-level numeric aggregates require a field argument on each target.
     // This matches Go's GraphQL schema validation where collection args require
@@ -380,6 +437,7 @@ pub(super) fn parse_top_level_aggregate(
         .document_mapping
         .add_render_key(index, aggregate.output_name());
 
+    select.group_by = target_groups.into_iter().next().flatten();
     select.fields.push(Requestable::Aggregate(aggregate));
 
     Ok(select)

@@ -40,6 +40,9 @@ impl Planner {
                     if target.host_name.is_empty() {
                         continue;
                     }
+                    if target.internal_key.is_some() {
+                        continue;
+                    }
 
                     let relation_field_name = &target.host_name;
 
@@ -228,7 +231,6 @@ impl Planner {
                             child_mapping.add_render_key(idx, field_name);
                         }
                     }
-
                     // Add fields referenced by the filter so they appear in the output
                     // for post-processing filter evaluation
                     if let Some(ref filter) = target.filter {

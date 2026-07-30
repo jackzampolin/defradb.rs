@@ -12,9 +12,10 @@ use crate::plan::{IndexScanNode, JoinSide, RelationFilter, ScanNode, TypeJoinMan
 use crate::planner::PlanNode;
 use query_types::document::DocumentMapping;
 use query_types::error::Result;
-use query_types::mapper::{Requestable, Select};
+use query_types::mapper::Select;
 
 use super::super::builder::Planner;
+use super::selection;
 
 impl Planner {
     /// Handle relation filters without corresponding selections.
@@ -37,11 +38,7 @@ impl Planner {
         // Get relations referenced by the filter
         for (relation_name, nested_conditions) in filter.relation_conditions() {
             // Skip if already joined via selection
-            let already_joined = select
-                .fields
-                .iter()
-                .any(|f| matches!(f, Requestable::Select(s) if s.field.name == relation_name));
-            if already_joined {
+            if selection::contains_relation_select(select, &relation_name) {
                 continue;
             }
 

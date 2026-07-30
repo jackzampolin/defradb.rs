@@ -8,6 +8,7 @@ use crate::fetcher::{DocFetcher, FetchByIdsResult, IndexScanResult};
 use crate::planner::{Doc, IndexScanParams, IndexScanType, PlanNode};
 use query_types::document::DocumentMapping;
 use query_types::error::Result;
+use query_types::mapper::GroupBy;
 
 use super::super::JoinSide;
 use super::node::TypeJoinMany;
@@ -326,6 +327,18 @@ async fn child_limit_iterations_include_terminal_call_per_parent() {
 
         assert_eq!(join.child_limit_iterations, 4);
     }
+}
+
+#[tokio::test]
+async fn grouped_join_debug_explain_includes_group_node() {
+    let join = build_join(false)
+        .await
+        .with_group_by(GroupBy::new(vec!["title".to_string()]));
+
+    assert!(join
+        .explain_debug()
+        .pointer("/typeIndexJoin/typeJoinMany/subType/selectTopNode/groupNode/selectNode/pipeNode/mockPlan")
+        .is_some());
 }
 
 #[tokio::test]

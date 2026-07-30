@@ -9,6 +9,17 @@ use query_types::mapper::{Field, Requestable, Select};
 
 use super::shared::SelectionJoinInfo;
 
+pub(super) fn contains_relation_select(select: &Select, relation_name: &str) -> bool {
+    select.fields.iter().any(|field| match field {
+        Requestable::Select(nested) if nested.field.name == relation_name => true,
+        Requestable::Select(group) if group.field.name == "GROUP" => group
+            .fields
+            .iter()
+            .any(|field| matches!(field, Requestable::Select(nested) if nested.field.name == relation_name)),
+        _ => false,
+    })
+}
+
 /// Collect nested Select items to process for joins, including those inside `_group`.
 ///
 /// Returns tuples of `(select, _group_index if from inside _group)`.
