@@ -13,8 +13,8 @@ use crate::host::event::HostEvent;
 impl<S: Store> P2PHost<S> {
     /// Handle a swarm event.
     ///
-    /// Returns `true` when the event added a peer address and should refresh
-    /// the DHT after the current connection burst.
+    /// Returns `true` when the event added a peer address that may unblock the
+    /// one-time initial DHT bootstrap.
     pub(super) async fn handle_swarm_event(&mut self, event: SwarmEvent<DefraEvent>) -> bool {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
@@ -58,7 +58,7 @@ impl<S: Store> P2PHost<S> {
                 // Add peer to Kademlia before any scheduled bootstrap. Kademlia's own
                 // ConnectionEstablished handler doesn't add peers to the
                 // routing table until protocol negotiation completes (async).
-                // We add the address now so the topology-change or periodic
+                // We add the address now so the initial or periodic
                 // bootstrap has at least one peer to query.
                 self.swarm
                     .behaviour_mut()
