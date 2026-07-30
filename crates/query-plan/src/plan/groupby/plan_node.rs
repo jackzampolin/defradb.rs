@@ -38,12 +38,17 @@ impl PlanNode for GroupByNode {
         // can create new groups, so the group ordering depends on which source
         // encounters a new group key first. We replicate this interleaving here.
         //
+        // The interleaving only applies when _group has a simple order (no inner
+        // groupBy). When _group has a groupBy, Go's child source yields grouped
+        // results (fewer items) with different interleaving semantics.
         let group_order = self.group_aliases.first().and_then(|a| a.order.clone());
-        let has_group_order = group_order.as_ref().is_some_and(|o| !o.is_empty());
+        let has_simple_group_order = group_order
+            .as_ref()
+            .is_some_and(|o| !o.is_empty() && self.inner_group_by_fields.is_empty());
         let mut ordered_keys: Vec<String> = Vec::new();
         let mut key_set: HashSet<String> = HashSet::new();
 
-        if !has_group_order {
+        if !has_simple_group_order {
             let mut group_map: HashMap<String, usize> = HashMap::with_capacity(all_docs.len());
             self.groups.reserve(all_docs.len());
 
@@ -70,7 +75,7 @@ impl PlanNode for GroupByNode {
             return Ok(());
         }
 
-        if has_group_order {
+        if has_simple_group_order {
             let order = group_order.as_ref().unwrap();
             if !all_docs.is_empty() {
                 // Sort indices by _group order (child order)
@@ -96,45 +101,16 @@ impl PlanNode for GroupByNode {
                     std::cmp::Ordering::Equal
                 });
 
-                let child_indices = if self.inner_group_by_fields.is_empty() {
-                    sorted_indices
-                } else {
-                    let mut child_group_fields = self.inner_group_by_fields.clone();
-                    for field in &self.group_by.fields {
-                        if !child_group_fields.contains(field) {
-                            child_group_fields.push(field.clone());
-                        }
+                // Interleave parent (scan order) and child (sorted order)
+                for i in 0..all_docs.len() {
+                    let parent_key = self.generate_key(&all_docs[i])?;
+                    if key_set.insert(parent_key.clone()) {
+                        ordered_keys.push(parent_key);
                     }
 
-                    let mut child_group_keys = HashSet::new();
-                    let mut grouped_indices = Vec::new();
-                    for index in sorted_indices {
-                        let key =
-                            self.generate_key_for_fields(&child_group_fields, &all_docs[index])?;
-                        if child_group_keys.insert(key) {
-                            grouped_indices.push(index);
-                        }
-                    }
-                    grouped_indices
-                };
-
-                let mut parent_index = 0;
-                let mut child_index = 0;
-                while parent_index < all_docs.len() || child_index < child_indices.len() {
-                    if let Some(parent) = all_docs.get(parent_index) {
-                        let key = self.generate_key(parent)?;
-                        if key_set.insert(key.clone()) {
-                            ordered_keys.push(key);
-                        }
-                        parent_index += 1;
-                    }
-
-                    if let Some(index) = child_indices.get(child_index) {
-                        let key = self.generate_key(&all_docs[*index])?;
-                        if key_set.insert(key.clone()) {
-                            ordered_keys.push(key);
-                        }
-                        child_index += 1;
+                    let child_key = self.generate_key(&all_docs[sorted_indices[i]])?;
+                    if key_set.insert(child_key.clone()) {
+                        ordered_keys.push(child_key);
                     }
                 }
             }

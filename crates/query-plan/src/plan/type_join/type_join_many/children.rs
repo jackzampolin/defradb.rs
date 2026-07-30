@@ -27,7 +27,8 @@ impl TypeJoinMany {
 
         let mut children: Vec<Doc> = docs.iter().map(|d| d.deep_clone()).collect();
 
-        // Apply explicit ordering; otherwise retain datastore scan order.
+        // Apply ordering if specified, otherwise default to _docID order
+        // for deterministic results matching Go DefraDB's storage scan order.
         if let Some(ref order_by) = self.child_order_by {
             let child_mapping = self.child_plan.document_map();
             children.sort_by(|a, b| {
@@ -64,6 +65,9 @@ impl TypeJoinMany {
                 }
                 Ordering::Equal
             });
+        } else {
+            // Default: sort by _docID (index 0) for deterministic ordering
+            children.sort_by(|a, b| compare_json_values(a.get(0), b.get(0)));
         }
 
         // NOTE: Limit/offset are NOT applied here. They are applied in the runner's

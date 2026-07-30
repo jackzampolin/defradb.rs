@@ -362,15 +362,7 @@ impl TypeJoinMany {
             select_node_content
         };
 
-        if self.child_group_by.is_some() && !has_order && !has_limit {
-            inner_content = serde_json::json!({
-                "groupNode": {
-                    "selectNode": {
-                        "pipeNode": inner_content
-                    }
-                }
-            });
-        } else if has_order && !(has_limit && nested_uses_orphan) {
+        if has_order && !(has_limit && nested_uses_orphan) {
             // Wrap selectNode in orderNode first (debug mode: no attributes, just structure)
             let mut order_node_content = serde_json::Map::new();
             order_node_content.insert(

@@ -15,7 +15,6 @@ use query_types::error::Result;
 use query_types::mapper::{AggregateType, Filter, Requestable, Select};
 
 use super::super::builder::Planner;
-use super::child_mapping::add_rendered_field;
 use super::SelectionJoinInfo;
 
 impl Planner {
@@ -208,18 +207,6 @@ impl Planner {
                                 }
                             }
                         }
-                        if let Some(ref group_by) = target.group_by {
-                            if let Some(child_mapping) = mapping.child_at_mut(relation_field_index)
-                            {
-                                for field_name in &group_by.fields {
-                                    add_rendered_field(
-                                        child_mapping,
-                                        &target_collection,
-                                        field_name,
-                                    );
-                                }
-                            }
-                        }
                         continue;
                     }
 
@@ -239,11 +226,6 @@ impl Planner {
                         {
                             child_mapping.add(idx, field_name);
                             child_mapping.add_render_key(idx, field_name);
-                        }
-                    }
-                    if let Some(ref group_by) = target.group_by {
-                        for field_name in &group_by.fields {
-                            add_rendered_field(&mut child_mapping, &target_collection, field_name);
                         }
                     }
 

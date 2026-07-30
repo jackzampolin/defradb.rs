@@ -4,7 +4,6 @@ use acp::{DocumentPermission, Identity};
 use identity::Did;
 use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::document::documents_to_plan_docs;
@@ -101,30 +100,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 // Compute the aggregate value
                 let value = match agg.aggregate_type {
                     crate::mapper::AggregateType::Count => {
-                        let count = if let Some(group_by) = &select.group_by {
-                            filtered_docs
-                                .iter()
-                                .map(|doc| {
-                                    JsonValue::Array(
-                                        group_by
-                                            .fields
-                                            .iter()
-                                            .map(|field| {
-                                                mapping
-                                                    .first_index_of_name(field)
-                                                    .and_then(|index| doc.get(index))
-                                                    .cloned()
-                                                    .unwrap_or(JsonValue::Null)
-                                            })
-                                            .collect(),
-                                    )
-                                    .to_string()
-                                })
-                                .collect::<HashSet<_>>()
-                                .len() as i64
-                        } else {
-                            filtered_docs.len() as i64
-                        };
+                        // Count documents (optionally filtered)
+                        let count = filtered_docs.len() as i64;
                         JsonValue::Number(count.into())
                     }
                     crate::mapper::AggregateType::Sum => {

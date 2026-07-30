@@ -9,7 +9,7 @@ use acp::{DocumentPermission, Identity};
 use identity::Did;
 use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
@@ -47,7 +47,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Get expected docID from select.doc_ids (optional validation)
         let expected_doc_id = select.doc_ids.as_ref().and_then(|ids| ids.first());
-        let collection = self.get_collection(&select.collection_name).await?;
 
         // Fetch document(s) at the specified CIDs.
         // For collection-level CIDs (branchable), this returns multiple documents.
@@ -82,35 +81,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
-        // CID ownership is independent of the GraphQL collection name. Keep only
-        // documents whose historical schema belongs to the requested collection.
-        let provider = self.effective_provider();
-        let mut collection_ids = HashMap::new();
-        collection_ids.insert(
-            collection.version_id.clone(),
-            Some(collection.collection_id.clone()),
-        );
-        let mut matching_documents = Vec::with_capacity(documents.len());
-        for (document, cid) in documents {
-            let Some(version_id) = document.schema_version_id() else {
-                continue;
-            };
-            if !collection_ids.contains_key(version_id) {
-                let collection_id = provider
-                    .get_collection_by_version_id(version_id)
-                    .await?
-                    .map(|version| version.collection_id.clone());
-                collection_ids.insert(version_id.to_string(), collection_id);
-            }
-            if collection_ids
-                .get(version_id)
-                .and_then(Option::as_ref)
-                .is_some_and(|collection_id| collection_id == &collection.collection_id)
-            {
-                matching_documents.push((document, cid));
-            }
-        }
-        let documents = matching_documents;
+        // Get collection schema for building the mapping
+        let collection = self.get_collection(&select.collection_name).await?;
 
         // Apply ACP filtering: check read permission for each reconstructed document.
         // CID-based time-travel queries must enforce the same ACP rules as regular queries.

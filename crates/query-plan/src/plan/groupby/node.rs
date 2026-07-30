@@ -135,12 +135,8 @@ impl GroupByNode {
     /// Format: `{field_index}_{field_value}_` for each GROUP BY field
     /// Returns an error if any GROUP BY field is not found in the document mapping
     pub(super) fn generate_key(&self, doc: &Doc) -> Result<String> {
-        self.generate_key_for_fields(&self.group_by.fields, doc)
-    }
-
-    pub(super) fn generate_key_for_fields(&self, fields: &[String], doc: &Doc) -> Result<String> {
-        let mut key = String::with_capacity(fields.len() * 16);
-        for field_name in fields {
+        let mut key = String::with_capacity(self.group_by.fields.len() * 16);
+        for field_name in &self.group_by.fields {
             let index = self
                 .document_mapping
                 .first_index_of_name(field_name)
