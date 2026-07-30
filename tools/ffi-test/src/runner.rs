@@ -221,6 +221,9 @@ pub async fn run_tests(
             &stderr,
         )));
     }
+    if !status.success() {
+        record_package_failure(&mut test_results, package, &package_output, &stderr);
+    }
 
     // Build summary
     let mut summary = TestSummary::default();
@@ -241,6 +244,31 @@ pub async fn run_tests(
         tests,
         duration_secs,
     })
+}
+
+fn record_package_failure(
+    test_results: &mut HashMap<String, TestResult>,
+    package: &str,
+    package_output: &[String],
+    stderr: &str,
+) {
+    if test_results
+        .values()
+        .any(|result| result.status == TestStatus::Fail)
+    {
+        return;
+    }
+
+    let name = format!("{package} (go test)");
+    test_results.insert(
+        name.clone(),
+        TestResult {
+            name,
+            status: TestStatus::Fail,
+            elapsed_secs: 0.0,
+            output: vec![test_execution_error(package_output, stderr)],
+        },
+    );
 }
 
 fn test_execution_error(package_output: &[String], stderr: &str) -> String {
@@ -390,5 +418,30 @@ mod tests {
             output,
             "./adapter.go:42: undefined: list_actions\nbuild failed"
         );
+    }
+
+    #[test]
+    fn nonzero_exit_cannot_leave_named_results_green() {
+        let mut results = HashMap::from([(
+            "TestPassed".to_string(),
+            TestResult {
+                name: "TestPassed".to_string(),
+                status: TestStatus::Pass,
+                elapsed_secs: 0.1,
+                output: Vec::new(),
+            },
+        )]);
+
+        record_package_failure(
+            &mut results,
+            "query/simple",
+            &["package setup failed\n".to_string()],
+            "",
+        );
+
+        assert_eq!(results.len(), 2);
+        let package_failure = &results["query/simple (go test)"];
+        assert_eq!(package_failure.status, TestStatus::Fail);
+        assert_eq!(package_failure.output, ["package setup failed"]);
     }
 }
