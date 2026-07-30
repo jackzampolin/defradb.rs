@@ -241,6 +241,7 @@ pub struct StartArgs {
     pub p2p_transport: Option<String>,
 
     /// Address for Postgres wire protocol compatibility (e.g., "127.0.0.1:5433")
+    #[cfg(feature = "postgres")]
     #[arg(long)]
     pub pg_address: Option<String>,
 
@@ -549,6 +550,7 @@ impl StartArgs {
         if let Some(depth) = self.query_max_filter_depth {
             config.api.query_max_filter_depth = depth;
         }
+        #[cfg(feature = "postgres")]
         if let Some(ref addr) = self.pg_address {
             config.api.pg_address = addr.clone();
         }

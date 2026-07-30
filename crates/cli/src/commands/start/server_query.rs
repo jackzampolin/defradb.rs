@@ -12,6 +12,7 @@ pub(super) struct QueryRunnerSetup<S: storage::corekv::Store + 'static> {
     pub(super) runner: Arc<dyn query::executor::QueryExecutor>,
     pub(super) rest_ops: Arc<dyn query::rest::RestOperations>,
     pub(super) registry: Arc<db::DbTransactionRegistry<S>>,
+    #[cfg(feature = "postgres")]
     pub(super) collection_provider: Arc<dyn query::CollectionProvider>,
 }
 
@@ -89,6 +90,7 @@ impl Node {
             runner,
             rest_ops,
             registry,
+            #[cfg(feature = "postgres")]
             collection_provider,
         }
     }

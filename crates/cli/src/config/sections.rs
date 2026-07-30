@@ -84,6 +84,7 @@ pub struct ApiConfig {
     #[serde(default = "default_query_max_filter_depth")]
     pub query_max_filter_depth: usize,
     /// Postgres wire protocol address (empty = disabled). Default: "" (disabled).
+    #[cfg(feature = "postgres")]
     #[serde(default)]
     pub pg_address: String,
 }
@@ -138,6 +139,7 @@ impl Default for ApiConfig {
             query_max_depth: default_query_max_depth(),
             query_max_width: default_query_max_width(),
             query_max_filter_depth: default_query_max_filter_depth(),
+            #[cfg(feature = "postgres")]
             pg_address: String::new(),
         }
     }
