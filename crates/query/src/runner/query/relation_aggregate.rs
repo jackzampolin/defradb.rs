@@ -148,9 +148,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
                         // Try internal key first (when selection and aggregate use same relation),
                         // then direct relation name, then fall back to alias
-                        let relation_data = aggregate_internal_keys
-                            .get(output_name)
-                            .and_then(|(_, internal_key)| obj.get(internal_key.as_str()))
+                        let relation_data = target
+                            .internal_key
+                            .as_deref()
+                            .and_then(|internal_key| obj.get(internal_key))
+                            .or_else(|| {
+                                aggregate_internal_keys
+                                    .get(output_name)
+                                    .and_then(|(_, internal_key)| obj.get(internal_key.as_str()))
+                            })
                             .or_else(|| obj.get(relation_name.as_str()))
                             .or_else(|| {
                                 relation_alias_map
@@ -159,6 +165,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             });
                         if let Some(relation_data) = relation_data {
                             if let JsonValue::Array(items) = relation_data {
+                                if target.internal_key.is_some()
+                                    && *agg_type == AggregateType::Count
+                                {
+                                    total_count += items.len() as i64;
+                                    continue;
+                                }
+
                                 // Array data: relation or inline array aggregate
                                 // Step 1: Apply filter to array elements
                                 let filtered_items: Vec<&JsonValue> = if let Some(ref filter) =
@@ -549,11 +562,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Clean up internal aggregate keys from output (keys like "__agg_published__count")
         // These are only used for looking up relation data when there's a collision with
         // a relation selection.
-        if !aggregate_internal_keys.is_empty() {
-            for result in &mut results {
-                if let JsonValue::Object(ref mut obj) = result {
-                    obj.retain(|k, _| !k.starts_with("__agg_"));
-                }
+        for result in &mut results {
+            if let JsonValue::Object(ref mut obj) = result {
+                obj.retain(|k, _| !k.starts_with("__agg_"));
             }
         }
 

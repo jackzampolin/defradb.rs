@@ -673,6 +673,34 @@ fn test_parse_top_level_count() {
 }
 
 #[test]
+fn test_parse_top_level_count_with_group_by() {
+    let selects = parse_query("{ COUNT(Users: {groupBy: [Age, Name]}) }").unwrap();
+
+    assert_eq!(
+        selects[0].group_by.as_ref().unwrap().fields,
+        ["Age", "Name"]
+    );
+}
+
+#[test]
+fn test_parse_relation_count_with_group_by_uses_internal_select() {
+    use query::mapper::Requestable;
+
+    let selects = parse_query("{ Author { COUNT(published: {groupBy: [name]}) } }").unwrap();
+    let Requestable::Aggregate(aggregate) = &selects[0].fields[0] else {
+        panic!("expected aggregate");
+    };
+    let internal_key = aggregate.targets[0].internal_key.as_deref().unwrap();
+    let Requestable::Select(grouped) = &selects[0].fields[1] else {
+        panic!("expected grouped relation select");
+    };
+
+    assert_eq!(grouped.field.name, "published");
+    assert_eq!(grouped.field.output_name(), internal_key);
+    assert_eq!(grouped.group_by.as_ref().unwrap().fields, ["name"]);
+}
+
+#[test]
 fn test_parse_top_level_aggregate_with_alias() {
     use query::mapper::Requestable;
 

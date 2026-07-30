@@ -17,6 +17,9 @@ use storage::corekv::Store;
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;
 
+const BLOCK_NOT_FOUND_ERROR: &str =
+    "seek failed: (version fetcher) failed to get block in blockstore: ipld: could not find";
+
 /// Fetcher for reconstructing documents at specific historical versions.
 ///
 /// Given a CID, this fetcher walks backwards through the merkle DAG,
@@ -88,7 +91,7 @@ impl<S: Store> VersionedFetcher<S> {
         // Check if this is a collection block (branchable collection CID)
         if matches!(&target_block.delta, CrdtDelta::Collection(_)) {
             return self
-                .get_documents_at_collection_cid(txn, &target_cid, &target_block)
+                .get_documents_at_collection_cid(txn, &target_cid, &target_block, expected_doc_id)
                 .await;
         }
 
@@ -140,7 +143,13 @@ impl<S: Store> VersionedFetcher<S> {
         txn: &mut DbTxn<S>,
         start_cid: &Cid,
         start_block: &Block,
+        expected_doc_id: Option<&str>,
     ) -> Result<Vec<Document>> {
+        let expected_doc_id = match expected_doc_id {
+            Some(doc_id) => Some(self.canonical_doc_id(txn, doc_id).await?),
+            None => None,
+        };
+
         // Walk the collection DAG backwards to find all document composite CIDs.
         // Each collection block links to one document composite block.
         // We track doc_id → (priority, composite_cid) keeping highest priority per doc.
@@ -158,23 +167,17 @@ impl<S: Store> VersionedFetcher<S> {
                     let doc_composite_cid = link.link;
                     // Load the document composite block to get its doc_id and priority
                     if let Ok(doc_block) = self.load_block(txn, &doc_composite_cid).await {
-                        if let Some(doc_id) = self
+                        if let Some(owners) = self
                             .resolve_doc_ids(txn, &doc_composite_cid, &doc_block)
                             .await?
-                            .and_then(|owners| owners.into_iter().next())
                         {
-                            let priority = doc_block.delta.priority();
-                            match doc_composites.get(&doc_id) {
-                                None => {
-                                    doc_composites.insert(doc_id, (priority, doc_composite_cid));
-                                }
-                                Some((existing_priority, _)) => {
-                                    if priority > *existing_priority {
-                                        doc_composites
-                                            .insert(doc_id, (priority, doc_composite_cid));
-                                    }
-                                }
-                            }
+                            record_doc_composite_owners(
+                                &mut doc_composites,
+                                owners,
+                                expected_doc_id.as_deref(),
+                                doc_block.delta.priority(),
+                                doc_composite_cid,
+                            );
                         }
                     }
                 }
@@ -195,18 +198,10 @@ impl<S: Store> VersionedFetcher<S> {
 
         // Reconstruct each document at its specific composite CID
         let mut documents = Vec::new();
-        for (_priority, composite_cid) in doc_composites.values() {
+        for (doc_id, (_priority, composite_cid)) in &doc_composites {
             let composite_block = match self.load_block(txn, composite_cid).await {
                 Ok(b) => b,
                 Err(_) => continue,
-            };
-            let doc_id = match self
-                .resolve_doc_ids(txn, composite_cid, &composite_block)
-                .await?
-                .and_then(|owners| owners.into_iter().next())
-            {
-                Some(id) => id,
-                None => continue,
             };
 
             // Collect all blocks from this composite back to genesis
@@ -217,7 +212,7 @@ impl<S: Store> VersionedFetcher<S> {
             let mut sorted_blocks: Vec<(Cid, Block)> = blocks.into_iter().collect();
             sorted_blocks.sort_by_key(|(_, block)| block.delta.priority());
 
-            let document = self.replay_deltas(&sorted_blocks, &doc_id)?;
+            let document = self.replay_deltas(&sorted_blocks, doc_id)?;
             documents.push(document);
         }
 
@@ -230,7 +225,7 @@ impl<S: Store> VersionedFetcher<S> {
             // Go's CID library is more lenient. If it looks like a valid CIDv1
             // format, treat as "not found" rather than "invalid".
             if Self::looks_like_cidv1(cid_str) {
-                Error::Serialization("cid either does not exist or belong to document".to_string())
+                Error::Serialization(BLOCK_NOT_FOUND_ERROR.to_string())
             } else {
                 Error::Serialization("invalid cid: selected encoding not supported".to_string())
             }
@@ -354,11 +349,7 @@ impl<S: Store> VersionedFetcher<S> {
             .get(&key)
             .await
             .map_err(Error::Storage)?
-            .ok_or_else(|| {
-                Error::Serialization(
-                    "seek failed: (version fetcher) failed to get block in blockstore: ipld: could not find".to_string(),
-                )
-            })?;
+            .ok_or_else(|| Error::Serialization(BLOCK_NOT_FOUND_ERROR.to_string()))?;
 
         let mut block = Block::from_dag_cbor(&data)
             .map_err(|e| Error::Serialization(format!("Failed to decode block: {}", e)))?;
@@ -462,6 +453,10 @@ impl<S: Store> VersionedFetcher<S> {
     ///
     /// Blocks should be sorted by priority (ascending) before calling this method.
     fn replay_deltas(&self, blocks: &[(Cid, Block)], doc_id: &str) -> Result<Document> {
+        let schema_version_id = blocks
+            .iter()
+            .rev()
+            .find_map(|(_, block)| block.delta.schema_version_id().map(str::to_owned));
         let mut field_values: HashMap<String, (u64, NormalValue)> = HashMap::new();
         let mut is_deleted = false;
         let mut max_composite_priority: u64 = 0;
@@ -589,6 +584,9 @@ impl<S: Store> VersionedFetcher<S> {
         if let Ok(doc_id_obj) = document::DocID::from_string(doc_id) {
             document.set_id(doc_id_obj);
         }
+        if let Some(version_id) = schema_version_id {
+            document.set_schema_version_id(version_id);
+        }
 
         // Set deleted status from composite block
         if is_deleted {
@@ -605,6 +603,26 @@ impl<S: Store> VersionedFetcher<S> {
             buf
         } else {
             Vec::new()
+        }
+    }
+}
+
+fn record_doc_composite_owners(
+    doc_composites: &mut HashMap<String, (u64, Cid)>,
+    owners: Vec<String>,
+    expected_doc_id: Option<&str>,
+    priority: u64,
+    composite_cid: Cid,
+) {
+    for doc_id in owners {
+        if expected_doc_id.is_some_and(|expected| expected != doc_id) {
+            continue;
+        }
+        let entry = doc_composites
+            .entry(doc_id)
+            .or_insert((priority, composite_cid));
+        if priority > entry.0 {
+            *entry = (priority, composite_cid);
         }
     }
 }
@@ -634,6 +652,36 @@ mod tests {
             !VersionedFetcher::<storage::backends::memory::MemoryStore>::looks_like_cidv1("short")
         );
     }
+
+    #[test]
+    fn cid_like_unknown_values_are_reported_as_missing_blocks() {
+        let err = VersionedFetcher::<storage::backends::memory::MemoryStore>::parse_cid(
+            "bafybeid57gpbwi4i6bg7g35hhhhhhhhhhhhhhhhhhhhhhhdoesnotexist",
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains(BLOCK_NOT_FOUND_ERROR));
+    }
+
+    #[test]
+    fn collection_composite_tracks_every_document_owner() {
+        let cid =
+            Cid::from_str("bafyreiajq6jmyblg2b6vupjdapzkaodbt7kkwqp4fijekdvydnyxvr4y7q").unwrap();
+        let mut composites = HashMap::new();
+
+        record_doc_composite_owners(
+            &mut composites,
+            vec!["bae-a".to_string(), "bae-b".to_string()],
+            None,
+            1,
+            cid,
+        );
+
+        assert_eq!(composites.len(), 2);
+        assert_eq!(composites["bae-a"], (1, cid));
+        assert_eq!(composites["bae-b"], (1, cid));
+    }
+
     #[tokio::test]
     async fn kms_identity_prefers_caller_then_task_then_thread() {
         let txn = Arc::new(TokioMutex::new(None));

@@ -259,6 +259,124 @@ fn doc(json: &str) -> Document {
     Document::from_json_str(json).unwrap()
 }
 
+#[tokio::test]
+async fn relation_filtered_top_level_count_counts_distinct_groups() {
+    let company_collection = CollectionVersion::new(
+        "Company",
+        "v1",
+        "coll-company",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "employees", FieldKind::relation("Employee", true))
+                .with_relation_name("employee_company"),
+        ],
+    );
+    let employee_collection = CollectionVersion::new(
+        "Employee",
+        "v1",
+        "coll-employee",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "age", FieldKind::int()),
+            FieldDescription::new("3", "company", FieldKind::relation("Company", false))
+                .with_relation_name("employee_company")
+                .as_primary(),
+            FieldDescription::new("4", "_companyID", FieldKind::doc_id())
+                .with_relation_name("employee_company")
+                .as_primary(),
+        ],
+    );
+
+    let fetcher = crate::test_utils::MockFetcher::new();
+    let acme = "bae-7b649bba-3168-5c05-827c-514c0f8d56fd";
+    let other = "bae-47bd7c29-69cc-5b8a-856f-caaa93d9ace0";
+    fetcher.add_doc(
+        "Company",
+        doc(&format!(r#"{{"_docID":"{acme}","name":"Acme"}}"#)),
+    );
+    fetcher.add_doc(
+        "Company",
+        doc(&format!(r#"{{"_docID":"{other}","name":"Other"}}"#)),
+    );
+    for (doc_id, age, company_id) in [
+        ("bae-bdeed30f-a5e4-5952-93df-27eccec5a5b9", 30, acme),
+        ("bae-daad4cec-56aa-5b13-9502-657f29321b5d", 30, acme),
+        ("bae-0c6127be-2c8f-5984-b5ca-a7f4343a5123", 40, acme),
+        ("bae-7aa1c1b0-7546-5b1d-81f8-6f9d972b8e38", 50, other),
+    ] {
+        fetcher.add_doc(
+            "Employee",
+            doc(&format!(
+                r#"{{"_docID":"{doc_id}","age":{age},"_companyID":"{company_id}"}}"#
+            )),
+        );
+    }
+
+    let runner = QueryRunner::new(fetcher, vec![company_collection, employee_collection]);
+    let result = runner
+        .execute_query(
+            r#"query {
+                COUNT(Employee: {
+                    groupBy: [age],
+                    filter: {company: {name: {_eq: "Acme"}}}
+                })
+            }"#,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result, serde_json::json!({"COUNT": 2}));
+}
+
+#[tokio::test]
+async fn nested_group_order_preserves_go_interleaving() {
+    let collection = crate::parse_sdl("type Users { Name: String, Age: Int, Verified: Boolean }")
+        .unwrap()
+        .remove(0);
+    let fetcher = crate::test_utils::MockFetcher::new();
+    for json in [
+        r#"{"_docID":"bae-7b649bba-3168-5c05-827c-514c0f8d56fd","Name":"John","Age":25,"Verified":false}"#,
+        r#"{"_docID":"bae-47bd7c29-69cc-5b8a-856f-caaa93d9ace0","Name":"John","Age":32,"Verified":true}"#,
+        r#"{"_docID":"bae-bdeed30f-a5e4-5952-93df-27eccec5a5b9","Name":"John","Age":34,"Verified":false}"#,
+        r#"{"_docID":"bae-daad4cec-56aa-5b13-9502-657f29321b5d","Name":"Carlo","Age":55,"Verified":true}"#,
+        r#"{"_docID":"bae-0c6127be-2c8f-5984-b5ca-a7f4343a5123","Name":"Alice","Age":19,"Verified":false}"#,
+    ] {
+        fetcher.add_doc("Users", doc(json));
+    }
+
+    let result = QueryRunner::new(fetcher, vec![collection])
+        .execute_query(
+            r#"query {
+                Users(groupBy: [Name]) {
+                    Name
+                    GROUP(groupBy: [Verified], order: {Verified: ASC}) {
+                        Verified
+                        GROUP(order: {Age: DESC}) { Age }
+                    }
+                }
+            }"#,
+        )
+        .await
+        .unwrap();
+    let users = result["Users"].as_array().unwrap();
+
+    assert_eq!(
+        users
+            .iter()
+            .map(|user| user["Name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["John", "Alice", "Carlo"]
+    );
+    assert_eq!(
+        users[0]["GROUP"],
+        serde_json::json!([
+            {"Verified": false, "GROUP": [{"Age": 34}, {"Age": 25}]},
+            {"Verified": true, "GROUP": [{"Age": 32}]}
+        ])
+    );
+}
+
 struct MockDocumentAcp {
     private_docs: HashMap<String, Did>,
 }
