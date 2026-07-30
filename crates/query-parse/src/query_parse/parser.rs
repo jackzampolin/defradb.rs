@@ -14,7 +14,7 @@ use query_types::document::DocumentMapping;
 use query_types::error::{QueryError, Result};
 use query_types::limits::QueryLimits;
 use query_types::mapper::{
-    AggregateType, Field as SelectField, Limit, Mutation, Requestable, Select,
+    AggregateType, Field as SelectField, Limit, Mutation, OrderBy, Requestable, Select,
 };
 
 use super::aggregates::{parse_aggregate_field, parse_group_by_value, parse_top_level_aggregate};
@@ -1080,7 +1080,123 @@ pub(super) fn parse_selection_set(
         }
     }
 
+    let fields = merge_duplicate_selects(fields);
+    let mapping = mapping_for_fields(&fields);
     Ok((fields, mapping))
+}
+
+fn merge_duplicate_selects(fields: Vec<Requestable>) -> Vec<Requestable> {
+    let mut merged: Vec<Requestable> = Vec::with_capacity(fields.len());
+
+    for field in fields {
+        match field {
+            Requestable::Field(field)
+                if merged.iter().any(|existing| {
+                    matches!(
+                        existing,
+                        Requestable::Field(existing)
+                            if existing.name == field.name
+                                && existing.output_name() == field.output_name()
+                    )
+                }) => {}
+            Requestable::Select(mut nested) => {
+                nested.fields = merge_duplicate_selects(nested.fields);
+                nested.document_mapping = mapping_for_fields(&nested.fields);
+
+                let existing = merged.iter_mut().find_map(|field| match field {
+                    Requestable::Select(existing)
+                        if compatible_response_fields(existing, &nested) =>
+                    {
+                        Some(existing)
+                    }
+                    _ => None,
+                });
+
+                if let Some(existing) = existing {
+                    existing.fields.append(&mut nested.fields);
+                    existing.fields = merge_duplicate_selects(std::mem::take(&mut existing.fields));
+                    existing.document_mapping = mapping_for_fields(&existing.fields);
+                } else {
+                    merged.push(Requestable::Select(nested));
+                }
+            }
+            field => merged.push(field),
+        }
+    }
+
+    merged
+}
+
+fn compatible_response_fields(left: &Select, right: &Select) -> bool {
+    left.collection_name == right.collection_name
+        && left.field.name == right.field.name
+        && left.field.output_name() == right.field.output_name()
+        && left.filter.as_ref().map(|filter| filter.conditions())
+            == right.filter.as_ref().map(|filter| filter.conditions())
+        && left.limit.as_ref().map(|limit| (limit.limit, limit.offset))
+            == right
+                .limit
+                .as_ref()
+                .map(|limit| (limit.limit, limit.offset))
+        && same_order(left.order_by.as_ref(), right.order_by.as_ref())
+        && left.group_by.as_ref().map(|group| &group.fields)
+            == right.group_by.as_ref().map(|group| &group.fields)
+        && left.doc_ids == right.doc_ids
+        && left.cid == right.cid
+        && left.depth == right.depth
+        && left.show_deleted == right.show_deleted
+        && left.is_encrypted == right.is_encrypted
+        && left.selection_type == right.selection_type
+        && left.exhaustive == right.exhaustive
+        && !left.is_cursor
+        && !right.is_cursor
+}
+
+fn same_order(left: Option<&OrderBy>, right: Option<&OrderBy>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.conditions.len() == right.conditions.len()
+                && left
+                    .conditions
+                    .iter()
+                    .zip(&right.conditions)
+                    .all(|(left, right)| {
+                        left.fields == right.fields && left.direction == right.direction
+                    })
+        }
+        _ => false,
+    }
+}
+
+fn mapping_for_fields(fields: &[Requestable]) -> DocumentMapping {
+    let mut mapping = DocumentMapping::new();
+    for field in fields {
+        let index = mapping.next_index();
+        match field {
+            Requestable::Field(field) => {
+                mapping.add(index, &field.name);
+                mapping.add_render_key(index, field.output_name());
+            }
+            Requestable::Aggregate(aggregate) => {
+                mapping.add(index, aggregate.aggregate_type.as_str());
+                mapping.add_render_key(index, aggregate.output_name());
+            }
+            Requestable::Select(select) => {
+                mapping.add(index, &select.field.name);
+                mapping.add_render_key(index, select.field.output_name());
+            }
+            Requestable::Similarity(similarity) => {
+                mapping.add(index, "SIMILARITY");
+                mapping.add_render_key(index, similarity.output_name());
+            }
+            Requestable::FullTextSearch(search) => {
+                mapping.add(index, "BM25");
+                mapping.add_render_key(index, search.output_name());
+            }
+        }
+    }
+    mapping
 }
 
 #[cfg(test)]
@@ -1135,6 +1251,35 @@ mod introspection_classification_tests {
         assert!(
             matches!(op, ParsedOperation::Query { .. }),
             "ordinary query should not classify as Introspection, got {op:?}",
+        );
+    }
+}
+
+#[cfg(test)]
+mod duplicate_selection_tests {
+    use super::*;
+
+    #[test]
+    fn compatible_relation_selections_are_merged() {
+        let selects =
+            parse_query("{ Book { author { name } author { age } } }").expect("parse query");
+        let relation_selects: Vec<_> = selects[0]
+            .fields
+            .iter()
+            .filter_map(|field| match field {
+                Requestable::Select(select) if select.field.name == "author" => Some(select),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(relation_selects.len(), 1);
+        assert_eq!(relation_selects[0].fields.len(), 2);
+        assert_eq!(
+            selects[0]
+                .document_mapping
+                .indexes_of_name("author")
+                .unwrap(),
+            &[0]
         );
     }
 }
