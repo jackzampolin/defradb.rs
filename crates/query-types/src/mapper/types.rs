@@ -371,6 +371,8 @@ pub struct AggregateTarget {
     pub limit: Option<Limit>,
     /// Order for the target
     pub order: Option<OrderBy>,
+    /// Fields used to group the target before aggregation
+    pub group_by: Option<GroupBy>,
     /// Internal key for looking up relation data when there's a collision
     /// (e.g., when both a relation selection and an aggregate use the same relation)
     pub internal_key: Option<String>,
@@ -384,6 +386,7 @@ impl AggregateTarget {
             filter: None,
             limit: None,
             order: None,
+            group_by: None,
             internal_key: None,
         }
     }
@@ -395,6 +398,7 @@ impl AggregateTarget {
             filter: None,
             limit: None,
             order: None,
+            group_by: None,
             internal_key: None,
         }
     }

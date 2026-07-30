@@ -673,6 +673,16 @@ fn test_parse_top_level_count() {
 }
 
 #[test]
+fn test_parse_top_level_count_with_group_by() {
+    let selects = parse_query("{ COUNT(Users: {groupBy: [Age, Name]}) }").unwrap();
+
+    assert_eq!(
+        selects[0].group_by.as_ref().unwrap().fields,
+        ["Age", "Name"]
+    );
+}
+
+#[test]
 fn test_parse_top_level_aggregate_with_alias() {
     use query::mapper::Requestable;
 

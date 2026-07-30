@@ -133,6 +133,9 @@ pub(super) fn parse_aggregate_target_obj(
                 };
                 target.order = Some(order);
             }
+            "groupBy" => {
+                target.group_by = Some(parse_group_by_value(val, variables)?);
+            }
             _ => {}
         }
     }
@@ -176,6 +179,19 @@ pub(super) fn parse_aggregate_target_from_json(
                 }
                 "order" => {
                     target.order = Some(parse_order_from_json(val)?);
+                }
+                "groupBy" => {
+                    let fields =
+                        val.as_array()
+                            .ok_or_else(|| QueryError::parse("groupBy must be a list"))?
+                            .iter()
+                            .map(|field| {
+                                field.as_str().map(str::to_owned).ok_or_else(|| {
+                                    QueryError::parse("groupBy items must be strings")
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                    target.group_by = Some(GroupBy::new(fields));
                 }
                 _ => {}
             }
@@ -380,6 +396,10 @@ pub(super) fn parse_top_level_aggregate(
         .document_mapping
         .add_render_key(index, aggregate.output_name());
 
+    select.group_by = aggregate
+        .targets
+        .first()
+        .and_then(|target| target.group_by.clone());
     select.fields.push(Requestable::Aggregate(aggregate));
 
     Ok(select)
