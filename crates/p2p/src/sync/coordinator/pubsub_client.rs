@@ -165,7 +165,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         .collect(),
                 };
                 if let Err(e) = self
-                    .handle_doc_sync_reply(PeerId::new(parsed.sender.clone()), converted)
+                    .handle_doc_sync_reply(authenticated_response_peer(&resp), converted)
                     .await
                 {
                     warn!(
@@ -263,7 +263,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 heads: reply.heads.clone(),
             };
             if let Err(e) = self
-                .handle_branchable_sync_reply(PeerId::new(reply.sender.clone()), converted)
+                .handle_branchable_sync_reply(authenticated_response_peer(&resp), converted)
                 .await
             {
                 warn!(
@@ -279,6 +279,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
         Ok(out)
     }
+}
+
+fn authenticated_response_peer(resp: &PubsubResponse) -> PeerId {
+    PeerId::new(resp.from.clone())
 }
 
 fn parse_doc_sync_response(resp: &PubsubResponse) -> Option<wire::DocSyncReply> {
@@ -596,6 +600,37 @@ mod tests {
             registered_topics.lock().len(),
             1,
             "first topic registered before failure, but services must remain unready"
+        );
+    }
+
+    #[test]
+    fn payload_sender_cannot_acquire_replicator_trust() {
+        let authenticated = PeerId::new("authenticated-peer".to_string());
+        let claimed = PeerId::new("configured-replicator".to_string());
+        let registry = crate::bitswap::ReplicatorRegistry::new();
+        registry.add_replicator("private-collection", claimed.as_str());
+
+        let reply = wire::DocSyncReply {
+            results: Vec::new(),
+            sender: claimed.to_string(),
+        };
+        let mut data = Vec::new();
+        ciborium::into_writer(&reply, &mut data).unwrap();
+        let response = PubsubResponse {
+            id: crate::pubsub_rpc::derive_request_id(b"request"),
+            from: authenticated.to_string(),
+            data,
+            err: None,
+        };
+
+        assert_eq!(
+            parse_doc_sync_response(&response).unwrap().sender,
+            claimed.as_str()
+        );
+        assert_eq!(authenticated_response_peer(&response), authenticated);
+        assert!(
+            registry.get_collections(authenticated.as_str()).is_empty(),
+            "payload sender metadata must not grant replicator treatment"
         );
     }
 }
