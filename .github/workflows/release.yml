@@ -338,8 +338,18 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           ARCHIVE="defra-ffi-${{ matrix.variant }}_${TAG}_${{ matrix.platform }}.tar.gz"
+          RELEASE_DIR="target/${{ matrix.target }}/release"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            LIB="libdefra_ffi.dylib"
+            cp "${RELEASE_DIR}/libffi.dylib" "${RELEASE_DIR}/${LIB}"
+            install_name_tool -id "@rpath/${LIB}" "${RELEASE_DIR}/${LIB}"
+            codesign --force --sign - "${RELEASE_DIR}/${LIB}"
+          else
+            LIB="libdefra_ffi.so"
+            cp "${RELEASE_DIR}/libffi.so" "${RELEASE_DIR}/${LIB}"
+          fi
           tar czf "${ARCHIVE}" \
-            -C "target/${{ matrix.target }}/release" libffi.a \
+            -C "${RELEASE_DIR}" "${LIB}" \
             -C "${GITHUB_WORKSPACE}" defra.h
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
