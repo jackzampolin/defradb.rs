@@ -74,8 +74,10 @@ void = { version = "1.0.2", optional = true }
 # Iroh transport (optional)
 iroh = { workspace = true, optional = true }
 iroh-gossip = { workspace = true, optional = true }
-iroh-blobs = { workspace = true, optional = true }
 iroh-tickets = { workspace = true, optional = true }
+# Preserve the noq defaults and feature aliases that iroh-blobs previously
+# enabled transitively, including the Iroh endpoint's bloom token log.
+noq = { version = "1.1", features = ["bloom", "rustls-ring"], optional = true }
 rand = { version = "0.9", optional = true }
 blake3 = { version = "1", optional = true }
 
@@ -91,11 +93,14 @@ libp2p-transport = [
     "dep:sysinfo",
     "dep:void",
 ]
-iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-blobs", "dep:iroh-tickets", "dep:rand", "dep:blake3"]
+iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-tickets", "dep:noq", "dep:rand", "dep:blake3"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 p2p = { path = ".", features = ["test-utils"] }
+
+[package.metadata.cargo-machete]
+ignored = ["noq"]
 
 [lints]
 workspace = true
