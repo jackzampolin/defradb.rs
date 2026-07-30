@@ -113,7 +113,7 @@ version = "0.9"
 optional = true
 
 [features]
-default = ["lark", "rocksdb", "redb", "postgres"]
+default = ["lark", "rocksdb", "redb"]
 lark = ["storage/lark"]
 postgres = ["dep:pg-compat"]
 redb = ["storage/redb"]
