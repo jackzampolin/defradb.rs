@@ -17,8 +17,6 @@ dependencies = [
  "defra-core",
  "identity",
  "parking_lot 0.12.5",
- "proptest",
- "schema",
  "serde",
  "serde_json",
  "serde_yaml",

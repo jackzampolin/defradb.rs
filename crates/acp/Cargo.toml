@@ -16,7 +16,6 @@ redb = ["storage/redb"]
 [dependencies]
 defra-core = { path = "../defra-core" }
 identity = { path = "../identity" }
-schema = { path = "../schema" }
 storage = { path = "../storage" }
 zanzibar = { path = "../zanzibar" }
 
@@ -31,7 +30,6 @@ sha2.workspace = true
 serde_yaml = "0.9"
 
 [dev-dependencies]
-proptest.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 
