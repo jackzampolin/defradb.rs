@@ -69,6 +69,7 @@ impl<S: Store + 'static> SchemaAdapter<S> {
     /// `AcpOperations` handle — that variant enables schema-time DRI
     /// validation (#746). This bare constructor exists for tests and
     /// for embedded PG callers that don't have ACP configured.
+    #[cfg(feature = "postgres")]
     pub fn new_pg_arc(database: Arc<db::DB<S>>) -> Arc<dyn pg_compat::SchemaManager> {
         Arc::new(Self::new(database))
     }
@@ -76,6 +77,7 @@ impl<S: Store + 'static> SchemaAdapter<S> {
     /// Create an Arc-wrapped PG schema manager with ACP wired in for
     /// schema-time DRI validation (#746). Use this when the PG server
     /// has access to an `AcpOperations` handle.
+    #[cfg(feature = "postgres")]
     pub fn new_pg_arc_with_acp(
         database: Arc<db::DB<S>>,
         acp: Arc<dyn AcpOperations>,
@@ -147,6 +149,7 @@ impl<S: Store + 'static> SchemaOperations for SchemaAdapter<S> {
     }
 }
 
+#[cfg(feature = "postgres")]
 #[async_trait]
 impl<S: Store + 'static> pg_compat::SchemaManager for SchemaAdapter<S> {
     async fn add_schema(&self, sdl: &str) -> Result<(), String> {

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use super::node::{Node, P2PTasks};
+use super::node::{Node, ServerSetup};
 use super::server_http::HttpServerArgs;
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -17,8 +17,8 @@ impl Node {
     /// This function creates the database, loads collections, sets up the query
     /// runner with proper transaction support, and returns the HTTP server.
     ///
-    /// Returns a tuple of (P2PHostHandle, P2PTasks, background tasks, HTTP Server)
-    /// where the background tasks are tracked for graceful shutdown.
+    /// Returns a [`ServerSetup`] holding the servers and background tasks
+    /// tracked for graceful shutdown.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn init_store_and_server<S>(
         store: Arc<S>,
@@ -29,14 +29,7 @@ impl Node {
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         node_identity_did: Option<String>,
         se_key: Option<[u8; 32]>,
-    ) -> Result<(
-        Option<p2p::P2PHostHandle>,
-        Option<P2PTasks>,
-        Option<tokio::task::JoinHandle<()>>,
-        Option<tokio::task::JoinHandle<()>>,
-        defra_http::Server,
-        Option<pg_compat::PgServer>,
-    )>
+    ) -> Result<ServerSetup>
     where
         S: storage::corekv::Store + 'static,
     {
@@ -311,6 +304,7 @@ impl Node {
             None
         };
 
+        #[cfg(feature = "postgres")]
         let zanzibar_store_for_pg = zanzibar_store.clone();
         let http_server = Self::build_http_server(HttpServerArgs {
             database: database.clone(),
@@ -325,6 +319,7 @@ impl Node {
             user_did: user_did.as_ref(),
             node_identity_did,
         })?;
+        #[cfg(feature = "postgres")]
         let pg_server = Self::build_pg_server(
             database,
             config,
@@ -333,13 +328,14 @@ impl Node {
             zanzibar_store_for_pg,
         )?;
 
-        Ok((
-            p2p_setup.host_handle,
-            p2p_setup.p2p_tasks,
+        Ok(ServerSetup {
+            p2p_handle: p2p_setup.host_handle,
+            p2p_tasks: p2p_setup.p2p_tasks,
             downsample_task,
             txn_cleanup_task,
             http_server,
+            #[cfg(feature = "postgres")]
             pg_server,
-        ))
+        })
     }
 }

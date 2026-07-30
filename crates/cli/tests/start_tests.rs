@@ -56,6 +56,7 @@ fn default_start_args() -> StartArgs {
         query_max_width: None,
         query_max_filter_depth: None,
         p2p_transport: None,
+        #[cfg(feature = "postgres")]
         pg_address: None,
         acp_cache_ttl: None,
         acp_circuit_breaker_threshold: None,
@@ -168,6 +169,7 @@ fn test_apply_to_config_all_flags() {
         query_max_width: Some(64),
         query_max_filter_depth: Some(24),
         p2p_transport: None,
+        #[cfg(feature = "postgres")]
         pg_address: None,
         acp_cache_ttl: None,
         acp_circuit_breaker_threshold: None,

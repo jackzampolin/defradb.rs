@@ -230,6 +230,7 @@ impl Node {
         Ok(server)
     }
 
+    #[cfg(feature = "postgres")]
     pub(super) fn build_pg_server<S>(
         database: Arc<db::DB<S>>,
         config: &Config,
