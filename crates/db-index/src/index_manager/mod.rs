@@ -149,9 +149,18 @@ impl IndexManager {
     /// Returns an error if any index in the schema has invalid configuration
     /// (e.g., empty fields list).
     pub fn from_collection(collection_short_id: u32, schema: &CollectionVersion) -> Result<Self> {
+        Self::from_indexes(collection_short_id, schema, &schema.indexes)
+    }
+
+    /// Load a selected set of regular indexes plus all full-text indexes from a collection schema.
+    pub fn from_indexes(
+        collection_short_id: u32,
+        schema: &CollectionVersion,
+        indexes: &[IndexDescription],
+    ) -> Result<Self> {
         let mut manager = Self::new(collection_short_id);
         manager.collection_id = schema.collection_id.clone();
-        for desc in &schema.indexes {
+        for desc in indexes {
             if desc.fields.is_empty() {
                 return Err(Error::Other(format!(
                     "index '{}' in schema has no fields",

@@ -26,7 +26,7 @@ impl<S: Store> crate::database::DB<S> {
 
         // Extract the target schema and perform all systemstore operations in a block
         // so the systemstore reference is dropped before calling txn.commit()
-        let (target_schema, name) = {
+        let (target_schema, name, _collection_guards) = {
             let systemstore = txn.systemstore()?;
 
             let collection_key = CollectionKey::new(version_id);
@@ -51,6 +51,9 @@ impl<S: Store> crate::database::DB<S> {
 
             let name = target_schema.name.clone();
             let collection_id = target_schema.collection_id.clone();
+            let collection_guards = self
+                .collection_write_guards(std::iter::once(collection_id.clone()))
+                .await?;
 
             // Update target to be active
             target_schema.is_active = true;
@@ -108,7 +111,7 @@ impl<S: Store> crate::database::DB<S> {
             }
             iter.close().await.map_err(Error::Storage)?;
 
-            (target_schema, name)
+            (target_schema, name, collection_guards)
         };
 
         txn.commit().await?;
@@ -385,6 +388,14 @@ impl<S: Store> crate::database::DB<S> {
                 return Err(Error::CollectionVersionNotFound(version_id.clone()));
             }
         }
+
+        let _collection_guards = self
+            .collection_write_guards(version_ids.iter().filter_map(|version_id| {
+                version_map
+                    .get(version_id.as_str())
+                    .map(|version| version.collection_id.clone())
+            }))
+            .await?;
 
         for version in &all_versions {
             if deleting_versions.contains(version.version_id.as_str()) {

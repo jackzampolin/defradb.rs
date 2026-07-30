@@ -17,6 +17,7 @@ mod validation;
 use crate::error::{Error, Result};
 use crate::index_manager::IndexManager;
 use datastore::NamespaceView;
+use defra_core::ActionStatus;
 use document::{DocID, Document, NormalValue};
 use schema::{
     legacy_collection_short_id, CollectionVersion, FieldKind, IndexDescription, ScalarArrayKind,
@@ -129,12 +130,42 @@ pub(super) const DELETED_MARKER: u8 = 0x01;
 pub struct Collection {
     /// The collection schema definition.
     def: CollectionVersion,
+    write_indexes: Vec<IndexDescription>,
+    queryable_indexes: Vec<IndexDescription>,
 }
 
 impl Collection {
     /// Create a new collection with the given schema definition.
     pub fn new(def: CollectionVersion) -> Self {
-        Self { def }
+        let indexes = def.indexes.clone();
+        Self {
+            def,
+            write_indexes: indexes.clone(),
+            queryable_indexes: indexes,
+        }
+    }
+
+    pub(crate) fn with_index_actions(
+        def: CollectionVersion,
+        actions: &std::collections::HashMap<u32, ActionStatus>,
+    ) -> Self {
+        let write_indexes = def
+            .indexes
+            .iter()
+            .filter(|index| actions.get(&index.id) != Some(&ActionStatus::ERRORED))
+            .cloned()
+            .collect();
+        let queryable_indexes = def
+            .indexes
+            .iter()
+            .filter(|index| !actions.contains_key(&index.id))
+            .cloned()
+            .collect();
+        Self {
+            def,
+            write_indexes,
+            queryable_indexes,
+        }
     }
 
     /// Get the collection name.
@@ -167,6 +198,16 @@ impl Collection {
     /// Get all indexes defined on this collection.
     pub fn get_indexes(&self) -> &[IndexDescription] {
         &self.def.indexes
+    }
+
+    pub(crate) fn write_indexes(&self) -> &[IndexDescription] {
+        &self.write_indexes
+    }
+
+    pub(crate) fn schema_for_queries(&self) -> CollectionVersion {
+        let mut schema = self.def.clone();
+        schema.indexes.clone_from(&self.queryable_indexes);
+        schema
     }
 
     /// Check if an index exists on this collection.

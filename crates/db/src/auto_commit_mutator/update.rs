@@ -21,6 +21,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
         let collection = self.get_collection_or_err(collection_name)?;
+        let _collection_guard = self
+            .db
+            .collection_read_guard(collection.collection_id())
+            .await
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
         // Generate embeddings if source fields were modified
@@ -154,13 +159,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let result: query::error::Result<u64> = async {
             // Create an IndexManager for index maintenance
             let short_id = collection.resolved_root_id();
-            let index_manager = IndexManager::from_collection(short_id, collection.schema())
-                .map_err(|e| {
-                    query::error::QueryError::execution(format!(
-                        "failed to create index manager for collection '{}': {}",
-                        collection_name, e
-                    ))
-                })?;
+            let index_manager = IndexManager::from_indexes(
+                short_id,
+                collection.schema(),
+                collection.write_indexes(),
+            )
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to create index manager for collection '{}': {}",
+                    collection_name, e
+                ))
+            })?;
 
             let (doc_short_id, canonical_doc_id) = collection
                 .require_doc_identity(&systemstore, &input_doc_id)

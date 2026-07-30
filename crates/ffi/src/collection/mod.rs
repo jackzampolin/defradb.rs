@@ -22,6 +22,6 @@ pub use read::{
 };
 pub use view::{add_view, gc_downsample_histories, refresh_views};
 pub use write::{
-    delete_collection, delete_collections, patch_collection, set_active_collection_version,
-    truncate_collection,
+    delete_collection, delete_collections, delete_collections_in_txn, patch_collection,
+    set_active_collection_version, set_collection_active_in_txn, truncate_collection,
 };

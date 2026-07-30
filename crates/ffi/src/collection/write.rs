@@ -1,4 +1,8 @@
 use crate::ffi_node_db_async_body;
+use crate::helpers::{get_rt, require_c_str};
+use crate::nac_check::check_nac_for_node;
+use crate::state::NODES;
+use crate::{ffi_async, ffi_entry, try_ffi, ERR_INVALID_NODE_HANDLE};
 use acp::nac::NodePermission;
 
 /// Delete a collection by name.
@@ -77,6 +81,49 @@ pub unsafe extern "C" fn delete_collections(
     }
 }
 
+/// Delete collections or collection versions within an existing transaction.
+///
+/// # Safety
+///
+/// `txn_id` and `targets_json` must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn delete_collections_in_txn(
+    node_ptr: usize,
+    txn_id: *const std::ffi::c_char,
+    identity_did: *const std::ffi::c_char,
+    targets_json: *const std::ffi::c_char,
+    active_only: bool,
+) -> crate::types::FfiResult {
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::CollectionPatch
+        ));
+        let txn_id = try_ffi!(require_c_str(txn_id, "txn_id"));
+        let targets_json = try_ffi!(require_c_str(targets_json, "targets_json"));
+        let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
+            Some(registry) => registry,
+            None => return crate::types::FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|value| !value.is_empty()),
+        );
+
+        ffi_async!(rt, {
+            let targets: Vec<String> = serde_json::from_str(&targets_json)
+                .map_err(|error| format!("failed to parse collection targets JSON: {}", error))?;
+            registry
+                .delete_collections_in_txn(&txn_id, targets, active_only)
+                .await
+                .map_err(|error| format!("failed to delete collections: {}", error))?;
+            Ok("{}".to_string())
+        })
+    }
+}
+
 /// Set the active collection version.
 ///
 /// This activates the collection with the given version ID and deactivates
@@ -115,6 +162,48 @@ pub unsafe extern "C" fn set_active_collection_version(
 
         Ok("{}".to_string())
     }
+    }
+}
+
+/// Set a collection version's active state within an existing transaction.
+///
+/// # Safety
+///
+/// `txn_id` and `version_id` must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn set_collection_active_in_txn(
+    node_ptr: usize,
+    txn_id: *const std::ffi::c_char,
+    identity_did: *const std::ffi::c_char,
+    version_id: *const std::ffi::c_char,
+    is_active: bool,
+) -> crate::types::FfiResult {
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::CollectionPatch
+        ));
+        let txn_id = try_ffi!(require_c_str(txn_id, "txn_id"));
+        let version_id = try_ffi!(require_c_str(version_id, "version_id"));
+        let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
+            Some(registry) => registry,
+            None => return crate::types::FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|value| !value.is_empty()),
+        );
+
+        ffi_async!(rt, {
+            let version = registry
+                .set_collection_active_in_txn(&txn_id, &version_id, is_active)
+                .await
+                .map_err(|error| format!("failed to update collection active state: {}", error))?;
+            serde_json::to_string(&version)
+                .map_err(|error| format!("failed to serialize collection version: {}", error))
+        })
     }
 }
 

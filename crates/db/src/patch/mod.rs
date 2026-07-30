@@ -91,6 +91,9 @@ impl<S: Store> crate::database::DB<S> {
         let actual_name = old_schema.name.clone();
         let old_version_id = old_schema.version_id.clone();
         let collection_id = old_schema.collection_id.clone();
+        let _collection_guards = self
+            .collection_write_guards(std::iter::once(collection_id.clone()))
+            .await?;
 
         // Collect known collection names for Kind validation
         let known_collection_names: Vec<String> = self
