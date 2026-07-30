@@ -38,8 +38,8 @@ events = { path = "../events" }
 lens = { path = "../lens" }
 document = { path = "../document" }
 keyring = { path = "../keyring" }
-orbis = { path = "../orbis" }
-sourcehub = { path = "../sourcehub" }
+orbis = { path = "../orbis", optional = true }
+sourcehub = { path = "../sourcehub", optional = true }
 defra-version = { path = "../defra-version" }
 pg-compat = { path = "../pg-compat" }
 telemetry = { path = "../telemetry", default-features = false }
@@ -113,8 +113,12 @@ version = "0.9"
 optional = true
 
 [features]
-default = ["lark", "rocksdb", "redb"]
+default = ["lark", "rocksdb", "redb", "sourcehub", "orbis"]
 lark = ["storage/lark"]
+# SourceHub/hub.rs on-chain document ACP (`--document-acp-type source-hub|hub-rs`).
+sourcehub = ["dep:sourcehub"]
+# Orbis ring threshold signing (`--signer-type orbis`).
+orbis = ["dep:orbis"]
 redb = ["storage/redb"]
 fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
