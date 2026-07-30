@@ -127,16 +127,20 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         &self,
         cid: &str,
         expected_doc_id: Option<&str>,
+        caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Document> {
-        self.get_document_at_cid_impl(cid, expected_doc_id).await
+        self.get_document_at_cid_impl(cid, expected_doc_id, caller_identity)
+            .await
     }
 
     async fn get_documents_at_cid(
         &self,
         cid: &str,
         expected_doc_id: Option<&str>,
+        caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Vec<Document>> {
-        self.get_documents_at_cid_impl(cid, expected_doc_id).await
+        self.get_documents_at_cid_impl(cid, expected_doc_id, caller_identity)
+            .await
     }
 
     async fn search_fulltext_scored(

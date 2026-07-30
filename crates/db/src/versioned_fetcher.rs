@@ -28,20 +28,30 @@ const BLOCK_NOT_FOUND_ERROR: &str =
 pub struct VersionedFetcher<S: Store> {
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
     kms: Option<Arc<dyn kms::KmsService>>,
+    caller_identity: Option<identity::Did>,
 }
 
 impl<S: Store> VersionedFetcher<S> {
     /// Create a new versioned fetcher with a shared transaction
     pub fn new(txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
-        Self { txn, kms: None }
+        Self {
+            txn,
+            kms: None,
+            caller_identity: None,
+        }
     }
 
     /// Create a versioned fetcher that resolves encrypted deltas through the KMS.
     pub fn with_kms(
         txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
         kms: Option<Arc<dyn kms::KmsService>>,
+        caller_identity: Option<identity::Did>,
     ) -> Self {
-        Self { txn, kms }
+        Self {
+            txn,
+            kms,
+            caller_identity,
+        }
     }
 
     /// Reconstruct a document at the specified CID.
@@ -391,10 +401,7 @@ impl<S: Store> VersionedFetcher<S> {
         encryption_cid: &Cid,
     ) -> Result<Vec<u8>> {
         let key = if let Some(kms) = &self.kms {
-            let request_context = defra_core::current_identity::get_current_identity()
-                .and_then(|did| identity::Did::new(&did).ok())
-                .map(kms::RequestContext::with_user)
-                .unwrap_or_else(kms::RequestContext::anonymous);
+            let request_context = self.kms_request_context();
             let results = kms
                 .get_keys(&request_context, std::slice::from_ref(encryption_cid))
                 .await
@@ -448,6 +455,18 @@ impl<S: Store> VersionedFetcher<S> {
 
         crypto::encryption::aes::decrypt_aes(None, data, &key, &[])
             .map_err(|e| Error::Serialization(format!("failed to decrypt versioned block: {e}")))
+    }
+
+    fn kms_request_context(&self) -> kms::RequestContext {
+        self.caller_identity
+            .clone()
+            .or_else(|| {
+                defra_core::current_identity::try_get_scoped_identity()
+                    .or_else(defra_core::current_identity::get_current_identity)
+                    .and_then(|did| identity::Did::new(&did).ok())
+            })
+            .map(kms::RequestContext::with_user)
+            .unwrap_or_else(kms::RequestContext::anonymous)
     }
 
     /// Replay CRDT deltas to reconstruct document state.
@@ -642,5 +661,34 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains(BLOCK_NOT_FOUND_ERROR));
+    }
+
+    #[tokio::test]
+    async fn kms_identity_prefers_caller_then_task_then_thread() {
+        let txn = Arc::new(TokioMutex::new(None));
+        let caller = identity::Did::new("did:key:caller").unwrap();
+        let fetcher = VersionedFetcher::<storage::backends::memory::MemoryStore>::with_kms(
+            txn.clone(),
+            None,
+            Some(caller.clone()),
+        );
+        let ambient =
+            VersionedFetcher::<storage::backends::memory::MemoryStore>::with_kms(txn, None, None);
+        let _thread =
+            defra_core::current_identity::scoped_current_identity(Some("did:key:thread".into()));
+
+        defra_core::current_identity::with_scoped_identity(Some("did:key:task".into()), async {
+            assert_eq!(fetcher.kms_request_context().user_identity(), Some(&caller));
+            assert_eq!(
+                ambient.kms_request_context().user_identity(),
+                Some(&identity::Did::new("did:key:task").unwrap())
+            );
+        })
+        .await;
+
+        assert_eq!(
+            ambient.kms_request_context().user_identity(),
+            Some(&identity::Did::new("did:key:thread").unwrap())
+        );
     }
 }
