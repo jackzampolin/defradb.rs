@@ -58,27 +58,27 @@ jobs:
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: "--no-default-features --features rocksdb,lark"
-          # redb (lark included: default runtime backend)
-          - variant: redb
+          # lark (minimal: single default-runtime backend)
+          - variant: lark
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
-            features: "--no-default-features --features redb,lark"
-          - variant: redb
+            features: "--no-default-features --features lark"
+          - variant: lark
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--no-default-features --features redb,lark"
-          - variant: redb
+            features: "--no-default-features --features lark"
+          - variant: lark
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features redb,lark,vendored-openssl"
-          - variant: redb
+            features: "--no-default-features --features lark,vendored-openssl"
+          - variant: lark
             target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--no-default-features --features redb,lark"
+            features: "--no-default-features --features lark"
     steps:
       - uses: actions/checkout@v4
 
@@ -106,7 +106,7 @@ jobs:
           if ! command -v protoc >/dev/null 2>&1; then
             NEEDS_APT=1
           fi
-          if [ "${{ matrix.variant }}" != "redb" ] && ! command -v clang >/dev/null 2>&1; then
+          if [ "${{ matrix.variant }}" != "lark" ] && ! command -v clang >/dev/null 2>&1; then
             NEEDS_APT=1
           fi
 
@@ -122,7 +122,7 @@ jobs:
 
           bash .github/scripts/apt-update-without-nodesource.sh "${APT_ARGS[@]}"
           sudo apt-get "${APT_ARGS[@]}" install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
-          if [ "${{ matrix.variant }}" != "redb" ]; then
+          if [ "${{ matrix.variant }}" != "lark" ]; then
             sudo apt-get "${APT_ARGS[@]}" install -y libclang-dev
           fi
 
