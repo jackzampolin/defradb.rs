@@ -114,6 +114,7 @@ optional = true
 
 [features]
 default = ["lark", "rocksdb", "redb"]
+release-full = ["lark", "rocksdb", "redb", "postgres", "sourcehub", "orbis"]
 lark = ["storage/lark"]
 postgres = ["dep:pg-compat"]
 # SourceHub/hub.rs on-chain document ACP (`--document-acp-type source-hub|hub-rs`).

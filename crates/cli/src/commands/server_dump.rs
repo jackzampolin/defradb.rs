@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use clap::Args;
 
+use crate::commands::start::Node;
 use crate::config::{Config, DatastoreType};
 use crate::error::{Error, Result};
 
@@ -21,9 +22,8 @@ impl ServerDumpArgs {
             DatastoreType::Redb => {
                 let opts = storage::backends::RedbStoreOptions::new()
                     .with_durability(config.datastore.durability);
-                let store = Arc::new(storage::DynStore::new(Arc::new(
-                    storage::RedbStore::open_with_options(config.data_path(), opts)?,
-                )));
+                let backend = storage::RedbStore::open_with_options(config.data_path(), opts)?;
+                let store = Arc::new(Node::wrap_store(config, backend)?);
                 let database = db::DB::open_from_arc(store)
                     .await
                     .map_err(|e| Error::Server(e.to_string()))?;
@@ -39,9 +39,8 @@ impl ServerDumpArgs {
             DatastoreType::Fjall => {
                 let opts = storage::backends::FjallStoreOptions::new()
                     .with_durability(config.datastore.durability);
-                let store = Arc::new(storage::DynStore::new(Arc::new(
-                    storage::FjallStore::open_with_options(config.data_path(), opts)?,
-                )));
+                let backend = storage::FjallStore::open_with_options(config.data_path(), opts)?;
+                let store = Arc::new(Node::wrap_store(config, backend)?);
                 let database = db::DB::open_from_arc(store)
                     .await
                     .map_err(|e| Error::Server(e.to_string()))?;
@@ -57,9 +56,8 @@ impl ServerDumpArgs {
             DatastoreType::RocksDb => {
                 let opts = storage::backends::RocksDbStoreOptions::new()
                     .with_durability(config.datastore.durability);
-                let store = Arc::new(storage::DynStore::new(Arc::new(
-                    storage::RocksDbStore::open_with_options(config.data_path(), opts)?,
-                )));
+                let backend = storage::RocksDbStore::open_with_options(config.data_path(), opts)?;
+                let store = Arc::new(Node::wrap_store(config, backend)?);
                 let database = db::DB::open_from_arc(store)
                     .await
                     .map_err(|e| Error::Server(e.to_string()))?;
@@ -75,9 +73,8 @@ impl ServerDumpArgs {
             DatastoreType::Lark => {
                 let opts = storage::backends::LarkStoreOptions::new()
                     .with_durability(config.datastore.durability);
-                let store = Arc::new(storage::DynStore::new(Arc::new(
-                    storage::LarkStore::open_with_options(config.data_path(), opts)?,
-                )));
+                let backend = storage::LarkStore::open_with_options(config.data_path(), opts)?;
+                let store = Arc::new(Node::wrap_store(config, backend)?);
                 let database = db::DB::open_from_arc(store)
                     .await
                     .map_err(|e| Error::Server(e.to_string()))?;

@@ -149,7 +149,7 @@ impl Node {
     /// Wrap a concrete backend in a type-erased [`storage::DynStore`],
     /// applying at-rest encryption when configured. The erasure keeps the
     /// whole node stack at a single `S = DynStore` instantiation.
-    fn wrap_store<S>(config: &Config, backend: S) -> Result<storage::DynStore>
+    pub(crate) fn wrap_store<S>(config: &Config, backend: S) -> Result<storage::DynStore>
     where
         S: storage::corekv::Store + 'static,
     {

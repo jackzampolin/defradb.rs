@@ -28,6 +28,11 @@ jobs:
 
       - run: cargo clippy --all -- -D warnings
 
+      # Release builds use explicit feature contracts rather than Cargo defaults.
+      - run: cargo clippy -p cli --no-default-features --features release-full --all-targets -- -D warnings
+      - run: cargo clippy -p cli --no-default-features --features rocksdb,lark --all-targets -- -D warnings
+      - run: cargo clippy -p cli --no-default-features --features lark --all-targets -- -D warnings
+
       # OTel feature paths are opt-in (mirror Go's `//go:build telemetry`),
       # so the default clippy pass doesn't exercise them. These checks keep
       # the feature-gated code from rotting silently. Issue #977.
