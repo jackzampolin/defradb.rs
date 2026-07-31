@@ -81,7 +81,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// # Flow
     ///
     /// 1. Parse CID from the message
-    /// 2. Acquire per-CID ownership or cheaply suppress a concurrent duplicate
+    /// 2. Serialize authorized replay or cheaply suppress an ordinary duplicate
     /// 3. Check if already merged
     /// 4. Store block in blockstore (marked as unmerged)
     /// 5. Emit BlockReceived only once the full reachable DAG is locally present,
@@ -109,39 +109,50 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             "Processing pushlog"
         );
 
-        let _guard = match self.process_queue.try_acquire_nowait(&cid) {
-            Some(guard) => guard,
-            None => {
-                self.diagnostics.record_single_flight_suppressed();
-                tracing::debug!(
-                    cid = %cid,
-                    sender_peer = ?sender_peer,
-                    "Suppressing PushLog while the same CID is already being processed"
-                );
-
-                if self.is_pending_dag_recovery_registered(&cid) {
-                    return Ok(());
+        let _guard = if explicit_replay_authorization.is_some() {
+            loop {
+                match self.process_queue.try_acquire(&cid).await {
+                    Ok(guard) => break guard,
+                    Err(waiter) => {
+                        let _ = waiter.await;
+                    }
                 }
+            }
+        } else {
+            match self.process_queue.try_acquire_nowait(&cid) {
+                Some(guard) => guard,
+                None => {
+                    self.diagnostics.record_single_flight_suppressed();
+                    tracing::debug!(
+                        cid = %cid,
+                        sender_peer = ?sender_peer,
+                        "Suppressing PushLog while the same CID is already being processed"
+                    );
 
-                match self
-                    .retry_retriable_pushlog_op(&cid, "suppressed_is_merged", || async {
-                        self.blockstore
-                            .is_merged(&cid)
-                            .await
-                            .map_err(Error::from_blockstore)
-                    })
-                    .await
-                {
-                    Ok(true) => {
-                        self.diagnostics.record_already_merged_fast_path();
+                    if self.is_pending_dag_recovery_registered(&cid) {
                         return Ok(());
                     }
-                    Ok(false) => {
-                        return Err(Error::PushLogInFlight {
-                            cid: cid.to_string(),
-                        });
+
+                    match self
+                        .retry_retriable_pushlog_op(&cid, "suppressed_is_merged", || async {
+                            self.blockstore
+                                .is_merged(&cid)
+                                .await
+                                .map_err(Error::from_blockstore)
+                        })
+                        .await
+                    {
+                        Ok(true) => {
+                            self.diagnostics.record_already_merged_fast_path();
+                            return Ok(());
+                        }
+                        Ok(false) => {
+                            return Err(Error::PushLogInFlight {
+                                cid: cid.to_string(),
+                            });
+                        }
+                        Err(error) => return Err(error),
                     }
-                    Err(error) => return Err(error),
                 }
             }
         };
@@ -795,6 +806,90 @@ mod tests {
             .process_pushlog(&message, Some("peer-8"), false, None)
             .await
             .expect("an established pending registration can ack a duplicate");
+    }
+
+    #[tokio::test]
+    async fn explicit_replay_waits_for_in_flight_announcement() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let config = SyncConfig {
+            event_buffer_size: 1,
+            ..SyncConfig::default()
+        };
+        let (manager, mut events) = SyncManager::new(blockstore.clone(), peer_state, config);
+        let manager = Arc::new(manager);
+        let (cid, block) = create_lww_block("name");
+        let message = Arc::new(make_broadcast("doc123", cid, block, "collection1"));
+        let authorization = ExplicitReplayAuthorization {
+            source_peer_id: "peer-1".to_string(),
+            target_peer_id: "peer-2".to_string(),
+            collection_id: "collection1".to_string(),
+            authorizer_did: "creator1".to_string(),
+            expires_at: u64::MAX,
+        };
+
+        manager
+            .event_tx
+            .send(SyncEvent::SyncError {
+                cid,
+                error: "hold event channel full".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let owner_manager = Arc::clone(&manager);
+        let owner_message = Arc::clone(&message);
+        let owner = tokio::spawn(async move {
+            owner_manager
+                .process_pushlog(&owner_message, Some("peer-1"), false, None)
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !blockstore.has(&cid).await.unwrap() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ordinary announcement should store the block");
+
+        let replay_manager = Arc::clone(&manager);
+        let replay_message = Arc::clone(&message);
+        let replay_authorization = authorization.clone();
+        let replay = tokio::spawn(async move {
+            replay_manager
+                .process_pushlog(
+                    &replay_message,
+                    Some("peer-1"),
+                    true,
+                    Some(replay_authorization),
+                )
+                .await
+        });
+
+        assert!(matches!(
+            events.recv().await,
+            Some(SyncEvent::SyncError { .. })
+        ));
+        owner.await.unwrap().unwrap();
+
+        assert!(matches!(
+            events.recv().await,
+            Some(SyncEvent::BlockReceived {
+                explicit_replay_authorization: None,
+                ..
+            })
+        ));
+        replay.await.unwrap().unwrap();
+
+        assert!(matches!(
+            events.recv().await,
+            Some(SyncEvent::BlockReceived {
+                explicit_replay_authorization: Some(actual),
+                ..
+            }) if actual == authorization
+        ));
     }
 
     #[tokio::test]
