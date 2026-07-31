@@ -26,6 +26,9 @@ impl Node {
         };
 
         // Start PG wire protocol server
+        #[cfg(not(feature = "postgres"))]
+        let pg_task: Option<JoinHandle<()>> = None;
+        #[cfg(feature = "postgres")]
         let pg_task: Option<JoinHandle<()>> = if let Some(server) = self.pg_server.take() {
             info!(
                 "Starting Postgres wire protocol server on {}",

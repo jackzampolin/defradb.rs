@@ -23,9 +23,13 @@ fn cli_with_defaults() -> Cli {
         keyring_backend: None,
         keyring_path: None,
         no_keyring: None,
+        #[cfg(feature = "sourcehub")]
         source_hub_address: None,
+        #[cfg(feature = "sourcehub")]
         source_hub_comet_address: None,
+        #[cfg(feature = "sourcehub")]
         source_hub_chain_id: None,
+        #[cfg(feature = "sourcehub")]
         hub_rs_address: None,
         secret_file: None,
         no_telemetry: None,

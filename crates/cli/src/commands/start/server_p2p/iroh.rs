@@ -10,17 +10,14 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 
 impl Node {
-    pub(super) async fn setup_iroh_p2p<S>(
-        store: Arc<S>,
-        database: Arc<db::DB<S>>,
+    pub(super) async fn setup_iroh_p2p(
+        store: Arc<storage::DynStore>,
+        database: Arc<db::DB<storage::DynStore>>,
         event_bus: Arc<dyn events::Bus>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
         se_key: Option<[u8; 32]>,
-    ) -> Result<P2PSetup>
-    where
-        S: storage::corekv::Store + 'static,
-    {
+    ) -> Result<P2PSetup> {
         info!("Initializing P2P network (iroh)");
 
         let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));

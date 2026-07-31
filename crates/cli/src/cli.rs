@@ -79,18 +79,22 @@ pub struct Cli {
     pub no_keyring: Option<bool>,
 
     /// The SourceHub address authorized by the client to make SourceHub transactions
+    #[cfg(feature = "sourcehub")]
     #[arg(long, global = true, env = "DEFRA_SOURCE_HUB_ADDRESS")]
     pub source_hub_address: Option<String>,
 
     /// SourceHub CometBFT RPC address for transaction broadcast
+    #[cfg(feature = "sourcehub")]
     #[arg(long, global = true, env = "DEFRA_SOURCE_HUB_COMET_ADDRESS")]
     pub source_hub_comet_address: Option<String>,
 
     /// SourceHub chain ID (e.g., "sourcehub-test")
+    #[cfg(feature = "sourcehub")]
     #[arg(long, global = true, env = "DEFRA_SOURCE_HUB_CHAIN_ID")]
     pub source_hub_chain_id: Option<String>,
 
     /// hub.rs JSON-RPC endpoint (e.g., "http://localhost:8545")
+    #[cfg(feature = "sourcehub")]
     #[arg(long, global = true, env = "DEFRA_HUB_RS_ADDRESS")]
     pub hub_rs_address: Option<String>,
 
@@ -114,6 +118,16 @@ pub struct Cli {
     pub acp_node_enable: Option<bool>,
 
     /// Document ACP type. Options are none, local, source-hub, or hub-rs
+    #[cfg(feature = "sourcehub")]
+    #[arg(
+        long = "document-acp-type",
+        global = true,
+        env = "DEFRA_ACP_DOCUMENT_TYPE"
+    )]
+    pub acp_document_type: Option<String>,
+
+    /// Document ACP type. Options are none or local
+    #[cfg(not(feature = "sourcehub"))]
     #[arg(
         long = "document-acp-type",
         global = true,

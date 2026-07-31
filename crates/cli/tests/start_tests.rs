@@ -24,9 +24,13 @@ fn default_start_args() -> StartArgs {
         identity: None,
         replicator_retry_intervals: None,
         durability: None,
+        #[cfg(feature = "orbis")]
         signer_type: None,
+        #[cfg(feature = "orbis")]
         signer_orbis_endpoint: None,
+        #[cfg(feature = "orbis")]
         signer_orbis_ring_id: None,
+        #[cfg(feature = "orbis")]
         signer_orbis_derivation: None,
         max_body_size: None,
         max_schema_size: None,
@@ -56,6 +60,7 @@ fn default_start_args() -> StartArgs {
         query_max_width: None,
         query_max_filter_depth: None,
         p2p_transport: None,
+        #[cfg(feature = "postgres")]
         pg_address: None,
         acp_cache_ttl: None,
         acp_circuit_breaker_threshold: None,
@@ -136,9 +141,13 @@ fn test_apply_to_config_all_flags() {
         identity: None, // identity is handled in Node::new, not apply_to_config
         replicator_retry_intervals: Some(vec![10, 20, 30]),
         durability: None,
+        #[cfg(feature = "orbis")]
         signer_type: None,
+        #[cfg(feature = "orbis")]
         signer_orbis_endpoint: None,
+        #[cfg(feature = "orbis")]
         signer_orbis_ring_id: None,
+        #[cfg(feature = "orbis")]
         signer_orbis_derivation: None,
         max_body_size: Some(1024),
         max_schema_size: Some(2048),
@@ -168,6 +177,7 @@ fn test_apply_to_config_all_flags() {
         query_max_width: Some(64),
         query_max_filter_depth: Some(24),
         p2p_transport: None,
+        #[cfg(feature = "postgres")]
         pg_address: None,
         acp_cache_ttl: None,
         acp_circuit_breaker_threshold: None,
