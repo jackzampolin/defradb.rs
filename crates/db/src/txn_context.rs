@@ -113,15 +113,19 @@ impl<S: Store + 'static> DbTransactionContext<S> {
     /// written through the same guarded, conflict-retrying path as direct
     /// auto-commit reads.
     pub(crate) async fn persist_pending_migrations(&self) -> query::error::Result<()> {
+        let pending = self.fetcher.take_pending_write_backs().await;
         let mut by_collection = BTreeMap::new();
-        for pending in self.fetcher.take_pending_write_backs().await {
+        for candidate in pending.documents {
+            if pending.full_scans.contains_key(&candidate.collection_name) {
+                continue;
+            }
             by_collection
-                .entry(pending.collection_name)
+                .entry(candidate.collection_name)
                 .or_insert_with(Vec::new)
-                .push(pending.write_back);
+                .push(candidate.write_back);
         }
 
-        if by_collection.is_empty() {
+        if by_collection.is_empty() && pending.full_scans.is_empty() {
             return Ok(());
         }
 
@@ -139,6 +143,13 @@ impl<S: Store + 'static> DbTransactionContext<S> {
             fetcher
                 .persist_migrated_documents(&collection, write_backs)
                 .await?;
+        }
+        for (collection_name, include_deleted) in pending.full_scans {
+            if include_deleted {
+                fetcher.get_all_with_deleted(&collection_name, true).await?;
+            } else {
+                fetcher.get_all(&collection_name).await?;
+            }
         }
 
         Ok(())

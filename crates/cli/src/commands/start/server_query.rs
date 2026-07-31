@@ -5,20 +5,23 @@ use std::sync::Arc;
 use tracing::info;
 
 use super::node::Node;
-use crate::config::{AcpDocumentType, Config};
+#[cfg(feature = "sourcehub")]
+use crate::config::AcpDocumentType;
+use crate::config::Config;
 use identity::Did;
 
-pub(super) struct QueryRunnerSetup<S: storage::corekv::Store + 'static> {
+pub(super) struct QueryRunnerSetup {
     pub(super) runner: Arc<dyn query::executor::QueryExecutor>,
     pub(super) rest_ops: Arc<dyn query::rest::RestOperations>,
-    pub(super) registry: Arc<db::DbTransactionRegistry<S>>,
+    pub(super) registry: Arc<db::DbTransactionRegistry<storage::DynStore>>,
+    #[cfg(feature = "postgres")]
     pub(super) collection_provider: Arc<dyn query::CollectionProvider>,
 }
 
 impl Node {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn setup_query_runner<S>(
-        database: Arc<db::DB<S>>,
+    pub(super) fn setup_query_runner(
+        database: Arc<db::DB<storage::DynStore>>,
         config: &Config,
         user_did: Option<&Did>,
         document_acp: Arc<dyn acp::DocumentACP>,
@@ -26,10 +29,7 @@ impl Node {
         mutator: Arc<dyn query::mutator::DocMutator>,
         txn_broadcaster: Option<Arc<dyn db::event_emission::TxnBroadcaster>>,
         se_transport: Option<Arc<dyn query::SeQueryTransport>>,
-    ) -> QueryRunnerSetup<S>
-    where
-        S: storage::corekv::Store + 'static,
-    {
+    ) -> QueryRunnerSetup {
         let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
         let registry = Arc::new(match txn_broadcaster {
             Some(b) => db::DbTransactionRegistry::with_broadcaster(database.clone(), b),
@@ -63,9 +63,12 @@ impl Node {
         }
 
         if let Some(did) = user_did {
-            if config.acp.document_type != AcpDocumentType::SourceHub
-                && config.acp.document_type != AcpDocumentType::HubRs
-            {
+            #[cfg(feature = "sourcehub")]
+            let remote_acp = config.acp.document_type == AcpDocumentType::SourceHub
+                || config.acp.document_type == AcpDocumentType::HubRs;
+            #[cfg(not(feature = "sourcehub"))]
+            let remote_acp = false;
+            if !remote_acp {
                 info!("Query runner configured with default identity for ACP");
                 query_runner = query_runner.with_default_identity(did.clone());
             }
@@ -89,6 +92,7 @@ impl Node {
             runner,
             rest_ops,
             registry,
+            #[cfg(feature = "postgres")]
             collection_provider,
         }
     }

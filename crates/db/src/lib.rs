@@ -118,7 +118,7 @@ pub use collection_provider::DbCollectionProvider;
 pub use collection_retriever::{resolve_collection_from_doc_id, DocCollectionInfo};
 pub use collection_snapshot::CollectionSnapshot;
 pub use commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
-pub use database::{DbOptions, EmbeddingClientConfig, DB};
+pub use database::{DbOptions, EmbeddingClientConfig, DB, DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE};
 pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
 pub use defra_core::{Action, ActionExecution, ActionStatus};
 pub use doc_write_queue::DocWriteQueue;

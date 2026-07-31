@@ -98,7 +98,6 @@ multiaddr = "0.18"
 # Iroh P2P transport (alternative to libp2p)
 iroh = "1.0.1"
 iroh-gossip = "0.101.0"
-iroh-blobs = "0.103.0"
 iroh-tickets = "1.0.0"
 postcard = { version = "1.0", features = ["alloc"] }
 
@@ -207,3 +206,73 @@ inherits = "release"
 strip = false
 debug = 1
 lto = "thin"
+
+# Fast release iteration for CI/dev: measured 1m40s cold vs 6m44s fat LTO
+# (+25% binary size — never ship artifacts from this profile).
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
+[profile.release.package."cranelift-assembler-x64"]
+opt-level = "z"
+[profile.release.package."cranelift-bforest"]
+opt-level = "z"
+[profile.release.package."cranelift-bitset"]
+opt-level = "z"
+[profile.release.package."cranelift-codegen"]
+opt-level = "z"
+[profile.release.package."cranelift-codegen-shared"]
+opt-level = "z"
+[profile.release.package."cranelift-control"]
+opt-level = "z"
+[profile.release.package."cranelift-entity"]
+opt-level = "z"
+[profile.release.package."cranelift-frontend"]
+opt-level = "z"
+[profile.release.package."cranelift-isle"]
+opt-level = "z"
+[profile.release.package."cranelift-native"]
+opt-level = "z"
+[profile.release.package."regalloc2"]
+opt-level = "z"
+[profile.release.package."pulley-interpreter"]
+opt-level = "z"
+[profile.release.package."wasmtime"]
+opt-level = "z"
+[profile.release.package."wasmtime-environ"]
+opt-level = "z"
+[profile.release.package."wasmtime-internal-core"]
+opt-level = "z"
+[profile.release.package."wasmtime-internal-cranelift"]
+opt-level = "z"
+[profile.release.package."wasmtime-internal-fiber"]
+opt-level = "z"
+[profile.release.package."wasmtime-internal-jit-debug"]
+opt-level = "z"
+[profile.release.package."wasmtime-internal-jit-icache-coherence"]
+opt-level = "z"
+[profile.release.package."wasmtime-internal-unwinder"]
+opt-level = "z"
+[profile.release.package."wasmparser"]
+opt-level = "z"
+[profile.release.package."wasm-encoder"]
+opt-level = "z"
+[profile.release.package."clap"]
+opt-level = "z"
+[profile.release.package."clap_builder"]
+opt-level = "z"
+[profile.release.package."clap_lex"]
+opt-level = "z"
+[profile.release.package."serde_yaml"]
+opt-level = "z"
+[profile.release.package."unsafe-libyaml"]
+opt-level = "z"
+[profile.release.package."tracing-subscriber"]
+opt-level = "z"
+[profile.release.package."hickory-proto"]
+opt-level = "z"
+[profile.release.package."hickory-resolver"]
+opt-level = "z"
+[profile.release.package."hickory-net"]
+opt-level = "z"

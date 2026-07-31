@@ -352,7 +352,23 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
             return Ok(());
         }
 
-        let mut candidates = candidates;
+        let batch_size = self.db.options().migration_write_back_batch_size();
+        let mut candidates = candidates.into_iter();
+        loop {
+            let batch: Vec<_> = candidates.by_ref().take(batch_size).collect();
+            if batch.is_empty() {
+                return Ok(());
+            }
+            self.persist_migrated_document_batch(collection, batch)
+                .await?;
+        }
+    }
+
+    async fn persist_migrated_document_batch(
+        &self,
+        collection: &Collection,
+        mut candidates: Vec<MigrationWriteBack>,
+    ) -> query::error::Result<()> {
         candidates.sort_by_key(|candidate| {
             candidate
                 .source_document

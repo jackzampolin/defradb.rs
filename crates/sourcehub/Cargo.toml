@@ -13,7 +13,7 @@ description = "SourceHub ACP client for DefraDB"
 reqwest = { version = "0.12", features = ["json"] }
 
 # Cosmos SDK transaction building and signing
-cosmrs = { version = "0.22", features = ["rpc"] }
+cosmrs = "0.22"
 
 # Serialization
 serde.workspace = true

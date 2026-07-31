@@ -110,18 +110,22 @@ pub struct StartArgs {
     pub durability: Option<String>,
 
     /// Signer type: "local" (default) or "orbis" (Orbis ring threshold signing)
+    #[cfg(feature = "orbis")]
     #[arg(long)]
     pub signer_type: Option<String>,
 
     /// Orbis gRPC endpoint (required when --signer-type=orbis)
+    #[cfg(feature = "orbis")]
     #[arg(long)]
     pub signer_orbis_endpoint: Option<String>,
 
     /// Orbis ring ID from DKG (required when --signer-type=orbis)
+    #[cfg(feature = "orbis")]
     #[arg(long)]
     pub signer_orbis_ring_id: Option<String>,
 
     /// Orbis derivation label for the ring's derived key (e.g. "x-archive")
+    #[cfg(feature = "orbis")]
     #[arg(long)]
     pub signer_orbis_derivation: Option<String>,
 
@@ -241,6 +245,7 @@ pub struct StartArgs {
     pub p2p_transport: Option<String>,
 
     /// Address for Postgres wire protocol compatibility (e.g., "127.0.0.1:5433")
+    #[cfg(feature = "postgres")]
     #[arg(long)]
     pub pg_address: Option<String>,
 
@@ -295,6 +300,7 @@ impl StartArgs {
         let user_identity = self.parse_user_identity()?;
 
         // Set up Orbis remote signer if configured
+        #[cfg(feature = "orbis")]
         if self.signer_type.as_deref() == Some("orbis") {
             self.setup_orbis_signer(&user_identity).await?;
         }
@@ -308,6 +314,7 @@ impl StartArgs {
     ///
     /// Connects to the Orbis ring, derives the BLS public key, and stores
     /// a SigningConfig with a remote signer under the signer's DID.
+    #[cfg(feature = "orbis")]
     async fn setup_orbis_signer(
         &self,
         user_identity: &Option<std::sync::Arc<identity::RawIdentity>>,
@@ -549,6 +556,7 @@ impl StartArgs {
         if let Some(depth) = self.query_max_filter_depth {
             config.api.query_max_filter_depth = depth;
         }
+        #[cfg(feature = "postgres")]
         if let Some(ref addr) = self.pg_address {
             config.api.pg_address = addr.clone();
         }

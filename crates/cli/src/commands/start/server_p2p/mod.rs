@@ -18,8 +18,8 @@ type WireKms = Option<Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Send>>;
 /// stalled connection cannot strand the peer's persisted retry ledger after
 /// the target restarts (the connectivity gate below would otherwise skip it
 /// forever, while nothing else redials it).
-async fn redial_replicator<S: storage::corekv::Store>(
-    peerstore: &storage::stores::Peerstore<S>,
+async fn redial_replicator(
+    peerstore: &storage::stores::Peerstore<storage::DynStore>,
     handle: &p2p::P2PHostHandle,
     peer_id_str: &str,
     peer_id: libp2p::PeerId,
@@ -43,8 +43,8 @@ async fn redial_replicator<S: storage::corekv::Store>(
     }
 }
 
-async fn set_persisted_replicator_status<S: storage::corekv::Store>(
-    peerstore: &storage::stores::Peerstore<S>,
+async fn set_persisted_replicator_status(
+    peerstore: &storage::stores::Peerstore<storage::DynStore>,
     peer_id: &str,
     status: p2p::ReplicatorStatus,
 ) -> Result<bool> {
@@ -120,17 +120,14 @@ pub(super) struct P2PSetup {
 }
 
 impl Node {
-    pub(super) async fn setup_p2p<S>(
-        store: Arc<S>,
-        database: Arc<db::DB<S>>,
+    pub(super) async fn setup_p2p(
+        store: Arc<storage::DynStore>,
+        database: Arc<db::DB<storage::DynStore>>,
         event_bus: Arc<dyn events::Bus>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
         se_key: Option<[u8; 32]>,
-    ) -> Result<P2PSetup>
-    where
-        S: storage::corekv::Store + 'static,
-    {
+    ) -> Result<P2PSetup> {
         if config.net.p2p_disabled {
             return Ok(Self::p2p_disabled(database));
         }
@@ -160,10 +157,7 @@ impl Node {
         Self::setup_libp2p_p2p(store, database, event_bus, config, peer_keypair, se_key).await
     }
 
-    fn p2p_disabled<S>(database: Arc<db::DB<S>>) -> P2PSetup
-    where
-        S: storage::corekv::Store + 'static,
-    {
+    fn p2p_disabled(database: Arc<db::DB<storage::DynStore>>) -> P2PSetup {
         P2PSetup {
             host_handle: None,
             p2p_tasks: None,

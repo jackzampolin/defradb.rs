@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -72,14 +73,19 @@ impl TransformStore for SetVerifiedStore {
 #[derive(Default)]
 struct BlockingVerifiedStore {
     transforms: RwLock<HashSet<TransformId>>,
-    armed: AtomicBool,
+    transform_calls: AtomicUsize,
+    block_on_call: AtomicUsize,
     entered: Arc<Notify>,
     release: Arc<Notify>,
 }
 
 impl BlockingVerifiedStore {
     fn arm(&self) {
-        self.armed.store(true, Ordering::SeqCst);
+        self.arm_on_call(self.transform_calls.load(Ordering::SeqCst) + 1);
+    }
+
+    fn arm_on_call(&self, call: usize) {
+        self.block_on_call.store(call, Ordering::SeqCst);
     }
 }
 
@@ -108,7 +114,8 @@ impl TransformStore for BlockingVerifiedStore {
         if !self.has_transform(id) {
             return Err(lens::Error::TransformNotFound(id.to_string()));
         }
-        let should_block = self.armed.swap(false, Ordering::SeqCst);
+        let call = self.transform_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let should_block = self.block_on_call.load(Ordering::SeqCst) == call;
         let entered = self.entered.clone();
         let release = self.release.clone();
         Ok(Box::pin(docs.then(move |mut doc| {
@@ -591,6 +598,124 @@ async fn lazy_write_back_updates_secondary_indexes_for_late_document() {
         1,
         "lazy migration must atomically replace the document's index entries"
     );
+}
+
+#[tokio::test]
+async fn lazy_full_scan_flushes_write_back_in_bounded_batches() {
+    let transform_store = Arc::new(BlockingVerifiedStore::default());
+    let options = crate::DbOptions::new().with_migration_write_back_batch_size(
+        NonZeroUsize::new(2).expect("batch size is non-zero"),
+    );
+    let mut raw_db = DB::with_options(MemoryStore::new(), options).unwrap();
+    raw_db.lens_store = transform_store.clone();
+    let db = Arc::new(raw_db);
+
+    db.create_collection(indexed_users_schema()).await.unwrap();
+    let v1 = db
+        .get_collection("Users")
+        .unwrap()
+        .unwrap()
+        .version_id()
+        .to_string();
+    let v2 = add_placeholder_version(&db, "placeholder").await;
+    db.set_migration(
+        LensConfig::new(
+            &v1,
+            &v2,
+            LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let mut doc_ids = Vec::new();
+    for name in ["Batch-1", "Batch-2", "Batch-3"] {
+        doc_ids.push(seed_old_user(&db, &v1, name).await);
+    }
+
+    transform_store.arm_on_call(3);
+    let fetch_db = db.clone();
+    let fetch = tokio::spawn(async move {
+        crate::LensedAutoCommitFetcher::new(fetch_db)
+            .get_all("Users")
+            .await
+    });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        transform_store.entered.notified(),
+    )
+    .await
+    .expect("third migration reached the transform");
+
+    assert_eq!(
+        verified_index_count(&db).await,
+        2,
+        "the completed batch must commit before the next batch is transformed"
+    );
+
+    transform_store.release.notify_one();
+    let docs = fetch.await.unwrap().unwrap();
+    assert_eq!(docs.len(), 3);
+    assert!(docs
+        .iter()
+        .all(|doc| doc.schema_version_id() == Some(v2.as_str())));
+    assert_eq!(verified_index_count(&db).await, 3);
+    for doc_id in doc_ids {
+        assert_eq!(
+            load_user(&db, &doc_id).await.schema_version_id(),
+            Some(v2.as_str())
+        );
+    }
+}
+
+#[tokio::test]
+async fn implicit_full_scan_defers_one_collection_instead_of_each_document() {
+    let transform_store = Arc::new(SetVerifiedStore::default());
+    let options = crate::DbOptions::new().with_migration_write_back_batch_size(
+        NonZeroUsize::new(2).expect("batch size is non-zero"),
+    );
+    let mut raw_db = DB::with_options(MemoryStore::new(), options).unwrap();
+    raw_db.lens_store = transform_store.clone();
+    let db = Arc::new(raw_db);
+
+    db.create_collection(indexed_users_schema()).await.unwrap();
+    let v1 = db
+        .get_collection("Users")
+        .unwrap()
+        .unwrap()
+        .version_id()
+        .to_string();
+    let v2 = add_placeholder_version(&db, "placeholder").await;
+    db.set_migration(
+        LensConfig::new(
+            &v1,
+            &v2,
+            LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+
+    for name in ["Deferred-1", "Deferred-2", "Deferred-3"] {
+        seed_old_user(&db, &v1, name).await;
+    }
+
+    let txn = db.new_txn(true).await.unwrap();
+    let fetcher = crate::LensedDocFetcher::new(db, txn, transform_store, true);
+    let docs = fetcher.get_all("Users").await.unwrap();
+    assert_eq!(docs.len(), 3);
+
+    let pending = fetcher.take_pending_write_backs().await;
+    assert!(
+        pending.documents.is_empty(),
+        "full scans must not retain one write-back candidate per stale document"
+    );
+    assert_eq!(pending.full_scans.get("Users"), Some(&false));
+
+    fetcher.take_txn().await.unwrap().discard().unwrap();
 }
 
 #[tokio::test]

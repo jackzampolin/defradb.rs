@@ -14,7 +14,7 @@ use crate::lensed_auto_commit_fetcher::migration::MigrationWriteBack;
 use crate::migration::helpers::{cache_migrated_document_with_indexes, lens_doc_to_document};
 use crate::schema_loader::get_collections_by_collection_id;
 
-use super::{LensedDocFetcher, PendingMigrationWriteBack};
+use super::LensedDocFetcher;
 
 impl<S: Store> LensedDocFetcher<S> {
     /// Check if any version in a list of collection versions has migrations registered.
@@ -335,17 +335,15 @@ impl<S: Store> LensedDocFetcher<S> {
             ))
         })? {
             if self.defer_readonly_write_back {
-                self.pending_write_backs
-                    .lock()
-                    .await
-                    .push(PendingMigrationWriteBack {
-                        collection_name: collection.name().to_string(),
-                        write_back: MigrationWriteBack {
-                            source_document: source_doc.clone(),
-                            migrated_document: migrated_doc.clone(),
-                            migration_generation: self.db.migration_generation(),
-                        },
-                    });
+                self.defer_document_write_back(
+                    collection.name(),
+                    MigrationWriteBack {
+                        source_document: source_doc.clone(),
+                        migrated_document: migrated_doc.clone(),
+                        migration_generation: self.db.migration_generation(),
+                    },
+                )
+                .await;
             } else {
                 trace!(
                     doc_id = ?migrated_doc.id(),
