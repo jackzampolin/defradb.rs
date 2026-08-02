@@ -63,6 +63,9 @@ pub struct ReplicatorDeleteRequest {
     /// Collections to remove from replicator.
     #[serde(rename = "Collections", default)]
     pub collections: Vec<String>,
+    /// Delete the entire replicator and any persisted retry state.
+    #[serde(rename = "Forget", default)]
+    pub forget: bool,
 }
 
 /// List replicators (Go-compatible format).
@@ -168,6 +171,23 @@ pub async fn remove_replicator(
 
     let p2p = state.require_p2p()?;
 
+    if request.forget {
+        if !request.collections.is_empty() {
+            return Err(HttpError::BadRequest(
+                "Forget cannot be combined with Collections".into(),
+            ));
+        }
+        let peer_id = request
+            .id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| HttpError::BadRequest("ID is required when Forget is true".into()))?;
+        p2p.remove_replicator(Vec::new(), Some(peer_id))
+            .await
+            .map_err(map_p2p_bad_request)?;
+        return Ok(());
+    }
+
     if request.collections.is_empty() {
         return Err(HttpError::BadRequest(
             "at least one collection is required".into(),
@@ -219,6 +239,17 @@ mod tests {
         let request: ReplicatorDeleteRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.id, Some("replicator-123".to_string()));
         assert_eq!(request.collections.len(), 2);
+        assert!(!request.forget);
+    }
+
+    #[test]
+    fn test_replicator_forget_request_deserialize() {
+        let request: ReplicatorDeleteRequest =
+            serde_json::from_str(r#"{"ID":"replicator-123","Forget":true}"#).unwrap();
+
+        assert_eq!(request.id.as_deref(), Some("replicator-123"));
+        assert!(request.collections.is_empty());
+        assert!(request.forget);
     }
 
     #[test]

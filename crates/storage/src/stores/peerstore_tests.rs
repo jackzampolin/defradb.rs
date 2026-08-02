@@ -109,6 +109,15 @@ async fn test_delete_replicator() {
 
     // Set
     peerstore.create_replicator(peer_id, data).await.unwrap();
+    let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+    peerstore
+        .record_push_failure(peer_id, "doc", "collection", "doc-cid", 1, &retry_info)
+        .await
+        .unwrap();
+    peerstore
+        .record_push_failure(peer_id, "", "collection", "commit-cid", 1, &retry_info)
+        .await
+        .unwrap();
     assert!(peerstore.has_replicator(peer_id).await.unwrap());
 
     // Delete
@@ -118,6 +127,54 @@ async fn test_delete_replicator() {
     // Get returns None
     let result = peerstore.get_replicator(peer_id).await.unwrap();
     assert_eq!(result, None);
+    assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
+    assert!(peerstore
+        .get_retry_documents(peer_id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn delete_replicator_clears_orphaned_retry_state() {
+    let store = Arc::new(MemoryStore::new());
+    let peerstore = Peerstore::new(store);
+    let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+    peerstore
+        .record_push_failure("orphan", "doc", "collection", "cid", 1, &retry_info)
+        .await
+        .unwrap();
+    peerstore.delete_replicator("orphan").await.unwrap();
+
+    assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
+    assert!(peerstore
+        .get_retry_documents("orphan")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn retry_sweep_peers_require_persisted_replicators() {
+    let store = Arc::new(MemoryStore::new());
+    let peerstore = Peerstore::new(store);
+    let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+    for peer_id in ["active", "orphan"] {
+        peerstore
+            .record_push_failure(peer_id, "doc", "collection", "cid", 1, &retry_info)
+            .await
+            .unwrap();
+    }
+    peerstore
+        .create_replicator("active", b"replicator")
+        .await
+        .unwrap();
+
+    let peers = peerstore.get_replicator_retry_peers().await.unwrap();
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].0, "active");
 }
 
 #[tokio::test]

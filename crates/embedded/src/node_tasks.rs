@@ -555,7 +555,7 @@ pub(crate) async fn run_libp2p_retry_pass<S: storage::corekv::Store + 'static>(
     force: bool,
 ) {
     let peerstore = storage::stores::Peerstore::new(store.clone());
-    let peers = match peerstore.get_all_retry_peers().await {
+    let peers = match peerstore.get_replicator_retry_peers().await {
         Ok(peers) => peers,
         Err(_) => return,
     };
@@ -722,7 +722,7 @@ pub(crate) async fn run_iroh_retry_pass<S: storage::corekv::Store + 'static>(
     force: bool,
 ) {
     let peerstore = storage::stores::Peerstore::new(store.clone());
-    let peers = match peerstore.get_all_retry_peers().await {
+    let peers = match peerstore.get_replicator_retry_peers().await {
         Ok(peers) => peers,
         Err(_) => return,
     };

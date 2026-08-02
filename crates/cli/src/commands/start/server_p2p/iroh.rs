@@ -391,7 +391,7 @@ impl Node {
             loop {
                 tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
                 let peerstore = storage::stores::Peerstore::new(retry_store.clone());
-                let peers = match peerstore.get_all_retry_peers().await {
+                let peers = match peerstore.get_replicator_retry_peers().await {
                     Ok(p) => p,
                     Err(_) => continue,
                 };

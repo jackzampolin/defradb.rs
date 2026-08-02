@@ -532,7 +532,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
         loop {
             tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
             let peerstore = storage::stores::Peerstore::new(store.clone());
-            let peers = match peerstore.get_all_retry_peers().await {
+            let peers = match peerstore.get_replicator_retry_peers().await {
                 Ok(peers) => peers,
                 Err(error) => {
                     tracing::debug!(target: "defra_node", error = %error, "failed to load retry peers");

@@ -80,12 +80,35 @@ impl<S: Store> Peerstore<S> {
         txn.get(&key.bytes()).await
     }
 
-    /// Delete a replicator's configuration.
+    /// Delete a replicator and all of its persisted push-retry state.
     pub async fn delete_replicator(&self, peer_id: &str) -> Result<()> {
-        let key = ReplicatorKey::new(peer_id);
+        retry_push_txn_conflicts(|| self.delete_replicator_once(peer_id)).await
+    }
+
+    async fn delete_replicator_once(&self, peer_id: &str) -> Result<()> {
         let mut txn = self.store.new_txn(false).await?;
-        txn.delete(&key.bytes()).await?;
+        txn.delete(&ReplicatorKey::new(peer_id).bytes()).await?;
+        Self::delete_retry_state(txn.as_mut(), peer_id).await?;
         txn.commit().await
+    }
+
+    async fn delete_retry_state(txn: &mut dyn Txn, peer_id: &str) -> Result<()> {
+        let mut keys = Vec::new();
+        for prefix in [
+            ReplicatorRetryDocIDKey::peer_prefix(peer_id),
+            ReplicatorRetryCommitKey::peer_prefix(peer_id),
+        ] {
+            let mut iter = txn.iterator(IterOptions::new().with_prefix(prefix)).await?;
+            while let Some(pair) = iter.next().await? {
+                keys.push(pair.key);
+            }
+        }
+
+        for key in keys {
+            txn.delete(&key).await?;
+        }
+        txn.delete(&ReplicatorRetryIDKey::new(peer_id).bytes())
+            .await
     }
 
     /// Get all stored replicator configurations.
@@ -666,6 +689,15 @@ impl<S: Store> Peerstore<S> {
     ///
     /// Returns `(peer_id, retry_info_bytes)` pairs.
     pub async fn get_all_retry_peers(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        self.get_retry_peers(false).await
+    }
+
+    /// Get retry peers that still have a persisted replicator.
+    pub async fn get_replicator_retry_peers(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        self.get_retry_peers(true).await
+    }
+
+    async fn get_retry_peers(&self, require_replicator: bool) -> Result<Vec<(String, Vec<u8>)>> {
         let prefix = ReplicatorRetryIDKey::retry_prefix();
         let txn = self.store.new_txn(true).await?;
         let opts = IterOptions::new().with_prefix(prefix);
@@ -675,7 +707,10 @@ impl<S: Store> Peerstore<S> {
         while let Some(pair) = iter.next().await? {
             let key_str = String::from_utf8_lossy(&pair.key);
             if let Some(peer_id) = key_str.strip_prefix("/rep/retry/id/") {
-                if !peer_id.is_empty() {
+                if !peer_id.is_empty()
+                    && (!require_replicator
+                        || txn.has(&ReplicatorKey::new(peer_id).bytes()).await?)
+                {
                     results.push((peer_id.to_string(), pair.value));
                 }
             }
