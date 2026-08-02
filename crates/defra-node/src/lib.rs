@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use defra_core::signing::SigningConfig;
 use identity::{Identity as _, IdentityKeyType, RawIdentity};
+use rand::Rng;
 
 pub use coding_search::{
     CodingHybridSearchHit, CodingHybridSearchRequest, CodingHybridSearchResponse,
@@ -45,8 +46,6 @@ pub use query::{QueryExecutor, QueryRequest, QueryResponse};
 pub use schema::CollectionVersion;
 #[cfg(feature = "otel")]
 pub use telemetry::{TelemetryConfig, TelemetryHandle};
-
-const TRANSACTION_CONFLICT_RETRY_MESSAGE: &str = "transaction conflict. Please retry";
 
 /// Retry policy for [`EmbeddedNode::execute_with_retry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,15 +399,16 @@ where
         }
 
         retry_count += 1;
-        tracing::debug!(
+        let delay = jittered_backoff(backoff);
+        tracing::warn!(
             retry = retry_count,
             max_retries = policy.max_retries,
-            backoff_ms = backoff.as_millis(),
+            backoff_ms = delay.as_millis(),
             "retrying embedded execute after transaction conflict"
         );
 
-        if !backoff.is_zero() {
-            tokio::time::sleep(backoff).await;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
         }
         backoff = next_retry_backoff(backoff, policy.max_backoff);
     }
@@ -442,11 +442,16 @@ async fn execute_with_signing_context(
 }
 
 fn is_transaction_conflict_response(response: &QueryResponse) -> bool {
-    response.data.is_none()
-        && response.errors.len() == 1
-        && response.errors[0]
-            .message
-            .contains(TRANSACTION_CONFLICT_RETRY_MESSAGE)
+    response.is_transaction_conflict()
+}
+
+fn jittered_backoff(max_backoff: Duration) -> Duration {
+    if max_backoff.is_zero() {
+        return Duration::ZERO;
+    }
+
+    let max_nanos = max_backoff.as_nanos().min(u64::MAX as u128) as u64;
+    Duration::from_nanos(rand::thread_rng().gen_range(0..=max_nanos))
 }
 
 fn next_retry_backoff(current: Duration, max_backoff: Duration) -> Duration {
@@ -545,6 +550,7 @@ pub struct NodeBuilder {
     node_identity_did: Option<String>,
     node_acp_enabled: bool,
     at_rest_encryption_key: Option<[u8; 32]>,
+    max_txn_retries: Option<u32>,
     query_timeout: Option<Duration>,
     query_limits: QueryLimits,
     #[cfg(feature = "http")]
@@ -631,6 +637,12 @@ impl NodeBuilder {
     /// Enable transparent at-rest value encryption for the persistent storage backend.
     pub fn with_at_rest_encryption_key(mut self, key: [u8; 32]) -> Self {
         self.at_rest_encryption_key = Some(key);
+        self
+    }
+
+    /// Set the maximum number of auto-commit transaction conflict retries.
+    pub fn with_max_txn_retries(mut self, retries: u32) -> Self {
+        self.max_txn_retries = Some(retries);
         self
     }
 
@@ -747,6 +759,9 @@ impl NodeBuilder {
             if let Some(api_key) = self.embedding_api_key.as_ref() {
                 options = options.with_embedding_api_key(api_key.clone());
             }
+            if let Some(retries) = self.max_txn_retries {
+                options = options.with_max_txn_retries(retries);
+            }
             if let (Some(did), Some(config)) =
                 (node_identity_did.as_deref(), node_identity_config.as_ref())
             {
@@ -756,6 +771,8 @@ impl NodeBuilder {
             }
             options
         };
+        #[cfg(feature = "http")]
+        let max_txn_retries = db_options.max_txn_retries();
 
         // 2. Extract configs before moving self
         #[cfg(feature = "http")]
@@ -935,6 +952,7 @@ impl NodeBuilder {
             let server_config = defra_http::ServerConfig {
                 address: http_cfg.address,
                 request_timeout: timeout_secs(http_cfg.request_timeout),
+                max_txn_retries,
                 query_limits,
                 ..Default::default()
             };
@@ -1387,7 +1405,7 @@ mod tests {
 
     #[test]
     fn execute_retry_classifier_matches_transaction_conflicts_only() {
-        let conflict = query::QueryResponse::error(
+        let conflict = query::QueryResponse::transaction_conflict(
             "commit error: datastore error: storage error: transaction conflict. Please retry",
         );
         assert!(super::is_transaction_conflict_response(&conflict));
@@ -1420,7 +1438,7 @@ mod tests {
                     async move {
                         let attempt = attempts.fetch_add(1, Ordering::SeqCst);
                         if attempt < 2 {
-                            query::QueryResponse::error(
+                            query::QueryResponse::transaction_conflict(
                                 "commit error: storage error: transaction conflict. Please retry",
                             )
                         } else {

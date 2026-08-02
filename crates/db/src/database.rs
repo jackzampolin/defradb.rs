@@ -26,6 +26,8 @@ use storage::corekv::Store;
 
 /// Default maximum number of lazy migrations written in one transaction.
 pub const DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE: usize = 128;
+/// Default maximum number of retries after an auto-commit transaction conflict.
+pub const DEFAULT_MAX_TXN_RETRIES: u32 = 5;
 
 /// Database options.
 #[derive(Clone, Default)]
@@ -100,6 +102,11 @@ impl DbOptions {
     pub fn with_max_txn_retries(mut self, retries: u32) -> Self {
         self.max_txn_retries = Some(retries);
         self
+    }
+
+    /// Returns the maximum number of transaction retries.
+    pub fn max_txn_retries(&self) -> u32 {
+        self.max_txn_retries.unwrap_or(DEFAULT_MAX_TXN_RETRIES)
     }
 
     /// Sets the maximum number of lazy migrations written in one transaction.

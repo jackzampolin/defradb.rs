@@ -78,7 +78,8 @@ impl Node {
             info!("Stored node identity signing config for DID {}", did);
         }
 
-        let mut db_options = db::DbOptions::new();
+        let mut db_options =
+            db::DbOptions::new().with_max_txn_retries(config.datastore.max_txn_retries);
         if let Some(identity) = user_identity {
             db_options = db_options.with_node_identity_arc(identity);
             info!("Database configured with user identity");

@@ -124,6 +124,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         message: e.to_string(),
                         path: None,
                         locations: None,
+                        extensions: None,
                     }],
                 };
             }
@@ -172,6 +173,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     message: e.to_string(),
                     path: None,
                     locations: None,
+                    extensions: None,
                 }],
             };
         }
@@ -266,11 +268,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 );
                 QueryResponse {
                     data: None,
-                    errors: vec![QueryResponseError {
-                        message: e.to_string(),
-                        path: None,
-                        locations: None,
-                    }],
+                    errors: vec![QueryResponseError::from_query_error(e)],
                 }
             }
         }
@@ -334,6 +332,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         message: e.to_string(),
                         path: None,
                         locations: None,
+                        extensions: None,
                     }],
                 };
             }
@@ -358,6 +357,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         message: e.to_string(),
                         path: None,
                         locations: None,
+                        extensions: None,
                     }],
                 };
             }
@@ -490,11 +490,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 );
                 QueryResponse {
                     data: None,
-                    errors: vec![QueryResponseError {
-                        message: e.to_string(),
-                        path: None,
-                        locations: None,
-                    }],
+                    errors: vec![QueryResponseError::from_query_error(e)],
                 }
             }
         }

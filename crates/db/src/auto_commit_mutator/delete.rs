@@ -78,10 +78,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             error = %e,
                             "Failed to commit transaction after no-op delete"
                         );
-                        return Err(query::error::QueryError::execution(format!(
-                            "commit error: {}",
-                            e
-                        )));
+                        return Err(crate::error::commit_query_error(e));
                     }
                     return Ok(DeleteResult::new(doc_id.clone(), false));
                 };
@@ -188,10 +185,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         error = %e,
                         "Failed to commit transaction after delete"
                     );
-                    return Err(query::error::QueryError::execution(format!(
-                        "commit error: {}",
-                        e
-                    )));
+                    return Err(crate::error::commit_query_error(e));
                 }
 
                 // Emit update event for subscriptions when blocks were written.
