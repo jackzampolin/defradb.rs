@@ -29,6 +29,7 @@ replication-filter = { path = "../replication-filter" }
 storage = { path = "../storage" }
 query = { path = "../query" }
 events = { path = "../events" }
+rand.workspace = true
 acp = { path = "../acp" }
 sourcehub = { path = "../sourcehub" }
 identity = { path = "../identity" }
