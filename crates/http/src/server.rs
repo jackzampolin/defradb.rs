@@ -45,6 +45,8 @@ pub struct ServerConfig {
     pub request_timeout: u64,
     /// Max concurrent requests (0 = unlimited).
     pub max_concurrent_requests: usize,
+    /// Maximum retries after an auto-commit transaction conflict.
+    pub max_txn_retries: u32,
     /// GraphQL parsing and filter evaluation limits.
     pub query_limits: QueryLimits,
 }
@@ -59,6 +61,7 @@ impl Default for ServerConfig {
             max_backup_size: 0,
             request_timeout: 300,
             max_concurrent_requests: 1000,
+            max_txn_retries: db::DEFAULT_MAX_TXN_RETRIES,
             query_limits: QueryLimits::default(),
         }
     }
@@ -460,6 +463,7 @@ impl Server {
             builder = builder.with_signing_enabled(true);
         }
         builder = builder.with_dev_mode(self.dev_mode);
+        builder = builder.with_max_txn_retries(self.config.max_txn_retries);
         builder = builder.with_query_limits(self.config.query_limits);
         let state = builder.build();
         let state_for_middleware = state.clone();

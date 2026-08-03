@@ -271,10 +271,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 error = %e,
                 "Failed to commit batch transaction"
             );
-            return Err(query::error::QueryError::execution(format!(
-                "commit error: {}",
-                e
-            )));
+            return Err(crate::error::commit_query_error(e));
         }
 
         for (doc_id, ..) in &results {

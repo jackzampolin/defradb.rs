@@ -187,10 +187,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         error = %e,
                         "Failed to commit transaction after create"
                     );
-                    return Err(query::error::QueryError::execution(format!(
-                        "commit error: {}",
-                        e
-                    )));
+                    return Err(crate::error::commit_query_error(e));
                 }
 
                 self.register_created_doc_with_acp(&collection, &doc_id.to_string())

@@ -6,16 +6,37 @@
 //! points, we pin execution to a single thread using `spawn_blocking` +
 //! `Handle::block_on` — the same pattern the FFI uses with `rt.block_on()`.
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use query::executor::{QueryExecutor, QueryRequest, QueryResponse};
 use query::txn::TransactionHandle;
+use rand::Rng;
 
 use crate::identity_extractor::ExtractIdentity;
 use crate::router::AppState;
 
+const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(10);
+const MAX_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+
 /// Execute a GraphQL query with signing config and DAC bypass context.
 pub async fn execute_with_context(
+    state: &AppState,
+    identity: &ExtractIdentity,
+    request: QueryRequest,
+) -> QueryResponse {
+    execute_request_with_retry_loop(
+        request,
+        state.max_txn_retries,
+        INITIAL_RETRY_BACKOFF,
+        MAX_RETRY_BACKOFF,
+        |request| execute_once_with_context(state, identity, request),
+    )
+    .await
+}
+
+async fn execute_once_with_context(
     state: &AppState,
     identity: &ExtractIdentity,
     request: QueryRequest,
@@ -47,6 +68,52 @@ pub async fn execute_with_context(
         Ok(response) => response,
         Err(join_err) => QueryResponse::error(format!("query execution task failed: {join_err}")),
     }
+}
+
+async fn execute_request_with_retry_loop<F, Fut>(
+    request: QueryRequest,
+    max_retries: u32,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+    mut execute_once: F,
+) -> QueryResponse
+where
+    F: FnMut(QueryRequest) -> Fut,
+    Fut: Future<Output = QueryResponse>,
+{
+    let mut retry_count = 0;
+    let mut backoff = initial_backoff.min(max_backoff);
+
+    loop {
+        let response = execute_once(request.clone()).await;
+        if !response.is_transaction_conflict() || retry_count >= max_retries {
+            return response;
+        }
+
+        retry_count += 1;
+        let delay = jittered_backoff(backoff);
+        tracing::warn!(
+            retry = retry_count,
+            max_retries,
+            backoff_ms = delay.as_millis(),
+            "retrying auto-commit GraphQL request after transaction conflict"
+        );
+        tokio::time::sleep(delay).await;
+        backoff = next_retry_backoff(backoff, max_backoff);
+    }
+}
+
+fn jittered_backoff(max_backoff: Duration) -> Duration {
+    if max_backoff.is_zero() {
+        return Duration::ZERO;
+    }
+
+    let max_nanos = max_backoff.as_nanos().min(u64::MAX as u128) as u64;
+    Duration::from_nanos(rand::thread_rng().gen_range(0..=max_nanos))
+}
+
+fn next_retry_backoff(current: Duration, max_backoff: Duration) -> Duration {
+    current.saturating_mul(2).min(max_backoff)
 }
 
 /// Execute a GraphQL query within a transaction with signing config and DAC bypass context.
@@ -153,4 +220,103 @@ pub(crate) async fn resolve_dac_bypass(state: &AppState, identity: &ExtractIdent
         nac.check_permission(d, p).await.unwrap_or(false)
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use query::error::{Result, TransactionError};
+
+    use super::*;
+    use crate::router::AppStateBuilder;
+
+    #[derive(Default)]
+    struct ConflictExecutor {
+        auto_commit_attempts: AtomicUsize,
+        explicit_txn_attempts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl QueryExecutor for ConflictExecutor {
+        async fn execute(&self, _request: QueryRequest) -> QueryResponse {
+            if self.auto_commit_attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                QueryResponse::transaction_conflict("transaction conflict")
+            } else {
+                QueryResponse::success(serde_json::json!({"_docID": "doc"}))
+            }
+        }
+
+        async fn execute_in_txn(
+            &self,
+            _request: QueryRequest,
+            _handle: &TransactionHandle,
+        ) -> QueryResponse {
+            self.explicit_txn_attempts.fetch_add(1, Ordering::SeqCst);
+            QueryResponse::transaction_conflict("transaction conflict")
+        }
+
+        async fn begin_txn(
+            &self,
+            _readonly: bool,
+        ) -> std::result::Result<TransactionHandle, TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn commit_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn rollback_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn schema(&self) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_commit_execution_retries_typed_conflicts() {
+        let executor = Arc::new(ConflictExecutor::default());
+        let state = AppStateBuilder::new(executor.clone())
+            .with_max_txn_retries(3)
+            .build();
+
+        let response = execute_with_context(
+            &state,
+            &ExtractIdentity::anonymous(),
+            QueryRequest::new("mutation { create_User(input: {}) { _docID } }"),
+        )
+        .await;
+
+        assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 3);
+        assert!(!response.has_errors());
+    }
+
+    #[tokio::test]
+    async fn explicit_transaction_execution_is_not_retried() {
+        let executor = Arc::new(ConflictExecutor::default());
+        let state = AppStateBuilder::new(executor.clone())
+            .with_max_txn_retries(3)
+            .build();
+
+        let response = execute_in_txn_with_context(
+            &state,
+            &ExtractIdentity::anonymous(),
+            QueryRequest::new("mutation { update_User(input: {}) { _docID } }"),
+            TransactionHandle::new("txn".to_string()),
+        )
+        .await;
+
+        assert_eq!(executor.explicit_txn_attempts.load(Ordering::SeqCst), 1);
+        assert!(response.is_transaction_conflict());
+    }
 }

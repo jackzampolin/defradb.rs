@@ -154,10 +154,7 @@ impl<S: Store + 'static> BatchMutator<S> {
 impl<S: Store + 'static> MutationBatchController for BatchMutator<S> {
     async fn commit(&self) -> query::error::Result<()> {
         let txn = self.take_txn().await?;
-        let result = txn
-            .commit()
-            .await
-            .map_err(|e| query::error::QueryError::execution(format!("commit error: {}", e)));
+        let result = txn.commit().await.map_err(crate::error::commit_query_error);
         // Release per-doc guards only after the durable commit (#1021).
         self.release_doc_guards();
         result

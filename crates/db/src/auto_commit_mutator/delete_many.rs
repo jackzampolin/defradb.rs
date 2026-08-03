@@ -207,10 +207,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 error = %e,
                 "Failed to commit batch delete transaction"
             );
-            return Err(query::error::QueryError::execution(format!(
-                "commit error: {}",
-                e
-            )));
+            return Err(crate::error::commit_query_error(e));
         }
 
         // Emit events after commit, only when blocks were written.

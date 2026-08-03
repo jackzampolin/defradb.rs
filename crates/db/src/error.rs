@@ -188,12 +188,21 @@ pub(crate) fn index_write_query_error(operation: &str, error: Error) -> query::e
     }
 }
 
+pub(crate) fn commit_query_error(error: Error) -> query::error::QueryError {
+    let message = format!("commit error: {error}");
+    if error.is_txn_conflict() {
+        query::error::QueryError::transaction_conflict(message)
+    } else {
+        query::error::QueryError::execution(message)
+    }
+}
+
 /// Result type for database operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests {
-    use super::{index_write_query_error, Error};
+    use super::{commit_query_error, index_write_query_error, Error};
 
     #[test]
     fn document_at_key_preserves_display_message() {
@@ -252,6 +261,16 @@ mod tests {
             index_write_query_error("create", error),
             query::error::QueryError::Execution(message)
                 if message == storage::corekv::UNIQUE_CONSTRAINT_VIOLATION_MESSAGE
+        ));
+    }
+
+    #[test]
+    fn commit_query_error_preserves_transaction_conflict_type() {
+        let error = Error::Storage(storage::Error::TxnConflict);
+
+        assert!(matches!(
+            commit_query_error(error),
+            query::error::QueryError::TransactionConflict(_)
         ));
     }
 }
