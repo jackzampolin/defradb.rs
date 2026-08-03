@@ -3,7 +3,7 @@ use crate::backends::MemoryStore;
 use crate::corekv::{IterOptions, Store};
 use crate::keys::IndexDataStoreKey;
 use document::NormalValue;
-use schema::IndexedFieldDescription;
+use schema::{FullTextIndexDescription, IndexedFieldDescription};
 
 fn test_index_description(unique: bool) -> schema::IndexDescription {
     schema::IndexDescription {
@@ -35,6 +35,36 @@ fn composite_index_description(unique: bool) -> schema::IndexDescription {
             },
         ],
     }
+}
+
+fn fulltext_index_description() -> schema::IndexDescription {
+    schema::IndexDescription {
+        id: 3,
+        name: "__fulltext__:text".to_string(),
+        unique: false,
+        auto_generated: false,
+        fields: vec![IndexedFieldDescription {
+            name: "text".to_string(),
+            descending: false,
+        }],
+    }
+}
+
+fn test_fulltext_index() -> FullTextIndex {
+    FullTextIndex::new(
+        1,
+        fulltext_index_description(),
+        FullTextIndexDescription::new("text"),
+    )
+}
+
+fn legacy_fulltext_stats_key() -> Vec<u8> {
+    let mut key = Vec::new();
+    key.extend_from_slice(&1u32.to_be_bytes());
+    key.push(b'/');
+    key.extend_from_slice(&3u32.to_be_bytes());
+    key.extend_from_slice(b"/_stats");
+    key
 }
 
 /// Helper to count entries with a prefix
@@ -450,4 +480,149 @@ async fn test_composite_index_sort_order() {
         keys[0] < keys[1] && keys[1] < keys[2],
         "composite index should maintain correct sort order"
     );
+}
+
+#[tokio::test]
+async fn concurrent_fulltext_saves_use_independent_stats_shards() {
+    let store = MemoryStore::new();
+    let index = test_fulltext_index();
+    let mut first = store.new_txn(false).await.unwrap();
+    let mut second = store.new_txn(false).await.unwrap();
+
+    index
+        .save(&mut first, 1, &[NormalValue::String("one two".to_string())])
+        .await
+        .unwrap();
+    index
+        .save(
+            &mut second,
+            2,
+            &[NormalValue::String("three four five".to_string())],
+        )
+        .await
+        .unwrap();
+
+    first.commit().await.unwrap();
+    second.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    assert_eq!(index.stats(&txn).await.unwrap(), (2, 2.5));
+}
+
+#[tokio::test]
+async fn fulltext_stats_preserve_legacy_base_and_apply_deltas() {
+    let store = MemoryStore::new();
+    let index = test_fulltext_index();
+    let legacy_key = legacy_fulltext_stats_key();
+    let mut legacy_value = Vec::new();
+    legacy_value.extend_from_slice(&2u64.to_be_bytes());
+    legacy_value.extend_from_slice(&4u64.to_be_bytes());
+
+    let mut seed = store.new_txn(false).await.unwrap();
+    seed.set(&legacy_key, &legacy_value).await.unwrap();
+    seed.commit().await.unwrap();
+
+    let mut create = store.new_txn(false).await.unwrap();
+    index
+        .save(
+            &mut create,
+            10,
+            &[NormalValue::String("new sharded document".to_string())],
+        )
+        .await
+        .unwrap();
+    create.commit().await.unwrap();
+
+    let read = store.new_txn(true).await.unwrap();
+    assert_eq!(index.stats(&read).await.unwrap(), (3, 7.0 / 3.0));
+
+    let mut update = store.new_txn(false).await.unwrap();
+    index
+        .update(
+            &mut update,
+            99,
+            &[NormalValue::String("old document".to_string())],
+            &[NormalValue::String("updated legacy document".to_string())],
+        )
+        .await
+        .unwrap();
+    update.commit().await.unwrap();
+
+    let read = store.new_txn(true).await.unwrap();
+    assert_eq!(index.stats(&read).await.unwrap(), (3, 8.0 / 3.0));
+
+    let legacy_value = read.get(&legacy_key).await.unwrap().unwrap();
+    assert_eq!(
+        u64::from_be_bytes(legacy_value[0..8].try_into().unwrap()),
+        2
+    );
+    assert_eq!(
+        u64::from_be_bytes(legacy_value[8..16].try_into().unwrap()),
+        4
+    );
+
+    let mut delete = store.new_txn(false).await.unwrap();
+    index
+        .delete(
+            &mut delete,
+            99,
+            &[NormalValue::String("updated legacy document".to_string())],
+        )
+        .await
+        .unwrap();
+    delete.commit().await.unwrap();
+
+    let read = store.new_txn(true).await.unwrap();
+    assert_eq!(index.stats(&read).await.unwrap(), (2, 2.5));
+}
+
+#[tokio::test]
+async fn fulltext_scoring_tracks_updates_and_deletes_with_sharded_stats() {
+    let store = MemoryStore::new();
+    let index = test_fulltext_index();
+    let mut create = store.new_txn(false).await.unwrap();
+    index
+        .save(
+            &mut create,
+            1,
+            &[NormalValue::String("rust database".to_string())],
+        )
+        .await
+        .unwrap();
+    index
+        .save(
+            &mut create,
+            2,
+            &[NormalValue::String("rust storage engine".to_string())],
+        )
+        .await
+        .unwrap();
+    create.commit().await.unwrap();
+
+    let read = store.new_txn(true).await.unwrap();
+    assert_eq!(index.search_scored(&read, "rust").await.unwrap().len(), 2);
+
+    let mut mutate = store.new_txn(false).await.unwrap();
+    index
+        .update(
+            &mut mutate,
+            1,
+            &[NormalValue::String("rust database".to_string())],
+            &[NormalValue::String("graph database".to_string())],
+        )
+        .await
+        .unwrap();
+    index
+        .delete(
+            &mut mutate,
+            2,
+            &[NormalValue::String("rust storage engine".to_string())],
+        )
+        .await
+        .unwrap();
+    mutate.commit().await.unwrap();
+
+    let read = store.new_txn(true).await.unwrap();
+    assert!(index.search_scored(&read, "rust").await.unwrap().is_empty());
+    assert_eq!(index.stats(&read).await.unwrap(), (1, 2.0));
 }

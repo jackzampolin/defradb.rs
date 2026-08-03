@@ -5,7 +5,8 @@
 //!
 //! Key layout:
 //!   Posting:  /[col_id]/[idx_id]/[term]/[doc_short_id] -> [term_freq, field_len]
-//!   Stats:    /[col_id]/[idx_id]/_stats                 -> [total_docs, total_field_len]
+//!   Legacy stats: /[col_id]/[idx_id]/_stats             -> [total_docs, total_field_len]
+//!   Stats shard:  /[col_id]/[idx_id]/0xff/s/[shard]     -> [doc_delta, field_len_delta]
 
 use async_trait::async_trait;
 use bm25::{DefaultTokenizer, Language, Tokenizer};
@@ -17,6 +18,10 @@ use super::validate_doc_short_id;
 use super::CollectionIndex;
 use crate::corekv::{IterOptions, MaybeSend, Reader, Result, Writer};
 use crate::keys::doc_id_index::{decode_doc_short_id, encode_doc_short_id};
+
+const METADATA_PREFIX: u8 = 0xff;
+const STATS_SHARD_TAG: u8 = b's';
+const STATS_SHARD_HASH: u64 = 0x9e37_79b9_7f4a_7c15;
 
 /// Map a language string to the bm25 crate's Language enum.
 pub fn parse_language(lang: &str) -> Language {
@@ -103,6 +108,23 @@ impl FullTextIndex {
         key
     }
 
+    fn metadata_prefix(&self, tag: u8) -> Vec<u8> {
+        let mut key = self.index_prefix();
+        // Terms are UTF-8 strings, so 0xff reserves a disjoint metadata namespace.
+        key.extend_from_slice(&[METADATA_PREFIX, tag, b'/']);
+        key
+    }
+
+    fn stats_shard_prefix(&self) -> Vec<u8> {
+        self.metadata_prefix(STATS_SHARD_TAG)
+    }
+
+    fn stats_shard_key(&self, doc_short_id: u64) -> Vec<u8> {
+        let mut key = self.stats_shard_prefix();
+        key.push((doc_short_id.wrapping_mul(STATS_SHARD_HASH) >> (u64::BITS - u8::BITS)) as u8);
+        key
+    }
+
     /// Tokenize text and return term frequencies.
     fn tokenize_with_freqs(&self, text: &str) -> HashMap<String, u32> {
         let tokens = self.tokenizer.tokenize(text);
@@ -113,29 +135,76 @@ impl FullTextIndex {
         freqs
     }
 
-    async fn read_stats<R: Reader + MaybeSend>(&self, txn: &R) -> Result<(u64, u64)> {
-        let key = self.stats_key();
-        match txn.get(&key).await? {
+    fn decode_stats(value: Option<Vec<u8>>) -> (u64, u64) {
+        match value {
             Some(bytes) if bytes.len() == 16 => {
                 let total_docs = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
                 let total_field_len = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
-                Ok((total_docs, total_field_len))
+                (total_docs, total_field_len)
             }
-            _ => Ok((0, 0)),
+            _ => (0, 0),
         }
     }
 
-    async fn write_stats<T: Writer + MaybeSend>(
+    fn decode_stats_delta(value: Option<Vec<u8>>) -> (i128, i128) {
+        match value {
+            Some(bytes) if bytes.len() == 32 => {
+                let docs = i128::from_be_bytes(bytes[0..16].try_into().unwrap());
+                let field_len = i128::from_be_bytes(bytes[16..32].try_into().unwrap());
+                (docs, field_len)
+            }
+            _ => (0, 0),
+        }
+    }
+
+    async fn apply_stats_delta<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
-        total_docs: u64,
-        total_field_len: u64,
+        doc_short_id: u64,
+        docs_delta: i128,
+        field_len_delta: i128,
     ) -> Result<()> {
-        let key = self.stats_key();
-        let mut value = Vec::with_capacity(16);
-        value.extend_from_slice(&total_docs.to_be_bytes());
-        value.extend_from_slice(&total_field_len.to_be_bytes());
+        let key = self.stats_shard_key(doc_short_id);
+        let (docs, field_len) = Self::decode_stats_delta(txn.get(&key).await?);
+        let docs = docs
+            .checked_add(docs_delta)
+            .ok_or_else(|| crate::corekv::Error::Other("full-text stats overflow".to_string()))?;
+        let field_len = field_len
+            .checked_add(field_len_delta)
+            .ok_or_else(|| crate::corekv::Error::Other("full-text stats overflow".to_string()))?;
+        let mut value = Vec::with_capacity(32);
+        value.extend_from_slice(&docs.to_be_bytes());
+        value.extend_from_slice(&field_len.to_be_bytes());
         txn.set(&key, &value).await
+    }
+
+    async fn read_stats<R: Reader + MaybeSend>(&self, txn: &R) -> Result<(u64, u64)> {
+        let (legacy_docs, legacy_field_len) = Self::decode_stats(txn.get(&self.stats_key()).await?);
+        let mut total_docs = i128::from(legacy_docs);
+        let mut total_field_len = i128::from(legacy_field_len);
+        let prefix = self.stats_shard_prefix();
+        let mut iter = txn
+            .iterator(IterOptions::new().with_prefix(prefix.clone()))
+            .await?;
+        while let Some(kv) = iter.next().await? {
+            if kv.key.len() != prefix.len() + 1 {
+                continue;
+            }
+            let (shard_docs, shard_field_len) = Self::decode_stats_delta(Some(kv.value));
+            total_docs = total_docs.checked_add(shard_docs).ok_or_else(|| {
+                crate::corekv::Error::Other("full-text stats overflow".to_string())
+            })?;
+            total_field_len = total_field_len
+                .checked_add(shard_field_len)
+                .ok_or_else(|| {
+                    crate::corekv::Error::Other("full-text stats overflow".to_string())
+                })?;
+        }
+        let total_docs = u64::try_from(total_docs.max(0))
+            .map_err(|_| crate::corekv::Error::Other("full-text stats overflow".to_string()))?;
+        let total_field_len = u64::try_from(total_field_len.max(0))
+            .map_err(|_| crate::corekv::Error::Other("full-text stats overflow".to_string()))?;
+        Ok((total_docs, total_field_len))
     }
 
     fn extract_text(values: &[NormalValue]) -> &str {
@@ -322,9 +391,8 @@ impl CollectionIndex for FullTextIndex {
         if text.is_empty() {
             return Ok(());
         }
-        let (total_docs, total_field_len) = self.read_stats(txn).await?;
         let field_len = self.write_postings(txn, doc_short_id, text).await?;
-        self.write_stats(txn, total_docs + 1, total_field_len + field_len)
+        self.apply_stats_delta(txn, doc_short_id, 1, i128::from(field_len))
             .await
     }
 
@@ -338,21 +406,28 @@ impl CollectionIndex for FullTextIndex {
         validate_doc_short_id(doc_short_id, &self.desc.name)?;
         let old_text = Self::extract_text(old_values);
         let new_text = Self::extract_text(new_values);
-        let (mut total_docs, mut total_field_len) = self.read_stats(txn).await?;
-
-        if !old_text.is_empty() {
-            let old_field_len = self.remove_postings(txn, doc_short_id, old_text).await?;
-            total_docs = total_docs.saturating_sub(1);
-            total_field_len = total_field_len.saturating_sub(old_field_len);
+        if old_text == new_text {
+            return Ok(());
         }
 
-        if !new_text.is_empty() {
-            let new_field_len = self.write_postings(txn, doc_short_id, new_text).await?;
-            total_docs += 1;
-            total_field_len += new_field_len;
+        let old_field_len = if old_text.is_empty() {
+            0
+        } else {
+            self.remove_postings(txn, doc_short_id, old_text).await?
+        };
+        let new_field_len = if new_text.is_empty() {
+            0
+        } else {
+            self.write_postings(txn, doc_short_id, new_text).await?
+        };
+        let docs_delta =
+            i128::from(u8::from(!new_text.is_empty())) - i128::from(u8::from(!old_text.is_empty()));
+        let field_len_delta = i128::from(new_field_len) - i128::from(old_field_len);
+        if docs_delta != 0 || field_len_delta != 0 {
+            self.apply_stats_delta(txn, doc_short_id, docs_delta, field_len_delta)
+                .await?;
         }
-
-        self.write_stats(txn, total_docs, total_field_len).await
+        Ok(())
     }
 
     async fn delete<T: Reader + Writer + MaybeSend>(
@@ -366,14 +441,9 @@ impl CollectionIndex for FullTextIndex {
         if text.is_empty() {
             return Ok(());
         }
-        let (total_docs, total_field_len) = self.read_stats(txn).await?;
         let field_len = self.remove_postings(txn, doc_short_id, text).await?;
-        self.write_stats(
-            txn,
-            total_docs.saturating_sub(1),
-            total_field_len.saturating_sub(field_len),
-        )
-        .await
+        self.apply_stats_delta(txn, doc_short_id, -1, -i128::from(field_len))
+            .await
     }
 
     async fn remove_all<T: Reader + Writer + MaybeSend>(&self, txn: &mut T) -> Result<()> {
