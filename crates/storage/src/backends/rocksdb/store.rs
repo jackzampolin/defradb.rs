@@ -197,11 +197,10 @@ impl Store for RocksDbStore {
         }
         let mut guard = NewTxnGuard(&self.active_txn_count, false);
 
-        // Pair the conflict version and RocksDB snapshot without a commit
-        // becoming visible between them. Read-only transactions skip the
-        // gate: they never conflict-check, and commit() only returns to its
-        // caller after the physical write, so read-your-committed-writes
-        // holds without serializing readers behind in-flight commits.
+        // Pair the published conflict version with the RocksDB snapshot. A
+        // pending physical write may already be visible, but its reservation
+        // remains a conservative conflict until publication. Read-only
+        // transactions never conflict-check and skip this gate.
         let _commit_guard = if readonly {
             None
         } else {
@@ -301,25 +300,24 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn snapshot_waits_for_physical_write_after_conflict_version_advances() {
+    async fn snapshot_waits_while_successful_commit_is_published() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let store = Arc::new(RocksDbStore::open(temp_dir.path()).unwrap());
         let sequence_key = b"/seq/doc".to_vec();
         let sequence_value = 14_u64.to_be_bytes();
 
-        // Reproduce the critical interval inside commit: the logical conflict
-        // version has advanced, but the corresponding RocksDB batch has not
-        // yet been written. A new transaction must not snapshot in this gap.
         let gate = Arc::clone(&store.commit_gate);
         let commit_guard = gate.write().await;
-        store
+        let reservation = store
             .conflict_tracker
-            .check_and_record(
+            .reserve(
                 store.conflict_tracker.current_version(),
                 std::slice::from_ref(&sequence_key).iter(),
                 &ReadSet::default(),
             )
             .unwrap();
+        store.db.put(&sequence_key, sequence_value).unwrap();
+        reservation.publish();
 
         let snapshot_store = Arc::clone(&store);
         let mut snapshot_task = tokio::spawn(async move { snapshot_store.new_txn(false).await });
@@ -327,10 +325,9 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(25), &mut snapshot_task)
                 .await
                 .is_err(),
-            "new transaction took a snapshot during an in-flight physical commit"
+            "new transaction took a snapshot during version publication"
         );
 
-        store.db.put(&sequence_key, sequence_value).unwrap();
         drop(commit_guard);
 
         let snapshot = tokio::time::timeout(Duration::from_secs(1), snapshot_task)
@@ -345,7 +342,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn physical_write_waits_for_snapshot_pairing() {
+    async fn physical_write_does_not_wait_for_snapshot_pairing() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let store = Arc::new(RocksDbStore::open(temp_dir.path()).unwrap());
         let key = b"commit-gate-key".to_vec();
@@ -362,18 +359,24 @@ mod tests {
         });
         started_rx.await.unwrap();
 
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while store.db.get(&key).unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("physical write remained blocked by snapshot pairing");
         assert!(
             tokio::time::timeout(Duration::from_millis(25), &mut commit_task)
                 .await
                 .is_err(),
-            "physical commit did not wait for snapshot pairing"
+            "commit completed before its conflict version was published"
         );
-        assert_eq!(store.db.get(&key).unwrap(), None);
 
         drop(snapshot_guard);
         tokio::time::timeout(Duration::from_secs(1), commit_task)
             .await
-            .expect("commit remained blocked after snapshot pairing")
+            .expect("commit remained blocked after publication gate release")
             .expect("commit task panicked")
             .expect("commit failed");
         assert_eq!(store.db.get(&key).unwrap(), Some(b"committed".to_vec()));
@@ -435,22 +438,22 @@ mod tests {
             }));
         }
 
-        // Park the commit's blocking task before it writes.
+        // Park version publication after the blocking task writes.
         let gate = Arc::clone(&store.commit_gate);
         let commit_guard = gate.write().await;
 
         let commit_task = tokio::spawn(async move { txn.commit().await });
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Drop the caller's future while the write is still parked.
+        // Drop the caller's future while publication is still parked.
         commit_task.abort();
         assert!(
             commit_task.await.is_err(),
             "commit task should have been aborted"
         );
 
-        // Releasing the gate lets the detached task finish the write and start
-        // the callbacks; they are spawned, so poll until they land.
+        // Releasing the gate lets the detached task publish and start the
+        // callbacks; they are spawned, so poll until they land.
         drop(commit_guard);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !(fired.load(Ordering::Acquire) && async_fired.load(Ordering::Acquire)) {
@@ -471,7 +474,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_commit_still_conflict_checks_against_pinned_records() {
+    async fn commit_conflict_checks_against_pinned_records() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let store = Arc::new(RocksDbStore::open(temp_dir.path()).unwrap());
         let key = b"contended-key".to_vec();
@@ -486,29 +489,12 @@ mod tests {
         txn_b.commit().await.unwrap();
         assert_eq!(store.db.get(&key).unwrap(), Some(b"committed-B".to_vec()));
 
-        // Hold the gate so A's blocking commit task parks at blocking_write.
-        let gate = Arc::clone(&store.commit_gate);
-        let commit_guard = gate.write().await;
+        let error = txn_a.commit().await.unwrap_err();
+        assert!(
+            error.is_txn_conflict(),
+            "expected TxnConflict, got: {error}"
+        );
 
-        let commit_task = tokio::spawn(async move { txn_a.commit().await });
-        // Let the commit future run its first poll (dispatch spawn_blocking).
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Cancel the commit future while the blocking thread waits for the
-        // gate. A's ConflictSnapshot moved into the closure, so B's record
-        // must stay pinned for the detached conflict check.
-        commit_task.abort();
-        let join = commit_task.await;
-        assert!(join.is_err(), "commit task should have been aborted");
-
-        // Release the gate; the detached blocking thread (queued ahead of
-        // us) runs check_and_record + physical write, so reacquiring the
-        // gate sequences after its completion.
-        drop(commit_guard);
-        drop(gate.write().await);
-
-        // Correct SSI behavior: A conflicts with B (same key, B committed
-        // after A's snapshot) so B's value must survive.
         assert_eq!(
             store.db.get(&key).unwrap(),
             Some(b"committed-B".to_vec()),
@@ -609,6 +595,6 @@ mod tests {
         let stats = store.stats().unwrap().transactions;
         assert_eq!(stats.conflicts, 1);
         assert_eq!(stats.snapshot_gate_waits, 2);
-        assert_eq!(stats.commit_gate_waits, 2);
+        assert_eq!(stats.commit_gate_waits, 1);
     }
 }

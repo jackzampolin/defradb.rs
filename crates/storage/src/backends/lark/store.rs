@@ -98,11 +98,10 @@ impl Store for LarkStore {
         }
         let mut guard = NewTxnGuard(&self.active_txn_count, false);
 
-        // Pair the conflict version and lark snapshot without a commit
-        // becoming visible between them. Read-only transactions skip the
-        // gate: lark now publishes its read horizon only after a batch is
-        // applied, so an ungated snapshot can no longer observe a torn
-        // batch, and read-only transactions never conflict-check.
+        // Pair the published conflict version with the lark snapshot. A
+        // pending physical write may already be visible, but its reservation
+        // remains a conservative conflict until publication. Read-only
+        // transactions never conflict-check and skip this gate.
         let _commit_guard = if readonly {
             None
         } else {
@@ -191,7 +190,7 @@ mod pairing_tests {
     }
 
     #[tokio::test]
-    async fn snapshot_waits_for_physical_write_after_conflict_version_advances() {
+    async fn snapshot_waits_while_successful_commit_is_published() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let store = Arc::new(LarkStore::open(temp_dir.path()).unwrap());
         let key = b"paired-snapshot".to_vec();
@@ -199,14 +198,21 @@ mod pairing_tests {
 
         let gate = Arc::clone(&store.commit_gate);
         let commit_guard = gate.write().await;
-        store
+        let reservation = store
             .conflict_tracker
-            .check_and_record(
+            .reserve(
                 store.conflict_tracker.current_version(),
                 std::slice::from_ref(&key).iter(),
                 &ReadSet::default(),
             )
             .unwrap();
+        let mut batch = lark_kv::WriteBatch::new();
+        batch.put(&key, &value);
+        store
+            .db
+            .write_with_durability(batch, lark_kv::DurabilityMode::Eventual)
+            .unwrap();
+        reservation.publish();
 
         let snapshot_store = Arc::clone(&store);
         let mut snapshot_task = tokio::spawn(async move { snapshot_store.new_txn(false).await });
@@ -214,15 +220,9 @@ mod pairing_tests {
             tokio::time::timeout(Duration::from_millis(25), &mut snapshot_task)
                 .await
                 .is_err(),
-            "new transaction took a snapshot during an in-flight physical commit"
+            "new transaction took a snapshot during version publication"
         );
 
-        let mut batch = lark_kv::WriteBatch::new();
-        batch.put(&key, &value);
-        store
-            .db
-            .write_with_durability(batch, lark_kv::DurabilityMode::Eventual)
-            .unwrap();
         drop(commit_guard);
 
         let snapshot = tokio::time::timeout(Duration::from_secs(1), snapshot_task)
@@ -234,7 +234,7 @@ mod pairing_tests {
     }
 
     #[tokio::test]
-    async fn physical_write_waits_for_snapshot_pairing() {
+    async fn physical_write_does_not_wait_for_snapshot_pairing() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let store = Arc::new(LarkStore::open(temp_dir.path()).unwrap());
         let key = b"paired-commit".to_vec();
@@ -250,18 +250,24 @@ mod pairing_tests {
         });
         started_rx.await.unwrap();
 
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while physical_value(&store, &key).is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("physical write remained blocked by snapshot pairing");
         assert!(
             tokio::time::timeout(Duration::from_millis(25), &mut commit_task)
                 .await
                 .is_err(),
-            "physical commit did not wait for snapshot pairing"
+            "commit completed before its conflict version was published"
         );
-        assert_eq!(physical_value(&store, &key), None);
 
         drop(snapshot_guard);
         tokio::time::timeout(Duration::from_secs(1), commit_task)
             .await
-            .expect("commit remained blocked after snapshot pairing")
+            .expect("commit remained blocked after publication gate release")
             .expect("commit task panicked")
             .expect("commit failed");
         assert_eq!(physical_value(&store, &key), Some(b"committed".to_vec()));

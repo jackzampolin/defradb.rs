@@ -317,126 +317,6 @@ fn block_write_vs_committed_read_still_conflicts() {
 }
 
 #[test]
-fn unrecord_removes_phantom_record() {
-    let tracker = Arc::new(ConflictTracker::new());
-    let first_snapshot = tracker.begin_snapshot();
-    let second_snapshot = tracker.begin_snapshot();
-
-    let writes = [b"d/i/books/failed-write".to_vec()];
-    let version = tracker
-        .check_and_record(first_snapshot.version(), writes.iter(), &ReadSet::default())
-        .unwrap();
-    drop(first_snapshot);
-
-    // Simulate the physical write failing: without unrecord the second
-    // transaction would hit a phantom conflict against data that never
-    // landed.
-    tracker.unrecord(version);
-
-    tracker
-        .check_and_record(
-            second_snapshot.version(),
-            writes.iter(),
-            &ReadSet::default(),
-        )
-        .unwrap();
-}
-
-#[test]
-fn unrecord_tolerates_pruned_and_empty_versions() {
-    let tracker = Arc::new(ConflictTracker::new());
-
-    // Version 0 marks "nothing recorded" (empty write set).
-    let empty_version = tracker
-        .check_and_record(0, [].iter(), &ReadSet::default())
-        .unwrap();
-    assert_eq!(empty_version, 0);
-    tracker.unrecord(empty_version);
-
-    // A record pruned before unrecord (no active snapshots pin it) is
-    // silently gone; unrecord must not panic or disturb later commits.
-    let snapshot = tracker.begin_snapshot();
-    let writes = [b"d/i/books/pruned".to_vec()];
-    let version = tracker
-        .check_and_record(snapshot.version(), writes.iter(), &ReadSet::default())
-        .unwrap();
-    drop(snapshot);
-    tracker.unrecord(version);
-    tracker.unrecord(version);
-
-    let survivor = tracker.begin_snapshot();
-    tracker
-        .check_and_record(survivor.version(), writes.iter(), &ReadSet::default())
-        .unwrap();
-}
-
-#[test]
-fn record_guard_unrecords_on_drop() {
-    let tracker = Arc::new(ConflictTracker::new());
-    let loser_snapshot = tracker.begin_snapshot();
-    let writes = [b"d/i/books/guarded".to_vec()];
-
-    let version = tracker
-        .check_and_record(
-            tracker.current_version(),
-            writes.iter(),
-            &ReadSet::default(),
-        )
-        .unwrap();
-    drop(RecordGuard::new(&tracker, version));
-
-    // The dropped (armed) guard removed the record: no phantom conflict.
-    tracker
-        .check_and_record(loser_snapshot.version(), writes.iter(), &ReadSet::default())
-        .unwrap();
-}
-
-#[test]
-fn record_guard_defuse_keeps_record() {
-    let tracker = Arc::new(ConflictTracker::new());
-    let loser_snapshot = tracker.begin_snapshot();
-    let writes = [b"d/i/books/kept".to_vec()];
-
-    let version = tracker
-        .check_and_record(
-            tracker.current_version(),
-            writes.iter(),
-            &ReadSet::default(),
-        )
-        .unwrap();
-    RecordGuard::new(&tracker, version).defuse();
-
-    let err = tracker
-        .check_and_record(loser_snapshot.version(), writes.iter(), &ReadSet::default())
-        .unwrap_err();
-    assert!(matches!(err, crate::corekv::Error::TxnConflict));
-}
-
-#[test]
-fn record_guard_unrecords_on_panic() {
-    let tracker = Arc::new(ConflictTracker::new());
-    let loser_snapshot = tracker.begin_snapshot();
-    let writes = [b"d/i/books/panicked".to_vec()];
-
-    let version = tracker
-        .check_and_record(
-            tracker.current_version(),
-            writes.iter(),
-            &ReadSet::default(),
-        )
-        .unwrap();
-    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = RecordGuard::new(&tracker, version);
-        panic!("physical write panicked");
-    }));
-    assert!(unwound.is_err());
-
-    tracker
-        .check_and_record(loser_snapshot.version(), writes.iter(), &ReadSet::default())
-        .unwrap();
-}
-
-#[test]
 fn skips_retained_prefix_for_recent_snapshots() {
     const RETAINED_PREFIX: usize = 64;
 
@@ -476,4 +356,164 @@ fn skips_retained_prefix_for_recent_snapshots() {
         .check_and_record(recent_snapshot.version(), suffix_writes.iter(), &no_reads)
         .unwrap_err();
     assert!(matches!(recent_err, crate::corekv::Error::TxnConflict));
+}
+
+#[test]
+fn pending_reservation_blocks_conflicting_writer_before_publication() {
+    let tracker = Arc::new(ConflictTracker::new());
+    let first_snapshot = tracker.begin_snapshot();
+    let second_snapshot = tracker.begin_snapshot();
+    let writes = [b"reserved/key".to_vec()];
+
+    let reservation = tracker
+        .reserve(first_snapshot.version(), writes.iter(), &ReadSet::default())
+        .unwrap();
+    assert_eq!(tracker.current_version(), 0);
+
+    let error = tracker
+        .reserve(
+            second_snapshot.version(),
+            writes.iter(),
+            &ReadSet::default(),
+        )
+        .err()
+        .expect("pending write must conflict");
+    assert!(matches!(error, crate::corekv::Error::TxnConflict));
+
+    assert_eq!(reservation.publish(), 1);
+    assert_eq!(tracker.current_version(), 1);
+}
+
+#[test]
+fn dropped_reservation_releases_conflicting_writer() {
+    let tracker = Arc::new(ConflictTracker::new());
+    let first_snapshot = tracker.begin_snapshot();
+    let second_snapshot = tracker.begin_snapshot();
+    let writes = [b"cancelled/key".to_vec()];
+
+    let reservation = tracker
+        .reserve(first_snapshot.version(), writes.iter(), &ReadSet::default())
+        .unwrap();
+    drop(reservation);
+
+    let replacement = tracker
+        .reserve(
+            second_snapshot.version(),
+            writes.iter(),
+            &ReadSet::default(),
+        )
+        .unwrap();
+    assert_eq!(replacement.publish(), 1);
+}
+
+#[test]
+fn disjoint_reservations_publish_in_physical_completion_order() {
+    let tracker = Arc::new(ConflictTracker::new());
+    let first_snapshot = tracker.begin_snapshot();
+    let second_snapshot = tracker.begin_snapshot();
+    let first_writes = [b"first/key".to_vec()];
+    let second_writes = [b"second/key".to_vec()];
+
+    let first = tracker
+        .reserve(
+            first_snapshot.version(),
+            first_writes.iter(),
+            &ReadSet::default(),
+        )
+        .unwrap();
+    let second = tracker
+        .reserve(
+            second_snapshot.version(),
+            second_writes.iter(),
+            &ReadSet::default(),
+        )
+        .unwrap();
+    assert_eq!(tracker.current_version(), 0);
+
+    assert_eq!(second.publish(), 1);
+    assert_eq!(first.publish(), 2);
+}
+
+#[test]
+fn indexed_conflict_checks_match_linear_history_scan() {
+    let mut state = ConflictTrackerState::default();
+
+    let mut point_reads = ReadSet::default();
+    point_reads.record_key(b"point/read");
+    state.record(1, HashSet::from([b"alpha/1".to_vec()]), point_reads);
+
+    let mut prefix_reads = ReadSet::default();
+    prefix_reads.record_iter_options(&IterOptions::new().with_prefix(b"prefix/".to_vec()));
+    state.record(2, HashSet::from([b"beta/2".to_vec()]), prefix_reads);
+
+    let mut range_reads = ReadSet::default();
+    range_reads.record_iter_options(
+        &IterOptions::new()
+            .with_start(b"range/b".to_vec())
+            .with_end(b"range/f".to_vec()),
+    );
+    state.record(3, HashSet::from([b"gamma/3".to_vec()]), range_reads);
+
+    let commutative_reads = collection_transition_reads();
+    state.record(
+        4,
+        HashSet::from([b"h/c/7/shared".to_vec()]),
+        commutative_reads,
+    );
+    state.record(5, HashSet::from([block_key(0xcc)]), ReadSet::default());
+
+    let write_sets = [
+        vec![],
+        vec![b"alpha/1".to_vec()],
+        vec![b"point/read".to_vec()],
+        vec![b"prefix/new".to_vec()],
+        vec![b"range/d".to_vec()],
+        vec![b"h/c/7/shared".to_vec()],
+        vec![block_key(0xcc)],
+        vec![b"unrelated".to_vec(), b"prefix/second".to_vec()],
+    ];
+
+    let mut candidate_point = ReadSet::default();
+    candidate_point.record_key(b"beta/2");
+    let mut candidate_prefix = ReadSet::default();
+    candidate_prefix.record_iter_options(&IterOptions::new().with_prefix(b"gamma/".to_vec()));
+    let mut candidate_range = ReadSet::default();
+    candidate_range.record_iter_options(
+        &IterOptions::new()
+            .with_start(b"alpha/".to_vec())
+            .with_end(b"delta/".to_vec()),
+    );
+    let mut candidate_empty_range = ReadSet::default();
+    candidate_empty_range.record_iter_options(
+        &IterOptions::new()
+            .with_start(b"zulu/".to_vec())
+            .with_end(b"alpha/".to_vec()),
+    );
+    let candidate_commutative = collection_transition_reads();
+    let read_sets = [
+        ReadSet::default(),
+        candidate_point,
+        candidate_prefix,
+        candidate_range,
+        candidate_empty_range,
+        candidate_commutative,
+    ];
+
+    for read_version in 0..=5 {
+        for writes in &write_sets {
+            let write_refs: Vec<&Vec<u8>> = writes.iter().collect();
+            for reads in &read_sets {
+                let linear = state.committed_after(read_version).iter().any(
+                    |(_, other_writes, other_reads)| {
+                        transaction_conflicts(&write_refs, reads, other_writes, other_reads)
+                    },
+                );
+                let indexed = state.conflicts_committed(read_version, &write_refs, reads);
+                assert_eq!(
+                    indexed, linear,
+                    "mismatch at version {read_version} for writes {writes:?} and reads {reads:?}"
+                );
+            }
+        }
+    }
 }

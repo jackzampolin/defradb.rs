@@ -116,21 +116,23 @@ mod pairing_tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn snapshot_waits_for_physical_write_after_conflict_version_advances() {
+    async fn snapshot_waits_while_successful_commit_is_published() {
         let store = Arc::new(MemoryStore::new());
         let key = b"paired-snapshot".to_vec();
         let value = b"committed".to_vec();
 
         let gate = Arc::clone(&store.commit_gate);
         let commit_guard = gate.write().await;
-        store
+        let reservation = store
             .conflict_tracker
-            .check_and_record(
+            .reserve(
                 store.conflict_tracker.current_version(),
                 std::slice::from_ref(&key).iter(),
                 &ReadSet::default(),
             )
             .unwrap();
+        store.data.write().await.insert(key.clone(), value.clone());
+        reservation.publish();
 
         let snapshot_store = Arc::clone(&store);
         let mut snapshot_task = tokio::spawn(async move { snapshot_store.new_txn(false).await });
@@ -138,10 +140,9 @@ mod pairing_tests {
             tokio::time::timeout(Duration::from_millis(25), &mut snapshot_task)
                 .await
                 .is_err(),
-            "new transaction took a snapshot during an in-flight physical commit"
+            "new transaction took a snapshot during version publication"
         );
 
-        store.data.write().await.insert(key.clone(), value.clone());
         drop(commit_guard);
 
         let snapshot = tokio::time::timeout(Duration::from_secs(1), snapshot_task)

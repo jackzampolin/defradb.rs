@@ -7,9 +7,7 @@ use tokio::sync::{mpsc, oneshot, RwLock as AsyncRwLock};
 
 use super::config::DurabilityMode;
 use super::KV_TABLE;
-use crate::backends::shared::{
-    CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet, RecordGuard,
-};
+use crate::backends::shared::{CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet};
 use crate::corekv::{AsyncTxnCallback, Error, Result, TxnCallback};
 
 /// Payload for a single transaction's pending commit.
@@ -32,8 +30,8 @@ pub(crate) struct PendingCommit {
 /// overhead across multiple mutations, dramatically improving throughput for
 /// write-heavy workloads (e.g., 852 document creates per Ethereum block).
 ///
-/// Conflict detection is performed inside the flush loop to ensure atomicity
-/// between version tracking and data writes.
+/// Conflict reservations are created inside the flush loop before data writes
+/// and published only after a successful batch commit.
 pub(crate) struct GroupCommitBuffer {
     sender: Mutex<Option<mpsc::UnboundedSender<PendingCommit>>>,
     flush_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -113,31 +111,26 @@ async fn flush_loop(
             }
         }
 
-        // Keep version publication and the Redb flush indivisible to new
-        // snapshots. The gate is acquired inside spawn_blocking so the
-        // blocking thread owns it: aborting the flush loop (store drop)
-        // cannot release the gate mid-write, and the flush fsync no longer
-        // blocks a tokio worker.
+        // Reserve each accepted write before the flush so conflicts remain
+        // deterministic within the batch. The physical flush does not hold
+        // the snapshot-pairing gate; only successful version publication does.
         let flush_db = Arc::clone(&db);
         let flush_tracker = Arc::clone(&conflict_tracker);
         let flush_gate = Arc::clone(&commit_gate);
         let flush_result = tokio::task::spawn_blocking(move || {
-            let _commit_guard = flush_gate.blocking_write();
             let mut passed = Vec::with_capacity(batch.len());
-            let mut record_guards = Vec::with_capacity(batch.len());
+            let mut reservations = Vec::with_capacity(batch.len());
             let mut failed: Vec<(PendingCommit, Error)> = Vec::new();
 
             for commit in batch {
-                match flush_tracker.check_and_record(
+                match flush_tracker.reserve(
                     commit.read_version,
                     commit.changes.keys(),
                     &commit.read_set,
                 ) {
-                    Ok(version) => {
+                    Ok(reservation) => {
                         passed.push(commit);
-                        // Unrecords on flush error or panic, so no phantom
-                        // write-set survives a failed batch.
-                        record_guards.push(RecordGuard::new(&flush_tracker, version));
+                        reservations.push(reservation);
                     }
                     Err(e) => failed.push((commit, e)),
                 }
@@ -148,8 +141,9 @@ async fn flush_loop(
             } else {
                 let result = flush_batch(&flush_db, &passed, durability);
                 if result.is_ok() {
-                    for guard in record_guards {
-                        guard.defuse();
+                    let _publication_guard = flush_gate.blocking_write();
+                    for reservation in reservations {
+                        reservation.publish();
                     }
                 }
                 Some(result)
