@@ -418,12 +418,14 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     return Err(MergeError::Database(e));
                 }
             };
-            match db::doc_id_map::resolve_or_allocate_doc_short_id(
-                &systemstore,
-                collection.resolved_root_id(),
-                doc_id_str,
-            )
-            .await
+            match self
+                .db
+                .resolve_or_allocate_doc_short_id(
+                    &systemstore,
+                    collection.resolved_root_id(),
+                    doc_id_str,
+                )
+                .await
             {
                 Ok(short_id) => short_id,
                 Err(e) => {
@@ -814,13 +816,14 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     payload.schema_version_id
                 ))
             })?;
-            db::doc_id_map::resolve_or_allocate_doc_short_id(
-                systemstore,
-                collection.resolved_root_id(),
-                doc_id_str,
-            )
-            .await
-            .map_err(MergeError::Database)?
+            self.db
+                .resolve_or_allocate_doc_short_id(
+                    systemstore,
+                    collection.resolved_root_id(),
+                    doc_id_str,
+                )
+                .await
+                .map_err(MergeError::Database)?
         };
         let context = CompositeMergeContext::new(
             cid,
