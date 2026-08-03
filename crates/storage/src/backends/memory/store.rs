@@ -30,7 +30,7 @@ impl MemoryStore {
         Self {
             data: Arc::new(RwLock::new(BTreeMap::new())),
             closed: Arc::new(AtomicBool::new(false)),
-            conflict_tracker: Arc::new(ConflictTracker::new()),
+            conflict_tracker: Arc::new(ConflictTracker::for_backend("memory")),
             commit_gate: Arc::new(RwLock::new(())),
         }
     }
@@ -51,6 +51,10 @@ impl crate::corekv::private::Sealed for MemoryStore {}
 
 #[async_trait]
 impl Store for MemoryStore {
+    fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
+        Some(self.conflict_tracker.stats_handle())
+    }
+
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         if self.is_closed() {
             return Err(Error::DBClosed);
@@ -218,6 +222,20 @@ mod pairing_tests {
             .expect("write transaction remained blocked after gate release")
             .expect("writer task panicked")
             .expect("write transaction failed");
+    }
+
+    #[tokio::test]
+    async fn transaction_stats_capture_commit_gate_waits() {
+        let store = MemoryStore::new();
+        let handle = store.transaction_stats_handle().unwrap();
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"key", b"value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let stats = handle.snapshot();
+        assert_eq!(stats.backend, "memory");
+        assert_eq!(stats.commit_gate_waits, 1);
+        assert_eq!(stats.tracker.current_version, 1);
     }
 
     #[tokio::test]

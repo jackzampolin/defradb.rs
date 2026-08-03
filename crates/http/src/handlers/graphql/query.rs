@@ -39,6 +39,12 @@ use crate::router::{AppState, NodePermission};
 
 use super::TX_HEADER_NAME;
 
+fn record_response_metrics(response: &QueryResponse) {
+    if response.is_transaction_conflict() {
+        telemetry::record_escaped_conflict("graphql");
+    }
+}
+
 /// Check if a query references `encrypted_` fields and P2P is disabled.
 ///
 /// Go DefraDB only generates `encrypted_<Collection>` GraphQL fields when P2P
@@ -147,6 +153,7 @@ pub async fn graphql(
     // Wire identity from Authorization header into the request
     request.identity = identity.did().cloned();
     let response = execute_with_context(&state, &identity, request).await;
+    record_response_metrics(&response);
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL POST query returned errors");
     }
@@ -201,6 +208,7 @@ pub async fn graphql_get(
     };
 
     let response = execute_with_context(&state, &identity, request).await;
+    record_response_metrics(&response);
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL GET query returned errors");
     }
@@ -311,6 +319,7 @@ pub async fn graphql_transactional(
         None => execute_with_context(&state, &identity, query_request).await,
     };
 
+    record_response_metrics(&response);
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL query returned errors");
     }
@@ -476,5 +485,15 @@ mod tests {
             }
             other => panic!("expected encrypted field validation error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn response_metrics_count_only_typed_conflicts() {
+        let before = telemetry::conflict_metrics_snapshot().escaped_to_clients;
+        record_response_metrics(&QueryResponse::error("validation failed"));
+        record_response_metrics(&QueryResponse::transaction_conflict("conflict"));
+        let after = telemetry::conflict_metrics_snapshot().escaped_to_clients;
+
+        assert_eq!(after - before, 1);
     }
 }

@@ -195,6 +195,11 @@ impl<T> ReaderWriter for T where T: Reader + Writer {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Store: MaybeSendSync + private::Sealed {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
+        None
+    }
+
     /// Create a new transaction.
     ///
     /// # Arguments

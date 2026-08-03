@@ -60,7 +60,7 @@ impl LarkStore {
         Ok(Self {
             db: Arc::new(db),
             closed: AtomicBool::new(false),
-            conflict_tracker: Arc::new(ConflictTracker::new()),
+            conflict_tracker: Arc::new(ConflictTracker::for_backend("lark")),
             commit_gate: Arc::new(tokio::sync::RwLock::new(())),
             db_path,
             active_txn_count: Arc::new(AtomicUsize::new(0)),
@@ -78,6 +78,10 @@ impl crate::corekv::private::Sealed for LarkStore {}
 
 #[async_trait]
 impl Store for LarkStore {
+    fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
+        Some(self.conflict_tracker.stats_handle())
+    }
+
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         if self.closed.load(Ordering::Acquire) {
             return Err(Error::DBClosed);

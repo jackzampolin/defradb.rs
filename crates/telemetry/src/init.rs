@@ -10,13 +10,11 @@
 //!   `resource.WithOS()` + `resource.WithProcess()` (which we approximate
 //!   with `std::env::consts` + `std::process` to avoid an extra dep).
 //!
-//! DefraDB currently exports traces only. Add a metrics pipeline alongside the
-//! first application metric rather than running an empty periodic exporter.
-
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
-use opentelemetry_otlp::SpanExporter;
+use opentelemetry_otlp::{MetricExporter, SpanExporter};
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 use thiserror::Error;
@@ -33,6 +31,8 @@ pub use opentelemetry_sdk::trace::SdkTracer as Tracer;
 pub enum InitError {
     #[error("failed to build OTLP span exporter: {0}")]
     SpanExporter(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("failed to build OTLP metric exporter: {0}")]
+    MetricExporter(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Returns the lifecycle handle and a configured [`SdkTracer`]. The caller
@@ -79,17 +79,30 @@ pub fn init(config: TelemetryConfig) -> Result<(TelemetryHandle, SdkTracer), Ini
 
     let tracer_provider = SdkTracerProvider::builder()
         .with_batch_exporter(span_exporter)
+        .with_resource(resource.clone())
+        .build();
+
+    let metric_exporter = MetricExporter::builder()
+        .with_http()
+        .build()
+        .map_err(|e| InitError::MetricExporter(Box::new(e)))?;
+    let meter_provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(metric_exporter)
         .with_resource(resource)
         .build();
+    let metric_installation = crate::metrics::install(&meter_provider);
 
     if config.install_global {
         global::set_tracer_provider(tracer_provider.clone());
+        global::set_meter_provider(meter_provider.clone());
     }
 
     let tracer = tracer_provider.tracer(config.service_name);
 
     let handle = TelemetryHandle {
-        inner: Some(tracer_provider),
+        tracer_provider: Some(tracer_provider),
+        meter_provider: Some(meter_provider),
+        metric_installation: Some(metric_installation),
     };
 
     Ok((handle, tracer))

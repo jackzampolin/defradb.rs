@@ -1,7 +1,7 @@
 //! OpenTelemetry exporter setup for DefraDB.
 //!
 //! Mirrors Go DefraDB's `internal/telemetry/otel.go`. The `otlp` feature
-//! compiles in OTLP/HTTP trace export; without it the crate provides only a
+//! compiles in OTLP/HTTP trace and metric export; without it the crate provides a
 //! no-op [`TelemetryHandle`] and the [`OtelDedupFilter`] (always available,
 //! no-op when no `opentelemetry*` events exist).
 //!
@@ -15,10 +15,16 @@
 mod config;
 mod dedup;
 mod handle;
+mod metrics;
 
 pub use config::TelemetryConfig;
 pub use dedup::OtelDedupFilter;
 pub use handle::TelemetryHandle;
+pub use metrics::{
+    conflict_metrics_snapshot, record_commit_gate_wait, record_conflict_tracker_size,
+    record_escaped_conflict, record_retry_attempt, record_retry_exhaustion, record_retry_success,
+    record_storage_conflict, ConflictMetricsSnapshot, RetryLayer, RetryLayerSnapshot,
+};
 
 #[cfg(feature = "otlp")]
 mod init;

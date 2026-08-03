@@ -79,7 +79,10 @@ pub mod opfs_env;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub mod test_suite;
 
-pub use shared::{CallbackCounts, DurabilityMode};
+pub use shared::{
+    CallbackCounts, ConflictTrackerStats, DurabilityMode, TransactionConflictStats,
+    TransactionStatsHandle, TransactionStatsSnapshot,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use memory::MemoryStore;

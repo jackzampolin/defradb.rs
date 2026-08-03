@@ -141,7 +141,9 @@ async fn flush_loop(
             } else {
                 let result = flush_batch(&flush_db, &passed, durability);
                 if result.is_ok() {
+                    let wait_started = std::time::Instant::now();
                     let _publication_guard = flush_gate.blocking_write();
+                    flush_tracker.record_commit_gate_wait(wait_started.elapsed());
                     for reservation in reservations {
                         reservation.publish();
                     }

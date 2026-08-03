@@ -147,7 +147,7 @@ impl RedbStore {
         }
 
         let db = Arc::new(db);
-        let conflict_tracker = Arc::new(ConflictTracker::new());
+        let conflict_tracker = Arc::new(ConflictTracker::for_backend("redb"));
         let commit_gate = Arc::new(tokio::sync::RwLock::new(()));
 
         // Create group commit buffer if a tokio runtime is available.
@@ -283,6 +283,10 @@ impl crate::corekv::private::Sealed for RedbStore {}
 
 #[async_trait]
 impl Store for RedbStore {
+    fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
+        Some(self.conflict_tracker.stats_handle())
+    }
+
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         // CAS-based TOCTOU protection: increment count, then verify not closed.
         if self.closed.load(Ordering::Acquire) {

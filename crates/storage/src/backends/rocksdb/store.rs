@@ -140,7 +140,7 @@ impl RocksDbStore {
         Ok(Self {
             db,
             closed: AtomicBool::new(false),
-            conflict_tracker: Arc::new(ConflictTracker::new()),
+            conflict_tracker: Arc::new(ConflictTracker::for_backend("rocksdb")),
             commit_gate: Arc::new(tokio::sync::RwLock::new(())),
             db_path,
             active_txn_count: Arc::new(AtomicUsize::new(0)),
@@ -174,6 +174,10 @@ impl crate::corekv::private::Sealed for RocksDbStore {}
 
 #[async_trait]
 impl Store for RocksDbStore {
+    fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
+        Some(self.conflict_tracker.stats_handle())
+    }
+
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         // CAS-based TOCTOU protection: increment count, then verify not closed.
         if self.closed.load(Ordering::Acquire) {

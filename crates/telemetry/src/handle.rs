@@ -18,7 +18,11 @@
 
 pub struct TelemetryHandle {
     #[cfg(feature = "otlp")]
-    pub(crate) inner: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    pub(crate) tracer_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    #[cfg(feature = "otlp")]
+    pub(crate) meter_provider: Option<opentelemetry_sdk::metrics::SdkMeterProvider>,
+    #[cfg(feature = "otlp")]
+    pub(crate) metric_installation: Option<u64>,
 }
 
 impl TelemetryHandle {
@@ -26,7 +30,11 @@ impl TelemetryHandle {
     pub fn noop() -> Self {
         Self {
             #[cfg(feature = "otlp")]
-            inner: None,
+            tracer_provider: None,
+            #[cfg(feature = "otlp")]
+            meter_provider: None,
+            #[cfg(feature = "otlp")]
+            metric_installation: None,
         }
     }
 
@@ -44,14 +52,20 @@ impl TelemetryHandle {
     #[cfg_attr(not(feature = "otlp"), allow(unused_mut, unused_variables))]
     pub fn shutdown(mut self) {
         #[cfg(feature = "otlp")]
-        if let Some(p) = self.inner.take() {
-            Self::shutdown_provider(p);
-        }
+        self.shutdown_providers();
     }
 
     #[cfg(feature = "otlp")]
-    fn shutdown_provider(provider: opentelemetry_sdk::trace::SdkTracerProvider) {
-        let _ = provider.shutdown();
+    fn shutdown_providers(&mut self) {
+        if let Some(installation) = self.metric_installation.take() {
+            crate::metrics::uninstall(installation);
+        }
+        if let Some(provider) = self.meter_provider.take() {
+            let _ = provider.shutdown();
+        }
+        if let Some(provider) = self.tracer_provider.take() {
+            let _ = provider.shutdown();
+        }
     }
 }
 
@@ -63,7 +77,7 @@ impl TelemetryHandle {
 impl Drop for TelemetryHandle {
     fn drop(&mut self) {
         #[cfg(feature = "otlp")]
-        if let Some(p) = self.inner.take() {
+        if self.tracer_provider.is_some() || self.meter_provider.is_some() {
             // `catch_unwind` keeps a panic inside the SDK shutdown (e.g. the
             // `handle.join().unwrap()` the batch processor does) from
             // becoming a panic-during-unwind → process abort when the handle
@@ -72,8 +86,8 @@ impl Drop for TelemetryHandle {
             // no post-panic logical state is observable. Unlike `shutdown`,
             // the panic is swallowed — but we surface it so a dead batch
             // thread isn't completely silent.
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                Self::shutdown_provider(p);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.shutdown_providers();
             }));
             if let Err(panic) = result {
                 let msg = panic
