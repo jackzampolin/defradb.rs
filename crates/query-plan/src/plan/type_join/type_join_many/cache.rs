@@ -10,6 +10,7 @@ impl TypeJoinMany {
         self.exec_info = ExecInfo::default();
         self.child_exec_info = ExecInfo::default();
         self.go_child_metrics.reset();
+        self.child_limit_iterations = 0;
         self.total_children_in_cache = 0;
         self.total_fields_per_scan = 0;
         self.child_scan_order.clear();

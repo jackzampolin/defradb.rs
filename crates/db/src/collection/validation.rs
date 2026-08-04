@@ -12,17 +12,27 @@ impl Collection {
                 continue;
             }
 
-            // Get the value for this field (if present)
-            if let Some(value) = doc.get(&field_def.name) {
-                // Validate the value type matches the schema
-                if !is_value_compatible_with_kind(value, &field_def.kind) {
+            match doc.get(&field_def.name) {
+                Some(value) if value.is_nil() && !field_def.kind.is_nillable() => {
+                    return Err(Error::InvalidDocument(format!(
+                        "null value provided for non-nillable field. Name: {}",
+                        field_def.name
+                    )));
+                }
+                Some(value) if !is_value_compatible_with_kind(value, &field_def.kind) => {
                     return Err(Error::InvalidDocument(format!(
                         "Field '{}' has incompatible type: expected {:?}, got {:?}",
                         field_def.name, field_def.kind, value
                     )));
                 }
+                None if !field_def.kind.is_nillable() => {
+                    return Err(Error::InvalidDocument(format!(
+                        "value not provided for non-nillable field. Name: {}",
+                        field_def.name
+                    )));
+                }
+                _ => {}
             }
-            // Missing fields are allowed (nullable by default in DefraDB)
         }
         Ok(())
     }
@@ -48,9 +58,8 @@ impl Collection {
 
 /// Check if a NormalValue is compatible with a FieldKind.
 fn is_value_compatible_with_kind(value: &NormalValue, kind: &FieldKind) -> bool {
-    // Null is compatible with all nillable types (which is everything in DefraDB)
     if value.is_nil() {
-        return true;
+        return kind.is_nillable();
     }
 
     match kind {
@@ -75,7 +84,7 @@ fn is_value_compatible_with_kind(value: &NormalValue, kind: &FieldKind) -> bool 
 
 /// Check if a NormalValue is compatible with a ScalarKind.
 fn is_value_compatible_with_scalar(value: &NormalValue, scalar: ScalarKind) -> bool {
-    match scalar {
+    match scalar.base_kind() {
         ScalarKind::None => true,
         ScalarKind::DocID => matches!(value, NormalValue::String(_)),
         ScalarKind::Bool => matches!(value, NormalValue::Bool(_) | NormalValue::NillableBool(_)),
@@ -165,6 +174,7 @@ fn is_value_compatible_with_array(value: &NormalValue, array: ScalarArrayKind) -
             )
         }
         ScalarArrayKind::StringArray => matches!(value, NormalValue::StringArray(_)),
+        ScalarArrayKind::DateTimeArray => matches!(value, NormalValue::TimeArray(_)),
         // Nillable arrays: also accept the non-nillable version
         ScalarArrayKind::NillableBoolArray => {
             matches!(
@@ -209,6 +219,14 @@ fn is_value_compatible_with_array(value: &NormalValue, array: ScalarArrayKind) -
                     | NormalValue::StringArray(_)
             )
         }
+        ScalarArrayKind::NillableDateTimeArray => {
+            matches!(
+                value,
+                NormalValue::NillableTimeArray(_)
+                    | NormalValue::NillableTimeElementArray(_)
+                    | NormalValue::TimeArray(_)
+            )
+        }
         _ => false,
     }
 }
@@ -221,18 +239,21 @@ fn is_empty_array(value: &NormalValue) -> bool {
         NormalValue::Float32Array(arr) => arr.is_empty(),
         NormalValue::Float64Array(arr) => arr.is_empty(),
         NormalValue::StringArray(arr) => arr.is_empty(),
+        NormalValue::TimeArray(arr) => arr.is_empty(),
         // NillableXxxArray wraps Option<Vec<_>>
         NormalValue::NillableBoolArray(opt) => opt.as_ref().is_none_or(|v| v.is_empty()),
         NormalValue::NillableIntArray(opt) => opt.as_ref().is_none_or(|v| v.is_empty()),
         NormalValue::NillableFloat32Array(opt) => opt.as_ref().is_none_or(|v| v.is_empty()),
         NormalValue::NillableFloat64Array(opt) => opt.as_ref().is_none_or(|v| v.is_empty()),
         NormalValue::NillableStringArray(opt) => opt.as_ref().is_none_or(|v| v.is_empty()),
+        NormalValue::NillableTimeArray(opt) => opt.as_ref().is_none_or(|v| v.is_empty()),
         // NillableXxxElementArray wraps Vec<Option<_>>
         NormalValue::NillableBoolElementArray(arr) => arr.is_empty(),
         NormalValue::NillableIntElementArray(arr) => arr.is_empty(),
         NormalValue::NillableFloat32ElementArray(arr) => arr.is_empty(),
         NormalValue::NillableFloat64ElementArray(arr) => arr.is_empty(),
         NormalValue::NillableStringElementArray(arr) => arr.is_empty(),
+        NormalValue::NillableTimeElementArray(arr) => arr.is_empty(),
         _ => false,
     }
 }
@@ -240,7 +261,7 @@ fn is_empty_array(value: &NormalValue) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use schema::{CollectionVersion, FieldDescription, FieldKind, ScalarKind};
 
     fn filtered_collection() -> Collection {
         Collection::new(CollectionVersion::new(
@@ -280,5 +301,33 @@ mod tests {
         assert!(
             matches!(result, Err(Error::InvalidDocument(message)) if message.contains("agent_did"))
         );
+    }
+
+    #[test]
+    fn non_nillable_field_rejects_null_and_missing_values() {
+        let collection = Collection::new(CollectionVersion::new(
+            "Event",
+            "event_version",
+            "event_collection",
+            vec![FieldDescription::new(
+                "1",
+                "createdAt",
+                FieldKind::Scalar(ScalarKind::NonNillableDateTime),
+            )],
+        ));
+
+        let valid = Document::from_json_str(r#"{"createdAt":"2024-01-01T00:00:00Z"}"#).unwrap();
+        collection.validate_document(&valid).unwrap();
+
+        let null = Document::from_json_str(r#"{"createdAt":null}"#).unwrap();
+        let error = collection.validate_document(&null).unwrap_err().to_string();
+        assert!(error.contains("null value provided for non-nillable field. Name: createdAt"));
+
+        let missing = Document::from_json_str("{}").unwrap();
+        let error = collection
+            .validate_document(&missing)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("value not provided for non-nillable field. Name: createdAt"));
     }
 }

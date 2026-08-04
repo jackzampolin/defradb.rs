@@ -59,7 +59,7 @@ pub async fn check_doc_permission(
     // DAC bypass via thread-local flag (set by HTTP/FFI entry points after
     // resolving NAC `bypass-dac` permission via `acp::nac::should_bypass_dac`).
     // Mirrors how the query path honors the bypass via `permission_filter`.
-    if defra_core::dac_bypass::get_dac_bypass() {
+    if identity.is_authenticated() && defra_core::dac_bypass::get_dac_bypass() {
         return Ok(true);
     }
 

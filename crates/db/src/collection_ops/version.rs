@@ -26,7 +26,7 @@ impl<S: Store> crate::database::DB<S> {
 
         // Extract the target schema and perform all systemstore operations in a block
         // so the systemstore reference is dropped before calling txn.commit()
-        let (target_schema, name) = {
+        let (target_schema, name, _collection_guards) = {
             let systemstore = txn.systemstore()?;
 
             let collection_key = CollectionKey::new(version_id);
@@ -51,6 +51,9 @@ impl<S: Store> crate::database::DB<S> {
 
             let name = target_schema.name.clone();
             let collection_id = target_schema.collection_id.clone();
+            let collection_guards = self
+                .collection_write_guards(std::iter::once(collection_id.clone()))
+                .await?;
 
             // Update target to be active
             target_schema.is_active = true;
@@ -108,7 +111,7 @@ impl<S: Store> crate::database::DB<S> {
             }
             iter.close().await.map_err(Error::Storage)?;
 
-            (target_schema, name)
+            (target_schema, name, collection_guards)
         };
 
         txn.commit().await?;
@@ -377,6 +380,67 @@ impl<S: Store> crate::database::DB<S> {
             .iter()
             .map(|v| (v.version_id.as_str(), v))
             .collect();
+        let deleting_versions: std::collections::HashSet<&str> =
+            version_ids.iter().map(String::as_str).collect();
+
+        for version_id in &version_ids {
+            if !version_map.contains_key(version_id.as_str()) {
+                return Err(Error::CollectionVersionNotFound(version_id.clone()));
+            }
+        }
+
+        let _collection_guards = self
+            .collection_write_guards(version_ids.iter().filter_map(|version_id| {
+                version_map
+                    .get(version_id.as_str())
+                    .map(|version| version.collection_id.clone())
+            }))
+            .await?;
+
+        for version in &all_versions {
+            if deleting_versions.contains(version.version_id.as_str()) {
+                if version.is_active && self.collection_has_data(version).await? {
+                    return Err(Error::InvalidPatch(
+                        "cannot delete a collection that has documents, first delete the documents and then delete the version".to_string(),
+                    ));
+                }
+                continue;
+            }
+
+            if version.previous_version.as_ref().is_some_and(|previous| {
+                deleting_versions.contains(previous.source_collection_id.as_str())
+            }) {
+                return Err(Error::InvalidPatch(
+                    "cannot delete a version that is used by a newer version, first delete the new version".to_string(),
+                ));
+            }
+        }
+
+        let removed_collection_ids: std::collections::HashSet<&str> = all_versions
+            .iter()
+            .filter(|version| {
+                deleting_versions.contains(version.version_id.as_str())
+                    && all_versions.iter().all(|other| {
+                        other.collection_id != version.collection_id
+                            || deleting_versions.contains(other.version_id.as_str())
+                    })
+            })
+            .map(|version| version.collection_id.as_str())
+            .collect();
+
+        if all_versions.iter().any(|version| {
+            !deleting_versions.contains(version.version_id.as_str())
+                && version.fields.iter().any(|field| {
+                    field
+                        .kind
+                        .relation_collection_id()
+                        .is_some_and(|id| removed_collection_ids.contains(id))
+                })
+        }) {
+            return Err(Error::InvalidPatch(
+                "cannot remove a collection while another field references it".to_string(),
+            ));
+        }
 
         let mut sorted = Vec::with_capacity(version_ids.len());
         let mut remaining: std::collections::HashSet<String> =

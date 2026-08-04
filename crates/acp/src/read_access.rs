@@ -38,7 +38,7 @@ impl ObjectAccessChecker for DirectChecker<'_> {
         resource_name: &str,
         object_id: &str,
     ) -> Result<DocAccess> {
-        if defra_core::dac_bypass::get_dac_bypass() {
+        if self.identity.is_authenticated() && defra_core::dac_bypass::get_dac_bypass() {
             return Ok(DocAccess {
                 has_access: true,
                 explicit: true,

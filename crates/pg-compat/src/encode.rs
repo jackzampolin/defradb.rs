@@ -286,7 +286,7 @@ pub fn describe_synthetic_query(sql: &str) -> Vec<FieldInfo> {
 /// Map a DefraDB FieldKind to a PostgreSQL type name string.
 pub fn field_kind_to_pg_type_name(kind: &FieldKind) -> String {
     match kind {
-        FieldKind::Scalar(scalar) => match scalar {
+        FieldKind::Scalar(scalar) => match scalar.base_kind() {
             ScalarKind::Bool => "boolean".to_string(),
             ScalarKind::Int => "bigint".to_string(),
             ScalarKind::Float64 => "double precision".to_string(),

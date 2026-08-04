@@ -93,13 +93,25 @@ impl<S: Store> crate::database::DB<S> {
                                     schema::ScalarKind::None => "0".to_string(),
                                     schema::ScalarKind::DocID => "ID".to_string(),
                                     schema::ScalarKind::Bool => "Boolean".to_string(),
+                                    schema::ScalarKind::NonNillableBool => "Boolean!".to_string(),
                                     schema::ScalarKind::Int => "Integer".to_string(),
+                                    schema::ScalarKind::NonNillableInt => "Integer!".to_string(),
                                     schema::ScalarKind::Float64 => "Float".to_string(),
+                                    schema::ScalarKind::NonNillableFloat64 => "Float!".to_string(),
                                     schema::ScalarKind::Float32 => "Float32".to_string(),
+                                    schema::ScalarKind::NonNillableFloat32 => {
+                                        "Float32!".to_string()
+                                    }
                                     schema::ScalarKind::DateTime => "DateTime".to_string(),
+                                    schema::ScalarKind::NonNillableDateTime => {
+                                        "DateTime!".to_string()
+                                    }
                                     schema::ScalarKind::String => "String".to_string(),
+                                    schema::ScalarKind::NonNillableString => "String!".to_string(),
                                     schema::ScalarKind::Blob => "Blob".to_string(),
+                                    schema::ScalarKind::NonNillableBlob => "Blob!".to_string(),
                                     schema::ScalarKind::Json => "JSON".to_string(),
+                                    schema::ScalarKind::NonNillableJson => "JSON!".to_string(),
                                     _ => String::new(),
                                 },
                                 other => format!("{:?}", other),
@@ -111,6 +123,12 @@ impl<S: Store> crate::database::DB<S> {
                         }
                     } else {
                         // Standard new field validations
+                        if !field.kind.is_nillable() {
+                            field_errors.push(
+                                "adding a non-nillable field to an existing collection is not supported"
+                                    .to_string(),
+                            );
+                        }
                         if matches!(
                             field.kind,
                             schema::FieldKind::Scalar(schema::ScalarKind::None)

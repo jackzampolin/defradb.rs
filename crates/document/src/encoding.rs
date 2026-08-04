@@ -160,7 +160,7 @@ pub fn json_to_normal_value_for_kind(
     use schema::ScalarKind;
     use serde_json::Value as JsonValue;
 
-    match kind {
+    match kind.base_kind() {
         ScalarKind::Int => value.as_i64().map(NormalValue::Int),
         ScalarKind::Float64 => value.as_f64().map(NormalValue::Float64),
         ScalarKind::Float32 => value.as_f64().map(|f| NormalValue::Float32(f as f32)),
@@ -290,6 +290,23 @@ pub fn json_to_normal_value_for_array_kind(
             })
             .collect::<Option<Vec<_>>>()
             .map(NormalValue::NillableStringElementArray),
+        ScalarArrayKind::DateTimeArray => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::String(value) => DateTime::parse_from_rfc3339(value).ok(),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(NormalValue::TimeArray),
+        ScalarArrayKind::NillableDateTimeArray => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::String(value) => DateTime::parse_from_rfc3339(value).ok().map(Some),
+                JsonValue::Null => Some(None),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(NormalValue::NillableTimeElementArray),
         _ => None,
     }
 }
@@ -313,7 +330,7 @@ pub fn json_to_normal_value_for_array_kind(
 /// `Bytes`, etc. survive the CBOR round-trip losslessly; only `Time` downgrades).
 pub fn coerce_stored_value_for_kind(value: NormalValue, kind: &schema::ScalarKind) -> NormalValue {
     use schema::ScalarKind;
-    match (kind, &value) {
+    match (kind.base_kind(), &value) {
         (ScalarKind::DateTime, NormalValue::String(s)) => match DateTime::parse_from_rfc3339(s) {
             Ok(dt) => NormalValue::Time(dt),
             Err(_) => value,
@@ -484,6 +501,10 @@ mod json_to_normal_value_for_kind_tests {
             (json!([1.5, null]), ScalarArrayKind::Float64Array),
             (json!([1.5, null]), ScalarArrayKind::Float32Array),
             (json!(["value", null]), ScalarArrayKind::StringArray),
+            (
+                json!(["2026-05-29T13:06:28Z", null]),
+                ScalarArrayKind::DateTimeArray,
+            ),
         ];
 
         for (value, kind) in cases {
@@ -504,6 +525,16 @@ mod json_to_normal_value_for_kind_tests {
             ),
             Some(NormalValue::NillableBoolElementArray(vec![
                 Some(true),
+                None,
+            ]))
+        );
+        assert_eq!(
+            json_to_normal_value_for_array_kind(
+                &json!(["2026-05-29T13:06:28Z", null]),
+                &ScalarArrayKind::NillableDateTimeArray,
+            ),
+            Some(NormalValue::NillableTimeElementArray(vec![
+                Some(DateTime::parse_from_rfc3339("2026-05-29T13:06:28Z").unwrap()),
                 None,
             ]))
         );

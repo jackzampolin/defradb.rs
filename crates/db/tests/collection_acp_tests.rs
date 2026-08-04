@@ -866,6 +866,18 @@ async fn test_dac_bypass_thread_local_grants_full_access() {
     .unwrap();
     assert!(allowed, "admin with dac_bypass flag must be granted access");
 
+    let allowed = check_doc_permission(
+        &acp,
+        &Identity::Anonymous,
+        DocumentPermission::Update,
+        &collection,
+        "doc1",
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!allowed, "dac_bypass must not grant anonymous access");
+
     // Reset the thread-local so it doesn't leak into other tests.
     defra_core::dac_bypass::set_dac_bypass(false);
 }

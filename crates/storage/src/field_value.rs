@@ -203,7 +203,9 @@ pub fn decode_field_value<'a>(
                 encoding::decode_bytes_ascending(buf)?
             };
             // Determine if this should be a String based on field kind
-            let is_string = matches!(kind, FieldKind::Scalar(ScalarKind::String));
+            let is_string = kind
+                .as_scalar()
+                .is_some_and(|kind| kind.base_kind() == ScalarKind::String);
             if is_string {
                 let s = String::from_utf8(v)
                     .map_err(|e| crate::corekv::Error::Other(format!("invalid utf-8: {}", e)))?;

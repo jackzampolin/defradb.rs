@@ -94,7 +94,16 @@ pub(crate) async fn load_collection_from_systemstore(
                     ))
                 })?;
 
-            Ok(Some(Collection::new(schema)))
+            let actions = crate::action::index_action_statuses(systemstore, &schema.collection_id)
+                .await
+                .map_err(|e| {
+                    query::error::QueryError::execution(format!(
+                        "failed to load index actions for collection '{}': {}",
+                        name, e
+                    ))
+                })?;
+
+            Ok(Some(Collection::with_index_actions(schema, &actions)))
         }
         None => {
             // version_id found but schema missing - inconsistent state
@@ -190,12 +199,13 @@ pub(crate) async fn get_collection_with_index_manager<S: Store + 'static>(
     // Create an IndexManager from the collection schema.
     let short_id = collection.resolved_root_id();
     let index_manager =
-        IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
-            query::error::QueryError::execution(format!(
-                "failed to create index manager for collection '{}': {}",
-                collection_name, e
-            ))
-        })?;
+        IndexManager::from_indexes(short_id, collection.schema(), collection.write_indexes())
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to create index manager for collection '{}': {}",
+                    collection_name, e
+                ))
+            })?;
 
     Ok((collection, datastore, systemstore, index_manager))
 }

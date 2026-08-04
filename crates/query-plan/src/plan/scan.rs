@@ -33,7 +33,7 @@ pub struct ScanNode {
     document_mapping: DocumentMapping,
     /// Optional filter to apply during scan
     filter: Option<Filter>,
-    /// Optional document IDs to scan (for explain prefixes)
+    /// Optional document IDs supplied separately from the scan filter
     doc_ids: Option<Vec<String>>,
     /// Whether to show deleted documents
     show_deleted: bool,
@@ -90,7 +90,7 @@ impl ScanNode {
         self
     }
 
-    /// Set the document IDs for this scan (used in explain prefixes)
+    /// Set document IDs supplied separately from the scan filter.
     pub fn with_doc_ids(mut self, doc_ids: Vec<String>) -> Self {
         // Only set if non-empty; empty means scan entire collection
         if !doc_ids.is_empty() {
@@ -212,6 +212,15 @@ impl PlanNode for ScanNode {
                 continue;
             }
 
+            if let Some(doc_ids) = &self.doc_ids {
+                let Some(doc_id) = doc.doc_id() else {
+                    continue;
+                };
+                if !doc_ids.iter().any(|id| id == doc_id) {
+                    continue;
+                }
+            }
+
             // Apply filter if present
             if let Some(ref filter) = self.filter {
                 if !filter.matches(doc.fields(), &self.document_mapping)? {
@@ -275,14 +284,10 @@ impl PlanNode for ScanNode {
             serde_json::Value::String(self.collection.version_id.clone()),
         );
 
-        // Go DefraDB format: always include prefixes
-        // When docIDs are provided, each prefix is "/<collection_prefix>/<docID>"
-        // Otherwise just "/<collection_prefix>"
-        let prefixes: Vec<String> = if let Some(ref doc_ids) = self.doc_ids {
-            doc_ids
-                .iter()
-                .map(|id| format!("/{}/{}", self.collection_prefix(), id))
-                .collect()
+        // Go keeps document IDs on the select node and hides the optimized
+        // per-document storage prefixes from the public explain result.
+        let prefixes = if self.doc_ids.is_some() {
+            Vec::new()
         } else {
             vec![format!("/{}", self.collection_prefix())]
         };
@@ -329,7 +334,7 @@ mod tests {
     use serde_json::json;
 
     use super::ScanNode;
-    use crate::planner::PlanNode;
+    use crate::planner::{Doc, PlanNode};
     use query_types::document::DocumentMapping;
     use query_types::mapper::Filter;
 
@@ -373,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn explain_strips_docid_filter_when_doc_id_prefix_scan_is_present() {
+    fn explain_strips_docid_filter_when_doc_ids_are_supplied_separately() {
         let filter = Filter::from_conditions(serde_json::Map::from_iter([
             ("_docID".to_string(), json!({"_eq": "doc-1"})),
             ("name".to_string(), json!({"_eq": "Alice"})),
@@ -388,6 +393,26 @@ mod tests {
             explain["scanNode"]["filter"],
             json!({"name": {"_eq": "Alice"}})
         );
-        assert!(explain["scanNode"]["prefixes"].is_array());
+        assert_eq!(explain["scanNode"]["prefixes"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn supplied_doc_ids_filter_preloaded_deleted_documents() {
+        let mut requested = Doc::new(2);
+        requested.set_doc_id("doc-1");
+        requested.mark_deleted();
+        let mut unrelated = Doc::new(2);
+        unrelated.set_doc_id("doc-2");
+        unrelated.mark_deleted();
+
+        let mut scan = ScanNode::new(make_collection(), make_mapping())
+            .with_docs(vec![unrelated, requested])
+            .with_doc_ids(vec!["doc-1".to_string()])
+            .with_show_deleted(true);
+        scan.init().await.unwrap();
+
+        assert!(scan.next().await.unwrap());
+        assert_eq!(scan.value().doc_id(), Some("doc-1"));
+        assert!(!scan.next().await.unwrap());
     }
 }
