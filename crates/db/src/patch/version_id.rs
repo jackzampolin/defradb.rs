@@ -13,7 +13,7 @@ impl<S: Store> crate::database::DB<S> {
         collection_priority: u64,
         collection_heads: &[cid::Cid],
         collection_id_map: &std::collections::HashMap<String, String>,
-    ) -> String {
+    ) -> (String, Option<Vec<u8>>, Option<cid::Cid>) {
         use cid::Cid;
         use sha2::{Digest, Sha256};
 
@@ -93,11 +93,31 @@ impl<S: Store> crate::database::DB<S> {
         } else {
             None
         };
-        match schema::generate_collection_cid_full(
+        let query_select = schema
+            .query
+            .as_ref()
+            .filter(|query| old_schema.query.as_ref() != Some(query))
+            .and_then(|query| schema::query_select_json_bytes(&query.query).ok());
+        let query_transform = schema
+            .query
+            .as_ref()
+            .and_then(|query| query.transform.as_deref())
+            .filter(|transform| {
+                old_schema
+                    .query
+                    .as_ref()
+                    .and_then(|query| query.transform.as_deref())
+                    != Some(*transform)
+            })
+            .and_then(|transform| cid::Cid::try_from(transform).ok());
+
+        let version_id = match schema::generate_collection_cid_full_with_query(
             collection_name,
             &field_cids,
             collection_priority,
             collection_heads,
+            query_select.as_deref(),
+            query_transform.as_ref(),
         ) {
             Ok(cid) => cid.to_string(),
             Err(_) => {
@@ -115,6 +135,7 @@ impl<S: Store> crate::database::DB<S> {
                     &hash[..8].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64)
                 )
             }
-        }
+        };
+        (version_id, query_select, query_transform)
     }
 }

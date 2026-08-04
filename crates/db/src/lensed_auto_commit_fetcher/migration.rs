@@ -392,7 +392,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         }
         drop(batch_gate);
 
-        let max_retries = self.db.options().max_txn_retries.unwrap_or(3);
+        let max_retries = self.db.options().max_txn_retries();
         let mut retry = 0;
         loop {
             let active_collection = self.db.get_collection(collection.name()).map_err(|error| {

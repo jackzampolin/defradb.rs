@@ -18,13 +18,6 @@ impl<'a> SdlParser<'a> {
 
         for type_def in self.type_defs.values() {
             for field in &type_def.fields {
-                // NonNull scalar fields are not supported
-                if field.field_type.is_non_null && !field.field_type.is_list {
-                    return Err(QueryError::parse(
-                        "NonNull fields are not currently supported",
-                    ));
-                }
-
                 // NonNull list element types are not supported for relation types (e.g., [Dogs!])
                 // Scalar array types like [Float32!], [Int!], [String!] are allowed
                 if field.field_type.is_list

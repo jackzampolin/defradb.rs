@@ -1,6 +1,8 @@
 use std::ffi::c_char;
 
 use acp::nac::NodePermission;
+use defra_core::{ActionExecution, ActionStatus};
+use serde::Serialize;
 use storage::corekv::Key;
 
 use crate::helpers::{get_node_database, get_rt, require_c_str};
@@ -14,6 +16,42 @@ fn visible_indexes(collection: &db::Collection) -> Vec<schema::IndexDescription>
         .iter()
         .filter(|index| !is_hidden_auto_relation_index(collection, index))
         .cloned()
+        .collect()
+}
+
+#[derive(Serialize)]
+struct IndexResult {
+    #[serde(flatten)]
+    description: schema::IndexDescription,
+    #[serde(rename = "CollectionName")]
+    collection_name: String,
+    #[serde(rename = "Execution")]
+    execution: ActionExecution,
+}
+
+fn index_results(
+    collection: &db::Collection,
+    actions: &std::collections::HashMap<u32, ActionExecution>,
+) -> Vec<IndexResult> {
+    visible_indexes(collection)
+        .into_iter()
+        .map(|description| {
+            let execution =
+                actions
+                    .get(&description.id)
+                    .cloned()
+                    .unwrap_or_else(|| ActionExecution {
+                        collection_id: collection.collection_id().to_string(),
+                        subject: description.id.to_string(),
+                        status: ActionStatus::COMPLETED,
+                        ..Default::default()
+                    });
+            IndexResult {
+                description,
+                collection_name: collection.name().to_string(),
+                execution,
+            }
+        })
         .collect()
 }
 
@@ -95,6 +133,16 @@ pub unsafe extern "C" fn delete_index(
                 .get_collection(&collection_name_str)
                 .map_err(|e| format!("failed to get collection: {}", e))?
                 .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
+            let collection_id = collection.collection_id().to_string();
+            let index_id = collection
+                .get_index(&index_name_str)
+                .map(|index| index.id)
+                .ok_or_else(|| {
+                    format!(
+                        "index with name doesn't exists. Name: {}",
+                        index_name_str
+                    )
+                })?;
 
             // Create a transaction
             let txn = database
@@ -162,6 +210,15 @@ pub unsafe extern "C" fn delete_index(
                 .await
                 .map_err(|e| format!("failed to commit: {}", e))?;
 
+            database
+                .clear_action(
+                    &collection_id,
+                    defra_core::Action::BACKFILL_INDEX,
+                    &index_id.to_string(),
+                )
+                .await
+                .map_err(|e| format!("failed to clear index backfill state: {}", e))?;
+
             // Reload the collection cache
             database
                 .reload_cache()
@@ -217,8 +274,11 @@ pub unsafe extern "C" fn get_indexes(
                 .map_err(|e| format!("failed to get collection: {}", e))?
                 .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
 
-            // Get indexes from the collection schema
-            let indexes = visible_indexes(&collection);
+            let actions = database
+                .list_index_actions(collection.collection_id())
+                .await
+                .map_err(|e| format!("failed to list index actions: {}", e))?;
+            let indexes = index_results(&collection, &actions);
 
             // Return JSON array
             let json = serde_json::to_string(&indexes)
@@ -270,13 +330,17 @@ pub unsafe extern "C" fn list_all_indexes(
                 .map_err(|e| format!("failed to list collections: {}", e))?;
 
             // Build a map of collection name -> indexes
-            let mut all_indexes: std::collections::HashMap<String, Vec<schema::IndexDescription>> =
+            let mut all_indexes: std::collections::HashMap<String, Vec<IndexResult>> =
                 std::collections::HashMap::new();
 
             for name in names {
                 match database.get_collection(&name) {
                     Ok(Some(collection)) => {
-                        let indexes = visible_indexes(&collection);
+                        let actions = database
+                            .list_index_actions(collection.collection_id())
+                            .await
+                            .map_err(|e| format!("failed to list index actions: {}", e))?;
+                        let indexes = index_results(&collection, &actions);
                         if !indexes.is_empty() {
                             all_indexes.insert(name, indexes);
                         }

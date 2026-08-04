@@ -51,6 +51,9 @@ thiserror.workspace = true
 # Logging
 tracing.workspace = true
 
+# Retry jitter
+rand.workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] }

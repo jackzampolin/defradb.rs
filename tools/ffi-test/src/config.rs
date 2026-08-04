@@ -1,8 +1,5 @@
 use std::path::PathBuf;
 
-/// Base path for Go defradb repository
-pub const GO_REPO_BASE: &str = "/Users/johnzampolin/go/src/github.com/sourcenetwork";
-
 /// Rust worktree prefix
 pub const RUST_WORKTREE_PREFIX: &str = "defradb.rs";
 

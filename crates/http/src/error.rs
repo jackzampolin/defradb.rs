@@ -205,6 +205,7 @@ fn http_error_from_query_error(err: &QueryError) -> HttpError {
         {
             HttpError::Conflict(message)
         }
+        QueryError::TransactionConflict(_) => HttpError::Conflict(message),
         QueryError::PermissionDenied(_)
         | QueryError::AcpRegistrationFailed { .. }
         | QueryError::AcpCheckFailed { .. }

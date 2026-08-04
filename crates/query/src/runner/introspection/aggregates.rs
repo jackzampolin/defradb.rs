@@ -1,5 +1,5 @@
 use async_graphql::dynamic::*;
-use schema::{CollectionVersion, FieldKind, ScalarArrayKind, ScalarKind};
+use schema::{CollectionVersion, FieldKind, ScalarArrayKind};
 use std::collections::HashMap;
 
 /// Build aggregate selector input types and register them for a collection.
@@ -11,11 +11,15 @@ pub(super) fn build_aggregate_types_for_collection(
     let coll_name = &collection.name;
     let mut types = Vec::new();
 
-    // {Collection}__CountSelector: filter, limit, offset
+    // {Collection}__CountSelector: filter, groupBy, limit, offset
     let count_selector = InputObject::new(format!("{}__CountSelector", coll_name))
         .field(InputValue::new(
             "filter",
             TypeRef::named(format!("{}FilterArg", coll_name)),
+        ))
+        .field(InputValue::new(
+            "groupBy",
+            TypeRef::named_nn_list(format!("{}Field", coll_name)),
         ))
         .field(InputValue::new("limit", TypeRef::named("Int")))
         .field(InputValue::new("offset", TypeRef::named("Int")));
@@ -172,12 +176,7 @@ pub(super) fn build_numeric_fields_enum(collection: &CollectionVersion) -> Enum 
     let mut enum_type = Enum::new(&type_name);
 
     for field in &collection.fields {
-        let is_numeric = matches!(
-            &field.kind,
-            FieldKind::Scalar(ScalarKind::Int)
-                | FieldKind::Scalar(ScalarKind::Float32)
-                | FieldKind::Scalar(ScalarKind::Float64)
-        );
+        let is_numeric = field.kind.is_numeric();
         if is_numeric {
             enum_type = enum_type.item(EnumItem::new(&field.name));
         }

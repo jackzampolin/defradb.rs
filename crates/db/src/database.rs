@@ -21,11 +21,13 @@ use lens::WasmTransformStore;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use storage::corekv::Store;
 
 /// Default maximum number of lazy migrations written in one transaction.
 pub const DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE: usize = 128;
+/// Default maximum number of retries after an auto-commit transaction conflict.
+pub const DEFAULT_MAX_TXN_RETRIES: u32 = 5;
 
 /// Database options.
 #[derive(Clone, Default)]
@@ -100,6 +102,11 @@ impl DbOptions {
     pub fn with_max_txn_retries(mut self, retries: u32) -> Self {
         self.max_txn_retries = Some(retries);
         self
+    }
+
+    /// Returns the maximum number of transaction retries.
+    pub fn max_txn_retries(&self) -> u32 {
+        self.max_txn_retries.unwrap_or(DEFAULT_MAX_TXN_RETRIES)
     }
 
     /// Sets the maximum number of lazy migrations written in one transaction.
@@ -213,6 +220,8 @@ pub struct DB<S: Store> {
     /// behind. The registry provides cancellation-safe mutual exclusion for
     /// operations running in this database instance.
     pub(crate) active_actions: Arc<crate::action::ActionRegistry>,
+    /// Per-collection locks coordinating document writes with schema changes.
+    pub(crate) collection_locks: Mutex<HashMap<String, Arc<async_lock::RwLock<()>>>>,
 }
 
 impl<S: Store> DB<S> {
@@ -247,6 +256,7 @@ impl<S: Store> DB<S> {
             nac_manager: std::sync::OnceLock::new(),
             doc_write_queue: Arc::new(crate::doc_write_queue::DocWriteQueue::new()),
             active_actions: Arc::new(crate::action::ActionRegistry::default()),
+            collection_locks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -302,6 +312,7 @@ impl<S: Store> DB<S> {
             nac_manager: std::sync::OnceLock::new(),
             doc_write_queue: Arc::new(crate::doc_write_queue::DocWriteQueue::new()),
             active_actions: Arc::new(crate::action::ActionRegistry::default()),
+            collection_locks: Mutex::new(HashMap::new()),
         })
     }
 

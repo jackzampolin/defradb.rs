@@ -112,6 +112,27 @@ pub struct IndexManager {
 }
 
 impl IndexManager {
+    fn validate_unique_value_sets(
+        index: &IndexType,
+        value_sets: &[Vec<document::NormalValue>],
+    ) -> Result<()> {
+        if !matches!(index, IndexType::Unique(_)) {
+            return Ok(());
+        }
+
+        for (position, values) in value_sets.iter().enumerate() {
+            if values.iter().any(document::NormalValue::is_nil) {
+                continue;
+            }
+            if value_sets[..position].contains(values) {
+                return Err(Error::Storage(
+                    storage::corekv::Error::UniqueConstraintViolation,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Create a new empty IndexManager.
     pub fn new(collection_short_id: u32) -> Self {
         Self {
@@ -128,9 +149,18 @@ impl IndexManager {
     /// Returns an error if any index in the schema has invalid configuration
     /// (e.g., empty fields list).
     pub fn from_collection(collection_short_id: u32, schema: &CollectionVersion) -> Result<Self> {
+        Self::from_indexes(collection_short_id, schema, &schema.indexes)
+    }
+
+    /// Load a selected set of regular indexes plus all full-text indexes from a collection schema.
+    pub fn from_indexes(
+        collection_short_id: u32,
+        schema: &CollectionVersion,
+        indexes: &[IndexDescription],
+    ) -> Result<Self> {
         let mut manager = Self::new(collection_short_id);
         manager.collection_id = schema.collection_id.clone();
-        for desc in &schema.indexes {
+        for desc in indexes {
             if desc.fields.is_empty() {
                 return Err(Error::Other(format!(
                     "index '{}' in schema has no fields",
@@ -589,6 +619,7 @@ impl IndexManager {
 
         for index in self.indexes.values() {
             let value_sets = self.extract_index_values(doc, index.description(), schema)?;
+            Self::validate_unique_value_sets(index, &value_sets)?;
             for values in &value_sets {
                 // Local creates stay strict but self-heal stale unique entries
                 // pointing at a deleted or missing document (#1111/#700).
@@ -623,6 +654,7 @@ impl IndexManager {
             let new_value_sets = self.extract_index_values(new_doc, index.description(), schema)?;
 
             if old_value_sets != new_value_sets {
+                Self::validate_unique_value_sets(index, &new_value_sets)?;
                 for old_values in &old_value_sets {
                     index
                         .delete(&mut mutable_datastore, doc_short_id, old_values)

@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use cid::Cid;
 use defra_core::block::{Block, Signature};
 use document::Document;
@@ -192,7 +191,7 @@ impl<S: Store> CommitsFetcher<S> {
                     let sig_json = json!({
                         "type": sig_type,
                         "identity": String::from_utf8_lossy(&sig.header.identity).to_string(),
-                        "value": BASE64_STANDARD.encode(&sig.value),
+                        "value": hex::encode(&sig.value),
                     });
                     tracing::debug!(sig_type, "Signature loaded successfully");
                     sig_json

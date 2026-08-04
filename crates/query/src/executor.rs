@@ -12,6 +12,9 @@ use storage::corekv::MaybeSendSync;
 use crate::error::{Result, TransactionError};
 use crate::txn::TransactionHandle;
 
+/// Stable GraphQL extension code for retryable transaction conflicts.
+pub const TXN_CONFLICT_ERROR_CODE: &str = "TXN_CONFLICT";
+
 /// Deserialize a string that may be empty as None.
 /// Go sends `"operationName": ""` for anonymous operations.
 fn deserialize_empty_string_as_none<'de, D>(
@@ -119,6 +122,25 @@ impl QueryResponse {
     pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
+
+    /// Create a retryable transaction conflict response.
+    pub fn transaction_conflict(message: impl Into<String>) -> Self {
+        Self::error(QueryResponseError::new(message).with_code(TXN_CONFLICT_ERROR_CODE))
+    }
+
+    /// Check whether this response is a retryable transaction conflict.
+    pub fn is_transaction_conflict(&self) -> bool {
+        self.data.is_none()
+            && self.errors.len() == 1
+            && self.errors[0].code() == Some(TXN_CONFLICT_ERROR_CODE)
+    }
+}
+
+/// GraphQL error extensions exposed to clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryResponseErrorExtensions {
+    /// Stable machine-readable error code.
+    pub code: String,
 }
 
 /// A GraphQL error in the response.
@@ -134,6 +156,10 @@ pub struct QueryResponseError {
     /// Optional locations in the query where the error occurred.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locations: Option<Vec<ErrorLocation>>,
+
+    /// Machine-readable GraphQL error metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<QueryResponseErrorExtensions>,
 }
 
 impl QueryResponseError {
@@ -143,6 +169,7 @@ impl QueryResponseError {
             message: message.into(),
             path: None,
             locations: None,
+            extensions: None,
         }
     }
 
@@ -156,6 +183,31 @@ impl QueryResponseError {
     pub fn with_locations(mut self, locations: Vec<ErrorLocation>) -> Self {
         self.locations = Some(locations);
         self
+    }
+
+    /// Set a stable machine-readable error code.
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.extensions = Some(QueryResponseErrorExtensions { code: code.into() });
+        self
+    }
+
+    /// Return the machine-readable error code, if present.
+    pub fn code(&self) -> Option<&str> {
+        self.extensions
+            .as_ref()
+            .map(|extensions| extensions.code.as_str())
+    }
+
+    /// Convert a query error while retaining retryable conflict metadata.
+    pub fn from_query_error(error: crate::error::QueryError) -> Self {
+        let is_transaction_conflict =
+            matches!(&error, crate::error::QueryError::TransactionConflict(_));
+        let response_error = Self::new(error.to_string());
+        if is_transaction_conflict {
+            response_error.with_code(TXN_CONFLICT_ERROR_CODE)
+        } else {
+            response_error
+        }
     }
 }
 
@@ -303,6 +355,17 @@ mod tests {
         assert!(resp.has_errors());
         assert!(resp.data.is_none());
         assert_eq!(resp.errors[0].message, "something went wrong");
+    }
+
+    #[test]
+    fn transaction_conflict_response_has_stable_graphql_code() {
+        let response = QueryResponse::transaction_conflict("transaction conflict");
+
+        assert!(response.is_transaction_conflict());
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["errors"][0]["extensions"]["code"],
+            TXN_CONFLICT_ERROR_CODE
+        );
     }
 
     #[test]

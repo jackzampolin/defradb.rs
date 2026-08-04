@@ -124,6 +124,10 @@ pub enum QueryError {
     #[error("storage error: {0}")]
     Storage(#[from] storage::corekv::Error),
 
+    /// An auto-commit transaction conflicted and may be retried.
+    #[error("{0}")]
+    TransactionConflict(String),
+
     /// Schema validation error
     #[error("schema error: {0}")]
     Schema(#[from] schema::SchemaError),
@@ -217,6 +221,11 @@ impl QueryError {
     /// Create an execution error
     pub fn execution(msg: impl Into<String>) -> Self {
         Self::Execution(msg.into())
+    }
+
+    /// Create a retryable transaction conflict error.
+    pub fn transaction_conflict(msg: impl Into<String>) -> Self {
+        Self::TransactionConflict(msg.into())
     }
 
     /// Create an internal error

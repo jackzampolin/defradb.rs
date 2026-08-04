@@ -59,7 +59,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
 
             match fetcher
-                .get_documents_at_cid(cid, expected_doc_id.map(|s| s.as_str()))
+                .get_documents_at_cid(
+                    cid,
+                    expected_doc_id.map(|s| s.as_str()),
+                    caller_identity.as_ref(),
+                )
                 .await
             {
                 Ok(docs) => {

@@ -107,7 +107,8 @@ impl PermissionFilterNode {
         let resource_name = Arc::clone(&self.resource_name);
 
         Box::pin(async move {
-            let allowed = if defra_core::dac_bypass::get_dac_bypass() {
+            let allowed = if identity.is_authenticated() && defra_core::dac_bypass::get_dac_bypass()
+            {
                 true
             } else {
                 check_doc_access_with_overlay(

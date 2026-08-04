@@ -65,6 +65,7 @@ impl Node {
             max_backup_size: config.api.max_backup_size,
             request_timeout: config.api.request_timeout,
             max_concurrent_requests: config.api.max_concurrent_requests,
+            max_txn_retries: config.datastore.max_txn_retries,
             query_limits,
         };
 

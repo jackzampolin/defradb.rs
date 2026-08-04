@@ -2,7 +2,9 @@
 //!
 //! Matches Go's collection source types in client/collection_description.go
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::ser::{Error as _, SerializeMap, SerializeSeq};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Describes a collection's membership in a collection set.
 /// Matches Go's CollectionSetDescription.
@@ -70,7 +72,7 @@ impl CollectionSource {
 pub struct QuerySource {
     /// The base query for this data source.
     /// Note: This is simplified - Go uses request.Select which is more complex.
-    #[serde(rename = "Query")]
+    #[serde(rename = "Query", deserialize_with = "deserialize_query_select")]
     pub query: serde_json::Value,
 
     /// Optional Lens transform ID.
@@ -91,6 +93,266 @@ impl QuerySource {
     pub fn with_transform(mut self, transform: impl Into<String>) -> Self {
         self.transform = Some(transform.into());
         self
+    }
+}
+
+/// Serialize a query using Go's `request.Select` JSON field order and defaults.
+pub fn query_select_json_bytes(query: &serde_json::Value) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(&GoSelect(query))
+}
+
+fn deserialize_query_select<'de, D>(deserializer: D) -> Result<serde_json::Value, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let query = serde_json::Value::deserialize(deserializer)?;
+    let bytes = query_select_json_bytes(&query).map_err(D::Error::custom)?;
+    serde_json::from_slice(&bytes).map_err(D::Error::custom)
+}
+
+struct GoSelect<'a>(&'a serde_json::Value);
+
+impl Serialize for GoSelect<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let object = self
+            .0
+            .as_object()
+            .ok_or_else(|| S::Error::custom("query select must be an object"))?;
+        let mut map = serializer.serialize_map(Some(12))?;
+        map.serialize_entry(
+            "Name",
+            object
+                .get("Name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+        )?;
+        map.serialize_entry("Alias", &Nullable(object.get("Alias")))?;
+        map.serialize_entry(
+            "Fields",
+            &GoSelections(object.get("Fields").and_then(serde_json::Value::as_array)),
+        )?;
+        map.serialize_entry("Limit", &Nullable(object.get("Limit")))?;
+        map.serialize_entry("Offset", &Nullable(object.get("Offset")))?;
+        map.serialize_entry("OrderBy", &Nullable(object.get("OrderBy")))?;
+        map.serialize_entry("Filter", &Nullable(object.get("Filter")))?;
+        map.serialize_entry("DocIDs", &Nullable(object.get("DocIDs")))?;
+        map.serialize_entry(
+            "CIDs",
+            &Nullable(object.get("CIDs").or_else(|| object.get("CID"))),
+        )?;
+        map.serialize_entry("GroupBy", &Nullable(object.get("GroupBy")))?;
+        map.serialize_entry(
+            "ShowDeleted",
+            &object
+                .get("ShowDeleted")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        )?;
+        map.serialize_entry(
+            "IsEncrypted",
+            &object
+                .get("IsEncrypted")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        )?;
+        map.end()
+    }
+}
+
+struct GoSelections<'a>(Option<&'a Vec<serde_json::Value>>);
+
+impl Serialize for GoSelections<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let Some(fields) = self.0 else {
+            return serializer.serialize_none();
+        };
+        let mut sequence = serializer.serialize_seq(Some(fields.len()))?;
+        for field in fields {
+            sequence.serialize_element(&GoSelection(field))?;
+        }
+        sequence.end()
+    }
+}
+
+struct GoSelection<'a>(&'a serde_json::Value);
+
+impl Serialize for GoSelection<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if let Some(name) = self.0.as_str() {
+            let mut map = serializer.serialize_map(Some(2))?;
+            map.serialize_entry("Name", name)?;
+            map.serialize_entry("Alias", &Option::<String>::None)?;
+            return map.end();
+        }
+
+        let object = self
+            .0
+            .as_object()
+            .ok_or_else(|| S::Error::custom("query selection must be an object"))?;
+        if object.contains_key("Fields") {
+            return GoSelect(self.0).serialize(serializer);
+        }
+        if object.contains_key("Targets") {
+            return GoAggregate(self.0).serialize(serializer);
+        }
+        if object.contains_key("Vector") {
+            return GoSimilarity(self.0).serialize(serializer);
+        }
+        GoField(self.0).serialize(serializer)
+    }
+}
+
+struct GoField<'a>(&'a serde_json::Value);
+
+impl Serialize for GoField<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let object = self
+            .0
+            .as_object()
+            .ok_or_else(|| S::Error::custom("query field must be an object"))?;
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry(
+            "Name",
+            object
+                .get("Name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+        )?;
+        map.serialize_entry("Alias", &Nullable(object.get("Alias")))?;
+        map.end()
+    }
+}
+
+struct GoAggregate<'a>(&'a serde_json::Value);
+
+impl Serialize for GoAggregate<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let object = self
+            .0
+            .as_object()
+            .ok_or_else(|| S::Error::custom("query aggregate must be an object"))?;
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry(
+            "Name",
+            object
+                .get("Name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+        )?;
+        map.serialize_entry("Alias", &Nullable(object.get("Alias")))?;
+        map.serialize_entry(
+            "Targets",
+            &GoAggregateTargets(object.get("Targets").and_then(serde_json::Value::as_array)),
+        )?;
+        map.end()
+    }
+}
+
+struct GoAggregateTargets<'a>(Option<&'a Vec<serde_json::Value>>);
+
+impl Serialize for GoAggregateTargets<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let Some(targets) = self.0 else {
+            return serializer.serialize_none();
+        };
+        let mut sequence = serializer.serialize_seq(Some(targets.len()))?;
+        for target in targets {
+            sequence.serialize_element(&GoAggregateTarget(target))?;
+        }
+        sequence.end()
+    }
+}
+
+struct GoAggregateTarget<'a>(&'a serde_json::Value);
+
+impl Serialize for GoAggregateTarget<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let object = self
+            .0
+            .as_object()
+            .ok_or_else(|| S::Error::custom("aggregate target must be an object"))?;
+        let mut map = serializer.serialize_map(Some(7))?;
+        map.serialize_entry("Limit", &Nullable(object.get("Limit")))?;
+        map.serialize_entry("Offset", &Nullable(object.get("Offset")))?;
+        map.serialize_entry("OrderBy", &Nullable(object.get("OrderBy")))?;
+        map.serialize_entry("Filter", &Nullable(object.get("Filter")))?;
+        map.serialize_entry("GroupBy", &Nullable(object.get("GroupBy")))?;
+        map.serialize_entry(
+            "HostName",
+            object
+                .get("HostName")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+        )?;
+        map.serialize_entry("ChildName", &Nullable(object.get("ChildName")))?;
+        map.end()
+    }
+}
+
+struct GoSimilarity<'a>(&'a serde_json::Value);
+
+impl Serialize for GoSimilarity<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let object = self
+            .0
+            .as_object()
+            .ok_or_else(|| S::Error::custom("similarity selection must be an object"))?;
+        let mut map = serializer.serialize_map(Some(4))?;
+        map.serialize_entry(
+            "Name",
+            object
+                .get("Name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+        )?;
+        map.serialize_entry("Alias", &Nullable(object.get("Alias")))?;
+        map.serialize_entry("Vector", &Nullable(object.get("Vector")))?;
+        map.serialize_entry(
+            "Target",
+            object
+                .get("Target")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+        )?;
+        map.end()
+    }
+}
+
+struct Nullable<'a>(Option<&'a serde_json::Value>);
+
+impl Serialize for Nullable<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.0 {
+            Some(value) => value.serialize(serializer),
+            None => serializer.serialize_none(),
+        }
     }
 }
 
@@ -146,6 +408,21 @@ mod tests {
         assert!(json.contains("\"Query\""));
 
         let parsed: QuerySource = serde_json::from_str(&json).unwrap();
-        assert_eq!(source, parsed);
+        assert_eq!(source.query["Name"], parsed.query["Name"]);
+        assert_eq!(parsed.query["Fields"][0]["Name"], "name");
+        assert_eq!(parsed.query["Fields"][1]["Name"], "email");
+    }
+
+    #[test]
+    fn query_select_json_matches_go() {
+        let query = serde_json::json!({
+            "Name": "Users",
+            "Fields": [{"Name": "name", "Alias": "fullName"}]
+        });
+
+        assert_eq!(
+            String::from_utf8(query_select_json_bytes(&query).unwrap()).unwrap(),
+            r#"{"Name":"Users","Alias":null,"Fields":[{"Name":"name","Alias":"fullName"}],"Limit":null,"Offset":null,"OrderBy":null,"Filter":null,"DocIDs":null,"CIDs":null,"GroupBy":null,"ShowDeleted":false,"IsEncrypted":false}"#
+        );
     }
 }

@@ -357,7 +357,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
     }
 
     async fn disconnect_peer(&self, addr: &str) -> P2PResult<()> {
-        self.check_nac(acp::nac::NodePermission::P2pPeerConnect)
+        self.check_nac(acp::nac::NodePermission::P2pPeerDisconnect)
             .await?;
 
         let (peer_id, _direct_addrs) = parse_public_peer_addr(addr)
@@ -527,7 +527,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                 replication_filters.clone(),
             );
             coordinator
-                .create_replicator_info(&peer_id, info, true)
+                .create_replicator_info(&peer_id, info, false)
                 .await
                 .map_err(|error| P2PError::transport(error.to_string()))?;
         } else {

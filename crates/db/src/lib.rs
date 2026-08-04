@@ -56,6 +56,7 @@ pub mod collection;
 pub mod collection_acp;
 pub(crate) mod collection_cache;
 pub(crate) mod collection_loader;
+pub(crate) mod collection_locks;
 pub(crate) mod collection_name;
 pub(crate) mod collection_ops;
 pub(crate) mod collection_provider;
@@ -117,7 +118,10 @@ pub use collection_provider::DbCollectionProvider;
 pub use collection_retriever::{resolve_collection_from_doc_id, DocCollectionInfo};
 pub use collection_snapshot::CollectionSnapshot;
 pub use commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
-pub use database::{DbOptions, EmbeddingClientConfig, DB, DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE};
+pub use database::{
+    DbOptions, EmbeddingClientConfig, DB, DEFAULT_MAX_TXN_RETRIES,
+    DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE,
+};
 pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
 pub use defra_core::{Action, ActionExecution, ActionStatus};
 pub use doc_write_queue::DocWriteQueue;

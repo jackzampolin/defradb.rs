@@ -1,6 +1,15 @@
 #[cfg(test)]
 mod unit_tests {
     use super::super::*;
+    use document::NormalValue;
+    use storage::backends::memory::MemoryStore;
+
+    fn commit(doc_id: &str, field_name: &str) -> Document {
+        let mut commit = Document::new();
+        commit.set("docID", NormalValue::String(doc_id.to_string()));
+        commit.set("fieldName", NormalValue::String(field_name.to_string()));
+        commit
+    }
 
     #[test]
     fn test_commits_query_options_default() {
@@ -11,6 +20,38 @@ mod unit_tests {
         assert!(opts.height_start.is_none());
         assert!(opts.height_end.is_none());
         assert!(opts.field_name.is_none());
+    }
+
+    #[test]
+    fn sort_commits_preserves_document_discovery_order() {
+        let fetcher = CommitsFetcher::<MemoryStore>::new(Arc::new(TokioMutex::new(None)));
+        let mut commits = vec![
+            commit("z-first", "_C"),
+            commit("z-first", "name"),
+            commit("a-second", "_C"),
+            commit("a-second", "age"),
+        ];
+
+        fetcher.sort_commits_go_order(&mut commits);
+
+        let actual: Vec<_> = commits
+            .iter()
+            .map(|commit| {
+                (
+                    commit.get("docID").and_then(|value| value.as_str()),
+                    commit.get("fieldName").and_then(|value| value.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                (Some("z-first"), Some("name")),
+                (Some("z-first"), Some("_C")),
+                (Some("a-second"), Some("age")),
+                (Some("a-second"), Some("_C")),
+            ]
+        );
     }
 }
 

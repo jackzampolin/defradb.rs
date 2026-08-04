@@ -331,7 +331,7 @@ pub unsafe extern "C" fn p2p_disconnect(
             rt,
             node_ptr,
             identity_did,
-            NodePermission::P2pPeerConnect
+            NodePermission::P2pPeerDisconnect
         ));
 
         // Bind the caller's identity so the adapter's inner NAC check resolves the

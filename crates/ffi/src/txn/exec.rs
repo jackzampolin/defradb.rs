@@ -1,4 +1,4 @@
-use std::ffi::c_char;
+use std::ffi::{c_char, c_int};
 
 use crate::ffi_entry;
 use crate::helpers::{get_node_runner, get_rt, require_c_str};
@@ -36,6 +36,39 @@ pub unsafe extern "C" fn exec_request_in_txn(
     variables: *const c_char,
     batch_session_id: *const c_char,
 ) -> FfiResult {
+    unsafe {
+        exec_request_in_txn_with_signing(
+            node_ptr,
+            txn_id,
+            identity_did,
+            request_query,
+            operation_name,
+            variables,
+            batch_session_id,
+            -1,
+        )
+    }
+}
+
+/// Execute a GraphQL query or mutation within a transaction with a signing override.
+///
+/// `signing_override` accepts `-1` for the node default, `0` to disable signing,
+/// and `1` to enable signing.
+///
+/// # Safety
+///
+/// All string pointers must be either null or valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn exec_request_in_txn_with_signing(
+    node_ptr: usize,
+    txn_id: *const c_char,
+    identity_did: *const c_char,
+    request_query: *const c_char,
+    operation_name: *const c_char,
+    variables: *const c_char,
+    batch_session_id: *const c_char,
+    signing_override: c_int,
+) -> FfiResult {
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
@@ -58,9 +91,15 @@ pub unsafe extern "C" fn exec_request_in_txn(
             _ => None,
         };
 
-        let (node_did, signing_enabled) = NODES
+        let (node_did, node_signing_enabled) = NODES
             .get(node_ptr, |state| (state.node_identity_did.clone(), state.signing_enabled))
             .unwrap_or((None, false));
+        let signing_enabled = match signing_override {
+            -1 => node_signing_enabled,
+            0 => false,
+            1 => true,
+            _ => return FfiResult::error("signing_override must be -1, 0, or 1"),
+        };
         let signing = defra_core::signing::resolve_signing_config_with_flag(
             identity_str.as_deref(),
             node_did.as_deref(),
@@ -162,6 +201,50 @@ mod tests {
             )
         };
         assert_eq!(result.status, 0, "exec_request_in_txn should succeed");
+
+        let response: serde_json::Value = unsafe {
+            serde_json::from_str(
+                std::ffi::CStr::from_ptr(result.value)
+                    .to_str()
+                    .expect("mutation response should be UTF-8"),
+            )
+            .expect("mutation response should be JSON")
+        };
+        let doc_id = response["data"]["add_TxnTest"][0]["_docID"]
+            .as_str()
+            .expect("mutation should return a document ID");
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        let commits_query =
+            CString::new(format!(r#"{{ _commits(docID: "{doc_id}") {{ cid }} }}"#)).unwrap();
+        let result = unsafe {
+            exec_request_in_txn(
+                node,
+                txn_id_cstr.as_ptr(),
+                std::ptr::null(),
+                commits_query.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(result.status, 0, "transaction commit query should succeed");
+        let response: serde_json::Value = unsafe {
+            serde_json::from_str(
+                std::ffi::CStr::from_ptr(result.value)
+                    .to_str()
+                    .expect("commit response should be UTF-8"),
+            )
+            .expect("commit response should be JSON")
+        };
+        assert!(
+            !response["data"]["_commits"]
+                .as_array()
+                .expect("commit response should be an array")
+                .is_empty(),
+            "transaction should expose its uncommitted commits"
+        );
+        unsafe { crate::types::defra_free_string(result.value) };
 
         // Commit transaction
         let result = unsafe { commit_txn(node, txn_id_cstr.as_ptr()) };
