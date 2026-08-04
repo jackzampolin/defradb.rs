@@ -43,6 +43,8 @@ impl<S: Store> P2PHost<S> {
         peer_id: PeerId,
         response: tokio::sync::oneshot::Sender<Result<()>>,
     ) {
+        self.peer_addrs.remove(&peer_id);
+        self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
         // `disconnect_peer_id` returns `Err(())` when the peer is not connected.
         // Disconnect is idempotent: hanging up on an absent peer is success.
         let _ = self.swarm.disconnect_peer_id(peer_id);

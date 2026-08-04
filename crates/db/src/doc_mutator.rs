@@ -107,6 +107,11 @@ impl<S: Store> DbDocMutator<S> {
         collection_name: &str,
         collection: &Collection,
     ) -> query::error::Result<()> {
+        self.db
+            .acquire_collection_read_lock(&self.txn, collection.collection_id())
+            .await
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+
         let was_created_in_txn = {
             let txn_guard = self.txn.lock().await;
             let txn = txn_guard.as_ref().ok_or_else(|| {

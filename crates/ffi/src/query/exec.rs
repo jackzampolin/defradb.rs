@@ -1,4 +1,4 @@
-use std::ffi::c_char;
+use std::ffi::{c_char, c_int};
 
 use crate::ffi_entry;
 use crate::helpers::{get_node_runner, get_rt, require_c_str};
@@ -44,6 +44,37 @@ pub unsafe extern "C" fn exec_request(
     variables: *const c_char,
     batch_session_id: *const c_char,
 ) -> FfiResult {
+    unsafe {
+        exec_request_with_signing(
+            node_ptr,
+            identity_did,
+            request_query,
+            operation_name,
+            variables,
+            batch_session_id,
+            -1,
+        )
+    }
+}
+
+/// Execute a GraphQL query or mutation with a request-scoped signing override.
+///
+/// `signing_override` accepts `-1` for the node default, `0` to disable signing,
+/// and `1` to enable signing.
+///
+/// # Safety
+///
+/// All string pointers must be either null or valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn exec_request_with_signing(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    request_query: *const c_char,
+    operation_name: *const c_char,
+    variables: *const c_char,
+    batch_session_id: *const c_char,
+    signing_override: c_int,
+) -> FfiResult {
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         let query_str = try_ffi!(require_c_str(request_query, "request_query"));
@@ -68,9 +99,15 @@ pub unsafe extern "C" fn exec_request(
         // Set up thread-local signer for block signing during mutations.
         // Matches Go's behavior: if signing is enabled and no explicit identity,
         // fall back to node identity for block signing.
-        let (node_did, signing_enabled) = NODES
+        let (node_did, node_signing_enabled) = NODES
             .get(node_ptr, |state| (state.node_identity_did.clone(), state.signing_enabled))
             .unwrap_or((None, false));
+        let signing_enabled = match signing_override {
+            -1 => node_signing_enabled,
+            0 => false,
+            1 => true,
+            _ => return FfiResult::error("signing_override must be -1, 0, or 1"),
+        };
         let signing = defra_core::signing::resolve_signing_config_with_flag(
             identity_str.as_deref(),
             node_did.as_deref(),

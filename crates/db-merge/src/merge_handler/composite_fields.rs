@@ -44,7 +44,10 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     // enforces immutability for JSON fields.
                     .filter(|field| {
                         field.immutable
-                            && !matches!(field.kind, FieldKind::Scalar(ScalarKind::Json))
+                            && !field
+                                .kind
+                                .as_scalar()
+                                .is_some_and(|kind| kind.base_kind() == ScalarKind::Json)
                     })
                     .map(|field| field.name.as_str())
                     .collect()

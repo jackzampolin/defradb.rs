@@ -178,7 +178,10 @@ pub(super) fn build_mutation_input_type(collection: &CollectionVersion) -> Input
 /// Convert field kind to input type ref (for mutation inputs).
 pub(super) fn field_kind_to_input_type_ref(kind: &FieldKind) -> TypeRef {
     match kind {
-        FieldKind::Scalar(scalar) => TypeRef::named(scalar_to_gql_name(scalar)),
+        FieldKind::Scalar(scalar) => {
+            let name = scalar_to_gql_name(scalar);
+            TypeRef::named(name)
+        }
         FieldKind::ScalarArray(array) => {
             let element_type = scalar_to_gql_name(&array.element_kind());
             TypeRef::named_list(element_type)
@@ -205,7 +208,7 @@ pub(super) fn get_filter_type_for_field(
     current_name: &str,
 ) -> String {
     match kind {
-        FieldKind::Scalar(scalar) => match scalar {
+        FieldKind::Scalar(scalar) => match scalar.base_kind() {
             ScalarKind::DocID => "IDOperatorBlock".to_string(),
             ScalarKind::String => "StringOperatorBlock".to_string(),
             ScalarKind::Int => "IntOperatorBlock".to_string(),

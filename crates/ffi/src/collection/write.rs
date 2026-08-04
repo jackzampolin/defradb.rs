@@ -1,4 +1,8 @@
 use crate::ffi_node_db_async_body;
+use crate::helpers::{get_rt, require_c_str};
+use crate::nac_check::check_nac_for_node;
+use crate::state::NODES;
+use crate::{ffi_async, ffi_entry, try_ffi, ERR_INVALID_NODE_HANDLE};
 use acp::nac::NodePermission;
 
 /// Delete a collection by name.
@@ -45,6 +49,81 @@ pub unsafe extern "C" fn delete_collection(
     }
 }
 
+/// Delete one or more collections by name.
+///
+/// # Safety
+///
+/// `names_json` must be a valid null-terminated UTF-8 JSON array of strings.
+#[no_mangle]
+pub unsafe extern "C" fn delete_collections(
+    node_ptr: usize,
+    identity_did: *const std::ffi::c_char,
+    names_json: *const std::ffi::c_char,
+    active_only: bool,
+) -> crate::types::FfiResult {
+    ffi_node_db_async_body! {
+        node = node_ptr,
+        identity = identity_did,
+        database = database,
+        permission = NodePermission::CollectionPatch,
+        names_json => names_str: "names_json";
+        {
+        let names: Vec<String> = serde_json::from_str(&names_str)
+            .map_err(|e| format!("failed to parse collection names JSON: {}", e))?;
+
+        database
+            .delete_collections(names, active_only)
+            .await
+            .map_err(|e| format!("failed to delete collections: {}", e))?;
+
+        Ok("{}".to_string())
+    }
+    }
+}
+
+/// Delete collections or collection versions within an existing transaction.
+///
+/// # Safety
+///
+/// `txn_id` and `targets_json` must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn delete_collections_in_txn(
+    node_ptr: usize,
+    txn_id: *const std::ffi::c_char,
+    identity_did: *const std::ffi::c_char,
+    targets_json: *const std::ffi::c_char,
+    active_only: bool,
+) -> crate::types::FfiResult {
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::CollectionPatch
+        ));
+        let txn_id = try_ffi!(require_c_str(txn_id, "txn_id"));
+        let targets_json = try_ffi!(require_c_str(targets_json, "targets_json"));
+        let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
+            Some(registry) => registry,
+            None => return crate::types::FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|value| !value.is_empty()),
+        );
+
+        ffi_async!(rt, {
+            let targets: Vec<String> = serde_json::from_str(&targets_json)
+                .map_err(|error| format!("failed to parse collection targets JSON: {}", error))?;
+            registry
+                .delete_collections_in_txn(&txn_id, targets, active_only)
+                .await
+                .map_err(|error| format!("failed to delete collections: {}", error))?;
+            Ok("{}".to_string())
+        })
+    }
+}
+
 /// Set the active collection version.
 ///
 /// This activates the collection with the given version ID and deactivates
@@ -83,6 +162,48 @@ pub unsafe extern "C" fn set_active_collection_version(
 
         Ok("{}".to_string())
     }
+    }
+}
+
+/// Set a collection version's active state within an existing transaction.
+///
+/// # Safety
+///
+/// `txn_id` and `version_id` must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn set_collection_active_in_txn(
+    node_ptr: usize,
+    txn_id: *const std::ffi::c_char,
+    identity_did: *const std::ffi::c_char,
+    version_id: *const std::ffi::c_char,
+    is_active: bool,
+) -> crate::types::FfiResult {
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::CollectionPatch
+        ));
+        let txn_id = try_ffi!(require_c_str(txn_id, "txn_id"));
+        let version_id = try_ffi!(require_c_str(version_id, "version_id"));
+        let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
+            Some(registry) => registry,
+            None => return crate::types::FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
+        let _identity_guard = defra_core::current_identity::scoped_current_identity(
+            crate::types::c_str_to_string(identity_did).filter(|value| !value.is_empty()),
+        );
+
+        ffi_async!(rt, {
+            let version = registry
+                .set_collection_active_in_txn(&txn_id, &version_id, is_active)
+                .await
+                .map_err(|error| format!("failed to update collection active state: {}", error))?;
+            serde_json::to_string(&version)
+                .map_err(|error| format!("failed to serialize collection version: {}", error))
+        })
     }
 }
 
@@ -238,6 +359,39 @@ mod tests {
         let error = unsafe { std::ffi::CStr::from_ptr(result.error).to_string_lossy() };
         assert_eq!(error, "collection name can't be empty");
         unsafe { crate::types::defra_free_string(result.error) };
+
+        node_close(node);
+    }
+
+    #[test]
+    fn test_delete_collections() {
+        assert!(crate::runtime::init_runtime());
+
+        let result = new_node(NodeInitOptions::default());
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        let sdl = CString::new(
+            "type FirstCollection { field: String }\ntype SecondCollection { field: String }",
+        )
+        .unwrap();
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
+        assert_eq!(result.status, 0);
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        let names = CString::new(r#"["FirstCollection","SecondCollection"]"#).unwrap();
+        let result = unsafe { delete_collections(node, std::ptr::null(), names.as_ptr(), false) };
+        assert_eq!(result.status, 0, "delete_collections should succeed");
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        for name in ["FirstCollection", "SecondCollection"] {
+            let name = CString::new(name).unwrap();
+            let result = unsafe { has_collection(node, std::ptr::null(), name.as_ptr()) };
+            assert_eq!(result.status, 0);
+            let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+            assert_eq!(value, "false");
+            unsafe { crate::types::defra_free_string(result.value) };
+        }
 
         node_close(node);
     }

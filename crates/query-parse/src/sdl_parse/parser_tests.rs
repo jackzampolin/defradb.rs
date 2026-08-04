@@ -28,20 +28,28 @@ fn test_parse_simple_type() {
 }
 
 #[test]
-fn test_parse_non_null_type_returns_error() {
+fn test_parse_non_null_scalars() {
     let sdl = r#"
         type Post {
             title: String!
+            publishedAt: DateTime!
+            metadata: JSON!
         }
     "#;
 
-    let result = parse_sdl(sdl);
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("NonNull fields are not currently supported"),
-        "error should reject NonNull: {}",
-        err
+    let collections = parse_sdl(sdl).unwrap();
+    let post = &collections[0];
+    assert_eq!(
+        post.field_by_name("title").unwrap().kind,
+        FieldKind::Scalar(ScalarKind::NonNillableString)
+    );
+    assert_eq!(
+        post.field_by_name("publishedAt").unwrap().kind,
+        FieldKind::Scalar(ScalarKind::NonNillableDateTime)
+    );
+    assert_eq!(
+        post.field_by_name("metadata").unwrap().kind,
+        FieldKind::Scalar(ScalarKind::NonNillableJson)
     );
 }
 
@@ -51,6 +59,8 @@ fn test_parse_array_type() {
         type User {
             tags: [String!]
             scores: [Int]
+            logins: [DateTime!]
+            optionalLogins: [DateTime]
         }
     "#;
 
@@ -64,6 +74,12 @@ fn test_parse_array_type() {
     // [Int] -> nillable elements
     let scores = user.field_by_name("scores").unwrap();
     assert_eq!(scores.kind, FieldKind::nillable_int_array());
+
+    let logins = user.field_by_name("logins").unwrap();
+    assert_eq!(logins.kind, FieldKind::datetime_array());
+
+    let optional_logins = user.field_by_name("optionalLogins").unwrap();
+    assert_eq!(optional_logins.kind, FieldKind::nillable_datetime_array());
 }
 
 #[test]
@@ -865,10 +881,9 @@ fn test_default_directive_missing_value_returns_error() {
     let result = parse_sdl(sdl);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("requires a value argument"),
-        "error should mention missing value: {}",
-        err
+    assert_eq!(
+        err,
+        "parse error: default value must specify one argument. Field: role"
     );
 }
 
@@ -882,10 +897,9 @@ fn test_default_directive_legacy_argument_returns_error() {
     let result = parse_sdl(sdl);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("unknown @default argument"),
-        "error should mention unknown argument: {}",
-        err
+    assert_eq!(
+        err,
+        r#"parse error: Unknown argument "string" on directive "@default""#
     );
 }
 
@@ -1490,10 +1504,9 @@ fn test_default_float32_wrong_type_returns_error() {
     let result = parse_sdl(sdl);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("has invalid value"),
-        "error should mention invalid value: {}",
-        err
+    assert_eq!(
+        err,
+        r#"parse error: default value is invalid. Field: temp, Expected: Float32, Actual: String, Value: "not a float""#
     );
 }
 
@@ -1508,10 +1521,9 @@ fn test_default_datetime_wrong_type_returns_error() {
     let result = parse_sdl(sdl);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("has invalid value"),
-        "error should mention invalid value: {}",
-        err
+    assert_eq!(
+        err,
+        "parse error: default value is invalid. Field: created, Expected: DateTime, Actual: Int, Value: 12345"
     );
 }
 
@@ -1526,10 +1538,9 @@ fn test_default_blob_wrong_type_returns_error() {
     let result = parse_sdl(sdl);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("has invalid value"),
-        "error should mention invalid value: {}",
-        err
+    assert_eq!(
+        err,
+        "parse error: default value is invalid. Field: data, Expected: Blob, Actual: Int, Value: 12345"
     );
 }
 
@@ -1581,9 +1592,9 @@ fn test_default_directive_value_uses_field_type_coercion() {
     );
 
     let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains(r#"Argument "value" has invalid value "forty""#),
-        "unexpected error: {err}"
+    assert_eq!(
+        err,
+        r#"parse error: default value is invalid. Field: age, Expected: Int, Actual: String, Value: "forty""#
     );
 }
 

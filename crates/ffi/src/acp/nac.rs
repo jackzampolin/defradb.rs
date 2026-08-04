@@ -127,9 +127,6 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
             if status == acp::nac::NacStatus::NotConfigured {
                 return Err("node acp is not configured".to_string());
             }
-            if status == acp::nac::NacStatus::Enabled {
-                return Err("node acp is already enabled".to_string());
-            }
 
             // Empty DID means no identity - not authorized
             if requestor_str.is_empty() {
@@ -151,6 +148,9 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
                 return Err(
                     format!("not authorized to perform operation. Permission: {}", NodePermission::NacReEnable),
                 );
+            }
+            if status == acp::nac::NacStatus::Enabled {
+                return Err("node acp is already enabled".to_string());
             }
 
             nac_manager
@@ -530,6 +530,39 @@ mod tests {
             "NAC should be re-enabled"
         );
         unsafe { crate::types::defra_free_string(result.value) };
+
+        node_close(node);
+    }
+
+    #[test]
+    fn test_re_enable_nac_checks_authorization_before_enabled_state() {
+        assert!(crate::runtime::init_runtime());
+
+        let result = new_node(NodeInitOptions::default());
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        let owner_did = CString::new(test_did()).unwrap();
+        let result = unsafe { enable_nac(node, owner_did.as_ptr()) };
+        assert_eq!(result.status, 0);
+
+        for requestor in ["", test_did2()] {
+            let requestor = CString::new(requestor).unwrap();
+            let result = unsafe { re_enable_nac(node, requestor.as_ptr()) };
+            assert_eq!(result.status, 1);
+            let error = unsafe { CStr::from_ptr(result.error).to_string_lossy() };
+            assert_eq!(
+                error,
+                "not authorized to perform operation. Permission: re-enable-nac"
+            );
+            unsafe { crate::types::defra_free_string(result.error) };
+        }
+
+        let result = unsafe { re_enable_nac(node, owner_did.as_ptr()) };
+        assert_eq!(result.status, 1);
+        let error = unsafe { CStr::from_ptr(result.error).to_string_lossy() };
+        assert_eq!(error, "node acp is already enabled");
+        unsafe { crate::types::defra_free_string(result.error) };
 
         node_close(node);
     }

@@ -96,7 +96,7 @@ async fn doc_sync_against_go_defradb() {
 
     eprintln!("issuing pubsub_sync_documents for doc {doc_id}");
     let results = coord
-        .pubsub_sync_documents(vec![doc_id.clone()], Some(Duration::from_secs(8)))
+        .pubsub_sync_documents(vec![doc_id.clone()], Some(Duration::from_secs(8)), None)
         .await
         .expect("pubsub_sync_documents call");
 

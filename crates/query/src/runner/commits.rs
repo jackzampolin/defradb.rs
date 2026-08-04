@@ -47,6 +47,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     pub(crate) async fn execute_commits_query(
         &self,
         select: &Select,
+        fetcher: &dyn DocFetcher,
         caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
         use crate::fetcher::CommitsQueryOptions;
@@ -105,7 +106,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     cid: Some(cid.clone()),
                     ..base_options.clone()
                 };
-                for commit in self.fetcher.get_commits(&options).await? {
+                for commit in fetcher.get_commits(&options).await? {
                     let Some(commit_cid) = commit.get("cid").and_then(|value| value.as_str())
                     else {
                         continue;
@@ -120,7 +121,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
             }
         } else {
-            commits = self.fetcher.get_commits(&base_options).await?;
+            commits = fetcher.get_commits(&base_options).await?;
         }
 
         // ACP filtering: check read permission for each commit's document or

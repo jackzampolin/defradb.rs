@@ -108,7 +108,7 @@ impl ManageMutateOp {
             ManageMutateOp::DocumentAdd { .. } => P::P2pDocumentAdd,
             ManageMutateOp::DocumentRemove { .. } => P::P2pDocumentDelete,
             ManageMutateOp::PeerConnect { .. } => P::P2pPeerConnect,
-            ManageMutateOp::PeerDisconnect { .. } => P::P2pPeerConnect,
+            ManageMutateOp::PeerDisconnect { .. } => P::P2pPeerDisconnect,
         }
     }
 }
@@ -609,6 +609,13 @@ mod tests {
             }
             .permission(),
             P::P2pPeerConnect
+        );
+        assert_eq!(
+            ManageMutateOp::PeerDisconnect {
+                address: "x".into()
+            }
+            .permission(),
+            P::P2pPeerDisconnect
         );
         assert_eq!(
             ManageQueryOp::ReplicatorList.permission(),

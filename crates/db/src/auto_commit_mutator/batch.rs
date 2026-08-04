@@ -93,6 +93,16 @@ impl<S: Store> BatchMutator<S> {
         Ok((blockstore, headstore))
     }
 
+    async fn acquire_collection_read_lock(
+        &self,
+        collection: &crate::collection::Collection,
+    ) -> query::error::Result<()> {
+        self.db
+            .acquire_collection_read_lock(&self.txn, collection.collection_id())
+            .await
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))
+    }
+
     async fn take_txn(&self) -> query::error::Result<DbTxn<S>> {
         self.txn.lock().await.take().ok_or_else(|| {
             query::error::QueryError::execution("mutation batch transaction is no longer active")
@@ -175,6 +185,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        self.acquire_collection_read_lock(&collection).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
@@ -305,6 +316,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        self.acquire_collection_read_lock(&collection).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
@@ -457,6 +469,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        self.acquire_collection_read_lock(&collection).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
         let Some((doc_short_id, canonical_doc_id)) = collection

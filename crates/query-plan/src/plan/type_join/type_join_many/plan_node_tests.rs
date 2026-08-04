@@ -311,6 +311,24 @@ async fn init_keeps_all_children_without_parent_scope_restriction() {
 }
 
 #[tokio::test]
+async fn child_limit_iterations_include_terminal_call_per_parent() {
+    for per_parent in [false, true] {
+        let join = build_join(false).await.with_limit(1);
+        let mut join = if per_parent {
+            join.with_per_parent_child_scan()
+        } else {
+            join
+        };
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+        while join.next().await.unwrap() {}
+
+        assert_eq!(join.child_limit_iterations, 4);
+    }
+}
+
+#[tokio::test]
 async fn init_builds_child_cache_from_indexed_fetch() {
     let parent_collection = make_parent_collection();
     let child_collection = make_child_collection();

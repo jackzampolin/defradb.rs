@@ -78,6 +78,8 @@ pub struct TypeJoinMany {
     /// Go re-initializes the child scan per parent, reading ALL children from
     /// the collection each time. Metrics accumulate across all parent scans.
     pub(super) go_child_metrics: JoinChildMetrics,
+    /// Accumulated calls to the per-parent child limit node.
+    pub(super) child_limit_iterations: u64,
     /// Total children in the cache (docs per full collection scan)
     pub(super) total_children_in_cache: u64,
     /// Total field fetches per full collection scan
@@ -182,6 +184,7 @@ impl TypeJoinMany {
             exec_info: ExecInfo::default(),
             child_exec_info: ExecInfo::default(),
             go_child_metrics: JoinChildMetrics::new(),
+            child_limit_iterations: 0,
             total_children_in_cache: 0,
             total_fields_per_scan: 0,
             per_parent_child_scan: false,
@@ -206,6 +209,22 @@ impl TypeJoinMany {
     pub fn with_offset(mut self, offset: u64) -> Self {
         self.child_offset = offset;
         self
+    }
+
+    pub(super) fn record_child_limit_iterations(&mut self, child_count: usize) {
+        if self.child_limit.is_none() && self.child_offset == 0 {
+            return;
+        }
+
+        let available = (child_count as u64).saturating_sub(self.child_offset);
+        let returned = self
+            .child_limit
+            .map(|limit| available.min(limit))
+            .unwrap_or(available);
+
+        // Go reinitializes the limit node per parent without resetting its
+        // metrics, and collectDocs makes one final false call.
+        self.child_limit_iterations += returned + 1;
     }
 
     /// Set the order by specification for children.

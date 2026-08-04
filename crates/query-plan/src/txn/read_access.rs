@@ -24,7 +24,7 @@ impl ObjectAccessChecker for OverlayChecker<'_> {
     ) -> acp::Result<DocAccess> {
         // NAC `bypass-dac` privilege grants full access, exactly as DirectChecker
         // and Go's checkDocAccess (canDACBypass is the first check on every path).
-        if defra_core::dac_bypass::get_dac_bypass() {
+        if self.identity.is_authenticated() && defra_core::dac_bypass::get_dac_bypass() {
             return Ok(DocAccess {
                 has_access: true,
                 explicit: true,

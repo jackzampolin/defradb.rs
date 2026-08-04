@@ -19,11 +19,12 @@ use cid::Cid;
 use document::{DocID, Document};
 use events::{Message, Update};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, MutationBatch, UpdateResult};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use storage::corekv::Store;
 use tracing::warn;
 
 use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
+use crate::collection::Collection;
 use crate::database::DB;
 use crate::index_manager::IndexManager;
 use crate::lensed_fetcher::LensedDocFetcher;
@@ -50,12 +51,59 @@ pub use batch::BatchMutator;
 /// `DbDocMutator` with explicit transaction management instead.
 pub struct AutoCommitMutator<S: Store> {
     db: Arc<DB<S>>,
+    document_acp: OnceLock<Arc<dyn acp::DocumentACP>>,
 }
 
 impl<S: Store> AutoCommitMutator<S> {
     /// Create a new auto-committing mutator wrapping the given database.
     pub fn new(db: Arc<DB<S>>) -> Self {
-        Self { db }
+        Self {
+            db,
+            document_acp: OnceLock::new(),
+        }
+    }
+
+    pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
+        let _ = self.document_acp.set(acp);
+    }
+
+    async fn register_created_doc_with_acp(
+        &self,
+        collection: &Collection,
+        doc_id: &str,
+    ) -> query::error::Result<()> {
+        let Some(policy) = collection.schema().policy.as_ref() else {
+            return Ok(());
+        };
+        let Some(creator_did) = defra_core::signing::get_broadcast_creator_did() else {
+            return Ok(());
+        };
+        let Some(acp) = self.document_acp.get() else {
+            return Ok(());
+        };
+        let creator = identity::Did::new(&creator_did).map_err(|error| {
+            query::error::QueryError::execution(format!("invalid mutation creator DID: {error}"))
+        })?;
+
+        if !acp
+            .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
+            .await
+            .map_err(|error| {
+                query::error::QueryError::execution(format!(
+                    "failed to check ACP registration before publishing update: {error}"
+                ))
+            })?
+        {
+            acp.register_doc_object(&creator, &policy.id, &policy.resource_name, doc_id)
+                .await
+                .map_err(|error| {
+                    query::error::QueryError::execution(format!(
+                        "failed to register document with ACP before publishing update: {error}"
+                    ))
+                })?;
+        }
+
+        Ok(())
     }
 
     pub async fn new_batch_components(
@@ -78,6 +126,10 @@ impl<S: Store> AutoCommitMutator<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
+    fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
+        AutoCommitMutator::set_document_acp(self, acp);
+    }
+
     async fn begin_batch(&self) -> query::error::Result<Option<MutationBatch>> {
         let (batch, fetcher) = self.new_batch_components().await?;
         let mutator: Arc<dyn DocMutator> = batch.clone();

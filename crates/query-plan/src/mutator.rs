@@ -360,6 +360,9 @@ impl MutationBatch {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait DocMutator: MaybeSendSync {
+    /// Configure document ACP for mutation-side ordering guarantees.
+    fn set_document_acp(&self, _acp: Arc<dyn acp::DocumentACP>) {}
+
     /// Begin a request-scoped mutation batch.
     ///
     /// Implementations can override this to provide a shared transaction for

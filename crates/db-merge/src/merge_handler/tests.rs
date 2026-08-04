@@ -657,6 +657,10 @@ async fn batch_merge_keeps_success_and_events_when_post_commit_action_fails() {
     let first = build_merge_block(&blockstore, "Alice", 30).await;
     let second = build_merge_block(&blockstore, "Bob", 31).await;
     let expected_doc_ids = [first.doc_id.clone(), second.doc_id.clone()];
+    let expected_blocks = [
+        (first.doc_id.clone(), first.block_data.clone()),
+        (second.doc_id.clone(), second.block_data.clone()),
+    ];
 
     let results = handler.handle_block_batch(&[first, second]).await;
 
@@ -677,18 +681,19 @@ async fn batch_merge_keeps_success_and_events_when_post_commit_action_fails() {
         .expect("expected second update event")
         .expect("subscription closed unexpectedly");
 
-    let mut seen_doc_ids = vec![
-        update1
-            .as_update()
-            .expect("expected update event")
-            .doc_id
-            .clone(),
-        update2
-            .as_update()
-            .expect("expected update event")
-            .doc_id
-            .clone(),
+    let updates = [
+        update1.as_update().expect("expected update event"),
+        update2.as_update().expect("expected update event"),
     ];
+    for update in updates {
+        let (_, expected_block) = expected_blocks
+            .iter()
+            .find(|(doc_id, _)| doc_id == &update.doc_id)
+            .expect("unexpected update document");
+        assert_eq!(update.block.as_ref(), expected_block.as_ref());
+    }
+
+    let mut seen_doc_ids = updates.map(|update| update.doc_id.clone()).to_vec();
     seen_doc_ids.sort();
 
     let mut expected = expected_doc_ids.to_vec();

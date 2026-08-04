@@ -425,8 +425,11 @@ async fn rebuild_indexes(
     collections: &[Collection],
 ) -> Result<()> {
     for collection in collections {
-        let manager =
-            IndexManager::from_collection(collection.resolved_root_id(), collection.schema())?;
+        let manager = IndexManager::from_indexes(
+            collection.resolved_root_id(),
+            collection.schema(),
+            collection.write_indexes(),
+        )?;
         let index_names = manager
             .get_indexes()
             .into_iter()

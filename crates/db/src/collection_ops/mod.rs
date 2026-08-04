@@ -58,6 +58,7 @@ impl<S: Store> crate::database::DB<S> {
         let prefix = CollectionNameKey::name_prefix();
         let mut schemas: std::collections::HashMap<String, CollectionVersion> =
             std::collections::HashMap::new();
+        let mut index_actions = std::collections::HashMap::new();
 
         // Block ensures systemstore reference is dropped before discard
         {
@@ -173,6 +174,14 @@ impl<S: Store> crate::database::DB<S> {
                 tracing::error!(error = ?e, "Failed to close iterator during collection load");
                 Error::Storage(e)
             })?;
+
+            for schema in schemas.values() {
+                index_actions.insert(
+                    schema.collection_id.clone(),
+                    crate::action::index_action_statuses(&systemstore, &schema.collection_id)
+                        .await?,
+                );
+            }
         }
 
         // Discard read transaction
@@ -197,7 +206,11 @@ impl<S: Store> crate::database::DB<S> {
                     field_count = schema.fields.len(),
                     "Loaded collection"
                 );
-                cache.insert(name, Collection::new(schema));
+                let actions = index_actions
+                    .get(&schema.collection_id)
+                    .cloned()
+                    .unwrap_or_default();
+                cache.insert(name, Collection::with_index_actions(schema, &actions));
             }
 
             tracing::info!(collection_count = cache.len(), "Loaded collections");

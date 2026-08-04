@@ -554,6 +554,21 @@ impl Counter {
         Ok(())
     }
 
+    /// Float32 variant of `reconcile_int64` — same init-if-absent + PCounter
+    /// migrate-via-max semantics. See that method.
+    pub async fn reconcile_float32(&self, rw: &mut dyn ReaderWriter, value: f32) -> Result<()> {
+        if !self.has_value(rw).await? {
+            return self.set_float32(rw, value).await;
+        }
+        if !self.allow_decrement {
+            let current = self.get_float32(rw).await?;
+            if value > current {
+                self.set_float32(rw, value).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Whether the accumulation store (`value_key`) currently holds a value.
     async fn has_value(&self, reader: &dyn Reader) -> Result<bool> {
         Ok(reader
