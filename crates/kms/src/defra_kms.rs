@@ -41,8 +41,7 @@ pub struct DefraKms {
     transports: Vec<Arc<dyn KeyTransport>>,
     policy: Arc<dyn AccessPolicy>,
     doc_resolver: Arc<dyn BlockDocIDResolver>,
-    /// Fallback identity used when `RequestContext::user_identity` is None
-    /// (gossip-triggered syncs with no caller).
+    /// Node identity sent on cross-peer requests and authenticated by peers.
     node_identity: Did,
     /// This node's transport-level peer id, bound into the ECIES AAD of
     /// served replies (Go's `makeAssociatedData`). Empty until the node
@@ -70,10 +69,6 @@ impl DefraKms {
             local_peer_id: RwLock::new(String::new()),
             test_ephemeral: RwLock::new(None),
         }
-    }
-
-    fn principal<'a>(&'a self, ctx: &'a RequestContext) -> &'a Did {
-        ctx.user_identity().unwrap_or(&self.node_identity)
     }
 
     fn local_peer_id(&self) -> String {
@@ -132,6 +127,7 @@ impl DefraKms {
         &self,
         actor: Option<&Did>,
         cid: &EncryptionCid,
+        delegated_actor: Option<(&Did, &str)>,
     ) -> Result<LocalRelease> {
         let doc_ids = self.doc_resolver.doc_ids_for_block(cid).await?;
         if doc_ids.is_empty() {
@@ -148,6 +144,16 @@ impl DefraKms {
             ) {
                 return Ok(LocalRelease::Allow);
             }
+            if let Some((delegate, collection_id)) = delegated_actor {
+                if matches!(
+                    self.policy
+                        .check_delegated_release(delegate, &scope, collection_id)
+                        .await?,
+                    PolicyDecision::Allow
+                ) {
+                    return Ok(LocalRelease::Allow);
+                }
+            }
         }
         Ok(LocalRelease::Deny)
     }
@@ -155,9 +161,15 @@ impl DefraKms {
     /// Serve-side release decision: the owner node has recorded ownership,
     /// so unknown ownership is treated as a denial (never leak a key we
     /// cannot attribute).
-    async fn may_serve(&self, actor: Option<&Did>, cid: &EncryptionCid) -> Result<bool> {
+    async fn may_serve(
+        &self,
+        actor: Option<&Did>,
+        cid: &EncryptionCid,
+        delegated_actor: Option<(&Did, &str)>,
+    ) -> Result<bool> {
         Ok(matches!(
-            self.local_release_decision(actor, cid).await?,
+            self.local_release_decision(actor, cid, delegated_actor)
+                .await?,
             LocalRelease::Allow
         ))
     }
@@ -210,7 +222,7 @@ impl KmsService for DefraKms {
                         }
                     };
                     match self
-                        .local_release_decision(user_actor.as_ref(), &cid)
+                        .local_release_decision(user_actor.as_ref(), &cid, None)
                         .await?
                     {
                         LocalRelease::Allow => {
@@ -242,16 +254,17 @@ impl KmsService for DefraKms {
                     let _ = tx.send(Err(Error::KeyUnavailable)).await;
                 }
             } else {
-                // Wire path: fall back to node identity for gossip-triggered
-                // syncs where ctx has no user identity (mirrors Go's
-                // behavior in internal/kms/pubsub.go per PR #4778).
-                let wire_actor = self.principal(ctx).clone();
+                // Cross-peer DEK access is authorized as the requesting node.
+                // Go responders still consume this legacy wire field, while
+                // Rust responders bind it to the authenticated transport peer.
+                let wire_actor = self.node_identity.clone();
                 let eph = self.ephemeral();
                 let pub_bytes = x25519_dalek::PublicKey::from(&eph).as_bytes().to_vec();
                 let req = FetchEncryptionKeyRequest {
                     identity: wire_actor.to_string().into_bytes(),
                     links: remote.iter().map(|c| c.to_bytes()).collect(),
                     ephemeral_public_key: pub_bytes,
+                    explicit_replay_capability: ctx.explicit_replay_capability().map(str::to_owned),
                 };
                 let payload =
                     serde_cbor::to_vec(&req).map_err(|e| Error::WireEncode(e.to_string()))?;
@@ -440,18 +453,35 @@ impl KmsService for DefraKms {
 
     async fn serve_request(
         &self,
-        _from: PeerIdentity,
+        from: PeerIdentity,
         req: FetchEncryptionKeyRequest,
     ) -> Result<FetchEncryptionKeyReply> {
-        let actor: Option<Did> = std::str::from_utf8(&req.identity)
+        let claimed_actor: Option<Did> = std::str::from_utf8(&req.identity)
             .ok()
             .and_then(|s| s.parse().ok());
-        if actor.is_none() && !req.identity.is_empty() {
+        if claimed_actor.is_none() && !req.identity.is_empty() {
             tracing::warn!(
                 identity_bytes_len = req.identity.len(),
-                "KMS request identity field is non-empty but failed DID parse; treating as anonymous"
+                "KMS request identity field is non-empty but failed DID parse"
             );
         }
+        if claimed_actor.as_ref() != from.authenticated_did.as_ref() {
+            tracing::warn!(
+                peer_id = %from.peer_id,
+                "KMS request identity does not match authenticated peer identity"
+            );
+        }
+        let actor = from.authenticated_did;
+        let delegated_actor =
+            from.explicit_replay_authorization
+                .as_ref()
+                .and_then(|authorization| {
+                    authorization
+                        .authorizer_did
+                        .parse::<Did>()
+                        .ok()
+                        .map(|did| (did, authorization.collection_id.as_str()))
+                });
 
         let mut out_links: Vec<Vec<u8>> = Vec::new();
         let mut out_blocks: Vec<Vec<u8>> = Vec::new();
@@ -470,7 +500,16 @@ impl KmsService for DefraKms {
             let Some(stored) = self.store.get(&cid).await? else {
                 continue;
             };
-            if self.may_serve(actor.as_ref(), &cid).await? {
+            if self
+                .may_serve(
+                    actor.as_ref(),
+                    &cid,
+                    delegated_actor
+                        .as_ref()
+                        .map(|(did, collection_id)| (did, *collection_id)),
+                )
+                .await?
+            {
                 tracing::debug!(cid = %cid, "KMS serve_request: DEK release GRANTED");
             } else {
                 tracing::warn!(cid = %cid, "KMS serve_request: DEK release DENIED");

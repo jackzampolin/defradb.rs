@@ -20,6 +20,18 @@ pub trait AccessPolicy: MaybeSendSync {
     /// `Deny` to refuse.
     async fn check_release(&self, actor: Option<&Did>, scope: &KeyScope) -> Result<PolicyDecision>;
 
+    /// Check a delegated document release and require the document to belong
+    /// to the collection named by the delegation. Implementations that cannot
+    /// prove the binding deny by default.
+    async fn check_delegated_release(
+        &self,
+        _actor: &Did,
+        _scope: &KeyScope,
+        _collection_id: &str,
+    ) -> Result<PolicyDecision> {
+        Ok(PolicyDecision::Deny)
+    }
+
     /// Node-level authorization check for collection-scoped keys.
     /// Called when the scope is `KeyScope::Collection`.
     async fn check_node_release(

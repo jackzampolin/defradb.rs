@@ -28,11 +28,9 @@ use storage::stores::Systemstore;
 use crate::error::{Error, Result};
 use crate::ExplicitReplayAuthorization;
 
-/// Verified explicit-replay claims carried by a persisted registration.
-///
-/// The capability signature was verified at admission time; persisting the
-/// claim summary lets a restored registration merge with the same
-/// authorization semantics it was admitted with.
+/// Verified explicit-replay authorization carried by a persisted registration.
+/// The original proof is retained so a restored replay can authenticate a
+/// reverse KMS request without trusting the request's claimed DID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedReplayAuthorization {
     pub source_peer_id: String,
@@ -40,6 +38,8 @@ pub struct PersistedReplayAuthorization {
     pub collection_id: String,
     pub authorizer_did: String,
     pub expires_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
 }
 
 impl From<&ExplicitReplayAuthorization> for PersistedReplayAuthorization {
@@ -50,6 +50,7 @@ impl From<&ExplicitReplayAuthorization> for PersistedReplayAuthorization {
             collection_id: auth.collection_id.clone(),
             authorizer_did: auth.authorizer_did.clone(),
             expires_at: auth.expires_at,
+            capability: auth.capability.clone(),
         }
     }
 }
@@ -62,6 +63,7 @@ impl From<PersistedReplayAuthorization> for ExplicitReplayAuthorization {
             collection_id: auth.collection_id,
             authorizer_did: auth.authorizer_did,
             expires_at: auth.expires_at,
+            capability: auth.capability,
         }
     }
 }
@@ -330,6 +332,7 @@ mod tests {
                 collection_id: "collection".to_string(),
                 authorizer_did: "did:key:z123".to_string(),
                 expires_at: 42,
+                capability: Some("signed-capability".to_string()),
             }),
         }
     }
