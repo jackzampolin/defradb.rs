@@ -15,8 +15,10 @@ use std::time::Duration;
 use futures::StreamExt;
 use iroh_bitswap::Store;
 use libp2p::{
-    identity::Keypair, noise, request_response, swarm::behaviour::toggle::Toggle, tcp, yamux,
-    Multiaddr, PeerId, Swarm, SwarmBuilder,
+    identity::Keypair,
+    noise, request_response,
+    swarm::{behaviour::toggle::Toggle, dial_opts::DialOpts},
+    tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
 use sysinfo::{RefreshKind, System, SystemExt};
 use tokio::{
@@ -434,24 +436,7 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
         )
         .await?;
 
-        // Outgoing dials use an ephemeral source port (no TCP port reuse).
-        //
-        // `port_reuse(true)` makes libp2p bind each outgoing dial to the listen
-        // port. rust-libp2p 0.53 has no fallback when that bind fails (unlike
-        // go-libp2p's reuseport dialer), so on any host where a connecting
-        // socket cannot share the listener's local port (macOS, or a node
-        // dialing several peers on one IP) the dial fails permanently with
-        // `EADDRINUSE`, the peer never connects, and replicated DAGs never sync.
-        //
-        // Disabling it does NOT affect Rust<->Go interop. Port reuse exists only
-        // to make a node's *observed* source port dialable for DCUtR hole
-        // punching, and DefraDB performs no hole punching: there is no dcutr or
-        // autonat behaviour (see `DefraBehaviour`), and NAT traversal goes
-        // through the circuit relay, which is independent of the dial source
-        // port. The TCP/Noise/Yamux wire protocol is identical either way, and
-        // peers learn each other's dialable listen address from Identify (see
-        // `handle_identify_event`), not from the observed source port.
-        let tcp_config = tcp::Config::default().port_reuse(false);
+        let tcp_config = tcp::Config::default();
 
         // Two builder paths required: libp2p's SwarmBuilder uses a typestate
         // pattern where `.with_relay_client()` transitions to a different builder
@@ -730,7 +715,12 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
     pub(super) fn dial_peer(&mut self, peer_id: PeerId, addrs: Vec<Multiaddr>) -> Result<()> {
         for addr in addrs {
             let dial_addr = addr.with(libp2p::multiaddr::Protocol::P2p(peer_id));
-            match self.swarm.dial(dial_addr.clone()) {
+            // Preserve ephemeral source ports now that TCP config no longer controls reuse.
+            let dial_opts = DialOpts::unknown_peer_id()
+                .address(dial_addr.clone())
+                .allocate_new_port()
+                .build();
+            match self.swarm.dial(dial_opts) {
                 Ok(_) => {
                     debug!("Dialing peer {} at {}", peer_id, dial_addr);
                     return Ok(());
