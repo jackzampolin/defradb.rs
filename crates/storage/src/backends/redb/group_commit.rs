@@ -143,8 +143,9 @@ async fn flush_loop(
                 if result.is_ok() {
                     let wait_started = std::time::Instant::now();
                     let _publication_guard = flush_gate.blocking_write();
-                    flush_tracker.record_commit_gate_wait(wait_started.elapsed());
+                    let gate_wait = wait_started.elapsed();
                     for reservation in reservations {
+                        flush_tracker.record_commit_gate_wait(gate_wait);
                         reservation.publish();
                     }
                 }
@@ -234,4 +235,45 @@ fn flush_batch(db: &Database, batch: &[PendingCommit], durability: DurabilityMod
 
     write_txn.commit().map_err(Error::from)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn grouped_commits_record_gate_wait_per_transaction() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db = Arc::new(Database::create(temp_dir.path().join("group.redb")).unwrap());
+        let tracker = Arc::new(ConflictTracker::for_backend("redb"));
+        let stats = tracker.stats_handle();
+        let gate = Arc::new(AsyncRwLock::new(()));
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let mut results = Vec::new();
+
+        for key in [b"first".to_vec(), b"second".to_vec()] {
+            let (result_tx, result_rx) = oneshot::channel();
+            sender
+                .send(PendingCommit {
+                    changes: BTreeMap::from([(key, Some(b"value".to_vec()))]),
+                    read_version: 0,
+                    read_set: ReadSet::default(),
+                    _conflict_snapshot: tracker.begin_snapshot(),
+                    result_tx,
+                    on_success: Vec::new(),
+                    on_success_async: Vec::new(),
+                    on_error: Vec::new(),
+                    on_error_async: Vec::new(),
+                })
+                .unwrap();
+            results.push(result_rx);
+        }
+        drop(sender);
+
+        flush_loop(receiver, db, DurabilityMode::Eventual, tracker, gate).await;
+        for result in results {
+            result.await.unwrap().unwrap();
+        }
+        assert_eq!(stats.snapshot().commit_gate_waits, 2);
+    }
 }
