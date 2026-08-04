@@ -137,8 +137,9 @@ const FIELD_COUNTS: [usize; 3] = [1, 4, 16];
 /// The original merge benches. Their timed body includes
 /// `Runtime::block_on`, a `MemoryStore` transaction get/set, a value read and
 /// `txn.discard()`, so they measure the whole stack rather than the merge
-/// algorithm. Retained as-is: the gap against the `*_clean` variants and the
-/// `overhead/*` benches below is what quantifies that contamination.
+/// algorithm. Retained as-is: the gap against the `*_clean` variants, which
+/// merge the same deltas from the same fixtures, is what quantifies that
+/// contamination.
 fn bench_merge_contaminated(c: &mut Criterion) {
     let mut group = c.benchmark_group("crdt");
 
@@ -395,8 +396,15 @@ fn bench_composite_merge(c: &mut Criterion) {
     group.finish();
 }
 
-/// Cost of the machinery the contaminated benches include but the clean ones do
-/// not. Subtracting these from `crdt/lww_merge_*` reconstructs the merge cost.
+/// Standalone costs of the machinery that surrounds a merge: the two executors,
+/// the transaction lifecycle and a transaction get/set.
+///
+/// These are independent measurements, not terms to subtract from
+/// `crdt/lww_merge_*`. `txn_new_and_discard` covers `MemoryStore::new()` and
+/// transaction creation, which `bench_merge_contaminated` performs in its
+/// untimed setup, and the contaminated body also times a `lww.value()` read
+/// that has no baseline here. They size each component individually; they do
+/// not sum to the gap between `crdt/*` and `crdt_clean/*`.
 fn bench_overhead(c: &mut Criterion) {
     let mut group = c.benchmark_group("crdt_overhead");
 

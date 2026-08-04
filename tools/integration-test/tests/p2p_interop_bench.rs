@@ -1,11 +1,16 @@
 //! Cross-runtime peer-to-peer replication cost.
 //!
-//! The same replication workload is run over three topologies - Rust to Rust, Go to Go,
-//! and Go to Rust - and the resulting latencies are printed side by side. The amount by
-//! which the mixed topology exceeds the two homogeneous ones is the cost of crossing the
-//! runtime boundary.
+//! The same replication workload is run over four topologies - Rust to Rust, Go to Go,
+//! Rust to Go and Go to Rust - and the resulting latencies are printed side by side. The
+//! amount by which a mixed topology exceeds the two homogeneous ones is the cost of
+//! crossing the runtime boundary.
 //!
-//! All three topologies are measured inside a single test so that the comparison is made
+//! Both mixed directions are measured because they are not the same experiment: a Rust
+//! sender pushing to a Go receiver exercises Rust's replicator against Go's block handler,
+//! and the reverse pairing exercises the opposite halves. Reporting one of them as "the"
+//! interop cost would hide whichever half is slower.
+//!
+//! All four topologies are measured inside a single test so that the comparison is made
 //! on one machine in one run. Comparing numbers from separately scheduled tests would fold
 //! machine noise into the delta being measured.
 //!
@@ -43,54 +48,69 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 /// One topology's measurement for one document-set size.
 struct Measurement {
     doc_count: usize,
-    /// Time from the first create mutation being issued on node 0 to a query against
-    /// node 1 returning every document.
+    /// Time from the first create mutation being issued on the sender to a query against
+    /// the receiver returning every document.
     visible: Duration,
-    /// Time from the last create mutation returning on node 0 to node 1 holding every
-    /// document. This isolates the replication tail from the cost of issuing the writes.
+    /// Time from the last create mutation returning on the sender to the receiver holding
+    /// every document. This isolates the replication tail from the cost of issuing the
+    /// writes.
     tail: Duration,
 }
 
-/// Brings both nodes to the point where node 0 replicates `User` to node 1.
+/// One topology's label and its measurements, in [`DOC_COUNTS`] order.
+struct Topology {
+    label: &'static str,
+    measurements: Vec<Measurement>,
+}
+
+/// Brings both nodes to the point where `sender` replicates `User` to `receiver`.
+///
+/// The indices are explicit because the cluster builder places Rust nodes at the low
+/// indices and Go nodes after them, so which runtime sits at which index depends on how
+/// the cluster was configured.
 ///
 /// Returns once the replicator is configured. None of this is timed - the benchmarks
 /// measure the replication of writes, not the cost of establishing the relationship.
-async fn establish_replication(cluster: &TestCluster) {
-    cluster
-        .wait_for_log(0, "p2p_listening", STARTUP_TIMEOUT)
-        .await
-        .expect("node0 P2P listener did not start");
-    cluster
-        .wait_for_log(1, "p2p_listening", STARTUP_TIMEOUT)
-        .await
-        .expect("node1 P2P listener did not start");
+async fn establish_replication(cluster: &TestCluster, sender: usize, receiver: usize) {
+    for index in [sender, receiver] {
+        cluster
+            .wait_for_log(index, "p2p_listening", STARTUP_TIMEOUT)
+            .await
+            .unwrap_or_else(|e| panic!("node{index} P2P listener did not start: {e}"));
+    }
 
-    let node0 = cluster.client(0);
-    let node1 = cluster.client(1);
+    let sender_client = cluster.client(sender);
+    let receiver_client = cluster.client(receiver);
 
-    let info1 = node1.p2p_info().expect("failed to get node1 p2p info");
-    let addr1 = info1
+    let receiver_info = receiver_client
+        .p2p_info()
+        .unwrap_or_else(|e| panic!("failed to get node{receiver} p2p info: {e}"));
+    let receiver_addr = receiver_info
         .as_array()
         .and_then(|arr| arr.first())
         .and_then(|v| v.as_str())
-        .expect("node1 has no P2P address")
+        .unwrap_or_else(|| panic!("node{receiver} has no P2P address"))
         .to_string();
 
-    node0.schema_add(SCHEMA).expect("add schema on node0");
-    node1.schema_add(SCHEMA).expect("add schema on node1");
+    sender_client
+        .schema_add(SCHEMA)
+        .unwrap_or_else(|e| panic!("add schema on node{sender}: {e}"));
+    receiver_client
+        .schema_add(SCHEMA)
+        .unwrap_or_else(|e| panic!("add schema on node{receiver}: {e}"));
 
-    node0
-        .p2p_connect(&[&addr1])
-        .expect("connect node0 to node1");
-    node0
+    sender_client
+        .p2p_connect(&[&receiver_addr])
+        .unwrap_or_else(|e| panic!("connect node{sender} to node{receiver}: {e}"));
+    sender_client
         .p2p_collection_add(&["User"])
-        .expect("subscribe node0 to User");
-    node1
+        .unwrap_or_else(|e| panic!("subscribe node{sender} to User: {e}"));
+    receiver_client
         .p2p_collection_add(&["User"])
-        .expect("subscribe node1 to User");
-    node0
-        .p2p_replicator_set(&["User"], &addr1)
-        .expect("set replicator from node0 to node1");
+        .unwrap_or_else(|e| panic!("subscribe node{receiver} to User: {e}"));
+    sender_client
+        .p2p_replicator_set(&["User"], &receiver_addr)
+        .unwrap_or_else(|e| panic!("set replicator from node{sender} to node{receiver}: {e}"));
 }
 
 /// Returns the number of `User` documents currently readable on the node.
@@ -110,36 +130,43 @@ fn user_count(cluster: &TestCluster, node_index: usize) -> usize {
         .unwrap_or(0)
 }
 
-/// Creates `doc_count` further documents on node 0 and times how long node 1 takes to
-/// hold all of them.
+/// Creates `doc_count` further documents on `sender` and times how long `receiver` takes
+/// to hold all of them.
 ///
-/// `baseline` is the number of documents node 1 already held, so that successive
+/// `baseline` is the number of documents the receiver already held, so that successive
 /// measurements can share one cluster - building a cluster launches real processes and is
 /// far more expensive than the measurement itself.
-async fn measure(cluster: &TestCluster, doc_count: usize, baseline: usize) -> Measurement {
-    let node0 = cluster.client(0);
+async fn measure(
+    cluster: &TestCluster,
+    sender: usize,
+    receiver: usize,
+    doc_count: usize,
+    baseline: usize,
+) -> Measurement {
+    let sender_client = cluster.client(sender);
     let expected = baseline + doc_count;
 
     let start = Instant::now();
     for i in baseline..expected {
-        node0
+        sender_client
             .query(&format!(
                 r#"mutation {{ add_User(input: {{name: "User-{i}", age: {}}}) {{ _docID }} }}"#,
                 i % 100
             ))
-            .expect("create document on node0");
+            .unwrap_or_else(|e| panic!("create document on node{sender}: {e}"));
     }
     let local_write = start.elapsed();
 
     let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
     loop {
-        let count = user_count(cluster, 1);
+        let count = user_count(cluster, receiver);
         if count >= expected {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "node1 reached only {count} of {expected} documents within {CONVERGENCE_TIMEOUT:?}"
+            "node{receiver} reached only {count} of {expected} documents \
+             within {CONVERGENCE_TIMEOUT:?}"
         );
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -152,64 +179,145 @@ async fn measure(cluster: &TestCluster, doc_count: usize, baseline: usize) -> Me
     }
 }
 
-/// Runs every size in [`DOC_COUNTS`] against one already-replicating cluster.
-async fn measure_topology(cluster: TestCluster) -> Vec<Measurement> {
-    establish_replication(&cluster).await;
+/// Runs every size in [`DOC_COUNTS`] against one cluster, replicating `sender` to
+/// `receiver`.
+async fn measure_topology(
+    label: &'static str,
+    cluster: TestCluster,
+    sender: usize,
+    receiver: usize,
+) -> Topology {
+    establish_replication(&cluster, sender, receiver).await;
 
     let mut measurements = Vec::with_capacity(DOC_COUNTS.len());
     let mut baseline = 0;
     for &doc_count in DOC_COUNTS {
-        measurements.push(measure(&cluster, doc_count, baseline).await);
+        measurements.push(measure(&cluster, sender, receiver, doc_count, baseline).await);
         baseline += doc_count;
     }
 
-    measurements
+    Topology {
+        label,
+        measurements,
+    }
 }
 
-/// Returns how much slower the mixed topology was than the homogeneous baseline, in
+/// Returns how much slower a mixed topology was than the homogeneous baseline, in
 /// milliseconds and as a percentage.
 ///
-/// The baseline is the mean of the two homogeneous topologies, since a mixed pair is half
-/// of each. Both figures are signed: a mixed pair can legitimately land between the two
-/// homogeneous pairs, and clamping that to zero would hide it.
-fn interop_delta(rust_rust: Duration, go_go: Duration, go_rust: Duration) -> (f64, f64) {
+/// The baseline is the mean of the two homogeneous topologies at the same document-set
+/// size, since a mixed pair is half of each. Both mixed directions are compared against
+/// that same baseline. Both figures are signed: a mixed pair can legitimately land between
+/// the two homogeneous pairs, and clamping that to zero would hide it.
+fn interop_delta(rust_rust: Duration, go_go: Duration, mixed: Duration) -> (f64, f64) {
     let baseline = (rust_rust.as_secs_f64() + go_go.as_secs_f64()) / 2.0;
-    let delta_ms = (go_rust.as_secs_f64() - baseline) * 1e3;
+    let delta_ms = (mixed.as_secs_f64() - baseline) * 1e3;
     let percent = if baseline == 0.0 {
         f64::INFINITY
     } else {
-        (go_rust.as_secs_f64() / baseline - 1.0) * 100.0
+        (mixed.as_secs_f64() / baseline - 1.0) * 100.0
     };
 
     (delta_ms, percent)
 }
 
-/// Measures replication latency across all three topologies and reports the cost of the
-/// mixed one.
+/// Prints one metric for every topology and document-set size.
+///
+/// Each mixed row carries the baseline it was compared against, so the delta columns are
+/// never ambiguous about which homogeneous pair they refer to.
+fn print_table(
+    title: &str,
+    rust_rust: &Topology,
+    go_go: &Topology,
+    mixed: [&Topology; 2],
+    metric: fn(&Measurement) -> Duration,
+) {
+    println!("\n{title}");
+    println!(
+        "{:<6} {:<11} {:>12} {:>12} {:>12} {:>9}",
+        "docs", "topology", "latency", "baseline", "delta", "delta %"
+    );
+
+    for i in 0..DOC_COUNTS.len() {
+        let rr = metric(&rust_rust.measurements[i]);
+        let gg = metric(&go_go.measurements[i]);
+        let doc_count = rust_rust.measurements[i].doc_count;
+
+        for topology in [rust_rust, go_go] {
+            println!(
+                "{doc_count:<6} {:<11} {:>12.2?} {:>12} {:>12} {:>9}",
+                topology.label,
+                metric(&topology.measurements[i]),
+                "-",
+                "-",
+                "-"
+            );
+        }
+
+        for topology in mixed {
+            let value = metric(&topology.measurements[i]);
+            let (delta_ms, percent) = interop_delta(rr, gg, value);
+            println!(
+                "{doc_count:<6} {:<11} {:>12.2?} {:>12.2?} {delta_ms:>+9.2} ms {percent:>+8.1}%",
+                topology.label,
+                value,
+                (rr + gg) / 2
+            );
+        }
+    }
+}
+
+/// Measures replication latency across all four topologies and reports the cost of each
+/// mixed direction.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "benchmark: launches six node processes and requires a `defradb` binary on PATH"]
+#[ignore = "benchmark: launches eight node processes and requires a `defradb` binary on PATH"]
 async fn bench_p2p_interop_cost() {
     let rust_rust = measure_topology(
+        "rust->rust",
         TestCluster::builder()
             .rust_nodes(2)
             .with_p2p()
             .build()
             .await
             .expect("build rust/rust cluster"),
+        0,
+        1,
     )
     .await;
 
     let go_go = measure_topology(
+        "go->go",
         TestCluster::builder()
             .go_nodes(2)
             .with_p2p()
             .build()
             .await
             .expect("build go/go cluster"),
+        0,
+        1,
+    )
+    .await;
+
+    // The builder spawns Rust nodes first, so in a one-Rust/one-Go cluster node 0 is the
+    // Rust node and node 1 is the Go node. Each direction gets its own cluster: a
+    // replicator is one-way, and reusing a cluster would leave the documents from the
+    // first direction already present for the second.
+    let rust_go = measure_topology(
+        "rust->go",
+        TestCluster::builder()
+            .rust_nodes(1)
+            .go_nodes(1)
+            .with_p2p()
+            .build()
+            .await
+            .expect("build rust/go cluster"),
+        0,
+        1,
     )
     .await;
 
     let go_rust = measure_topology(
+        "go->rust",
         TestCluster::builder()
             .rust_nodes(1)
             .go_nodes(1)
@@ -217,36 +325,24 @@ async fn bench_p2p_interop_cost() {
             .build()
             .await
             .expect("build go/rust cluster"),
+        1,
+        0,
     )
     .await;
 
-    println!("\ncross-runtime replication cost (poll resolution {POLL_INTERVAL:?})");
-    println!(
-        "{:<6} {:>12} {:>12} {:>12} {:>12} {:>9}",
-        "docs", "rust->rust", "go->go", "go->rust", "delta", "delta %"
+    print_table(
+        &format!("cross-runtime replication cost (poll resolution {POLL_INTERVAL:?})"),
+        &rust_rust,
+        &go_go,
+        [&rust_go, &go_rust],
+        |m| m.visible,
     );
 
-    for i in 0..DOC_COUNTS.len() {
-        let (rr, gg, gr) = (&rust_rust[i], &go_go[i], &go_rust[i]);
-        let (delta_ms, percent) = interop_delta(rr.visible, gg.visible, gr.visible);
-        println!(
-            "{:<6} {:>12.2?} {:>12.2?} {:>12.2?} {delta_ms:>+9.2} ms {percent:>+8.1}%",
-            rr.doc_count, rr.visible, gg.visible, gr.visible
-        );
-    }
-
-    println!("\nreplication tail only (excludes the cost of issuing the writes)");
-    println!(
-        "{:<6} {:>12} {:>12} {:>12} {:>12} {:>9}",
-        "docs", "rust->rust", "go->go", "go->rust", "delta", "delta %"
+    print_table(
+        "replication tail only (excludes the cost of issuing the writes)",
+        &rust_rust,
+        &go_go,
+        [&rust_go, &go_rust],
+        |m| m.tail,
     );
-
-    for i in 0..DOC_COUNTS.len() {
-        let (rr, gg, gr) = (&rust_rust[i], &go_go[i], &go_rust[i]);
-        let (delta_ms, percent) = interop_delta(rr.tail, gg.tail, gr.tail);
-        println!(
-            "{:<6} {:>12.2?} {:>12.2?} {:>12.2?} {delta_ms:>+9.2} ms {percent:>+8.1}%",
-            rr.doc_count, rr.tail, gg.tail, gr.tail
-        );
-    }
 }

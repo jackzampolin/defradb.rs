@@ -176,7 +176,10 @@ fn bench_merge_dag(c: &mut Criterion) {
             group.throughput(Throughput::Elements(depth as u64));
 
             group.bench_function(BenchmarkId::from_parameter(&label), |b| {
-                b.iter_batched(
+                // `_ref`: the handler owns the DB and blockstore holding every block in
+                // the DAG, so moving it into the routine would put its teardown inside
+                // the measurement.
+                b.iter_batched_ref(
                     || rt.block_on(seed_handler(&dag, field_count)),
                     |handler| {
                         rt.block_on(async {

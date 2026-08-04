@@ -241,7 +241,10 @@ fn bench_go_vectors(c: &mut Criterion) {
         });
 
         group.bench_function(BenchmarkId::new("reencode_go", name), |b| {
-            b.iter_batched(
+            // `_ref`: criterion drops the routine's return value outside the measurement
+            // but not its argument, so a by-value `Block` would have its teardown timed
+            // alongside the encode.
+            b.iter_batched_ref(
                 || Block::from_dag_cbor(go_bytes).unwrap(),
                 |block| black_box(block.to_dag_cbor().unwrap()),
                 criterion::BatchSize::SmallInput,
