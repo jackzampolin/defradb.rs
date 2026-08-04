@@ -39,6 +39,10 @@ name = "p2p_admission_fairness"
 path = "tests/p2p_admission_fairness.rs"
 
 [[test]]
+name = "p2p_interop_bench"
+path = "tests/p2p_interop_bench.rs"
+
+[[test]]
 name = "issue1154_repro"
 path = "tests/issue1154_repro.rs"
 
