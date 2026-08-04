@@ -142,7 +142,13 @@ fn command_invalidation(policy_id: String, command: Option<PolicyCommand>) -> Ca
         return CacheInvalidation::All;
     }
 
-    let Some(object) = command.and_then(PolicyCommand::object) else {
+    let Some(command) = command else {
+        return CacheInvalidation::Policy(policy_id);
+    };
+    if command.set_relationship.is_some() || command.delete_relationship.is_some() {
+        return CacheInvalidation::Policy(policy_id);
+    }
+    let Some(object) = command.object() else {
         return CacheInvalidation::Policy(policy_id);
     };
     if object.resource.is_empty() || object.id.is_empty() {
@@ -214,11 +220,8 @@ struct PolicyCommand {
 
 impl PolicyCommand {
     fn object(self) -> Option<ObjectRef> {
-        self.set_relationship
-            .or(self.delete_relationship)
-            .and_then(|command| command.relationship)
-            .and_then(|relationship| relationship.object)
-            .or_else(|| self.register_object.and_then(|command| command.object))
+        self.register_object
+            .and_then(|command| command.object)
             .or_else(|| self.archive_object.and_then(|command| command.object))
             .or_else(|| self.unarchive_object.and_then(|command| command.object))
     }
@@ -281,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_bearer_relationship_object() {
+    fn relationship_mutation_invalidates_the_whole_policy() {
         let command = BearerPolicyCommand {
             policy_id: "policy-1".into(),
             command: Some(PolicyCommand {
@@ -303,11 +306,7 @@ mod tests {
 
         assert_eq!(
             decode_event(&event).unwrap(),
-            vec![CacheInvalidation::Object {
-                policy_id: "policy-1".into(),
-                resource: "users".into(),
-                object_id: "doc-1".into(),
-            }]
+            vec![CacheInvalidation::Policy("policy-1".into())]
         );
     }
 

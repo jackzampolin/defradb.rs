@@ -21,7 +21,7 @@ struct CachedDecision {
 /// Caches the result of `verify_access` calls keyed by
 /// `(actor, policy, resource, doc_id, permission)`. Entries expire
 /// after a configurable TTL. Relationship mutations eagerly invalidate
-/// all entries for the affected document.
+/// all entries for their policy so indirect grants cannot remain cached.
 pub(crate) struct AccessCache {
     ttl: Duration,
     entries: Mutex<HashMap<CacheKey, CachedDecision>>,
@@ -92,10 +92,8 @@ impl AccessCache {
 
     /// Invalidate ALL cached decisions for a specific document.
     ///
-    /// Called on relationship mutations (grant/revoke) and document
-    /// unregistration. Invalidates all actors and permissions for the
-    /// document to avoid subtle races where permission changes affect
-    /// multiple actors through indirect relations.
+    /// Called on document registration and archival mutations. Invalidates all
+    /// actors and permissions for the affected document.
     pub(crate) fn invalidate_object(&self, policy_id: &str, resource: &str, doc_id: &str) -> usize {
         if let Ok(mut entries) = self.entries.lock() {
             let previous_len = entries.len();

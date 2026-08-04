@@ -67,6 +67,11 @@ async fn run(websocket_url: String, cache: Arc<AccessCache>) {
                     tracing::warn!(%error, "failed to subscribe to SourceHub ACP events");
                 } else {
                     tracing::info!(url = %websocket_url, "subscribed to SourceHub ACP events");
+                    let invalidated_entries = cache.clear();
+                    tracing::info!(
+                        invalidated_entries,
+                        "cleared access cache after subscribing; events during the gap are not replayed"
+                    );
                     if let Err(error) = consume(&mut socket, &cache).await {
                         tracing::warn!(%error, "SourceHub ACP event stream disconnected");
                     }
@@ -223,6 +228,19 @@ mod tests {
         let request: serde_json::Value = serde_json::from_str(&request).unwrap();
         assert_eq!(request["method"], "subscribe");
         assert_eq!(request["params"]["query"], SUBSCRIPTION_QUERY);
+
+        timeout(Duration::from_secs(1), async {
+            while cache
+                .get("did:key:alice", "p1", "users", "doc1", "read")
+                .is_some()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        cache.set("did:key:alice", "p1", "users", "doc1", "read", true);
 
         socket.send(Message::Text("not-json".into())).await.unwrap();
         timeout(Duration::from_secs(1), async {
