@@ -449,7 +449,7 @@ mod tests {
             }
         })
         .await
-        .expect("commit never reached its physical write");
+        .expect("physical write did not complete before cancellation");
 
         // Drop the caller's future while publication is still parked.
         commit_task.abort();
