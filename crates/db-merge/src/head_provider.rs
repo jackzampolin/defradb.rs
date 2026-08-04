@@ -441,9 +441,7 @@ mod tests {
             .unwrap();
         {
             let systemstore = txn.systemstore().unwrap();
-            let short_id = db::doc_id_map::next_doc_short_id(&systemstore)
-                .await
-                .unwrap();
+            let short_id = db.next_doc_short_id().await.unwrap();
             db::doc_id_map::set_doc_id_mapping(&systemstore, 1, short_id, &doc_id)
                 .await
                 .unwrap();

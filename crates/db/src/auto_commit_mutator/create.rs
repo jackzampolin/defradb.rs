@@ -86,7 +86,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .await
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-            let doc_short_id = crate::doc_id_map::next_doc_short_id(&systemstore)
+            let doc_short_id = self
+                .db
+                .next_doc_short_id()
                 .await
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
             let identity = DocStorageIdentity::new(short_id, doc_short_id);
