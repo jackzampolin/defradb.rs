@@ -89,10 +89,12 @@ pub enum SigningKey {
 pub enum DocumentAcpConfig {
     #[default]
     Local,
+    #[cfg(feature = "sourcehub")]
     SourceHub(SourceHubConfig),
 }
 
 /// SourceHub document ACP configuration.
+#[cfg(feature = "sourcehub")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceHubConfig {
     pub grpc_address: String,

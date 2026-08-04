@@ -4,19 +4,23 @@ use anyhow::{anyhow, Result};
 
 use crate::Persistence;
 
+pub(crate) struct DocumentAcpSetup {
+    pub document_acp: Arc<dyn acp::DocumentACP>,
+    pub local_zanzibar_store: Option<Arc<dyn acp::ZanzibarStore>>,
+    #[cfg(feature = "sourcehub")]
+    pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
+}
+
 pub(crate) async fn create_document_acp<S>(
     store: Arc<S>,
     persistence: Persistence,
     config: &crate::DocumentAcpConfig,
-) -> Result<(
-    Arc<dyn acp::DocumentACP>,
-    Option<Arc<dyn acp::ZanzibarStore>>,
-    Option<Arc<sourcehub::SourceHubDocumentACP>>,
-)>
+) -> Result<DocumentAcpSetup>
 where
     S: storage::corekv::Store + 'static,
 {
     match config {
+        #[cfg(feature = "sourcehub")]
         crate::DocumentAcpConfig::SourceHub(sourcehub_config) => {
             let tuning = sourcehub::AcpTuning::default();
             let provider = Arc::new(
@@ -33,20 +37,36 @@ where
                 provider,
                 tuning.cache_ttl,
             ));
-            Ok((sh_acp.clone(), None, Some(sh_acp)))
+            Ok(DocumentAcpSetup {
+                document_acp: sh_acp.clone(),
+                local_zanzibar_store: None,
+                sourcehub_acp: Some(sh_acp),
+            })
         }
         crate::DocumentAcpConfig::Local => match persistence {
             Persistence::Persistent => {
                 let zanzibar_store = Arc::new(acp::PersistentZanzibarStore::from_store(store));
                 let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
-                Ok((document_acp, Some(zanzibar_store), None))
+                Ok(local_document_acp_setup(document_acp, zanzibar_store))
             }
             Persistence::Memory => {
                 let zanzibar_store = Arc::new(acp::MemoryZanzibarStore::new());
                 let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
-                Ok((document_acp, Some(zanzibar_store), None))
+                Ok(local_document_acp_setup(document_acp, zanzibar_store))
             }
         },
+    }
+}
+
+fn local_document_acp_setup(
+    document_acp: Arc<dyn acp::DocumentACP>,
+    zanzibar_store: Arc<dyn acp::ZanzibarStore>,
+) -> DocumentAcpSetup {
+    DocumentAcpSetup {
+        document_acp,
+        local_zanzibar_store: Some(zanzibar_store),
+        #[cfg(feature = "sourcehub")]
+        sourcehub_acp: None,
     }
 }
 
@@ -90,13 +110,16 @@ mod tests {
     #[tokio::test]
     async fn local_document_acp_enforces_stored_custom_policy() {
         let store = Arc::new(storage::MemoryStore::new());
-        let (document_acp, local_store, sourcehub_acp) =
-            create_document_acp(store, Persistence::Memory, &DocumentAcpConfig::Local)
-                .await
-                .unwrap();
+        let acp_setup = create_document_acp(store, Persistence::Memory, &DocumentAcpConfig::Local)
+            .await
+            .unwrap();
 
-        assert!(sourcehub_acp.is_none());
-        let local_store = local_store.expect("local ACP should expose a Zanzibar store");
+        #[cfg(feature = "sourcehub")]
+        assert!(acp_setup.sourcehub_acp.is_none());
+        let document_acp = acp_setup.document_acp;
+        let local_store = acp_setup
+            .local_zanzibar_store
+            .expect("local ACP should expose a Zanzibar store");
 
         let parsed = acp::policy_yaml::parse_policy_yaml(
             r#"

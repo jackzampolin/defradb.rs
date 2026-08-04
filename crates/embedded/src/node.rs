@@ -7,9 +7,11 @@ use crate::node_identity::create_node_identity;
 use crate::node_tasks::BackgroundTasks;
 #[cfg(feature = "iroh")]
 use crate::IrohConfig;
+#[cfg(feature = "sourcehub")]
+use crate::{DocumentAcpConfig, SourceHubConfig};
 use crate::{
-    DocumentAcpConfig, EmbeddedNodeConfig, EmbeddedStore, Libp2pConfig, ManagedP2PSystem,
-    Persistence, SigningConfig, SigningKey, SourceHubConfig, TransportConfig,
+    EmbeddedNodeConfig, EmbeddedStore, Libp2pConfig, ManagedP2PSystem, Persistence, SigningConfig,
+    SigningKey, TransportConfig,
 };
 use anyhow::{anyhow, Context, Result};
 use p2p::sync::SyncConfig;
@@ -52,6 +54,7 @@ pub struct EmbeddedNode<S: storage::corekv::Store> {
     pub local_zanzibar_store: Option<Arc<dyn acp::ZanzibarStore>>,
     pub event_bus: Arc<dyn events::Bus>,
     pub node_identity_did: Option<String>,
+    #[cfg(feature = "sourcehub")]
     pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
     pub query_limits: query::QueryLimits,
     pub p2p: Option<Arc<ManagedP2PSystem>>,
@@ -298,6 +301,7 @@ impl NodeBuilder {
         self
     }
 
+    #[cfg(feature = "sourcehub")]
     pub fn with_sourcehub(mut self, config: SourceHubConfig) -> Self {
         self.config.document_acp = DocumentAcpConfig::SourceHub(config);
         self
@@ -550,8 +554,12 @@ where
         ),
     };
 
-    let (document_acp, local_zanzibar_store, sourcehub_acp) =
+    let acp_setup =
         create_document_acp(store.clone(), config.persistence, &config.document_acp).await?;
+    let document_acp = acp_setup.document_acp;
+    let local_zanzibar_store = acp_setup.local_zanzibar_store;
+    #[cfg(feature = "sourcehub")]
+    let sourcehub_acp = acp_setup.sourcehub_acp;
     let nac_manager = create_nac_manager(store.clone(), config.persistence).await?;
 
     // Wire the NAC manager into the DB so DB-layer `check_node_access` calls go
@@ -561,9 +569,12 @@ where
 
     if let Some(ref mut setup) = p2p_setup {
         setup.merge_handler.set_document_acp(document_acp.clone());
+        #[cfg(feature = "sourcehub")]
         setup
             .merge_handler
             .set_strict_replicated_doc_access(sourcehub_acp.is_some());
+        #[cfg(not(feature = "sourcehub"))]
+        setup.merge_handler.set_strict_replicated_doc_access(false);
         if let Some(wire_document_acp) = setup.wire_document_acp.take() {
             wire_document_acp(document_acp.clone());
         }
@@ -710,6 +721,7 @@ where
         local_zanzibar_store,
         event_bus,
         node_identity_did,
+        #[cfg(feature = "sourcehub")]
         sourcehub_acp,
         query_limits: config.query_limits,
         p2p: p2p_setup.map(|setup| setup.system),
