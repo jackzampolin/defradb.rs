@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use document::Document;
+use identity::Did;
 use storage::corekv::MaybeSendSync;
 
 use crate::planner::index_selection::IndexScanParams;
@@ -244,6 +245,7 @@ pub trait DocFetcher: MaybeSendSync {
     ///
     /// * `cid` - The CID of the commit to reconstruct state at
     /// * `expected_doc_id` - Optional document ID to validate the CID belongs to
+    /// * `caller_identity` - Verified identity requesting the historical data
     ///
     /// # Returns
     ///
@@ -258,8 +260,9 @@ pub trait DocFetcher: MaybeSendSync {
         &self,
         cid: &str,
         expected_doc_id: Option<&str>,
+        caller_identity: Option<&Did>,
     ) -> Result<Document> {
-        let _ = (cid, expected_doc_id);
+        let _ = (cid, expected_doc_id, caller_identity);
         Err(query_types::error::QueryError::execution(
             "CID-based time-travel queries are not supported by this fetcher".to_string(),
         ))
@@ -274,9 +277,12 @@ pub trait DocFetcher: MaybeSendSync {
         &self,
         cid: &str,
         expected_doc_id: Option<&str>,
+        caller_identity: Option<&Did>,
     ) -> Result<Vec<Document>> {
         // Default: delegate to single-document method
-        let doc = self.get_document_at_cid(cid, expected_doc_id).await?;
+        let doc = self
+            .get_document_at_cid(cid, expected_doc_id, caller_identity)
+            .await?;
         Ok(vec![doc])
     }
 

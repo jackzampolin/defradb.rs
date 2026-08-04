@@ -160,7 +160,7 @@ where
         .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
         .await;
     let coordinator_for_restore = coordinator.clone();
-    tokio::spawn(async move {
+    let pending_dag_resync_task = tokio::spawn(async move {
         coordinator_for_restore
             .run_pending_dag_resync(std::time::Duration::from_secs(60))
             .await;
@@ -169,7 +169,7 @@ where
     // Receiver's re-arm loop (#1116 stage 2): dispatches due pending roots
     // at a tight cadence. Sibling of the resync sweep above.
     let coordinator_for_retry_clock = coordinator.clone();
-    tokio::spawn(async move {
+    let pending_dag_retry_task = tokio::spawn(async move {
         coordinator_for_retry_clock
             .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
             .await;
@@ -299,10 +299,12 @@ where
             handle.clone(),
             coordinator.shutdown_handle(),
             vec![
-                host_event_task.abort_handle(),
-                replication_task.abort_handle(),
-                failure_recorder_task.abort_handle(),
-                retry_loop_task.abort_handle(),
+                host_event_task,
+                replication_task,
+                failure_recorder_task,
+                retry_loop_task,
+                pending_dag_resync_task,
+                pending_dag_retry_task,
             ],
         ),
         replicator_push_options,
@@ -454,7 +456,7 @@ where
         .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
         .await;
     let coordinator_for_restore = coordinator.clone();
-    tokio::spawn(async move {
+    let pending_dag_resync_task = tokio::spawn(async move {
         coordinator_for_restore
             .run_pending_dag_resync(std::time::Duration::from_secs(60))
             .await;
@@ -463,7 +465,7 @@ where
     // Receiver's re-arm loop (#1116 stage 2): dispatches due pending roots
     // at a tight cadence. Sibling of the resync sweep above.
     let coordinator_for_retry_clock = coordinator.clone();
-    tokio::spawn(async move {
+    let pending_dag_retry_task = tokio::spawn(async move {
         coordinator_for_retry_clock
             .run_pending_dag_retry_clock(std::time::Duration::from_secs(2))
             .await;
@@ -576,11 +578,13 @@ where
             transport.clone(),
             coordinator.shutdown_handle(),
             vec![
-                endpoint_task.abort_handle(),
-                event_handler_task.abort_handle(),
-                replication_task.abort_handle(),
-                failure_recorder_task.abort_handle(),
-                retry_loop_task.abort_handle(),
+                endpoint_task,
+                event_handler_task,
+                replication_task,
+                failure_recorder_task,
+                retry_loop_task,
+                pending_dag_resync_task,
+                pending_dag_retry_task,
             ],
         ),
         replicator_push_options,

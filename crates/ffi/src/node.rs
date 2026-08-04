@@ -58,7 +58,7 @@ pub(crate) async fn build_node_state(
             .clone()
             .map(|system| Arc::new(P2PState::new(system))),
         node_identity_did: node.node_identity_did.clone(),
-        signing_enabled: node.node_identity_did.is_some(),
+        signing_enabled: options.enable_signing != 0,
         sourcehub_acp: node.sourcehub_acp.clone(),
         query_limits: node.query_limits,
         se_encryption_key: None,
@@ -141,47 +141,44 @@ fn resolve_embedded_config(
     options: &NodeInitOptions,
     persistence: embedded::Persistence,
 ) -> Result<embedded::EmbeddedNodeConfig, String> {
-    let signing = if options.enable_signing != 0 {
-        let key = if !options.signing_private_key.is_null() && options.signing_private_key_len > 0 {
-            if options.signing_private_key_len > MAX_PRIVATE_KEY_LEN {
-                return Err(format!(
-                    "signing_private_key_len {} exceeds maximum {}",
-                    options.signing_private_key_len, MAX_PRIVATE_KEY_LEN
-                ));
-            }
-            // SAFETY: `signing_private_key` is non-null (checked above) and
-            // `signing_private_key_len` is bounded by MAX_PRIVATE_KEY_LEN.
-            // The caller guarantees the pointer is valid for the given length.
-            let key_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    options.signing_private_key,
-                    options.signing_private_key_len,
-                )
+    let key = if !options.signing_private_key.is_null() && options.signing_private_key_len > 0 {
+        if options.signing_private_key_len > MAX_PRIVATE_KEY_LEN {
+            return Err(format!(
+                "signing_private_key_len {} exceeds maximum {}",
+                options.signing_private_key_len, MAX_PRIVATE_KEY_LEN
+            ));
+        }
+        // SAFETY: `signing_private_key` is non-null (checked above) and
+        // `signing_private_key_len` is bounded by MAX_PRIVATE_KEY_LEN.
+        // The caller guarantees the pointer is valid for the given length.
+        let key_bytes = unsafe {
+            std::slice::from_raw_parts(options.signing_private_key, options.signing_private_key_len)
                 .to_vec()
-            };
-            let key_type = unsafe { c_str_to_string(options.signing_key_type) }
-                .unwrap_or_else(|| "secp256k1".to_string());
-            let signing_key_type: defra_core::signing::SigningKeyType = key_type.parse()?;
-
-            Some(match signing_key_type {
-                defra_core::signing::SigningKeyType::Secp256k1 => {
-                    embedded::SigningKey::Secp256k1(key_bytes)
-                }
-                defra_core::signing::SigningKeyType::Secp256r1 => {
-                    embedded::SigningKey::Secp256r1(key_bytes)
-                }
-                defra_core::signing::SigningKeyType::Ed25519 => {
-                    embedded::SigningKey::Ed25519(key_bytes)
-                }
-                defra_core::signing::SigningKeyType::Bls => {
-                    return Err("unsupported signing key type: bls".to_string())
-                }
-                other => return Err(format!("unsupported signing key type: {}", other)),
-            })
-        } else {
-            None
         };
+        let key_type = unsafe { c_str_to_string(options.signing_key_type) }
+            .unwrap_or_else(|| "secp256k1".to_string());
+        let signing_key_type: defra_core::signing::SigningKeyType = key_type.parse()?;
 
+        Some(match signing_key_type {
+            defra_core::signing::SigningKeyType::Secp256k1 => {
+                embedded::SigningKey::Secp256k1(key_bytes)
+            }
+            defra_core::signing::SigningKeyType::Secp256r1 => {
+                embedded::SigningKey::Secp256r1(key_bytes)
+            }
+            defra_core::signing::SigningKeyType::Ed25519 => {
+                embedded::SigningKey::Ed25519(key_bytes)
+            }
+            defra_core::signing::SigningKeyType::Bls => {
+                return Err("unsupported signing key type: bls".to_string())
+            }
+            other => return Err(format!("unsupported signing key type: {}", other)),
+        })
+    } else {
+        None
+    };
+
+    let signing = if options.enable_signing != 0 || key.is_some() {
         embedded::SigningConfig::Enabled { key }
     } else {
         embedded::SigningConfig::Disabled
@@ -302,14 +299,14 @@ pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
             });
         }
 
-        let state = match NODES.remove(node_ptr) {
+        let mut state = match NODES.remove(node_ptr) {
             Some(state) => state,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
         rt.block_on(state.background_tasks.shutdown());
 
-        if let Some(ref p2p) = state.p2p {
+        if let Some(p2p) = state.p2p.take() {
             rt.block_on(async { p2p.system.shutdown().await });
         }
 
@@ -325,7 +322,7 @@ pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::CString;
+    use std::ffi::{CStr, CString};
 
     use super::*;
 
@@ -371,6 +368,31 @@ mod tests {
         assert_eq!(node_close(result2.node_ptr).status, 0);
     }
 
+    #[test]
+    fn test_private_key_configures_node_identity_without_enabling_block_signing() {
+        assert!(crate::runtime::init_runtime());
+
+        let key = [1u8; 32];
+        let key_type = CString::new("secp256k1").unwrap();
+        let result = new_node(NodeInitOptions {
+            enable_signing: 0,
+            signing_key_type: key_type.as_ptr(),
+            signing_private_key: key.as_ptr(),
+            signing_private_key_len: key.len(),
+            ..NodeInitOptions::default()
+        });
+
+        assert_eq!(result.status, 0);
+        assert_eq!(
+            NODES.get(result.node_ptr, |state| (
+                state.node_identity_did.is_some(),
+                state.signing_enabled,
+            )),
+            Some((true, false))
+        );
+        assert_eq!(node_close(result.node_ptr).status, 0);
+    }
+
     #[cfg(feature = "lark")]
     #[test]
     fn test_persistent_node_can_reopen_after_close() {
@@ -393,5 +415,85 @@ mod tests {
         let second = new_node(options());
         assert_eq!(second.status, 0);
         assert_eq!(node_close(second.node_ptr).status, 0);
+    }
+
+    #[cfg(feature = "lark")]
+    #[test]
+    fn test_persistent_p2p_nodes_reopen_after_pending_broadcasts() {
+        assert!(crate::runtime::init_runtime());
+
+        let first_directory = tempfile::tempdir().unwrap();
+        let second_directory = tempfile::tempdir().unwrap();
+        let first_path = CString::new(first_directory.path().to_string_lossy().as_bytes()).unwrap();
+        let second_path =
+            CString::new(second_directory.path().to_string_lossy().as_bytes()).unwrap();
+        let backend = CString::new("lark").unwrap();
+        let listen_addr = CString::new("/ip4/127.0.0.1/tcp/0").unwrap();
+        let options = |path: &CString| NodeInitOptions {
+            db_path: path.as_ptr(),
+            in_memory: 0,
+            datastore_backend: backend.as_ptr(),
+            ..NodeInitOptions::default()
+        };
+
+        let first =
+            unsafe { crate::p2p::new_node_with_p2p(options(&first_path), listen_addr.as_ptr()) };
+        assert_eq!(first.status, 0);
+        let second =
+            unsafe { crate::p2p::new_node_with_p2p(options(&second_path), listen_addr.as_ptr()) };
+        assert_eq!(second.status, 0);
+
+        let schema = CString::new("type Users { Name: String Age: Int }").unwrap();
+        let mutation =
+            CString::new(r#"mutation { add_Users(input: {Name: "John", Age: 21}) { _docID } }"#)
+                .unwrap();
+        for node in [first.node_ptr, second.node_ptr] {
+            let result =
+                unsafe { crate::schema::add_schema(node, std::ptr::null(), schema.as_ptr()) };
+            assert_eq!(result.status, 0);
+            unsafe { crate::types::defra_free_string(result.value) };
+
+            let result = unsafe {
+                crate::query::exec_request(
+                    node,
+                    std::ptr::null(),
+                    mutation.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            };
+            assert_eq!(result.status, 0);
+            unsafe { crate::types::defra_free_string(result.value) };
+        }
+
+        let peer_info = unsafe { crate::p2p::p2p_peer_info(second.node_ptr, std::ptr::null()) };
+        assert_eq!(peer_info.status, 0);
+        let peer_info_json = unsafe { CStr::from_ptr(peer_info.value) }
+            .to_string_lossy()
+            .to_string();
+        unsafe { crate::types::defra_free_string(peer_info.value) };
+        let address = serde_json::from_str::<Vec<String>>(&peer_info_json)
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("libp2p should publish a listen address");
+        let address = CString::new(address).unwrap();
+        let connected =
+            unsafe { crate::p2p::p2p_connect(first.node_ptr, std::ptr::null(), address.as_ptr()) };
+        assert_eq!(connected.status, 0);
+
+        assert_eq!(node_close(first.node_ptr).status, 0);
+        assert_eq!(node_close(second.node_ptr).status, 0);
+
+        for path in [&first_path, &second_path] {
+            let reopened =
+                unsafe { crate::p2p::new_node_with_p2p(options(path), listen_addr.as_ptr()) };
+            if reopened.status != 0 {
+                let error = unsafe { CStr::from_ptr(reopened.error) }.to_string_lossy();
+                panic!("failed to reopen {}: {error}", path.to_string_lossy());
+            }
+            assert_eq!(node_close(reopened.node_ptr).status, 0);
+        }
     }
 }

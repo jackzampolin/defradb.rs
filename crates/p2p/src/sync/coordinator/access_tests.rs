@@ -19,8 +19,8 @@ use crate::bitswap::{
 };
 use crate::error::Error;
 use crate::message::{
-    BranchableSyncReply, BranchableSyncRequest, CarFetchRequest, DocSyncReply, DocSyncRequest,
-    PushLogBroadcast, PushLogReply, PushLogRequest,
+    BranchableSyncReply, BranchableSyncRequest, CarFetchRequest, DocSyncItem, DocSyncReply,
+    DocSyncRequest, PushLogBroadcast, PushLogReply, PushLogRequest,
 };
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::NoOpCollectionStorage;
@@ -421,6 +421,7 @@ struct NoopTransport {
     two_stream_replies: Arc<RwLock<Vec<crate::message::PushLogReply>>>,
     two_stream_handler: Arc<RwLock<Option<TwoStreamHandler>>>,
     branchable_replies: Arc<RwLock<Vec<BranchableSyncReply>>>,
+    car_requests: Arc<RwLock<Vec<Cid>>>,
 }
 
 impl NoopTransport {
@@ -437,6 +438,7 @@ impl NoopTransport {
             two_stream_replies: Arc::new(RwLock::new(Vec::new())),
             two_stream_handler: Arc::new(RwLock::new(None)),
             branchable_replies: Arc::new(RwLock::new(Vec::new())),
+            car_requests: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -472,6 +474,10 @@ impl NoopTransport {
     /// blocks were actually served after per-block serve filtering).
     fn car_responses(&self) -> Vec<Vec<u8>> {
         self.car_responses.read().clone()
+    }
+
+    fn car_requests(&self) -> Vec<Cid> {
+        self.car_requests.read().clone()
     }
 }
 
@@ -608,7 +614,8 @@ impl P2PTransport for NoopTransport {
         Ok(())
     }
 
-    async fn send_car_request(&self, _peer_id: &PeerId, _root_cid: Cid) -> crate::Result<()> {
+    async fn send_car_request(&self, _peer_id: &PeerId, root_cid: Cid) -> crate::Result<()> {
+        self.car_requests.write().push(root_cid);
         Ok(())
     }
 
@@ -2856,6 +2863,54 @@ async fn doc_sync_error_reply_is_not_consumed_as_empty_success() {
         result.is_err(),
         "an error reply must not be treated as an empty successful sync, got {:?}",
         result
+    );
+}
+
+#[tokio::test]
+async fn doc_sync_reply_starts_independent_dag_roots_concurrently() {
+    let transport = NoopTransport::new();
+    let transport_handle = transport.clone();
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _events) = SyncCoordinator::new(transport, blockstore, SyncConfig::default())
+        .await
+        .unwrap();
+    let first_root = cid_for(b"first root");
+    let second_root = cid_for(b"second root");
+
+    coordinator
+        .handle_transport_event(TransportEvent::DocSyncReply {
+            peer_id: random_peer_id(),
+            reply: DocSyncReply::success(
+                "doc-sync-1",
+                vec![
+                    DocSyncItem {
+                        doc_id: "doc1".to_string(),
+                        heads: vec![first_root.to_bytes()],
+                    },
+                    DocSyncItem {
+                        doc_id: "doc2".to_string(),
+                        heads: vec![second_root.to_bytes()],
+                    },
+                ],
+            ),
+        })
+        .await
+        .unwrap();
+
+    timeout(Duration::from_secs(1), async {
+        while transport_handle.car_requests().len() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a stalled first root must not block the second root");
+
+    let requested: std::collections::HashSet<_> =
+        transport_handle.car_requests().into_iter().collect();
+    assert_eq!(
+        requested,
+        std::collections::HashSet::from([first_root, second_root])
     );
 }
 

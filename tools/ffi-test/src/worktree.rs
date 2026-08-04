@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-use crate::config::{GO_REPO_BASE, GO_WORKTREE_PREFIX, RUST_WORKTREE_PREFIX};
+use crate::config::{GO_WORKTREE_PREFIX, RUST_WORKTREE_PREFIX};
 use crate::error::{FfiTestError, Result};
 
 /// Information about the current worktree context
@@ -38,7 +38,7 @@ impl WorktreeContext {
         let suffix = extract_suffix(&rust_path)?;
 
         // Derive Go worktree path
-        let go_path = derive_go_path(&suffix);
+        let go_path = derive_go_path(&rust_path, &suffix)?;
 
         // Validate Go worktree exists
         if !go_path.exists() {
@@ -113,13 +113,35 @@ fn extract_suffix(rust_path: &Path) -> Result<String> {
 }
 
 /// Derive Go worktree path from suffix
-fn derive_go_path(suffix: &str) -> PathBuf {
+fn derive_go_path(rust_path: &Path, suffix: &str) -> Result<PathBuf> {
+    let base = repository_base(rust_path)?;
     let go_dir = if suffix.is_empty() {
         GO_WORKTREE_PREFIX.to_string()
     } else {
         format!("{}-{}", GO_WORKTREE_PREFIX, suffix)
     };
-    PathBuf::from(GO_REPO_BASE).join(go_dir)
+    Ok(base.join(go_dir))
+}
+
+fn repository_base(rust_path: &Path) -> Result<&Path> {
+    rust_path.parent().ok_or_else(|| {
+        FfiTestError::WorktreeDetection(format!(
+            "Could not determine repository base from {}",
+            rust_path.display()
+        ))
+    })
+}
+
+pub async fn worktree_pair_paths(suffix: &str) -> Result<(PathBuf, PathBuf)> {
+    let cwd = std::env::current_dir()?;
+    let rust_root = find_git_root(&cwd).await?;
+    let base = repository_base(&rust_root)?;
+    let suffix = format!("-{}", suffix);
+
+    Ok((
+        base.join(format!("{}{}", RUST_WORKTREE_PREFIX, suffix)),
+        base.join(format!("{}{}", GO_WORKTREE_PREFIX, suffix)),
+    ))
 }
 
 /// Get the current git branch
@@ -190,7 +212,9 @@ pub async fn check_unpushed_commits(path: &Path) -> Result<bool> {
 
 /// List all defradb.rs worktrees
 pub async fn list_rust_worktrees() -> Result<Vec<(PathBuf, String)>> {
-    let base = PathBuf::from(GO_REPO_BASE);
+    let cwd = std::env::current_dir()?;
+    let rust_root = find_git_root(&cwd).await?;
+    let base = repository_base(&rust_root)?;
     let mut worktrees = Vec::new();
 
     let mut entries = tokio::fs::read_dir(&base).await?;
@@ -215,12 +239,11 @@ pub async fn list_rust_worktrees() -> Result<Vec<(PathBuf, String)>> {
 /// Create paired worktrees for Rust and Go
 pub async fn create_worktree_pair(suffix: &str) -> Result<(PathBuf, PathBuf)> {
     let branch = format!("ffi/{}", suffix);
-    let rust_path =
-        PathBuf::from(GO_REPO_BASE).join(format!("{}-{}", RUST_WORKTREE_PREFIX, suffix));
-    let go_path = PathBuf::from(GO_REPO_BASE).join(format!("{}-{}", GO_WORKTREE_PREFIX, suffix));
+    let (rust_path, go_path) = worktree_pair_paths(suffix).await?;
+    let base = repository_base(&rust_path)?;
 
     // Create Rust worktree
-    let main_rust = PathBuf::from(GO_REPO_BASE).join(RUST_WORKTREE_PREFIX);
+    let main_rust = base.join(RUST_WORKTREE_PREFIX);
     let output = Command::new("git")
         .args([
             "worktree",
@@ -241,7 +264,7 @@ pub async fn create_worktree_pair(suffix: &str) -> Result<(PathBuf, PathBuf)> {
     }
 
     // Create Go worktree
-    let main_go = PathBuf::from(GO_REPO_BASE).join(GO_WORKTREE_PREFIX);
+    let main_go = base.join(GO_WORKTREE_PREFIX);
     let output = Command::new("git")
         .args(["worktree", "add", go_path.to_str().unwrap(), "-b", &branch])
         .current_dir(&main_go)
@@ -267,9 +290,8 @@ pub async fn create_worktree_pair(suffix: &str) -> Result<(PathBuf, PathBuf)> {
 
 /// Remove paired worktrees
 pub async fn remove_worktree_pair(suffix: &str, force: bool, delete_branch: bool) -> Result<()> {
-    let rust_path =
-        PathBuf::from(GO_REPO_BASE).join(format!("{}-{}", RUST_WORKTREE_PREFIX, suffix));
-    let go_path = PathBuf::from(GO_REPO_BASE).join(format!("{}-{}", GO_WORKTREE_PREFIX, suffix));
+    let (rust_path, go_path) = worktree_pair_paths(suffix).await?;
+    let base = repository_base(&rust_path)?;
     let branch = format!("ffi/{}", suffix);
 
     // Check for uncommitted changes if not forcing
@@ -291,8 +313,8 @@ pub async fn remove_worktree_pair(suffix: &str, force: bool, delete_branch: bool
         }
     }
 
-    let main_rust = PathBuf::from(GO_REPO_BASE).join(RUST_WORKTREE_PREFIX);
-    let main_go = PathBuf::from(GO_REPO_BASE).join(GO_WORKTREE_PREFIX);
+    let main_rust = base.join(RUST_WORKTREE_PREFIX);
+    let main_go = base.join(GO_WORKTREE_PREFIX);
 
     // Remove Rust worktree
     let mut args = vec!["worktree", "remove"];
@@ -349,4 +371,19 @@ pub async fn remove_worktree_pair(suffix: &str, force: bool, delete_branch: bool
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_go_worktree_next_to_rust_worktree() {
+        let rust_path = Path::new("/home/user/source/defradb.rs-feature");
+
+        assert_eq!(
+            derive_go_path(rust_path, "feature").unwrap(),
+            Path::new("/home/user/source/defradb-feature")
+        );
+    }
 }

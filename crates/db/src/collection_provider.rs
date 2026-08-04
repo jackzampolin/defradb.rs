@@ -45,7 +45,7 @@ impl<S: Store + 'static> DbCollectionProvider<S> {
 impl<S: Store + 'static> CollectionProvider for DbCollectionProvider<S> {
     async fn get_collection(&self, name: &str) -> QueryResult<Option<Arc<CollectionVersion>>> {
         match self.db.get_collection(name) {
-            Ok(Some(coll)) => Ok(Some(Arc::new(coll.schema().clone()))),
+            Ok(Some(coll)) => Ok(Some(Arc::new(coll.schema_for_queries()))),
             Ok(None) => Ok(None),
             Err(e) => Err(QueryError::execution(e.to_string())),
         }
@@ -110,7 +110,16 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
                         collection::populate_collection_root_id(&systemstore, &mut schema)
                             .await
                             .map_err(|e| QueryError::execution(e.to_string()))?;
-                        return Ok(Some(Arc::new(schema)));
+                        let actions = crate::action::index_action_statuses(
+                            &systemstore,
+                            &schema.collection_id,
+                        )
+                        .await
+                        .map_err(|e| QueryError::execution(e.to_string()))?;
+                        return Ok(Some(Arc::new(
+                            collection::Collection::with_index_actions(schema, &actions)
+                                .schema_for_queries(),
+                        )));
                     }
                 };
 
@@ -125,14 +134,21 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
                     collection::populate_collection_root_id(&systemstore, &mut schema)
                         .await
                         .map_err(|e| QueryError::execution(e.to_string()))?;
-                    return Ok(Some(Arc::new(schema)));
+                    let actions =
+                        crate::action::index_action_statuses(&systemstore, &schema.collection_id)
+                            .await
+                            .map_err(|e| QueryError::execution(e.to_string()))?;
+                    return Ok(Some(Arc::new(
+                        collection::Collection::with_index_actions(schema, &actions)
+                            .schema_for_queries(),
+                    )));
                 }
             }
         }
         drop(txn_guard);
 
         match self.db.get_collection(name) {
-            Ok(Some(coll)) => Ok(Some(Arc::new(coll.schema().clone()))),
+            Ok(Some(coll)) => Ok(Some(Arc::new(coll.schema_for_queries()))),
             Ok(None) => Ok(None),
             Err(e) => Err(QueryError::execution(e.to_string())),
         }

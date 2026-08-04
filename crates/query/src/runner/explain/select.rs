@@ -252,14 +252,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             dag_scan_attrs.insert("cid".to_string(), serde_json::Value::Null);
         }
 
-        // prefixes: array of storage prefixes being scanned
-        // Format: /d/<docID> for document-specific commits
-        let prefixes: Vec<String> = if let Some(ref doc_ids) = select.doc_ids {
-            doc_ids.iter().map(|id| format!("/d/{}", id)).collect()
-        } else {
-            vec![]
-        };
-        dag_scan_attrs.insert("prefixes".to_string(), serde_json::json!(prefixes));
+        // Go does not expose internal commit storage prefixes in explain output.
+        dag_scan_attrs.insert("prefixes".to_string(), serde_json::json!([]));
 
         // Build the selectNode wrapper (Go structure: selectNode -> dagScanNode)
         let dag_scan_node = serde_json::json!({ "dagScanNode": dag_scan_attrs });

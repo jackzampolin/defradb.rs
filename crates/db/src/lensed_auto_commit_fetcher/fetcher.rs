@@ -385,6 +385,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         &self,
         cid: &str,
         expected_doc_id: Option<&str>,
+        caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Document> {
         let txn = self.db.new_txn(true).await.map_err(|e| {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
@@ -393,7 +394,8 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         let txn_holder: std::sync::Arc<TokioMutex<Option<DbTxn<S>>>> =
             std::sync::Arc::new(TokioMutex::new(Some(txn)));
 
-        let versioned_fetcher = VersionedFetcher::new(txn_holder.clone());
+        let versioned_fetcher =
+            VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms(), caller_identity.cloned());
         let result = versioned_fetcher
             .get_document_at_cid(cid, expected_doc_id)
             .await
@@ -410,6 +412,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         &self,
         cid: &str,
         expected_doc_id: Option<&str>,
+        caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Vec<Document>> {
         let txn = self.db.new_txn(true).await.map_err(|e| {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
@@ -418,7 +421,8 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         let txn_holder: std::sync::Arc<TokioMutex<Option<DbTxn<S>>>> =
             std::sync::Arc::new(TokioMutex::new(Some(txn)));
 
-        let versioned_fetcher = VersionedFetcher::new(txn_holder.clone());
+        let versioned_fetcher =
+            VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms(), caller_identity.cloned());
         let result = versioned_fetcher
             .get_documents_at_cid(cid, expected_doc_id)
             .await

@@ -352,11 +352,12 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> MutationBatch
         let pending_broadcasts = std::mem::take(&mut *self.pending_broadcasts.lock().await);
         if !pending_broadcasts.is_empty() {
             let sync = self.sync.clone();
-            tokio::spawn(async move {
-                for pending in pending_broadcasts {
-                    Self::broadcast_pending_static(&sync, pending).await;
-                }
-            });
+            self.sync
+                .spawn_background_task("broadcast_mutation_batch", async move {
+                    for pending in pending_broadcasts {
+                        Self::broadcast_pending_static(&sync, pending).await;
+                    }
+                });
         }
 
         Ok(())

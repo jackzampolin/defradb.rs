@@ -500,7 +500,7 @@ impl TypeJoinMany {
             serde_json::json!({
                 "selectTopNode": {
                     "limitNode": {
-                        "iterations": self.go_child_metrics.doc_fetches,
+                        "iterations": self.child_limit_iterations,
                         "selectNode": {
                             "iterations": self.exec_info.iterations,
                             "filterMatches": self.exec_info.iterations,

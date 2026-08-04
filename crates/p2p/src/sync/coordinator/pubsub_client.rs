@@ -88,6 +88,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         &self,
         doc_ids: Vec<String>,
         timeout: Option<Duration>,
+        expected_responses: Option<usize>,
     ) -> Result<Vec<(String, wire::DocSyncReply)>> {
         let Some(services) = self.pubsub_services.as_ref() else {
             return Err(Error::Transport(
@@ -123,8 +124,23 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         let wait = timeout.unwrap_or(DEFAULT_PUBSUB_SYNC_TIMEOUT);
+        let deadline = tokio::time::Instant::now() + wait;
         let mut out = Vec::new();
-        while let Ok(Some(resp)) = tokio::time::timeout(wait, prep.responses.recv()).await {
+        loop {
+            if expected_responses.is_some_and(|expected| out.len() >= expected) {
+                break;
+            }
+
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                break;
+            };
+
+            let Ok(Some(resp)) = tokio::time::timeout(remaining, prep.responses.recv()).await
+            else {
+                break;
+            };
+
             if let Some(parsed) = parse_doc_sync_response(&resp) {
                 let peer_str = resp.from.to_string();
                 // Feed the reply into the coordinator's standard handler
@@ -149,10 +165,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         .collect(),
                 };
                 if let Err(e) = self
-                    .handle_doc_sync_reply(PeerId::new(peer_str.clone()), converted)
+                    .handle_doc_sync_reply(authenticated_response_peer(&resp), converted)
                     .await
                 {
-                    warn!(from = %peer_str, error = %e, "doc-sync: reply processing failed");
+                    warn!(
+                        from = %peer_str,
+                        sender = %parsed.sender,
+                        error = %e,
+                        "doc-sync: reply processing failed"
+                    );
                 }
                 out.push((peer_str, parsed));
             }
@@ -242,10 +263,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 heads: reply.heads.clone(),
             };
             if let Err(e) = self
-                .handle_branchable_sync_reply(PeerId::new(peer_str.clone()), converted)
+                .handle_branchable_sync_reply(authenticated_response_peer(&resp), converted)
                 .await
             {
-                warn!(from = %peer_str, error = %e, "sync-branchable: reply processing failed");
+                warn!(
+                    from = %peer_str,
+                    sender = %reply.sender,
+                    error = %e,
+                    "sync-branchable: reply processing failed"
+                );
             } else {
                 out.push((peer_str, reply));
             }
@@ -253,6 +279,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
         Ok(out)
     }
+}
+
+fn authenticated_response_peer(resp: &PubsubResponse) -> PeerId {
+    PeerId::new(resp.from.clone())
 }
 
 fn parse_doc_sync_response(resp: &PubsubResponse) -> Option<wire::DocSyncReply> {
@@ -570,6 +600,37 @@ mod tests {
             registered_topics.lock().len(),
             1,
             "first topic registered before failure, but services must remain unready"
+        );
+    }
+
+    #[test]
+    fn payload_sender_cannot_acquire_replicator_trust() {
+        let authenticated = PeerId::new("authenticated-peer".to_string());
+        let claimed = PeerId::new("configured-replicator".to_string());
+        let registry = crate::bitswap::ReplicatorRegistry::new();
+        registry.add_replicator("private-collection", claimed.as_str());
+
+        let reply = wire::DocSyncReply {
+            results: Vec::new(),
+            sender: claimed.to_string(),
+        };
+        let mut data = Vec::new();
+        ciborium::into_writer(&reply, &mut data).unwrap();
+        let response = PubsubResponse {
+            id: crate::pubsub_rpc::derive_request_id(b"request"),
+            from: authenticated.to_string(),
+            data,
+            err: None,
+        };
+
+        assert_eq!(
+            parse_doc_sync_response(&response).unwrap().sender,
+            claimed.as_str()
+        );
+        assert_eq!(authenticated_response_peer(&response), authenticated);
+        assert!(
+            registry.get_collections(authenticated.as_str()).is_empty(),
+            "payload sender metadata must not grant replicator treatment"
         );
     }
 }

@@ -56,6 +56,7 @@ pub mod collection;
 pub mod collection_acp;
 pub(crate) mod collection_cache;
 pub(crate) mod collection_loader;
+pub(crate) mod collection_locks;
 pub(crate) mod collection_name;
 pub(crate) mod collection_ops;
 pub(crate) mod collection_provider;

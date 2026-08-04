@@ -273,12 +273,22 @@ impl<S: Store> CommitsFetcher<S> {
     /// 2. Within each document, sort by field ID: regular fields first (by name),
     ///    composite field (_C) last
     fn sort_commits_go_order(&self, commits: &mut [Document]) {
+        let mut doc_order = std::collections::HashMap::new();
+        for commit in commits.iter() {
+            let doc_id = commit
+                .get("docID")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let next_index = doc_order.len();
+            doc_order.entry(doc_id.to_string()).or_insert(next_index);
+        }
+
         commits.sort_by(|a, b| {
             let doc_id_a = a.get("docID").and_then(|v| v.as_str()).unwrap_or("");
             let doc_id_b = b.get("docID").and_then(|v| v.as_str()).unwrap_or("");
 
             if doc_id_a != doc_id_b {
-                return doc_id_a.cmp(doc_id_b);
+                return doc_order[doc_id_a].cmp(&doc_order[doc_id_b]);
             }
 
             let field_a = a.get("fieldName").and_then(|v| v.as_str()).unwrap_or("");
