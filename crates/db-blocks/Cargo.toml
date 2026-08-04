@@ -46,6 +46,11 @@ kms = { path = "../kms" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 hex.workspace = true
 ed25519-dalek.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "write"
+harness = false
 
 [lints]
 workspace = true
