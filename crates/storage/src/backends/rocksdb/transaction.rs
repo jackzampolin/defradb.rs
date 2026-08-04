@@ -440,7 +440,9 @@ impl Txn for RocksDbTxn {
 
                         let wait_started = std::time::Instant::now();
                         let _publication_guard = commit_gate.blocking_write();
-                        metrics.record_commit_gate_wait(wait_started.elapsed());
+                        let wait = wait_started.elapsed();
+                        metrics.record_commit_gate_wait(wait);
+                        conflict_tracker.record_commit_gate_wait(wait);
                         reservation.publish();
                         Ok(())
                     })();

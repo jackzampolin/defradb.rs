@@ -21,12 +21,24 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
+    let mut retried = false;
     for attempt in 1..=PUSH_RETRY_TXN_MAX_ATTEMPTS {
         match operation().await {
             Err(error) if error.is_retriable() && attempt < PUSH_RETRY_TXN_MAX_ATTEMPTS => {
+                telemetry::record_retry_attempt(telemetry::RetryLayer::PushLedger);
+                retried = true;
                 tracing::debug!(attempt, "retrying push-ledger transaction conflict");
             }
-            result => return result,
+            Err(error) if error.is_retriable() => {
+                telemetry::record_retry_exhaustion(telemetry::RetryLayer::PushLedger);
+                return Err(error);
+            }
+            result => {
+                if retried {
+                    telemetry::record_retry_success(telemetry::RetryLayer::PushLedger);
+                }
+                return result;
+            }
         }
     }
     unreachable!("bounded transaction retry loop always returns")
@@ -769,6 +781,11 @@ impl<S: Store> crate::corekv::private::Sealed for Peerstore<S> {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for Peerstore<S> {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
+        self.store.transaction_stats_handle()
+    }
+
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         self.store.new_txn(readonly).await
     }

@@ -306,7 +306,9 @@ impl Txn for FjallTxn {
 
                         batch.commit()?;
 
+                        let wait_started = std::time::Instant::now();
                         let _publication_guard = commit_gate.blocking_write();
+                        conflict_tracker.record_commit_gate_wait(wait_started.elapsed());
                         reservation.publish();
                         Ok(())
                     })();

@@ -9,6 +9,8 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::corekv::IterOptions;
@@ -314,10 +316,99 @@ type CommittedTxnRecord = (u64, HashSet<Vec<u8>>, ReadSet);
 #[cfg(not(target_arch = "wasm32"))]
 type PendingTxnRecord = (HashSet<Vec<u8>>, ReadSet);
 
+/// Cumulative storage conflicts classified by the dependency that aborted the transaction.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct TransactionConflictStats {
+    /// This transaction wrote a key written by a newer transaction.
+    pub write_write: u64,
+    /// This transaction wrote a key read by a newer transaction.
+    pub write_read: u64,
+    /// This transaction read a key written by a newer transaction.
+    pub read_write: u64,
+}
+
+/// Current conflict-tracker state retained for active write snapshots.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ConflictTrackerStats {
+    /// Latest published storage version.
+    pub current_version: u64,
+    /// Committed transactions retained for active snapshots.
+    pub committed_transactions: u64,
+    /// Conflict-checked writes awaiting physical commit.
+    pub pending_reservations: u64,
+    /// Write transaction snapshots currently alive.
+    pub active_snapshots: u64,
+    /// Distinct retained keys indexed as writes.
+    pub indexed_write_keys: u64,
+    /// Distinct retained keys indexed as point reads.
+    pub indexed_read_keys: u64,
+    /// Retained iterator read ranges.
+    pub indexed_read_ranges: u64,
+}
+
+/// Backend-neutral, process-lifetime transaction diagnostics for one store.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct TransactionStatsSnapshot {
+    /// Storage backend that owns these diagnostics.
+    pub backend: &'static str,
+    /// Cumulative transaction aborts for the store lifetime.
+    pub conflicts: TransactionConflictStats,
+    /// Number of successful commits that acquired the publication gate.
+    pub commit_gate_waits: u64,
+    /// Cumulative publication-gate wait time in microseconds.
+    pub commit_gate_wait_micros: u64,
+    /// Longest publication-gate wait in microseconds.
+    pub commit_gate_wait_max_micros: u64,
+    /// Current retained conflict-tracker state.
+    pub tracker: ConflictTrackerStats,
+}
+
+/// Cloneable handle for capturing transaction diagnostics from a live store.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct TransactionStatsHandle {
+    tracker: Arc<ConflictTracker>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+enum ConflictRule {
+    WriteWrite,
+    WriteRead,
+    ReadWrite,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ConflictRule {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::WriteWrite => "write_write",
+            Self::WriteRead => "write_read",
+            Self::ReadWrite => "read_write",
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct TransactionMetrics {
+    write_write_conflicts: AtomicU64,
+    write_read_conflicts: AtomicU64,
+    read_write_conflicts: AtomicU64,
+    commit_gate_waits: AtomicU64,
+    commit_gate_wait_micros: AtomicU64,
+    commit_gate_wait_max_micros: AtomicU64,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct ConflictTracker {
+    backend: &'static str,
     version: AtomicU64,
     state: Mutex<ConflictTrackerState>,
+    metrics: TransactionMetrics,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -447,7 +538,7 @@ impl ConflictTrackerState {
         read_version: u64,
         write_keys: &[&Vec<u8>],
         read_set: &ReadSet,
-    ) -> bool {
+    ) -> Option<ConflictRule> {
         for write_key in write_keys {
             if !is_content_addressed_block_key(write_key) {
                 if let Some(versions) = self.write_versions.get(*write_key) {
@@ -459,7 +550,7 @@ impl ConflictTrackerState {
                         let commutative_overlap = read_set.has_commutative_range(write_key)
                             && committed_reads.has_commutative_range(write_key);
                         if !commutative_overlap {
-                            return true;
+                            return Some(ConflictRule::WriteWrite);
                         }
                     }
                 }
@@ -471,7 +562,7 @@ impl ConflictTrackerState {
                 .and_then(|versions| versions.last())
                 .is_some_and(|version| *version > read_version)
             {
-                return true;
+                return Some(ConflictRule::WriteRead);
             }
 
             let first = self
@@ -481,7 +572,7 @@ impl ConflictTrackerState {
                 range.contains(write_key)
                     && (!range.commutative_set() || !read_set.has_commutative_range(write_key))
             }) {
-                return true;
+                return Some(ConflictRule::WriteRead);
             }
         }
 
@@ -492,14 +583,19 @@ impl ConflictTrackerState {
                 .and_then(|versions| versions.last())
                 .is_some_and(|version| *version > read_version)
             {
-                return true;
+                return Some(ConflictRule::ReadWrite);
             }
         }
 
-        read_set
+        if read_set
             .ranges
             .iter()
             .any(|range| self.write_range_conflicts(read_version, range))
+        {
+            Some(ConflictRule::ReadWrite)
+        } else {
+            None
+        }
     }
 
     fn write_range_conflicts(&self, read_version: u64, range: &ReadRange) -> bool {
@@ -537,10 +633,14 @@ impl ConflictTrackerState {
             })
     }
 
-    fn conflicts_pending(&self, write_keys: &[&Vec<u8>], read_set: &ReadSet) -> bool {
+    fn conflicts_pending(
+        &self,
+        write_keys: &[&Vec<u8>],
+        read_set: &ReadSet,
+    ) -> Option<ConflictRule> {
         self.pending
             .values()
-            .any(|(writes, reads)| transaction_conflicts(write_keys, read_set, writes, reads))
+            .find_map(|(writes, reads)| transaction_conflict(write_keys, read_set, writes, reads))
     }
 }
 
@@ -558,35 +658,55 @@ fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn transaction_conflicts(
+fn transaction_conflict(
     write_keys: &[&Vec<u8>],
     read_set: &ReadSet,
     other_writes: &HashSet<Vec<u8>>,
     other_reads: &ReadSet,
-) -> bool {
+) -> Option<ConflictRule> {
     for write_key in write_keys {
         let commutative_overlap = read_set.has_commutative_range(write_key)
             && other_reads.has_commutative_range(write_key);
-        if (other_writes.contains(*write_key)
+        if other_writes.contains(*write_key)
             && !is_content_addressed_block_key(write_key)
-            && !commutative_overlap)
-            || other_reads.conflicts_key(write_key, read_set)
+            && !commutative_overlap
         {
-            return true;
+            return Some(ConflictRule::WriteWrite);
+        }
+        if other_reads.conflicts_key(write_key, read_set) {
+            return Some(ConflictRule::WriteRead);
         }
     }
 
-    other_writes
+    if other_writes
         .iter()
         .any(|other_write| read_set.conflicts_key(other_write, other_reads))
+    {
+        Some(ConflictRule::ReadWrite)
+    } else {
+        None
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ConflictTracker {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::for_backend("test")
+    }
+
+    pub(crate) fn for_backend(backend: &'static str) -> Self {
         Self {
+            backend,
             version: AtomicU64::new(0),
             state: Mutex::new(ConflictTrackerState::default()),
+            metrics: TransactionMetrics::default(),
+        }
+    }
+
+    pub(crate) fn stats_handle(self: &Arc<Self>) -> TransactionStatsHandle {
+        TransactionStatsHandle {
+            tracker: Arc::clone(self),
         }
     }
 
@@ -597,12 +717,13 @@ impl ConflictTracker {
 
     /// Register a write transaction snapshot until its transaction is finalized.
     pub(crate) fn begin_snapshot(self: &Arc<Self>) -> ConflictSnapshot {
-        let version = {
+        let (version, sizes) = {
             let mut state = self.state.lock();
             let version = self.current_version();
             *state.active_snapshots.entry(version).or_default() += 1;
-            version
+            (version, tracker_sizes(&state))
         };
+        self.record_tracker_sizes(sizes);
         ConflictSnapshot {
             tracker: Arc::clone(self),
             version,
@@ -625,9 +746,12 @@ impl ConflictTracker {
         }
 
         let mut state = self.state.lock();
-        if state.conflicts_committed(read_version, &write_keys, read_set)
-            || state.conflicts_pending(&write_keys, read_set)
+        if let Some(rule) = state
+            .conflicts_committed(read_version, &write_keys, read_set)
+            .or_else(|| state.conflicts_pending(&write_keys, read_set))
         {
+            drop(state);
+            self.record_conflict(rule);
             return Err(crate::corekv::Error::TxnConflict);
         }
 
@@ -640,6 +764,9 @@ impl ConflictTracker {
             id,
             (write_keys.into_iter().cloned().collect(), read_set.clone()),
         );
+        let sizes = tracker_sizes(&state);
+        drop(state);
+        self.record_tracker_sizes(sizes);
         Ok(ConflictReservation {
             tracker: Arc::clone(self),
             id: Some(id),
@@ -657,6 +784,64 @@ impl ConflictTracker {
             state.active_snapshots.remove(&version);
         }
         state.prune(self.current_version());
+        let sizes = tracker_sizes(&state);
+        drop(state);
+        self.record_tracker_sizes(sizes);
+    }
+
+    pub(crate) fn record_commit_gate_wait(&self, elapsed: Duration) {
+        let micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+        self.metrics
+            .commit_gate_waits
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .commit_gate_wait_micros
+            .fetch_add(micros, Ordering::Relaxed);
+        self.metrics
+            .commit_gate_wait_max_micros
+            .fetch_max(micros, Ordering::Relaxed);
+        telemetry::record_commit_gate_wait(self.backend, elapsed.as_secs_f64());
+    }
+
+    fn record_conflict(&self, rule: ConflictRule) {
+        let counter = match rule {
+            ConflictRule::WriteWrite => &self.metrics.write_write_conflicts,
+            ConflictRule::WriteRead => &self.metrics.write_read_conflicts,
+            ConflictRule::ReadWrite => &self.metrics.read_write_conflicts,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        telemetry::record_storage_conflict(self.backend, rule.as_str());
+    }
+
+    fn record_tracker_sizes(&self, sizes: (u64, u64, u64)) {
+        telemetry::record_conflict_tracker_size(self.backend, sizes.0, sizes.1, sizes.2);
+    }
+
+    fn stats(&self) -> TransactionStatsSnapshot {
+        let state = self.state.lock();
+        TransactionStatsSnapshot {
+            backend: self.backend,
+            conflicts: TransactionConflictStats {
+                write_write: self.metrics.write_write_conflicts.load(Ordering::Relaxed),
+                write_read: self.metrics.write_read_conflicts.load(Ordering::Relaxed),
+                read_write: self.metrics.read_write_conflicts.load(Ordering::Relaxed),
+            },
+            commit_gate_waits: self.metrics.commit_gate_waits.load(Ordering::Relaxed),
+            commit_gate_wait_micros: self.metrics.commit_gate_wait_micros.load(Ordering::Relaxed),
+            commit_gate_wait_max_micros: self
+                .metrics
+                .commit_gate_wait_max_micros
+                .load(Ordering::Relaxed),
+            tracker: ConflictTrackerStats {
+                current_version: self.current_version(),
+                committed_transactions: state.committed.len() as u64,
+                pending_reservations: state.pending.len() as u64,
+                active_snapshots: state.active_snapshots.values().sum::<usize>() as u64,
+                indexed_write_keys: state.write_versions.len() as u64,
+                indexed_read_keys: state.read_key_versions.len() as u64,
+                indexed_read_ranges: state.read_ranges.len() as u64,
+            },
+        }
     }
 
     /// Reserve and immediately publish a record for conflict-tracker tests.
@@ -669,6 +854,22 @@ impl ConflictTracker {
     ) -> std::result::Result<u64, crate::corekv::Error> {
         Ok(self.reserve(read_version, write_keys, read_set)?.publish())
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl TransactionStatsHandle {
+    pub fn snapshot(&self) -> TransactionStatsSnapshot {
+        self.tracker.stats()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn tracker_sizes(state: &ConflictTrackerState) -> (u64, u64, u64) {
+    (
+        state.committed.len() as u64,
+        state.pending.len() as u64,
+        state.active_snapshots.values().sum::<usize>() as u64,
+    )
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -686,6 +887,9 @@ impl ConflictReservation {
         let version = self.tracker.version.fetch_add(1, Ordering::SeqCst) + 1;
         state.record(version, writes, reads);
         state.prune(version);
+        let sizes = tracker_sizes(&state);
+        drop(state);
+        self.tracker.record_tracker_sizes(sizes);
         version
     }
 }
@@ -694,7 +898,11 @@ impl ConflictReservation {
 impl Drop for ConflictReservation {
     fn drop(&mut self) {
         if let Some(id) = self.id.take() {
-            self.tracker.state.lock().pending.remove(&id);
+            let mut state = self.tracker.state.lock();
+            state.pending.remove(&id);
+            let sizes = tracker_sizes(&state);
+            drop(state);
+            self.tracker.record_tracker_sizes(sizes);
         }
     }
 }

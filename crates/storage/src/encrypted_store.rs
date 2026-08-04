@@ -88,6 +88,11 @@ impl<S: Store> Sealed for EncryptedStore<S> {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for EncryptedStore<S> {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
+        self.inner.transaction_stats_handle()
+    }
+
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         let inner = self.inner.new_txn(readonly).await?;
         Ok(Box::new(EncryptedTxn {

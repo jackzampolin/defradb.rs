@@ -474,7 +474,9 @@ impl Txn for LarkTxn {
                         db.write_with_durability(batch, durability)
                             .map_err(|error| Error::Backend(error.to_string()))?;
 
+                        let wait_started = std::time::Instant::now();
                         let _publication_guard = commit_gate.blocking_write();
+                        conflict_tracker.record_commit_gate_wait(wait_started.elapsed());
                         reservation.publish();
                         Ok(())
                     })();

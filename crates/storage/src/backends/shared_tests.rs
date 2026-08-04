@@ -1,6 +1,70 @@
 use super::*;
 
 #[test]
+fn transaction_stats_classify_conflict_rules() {
+    let tracker = Arc::new(ConflictTracker::new());
+    let handle = tracker.stats_handle();
+
+    let older = tracker.begin_snapshot();
+    let newer = tracker.begin_snapshot();
+    let shared_write = [b"write-write".to_vec()];
+    tracker
+        .check_and_record(newer.version(), shared_write.iter(), &ReadSet::default())
+        .unwrap();
+    assert!(tracker
+        .check_and_record(older.version(), shared_write.iter(), &ReadSet::default(),)
+        .is_err());
+    drop((older, newer));
+
+    let older = tracker.begin_snapshot();
+    let newer = tracker.begin_snapshot();
+    let read_key = b"write-read".to_vec();
+    let mut newer_reads = ReadSet::default();
+    newer_reads.record_key(&read_key);
+    tracker
+        .check_and_record(
+            newer.version(),
+            [b"write-read-side-effect".to_vec()].iter(),
+            &newer_reads,
+        )
+        .unwrap();
+    assert!(tracker
+        .check_and_record(
+            older.version(),
+            std::slice::from_ref(&read_key).iter(),
+            &ReadSet::default(),
+        )
+        .is_err());
+    drop((older, newer));
+
+    let older = tracker.begin_snapshot();
+    let newer = tracker.begin_snapshot();
+    let written_key = b"read-write".to_vec();
+    tracker
+        .check_and_record(
+            newer.version(),
+            std::slice::from_ref(&written_key).iter(),
+            &ReadSet::default(),
+        )
+        .unwrap();
+    let mut older_reads = ReadSet::default();
+    older_reads.record_key(&written_key);
+    assert!(tracker
+        .check_and_record(
+            older.version(),
+            [b"read-write-side-effect".to_vec()].iter(),
+            &older_reads,
+        )
+        .is_err());
+
+    let stats = handle.snapshot();
+    assert_eq!(stats.backend, "test");
+    assert_eq!(stats.conflicts.write_write, 1);
+    assert_eq!(stats.conflicts.write_read, 1);
+    assert_eq!(stats.conflicts.read_write, 1);
+}
+
+#[test]
 fn detects_write_to_committed_read_prefix() {
     let tracker = Arc::new(ConflictTracker::new());
     let first_snapshot = tracker.begin_snapshot();
@@ -505,10 +569,13 @@ fn indexed_conflict_checks_match_linear_history_scan() {
             for reads in &read_sets {
                 let linear = state.committed_after(read_version).iter().any(
                     |(_, other_writes, other_reads)| {
-                        transaction_conflicts(&write_refs, reads, other_writes, other_reads)
+                        transaction_conflict(&write_refs, reads, other_writes, other_reads)
+                            .is_some()
                     },
                 );
-                let indexed = state.conflicts_committed(read_version, &write_refs, reads);
+                let indexed = state
+                    .conflicts_committed(read_version, &write_refs, reads)
+                    .is_some();
                 assert_eq!(
                     indexed, linear,
                     "mismatch at version {read_version} for writes {writes:?} and reads {reads:?}"

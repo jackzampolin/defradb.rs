@@ -86,10 +86,18 @@ where
 
     loop {
         let response = execute_once(request.clone()).await;
-        if !response.is_transaction_conflict() || retry_count >= max_retries {
+        if !response.is_transaction_conflict() {
+            if retry_count > 0 {
+                telemetry::record_retry_success(telemetry::RetryLayer::HttpAutoCommit);
+            }
+            return response;
+        }
+        if retry_count >= max_retries {
+            telemetry::record_retry_exhaustion(telemetry::RetryLayer::HttpAutoCommit);
             return response;
         }
 
+        telemetry::record_retry_attempt(telemetry::RetryLayer::HttpAutoCommit);
         retry_count += 1;
         let delay = jittered_backoff(backoff);
         tracing::warn!(
@@ -285,6 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_commit_execution_retries_typed_conflicts() {
+        let metrics_before = telemetry::conflict_metrics_snapshot().http_auto_commit;
         let executor = Arc::new(ConflictExecutor::default());
         let state = AppStateBuilder::new(executor.clone())
             .with_max_txn_retries(3)
@@ -299,6 +308,9 @@ mod tests {
 
         assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 3);
         assert!(!response.has_errors());
+        let metrics_after = telemetry::conflict_metrics_snapshot().http_auto_commit;
+        assert_eq!(metrics_after.attempts - metrics_before.attempts, 2);
+        assert_eq!(metrics_after.successes - metrics_before.successes, 1);
     }
 
     #[tokio::test]

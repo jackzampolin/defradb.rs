@@ -222,7 +222,10 @@ impl Txn for MemoryTxn {
                         return Err(error);
                     }
                 };
+            let wait_started = std::time::Instant::now();
             let commit_guard = self.commit_gate.write().await;
+            self.conflict_tracker
+                .record_commit_gate_wait(wait_started.elapsed());
             let mut store = self.store.write().await;
 
             for (key, value) in pending.iter() {

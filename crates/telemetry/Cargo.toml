@@ -9,7 +9,7 @@ repository.workspace = true
 
 [features]
 default = []
-# Compile in the OTLP exporter (traces). Mirrors Go DefraDB's
+# Compile in the OTLP exporters. Mirrors Go DefraDB's
 # `//go:build telemetry` tag — opt-in at compile time. When this feature is on,
 # runtime behavior is default-on (Go parity); use `--no-telemetry` to disable
 # at runtime.
@@ -21,7 +21,9 @@ otlp = [
     "dep:opentelemetry-semantic-conventions",
     "dep:tracing-opentelemetry",
     "opentelemetry_sdk/trace",
+    "opentelemetry_sdk/metrics",
     "opentelemetry-otlp/trace",
+    "opentelemetry-otlp/metrics",
     # `internal-logs` is a default feature of both crates that
     # `default-features = false` (below) turns off. Without it the SDK's
     # `otel_error!` / `otel_warn!` macros compile to no-ops, so exporter
@@ -37,7 +39,7 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["registry", "std"] }
 thiserror = { workspace = true, optional = true }
 
-opentelemetry = { version = "0.32", optional = true }
+opentelemetry = { version = "0.32", features = ["metrics"], optional = true }
 # `experimental_async_runtime` (not `rt-tokio`) is all that's needed: with the
 # `reqwest-blocking-client` transport the OTLP exporter selects the `NoAsync`
 # runtime, and the batch processors run on dedicated `std::thread` workers — no

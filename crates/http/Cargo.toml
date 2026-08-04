@@ -50,6 +50,7 @@ thiserror.workspace = true
 
 # Logging
 tracing.workspace = true
+telemetry = { path = "../telemetry" }
 
 # Retry jitter
 rand.workspace = true

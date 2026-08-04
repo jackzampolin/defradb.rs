@@ -28,6 +28,11 @@ impl private::Sealed for DynStore {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Store for DynStore {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
+        self.inner.transaction_stats_handle()
+    }
+
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         self.inner.new_txn(readonly).await
     }

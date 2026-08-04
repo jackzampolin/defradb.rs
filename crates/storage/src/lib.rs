@@ -112,7 +112,10 @@ pub mod stores;
 // Re-export commonly used types for convenience
 // MemoryStore is only available on native platforms (uses tokio::sync::RwLock)
 #[cfg(not(target_arch = "wasm32"))]
-pub use backends::MemoryStore;
+pub use backends::{
+    ConflictTrackerStats, MemoryStore, TransactionConflictStats, TransactionStatsHandle,
+    TransactionStatsSnapshot,
+};
 
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub use backends::{RedbStore, RedbStoreOptions};

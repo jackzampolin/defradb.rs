@@ -20,7 +20,7 @@ rocksdb = ["storage/rocksdb"]
 # Compile in OpenTelemetry exporter support. Mirrors the CLI's `otel` feature
 # and the underlying `telemetry/otlp` gate. Off by default — embedded users
 # who want OTel must opt in.
-otel = ["dep:telemetry", "telemetry/otlp"]
+otel = ["telemetry/otlp"]
 
 [dependencies]
 db = { path = "../db" }
@@ -58,7 +58,7 @@ cid = { workspace = true, optional = true }
 defra-p2p-adapter = { workspace = true, optional = true, default-features = false, features = ["iroh"] }
 
 # Optional — OpenTelemetry exporter (see the `otel` feature)
-telemetry = { path = "../telemetry", optional = true, default-features = false }
+telemetry = { path = "../telemetry", default-features = false }
 
 [dev-dependencies]
 axum.workspace = true
