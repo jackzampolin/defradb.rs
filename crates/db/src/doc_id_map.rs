@@ -522,6 +522,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allocator_keeps_ids_unique_across_many_database_instances() {
+        const DATABASES: usize = 8;
+        const IDS_PER_DATABASE: usize = 128;
+
+        let store = Arc::new(MemoryStore::new());
+        let mut tasks = Vec::with_capacity(DATABASES);
+        for _ in 0..DATABASES {
+            let db = DB::from_arc(store.clone()).unwrap();
+            tasks.push(tokio::spawn(async move {
+                let mut ids = Vec::with_capacity(IDS_PER_DATABASE);
+                for _ in 0..IDS_PER_DATABASE {
+                    ids.push(db.next_doc_short_id().await.unwrap());
+                }
+                ids
+            }));
+        }
+
+        let mut ids = Vec::with_capacity(DATABASES * IDS_PER_DATABASE);
+        for task in tasks {
+            ids.extend(task.await.unwrap());
+        }
+        ids.sort_unstable();
+        ids.dedup();
+
+        assert_eq!(ids.len(), DATABASES * IDS_PER_DATABASE);
+        assert_eq!(persisted_sequence(store).await, 8192);
+    }
+
+    #[tokio::test]
     async fn allocations_do_not_conflict_unrelated_caller_transactions() {
         let store = Arc::new(MemoryStore::new());
         let db = DB::from_arc(store).unwrap();
