@@ -99,10 +99,12 @@ impl Node {
         // Build the KMS pubsub transport and install it on the coordinator so
         // raw gossip on the encryption topic is routed to it (mirrors
         // crates/embedded/src/node_p2p.rs::setup_libp2p).
-        let kms_transport =
-            p2p::kms::PubsubKeyTransport::new(p2p::Libp2pTransport::new(handle.clone()))
-                .await
-                .map_err(|e| Error::Server(format!("failed to create KMS transport: {e}")))?;
+        let kms_transport = p2p::kms::PubsubKeyTransport::new(
+            p2p::Libp2pTransport::new(handle.clone()),
+            Arc::new(p2p::HandlePeerIdentityResolver::new(handle.clone())),
+        )
+        .await
+        .map_err(|e| Error::Server(format!("failed to create KMS transport: {e}")))?;
         coordinator.install_kms_transport(kms_transport.clone());
         let local_peer_id = {
             use p2p::transport::P2PTransport;

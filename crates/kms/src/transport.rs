@@ -16,7 +16,8 @@ use crate::wire::{FetchEncryptionKeyReply, FetchEncryptionKeyRequest};
 
 /// A CBOR-encoded `FetchEncryptionKeyRequest` ready to publish on a
 /// `KeyTransport`. KMS wire is bare CBOR (matching Go's
-/// `internal/kms/pubsub.go`) — there is no signature envelope here.
+/// `internal/kms/pubsub.go`); peer identity is authenticated separately by
+/// the transport.
 ///
 /// `request_id` is local-only for tracing/correlation; NOT on the wire.
 #[derive(Debug, Clone)]

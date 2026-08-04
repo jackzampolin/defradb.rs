@@ -59,8 +59,8 @@ mod vec_of_bytes {
 /// KMS fetch request published on the `"encryption"` gossipsub topic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchEncryptionKeyRequest {
-    /// DID of the requesting principal (user identity if attached to the
-    /// request context, else node identity). NOT the requesting peer's libp2p key.
+    /// DID of the requesting node. Retained for Go wire compatibility; Rust
+    /// responders authorize against the transport-authenticated peer DID.
     #[serde(rename = "Identity", with = "serde_bytes")]
     pub identity: Vec<u8>,
 

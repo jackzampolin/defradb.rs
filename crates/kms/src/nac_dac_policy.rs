@@ -4,8 +4,7 @@
 //!   - Collection lookup runs internally (node-level; no actor check at
 //!     this step, mirroring how the serving peer resolves which policy
 //!     to apply).
-//!   - DAC permission check runs as the **actor** (the caller from the
-//!     wire `identity` field).
+//!   - DAC permission check runs as the transport-authenticated peer DID.
 //!
 //! Collection-scoped DEK release:
 //!   - NAC `read-document` check on the actor.
@@ -25,7 +24,7 @@ use crate::types::{KeyScope, PolicyDecision};
 
 /// Default `AccessPolicy` impl for `DefraKms`. Combines DAC for
 /// document-scoped keys with NAC for collection-scoped keys, both gated
-/// on the actor (the caller DID from the wire request).
+/// on the transport-authenticated peer DID.
 pub struct NacDacPolicy {
     doc_acp: Arc<dyn acp::DocumentACP>,
     doc_lookup: Arc<dyn DocCollectionLookup>,

@@ -104,9 +104,10 @@ impl Node {
         // raw gossip on the encryption topic is routed to it (mirrors
         // crates/embedded/src/node_p2p.rs::setup_iroh).
         let local_peer_id = transport.local_peer_id().to_string();
-        let kms_transport = p2p::kms::PubsubKeyTransport::new(transport.clone())
-            .await
-            .map_err(|e| Error::Server(format!("failed to create KMS transport: {e}")))?;
+        let kms_transport =
+            p2p::kms::PubsubKeyTransport::new(transport.clone(), Arc::new(p2p::AnonymousResolver))
+                .await
+                .map_err(|e| Error::Server(format!("failed to create KMS transport: {e}")))?;
         coordinator.install_kms_transport(kms_transport.clone());
 
         match db_merge::load_persisted_collections(&coordinator).await {

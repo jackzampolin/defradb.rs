@@ -9,13 +9,14 @@ use crate::results::KeyResults;
 use crate::types::{EncryptionCid, KeyScope};
 use crate::wire::{FetchEncryptionKeyReply, FetchEncryptionKeyRequest};
 
-/// Identity of an incoming peer at the transport boundary. Used by
-/// `KmsService::serve_request` for tracing and audit (NOT for authorization —
-/// the wire `identity` field on the request carries the authorization principal).
+/// Identity of an incoming peer established at the transport boundary.
 #[derive(Debug, Clone)]
 pub struct PeerIdentity {
     /// Transport-level peer id (libp2p `PeerId` stringified, or iroh node id).
     pub peer_id: String,
+    /// DID authenticated by the transport's peer-identity protocol. `None`
+    /// means the transport could not establish an authorization principal.
+    pub authenticated_did: Option<identity::Did>,
 }
 
 /// Top-level KMS surface. One concrete implementation (`DefraKms`) lives

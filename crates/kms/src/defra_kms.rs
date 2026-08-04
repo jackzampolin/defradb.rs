@@ -41,8 +41,7 @@ pub struct DefraKms {
     transports: Vec<Arc<dyn KeyTransport>>,
     policy: Arc<dyn AccessPolicy>,
     doc_resolver: Arc<dyn BlockDocIDResolver>,
-    /// Fallback identity used when `RequestContext::user_identity` is None
-    /// (gossip-triggered syncs with no caller).
+    /// Node identity sent on cross-peer requests and authenticated by peers.
     node_identity: Did,
     /// This node's transport-level peer id, bound into the ECIES AAD of
     /// served replies (Go's `makeAssociatedData`). Empty until the node
@@ -70,10 +69,6 @@ impl DefraKms {
             local_peer_id: RwLock::new(String::new()),
             test_ephemeral: RwLock::new(None),
         }
-    }
-
-    fn principal<'a>(&'a self, ctx: &'a RequestContext) -> &'a Did {
-        ctx.user_identity().unwrap_or(&self.node_identity)
     }
 
     fn local_peer_id(&self) -> String {
@@ -242,10 +237,10 @@ impl KmsService for DefraKms {
                     let _ = tx.send(Err(Error::KeyUnavailable)).await;
                 }
             } else {
-                // Wire path: fall back to node identity for gossip-triggered
-                // syncs where ctx has no user identity (mirrors Go's
-                // behavior in internal/kms/pubsub.go per PR #4778).
-                let wire_actor = self.principal(ctx).clone();
+                // Cross-peer DEK access is authorized as the requesting node.
+                // Go responders still consume this legacy wire field, while
+                // Rust responders bind it to the authenticated transport peer.
+                let wire_actor = self.node_identity.clone();
                 let eph = self.ephemeral();
                 let pub_bytes = x25519_dalek::PublicKey::from(&eph).as_bytes().to_vec();
                 let req = FetchEncryptionKeyRequest {
@@ -440,18 +435,25 @@ impl KmsService for DefraKms {
 
     async fn serve_request(
         &self,
-        _from: PeerIdentity,
+        from: PeerIdentity,
         req: FetchEncryptionKeyRequest,
     ) -> Result<FetchEncryptionKeyReply> {
-        let actor: Option<Did> = std::str::from_utf8(&req.identity)
+        let claimed_actor: Option<Did> = std::str::from_utf8(&req.identity)
             .ok()
             .and_then(|s| s.parse().ok());
-        if actor.is_none() && !req.identity.is_empty() {
+        if claimed_actor.is_none() && !req.identity.is_empty() {
             tracing::warn!(
                 identity_bytes_len = req.identity.len(),
-                "KMS request identity field is non-empty but failed DID parse; treating as anonymous"
+                "KMS request identity field is non-empty but failed DID parse"
             );
         }
+        if claimed_actor.as_ref() != from.authenticated_did.as_ref() {
+            tracing::warn!(
+                peer_id = %from.peer_id,
+                "KMS request identity does not match authenticated peer identity"
+            );
+        }
+        let actor = from.authenticated_did;
 
         let mut out_links: Vec<Vec<u8>> = Vec::new();
         let mut out_blocks: Vec<Vec<u8>> = Vec::new();

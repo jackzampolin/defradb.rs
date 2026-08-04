@@ -15,7 +15,7 @@ pub struct RequestContext {
 
 impl RequestContext {
     /// Construct an anonymous request context (no user identity attached).
-    /// The KMS will fall back to node identity at the wire boundary.
+    /// Cross-peer requests are always made as the node identity.
     pub fn anonymous() -> Self {
         Self::default()
     }
