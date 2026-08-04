@@ -133,6 +133,47 @@ async fn test_delete_replicator() {
         .await
         .unwrap()
         .is_empty());
+    assert_eq!(peerstore.activate_dormant_push_retries().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn forget_waits_for_selected_retry_and_blocks_future_retries() {
+    let store = Arc::new(MemoryStore::new());
+    let peerstore = Peerstore::new(store.clone());
+    let peer_id = "coordinated-peer";
+    peerstore
+        .create_replicator(peer_id, b"replicator")
+        .await
+        .unwrap();
+
+    let retry_guard = peerstore
+        .acquire_replicator_retry_guard(peer_id)
+        .await
+        .unwrap()
+        .expect("replicator should be eligible for retry");
+    let delete_store = Peerstore::new(store);
+    let mut delete_task =
+        tokio::spawn(async move { delete_store.delete_replicator(peer_id).await });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut delete_task)
+            .await
+            .is_err(),
+        "forget completed while a retry still held permission to replay"
+    );
+
+    drop(retry_guard);
+    tokio::time::timeout(std::time::Duration::from_secs(1), delete_task)
+        .await
+        .expect("forget remained blocked after retry completed")
+        .expect("forget task panicked")
+        .expect("forget failed");
+
+    assert!(peerstore
+        .acquire_replicator_retry_guard(peer_id)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]

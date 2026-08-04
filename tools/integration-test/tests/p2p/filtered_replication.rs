@@ -3028,6 +3028,168 @@ async fn rust_filtered_replication_retry_respects_filter() {
     );
 }
 
+/// #1269 regression: forgetting a down replicator must remove its persisted
+/// retry ledger. After both nodes restart, the source must neither redial the
+/// forgotten peer nor deliver the document that previously entered retry.
+#[tokio::test]
+async fn rust_forget_replicator_prevents_retry_redial_after_restart() {
+    let mut cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_keyring()
+        .with_store("redb")
+        .build()
+        .await
+        .unwrap();
+    wait_for_log_ready(&cluster, 2).await;
+    let node0 = cluster.client(0);
+    let node1 = cluster.client(1);
+
+    node0.schema_add(AGENT_SCHEMA).expect("schema node0");
+    node1.schema_add(AGENT_SCHEMA).expect("schema node1");
+
+    let addr1 = extract_p2p_addr(&cluster, 1);
+    let peer_id = addr1.rsplit("/p2p/").next().unwrap_or(&addr1).to_string();
+    node0.p2p_connect(&[&addr1]).expect("connect 0->1");
+    node0
+        .p2p_collection_add(&["AgentDoc"])
+        .expect("subscribe node0");
+    node0
+        .p2p_replicator_set(&["AgentDoc"], &addr1)
+        .expect("add replicator");
+
+    let live = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "before-forget"}}) {{ _docID }} }}"#
+        ))
+        .expect("create live document");
+    let live_id = extract_doc_id(&live, "add_AgentDoc");
+    let node1_poll = cluster.client(1);
+    let live_poll = live_id.clone();
+    poll_until(
+        || {
+            let result = node1_poll
+                .query("query { AgentDoc { _docID } }")
+                .unwrap_or_default();
+            result["AgentDoc"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["_docID"].as_str() == Some(live_poll.as_str()))
+            })
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "live document did not replicate before target shutdown",
+    )
+    .await;
+
+    cluster.nodes[1].process.kill();
+    poll_until(
+        || {
+            node0
+                .p2p_active_peers()
+                .unwrap_or_default()
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "source did not observe target disconnect",
+    )
+    .await;
+    let queued = node0
+        .query(&format!(
+            r#"mutation {{ add_AgentDoc(input: {{agent_did: "{ALICE}", body: "must-stay-forgotten"}}) {{ _docID }} }}"#
+        ))
+        .expect("create document while target is down");
+    let queued_id = extract_doc_id(&queued, "add_AgentDoc");
+
+    poll_until(
+        || {
+            let replicators = node0.p2p_replicator_list().unwrap_or_default();
+            replicators
+                .as_array()
+                .and_then(|entries| entries.first())
+                .and_then(|entry| entry["status"].as_u64())
+                == Some(1)
+        },
+        P2P_TIMEOUT,
+        P2P_POLL_INTERVAL,
+        "failed push did not persist an inactive retrying replicator",
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .delete(format!("{}/api/v0/p2p/replicators", cluster.api_url(0)))
+        .json(&serde_json::json!({"ID": &peer_id, "Forget": true}))
+        .send()
+        .await
+        .expect("send forget request");
+    assert!(
+        response.status().is_success(),
+        "forget request failed with {}",
+        response.status()
+    );
+    assert!(
+        list_replicators_http(&cluster, 0)
+            .await
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "forgotten replicator remained persisted"
+    );
+
+    cluster.nodes[0].process.kill();
+    cluster
+        .restart_node(0, Duration::from_secs(60))
+        .await
+        .expect("restart source");
+    cluster
+        .restart_node(1, Duration::from_secs(60))
+        .await
+        .expect("restart target");
+    for node in 0..2 {
+        cluster
+            .wait_for_log(node, "p2p_listening", P2P_TIMEOUT)
+            .await
+            .unwrap_or_else(|error| panic!("node {node} P2P did not restart: {error}"));
+    }
+
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let active = cluster
+        .client(0)
+        .p2p_active_peers()
+        .expect("list active peers after restart");
+    assert!(
+        active
+            .as_array()
+            .is_some_and(|peers| peers.iter().all(|peer| {
+                peer.as_str()
+                    .is_none_or(|address| !address.contains(&peer_id))
+            })),
+        "retry sweep redialed forgotten peer after restart: {active}"
+    );
+
+    let result = cluster
+        .client(1)
+        .query("query { AgentDoc { _docID } }")
+        .expect("query target after restart");
+    let ids: Vec<&str> = result["AgentDoc"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row["_docID"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        ids.contains(&live_id.as_str()),
+        "live document was lost: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&queued_id.as_str()),
+        "forgotten retry was delivered after restart: {ids:?}"
+    );
+}
+
 /// #1038 Gap 2: the filter must survive a SOURCE-node restart. On startup the
 /// replicator-restore loop reloads persisted `ReplicatorInfo` into the in-memory
 /// swarm registry; if it reloads only the collections (dropping `.filters`), the

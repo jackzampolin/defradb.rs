@@ -666,4 +666,38 @@ mod tests {
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
+
+    #[tokio::test]
+    async fn p2p_replicator_forget_rejects_collections() {
+        let status = status_for_p2p_request(
+            Method::DELETE,
+            "/api/v0/p2p/replicators",
+            r#"{"ID":"peer","Collections":["Users"],"Forget":true}"#,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn p2p_replicator_forget_requires_nonempty_id() {
+        for body in [r#"{"Forget":true}"#, r#"{"ID":"  ","Forget":true}"#] {
+            let status =
+                status_for_p2p_request(Method::DELETE, "/api/v0/p2p/replicators", body).await;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn p2p_replicator_delete_without_collections_is_not_forget() {
+        let status = status_for_p2p_request(
+            Method::DELETE,
+            "/api/v0/p2p/replicators",
+            r#"{"ID":"peer"}"#,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
 }

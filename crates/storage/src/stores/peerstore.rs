@@ -10,11 +10,35 @@ use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
 use cid::Cid;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tracing;
 
 const PUSH_RETRY_TXN_MAX_ATTEMPTS: usize = 4;
+
+type RetryPeerLock = tokio::sync::RwLock<()>;
+
+fn retry_peer_lock(peer_id: &str) -> Arc<RetryPeerLock> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Weak<RetryPeerLock>>>> = OnceLock::new();
+
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(lock) = locks.get(peer_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+
+    let lock = Arc::new(RetryPeerLock::new(()));
+    locks.insert(peer_id.to_string(), Arc::downgrade(&lock));
+    lock
+}
+
+/// Keeps a retry pass or failure-recording operation coordinated with forget.
+pub struct ReplicatorRetryGuard {
+    _guard: tokio::sync::OwnedRwLockReadGuard<()>,
+}
 
 async fn retry_push_txn_conflicts<T, F, Fut>(mut operation: F) -> Result<T>
 where
@@ -80,8 +104,26 @@ impl<S: Store> Peerstore<S> {
         txn.get(&key.bytes()).await
     }
 
+    /// Acquire permission to process retry state while the replicator exists.
+    ///
+    /// The guard must be retained through transport replay and any resulting
+    /// ledger update. Forget takes the corresponding write lock, so it cannot
+    /// return while a selected retry can still be sent or persisted.
+    pub async fn acquire_replicator_retry_guard(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<ReplicatorRetryGuard>> {
+        let guard = retry_peer_lock(peer_id).read_owned().await;
+        if self.has_replicator(peer_id).await? {
+            Ok(Some(ReplicatorRetryGuard { _guard: guard }))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Delete a replicator and all of its persisted push-retry state.
     pub async fn delete_replicator(&self, peer_id: &str) -> Result<()> {
+        let _retry_guard = retry_peer_lock(peer_id).write_owned().await;
         retry_push_txn_conflicts(|| self.delete_replicator_once(peer_id)).await
     }
 
@@ -557,6 +599,9 @@ impl<S: Store> Peerstore<S> {
 
         let mut activated = 0;
         for (peer_id, key_doc_id, retry) in dormant {
+            let Some(_retry_guard) = self.acquire_replicator_retry_guard(&peer_id).await? else {
+                continue;
+            };
             match retry_push_txn_conflicts(|| {
                 self.activate_dormant_push_retry_once(&peer_id, &key_doc_id, &retry)
             })
