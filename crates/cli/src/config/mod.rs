@@ -210,6 +210,10 @@ impl Config {
             self.acp.sourcehub_comet_address = addr.clone();
         }
         #[cfg(feature = "sourcehub")]
+        if let Some(ref addr) = cli.source_hub_events_ws {
+            self.acp.sourcehub_events_ws = addr.clone();
+        }
+        #[cfg(feature = "sourcehub")]
         if let Some(ref id) = cli.source_hub_chain_id {
             self.acp.sourcehub_chain_id = id.clone();
         }

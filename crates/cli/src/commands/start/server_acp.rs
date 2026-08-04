@@ -70,10 +70,17 @@ impl Node {
                 .map_err(|e| Error::InvalidConfig(format!("SourceHub provider: {}", e)))?,
             );
 
-            let document_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(
-                provider,
-                tuning.cache_ttl,
-            ));
+            let document_acp = sourcehub::SourceHubDocumentACP::new(provider, tuning.cache_ttl);
+            let document_acp = if config.acp.sourcehub_events_ws.is_empty() {
+                document_acp
+            } else {
+                document_acp
+                    .with_cosmos_event_invalidation(config.acp.sourcehub_events_ws.clone())
+                    .map_err(|e| {
+                        Error::InvalidConfig(format!("SourceHub event subscriber: {}", e))
+                    })?
+            };
+            let document_acp = Arc::new(document_acp);
             let http_adapter = crate::sourcehub_acp_adapter::SourceHubAcpAdapter::new_arc(
                 document_acp.clone(),
                 zanzibar_store,
