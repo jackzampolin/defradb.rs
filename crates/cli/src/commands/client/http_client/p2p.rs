@@ -183,6 +183,15 @@ impl HttpClient {
         self.request_void("DELETE", &url, Some(&body)).await
     }
 
+    pub async fn p2p_replicator_forget(&self, peer_id: &str) -> Result<()> {
+        let url = format!("{}/api/v0/p2p/replicator", self.base_url);
+        let body = serde_json::to_string(&serde_json::json!({
+            "ID": peer_id,
+            "Forget": true,
+        }))?;
+        self.request_void("DELETE", &url, Some(&body)).await
+    }
+
     pub async fn p2p_collection_add(&self, collections: &[String]) -> Result<()> {
         let url = format!("{}/api/v0/p2p/collections", self.base_url);
         let body = serde_json::to_string(&collections)?;

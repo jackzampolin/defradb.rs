@@ -1,7 +1,7 @@
 //! P2P command unit tests
 
 use super::collection::P2pCollectionAddArgs;
-use super::replicator::P2pReplicatorAddArgs;
+use super::replicator::{P2pReplicatorAddArgs, P2pReplicatorCommand};
 
 #[test]
 fn test_p2p_replicator_add_args() {
@@ -26,6 +26,23 @@ fn test_p2p_replicator_add_args_no_address() {
         filter: None,
     };
     assert!(args.addresses.is_empty());
+}
+
+#[test]
+fn test_p2p_replicator_forget_parses() {
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Wrap {
+        #[command(subcommand)]
+        command: P2pReplicatorCommand,
+    }
+
+    let wrap = Wrap::parse_from(["replicator", "forget", "peer-123"]);
+    let P2pReplicatorCommand::Forget(args) = wrap.command else {
+        panic!("expected forget subcommand");
+    };
+    assert_eq!(args.peer_id, "peer-123");
 }
 
 #[test]

@@ -22,6 +22,8 @@ pub enum P2pReplicatorCommand {
     Add(P2pReplicatorAddArgs),
     /// Delete replicator(s) and stop synchronization
     Delete(P2pReplicatorDeleteArgs),
+    /// Forget a peer and discard all pending retries
+    Forget(P2pReplicatorForgetArgs),
     /// List all replicators
     List(P2pReplicatorListArgs),
 }
@@ -67,12 +69,21 @@ pub struct P2pReplicatorDeleteArgs {
     pub peer_id: Option<String>,
 }
 
+/// Arguments for forgetting a replicator peer.
+#[derive(Args, Debug)]
+pub struct P2pReplicatorForgetArgs {
+    /// Peer ID whose replicator and retry state should be removed
+    #[arg(value_name = "peerID")]
+    pub peer_id: String,
+}
+
 impl P2pReplicatorArgs {
     /// Execute the replicator subcommand
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
             P2pReplicatorCommand::Add(args) => args.execute(ctx).await,
             P2pReplicatorCommand::Delete(args) => args.execute(ctx).await,
+            P2pReplicatorCommand::Forget(args) => args.execute(ctx).await,
             P2pReplicatorCommand::List(args) => args.execute(ctx).await,
         }
     }
@@ -266,6 +277,19 @@ impl P2pReplicatorDeleteArgs {
             "Removed replicator for collections: {}",
             self.collection.join(", ")
         );
+        Ok(())
+    }
+}
+
+impl P2pReplicatorForgetArgs {
+    /// Execute the replicator forget command.
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        client.p2p_replicator_forget(&self.peer_id).await?;
+        println!("Forgot replicator peer: {}", self.peer_id);
         Ok(())
     }
 }
