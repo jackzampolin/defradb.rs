@@ -500,6 +500,11 @@ pub struct AcpConfig {
     #[serde(default)]
     pub sourcehub_comet_address: String,
 
+    /// SourceHub CometBFT WebSocket endpoint for ACP cache invalidation.
+    #[cfg(feature = "sourcehub")]
+    #[serde(default)]
+    pub sourcehub_events_ws: String,
+
     /// SourceHub chain ID (e.g., "sourcehub-test")
     #[cfg(feature = "sourcehub")]
     #[serde(default)]
@@ -556,6 +561,8 @@ impl Default for AcpConfig {
             sourcehub_address: String::new(),
             #[cfg(feature = "sourcehub")]
             sourcehub_comet_address: String::new(),
+            #[cfg(feature = "sourcehub")]
+            sourcehub_events_ws: String::new(),
             #[cfg(feature = "sourcehub")]
             sourcehub_chain_id: String::new(),
             #[cfg(feature = "sourcehub")]

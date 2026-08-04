@@ -2,6 +2,15 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+#[derive(PartialEq, Eq, Hash)]
+struct CacheKey {
+    actor_did: String,
+    policy_id: String,
+    resource: String,
+    doc_id: String,
+    permission: String,
+}
+
 struct CachedDecision {
     allowed: bool,
     cached_at: Instant,
@@ -12,10 +21,10 @@ struct CachedDecision {
 /// Caches the result of `verify_access` calls keyed by
 /// `(actor, policy, resource, doc_id, permission)`. Entries expire
 /// after a configurable TTL. Relationship mutations eagerly invalidate
-/// all entries for the affected document.
+/// all entries for their policy so indirect grants cannot remain cached.
 pub(crate) struct AccessCache {
     ttl: Duration,
-    entries: Mutex<HashMap<String, CachedDecision>>,
+    entries: Mutex<HashMap<CacheKey, CachedDecision>>,
 }
 
 fn cache_key(
@@ -24,15 +33,14 @@ fn cache_key(
     resource: &str,
     doc_id: &str,
     permission: &str,
-) -> String {
-    format!(
-        "{}|{}|{}|{}|{}",
-        actor_did, policy_id, resource, doc_id, permission
-    )
-}
-
-fn object_prefix(policy_id: &str, resource: &str, doc_id: &str) -> String {
-    format!("|{}|{}|{}|", policy_id, resource, doc_id)
+) -> CacheKey {
+    CacheKey {
+        actor_did: actor_did.to_string(),
+        policy_id: policy_id.to_string(),
+        resource: resource.to_string(),
+        doc_id: doc_id.to_string(),
+        permission: permission.to_string(),
+    }
 }
 
 impl AccessCache {
@@ -84,14 +92,37 @@ impl AccessCache {
 
     /// Invalidate ALL cached decisions for a specific document.
     ///
-    /// Called on relationship mutations (grant/revoke) and document
-    /// unregistration. Invalidates all actors and permissions for the
-    /// document to avoid subtle races where permission changes affect
-    /// multiple actors through indirect relations.
-    pub(crate) fn invalidate_object(&self, policy_id: &str, resource: &str, doc_id: &str) {
-        let prefix = object_prefix(policy_id, resource, doc_id);
+    /// Called on document registration and archival mutations. Invalidates all
+    /// actors and permissions for the affected document.
+    pub(crate) fn invalidate_object(&self, policy_id: &str, resource: &str, doc_id: &str) -> usize {
         if let Ok(mut entries) = self.entries.lock() {
-            entries.retain(|key, _| !key.contains(&prefix));
+            let previous_len = entries.len();
+            entries.retain(|key, _| {
+                key.policy_id != policy_id || key.resource != resource || key.doc_id != doc_id
+            });
+            previous_len - entries.len()
+        } else {
+            0
+        }
+    }
+
+    pub(crate) fn invalidate_policy(&self, policy_id: &str) -> usize {
+        if let Ok(mut entries) = self.entries.lock() {
+            let previous_len = entries.len();
+            entries.retain(|key, _| key.policy_id != policy_id);
+            previous_len - entries.len()
+        } else {
+            0
+        }
+    }
+
+    pub(crate) fn clear(&self) -> usize {
+        if let Ok(mut entries) = self.entries.lock() {
+            let previous_len = entries.len();
+            entries.clear();
+            previous_len
+        } else {
+            0
         }
     }
 }
@@ -172,6 +203,54 @@ mod tests {
         assert_eq!(
             cache.get("did:key:alice", "p1", "users", "doc2", "read"),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn invalidate_object_uses_exact_key_components() {
+        let cache = AccessCache::new(Duration::from_secs(300));
+        cache.set("did:key:alice", "p1", "users", "doc1", "read", true);
+        cache.set("did:key:alice", "p1", "users|doc1", "other", "read", true);
+
+        cache.invalidate_object("p1", "users", "doc1");
+
+        assert_eq!(
+            cache.get("did:key:alice", "p1", "users|doc1", "other", "read"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn invalidate_policy_preserves_other_policies() {
+        let cache = AccessCache::new(Duration::from_secs(300));
+        cache.set("did:key:alice", "p1", "users", "doc1", "read", true);
+        cache.set("did:key:alice", "p2", "users", "doc1", "read", true);
+
+        assert_eq!(cache.invalidate_policy("p1"), 1);
+        assert_eq!(
+            cache.get("did:key:alice", "p1", "users", "doc1", "read"),
+            None
+        );
+        assert_eq!(
+            cache.get("did:key:alice", "p2", "users", "doc1", "read"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn clear_removes_every_entry() {
+        let cache = AccessCache::new(Duration::from_secs(300));
+        cache.set("did:key:alice", "p1", "users", "doc1", "read", true);
+        cache.set("did:key:bob", "p2", "books", "doc2", "update", true);
+
+        assert_eq!(cache.clear(), 2);
+        assert_eq!(
+            cache.get("did:key:alice", "p1", "users", "doc1", "read"),
+            None
+        );
+        assert_eq!(
+            cache.get("did:key:bob", "p2", "books", "doc2", "update"),
+            None
         );
     }
 }
