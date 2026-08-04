@@ -456,6 +456,11 @@ async fn sweep_clear_preserves_dormant_watermark_for_restart_promotion() {
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+
+    peerstore
         .record_push_failure("peer", "doc", "collection", "old", 1, &initial)
         .await
         .unwrap();
