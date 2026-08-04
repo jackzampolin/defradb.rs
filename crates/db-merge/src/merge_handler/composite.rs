@@ -529,6 +529,12 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     .await?;
                 }
 
+                let event_block = block.to_dag_cbor().map_err(|error| {
+                    MergeError::BlockDecode(format!(
+                        "Failed to encode merged composite update block: {}",
+                        error
+                    ))
+                })?;
                 txn.force_commit().await?;
 
                 self.best_effort_finalize_linked_field_blocks(&state.linked_field_cids)
@@ -571,7 +577,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         doc_id_str.to_string(),
                         *cid,
                         payload.schema_version_id.clone(),
-                        vec![],
+                        event_block,
                         false,
                         true,
                     );
@@ -956,7 +962,12 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         doc_id_str.to_string(),
                         *cid,
                         payload.schema_version_id.clone(),
-                        vec![],
+                        block.to_dag_cbor().map_err(|error| {
+                            MergeError::BlockDecode(format!(
+                                "Failed to encode merged composite update block: {}",
+                                error
+                            ))
+                        })?,
                         false,
                         true,
                     );

@@ -41,5 +41,7 @@ pub use index::{
     IndexedFieldDescription,
 };
 pub use policy::PolicyDescription;
-pub use source::{CollectionSetDescription, CollectionSource, QuerySource};
+pub use source::{
+    query_select_json_bytes, CollectionSetDescription, CollectionSource, QuerySource,
+};
 pub use validation::{validate_schema, SchemaValidator};

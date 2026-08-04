@@ -212,8 +212,11 @@ impl Planner {
                                 child_fk_field_name.trim_start_matches('_')
                             )
                         });
-                    let orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
+                    let mut orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
                         .with_fetcher(orphan_fetcher.unwrap());
+                    if let Some(filter) = parent_residual_filter.clone() {
+                        orphan_scan = orphan_scan.with_filter(filter);
+                    }
                     let orphan = OrphanNode::secondary_side(
                         Box::new(orphan_scan),
                         shared_ids.clone(),
@@ -290,8 +293,11 @@ impl Planner {
                             parent_fk_field_name.clone(),
                             serde_json::json!({"_eq": null}),
                         )]));
+                        let orphan_filter = parent_residual_filter
+                            .clone()
+                            .map_or_else(|| null_filter.clone(), |filter| null_filter.and(filter));
                         let orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
-                            .with_filter(null_filter)
+                            .with_filter(orphan_filter)
                             .with_fetcher(orphan_fetcher.unwrap());
                         let orphan =
                             OrphanNode::primary_side(Box::new(orphan_scan), mapping.clone());

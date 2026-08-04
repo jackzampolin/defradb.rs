@@ -57,7 +57,9 @@ pub fn filter_to_index_scan(
         .iter()
         .find(|f| &f.name == first_field)
         .map(|f| &f.kind);
-    let first_field_is_json = matches!(first_field_kind, Some(FieldKind::Scalar(ScalarKind::Json)));
+    let first_field_is_json = first_field_kind
+        .and_then(FieldKind::as_scalar)
+        .is_some_and(|kind| kind.base_kind() == ScalarKind::Json);
 
     // Find conditions on the first index field
     // For JSON fields, ensure top-level conditions get an empty json_path

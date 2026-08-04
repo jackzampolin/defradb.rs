@@ -78,6 +78,20 @@ async fn wait_for_branchable_merges(
     }
 }
 
+async fn unmerged_doc_sync_heads<B, I>(blockstore: &B, heads: I) -> HashSet<cid::Cid>
+where
+    B: Blockstore,
+    I: IntoIterator<Item = cid::Cid>,
+{
+    let mut pending = HashSet::new();
+    for cid in heads {
+        if !matches!(blockstore.is_merged(&cid).await, Ok(true)) {
+            pending.insert(cid);
+        }
+    }
+    pending
+}
+
 impl<B: Blockstore + 'static> P2PAdapter<B> {
     async fn check_nac(&self, permission: acp::nac::NodePermission) -> P2PResult<()> {
         if let Some(ref checker) = self.nac_checker {
@@ -298,7 +312,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn disconnect_peer(&self, addr: &str) -> P2PResult<()> {
-        self.check_nac(acp::nac::NodePermission::P2pPeerConnect)
+        self.check_nac(acp::nac::NodePermission::P2pPeerDisconnect)
             .await?;
 
         let parsed = p2p::parse_multiaddr_with_peer_id(addr)
@@ -530,7 +544,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 replication_filters.clone(),
             );
             coordinator
-                .create_replicator_info(&transport_peer_id, info, true)
+                .create_replicator_info(&transport_peer_id, info, false)
                 .await
                 .map_err(|error| P2PError::transport(error.to_string()))?;
         } else {
@@ -899,14 +913,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             return Ok(());
         }
 
-        let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);
-        let total_expected = connected_peers.len() * doc_ids.len();
-        let mut total_received = 0;
-        let overall_timeout = std::time::Duration::from_secs(30);
-        let idle_timeout = std::time::Duration::from_secs(3);
-        let start = std::time::Instant::now();
-        let doc_set: HashSet<String> = doc_ids.iter().cloned().collect();
-
         // Wire-compatible with Go (#828): use pubsub_rpc doc-sync when the
         // coordinator has it. `pubsub_sync_documents` also feeds each
         // received reply through the coordinator's DAG-fetch scheduler,
@@ -917,6 +923,71 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .sync_coordinator
             .as_ref()
             .is_some_and(|coord| coord.pubsub_services_ready());
+        let sync_peer_count = if use_pubsub {
+            self.handle
+                .topic_peers(DefraTopic::DocSync)
+                .await
+                .map_err(|error| {
+                    P2PError::transport(format!("failed to get doc-sync topic peers: {error}"))
+                })?
+                .len()
+        } else {
+            connected_peers.len()
+        };
+        if sync_peer_count == 0 {
+            return Ok(());
+        }
+
+        let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);
+        let total_expected = sync_peer_count * doc_ids.len();
+        let mut total_received = 0;
+        let overall_timeout = std::time::Duration::from_secs(30);
+        let idle_timeout = std::time::Duration::from_secs(3);
+        let start = std::time::Instant::now();
+        let doc_set: HashSet<String> = doc_ids.iter().cloned().collect();
+
+        if use_pubsub {
+            let coord = self
+                .sync_coordinator
+                .as_ref()
+                .expect("pubsub readiness requires a coordinator");
+            let replies = coord
+                .pubsub_sync_documents(
+                    doc_ids,
+                    Some(std::time::Duration::from_secs(8)),
+                    Some(sync_peer_count),
+                )
+                .await
+                .map_err(|error| {
+                    event_bus.unsubscribe(sub.id());
+                    P2PError::transport(format!("pubsub_rpc doc-sync failed: {error}"))
+                })?;
+            let heads = replies
+                .into_iter()
+                .flat_map(|(_, reply)| reply.results)
+                .flat_map(|item| item.heads)
+                .filter_map(|head| cid::Cid::try_from(head.as_slice()).ok());
+            let mut pending_heads =
+                unmerged_doc_sync_heads(coord.blockstore().as_ref(), heads).await;
+
+            while !pending_heads.is_empty() && start.elapsed() < overall_timeout {
+                match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv()).await
+                {
+                    Ok(Some(msg)) => {
+                        if let Some(data) = msg.as_merge_complete() {
+                            if doc_set.contains(&data.doc_id) {
+                                pending_heads.remove(&data.cid);
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => {}
+                }
+            }
+
+            event_bus.unsubscribe(sub.id());
+            return Ok(());
+        }
 
         for _attempt in 0..3 {
             if total_received >= total_expected || start.elapsed() >= overall_timeout {
@@ -927,45 +998,23 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             // attempts cannot produce merges — exit like the historical CLI
             // and iroh paths instead of burning the full overall timeout.
             let mut any_sent = false;
-            if use_pubsub {
-                let coord = self
-                    .sync_coordinator
-                    .as_ref()
-                    .expect("pubsub readiness requires a coordinator")
-                    .clone();
-                let doc_ids = doc_ids.clone();
-                // Remaining budget for this attempt.
-                let remaining = overall_timeout.saturating_sub(start.elapsed());
-                let attempt_timeout = remaining.min(std::time::Duration::from_secs(8));
-                tokio::spawn(async move {
-                    if let Err(error) = coord
-                        .pubsub_sync_documents(doc_ids, Some(attempt_timeout))
-                        .await
-                    {
-                        tracing::warn!(error = %error, "pubsub_rpc doc-sync publish failed");
-                    }
-                });
-                any_sent = true;
-            } else {
-                let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
-                if let Err(error) = p2p::signing::sign_message(self.handle.keypair(), &mut request)
-                {
-                    event_bus.unsubscribe(sub.id());
-                    return Err(P2PError::internal(format!(
-                        "failed to sign DocSync request: {error}"
-                    )));
-                }
+            let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
+            if let Err(error) = p2p::signing::sign_message(self.handle.keypair(), &mut request) {
+                event_bus.unsubscribe(sub.id());
+                return Err(P2PError::internal(format!(
+                    "failed to sign DocSync request: {error}"
+                )));
+            }
 
-                for peer_id in &connected_peers {
-                    match self
-                        .handle
-                        .send_doc_sync_request(*peer_id, request.clone())
-                        .await
-                    {
-                        Ok(()) => any_sent = true,
-                        Err(error) => {
-                            tracing::warn!(peer_id = %peer_id, error = %error, "failed to send DocSync request");
-                        }
+            for peer_id in &connected_peers {
+                match self
+                    .handle
+                    .send_doc_sync_request(*peer_id, request.clone())
+                    .await
+                {
+                    Ok(_) => any_sent = true,
+                    Err(error) => {
+                        tracing::warn!(peer_id = %peer_id, error = %error, "failed to send DocSync request");
                     }
                 }
             }
@@ -1033,18 +1082,21 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         // Go-compatible pubsub_rpc path when coordinator is wired (#828).
         // Falls back to two-stream per-peer requests otherwise.
         if let Some(coord) = self.sync_coordinator.as_ref() {
-            let expected_responses = match self.handle.topic_peers(DefraTopic::SyncBranchable).await
-            {
-                Ok(peers) if !peers.is_empty() => peers.len(),
-                Ok(_) => connected_peers.len(),
-                Err(error) => {
-                    tracing::debug!(
-                        error = %error,
-                        "failed to get sync-branchable topic peers; using connected peer count"
-                    );
-                    connected_peers.len()
-                }
-            };
+            let expected_responses = self
+                .handle
+                .topic_peers(DefraTopic::SyncBranchable)
+                .await
+                .map_err(|error| {
+                    event_bus.unsubscribe(sub.id());
+                    P2PError::transport(format!(
+                        "failed to get sync-branchable topic peers: {error}"
+                    ))
+                })?
+                .len();
+            if expected_responses == 0 {
+                event_bus.unsubscribe(sub.id());
+                return Ok(());
+            }
             coord
                 .pubsub_sync_branchable_collection(
                     collection_id.to_string(),
@@ -1123,5 +1175,30 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         syncer
             .sync_versions(&self.handle, version_ids, connected_peers)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    #[tokio::test]
+    async fn merged_doc_sync_heads_are_not_pending() {
+        let blockstore = DefraBlockstore::new(Arc::new(MemoryStore::new()), true);
+        let merged =
+            cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+                .unwrap();
+        let unmerged =
+            cid::Cid::try_from("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy")
+                .unwrap();
+        blockstore.put(&merged, b"merged").await.unwrap();
+        blockstore.put(&unmerged, b"unmerged").await.unwrap();
+        blockstore.mark_as_merged(&merged).await.unwrap();
+
+        let pending = unmerged_doc_sync_heads(&blockstore, [merged, unmerged, unmerged]).await;
+
+        assert_eq!(pending, HashSet::from([unmerged]));
     }
 }

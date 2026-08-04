@@ -1,8 +1,9 @@
 use super::*;
+use acp::{DocumentACP, LocalDocumentACP, MemoryAcpStore};
 use document::NormalValue;
 use events::{Bus, ChannelBus, EventName};
 use query::mutator::DocMutator;
-use schema::{CType, CollectionVersion, FieldDescription, FieldKind};
+use schema::{CType, CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
 use storage::backends::MemoryStore;
 
 async fn make_test_db_with_bus() -> (Arc<DB<MemoryStore>>, Arc<dyn Bus>) {
@@ -36,6 +37,19 @@ fn counter_collection() -> CollectionVersion {
     )
 }
 
+fn float32_counter_collection() -> CollectionVersion {
+    CollectionVersion::new(
+        "FloatCounters",
+        "fcv1",
+        "col-float-counters",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "points", FieldKind::float32())
+                .with_crdt_type(CType::PnCounter),
+        ],
+    )
+}
+
 /// Read the PNCounter accumulation store value for a doc/field from the
 /// committed store (a fresh read txn), proving the authoritative store — not
 /// just the materialized blob — advanced.
@@ -63,6 +77,63 @@ async fn read_counter_store(
         .expect("counter value");
     assert_eq!(bytes.len(), 8, "int64 counter store value is 8 bytes");
     i64::from_be_bytes(bytes.try_into().unwrap())
+}
+
+#[tokio::test]
+async fn auto_commit_float32_counter_accumulates_with_float32_precision() {
+    let (db, _bus) = make_test_db_with_bus().await;
+    db.create_collection(float32_counter_collection())
+        .await
+        .unwrap();
+    let mutator = crate::AutoCommitMutator::new(Arc::clone(&db));
+
+    let mut doc = Document::new();
+    doc.set("points", NormalValue::Float32(0.0));
+    let doc_id = mutator.create("FloatCounters", doc).await.unwrap().doc_id;
+
+    for (value, delta) in [(10.1f32, 10.1f32), (10.1f32 + 10.2f32, 10.2f32)] {
+        let mut doc = mutator
+            .get_for_update("FloatCounters", &doc_id)
+            .await
+            .unwrap()
+            .unwrap();
+        doc.set("points", NormalValue::Float32(value));
+        doc.set_counter_delta("points".into(), NormalValue::Float32(delta));
+        mutator
+            .update(
+                "FloatCounters",
+                doc,
+                std::iter::once("points".to_string()).collect(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let doc = mutator
+        .get_for_update("FloatCounters", &doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = 10.1f32 + 10.2f32;
+    assert_eq!(
+        doc.get("points"),
+        Some(&NormalValue::Float64(f64::from(expected)))
+    );
+
+    use crdt::traits::ValueReader;
+    let txn = db.new_txn(true).await.unwrap();
+    let datastore = txn.datastore().unwrap();
+    let counter = crdt::Counter::new(
+        "fcv1".into(),
+        doc_id.to_string().as_bytes(),
+        "points".into(),
+        true,
+        crdt::NumericKind::Float32,
+    )
+    .unwrap();
+    let bytes = ValueReader::value(&counter, &datastore).await.unwrap();
+    assert_eq!(bytes.len(), 4);
+    assert_eq!(f32::from_be_bytes(bytes.try_into().unwrap()), expected);
 }
 
 #[tokio::test]
@@ -879,6 +950,46 @@ async fn create_in_tx_publishes_event_on_commit() {
         !update.block.is_empty(),
         "block bytes should be populated (matches Go's sendUpdate)"
     );
+}
+
+#[tokio::test]
+async fn auto_commit_create_registers_acp_before_publishing_update() {
+    let (db, bus) = make_test_db_with_bus().await;
+    db.create_collection(
+        test_collection().with_policy(PolicyDescription::new("policy1", "test-docs")),
+    )
+    .await
+    .expect("schema");
+
+    let acp: Arc<dyn DocumentACP> =
+        Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
+    let mutator = crate::AutoCommitMutator::new(db);
+    mutator.set_document_acp(acp.clone());
+    let mut sub = bus.subscribe(&[EventName::Update]);
+    let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+    defra_core::signing::set_broadcast_creator_did(Some(owner.to_string()));
+
+    let created = mutator
+        .create(
+            "TestDoc",
+            Document::from_json_str(r#"{"x": 1}"#).expect("doc"),
+        )
+        .await
+        .expect("create");
+    defra_core::signing::set_broadcast_creator_did(None);
+
+    let message = tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv())
+        .await
+        .expect("event arrived within timeout")
+        .expect("subscription not closed");
+    assert_eq!(
+        message.as_update().expect("update").doc_id,
+        created.doc_id.to_string()
+    );
+    assert!(acp
+        .is_doc_registered("policy1", "test-docs", &created.doc_id.to_string())
+        .await
+        .expect("registration check"));
 }
 
 #[tokio::test]

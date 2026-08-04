@@ -34,6 +34,7 @@
 //! - `defra_free_string()` - Free strings allocated by FFI functions
 
 pub mod acp;
+pub mod action;
 pub mod backup;
 pub mod batch;
 pub mod block;
@@ -238,14 +239,16 @@ pub use acp::{
     get_node_identity, list_dac_policies, node_set_default_identity, re_enable_nac,
     register_remote_identity, register_remote_identity_bytes, RegisterIdentity,
 };
+pub use action::list_actions;
 pub use backup::{basic_export, basic_import};
 pub use batch::{batch_sign, batch_start};
 pub use block::{block_verify_signature, block_verify_signature_in_txn};
 pub use collection::{
-    add_view, delete_collection, delete_collection_versions, delete_documents,
-    find_collection_by_id, gc_downsample_histories, get_collection_by_name,
-    get_collection_by_version_id, has_collection, materialize_collection, patch_collection,
-    refresh_views, set_active_collection_version, set_migration, truncate_collection,
+    add_view, delete_collection, delete_collection_versions, delete_collections,
+    delete_collections_in_txn, delete_documents, find_collection_by_id, gc_downsample_histories,
+    get_collection_by_name, get_collection_by_version_id, has_collection, materialize_collection,
+    patch_collection, refresh_views, set_active_collection_version, set_collection_active_in_txn,
+    set_migration, truncate_collection,
 };
 pub use document::{collection_create, is_json_array, parse_duration, parse_string_array};
 pub use encrypted_index::{

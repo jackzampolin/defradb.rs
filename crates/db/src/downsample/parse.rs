@@ -56,7 +56,7 @@ fn decode_commit_delta_value(commit: &document::Document) -> Option<NormalValue>
 }
 
 pub(super) fn scalar_kind_name(kind: ScalarKind) -> &'static str {
-    match kind {
+    match kind.base_kind() {
         ScalarKind::None => "None",
         ScalarKind::DocID => "DocID",
         ScalarKind::Bool => "Bool",
@@ -88,7 +88,7 @@ pub(super) fn require_scalar_kind(
             collection.name, field_name
         )));
     };
-    if allowed.contains(&kind) {
+    if allowed.contains(&kind.base_kind()) {
         Ok(())
     } else {
         let expected = allowed
@@ -342,7 +342,7 @@ pub(super) fn numeric_value_to_normal_value(
             collection.name, field_name
         ))
     })?;
-    match field.kind.as_scalar() {
+    match field.kind.as_scalar().map(ScalarKind::base_kind) {
         Some(ScalarKind::Int) => match value {
             NumericValue::Int(value) => Ok(NormalValue::Int(value)),
             NumericValue::Float(_) => Err(Error::Other(format!(
@@ -370,7 +370,7 @@ pub(super) fn average_value_to_normal_value(
             collection.name, field_name
         ))
     })?;
-    match field.kind.as_scalar() {
+    match field.kind.as_scalar().map(ScalarKind::base_kind) {
         Some(ScalarKind::Float32) => Ok(NormalValue::Float32(value as f32)),
         Some(ScalarKind::Float64) => Ok(NormalValue::Float64(value)),
         _ => Err(Error::Other(format!(

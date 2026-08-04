@@ -122,7 +122,7 @@ pub fn select_to_go_json(select: &query_types::Select) -> serde_json::Value {
             .unwrap_or(serde_json::Value::Null),
     );
     m.insert("DocIDs".into(), serde_json::Value::Null);
-    m.insert("CID".into(), serde_json::Value::Null);
+    m.insert("CIDs".into(), serde_json::Value::Null);
     m.insert("GroupBy".into(), serde_json::Value::Null);
     m.insert(
         "ShowDeleted".into(),

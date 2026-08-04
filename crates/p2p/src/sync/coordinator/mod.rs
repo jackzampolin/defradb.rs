@@ -630,7 +630,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         self.runtime.shutdown.shutdown().await;
     }
 
-    pub(crate) fn spawn_background_task<F>(&self, task_name: &'static str, future: F)
+    /// Spawn work owned by this coordinator so shutdown can drain or cancel it.
+    pub fn spawn_background_task<F>(&self, task_name: &'static str, future: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {

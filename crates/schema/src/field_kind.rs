@@ -37,29 +37,83 @@ pub enum ScalarKind {
     String = 11,
     Blob = 13,
     Json = 14,
+    NonNillableBool = 15,
+    NonNillableInt = 23,
+    NonNillableFloat64 = 24,
+    NonNillableFloat32 = 25,
+    NonNillableString = 26,
+    NonNillableDateTime = 27,
+    NonNillableBlob = 28,
+    NonNillableJson = 29,
 }
 
 impl ScalarKind {
+    /// Returns the nillable variant with the same value type.
+    pub fn base_kind(self) -> Self {
+        match self {
+            ScalarKind::NonNillableBool => ScalarKind::Bool,
+            ScalarKind::NonNillableInt => ScalarKind::Int,
+            ScalarKind::NonNillableFloat64 => ScalarKind::Float64,
+            ScalarKind::NonNillableFloat32 => ScalarKind::Float32,
+            ScalarKind::NonNillableString => ScalarKind::String,
+            ScalarKind::NonNillableDateTime => ScalarKind::DateTime,
+            ScalarKind::NonNillableBlob => ScalarKind::Blob,
+            ScalarKind::NonNillableJson => ScalarKind::Json,
+            kind => kind,
+        }
+    }
+
+    /// Returns the non-nillable variant with the same value type.
+    pub fn to_non_nillable(self) -> Option<Self> {
+        match self.base_kind() {
+            ScalarKind::Bool => Some(ScalarKind::NonNillableBool),
+            ScalarKind::Int => Some(ScalarKind::NonNillableInt),
+            ScalarKind::Float64 => Some(ScalarKind::NonNillableFloat64),
+            ScalarKind::Float32 => Some(ScalarKind::NonNillableFloat32),
+            ScalarKind::String => Some(ScalarKind::NonNillableString),
+            ScalarKind::DateTime => Some(ScalarKind::NonNillableDateTime),
+            ScalarKind::Blob => Some(ScalarKind::NonNillableBlob),
+            ScalarKind::Json => Some(ScalarKind::NonNillableJson),
+            ScalarKind::None | ScalarKind::DocID => None,
+            _ => None,
+        }
+    }
+
+    pub fn is_nillable(self) -> bool {
+        !matches!(
+            self,
+            ScalarKind::NonNillableBool
+                | ScalarKind::NonNillableInt
+                | ScalarKind::NonNillableFloat64
+                | ScalarKind::NonNillableFloat32
+                | ScalarKind::NonNillableString
+                | ScalarKind::NonNillableDateTime
+                | ScalarKind::NonNillableBlob
+                | ScalarKind::NonNillableJson
+        )
+    }
+
     /// Returns true if this is a numeric type (Int, Float64, Float32)
     pub fn is_numeric(&self) -> bool {
         matches!(
-            self,
+            self.base_kind(),
             ScalarKind::Int | ScalarKind::Float64 | ScalarKind::Float32
         )
     }
 
     /// Returns true if this is a floating-point type (Float64, Float32).
     pub fn is_float(&self) -> bool {
-        matches!(self, ScalarKind::Float64 | ScalarKind::Float32)
+        matches!(self.base_kind(), ScalarKind::Float64 | ScalarKind::Float32)
     }
 
     /// Get the corresponding array kind for this scalar
     pub fn to_array_kind(&self) -> Option<ScalarArrayKind> {
-        match self {
+        match self.base_kind() {
             ScalarKind::Bool => Some(ScalarArrayKind::BoolArray),
             ScalarKind::Int => Some(ScalarArrayKind::IntArray),
             ScalarKind::Float64 => Some(ScalarArrayKind::Float64Array),
             ScalarKind::Float32 => Some(ScalarArrayKind::Float32Array),
+            ScalarKind::DateTime => Some(ScalarArrayKind::DateTimeArray),
             ScalarKind::String => Some(ScalarArrayKind::StringArray),
             _ => None,
         }
@@ -67,11 +121,12 @@ impl ScalarKind {
 
     /// Get the corresponding nillable array kind for this scalar
     pub fn to_nillable_array_kind(&self) -> Option<ScalarArrayKind> {
-        match self {
+        match self.base_kind() {
             ScalarKind::Bool => Some(ScalarArrayKind::NillableBoolArray),
             ScalarKind::Int => Some(ScalarArrayKind::NillableIntArray),
             ScalarKind::Float64 => Some(ScalarArrayKind::NillableFloat64Array),
             ScalarKind::Float32 => Some(ScalarArrayKind::NillableFloat32Array),
+            ScalarKind::DateTime => Some(ScalarArrayKind::NillableDateTimeArray),
             ScalarKind::String => Some(ScalarArrayKind::NillableStringArray),
             _ => None,
         }
@@ -94,6 +149,8 @@ pub enum ScalarArrayKind {
     NillableFloat64Array = 20,
     NillableStringArray = 21,
     NillableFloat32Array = 22,
+    DateTimeArray = 30,
+    NillableDateTimeArray = 31,
 }
 
 impl ScalarArrayKind {
@@ -107,6 +164,7 @@ impl ScalarArrayKind {
                 | ScalarArrayKind::NillableFloat64Array
                 | ScalarArrayKind::NillableStringArray
                 | ScalarArrayKind::NillableFloat32Array
+                | ScalarArrayKind::NillableDateTimeArray
         )
     }
 
@@ -123,6 +181,9 @@ impl ScalarArrayKind {
             }
             ScalarArrayKind::StringArray | ScalarArrayKind::NillableStringArray => {
                 ScalarKind::String
+            }
+            ScalarArrayKind::DateTimeArray | ScalarArrayKind::NillableDateTimeArray => {
+                ScalarKind::DateTime
             }
         }
     }
@@ -169,6 +230,45 @@ impl Default for FieldKind {
 }
 
 impl FieldKind {
+    /// Convert a numeric kind value using Go's IntToFieldKind mapping.
+    pub fn from_numeric_kind(kind: u8) -> Self {
+        match kind {
+            // Array kinds
+            3 => FieldKind::ScalarArray(ScalarArrayKind::BoolArray),
+            5 => FieldKind::ScalarArray(ScalarArrayKind::IntArray),
+            7 => FieldKind::ScalarArray(ScalarArrayKind::Float64Array),
+            9 => FieldKind::ScalarArray(ScalarArrayKind::Float32Array),
+            12 => FieldKind::ScalarArray(ScalarArrayKind::StringArray),
+            18 => FieldKind::ScalarArray(ScalarArrayKind::NillableBoolArray),
+            19 => FieldKind::ScalarArray(ScalarArrayKind::NillableIntArray),
+            20 => FieldKind::ScalarArray(ScalarArrayKind::NillableFloat64Array),
+            21 => FieldKind::ScalarArray(ScalarArrayKind::NillableStringArray),
+            22 => FieldKind::ScalarArray(ScalarArrayKind::NillableFloat32Array),
+            30 => FieldKind::ScalarArray(ScalarArrayKind::DateTimeArray),
+            31 => FieldKind::ScalarArray(ScalarArrayKind::NillableDateTimeArray),
+            // Scalar kinds
+            0 => FieldKind::Scalar(ScalarKind::None),
+            1 => FieldKind::Scalar(ScalarKind::DocID),
+            2 => FieldKind::Scalar(ScalarKind::Bool),
+            4 => FieldKind::Scalar(ScalarKind::Int),
+            6 => FieldKind::Scalar(ScalarKind::Float64),
+            8 => FieldKind::Scalar(ScalarKind::Float32),
+            10 => FieldKind::Scalar(ScalarKind::DateTime),
+            11 => FieldKind::Scalar(ScalarKind::String),
+            13 => FieldKind::Scalar(ScalarKind::Blob),
+            14 => FieldKind::Scalar(ScalarKind::Json),
+            15 => FieldKind::Scalar(ScalarKind::NonNillableBool),
+            23 => FieldKind::Scalar(ScalarKind::NonNillableInt),
+            24 => FieldKind::Scalar(ScalarKind::NonNillableFloat64),
+            25 => FieldKind::Scalar(ScalarKind::NonNillableFloat32),
+            26 => FieldKind::Scalar(ScalarKind::NonNillableString),
+            27 => FieldKind::Scalar(ScalarKind::NonNillableDateTime),
+            28 => FieldKind::Scalar(ScalarKind::NonNillableBlob),
+            29 => FieldKind::Scalar(ScalarKind::NonNillableJson),
+            _ => FieldKind::Scalar(ScalarKind::None),
+        }
+    }
+
     // Convenience constructors for common scalar types
     pub fn doc_id() -> Self {
         FieldKind::Scalar(ScalarKind::DocID)
@@ -214,6 +314,9 @@ impl FieldKind {
     pub fn string_array() -> Self {
         FieldKind::ScalarArray(ScalarArrayKind::StringArray)
     }
+    pub fn datetime_array() -> Self {
+        FieldKind::ScalarArray(ScalarArrayKind::DateTimeArray)
+    }
 
     // Nillable array constructors
     pub fn nillable_bool_array() -> Self {
@@ -230,6 +333,9 @@ impl FieldKind {
     }
     pub fn nillable_string_array() -> Self {
         FieldKind::ScalarArray(ScalarArrayKind::NillableStringArray)
+    }
+    pub fn nillable_datetime_array() -> Self {
+        FieldKind::ScalarArray(ScalarArrayKind::NillableDateTimeArray)
     }
 
     /// Create a relation to another collection
@@ -302,25 +408,24 @@ impl FieldKind {
     /// string `"30"` against an `Int` field), which would otherwise silently
     /// select zero documents.
     pub fn accepts_filter_value(&self, value: &serde_json::Value) -> bool {
-        match self {
-            FieldKind::Scalar(ScalarKind::String)
-            | FieldKind::Scalar(ScalarKind::DateTime)
-            | FieldKind::Scalar(ScalarKind::Blob)
-            | FieldKind::Scalar(ScalarKind::DocID) => value.is_string(),
-            FieldKind::Scalar(ScalarKind::Bool) => value.is_boolean(),
-            FieldKind::Scalar(ScalarKind::Int) => value.is_i64() || value.is_u64(),
-            FieldKind::Scalar(ScalarKind::Float64) | FieldKind::Scalar(ScalarKind::Float32) => {
-                value.is_number()
-            }
-            FieldKind::Scalar(ScalarKind::Json) => true,
+        match self.as_scalar().map(ScalarKind::base_kind) {
+            Some(
+                ScalarKind::String | ScalarKind::DateTime | ScalarKind::Blob | ScalarKind::DocID,
+            ) => value.is_string(),
+            Some(ScalarKind::Bool) => value.is_boolean(),
+            Some(ScalarKind::Int) => value.is_i64() || value.is_u64(),
+            Some(ScalarKind::Float64 | ScalarKind::Float32) => value.is_number(),
+            Some(ScalarKind::Json) => true,
             _ => false,
         }
     }
 
     /// Returns true if values of this kind can be nil/null.
-    /// In Go DefraDB, ALL types return true for IsNillable().
     pub fn is_nillable(&self) -> bool {
-        true
+        match self {
+            FieldKind::Scalar(kind) => kind.is_nillable(),
+            _ => true,
+        }
     }
 
     /// Returns true if this array type has nillable elements.
@@ -376,21 +481,35 @@ impl FieldKind {
                 ScalarKind::None => "String",
                 ScalarKind::DocID => "ID",
                 ScalarKind::Bool => "Boolean",
+                ScalarKind::NonNillableBool => "Boolean!",
                 ScalarKind::Int => "Int",
-                ScalarKind::Float64 | ScalarKind::Float32 => "Float",
+                ScalarKind::NonNillableInt => "Int!",
+                ScalarKind::Float64 => "Float64",
+                ScalarKind::Float32 => "Float32",
+                ScalarKind::NonNillableFloat64 => "Float64!",
+                ScalarKind::NonNillableFloat32 => "Float32!",
                 ScalarKind::DateTime => "DateTime",
+                ScalarKind::NonNillableDateTime => "DateTime!",
                 ScalarKind::String => "String",
+                ScalarKind::NonNillableString => "String!",
                 ScalarKind::Blob => "Blob",
+                ScalarKind::NonNillableBlob => "Blob!",
                 ScalarKind::Json => "JSON",
+                ScalarKind::NonNillableJson => "JSON!",
             },
             FieldKind::ScalarArray(a) => match a {
-                ScalarArrayKind::BoolArray | ScalarArrayKind::NillableBoolArray => "[Boolean]",
-                ScalarArrayKind::IntArray | ScalarArrayKind::NillableIntArray => "[Int]",
-                ScalarArrayKind::Float64Array
-                | ScalarArrayKind::Float32Array
-                | ScalarArrayKind::NillableFloat64Array
-                | ScalarArrayKind::NillableFloat32Array => "[Float]",
-                ScalarArrayKind::StringArray | ScalarArrayKind::NillableStringArray => "[String]",
+                ScalarArrayKind::BoolArray => "[Boolean!]",
+                ScalarArrayKind::NillableBoolArray => "[Boolean]",
+                ScalarArrayKind::IntArray => "[Int!]",
+                ScalarArrayKind::NillableIntArray => "[Int]",
+                ScalarArrayKind::Float64Array => "[Float64!]",
+                ScalarArrayKind::NillableFloat64Array => "[Float64]",
+                ScalarArrayKind::Float32Array => "[Float32!]",
+                ScalarArrayKind::NillableFloat32Array => "[Float32]",
+                ScalarArrayKind::StringArray => "[String!]",
+                ScalarArrayKind::NillableStringArray => "[String]",
+                ScalarArrayKind::DateTimeArray => "[DateTime!]",
+                ScalarArrayKind::NillableDateTimeArray => "[DateTime]",
             },
             FieldKind::Relation { is_array, .. } => {
                 if *is_array {
@@ -482,7 +601,7 @@ impl<'de> Deserialize<'de> for FieldKind {
                 let kind = n.as_u64().ok_or_else(|| {
                     de::Error::custom("FieldKind integer must be a positive number")
                 })? as u8;
-                Ok(int_to_field_kind(kind))
+                Ok(FieldKind::from_numeric_kind(kind))
             }
 
             // String → Use Go's string mapping or NamedKind
@@ -545,49 +664,27 @@ impl<'de> Deserialize<'de> for FieldKind {
     }
 }
 
-/// Convert an integer to a FieldKind (matches Go's IntToFieldKind)
-fn int_to_field_kind(kind: u8) -> FieldKind {
-    // Array kinds
-    match kind {
-        3 => FieldKind::ScalarArray(ScalarArrayKind::BoolArray),
-        5 => FieldKind::ScalarArray(ScalarArrayKind::IntArray),
-        7 => FieldKind::ScalarArray(ScalarArrayKind::Float64Array),
-        9 => FieldKind::ScalarArray(ScalarArrayKind::Float32Array),
-        12 => FieldKind::ScalarArray(ScalarArrayKind::StringArray),
-        18 => FieldKind::ScalarArray(ScalarArrayKind::NillableBoolArray),
-        19 => FieldKind::ScalarArray(ScalarArrayKind::NillableIntArray),
-        20 => FieldKind::ScalarArray(ScalarArrayKind::NillableFloat64Array),
-        21 => FieldKind::ScalarArray(ScalarArrayKind::NillableStringArray),
-        22 => FieldKind::ScalarArray(ScalarArrayKind::NillableFloat32Array),
-        // Scalar kinds
-        0 => FieldKind::Scalar(ScalarKind::None),
-        1 => FieldKind::Scalar(ScalarKind::DocID),
-        2 => FieldKind::Scalar(ScalarKind::Bool),
-        4 => FieldKind::Scalar(ScalarKind::Int),
-        6 => FieldKind::Scalar(ScalarKind::Float64),
-        8 => FieldKind::Scalar(ScalarKind::Float32),
-        10 => FieldKind::Scalar(ScalarKind::DateTime),
-        11 => FieldKind::Scalar(ScalarKind::String),
-        13 => FieldKind::Scalar(ScalarKind::Blob),
-        14 => FieldKind::Scalar(ScalarKind::Json),
-        // Unknown → treat as scalar
-        _ => FieldKind::Scalar(ScalarKind::None),
-    }
-}
-
 /// Parse a string to FieldKind (matches Go's FieldKindStringToEnumMapping)
 fn parse_string_kind(s: &str) -> Result<FieldKind, String> {
     // Go's FieldKindStringToEnumMapping
     match s {
         "ID" => Ok(FieldKind::Scalar(ScalarKind::DocID)),
         "Boolean" => Ok(FieldKind::Scalar(ScalarKind::Bool)),
+        "Boolean!" => Ok(FieldKind::Scalar(ScalarKind::NonNillableBool)),
         "Int" => Ok(FieldKind::Scalar(ScalarKind::Int)),
+        "Int!" => Ok(FieldKind::Scalar(ScalarKind::NonNillableInt)),
         "DateTime" => Ok(FieldKind::Scalar(ScalarKind::DateTime)),
+        "DateTime!" => Ok(FieldKind::Scalar(ScalarKind::NonNillableDateTime)),
         "Float" | "Float64" => Ok(FieldKind::Scalar(ScalarKind::Float64)),
+        "Float64!" => Ok(FieldKind::Scalar(ScalarKind::NonNillableFloat64)),
         "Float32" => Ok(FieldKind::Scalar(ScalarKind::Float32)),
+        "Float32!" => Ok(FieldKind::Scalar(ScalarKind::NonNillableFloat32)),
         "String" => Ok(FieldKind::Scalar(ScalarKind::String)),
+        "String!" => Ok(FieldKind::Scalar(ScalarKind::NonNillableString)),
         "Blob" => Ok(FieldKind::Scalar(ScalarKind::Blob)),
+        "Blob!" => Ok(FieldKind::Scalar(ScalarKind::NonNillableBlob)),
         "JSON" => Ok(FieldKind::Scalar(ScalarKind::Json)),
+        "JSON!" => Ok(FieldKind::Scalar(ScalarKind::NonNillableJson)),
         // Arrays
         "[Boolean]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::NillableBoolArray)),
         "[Boolean!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::BoolArray)),
@@ -603,6 +700,10 @@ fn parse_string_kind(s: &str) -> Result<FieldKind, String> {
         "[Float32!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::Float32Array)),
         "[String]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::NillableStringArray)),
         "[String!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::StringArray)),
+        "[DateTime]" => Ok(FieldKind::ScalarArray(
+            ScalarArrayKind::NillableDateTimeArray,
+        )),
+        "[DateTime!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::DateTimeArray)),
         // Self reference (Go uses "Self" from request.SelfTypeName)
         "Self" => Ok(FieldKind::SelfRef {
             relative_id: String::new(),

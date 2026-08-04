@@ -458,6 +458,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         &self,
         cid: &str,
         expected_doc_id: Option<&str>,
+        _caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Document> {
         let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
         versioned_fetcher
@@ -470,6 +471,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         &self,
         cid: &str,
         expected_doc_id: Option<&str>,
+        _caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Vec<Document>> {
         let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
         versioned_fetcher

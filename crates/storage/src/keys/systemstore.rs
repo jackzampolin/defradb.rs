@@ -53,6 +53,10 @@ impl ActionStatusKey {
         format!("{ACTION_STATUS_PREFIX}/").into_bytes()
     }
 
+    pub fn collection_prefix(collection_id: &str) -> Vec<u8> {
+        format!("{ACTION_STATUS_PREFIX}/{collection_id}/").into_bytes()
+    }
+
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         let value = std::str::from_utf8(bytes)
             .ok()?

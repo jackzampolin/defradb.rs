@@ -200,10 +200,12 @@ fn typed_value_to_graphql(
     value: &Value,
     type_hint: Option<&ScalarKind>,
 ) -> Result<String, PgCompatError> {
-    let is_string_field = matches!(
-        type_hint,
-        Some(ScalarKind::String | ScalarKind::DocID | ScalarKind::None | ScalarKind::DateTime)
-    );
+    let is_string_field = type_hint.is_some_and(|kind| {
+        matches!(
+            kind.base_kind(),
+            ScalarKind::String | ScalarKind::DocID | ScalarKind::None | ScalarKind::DateTime
+        )
+    });
 
     match value {
         Value::Number(n, _) if is_string_field => Ok(format!("\"{}\"", n)),

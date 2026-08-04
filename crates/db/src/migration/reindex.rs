@@ -224,11 +224,15 @@ impl<S: Store> DB<S> {
                 migrated_docs.push((doc_short_id, migrated));
             }
 
-            if !collection.get_indexes().is_empty() {
-                let index_manager = IndexManager::from_collection(short_id, collection.schema())
-                    .map_err(|e| Error::Other(format!("failed to create index manager: {}", e)))?;
+            if !collection.write_indexes().is_empty() {
+                let index_manager = IndexManager::from_indexes(
+                    short_id,
+                    collection.schema(),
+                    collection.write_indexes(),
+                )
+                .map_err(|e| Error::Other(format!("failed to create index manager: {}", e)))?;
 
-                for index_desc in collection.get_indexes() {
+                for index_desc in collection.write_indexes() {
                     if let Some(index) = index_manager.get_index(&index_desc.name) {
                         index
                             .remove_all(&mut datastore.clone())

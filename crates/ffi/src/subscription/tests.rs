@@ -1,7 +1,9 @@
 use std::ffi::CString;
 use std::ptr;
 
-use super::{close_subscription, create_subscription, poll_subscription};
+use super::{
+    close_subscription, create_merge_complete_subscription, create_subscription, poll_subscription,
+};
 use crate::node::{new_node, node_close};
 use crate::types::NodeInitOptions;
 
@@ -47,14 +49,15 @@ fn test_subscription_receives_mutation_event() {
 
     assert!(crate::runtime::init_runtime());
 
-    // Create node
+    // Create a P2P node so mutations use the broadcast mutator.
     let options = NodeInitOptions::default();
-    let result = new_node(options);
+    let listen_addr = CString::new("/ip4/127.0.0.1/tcp/0").unwrap();
+    let result = unsafe { crate::p2p::new_node_with_p2p(options, listen_addr.as_ptr()) };
     assert_eq!(result.status, 0);
     let node = result.node_ptr;
 
     // Add schema
-    let sdl = CString::new("type Book { title: String }").unwrap();
+    let sdl = CString::new("type Book @branchable { title: String }").unwrap();
     let result = unsafe { crate::schema::add_schema(node, std::ptr::null(), sdl.as_ptr()) };
     assert_eq!(result.status, 0);
     if !result.value.is_null() {
@@ -84,17 +87,17 @@ fn test_subscription_receives_mutation_event() {
         unsafe { crate::types::defra_free_string(result.value) };
     }
 
-    // Poll should return the event
-    let result = poll_subscription(sub_handle);
-    // Event may or may not be available depending on timing
-    // status 0 = event, 2 = no event yet, both are valid
-    assert!(
-        result.status == 0 || result.status == 2,
-        "poll should succeed"
-    );
-    if result.status == 0 && !result.value.is_null() {
+    // Branchable mutations publish document and collection update blocks.
+    for _ in 0..2 {
+        let result = poll_subscription(sub_handle);
+        assert_eq!(result.status, 0);
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
-        assert!(value.contains("update"), "event should be an update");
+        let event: serde_json::Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(event["type"], "update");
+        assert!(
+            !event["block"].as_str().unwrap().is_empty(),
+            "event should include block bytes"
+        );
         unsafe { crate::types::defra_free_string(result.value) };
     }
 
@@ -112,6 +115,42 @@ fn test_subscription_invalid_node() {
     assert_eq!(result.status, 1, "should fail with invalid node");
     assert!(!result.error.is_null());
     unsafe { crate::types::defra_free_string(result.error) };
+}
+
+#[test]
+fn test_event_subscription_receives_action_execution() {
+    assert!(crate::runtime::init_runtime());
+
+    let result = new_node(NodeInitOptions::default());
+    assert_eq!(result.status, 0);
+    let node = result.node_ptr;
+
+    let sdl = CString::new("type Book { title: String }").unwrap();
+    let result = unsafe { crate::schema::add_schema(node, ptr::null(), sdl.as_ptr()) };
+    assert_eq!(result.status, 0);
+    unsafe { crate::types::defra_free_string(result.value) };
+
+    let result = create_merge_complete_subscription(node);
+    assert_eq!(result.status, 0);
+    let sub_handle = result.subscription_handle;
+
+    let name = CString::new("Book").unwrap();
+    let result =
+        unsafe { crate::collection::truncate_collection(node, ptr::null(), name.as_ptr()) };
+    assert_eq!(result.status, 0);
+    unsafe { crate::types::defra_free_string(result.value) };
+
+    let result = poll_subscription(sub_handle);
+    assert_eq!(result.status, 0);
+    let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+    let event: serde_json::Value = serde_json::from_str(&value).unwrap();
+    assert_eq!(event["type"], "action_execution");
+    assert_eq!(event["action_execution"]["Action"], 1);
+    assert_eq!(event["action_execution"]["Status"], 1);
+    unsafe { crate::types::defra_free_string(result.value) };
+
+    close_subscription(sub_handle);
+    node_close(node);
 }
 
 #[test]

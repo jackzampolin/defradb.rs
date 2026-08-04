@@ -117,6 +117,9 @@ pub enum NodePermission {
     /// Connect to a peer (used by P2P connect and list endpoints)
     P2pPeerConnect,
 
+    /// Disconnect from a peer
+    P2pPeerDisconnect,
+
     /// List active peers (used by GET /api/v0/p2p/active-peers)
     P2pPeerActive,
 
@@ -240,6 +243,7 @@ impl NodePermission {
             // P2P operations
             Self::P2pPeerInfo => "get-p2p-peer-info",
             Self::P2pPeerConnect => "connect-p2p-peer",
+            Self::P2pPeerDisconnect => "disconnect-p2p-peer",
             Self::P2pPeerActive => "get-p2p-active-peers",
             Self::P2pReplicatorAdd => "add-p2p-replicator",
             Self::P2pReplicatorDelete => "delete-p2p-replicator",
@@ -312,6 +316,7 @@ impl NodePermission {
             // P2P
             Self::P2pPeerInfo,
             Self::P2pPeerConnect,
+            Self::P2pPeerDisconnect,
             Self::P2pPeerActive,
             Self::P2pReplicatorAdd,
             Self::P2pReplicatorDelete,
@@ -379,6 +384,7 @@ impl NodePermission {
             // P2P
             "get-p2p-peer-info" => Self::P2pPeerInfo,
             "connect-p2p-peer" => Self::P2pPeerConnect,
+            "disconnect-p2p-peer" => Self::P2pPeerDisconnect,
             "get-p2p-active-peers" => Self::P2pPeerActive,
             "add-p2p-replicator" => Self::P2pReplicatorAdd,
             "delete-p2p-replicator" => Self::P2pReplicatorDelete,
@@ -430,7 +436,7 @@ mod tests {
 
     #[test]
     fn test_all_permissions_count() {
-        assert_eq!(NodePermission::all().len(), 50);
+        assert_eq!(NodePermission::all().len(), 51);
     }
 
     #[test]

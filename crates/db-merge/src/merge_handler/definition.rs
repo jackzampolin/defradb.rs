@@ -118,7 +118,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         // Regular collections are materialized.
         if let Some(ref query_bytes) = payload.query_select {
             schema.is_materialized = false;
-            if let Ok(query_value) = serde_cbor::from_slice::<serde_json::Value>(query_bytes) {
+            if let Ok(query_value) = serde_json::from_slice::<serde_json::Value>(query_bytes) {
                 let mut source = QuerySource::new(query_value);
                 if let Some(ref transform_cid) = payload.query_transform {
                     source.transform = Some(transform_cid.to_string());
@@ -127,7 +127,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             } else {
                 tracing::warn!(
                     cid = %cid,
-                    "Failed to decode query_select CBOR bytes for view collection"
+                    "Failed to decode query_select JSON bytes for view collection"
                 );
             }
         } else {
@@ -214,21 +214,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 is_array: false,
             }
         } else if let Some(scalar_kind_u8) = payload.scalar_kind {
-            // Scalar field - convert u8 to ScalarKind
-            let scalar_kind = match scalar_kind_u8 {
-                0 => ScalarKind::None,
-                1 => ScalarKind::DocID,
-                2 => ScalarKind::Bool,
-                4 => ScalarKind::Int,
-                6 => ScalarKind::Float64,
-                8 => ScalarKind::Float32,
-                10 => ScalarKind::DateTime,
-                11 => ScalarKind::String,
-                13 => ScalarKind::Blob,
-                14 => ScalarKind::Json,
-                _ => ScalarKind::None,
-            };
-            FieldKind::Scalar(scalar_kind)
+            FieldKind::from_numeric_kind(scalar_kind_u8)
         } else {
             // Default to None scalar
             FieldKind::Scalar(ScalarKind::None)
