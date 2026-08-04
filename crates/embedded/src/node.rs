@@ -181,13 +181,10 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     ///    gracefully and aborts the replication/merge background tasks.
     ///    Addresses the `Endpoint dropped without calling Endpoint::close`
     ///    iroh warning downstream embedders have been hitting.
-    /// 2. **Database** — close-guards future transactions (new `begin_txn`
+    /// 2. **Background tasks** — aborts and awaits node-owned tasks.
+    /// 3. **Database** — close-guards future transactions (new `begin_txn`
     ///    calls will return `Error::DatabaseClosed`) and closes the
     ///    underlying store.
-    ///
-    /// The background downsample task is aborted by the `Drop` impl on
-    /// `BackgroundTasks` when the node itself is dropped, so no explicit
-    /// step is needed here.
     ///
     /// This method is **idempotent** — the first caller performs the
     /// work, concurrent callers wait for that teardown to finish and
@@ -220,7 +217,10 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
             p2p.shutdown().await;
         }
 
-        // 2. Database — sets the is_closed flag and closes the store.
+        // 2. Background tasks — await cancellation so they release store handles.
+        self.background_tasks.shutdown().await;
+
+        // 3. Database — sets the is_closed flag and closes the store.
         //    Log but don't propagate errors: shutdown should complete
         //    even if the store close returns an I/O error, so embedders
         //    can't be blocked from exiting by a closing store.
