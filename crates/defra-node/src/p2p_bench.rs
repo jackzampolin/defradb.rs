@@ -34,6 +34,18 @@ const DOC_COUNTS: &[usize] = &[1, 50, 500];
 /// once that walk is bounded or made iterative.
 const CATCH_UP_DEPTHS: &[usize] = &[10, 100, 500];
 
+/// Document-set sizes [`bench_pull_by_document_count`] is run against.
+///
+/// These mirror the Go `Sync_Pull/docs=1` and `Sync_Pull/docs=50` benchmarks so the two
+/// sets of rows can be read side by side.
+const PULL_DOC_COUNTS: &[usize] = &[1, 50];
+
+/// How long to keep polling the receiving node after `sync_documents` has returned.
+///
+/// The call is supposed to have waited for the documents itself, so anything that only
+/// shows up during this window arrived after the call claimed to be finished.
+const PULL_SETTLE_WINDOW: Duration = Duration::from_secs(5);
+
 /// How long to wait for a node to converge before giving up.
 const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -191,6 +203,37 @@ async fn connect_and_replicate(sender: &EmbeddedNode, receiver: &EmbeddedNode) {
         )
         .await
         .expect("set replicator from sender to receiver");
+}
+
+/// Connects `receiver` to `sender` without configuring any replicator.
+///
+/// [`connect_and_replicate`] cannot be used for the pull benchmark: the replicator it
+/// installs backfills documents that already exist on the sender - that is exactly what
+/// [`measure_catch_up`] relies on - which would deliver the documents before
+/// `sync_documents` is ever called. A bare connection is also all the serving side needs,
+/// since it authorizes DocSync heads for any connected peer.
+async fn connect_only(sender: &EmbeddedNode, receiver: &EmbeddedNode) {
+    let sender_addr = listen_addr(sender).await;
+
+    let sender_p2p = sender.p2p().expect("sender P2P should be enabled");
+    let receiver_p2p = receiver.p2p().expect("receiver P2P should be enabled");
+
+    receiver_p2p
+        .connect_peer(&sender_addr)
+        .await
+        .expect("connect receiver to sender");
+    await_connected_peer(receiver).await;
+    await_connected_peer(sender).await;
+
+    let collections = vec!["User".to_string()];
+    sender_p2p
+        .add_collections(collections.clone())
+        .await
+        .expect("subscribe sender to User");
+    receiver_p2p
+        .add_collections(collections)
+        .await
+        .expect("subscribe receiver to User");
 }
 
 /// Returns the number of `User` documents currently readable on the node.
@@ -384,5 +427,125 @@ async fn await_user_age(node: &EmbeddedNode, expected: i64) {
             "receiving node reached age {age:?} rather than {expected} within {CONVERGENCE_TIMEOUT:?}"
         );
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// The outcome of one `sync_documents` measurement.
+struct PullOutcome {
+    /// Wall-clock duration of the `sync_documents` call itself.
+    call: Duration,
+
+    /// Whether `sync_documents` returned `Ok`.
+    ///
+    /// The Iroh implementation ends in an unconditional `Ok(())` after its timeouts
+    /// expire, so this is recorded separately from what actually arrived.
+    returned_ok: bool,
+
+    /// Documents readable on the receiving node the moment `sync_documents` returned.
+    arrived: usize,
+
+    /// Documents readable on the receiving node after a further
+    /// [`PULL_SETTLE_WINDOW`] of polling.
+    ///
+    /// Anything beyond [`PullOutcome::arrived`] landed after the call had already
+    /// reported completion.
+    settled: usize,
+}
+
+/// Pulls `doc_count` documents that the receiving node has never replicated.
+///
+/// The sender writes the documents before the two nodes are connected, and no replicator
+/// is configured in either direction, so the only thing that can move them is the
+/// receiver's own `sync_documents` call.
+async fn measure_pull(doc_count: usize) -> PullOutcome {
+    let sender = build_bench_node().await;
+
+    let mut doc_ids = Vec::with_capacity(doc_count);
+    for i in 0..doc_count {
+        let response = sender
+            .execute(&format!(
+                r#"mutation {{ add_User(input: {{name: "User-{i}", age: {}}}) {{ _docID }} }}"#,
+                i % 100
+            ))
+            .await;
+        assert!(
+            response.errors.is_empty(),
+            "create mutation returned errors: {:?}",
+            response.errors
+        );
+
+        doc_ids.push(
+            response
+                .data
+                .as_ref()
+                .and_then(|data| data.get("add_User"))
+                .and_then(|users| users.as_array())
+                .and_then(|users| users.first())
+                .and_then(|user| user.get("_docID"))
+                .and_then(|id| id.as_str())
+                .expect("created document should have a _docID")
+                .to_string(),
+        );
+    }
+
+    // Built after the writes for the same reason as in `measure_catch_up`: an idle node
+    // left waiting through a long write phase eventually becomes undialable.
+    let receiver = build_bench_node().await;
+    connect_only(&sender, &receiver).await;
+    assert_eq!(
+        user_count(&receiver).await,
+        0,
+        "receiving node must not hold any documents before the pull"
+    );
+
+    let start = Instant::now();
+    let result = receiver
+        .p2p()
+        .expect("receiver P2P should be enabled")
+        .sync_documents("User", doc_ids)
+        .await;
+    let call = start.elapsed();
+
+    let arrived = user_count(&receiver).await;
+
+    let settle_deadline = Instant::now() + PULL_SETTLE_WINDOW;
+    let mut settled = arrived;
+    while settled < doc_count && Instant::now() < settle_deadline {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        settled = user_count(&receiver).await;
+    }
+
+    PullOutcome {
+        call,
+        returned_ok: result.is_ok(),
+        arrived,
+        settled,
+    }
+}
+
+/// Measures how long `sync_documents` takes to pull documents the receiving node has
+/// never seen, across [`PULL_DOC_COUNTS`].
+///
+/// The duration is only half the result. `sync_documents` returns `P2PResult<()>` but its
+/// Iroh implementation ends in an unconditional `Ok(())` once its timeouts expire, so the
+/// document count on the receiving node - not the return value - is what says whether the
+/// pull worked.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "benchmark: spins up two networked nodes per document count"]
+async fn bench_pull_by_document_count() {
+    println!("document pull via sync_documents (poll resolution {POLL_INTERVAL:?})");
+    for &doc_count in PULL_DOC_COUNTS {
+        let outcome = measure_pull(doc_count).await;
+        let returned = if outcome.returned_ok { "Ok" } else { "Err" };
+        let honest = if outcome.returned_ok && outcome.arrived < doc_count {
+            "  RETURNED Ok WITH DOCUMENTS MISSING"
+        } else {
+            ""
+        };
+
+        println!(
+            "docs={doc_count:<4} call={:>9.2?}  returned={returned:<3}  arrived={:>4}/{doc_count:<4} settled={:>4}/{doc_count:<4}{honest}",
+            outcome.call, outcome.arrived, outcome.settled
+        );
     }
 }
