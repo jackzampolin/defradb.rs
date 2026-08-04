@@ -8,6 +8,8 @@
 //! bare CBOR on gossipsub topic "encryption" and matches replies by
 //! cryptographic compatibility (the requester's ephemeral pubkey is
 //! wrapped into each ECIES reply block).
+//! Rust may add an optional signed replay capability; older Go and Rust
+//! decoders ignore that unknown map field.
 
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +74,14 @@ pub struct FetchEncryptionKeyRequest {
     /// responder to ECIES-wrap each reply block.
     #[serde(rename = "EphemeralPublicKey", with = "serde_bytes")]
     pub ephemeral_public_key: Vec<u8>,
+
+    /// Signed explicit-replay capability used only for owner-authorized replay.
+    #[serde(
+        rename = "ExplicitReplayCapability",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub explicit_replay_capability: Option<String>,
 }
 
 /// KMS fetch reply.
@@ -104,6 +114,7 @@ mod tests {
             identity: vec![0xaa; 32],
             links: vec![vec![0x01; 36], vec![0x02; 36]],
             ephemeral_public_key: vec![0xee; 32],
+            explicit_replay_capability: Some("signed-proof".into()),
         };
         let bytes = serde_cbor::to_vec(&req).unwrap();
         let parsed: FetchEncryptionKeyRequest = serde_cbor::from_slice(&bytes).unwrap();
@@ -128,6 +139,7 @@ mod tests {
             identity: vec![1],
             links: vec![vec![2]],
             ephemeral_public_key: vec![3],
+            explicit_replay_capability: None,
         };
         let bytes = serde_cbor::to_vec(&req).unwrap();
         let val: serde_cbor::Value = serde_cbor::from_slice(&bytes).unwrap();
@@ -145,6 +157,7 @@ mod tests {
         assert!(keys.contains(&"Identity".to_string()));
         assert!(keys.contains(&"Links".to_string()));
         assert!(keys.contains(&"EphemeralPublicKey".to_string()));
+        assert!(!keys.contains(&"ExplicitReplayCapability".to_string()));
     }
 
     #[test]
@@ -155,6 +168,7 @@ mod tests {
             identity: vec![],
             links: vec![vec![0x01, 0x02]],
             ephemeral_public_key: vec![],
+            explicit_replay_capability: None,
         };
         let bytes = serde_cbor::to_vec(&req).unwrap();
         // Find the Links field's value in the encoded bytes. We just check that

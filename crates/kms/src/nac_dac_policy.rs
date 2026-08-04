@@ -52,6 +52,46 @@ impl NacDacPolicy {
     pub fn set_node_acp(&self, nac: Arc<dyn NodeAcpRead>) {
         let _ = self.node_acp.set(nac);
     }
+
+    async fn check_document_release(
+        &self,
+        actor: Option<&Did>,
+        doc_id: &str,
+        required_collection_id: Option<&str>,
+    ) -> Result<PolicyDecision> {
+        let Some(info) = self.doc_lookup.collection_for_doc(doc_id).await? else {
+            return Ok(if required_collection_id.is_some() {
+                PolicyDecision::Deny
+            } else {
+                PolicyDecision::Allow
+            });
+        };
+        if required_collection_id.is_some_and(|id| id != info.collection_id) {
+            return Ok(PolicyDecision::Deny);
+        }
+
+        let actor_id: acp::Identity = actor.into();
+        let checker = acp::read_access::DirectChecker {
+            acp: self.doc_acp.as_ref(),
+            identity: &actor_id,
+            node_did: None,
+        };
+        let allowed = acp::read_access::check_doc_read_access(
+            &checker,
+            &info.policy_id,
+            &info.resource_name,
+            &info.collection_id,
+            info.is_branchable,
+            doc_id,
+        )
+        .await
+        .map_err(classify_acp_error)?;
+        Ok(if allowed {
+            PolicyDecision::Allow
+        } else {
+            PolicyDecision::Deny
+        })
+    }
 }
 
 /// Map an `acp::Error` to either `AccessDenied` (the backend actively
@@ -85,33 +125,24 @@ impl AccessPolicy for NacDacPolicy {
                 // no per-document access gate, so the DEK is freely releasable —
                 // matching the legacy decrypt path, which reads the key from the
                 // Encryption block with no policy check at all.
-                let Some(info) = self.doc_lookup.collection_for_doc(doc_id).await? else {
-                    return Ok(PolicyDecision::Allow);
-                };
-
-                let actor_id: acp::Identity = actor.into();
-                let checker = acp::read_access::DirectChecker {
-                    acp: self.doc_acp.as_ref(),
-                    identity: &actor_id,
-                    node_did: None,
-                };
-                let allowed = acp::read_access::check_doc_read_access(
-                    &checker,
-                    &info.policy_id,
-                    &info.resource_name,
-                    &info.collection_id,
-                    info.is_branchable,
-                    doc_id,
-                )
-                .await
-                .map_err(classify_acp_error)?;
-                Ok(if allowed {
-                    PolicyDecision::Allow
-                } else {
-                    PolicyDecision::Deny
-                })
+                self.check_document_release(actor, doc_id, None).await
             }
             KeyScope::Collection { .. } => self.check_node_release(actor, scope).await,
+        }
+    }
+
+    async fn check_delegated_release(
+        &self,
+        actor: &Did,
+        scope: &KeyScope,
+        collection_id: &str,
+    ) -> Result<PolicyDecision> {
+        match scope {
+            KeyScope::Document { doc_id, .. } => {
+                self.check_document_release(Some(actor), doc_id, Some(collection_id))
+                    .await
+            }
+            KeyScope::Collection { .. } => Ok(PolicyDecision::Deny),
         }
     }
 

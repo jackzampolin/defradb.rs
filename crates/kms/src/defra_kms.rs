@@ -127,6 +127,7 @@ impl DefraKms {
         &self,
         actor: Option<&Did>,
         cid: &EncryptionCid,
+        delegated_actor: Option<(&Did, &str)>,
     ) -> Result<LocalRelease> {
         let doc_ids = self.doc_resolver.doc_ids_for_block(cid).await?;
         if doc_ids.is_empty() {
@@ -143,6 +144,16 @@ impl DefraKms {
             ) {
                 return Ok(LocalRelease::Allow);
             }
+            if let Some((delegate, collection_id)) = delegated_actor {
+                if matches!(
+                    self.policy
+                        .check_delegated_release(delegate, &scope, collection_id)
+                        .await?,
+                    PolicyDecision::Allow
+                ) {
+                    return Ok(LocalRelease::Allow);
+                }
+            }
         }
         Ok(LocalRelease::Deny)
     }
@@ -150,9 +161,15 @@ impl DefraKms {
     /// Serve-side release decision: the owner node has recorded ownership,
     /// so unknown ownership is treated as a denial (never leak a key we
     /// cannot attribute).
-    async fn may_serve(&self, actor: Option<&Did>, cid: &EncryptionCid) -> Result<bool> {
+    async fn may_serve(
+        &self,
+        actor: Option<&Did>,
+        cid: &EncryptionCid,
+        delegated_actor: Option<(&Did, &str)>,
+    ) -> Result<bool> {
         Ok(matches!(
-            self.local_release_decision(actor, cid).await?,
+            self.local_release_decision(actor, cid, delegated_actor)
+                .await?,
             LocalRelease::Allow
         ))
     }
@@ -205,7 +222,7 @@ impl KmsService for DefraKms {
                         }
                     };
                     match self
-                        .local_release_decision(user_actor.as_ref(), &cid)
+                        .local_release_decision(user_actor.as_ref(), &cid, None)
                         .await?
                     {
                         LocalRelease::Allow => {
@@ -247,6 +264,7 @@ impl KmsService for DefraKms {
                     identity: wire_actor.to_string().into_bytes(),
                     links: remote.iter().map(|c| c.to_bytes()).collect(),
                     ephemeral_public_key: pub_bytes,
+                    explicit_replay_capability: ctx.explicit_replay_capability().map(str::to_owned),
                 };
                 let payload =
                     serde_cbor::to_vec(&req).map_err(|e| Error::WireEncode(e.to_string()))?;
@@ -454,6 +472,16 @@ impl KmsService for DefraKms {
             );
         }
         let actor = from.authenticated_did;
+        let delegated_actor =
+            from.explicit_replay_authorization
+                .as_ref()
+                .and_then(|authorization| {
+                    authorization
+                        .authorizer_did
+                        .parse::<Did>()
+                        .ok()
+                        .map(|did| (did, authorization.collection_id.as_str()))
+                });
 
         let mut out_links: Vec<Vec<u8>> = Vec::new();
         let mut out_blocks: Vec<Vec<u8>> = Vec::new();
@@ -472,7 +500,16 @@ impl KmsService for DefraKms {
             let Some(stored) = self.store.get(&cid).await? else {
                 continue;
             };
-            if self.may_serve(actor.as_ref(), &cid).await? {
+            if self
+                .may_serve(
+                    actor.as_ref(),
+                    &cid,
+                    delegated_actor
+                        .as_ref()
+                        .map(|(did, collection_id)| (did, *collection_id)),
+                )
+                .await?
+            {
                 tracing::debug!(cid = %cid, "KMS serve_request: DEK release GRANTED");
             } else {
                 tracing::warn!(cid = %cid, "KMS serve_request: DEK release DENIED");

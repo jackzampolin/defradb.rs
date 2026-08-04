@@ -17,6 +17,8 @@ pub struct PeerIdentity {
     /// DID authenticated by the transport's peer-identity protocol. `None`
     /// means the transport could not establish an authorization principal.
     pub authenticated_did: Option<identity::Did>,
+    /// Replay delegation verified by the transport against this peer.
+    pub explicit_replay_authorization: Option<defra_core::merge::ExplicitReplayAuthorization>,
 }
 
 /// Top-level KMS surface. One concrete implementation (`DefraKms`) lives

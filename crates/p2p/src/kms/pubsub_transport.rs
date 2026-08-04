@@ -205,11 +205,32 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
             .identity_resolver
             .resolve(&PeerId::new(from.clone()))
             .await;
+        let explicit_replay_authorization =
+            req.explicit_replay_capability
+                .as_deref()
+                .and_then(|capability| {
+                    match crate::verify_explicit_replay_capability_for_key_request(
+                        capability,
+                        &self.local_peer_id,
+                        &from,
+                    ) {
+                        Ok(authorization) => Some(authorization),
+                        Err(error) => {
+                            warn!(
+                                peer_id = %from,
+                                error = %error,
+                                "KMS request carried an invalid explicit-replay capability"
+                            );
+                            None
+                        }
+                    }
+                });
         let (reply_bytes, err) = match handler
             .handle(
                 kms::PeerIdentity {
                     peer_id: from.clone(),
                     authenticated_did,
+                    explicit_replay_authorization,
                 },
                 req,
             )
@@ -824,6 +845,7 @@ mod tests {
             identity: b"did:key:zrequester".to_vec(),
             links: vec![first_link.clone(), second_link.clone()],
             ephemeral_public_key: vec![9; 32],
+            explicit_replay_capability: None,
         };
         let payload = serde_cbor::to_vec(&request).unwrap();
         let req = EncodedFetchRequest {
@@ -890,6 +912,7 @@ mod tests {
             identity: b"did:key:zrequester".to_vec(),
             links: vec![requested_link.clone()],
             ephemeral_public_key: vec![9; 32],
+            explicit_replay_capability: None,
         };
         let payload = serde_cbor::to_vec(&request).unwrap();
         let mut rx = kt
@@ -1059,6 +1082,18 @@ mod tests {
         // wait_for_subscriber).
         let transport = RacyTransport::new(0);
         let published = transport.published.clone();
+        let source_peer_id = transport.local_peer_id().to_string();
+        let caller = a_libp2p_peer();
+        let authorizer =
+            identity::RawIdentity::from_private_key(crypto::generate_ed25519().unwrap()).unwrap();
+        let capability = crate::generate_explicit_replay_capability(
+            &authorizer,
+            &source_peer_id,
+            &caller.to_string(),
+            "collection-a",
+            Duration::from_secs(60),
+        )
+        .unwrap();
         let resolved_did: identity::Did = "did:key:zalice".parse().unwrap();
         let seen = Arc::new(Mutex::new(None));
         let kt = PubsubKeyTransport::new(
@@ -1069,11 +1104,11 @@ mod tests {
         .unwrap();
         kt.install_handler(Arc::new(EchoHandler { seen: seen.clone() }));
 
-        let caller = a_libp2p_peer();
         let req = FetchEncryptionKeyRequest {
             identity: b"did:key:zalice".to_vec(),
             links: vec![vec![1]],
             ephemeral_public_key: vec![2; 32],
+            explicit_replay_capability: Some(capability),
         };
         let req_bytes = serde_cbor::to_vec(&req).unwrap();
 
@@ -1093,5 +1128,11 @@ mod tests {
         let from = seen.lock().clone().expect("handler must see peer identity");
         assert_eq!(from.peer_id, caller.to_string());
         assert_eq!(from.authenticated_did, Some(resolved_did));
+        let authorization = from
+            .explicit_replay_authorization
+            .expect("handler must receive verified replay authorization");
+        assert_eq!(authorization.source_peer_id, source_peer_id);
+        assert_eq!(authorization.target_peer_id, caller.to_string());
+        assert_eq!(authorization.collection_id, "collection-a");
     }
 }

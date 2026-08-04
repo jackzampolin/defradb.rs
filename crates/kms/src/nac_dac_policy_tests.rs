@@ -174,6 +174,31 @@ async fn doc_scope_allow_when_user_has_dac_grant() {
 }
 
 #[tokio::test]
+async fn delegated_release_is_bound_to_the_document_collection() {
+    let policy = NacDacPolicy::new(Arc::new(FakeDac { allow: true }), Arc::new(FakeLookup));
+    let scope = KeyScope::Document {
+        doc_id: "d1".into(),
+        field: None,
+    };
+    let actor = did("did:key:zalice");
+
+    assert_eq!(
+        policy
+            .check_delegated_release(&actor, &scope, "col-1")
+            .await
+            .unwrap(),
+        PolicyDecision::Allow
+    );
+    assert_eq!(
+        policy
+            .check_delegated_release(&actor, &scope, "other-collection")
+            .await
+            .unwrap(),
+        PolicyDecision::Deny
+    );
+}
+
+#[tokio::test]
 async fn doc_scope_deny_when_user_lacks_grant() {
     let policy = NacDacPolicy::new(Arc::new(FakeDac { allow: false }), Arc::new(FakeLookup));
     policy.set_node_acp(Arc::new(FakeNac { allow: true }));

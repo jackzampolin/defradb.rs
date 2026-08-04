@@ -378,6 +378,7 @@ async fn validate_explicit_replay_authorization_checks_collection_and_creator() 
         collection_id: "v1".to_string(),
         authorizer_did: did.clone(),
         expires_at: u64::MAX,
+        capability: None,
     };
 
     handler

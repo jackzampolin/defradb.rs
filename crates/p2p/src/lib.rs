@@ -98,6 +98,7 @@ pub use explicit_replay::{
     is_capability_revoked as is_explicit_replay_capability_revoked,
     revoke_capability as revoke_explicit_replay_capability,
     verify_capability as verify_explicit_replay_capability,
+    verify_capability_for_key_request as verify_explicit_replay_capability_for_key_request,
     verify_capability_with_revocations as verify_explicit_replay_capability_with_revocations,
     ExplicitReplayAuthorization, ExplicitReplayCapabilityClaims, ExplicitReplayRevocationRegistry,
     DEFAULT_CAPABILITY_TTL as DEFAULT_EXPLICIT_REPLAY_CAPABILITY_TTL,
