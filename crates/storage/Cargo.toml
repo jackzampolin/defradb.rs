@@ -16,6 +16,7 @@ zeroize = "1.8"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Async runtime
+async-lock.workspace = true
 async-trait.workspace = true
 
 # Serialization

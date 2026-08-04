@@ -7,6 +7,7 @@ use crate::keys::peerstore::{
     ReplicatorKey, ReplicatorRetryCommitKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
 };
 use crate::namespace::{Namespace, NamespacedStore};
+use async_lock::{RwLock, RwLockReadGuardArc};
 use async_trait::async_trait;
 use cid::Cid;
 use std::cmp::Ordering;
@@ -17,7 +18,7 @@ use tracing;
 
 const PUSH_RETRY_TXN_MAX_ATTEMPTS: usize = 4;
 
-type RetryPeerLock = tokio::sync::RwLock<()>;
+type RetryPeerLock = RwLock<()>;
 
 fn retry_peer_lock(peer_id: &str) -> Arc<RetryPeerLock> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Weak<RetryPeerLock>>>> = OnceLock::new();
@@ -37,7 +38,7 @@ fn retry_peer_lock(peer_id: &str) -> Arc<RetryPeerLock> {
 
 /// Keeps a retry pass or failure-recording operation coordinated with forget.
 pub struct ReplicatorRetryGuard {
-    _guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    _guard: RwLockReadGuardArc<()>,
 }
 
 async fn retry_push_txn_conflicts<T, F, Fut>(mut operation: F) -> Result<T>
@@ -125,7 +126,7 @@ impl<S: Store> Peerstore<S> {
         &self,
         peer_id: &str,
     ) -> Result<Option<ReplicatorRetryGuard>> {
-        let guard = retry_peer_lock(peer_id).read_owned().await;
+        let guard = retry_peer_lock(peer_id).read_arc().await;
         if self.has_replicator(peer_id).await? {
             Ok(Some(ReplicatorRetryGuard { _guard: guard }))
         } else {
@@ -135,7 +136,7 @@ impl<S: Store> Peerstore<S> {
 
     /// Delete a replicator and all of its persisted push-retry state.
     pub async fn delete_replicator(&self, peer_id: &str) -> Result<()> {
-        let _retry_guard = retry_peer_lock(peer_id).write_owned().await;
+        let _retry_guard = retry_peer_lock(peer_id).write_arc().await;
         retry_push_txn_conflicts(|| self.delete_replicator_once(peer_id)).await
     }
 

@@ -11523,6 +11523,7 @@ dependencies = [
 name = "storage"
 version = "0.5.0"
 dependencies = [
+ "async-lock",
  "async-trait",
  "bm25",
  "chrono",
