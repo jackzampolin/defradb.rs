@@ -51,9 +51,9 @@ impl Drop for CosmosEventSubscriber {
 async fn run(websocket_url: String, cache: Arc<AccessCache>) {
     let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
     loop {
+        let mut session_duration = None;
         match tokio_tungstenite::connect_async(&websocket_url).await {
             Ok((mut socket, _)) => {
-                reconnect_delay = INITIAL_RECONNECT_DELAY;
                 let subscription = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -72,9 +72,11 @@ async fn run(websocket_url: String, cache: Arc<AccessCache>) {
                         invalidated_entries,
                         "cleared access cache after subscribing; events during the gap are not replayed"
                     );
+                    let session_started = tokio::time::Instant::now();
                     if let Err(error) = consume(&mut socket, &cache).await {
                         tracing::warn!(%error, "SourceHub ACP event stream disconnected");
                     }
+                    session_duration = Some(session_started.elapsed());
                 }
             }
             Err(error) => {
@@ -86,8 +88,17 @@ async fn run(websocket_url: String, cache: Arc<AccessCache>) {
             }
         }
 
+        reconnect_delay = retry_delay_after_session(reconnect_delay, session_duration);
         tokio::time::sleep(reconnect_delay).await;
         reconnect_delay = reconnect_delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
+    }
+}
+
+fn retry_delay_after_session(current: Duration, session_duration: Option<Duration>) -> Duration {
+    if session_duration.is_some_and(|duration| duration >= MAX_RECONNECT_DELAY) {
+        INITIAL_RECONNECT_DELAY
+    } else {
+        current
     }
 }
 
@@ -202,6 +213,18 @@ mod tests {
         let result = CosmosEventSubscriber::start("not a websocket URL".into(), cache);
 
         assert!(matches!(result, Err(ProviderError::Config(_))));
+    }
+
+    #[test]
+    fn reconnect_backoff_resets_only_after_a_healthy_session() {
+        assert_eq!(
+            retry_delay_after_session(Duration::from_secs(16), Some(Duration::from_secs(29))),
+            Duration::from_secs(16)
+        );
+        assert_eq!(
+            retry_delay_after_session(Duration::from_secs(16), Some(MAX_RECONNECT_DELAY)),
+            INITIAL_RECONNECT_DELAY
+        );
     }
 
     #[tokio::test]

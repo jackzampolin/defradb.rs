@@ -40,9 +40,13 @@ use crate::router::{AppState, NodePermission};
 use super::TX_HEADER_NAME;
 
 fn record_response_metrics(response: &QueryResponse) {
-    if response.is_transaction_conflict() {
-        telemetry::record_escaped_conflict("graphql");
+    if let Some(surface) = escaped_conflict_surface(response) {
+        telemetry::record_escaped_conflict(surface);
     }
+}
+
+fn escaped_conflict_surface(response: &QueryResponse) -> Option<&'static str> {
+    response.is_transaction_conflict().then_some("graphql")
 }
 
 /// Check if a query references `encrypted_` fields and P2P is disabled.
@@ -489,11 +493,13 @@ mod tests {
 
     #[test]
     fn response_metrics_count_only_typed_conflicts() {
-        let before = telemetry::conflict_metrics_snapshot().escaped_to_clients;
-        record_response_metrics(&QueryResponse::error("validation failed"));
-        record_response_metrics(&QueryResponse::transaction_conflict("conflict"));
-        let after = telemetry::conflict_metrics_snapshot().escaped_to_clients;
-
-        assert_eq!(after - before, 1);
+        assert_eq!(
+            escaped_conflict_surface(&QueryResponse::error("validation failed")),
+            None
+        );
+        assert_eq!(
+            escaped_conflict_surface(&QueryResponse::transaction_conflict("conflict")),
+            Some("graphql")
+        );
     }
 }

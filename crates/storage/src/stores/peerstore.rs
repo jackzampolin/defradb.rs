@@ -27,6 +27,7 @@ fn retry_peer_lock(peer_id: &str) -> Arc<RetryPeerLock> {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.upgrade().is_some());
     if let Some(lock) = locks.get(peer_id).and_then(Weak::upgrade) {
         return lock;
     }
@@ -58,12 +59,13 @@ where
                 telemetry::record_retry_exhaustion(telemetry::RetryLayer::PushLedger);
                 return Err(error);
             }
-            result => {
+            Ok(value) => {
                 if retried {
                     telemetry::record_retry_success(telemetry::RetryLayer::PushLedger);
                 }
-                return result;
+                return Ok(value);
             }
+            Err(error) => return Err(error),
         }
     }
     unreachable!("bounded transaction retry loop always returns")

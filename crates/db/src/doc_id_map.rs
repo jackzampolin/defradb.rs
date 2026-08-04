@@ -76,7 +76,7 @@ impl<S: Store> DocShortIdAllocator<S> {
                 .new_txn(false)
                 .await
                 .map_err(Error::Storage)?;
-            let current = decode_sequence(txn.get(&key).await.map_err(Error::Storage)?);
+            let current = decode_sequence(txn.get(&key).await.map_err(Error::Storage)?)?;
             let start = current
                 .checked_add(1)
                 .ok_or_else(|| Error::Other("document short-ID sequence exhausted".into()))?;
@@ -100,10 +100,15 @@ impl<S: Store> DocShortIdAllocator<S> {
     }
 }
 
-fn decode_sequence(value: Option<Vec<u8>>) -> u64 {
+fn decode_sequence(value: Option<Vec<u8>>) -> Result<u64> {
     match value {
-        Some(bytes) if bytes.len() == 8 => u64::from_be_bytes(bytes.as_slice().try_into().unwrap()),
-        _ => 0,
+        None => Ok(0),
+        Some(bytes) => {
+            let bytes: [u8; 8] = bytes
+                .try_into()
+                .map_err(|_| Error::Other("invalid persisted document short-ID sequence".into()))?;
+            Ok(u64::from_be_bytes(bytes))
+        }
     }
 }
 
@@ -113,7 +118,7 @@ fn decode_sequence(value: Option<Vec<u8>>) -> u64 {
 /// sequence is not part of the caller's conflict set.
 pub async fn next_doc_short_id(systemstore: &NamespaceView) -> Result<u64> {
     let key = DocShortIDSequenceKey::new().bytes();
-    let current = decode_sequence(systemstore.get(&key).await.map_err(Error::Storage)?);
+    let current = decode_sequence(systemstore.get(&key).await.map_err(Error::Storage)?)?;
     let next = current + 1;
     systemstore
         .set(&key, &next.to_be_bytes())
@@ -132,7 +137,7 @@ pub async fn ensure_doc_short_id_sequence_at_least(
     minimum: u64,
 ) -> Result<()> {
     let key = DocShortIDSequenceKey::new().bytes();
-    let current = decode_sequence(systemstore.get(&key).await.map_err(Error::Storage)?);
+    let current = decode_sequence(systemstore.get(&key).await.map_err(Error::Storage)?)?;
     if current < minimum {
         systemstore
             .set(&key, &minimum.to_be_bytes())
@@ -462,6 +467,7 @@ mod tests {
                 .await
                 .unwrap(),
         )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -469,6 +475,27 @@ mod tests {
         let store = systemstore().await;
         assert_eq!(next_doc_short_id(&store).await.unwrap(), 1);
         assert_eq!(next_doc_short_id(&store).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn malformed_sequence_is_rejected() {
+        let store = Arc::new(MemoryStore::new());
+        let systemstore = Systemstore::new(store.clone());
+        let mut txn = systemstore.new_txn(false).await.unwrap();
+        txn.set(&DocShortIDSequenceKey::new().bytes(), b"invalid")
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        let error = DocShortIdAllocator::with_reservation_size(store, 4)
+            .next()
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Other(message)
+                if message == "invalid persisted document short-ID sequence"
+        ));
     }
 
     #[tokio::test]
