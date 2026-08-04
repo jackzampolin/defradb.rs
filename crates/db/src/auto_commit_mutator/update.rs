@@ -121,7 +121,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 || expected.is_deleted() != current_doc.is_deleted()
                 || !values_unchanged
             {
-                return Err(query::error::QueryError::execution(
+                return Err(query::error::QueryError::transaction_conflict(
                     "transaction conflict. Please retry",
                 ));
             }
@@ -491,10 +491,11 @@ mod tests {
             )
             .await
             .expect_err("stale conditional update must conflict");
-        assert!(
-            error.to_string().contains("transaction conflict"),
-            "unexpected error: {error}"
-        );
+        assert!(matches!(
+            error,
+            query::error::QueryError::TransactionConflict(ref message)
+                if message == "transaction conflict. Please retry"
+        ));
 
         let final_doc = mutator
             .get_for_update("Patch", &created.doc_id)
