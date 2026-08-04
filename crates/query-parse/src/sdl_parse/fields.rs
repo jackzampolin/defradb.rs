@@ -515,9 +515,10 @@ impl<'a> SdlParser<'a> {
     ) -> Result<serde_json::Value> {
         // Match Go's supported scalar field types for @default(value:).
         let Some((name, value)) = directive.arguments.first() else {
-            return Err(QueryError::parse(
-                "@default directive requires a value argument",
-            ));
+            return Err(QueryError::parse(format!(
+                "default value must specify one argument. Field: {}",
+                field_name
+            )));
         };
 
         // Multiple arguments not allowed
@@ -530,7 +531,7 @@ impl<'a> SdlParser<'a> {
 
         if name != "value" {
             return Err(QueryError::parse(format!(
-                "unknown @default argument '{}'. Valid argument is: value",
+                "Unknown argument \"{}\" on directive \"@default\"",
                 name
             )));
         }
@@ -540,11 +541,11 @@ impl<'a> SdlParser<'a> {
                 graphql_parser::schema::Value::String(s) => {
                     Ok(serde_json::Value::String(s.clone()))
                 }
-                other => Err(default_type_error(name, "string", other)),
+                other => Err(default_type_error(field_name, field_type, other)),
             },
             "Boolean" => match value {
                 graphql_parser::schema::Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
-                other => Err(default_type_error(name, "boolean", other)),
+                other => Err(default_type_error(field_name, field_type, other)),
             },
             "Int" => match value {
                 graphql_parser::schema::Value::Int(n) => {
@@ -553,7 +554,7 @@ impl<'a> SdlParser<'a> {
                     })?;
                     Ok(serde_json::Value::Number(serde_json::Number::from(int_val)))
                 }
-                other => Err(default_type_error(name, "integer", other)),
+                other => Err(default_type_error(field_name, field_type, other)),
             },
             "Float" | "Float64" => match value {
                 graphql_parser::schema::Value::Float(f) => serde_json::Number::from_f64(*f)
@@ -570,7 +571,7 @@ impl<'a> SdlParser<'a> {
                     })?;
                     Ok(serde_json::Value::Number(serde_json::Number::from(int_val)))
                 }
-                other => Err(default_type_error(name, "float", other)),
+                other => Err(default_type_error(field_name, field_type, other)),
             },
             "Float32" => match value {
                 graphql_parser::schema::Value::Float(f) => {
@@ -595,7 +596,7 @@ impl<'a> SdlParser<'a> {
                     })?;
                     Ok(serde_json::Value::Number(serde_json::Number::from(int_val)))
                 }
-                other => Err(default_type_error(name, "float", other)),
+                other => Err(default_type_error(field_name, field_type, other)),
             },
             "DateTime" => match value {
                 graphql_parser::schema::Value::String(s) => {
@@ -608,7 +609,7 @@ impl<'a> SdlParser<'a> {
                 }
                 // Accept Enum for special values like UTC_NOW
                 graphql_parser::schema::Value::Enum(s) => Ok(serde_json::Value::String(s.clone())),
-                other => Err(default_type_error(name, "string", other)),
+                other => Err(default_type_error(field_name, field_type, other)),
             },
             "JSON" => {
                 // JSON @default accepts various value types
@@ -670,7 +671,7 @@ impl<'a> SdlParser<'a> {
                 graphql_parser::schema::Value::String(s) => {
                     Ok(serde_json::Value::String(s.clone()))
                 }
-                other => Err(default_type_error(name, "string", other)),
+                other => Err(default_type_error(field_name, field_type, other)),
             },
             _ => Err(QueryError::parse(format!(
                 "default value is not allowed for this field type. Name: {}, Type: {}",

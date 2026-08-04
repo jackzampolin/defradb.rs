@@ -198,8 +198,11 @@ pub(crate) async fn cache_migrated_document_with_indexes(
     // Deleted documents have already been removed from secondary indexes.
     // Materializing their retained blob must not add those entries back.
     if !collection.is_deleted(datastore, doc_short_id).await? {
-        let index_manager =
-            IndexManager::from_collection(collection.resolved_root_id(), collection.schema())?;
+        let index_manager = IndexManager::from_indexes(
+            collection.resolved_root_id(),
+            collection.schema(),
+            collection.write_indexes(),
+        )?;
         index_manager
             .on_document_update(datastore, &old_doc, doc, doc_short_id, collection.schema())
             .await?;

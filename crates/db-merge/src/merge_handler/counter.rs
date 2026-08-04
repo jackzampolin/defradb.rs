@@ -116,6 +116,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         (NumericKind::Float64, NormalValue::Float64(v)) => {
                             let _ = counter.reconcile_float64(&mut datastore, *v).await;
                         }
+                        (NumericKind::Float32, NormalValue::Float32(v)) => {
+                            let _ = counter.reconcile_float32(&mut datastore, *v).await;
+                        }
                         _ => {}
                     }
                 }
@@ -255,6 +258,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     (NumericKind::Float64, NormalValue::Float64(v)) => {
                         let _ = counter.reconcile_float64(datastore, *v).await;
                     }
+                    (NumericKind::Float32, NormalValue::Float32(v)) => {
+                        let _ = counter.reconcile_float32(datastore, *v).await;
+                    }
                     _ => {}
                 }
             }
@@ -362,9 +368,10 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         match &field.kind {
             FieldKind::Scalar(scalar_kind) => {
                 use schema::ScalarKind;
-                match scalar_kind {
+                match scalar_kind.base_kind() {
                     ScalarKind::Int => Ok(NumericKind::Int64),
-                    ScalarKind::Float64 | ScalarKind::Float32 => Ok(NumericKind::Float64),
+                    ScalarKind::Float32 => Ok(NumericKind::Float32),
+                    ScalarKind::Float64 => Ok(NumericKind::Float64),
                     other => Err(MergeError::UnsupportedDelta(format!(
                         "Counter field '{}' has unsupported scalar kind: {:?}",
                         field.name, other
@@ -386,7 +393,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         doc_id_str: &str,
     ) -> std::result::Result<CounterDelta, MergeError> {
         // Go encodes counter data as CBOR. We need to decode it first.
-        // The payload.data contains CBOR-encoded i64 or f64
+        // The payload.data contains a CBOR-encoded i64, f32, or f64.
         match kind {
             NumericKind::Int64 => {
                 let increment: i64 = ciborium::from_reader(&payload.data[..]).map_err(|e| {
@@ -413,6 +420,23 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     ))
                 })?;
                 CounterDelta::new_float64(
+                    doc_id_str.as_bytes().to_vec(),
+                    payload.field_name.clone(),
+                    payload.priority,
+                    payload.nonce,
+                    payload.schema_version_id.clone(),
+                    increment,
+                )
+                .map_err(|e| MergeError::MergeFailed(e.to_string()))
+            }
+            NumericKind::Float32 => {
+                let increment: f32 = ciborium::from_reader(&payload.data[..]).map_err(|e| {
+                    MergeError::BlockDecode(format!(
+                        "Failed to decode Counter Float32 increment: {}",
+                        e
+                    ))
+                })?;
+                CounterDelta::new_float32(
                     doc_id_str.as_bytes().to_vec(),
                     payload.field_name.clone(),
                     payload.priority,
@@ -480,6 +504,18 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     tracing::warn!(
                         field_name = %field_name,
                         "Invalid counter value length for Float64"
+                    );
+                    None
+                }
+            }
+            NumericKind::Float32 => {
+                if bytes.len() == 4 {
+                    let arr: [u8; 4] = bytes[..4].try_into().unwrap();
+                    Some(NormalValue::Float32(f32::from_be_bytes(arr)))
+                } else {
+                    tracing::warn!(
+                        field_name = %field_name,
+                        "Invalid counter value length for Float32"
                     );
                     None
                 }

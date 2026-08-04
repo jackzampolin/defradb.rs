@@ -223,7 +223,8 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
 
         let short_id = collection.resolved_root_id();
         let index_manager =
-            IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
+            IndexManager::from_indexes(short_id, collection.schema(), collection.write_indexes())
+                .map_err(|e| {
                 query::error::QueryError::execution(format!(
                     "failed to create index manager: {}",
                     e
@@ -271,10 +272,12 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         &self,
         cid: &str,
         expected_doc_id: Option<&str>,
+        caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Document> {
         use crate::versioned_fetcher::VersionedFetcher;
 
-        let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
+        let versioned_fetcher =
+            VersionedFetcher::with_kms(self.txn.clone(), self.db.kms(), caller_identity.cloned());
         versioned_fetcher
             .get_document_at_cid(cid, expected_doc_id)
             .await
@@ -285,10 +288,12 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         &self,
         cid: &str,
         expected_doc_id: Option<&str>,
+        caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Vec<Document>> {
         use crate::versioned_fetcher::VersionedFetcher;
 
-        let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
+        let versioned_fetcher =
+            VersionedFetcher::with_kms(self.txn.clone(), self.db.kms(), caller_identity.cloned());
         versioned_fetcher
             .get_documents_at_cid(cid, expected_doc_id)
             .await

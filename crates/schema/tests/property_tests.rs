@@ -26,6 +26,14 @@ fn arb_scalar_kind() -> impl Strategy<Value = ScalarKind> {
         Just(ScalarKind::String),
         Just(ScalarKind::Blob),
         Just(ScalarKind::Json),
+        Just(ScalarKind::NonNillableBool),
+        Just(ScalarKind::NonNillableInt),
+        Just(ScalarKind::NonNillableFloat64),
+        Just(ScalarKind::NonNillableFloat32),
+        Just(ScalarKind::NonNillableString),
+        Just(ScalarKind::NonNillableDateTime),
+        Just(ScalarKind::NonNillableBlob),
+        Just(ScalarKind::NonNillableJson),
     ]
 }
 
@@ -41,6 +49,8 @@ fn arb_scalar_array_kind() -> impl Strategy<Value = ScalarArrayKind> {
         Just(ScalarArrayKind::NillableFloat64Array),
         Just(ScalarArrayKind::NillableStringArray),
         Just(ScalarArrayKind::NillableFloat32Array),
+        Just(ScalarArrayKind::DateTimeArray),
+        Just(ScalarArrayKind::NillableDateTimeArray),
     ]
 }
 
@@ -115,10 +125,8 @@ proptest! {
     fn only_numeric_types_are_numeric(kind in arb_field_kind()) {
         let is_numeric = kind.is_numeric();
         let expected_numeric = matches!(
-            kind,
-            FieldKind::Scalar(ScalarKind::Int)
-            | FieldKind::Scalar(ScalarKind::Float64)
-            | FieldKind::Scalar(ScalarKind::Float32)
+            kind.as_scalar().map(ScalarKind::base_kind),
+            Some(ScalarKind::Int | ScalarKind::Float64 | ScalarKind::Float32)
         );
         prop_assert_eq!(is_numeric, expected_numeric);
     }
@@ -391,6 +399,8 @@ proptest! {
             Just("[Boolean]"),
             Just("[Float64!]"),
             Just("[Float64]"),
+            Just("[DateTime!]"),
+            Just("[DateTime]"),
         ]
     ) {
         let json = format!(r#""{}""#, type_name);

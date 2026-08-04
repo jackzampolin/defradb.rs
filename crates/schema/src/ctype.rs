@@ -85,7 +85,7 @@ impl<'de> Deserialize<'de> for CType {
                 "Composite" | "composite" | "COMPOSITE" => Ok(CType::Composite),
                 "PnCounter" | "pncounter" | "PN_COUNTER" => Ok(CType::PnCounter),
                 "PCounter" | "pcounter" | "P_COUNTER" => Ok(CType::PCounter),
-                _ => Err(de::Error::custom(format!("Unknown CType: {}", s))),
+                _ => Err(de::Error::custom("unknown crdt string representation")),
             },
             // Null defaults to LwwRegister
             serde_json::Value::Null => Ok(CType::LwwRegister),
@@ -232,6 +232,14 @@ mod tests {
                 | CType::PnCounter
                 | CType::PCounter
         ));
+    }
+
+    #[test]
+    fn test_unknown_string_matches_go_error() {
+        let err = serde_json::from_str::<CType>(r#""invalid""#).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("unknown crdt string representation"));
     }
 
     #[test]

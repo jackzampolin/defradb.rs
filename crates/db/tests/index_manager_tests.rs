@@ -98,6 +98,47 @@ async fn test_create_unique_index() {
 }
 
 #[tokio::test]
+async fn unique_json_index_rejects_duplicate_array_values() {
+    let store = MemoryStore::new();
+    let db = DB::new(store).unwrap();
+    let txn = db.new_txn(false).await.unwrap();
+    let datastore = txn.datastore().unwrap();
+
+    let mut schema = CollectionVersion::new(
+        "users",
+        "v1",
+        "col-users",
+        vec![FieldDescription::new("1", "custom", FieldKind::json())],
+    );
+    schema.indexes = vec![IndexDescription {
+        name: "idx_custom".to_string(),
+        id: 1,
+        fields: vec![IndexedFieldDescription {
+            name: "custom".to_string(),
+            descending: false,
+        }],
+        unique: true,
+        auto_generated: false,
+    }];
+    let manager = IndexManager::from_collection(1, &schema).unwrap();
+    let mut doc = Document::new();
+    doc.set(
+        "custom",
+        NormalValue::Json(serde_json::json!({"numbers": [5, 8, 5]})),
+    );
+
+    let error = manager
+        .on_document_create(&datastore, &doc, next_test_doc_short_id(), &schema)
+        .await
+        .expect_err("duplicate JSON array values must violate a unique index");
+
+    assert!(matches!(
+        error,
+        Error::Storage(storage::Error::UniqueConstraintViolation)
+    ));
+}
+
+#[tokio::test]
 async fn test_create_duplicate_index_fails() {
     let store = MemoryStore::new();
     let db = DB::new(store).unwrap();

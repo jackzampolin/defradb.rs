@@ -24,6 +24,14 @@ fn test_scalar_repr_values_match_go() {
     assert_eq!(ScalarKind::String as u8, 11);
     assert_eq!(ScalarKind::Blob as u8, 13);
     assert_eq!(ScalarKind::Json as u8, 14);
+    assert_eq!(ScalarKind::NonNillableBool as u8, 15);
+    assert_eq!(ScalarKind::NonNillableInt as u8, 23);
+    assert_eq!(ScalarKind::NonNillableFloat64 as u8, 24);
+    assert_eq!(ScalarKind::NonNillableFloat32 as u8, 25);
+    assert_eq!(ScalarKind::NonNillableString as u8, 26);
+    assert_eq!(ScalarKind::NonNillableDateTime as u8, 27);
+    assert_eq!(ScalarKind::NonNillableBlob as u8, 28);
+    assert_eq!(ScalarKind::NonNillableJson as u8, 29);
 }
 
 #[test]
@@ -38,6 +46,8 @@ fn test_array_repr_values_match_go() {
     assert_eq!(ScalarArrayKind::NillableFloat64Array as u8, 20);
     assert_eq!(ScalarArrayKind::NillableStringArray as u8, 21);
     assert_eq!(ScalarArrayKind::NillableFloat32Array as u8, 22);
+    assert_eq!(ScalarArrayKind::DateTimeArray as u8, 30);
+    assert_eq!(ScalarArrayKind::NillableDateTimeArray as u8, 31);
 }
 
 // ============================================================================
@@ -73,10 +83,10 @@ fn test_is_relation() {
 
 #[test]
 fn test_is_nillable() {
-    // Go: ALL types return true for IsNillable()
     assert!(FieldKind::string().is_nillable());
     assert!(FieldKind::int().is_nillable());
     assert!(FieldKind::doc_id().is_nillable());
+    assert!(!FieldKind::Scalar(ScalarKind::NonNillableString).is_nillable());
     assert!(FieldKind::int_array().is_nillable());
     assert!(FieldKind::nillable_int_array().is_nillable());
     assert!(FieldKind::relation("users", false).is_nillable());
@@ -104,6 +114,10 @@ fn test_scalar_to_array() {
         Some(ScalarArrayKind::IntArray)
     );
     assert_eq!(ScalarKind::DocID.to_array_kind(), None);
+    assert_eq!(
+        ScalarKind::DateTime.to_array_kind(),
+        Some(ScalarArrayKind::DateTimeArray)
+    );
 }
 
 #[test]
@@ -363,6 +377,34 @@ fn test_go_compat_all_scalar_kinds_roundtrip() {
         (FieldKind::Scalar(ScalarKind::String), 11, "String"),
         (FieldKind::Scalar(ScalarKind::Blob), 13, "Blob"),
         (FieldKind::Scalar(ScalarKind::Json), 14, "JSON"),
+        (
+            FieldKind::Scalar(ScalarKind::NonNillableBool),
+            15,
+            "Boolean!",
+        ),
+        (FieldKind::Scalar(ScalarKind::NonNillableInt), 23, "Int!"),
+        (
+            FieldKind::Scalar(ScalarKind::NonNillableFloat64),
+            24,
+            "Float64!",
+        ),
+        (
+            FieldKind::Scalar(ScalarKind::NonNillableFloat32),
+            25,
+            "Float32!",
+        ),
+        (
+            FieldKind::Scalar(ScalarKind::NonNillableString),
+            26,
+            "String!",
+        ),
+        (
+            FieldKind::Scalar(ScalarKind::NonNillableDateTime),
+            27,
+            "DateTime!",
+        ),
+        (FieldKind::Scalar(ScalarKind::NonNillableBlob), 28, "Blob!"),
+        (FieldKind::Scalar(ScalarKind::NonNillableJson), 29, "JSON!"),
     ];
 
     for (kind, expected_int, canonical) in scalars {
@@ -434,6 +476,16 @@ fn test_go_compat_all_array_kinds_roundtrip() {
             FieldKind::ScalarArray(ScalarArrayKind::NillableFloat32Array),
             22,
             "[Float32]",
+        ),
+        (
+            FieldKind::ScalarArray(ScalarArrayKind::DateTimeArray),
+            30,
+            "[DateTime!]",
+        ),
+        (
+            FieldKind::ScalarArray(ScalarArrayKind::NillableDateTimeArray),
+            31,
+            "[DateTime]",
         ),
     ];
 

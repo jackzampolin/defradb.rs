@@ -16,6 +16,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
         let collection = self.get_collection_or_err(collection_name)?;
+        let _collection_guard = self
+            .db
+            .collection_read_guard(collection.collection_id())
+            .await
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
         // Generate embeddings before blocks (embedding values affect the genesis CID)
@@ -58,13 +63,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let result: query::error::Result<(DocID, Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = async {
             // Create an IndexManager for unique constraint enforcement
             let short_id = collection.resolved_root_id();
-            let index_manager = IndexManager::from_collection(short_id, collection.schema())
-                .map_err(|e| {
-                    query::error::QueryError::execution(format!(
-                        "failed to create index manager for collection '{}': {}",
-                        collection_name, e
-                    ))
-                })?;
+            let index_manager = IndexManager::from_indexes(
+                short_id,
+                collection.schema(),
+                collection.write_indexes(),
+            )
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to create index manager for collection '{}': {}",
+                    collection_name, e
+                ))
+            })?;
 
             self.db
                 .validate_downsample_write(
@@ -180,6 +189,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     );
                     return Err(crate::error::commit_query_error(e));
                 }
+
+                self.register_created_doc_with_acp(&collection, &doc_id.to_string())
+                    .await?;
 
                 // Emit update event for subscriptions
                 self.emit_update_events(

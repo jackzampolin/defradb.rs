@@ -120,7 +120,7 @@ mod tests {
         let resource = policy.get_resource(NODE_RESOURCE_NAME).unwrap();
 
         // Owner and admin plus one relation per permission.
-        assert_eq!(resource.relations.len(), 52);
+        assert_eq!(resource.relations.len(), NodePermission::all().len() + 2);
     }
 
     #[test]
@@ -142,7 +142,7 @@ mod tests {
         let resource = policy.get_resource(NODE_RESOURCE_NAME).unwrap();
         let admin = resource.get_relation(ADMIN_RELATION).unwrap();
 
-        assert_eq!(admin.manages.len(), 50);
+        assert_eq!(admin.manages.len(), NodePermission::all().len());
     }
 
     #[test]

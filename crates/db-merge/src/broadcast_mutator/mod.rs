@@ -5,9 +5,9 @@
 //!
 //! # Broadcast Status
 //!
-//! Broadcast is fire-and-forget: mutation results return `BroadcastStatus::Pending`
-//! immediately after the local commit. Broadcast failures are logged at `error`
-//! level but do not affect the mutation result.
+//! Broadcast runs asynchronously in coordinator-owned tasks: mutation results return
+//! `BroadcastStatus::Pending` immediately after the local commit. Broadcast failures
+//! are logged at `error` level but do not affect the mutation result.
 
 mod batch;
 pub(crate) mod broadcast;
@@ -15,7 +15,6 @@ pub(crate) mod broadcast;
 use async_trait::async_trait;
 use blockstore::Blockstore;
 use document::{DocID, Document};
-use identity::Did;
 use p2p::message::SEArtifact;
 use p2p::sync::SyncCoordinator;
 use p2p::transport::P2PTransport;
@@ -72,16 +71,16 @@ pub trait SeArtifactRepusher: Send + Sync {
 ///
 /// # Error Handling
 ///
-/// Local mutations are atomic with the transaction. Broadcast is fire-and-forget
-/// via `tokio::spawn` -- the mutation returns `BroadcastStatus::Pending` immediately
-/// after the local commit. Broadcast failures are logged at `error` level but do
-/// not affect the mutation result. Peers will eventually receive the data via the
-/// next replicator sync or DAG fetch.
+/// Local mutations are atomic with the transaction. Broadcast runs in a
+/// coordinator-owned background task -- the mutation returns
+/// `BroadcastStatus::Pending` immediately after the local commit. Broadcast
+/// failures are logged at `error` level but do not affect the mutation result.
+/// Peers will eventually receive the data via the next replicator sync or DAG
+/// fetch.
 pub struct BroadcastMutator<S: Store, B: Blockstore, T: P2PTransport = p2p::Libp2pTransport> {
     inner: AutoCommitMutator<S>,
     sync: Arc<SyncCoordinator<B, T>>,
     db: Arc<DB<S>>,
-    document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
     se_options: Arc<RwLock<BroadcastSeOptions>>,
 }
 
@@ -92,13 +91,12 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, 
             inner: AutoCommitMutator::new(db.clone()),
             sync,
             db,
-            document_acp: std::sync::OnceLock::new(),
             se_options: Arc::new(RwLock::new(BroadcastSeOptions::default())),
         }
     }
 
     pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
-        let _ = self.document_acp.set(acp);
+        self.inner.set_document_acp(acp);
     }
 
     pub fn set_se_options(&self, options: BroadcastSeOptions) -> Result<(), String> {
@@ -168,49 +166,6 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, 
                 Vec::new()
             }
         }
-    }
-
-    async fn register_created_doc_with_acp_if_needed(
-        &self,
-        collection: &db::Collection,
-        doc_id: &str,
-        creator_did: Option<&str>,
-    ) -> query::error::Result<()> {
-        let Some(policy) = collection.schema().policy.as_ref() else {
-            return Ok(());
-        };
-        let Some(creator_did) = creator_did else {
-            return Ok(());
-        };
-        let Some(acp) = self.document_acp.get() else {
-            return Ok(());
-        };
-        let acp: &dyn acp::DocumentACP = acp.as_ref();
-
-        let creator = Did::new(creator_did).map_err(|error| {
-            query::error::QueryError::execution(format!("invalid broadcast creator DID: {error}"))
-        })?;
-
-        let is_registered = acp
-            .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
-            .await
-            .map_err(|error| {
-                query::error::QueryError::execution(format!(
-                    "failed to check ACP registration before broadcast: {error}"
-                ))
-            })?;
-
-        if !is_registered {
-            acp.register_doc_object(&creator, &policy.id, &policy.resource_name, doc_id)
-                .await
-                .map_err(|error| {
-                    query::error::QueryError::execution(format!(
-                        "failed to register document with ACP before broadcast: {error}"
-                    ))
-                })?;
-        }
-
-        Ok(())
     }
 }
 
@@ -333,55 +288,56 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMuta
         let sync = self.sync.clone();
         let collection_name_owned = collection_name.to_string();
 
-        tokio::spawn(async move {
-            let creator_ref = creator_did.as_deref();
-            sync.push_document_to_replicators_with_creator(
-                &block_result.cid,
-                &block_result.block,
-                &block_result.doc_id,
-                &collection_id,
-                &document_json,
-                creator_ref,
-            )
-            .await;
-            sync.push_se_artifacts_to_replicators_for_document(
-                &collection_id,
-                se_artifacts,
-                &document_json,
-            )
-            .await;
-            log_broadcast_failure(
-                &broadcast_with_retry_with_creator(
-                    &sync,
-                    &block_result,
+        self.sync
+            .spawn_background_task("broadcast_document_update", async move {
+                let creator_ref = creator_did.as_deref();
+                sync.push_document_to_replicators_with_creator(
+                    &block_result.cid,
+                    &block_result.block,
+                    &block_result.doc_id,
                     &collection_id,
-                    &collection_name_owned,
+                    &document_json,
                     creator_ref,
                 )
-                .await,
-            );
-
-            if let Some(col_block_result) = branchable_data {
-                sync.push_to_replicators_with_creator(
-                    &col_block_result.cid,
-                    &col_block_result.block,
-                    &col_block_result.doc_id,
+                .await;
+                sync.push_se_artifacts_to_replicators_for_document(
                     &collection_id,
-                    creator_ref,
+                    se_artifacts,
+                    &document_json,
                 )
                 .await;
                 log_broadcast_failure(
                     &broadcast_with_retry_with_creator(
                         &sync,
-                        &col_block_result,
+                        &block_result,
                         &collection_id,
                         &collection_name_owned,
                         creator_ref,
                     )
                     .await,
                 );
-            }
-        });
+
+                if let Some(col_block_result) = branchable_data {
+                    sync.push_to_replicators_with_creator(
+                        &col_block_result.cid,
+                        &col_block_result.block,
+                        &col_block_result.doc_id,
+                        &collection_id,
+                        creator_ref,
+                    )
+                    .await;
+                    log_broadcast_failure(
+                        &broadcast_with_retry_with_creator(
+                            &sync,
+                            &col_block_result,
+                            &collection_id,
+                            &collection_name_owned,
+                            creator_ref,
+                        )
+                        .await,
+                    );
+                }
+            });
 
         Ok(UpdateResult::with_broadcast(
             result.document,
@@ -396,6 +352,10 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMuta
 impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
     for BroadcastMutator<S, B, T>
 {
+    fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
+        BroadcastMutator::set_document_acp(self, acp);
+    }
+
     async fn begin_batch(&self) -> query::error::Result<Option<MutationBatch>> {
         let (inner_batch, fetcher) = self.inner.new_batch_components().await?;
         let inner_controller: Arc<dyn MutationBatchController> = inner_batch.clone();
@@ -465,15 +425,6 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         // Read broadcast creator DID before spawning (reads thread-local state).
         let creator_did = defra_core::signing::get_broadcast_creator_did();
 
-        // For ACP-protected collections, ensure newly created docs are registered
-        // before any detached P2P broadcast can expose them to other peers.
-        self.register_created_doc_with_acp_if_needed(
-            &collection,
-            &block_result.doc_id,
-            creator_did.as_deref(),
-        )
-        .await?;
-
         // Capture branchable collection broadcast data before spawning.
         let branchable_data = if let (Some(col_cid), Some(col_block)) =
             (result.broadcast_cid, result.broadcast_block.as_ref())
@@ -509,63 +460,64 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let return_cid = block_result.cid;
         let return_block = block_result.block.clone();
 
-        // Spawn broadcast work as a detached task -- the local transaction
-        // is already committed, so we return immediately.
-        tokio::spawn(async move {
-            let creator_ref = creator_did.as_deref();
+        // The local transaction is already committed, so return without
+        // waiting for network delivery.
+        self.sync
+            .spawn_background_task("broadcast_document_create", async move {
+                let creator_ref = creator_did.as_deref();
 
-            // Match Go DefraDB's live replicator model: push the new head block
-            // and let the receiver resolve any missing links via DAG sync.
-            sync.push_document_to_replicators_with_creator(
-                &block_result.cid,
-                &block_result.block,
-                &block_result.doc_id,
-                &collection_id,
-                &document_json,
-                creator_ref,
-            )
-            .await;
-            sync.push_se_artifacts_to_replicators_for_document(
-                &collection_id,
-                se_artifacts,
-                &document_json,
-            )
-            .await;
-
-            // Broadcast composite via GossipSub with retry for InsufficientPeers
-            log_broadcast_failure(
-                &broadcast_with_retry_with_creator(
-                    &sync,
-                    &block_result,
+                // Match Go DefraDB's live replicator model: push the new head block
+                // and let the receiver resolve any missing links via DAG sync.
+                sync.push_document_to_replicators_with_creator(
+                    &block_result.cid,
+                    &block_result.block,
+                    &block_result.doc_id,
                     &collection_id,
-                    &collection_name_owned,
-                    creator_ref,
-                )
-                .await,
-            );
-
-            // For branchable collections, also broadcast the collection block.
-            if let Some(col_block_result) = branchable_data {
-                sync.push_to_replicators_with_creator(
-                    &col_block_result.cid,
-                    &col_block_result.block,
-                    &col_block_result.doc_id,
-                    &collection_id,
+                    &document_json,
                     creator_ref,
                 )
                 .await;
+                sync.push_se_artifacts_to_replicators_for_document(
+                    &collection_id,
+                    se_artifacts,
+                    &document_json,
+                )
+                .await;
+
+                // Broadcast composite via GossipSub with retry for InsufficientPeers
                 log_broadcast_failure(
                     &broadcast_with_retry_with_creator(
                         &sync,
-                        &col_block_result,
+                        &block_result,
                         &collection_id,
                         &collection_name_owned,
                         creator_ref,
                     )
                     .await,
                 );
-            }
-        });
+
+                // For branchable collections, also broadcast the collection block.
+                if let Some(col_block_result) = branchable_data {
+                    sync.push_to_replicators_with_creator(
+                        &col_block_result.cid,
+                        &col_block_result.block,
+                        &col_block_result.doc_id,
+                        &collection_id,
+                        creator_ref,
+                    )
+                    .await;
+                    log_broadcast_failure(
+                        &broadcast_with_retry_with_creator(
+                            &sync,
+                            &col_block_result,
+                            &collection_id,
+                            &collection_name_owned,
+                            creator_ref,
+                        )
+                        .await,
+                    );
+                }
+            });
 
         Ok(CreateResult::with_commit_and_broadcast(
             result.doc_id,
@@ -658,13 +610,6 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 None
             };
 
-            self.register_created_doc_with_acp_if_needed(
-                &collection,
-                &block_result.doc_id,
-                creator_did.as_deref(),
-            )
-            .await?;
-
             let se_artifacts = self.generate_se_artifacts(
                 collection.schema(),
                 &block_result.doc_id,
@@ -691,65 +636,67 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             broadcast_work.push((block_result, branchable_data, se_artifacts, document_json));
         }
 
-        // Spawn a single detached task that processes all broadcast work items.
+        // Process all broadcast work items in one coordinator-owned task.
         if !broadcast_work.is_empty() {
             let sync = self.sync.clone();
             let collection_name_owned = collection_name.to_string();
 
-            tokio::spawn(async move {
-                let creator_ref = creator_did.as_deref();
+            self.sync
+                .spawn_background_task("broadcast_document_create_many", async move {
+                    let creator_ref = creator_did.as_deref();
 
-                for (block_result, branchable_data, se_artifacts, document_json) in &broadcast_work
-                {
-                    sync.push_document_to_replicators_with_creator(
-                        &block_result.cid,
-                        &block_result.block,
-                        &block_result.doc_id,
-                        &collection_id,
-                        document_json,
-                        creator_ref,
-                    )
-                    .await;
-                    sync.push_se_artifacts_to_replicators_for_document(
-                        &collection_id,
-                        se_artifacts.clone(),
-                        document_json,
-                    )
-                    .await;
-
-                    log_broadcast_failure(
-                        &broadcast_with_retry_with_creator(
-                            &sync,
-                            block_result,
+                    for (block_result, branchable_data, se_artifacts, document_json) in
+                        &broadcast_work
+                    {
+                        sync.push_document_to_replicators_with_creator(
+                            &block_result.cid,
+                            &block_result.block,
+                            &block_result.doc_id,
                             &collection_id,
-                            &collection_name_owned,
-                            creator_ref,
-                        )
-                        .await,
-                    );
-
-                    if let Some(col_block_result) = branchable_data {
-                        sync.push_to_replicators_with_creator(
-                            &col_block_result.cid,
-                            &col_block_result.block,
-                            &col_block_result.doc_id,
-                            &collection_id,
+                            document_json,
                             creator_ref,
                         )
                         .await;
+                        sync.push_se_artifacts_to_replicators_for_document(
+                            &collection_id,
+                            se_artifacts.clone(),
+                            document_json,
+                        )
+                        .await;
+
                         log_broadcast_failure(
                             &broadcast_with_retry_with_creator(
                                 &sync,
-                                col_block_result,
+                                block_result,
                                 &collection_id,
                                 &collection_name_owned,
                                 creator_ref,
                             )
                             .await,
                         );
+
+                        if let Some(col_block_result) = branchable_data {
+                            sync.push_to_replicators_with_creator(
+                                &col_block_result.cid,
+                                &col_block_result.block,
+                                &col_block_result.doc_id,
+                                &collection_id,
+                                creator_ref,
+                            )
+                            .await;
+                            log_broadcast_failure(
+                                &broadcast_with_retry_with_creator(
+                                    &sync,
+                                    col_block_result,
+                                    &collection_id,
+                                    &collection_name_owned,
+                                    creator_ref,
+                                )
+                                .await,
+                            );
+                        }
                     }
-                }
-            });
+                });
         }
 
         Ok(broadcast_results)
@@ -878,67 +825,68 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let sync = self.sync.clone();
         let collection_name_owned = collection_name.to_string();
 
-        // Spawn broadcast work as a detached task -- the local transaction
-        // is already committed, so we return immediately.
-        tokio::spawn(async move {
-            let creator_ref = creator_did.as_deref();
+        // The local transaction is already committed, so return without
+        // waiting for network delivery.
+        self.sync
+            .spawn_background_task("broadcast_document_delete", async move {
+                let creator_ref = creator_did.as_deref();
 
-            // Push to replicators (single block for delete, not full DAG).
-            if let Some(document_json) = pre_delete_document_json.as_ref() {
-                sync.push_document_to_replicators_with_creator(
-                    &block_result.cid,
-                    &block_result.block,
-                    &block_result.doc_id,
-                    &collection_id,
-                    document_json,
-                    creator_ref,
-                )
-                .await;
-            } else {
-                sync.push_to_replicators_with_creator(
-                    &block_result.cid,
-                    &block_result.block,
-                    &block_result.doc_id,
-                    &collection_id,
-                    creator_ref,
-                )
-                .await;
-            }
+                // Push to replicators (single block for delete, not full DAG).
+                if let Some(document_json) = pre_delete_document_json.as_ref() {
+                    sync.push_document_to_replicators_with_creator(
+                        &block_result.cid,
+                        &block_result.block,
+                        &block_result.doc_id,
+                        &collection_id,
+                        document_json,
+                        creator_ref,
+                    )
+                    .await;
+                } else {
+                    sync.push_to_replicators_with_creator(
+                        &block_result.cid,
+                        &block_result.block,
+                        &block_result.doc_id,
+                        &collection_id,
+                        creator_ref,
+                    )
+                    .await;
+                }
 
-            // Broadcast via GossipSub with retry for InsufficientPeers
-            log_broadcast_failure(
-                &broadcast_with_retry_with_creator(
-                    &sync,
-                    &block_result,
-                    &collection_id,
-                    &collection_name_owned,
-                    creator_ref,
-                )
-                .await,
-            );
-
-            // For branchable collections, also broadcast the collection block.
-            if let Some(col_block_result) = branchable_data {
-                sync.push_to_replicators_with_creator(
-                    &col_block_result.cid,
-                    &col_block_result.block,
-                    &col_block_result.doc_id,
-                    &collection_id,
-                    creator_ref,
-                )
-                .await;
+                // Broadcast via GossipSub with retry for InsufficientPeers
                 log_broadcast_failure(
                     &broadcast_with_retry_with_creator(
                         &sync,
-                        &col_block_result,
+                        &block_result,
                         &collection_id,
                         &collection_name_owned,
                         creator_ref,
                     )
                     .await,
                 );
-            }
-        });
+
+                // For branchable collections, also broadcast the collection block.
+                if let Some(col_block_result) = branchable_data {
+                    sync.push_to_replicators_with_creator(
+                        &col_block_result.cid,
+                        &col_block_result.block,
+                        &col_block_result.doc_id,
+                        &collection_id,
+                        creator_ref,
+                    )
+                    .await;
+                    log_broadcast_failure(
+                        &broadcast_with_retry_with_creator(
+                            &sync,
+                            &col_block_result,
+                            &collection_id,
+                            &collection_name_owned,
+                            creator_ref,
+                        )
+                        .await,
+                    );
+                }
+            });
 
         Ok(DeleteResult::with_broadcast(
             result.doc_id,

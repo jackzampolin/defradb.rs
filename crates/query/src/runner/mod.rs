@@ -325,6 +325,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// When set, queries will filter results based on the identity's permissions.
     /// Collections with a policy will have ACP enforced; others are unaffected.
     pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>) -> Self {
+        if let Some(mutator) = &self.mutator {
+            mutator.set_document_acp(acp.clone());
+        }
         self.acp = acp;
         self
     }
