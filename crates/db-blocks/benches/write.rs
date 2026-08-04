@@ -63,14 +63,14 @@ fn bench_write_create(c: &mut Criterion) {
             group.throughput(Throughput::Elements(field_count as u64));
 
             group.bench_function(BenchmarkId::from_parameter(&label), |b| {
-                b.iter_batched(
+                b.iter_batched_ref(
                     || rt.block_on(new_stores()),
                     |(blockstore, headstore)| {
                         rt.block_on(async {
                             black_box(
                                 write_document_blocks(
-                                    &blockstore,
-                                    &headstore,
+                                    blockstore,
+                                    headstore,
                                     &doc,
                                     SCHEMA_VERSION_ID,
                                     DocStorageIdentity::new(1, 1),
@@ -105,7 +105,7 @@ fn bench_write_update(c: &mut Criterion) {
             group.throughput(Throughput::Elements(field_count as u64));
 
             group.bench_function(BenchmarkId::from_parameter(&label), |b| {
-                b.iter_batched(
+                b.iter_batched_ref(
                     || {
                         rt.block_on(async {
                             let (blockstore, headstore) = new_stores().await;
@@ -135,9 +135,9 @@ fn bench_write_update(c: &mut Criterion) {
                         rt.block_on(async {
                             black_box(
                                 write_document_blocks(
-                                    &blockstore,
-                                    &headstore,
-                                    &updated,
+                                    blockstore,
+                                    headstore,
+                                    updated,
                                     SCHEMA_VERSION_ID,
                                     DocStorageIdentity::new(1, 1),
                                     Some(&fields),

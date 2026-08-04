@@ -94,16 +94,19 @@ async fn establish_replication(cluster: &TestCluster) {
 }
 
 /// Returns the number of `User` documents currently readable on the node.
+///
+/// A failed query panics rather than counting as zero: absorbing a node failure into
+/// the convergence poll would turn it into a [`CONVERGENCE_TIMEOUT`] wait reported as a
+/// slow topology.
 fn user_count(cluster: &TestCluster, node_index: usize) -> usize {
-    cluster
+    let result = cluster
         .client(node_index)
         .query("query { User { _docID } }")
-        .map(|result| {
-            result["User"]
-                .as_array()
-                .map(|users| users.len())
-                .unwrap_or(0)
-        })
+        .unwrap_or_else(|e| panic!("query node{node_index} for User documents: {e}"));
+
+    result["User"]
+        .as_array()
+        .map(|users| users.len())
         .unwrap_or(0)
 }
 

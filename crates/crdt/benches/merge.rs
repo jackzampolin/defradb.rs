@@ -195,20 +195,21 @@ fn bench_merge_contaminated(c: &mut Criterion) {
 }
 
 /// Merge benches whose timed body is only the `merge` call. Fixture construction
-/// and transaction teardown live in `iter_batched` setup / drop, and the executor
-/// is the single-poll [`block_on`] above.
+/// and teardown live in `iter_batched_ref` setup / drop - the routine borrows the
+/// fixture rather than taking it by value, so nothing is dropped inside the timed
+/// region - and the executor is the single-poll [`block_on`] above.
 fn bench_merge_clean(c: &mut Criterion) {
     let mut group = c.benchmark_group("crdt_clean");
 
     let lww_low = lww_delta(10, b"low");
     let lww_high = lww_delta(20, b"high");
     group.bench_function(BenchmarkId::from_parameter("lww_merge_clean"), |b| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || make_clean_lww_setup(lww_low.clone()),
-            |(mut txn, lww, ctx)| {
-                let result =
-                    block_on(async { lww.merge(&mut *txn, &ctx, &lww_high).await.unwrap() });
-                (txn, black_box(result))
+            |(txn, lww, ctx)| {
+                black_box(block_on(async {
+                    lww.merge(&mut **txn, ctx, &lww_high).await.unwrap()
+                }))
             },
             BatchSize::SmallInput,
         );
@@ -219,12 +220,12 @@ fn bench_merge_clean(c: &mut Criterion) {
     group.bench_function(
         BenchmarkId::from_parameter("lww_merge_clean_tiebreak"),
         |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || make_clean_lww_setup(tie_low.clone()),
-                |(mut txn, lww, ctx)| {
-                    let result =
-                        block_on(async { lww.merge(&mut *txn, &ctx, &tie_high).await.unwrap() });
-                    (txn, black_box(result))
+                |(txn, lww, ctx)| {
+                    black_box(block_on(async {
+                        lww.merge(&mut **txn, ctx, &tie_high).await.unwrap()
+                    }))
                 },
                 BatchSize::SmallInput,
             );
@@ -235,12 +236,12 @@ fn bench_merge_clean(c: &mut Criterion) {
     group.bench_function(
         BenchmarkId::from_parameter("lww_merge_clean_rejected"),
         |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || make_clean_lww_setup(lww_low.clone()),
-                |(mut txn, lww, ctx)| {
-                    let result =
-                        block_on(async { lww.merge(&mut *txn, &ctx, &reject).await.unwrap() });
-                    (txn, black_box(result))
+                |(txn, lww, ctx)| {
+                    black_box(block_on(async {
+                        lww.merge(&mut **txn, ctx, &reject).await.unwrap()
+                    }))
                 },
                 BatchSize::SmallInput,
             );
@@ -272,13 +273,12 @@ fn bench_counter_merge(c: &mut Criterion) {
     )
     .unwrap();
     group.bench_function(BenchmarkId::from_parameter("counter_merge_int64"), |b| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || make_counter_setup(NumericKind::Int64, &int_initial),
-            |(mut txn, counter, ctx)| {
-                let result = block_on(async {
-                    counter.merge(&mut *txn, &ctx, &int_incoming).await.unwrap()
-                });
-                (txn, black_box(result))
+            |(txn, counter, ctx)| {
+                black_box(block_on(async {
+                    counter.merge(&mut **txn, ctx, &int_incoming).await.unwrap()
+                }))
             },
             BatchSize::SmallInput,
         );
@@ -303,13 +303,12 @@ fn bench_counter_merge(c: &mut Criterion) {
     )
     .unwrap();
     group.bench_function(BenchmarkId::from_parameter("counter_merge_float32"), |b| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || make_counter_setup(NumericKind::Float32, &f32_initial),
-            |(mut txn, counter, ctx)| {
-                let result = block_on(async {
-                    counter.merge(&mut *txn, &ctx, &f32_incoming).await.unwrap()
-                });
-                (txn, black_box(result))
+            |(txn, counter, ctx)| {
+                black_box(block_on(async {
+                    counter.merge(&mut **txn, ctx, &f32_incoming).await.unwrap()
+                }))
             },
             BatchSize::SmallInput,
         );
@@ -334,13 +333,12 @@ fn bench_counter_merge(c: &mut Criterion) {
     )
     .unwrap();
     group.bench_function(BenchmarkId::from_parameter("counter_merge_float64"), |b| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || make_counter_setup(NumericKind::Float64, &f64_initial),
-            |(mut txn, counter, ctx)| {
-                let result = block_on(async {
-                    counter.merge(&mut *txn, &ctx, &f64_incoming).await.unwrap()
-                });
-                (txn, black_box(result))
+            |(txn, counter, ctx)| {
+                black_box(block_on(async {
+                    counter.merge(&mut **txn, ctx, &f64_incoming).await.unwrap()
+                }))
             },
             BatchSize::SmallInput,
         );
@@ -360,16 +358,15 @@ fn bench_composite_merge(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("composite_merge_clear_winner", field_count),
             |b| {
-                b.iter_batched(
+                b.iter_batched_ref(
                     || {
                         let (txn, ctx) = make_composite_setup(field_count, &initial);
                         (txn, composite_dag(field_count), ctx)
                     },
-                    |(mut txn, dag, ctx)| {
-                        let result = block_on(async {
-                            dag.merge(&mut *txn, &ctx, &clear_winner).await.unwrap()
-                        });
-                        (txn, black_box(result))
+                    |(txn, dag, ctx)| {
+                        black_box(block_on(async {
+                            dag.merge(&mut **txn, ctx, &clear_winner).await.unwrap()
+                        }))
                     },
                     BatchSize::SmallInput,
                 );
@@ -379,16 +376,15 @@ fn bench_composite_merge(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("composite_merge_tiebreak", field_count),
             |b| {
-                b.iter_batched(
+                b.iter_batched_ref(
                     || {
                         let (txn, ctx) = make_composite_setup(field_count, &initial);
                         (txn, composite_dag(field_count), ctx)
                     },
-                    |(mut txn, dag, ctx)| {
-                        let result = block_on(async {
-                            dag.merge(&mut *txn, &ctx, &tiebreak).await.unwrap()
-                        });
-                        (txn, black_box(result))
+                    |(txn, dag, ctx)| {
+                        black_box(block_on(async {
+                            dag.merge(&mut **txn, ctx, &tiebreak).await.unwrap()
+                        }))
                     },
                     BatchSize::SmallInput,
                 );

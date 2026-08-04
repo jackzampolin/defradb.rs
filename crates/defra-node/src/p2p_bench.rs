@@ -21,7 +21,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
-use super::{EmbeddedNode, P2PConfig};
+use super::{EmbeddedNode, P2PConfig, QueryResponse};
 
 /// Document-set sizes each benchmark is run against.
 const DOC_COUNTS: &[usize] = &[1, 50, 500];
@@ -270,6 +270,30 @@ async fn await_user_count(node: &EmbeddedNode, expected: usize) {
     }
 }
 
+/// Stops both nodes before the next measurement builds more.
+///
+/// Neither `EmbeddedNode` nor the `P2PLifecycle` it owns has a `Drop` impl, so the Iroh
+/// endpoint and its background tasks survive the nodes going out of scope. Without this,
+/// every size in a benchmark would run alongside the leftovers of all the earlier ones.
+async fn shutdown_nodes(sender: &EmbeddedNode, receiver: &EmbeddedNode) {
+    sender.shutdown().await;
+    receiver.shutdown().await;
+}
+
+/// Returns the `_docID` of the single document a create mutation reported.
+fn created_doc_id(response: &QueryResponse) -> String {
+    response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("add_User"))
+        .and_then(|users| users.as_array())
+        .and_then(|users| users.first())
+        .and_then(|user| user.get("_docID"))
+        .and_then(|id| id.as_str())
+        .expect("created document should have a _docID")
+        .to_string()
+}
+
 /// Runs one replication measurement for `doc_count` documents.
 async fn measure_replication(doc_count: usize) -> ReplicationSpans {
     let sender = build_bench_node().await;
@@ -294,6 +318,8 @@ async fn measure_replication(doc_count: usize) -> ReplicationSpans {
 
     await_user_count(&receiver, doc_count).await;
     let visible = start.elapsed();
+
+    shutdown_nodes(&sender, &receiver).await;
 
     ReplicationSpans {
         local_write,
@@ -362,16 +388,7 @@ async fn measure_catch_up(update_count: usize) -> Duration {
         response.errors
     );
 
-    let doc_id = response
-        .data
-        .as_ref()
-        .and_then(|data| data.get("add_User"))
-        .and_then(|users| users.as_array())
-        .and_then(|users| users.first())
-        .and_then(|user| user.get("_docID"))
-        .and_then(|id| id.as_str())
-        .expect("created document should have a _docID")
-        .to_string();
+    let doc_id = created_doc_id(&response);
 
     for age in 1..=update_count {
         let response = sender
@@ -395,8 +412,11 @@ async fn measure_catch_up(update_count: usize) -> Duration {
     let start = Instant::now();
     connect_and_replicate(&sender, &receiver).await;
     await_user_age(&receiver, update_count as i64).await;
+    let elapsed = start.elapsed();
 
-    start.elapsed()
+    shutdown_nodes(&sender, &receiver).await;
+
+    elapsed
 }
 
 /// Polls the node until its single `User` document reports `expected` as its age.
@@ -474,18 +494,7 @@ async fn measure_pull(doc_count: usize) -> PullOutcome {
             response.errors
         );
 
-        doc_ids.push(
-            response
-                .data
-                .as_ref()
-                .and_then(|data| data.get("add_User"))
-                .and_then(|users| users.as_array())
-                .and_then(|users| users.first())
-                .and_then(|user| user.get("_docID"))
-                .and_then(|id| id.as_str())
-                .expect("created document should have a _docID")
-                .to_string(),
-        );
+        doc_ids.push(created_doc_id(&response));
     }
 
     // Built after the writes for the same reason as in `measure_catch_up`: an idle node
@@ -514,6 +523,8 @@ async fn measure_pull(doc_count: usize) -> PullOutcome {
         tokio::time::sleep(POLL_INTERVAL).await;
         settled = user_count(&receiver).await;
     }
+
+    shutdown_nodes(&sender, &receiver).await;
 
     PullOutcome {
         call,

@@ -23,7 +23,7 @@ use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criteri
 use datastore::{Namespace, NamespaceView, SharedTxn};
 use db::DB;
 use db_merge::DbMergeHandler;
-use defra_core::merge::{BlockMetadata, MergeHandler};
+use defra_core::merge::{BlockMetadata, MergeHandler, MergeOutcome};
 use document::{DocID, Document, NormalValue};
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 use storage::backends::MemoryStore;
@@ -187,12 +187,17 @@ fn bench_merge_dag(c: &mut Criterion) {
                                 None,
                                 false,
                             );
-                            black_box(
-                                handler
-                                    .handle_block(&dag.tip_cid, &dag.tip_bytes, metadata)
-                                    .await
-                                    .unwrap(),
-                            )
+                            let outcome = handler
+                                .handle_block(&dag.tip_cid, &dag.tip_bytes, metadata)
+                                .await
+                                .unwrap();
+                            // A skipped or rejected block does no walk, so timing it
+                            // would report a merge cost that was never paid.
+                            assert!(
+                                matches!(outcome, MergeOutcome::Merged),
+                                "tip was not merged: {outcome:?}"
+                            );
+                            black_box(outcome)
                         })
                     },
                     BatchSize::SmallInput,

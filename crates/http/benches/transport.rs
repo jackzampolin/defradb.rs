@@ -209,11 +209,11 @@ fn signing_config() -> SigningConfig {
 /// that condition and therefore pay `spawn_blocking` + `Handle::block_on` plus
 /// the thread-local setup:
 ///
-/// * `signing_enabled` trips it via the signing config alone, which isolates
-///   the hop itself.
-/// * `nac_enabled` trips it via NAC, which additionally pays a NAC status
-///   lookup and a DAC-bypass resolution - closer to what an access-controlled
-///   deployment actually costs.
+/// * `spawn_blocking_signing` trips it via the signing config alone, which
+///   isolates the hop itself.
+/// * `spawn_blocking_nac` trips it via NAC, which additionally pays a NAC
+///   status lookup and a DAC-bypass resolution - closer to what an
+///   access-controlled deployment actually costs.
 fn bench_query_context(c: &mut Criterion) {
     let rt = runtime();
 
