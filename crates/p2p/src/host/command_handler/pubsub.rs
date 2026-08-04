@@ -1,6 +1,7 @@
 //! PubSub commands: Subscribe, Unsubscribe, Publish, SubscribedTopics.
 
 use iroh_bitswap::Store;
+use libp2p::gossipsub;
 use tracing::debug;
 
 use crate::error::{Error, Result};
@@ -8,6 +9,14 @@ use crate::message::PushLogBroadcast;
 use crate::topics::DefraTopic;
 
 use super::super::p2p_host::P2PHost;
+
+fn map_publish_error(error: gossipsub::PublishError) -> Error {
+    let message = match error {
+        gossipsub::PublishError::NoPeersSubscribedToTopic => "InsufficientPeers".to_string(),
+        error => error.to_string(),
+    };
+    Error::GossipSubPublish(message)
+}
 
 impl<S: Store> P2PHost<S> {
     pub(super) fn handle_subscribe(
@@ -72,7 +81,7 @@ impl<S: Store> P2PHost<S> {
                 self.swarm
                     .behaviour_mut()
                     .publish(ident_topic, data)
-                    .map_err(|e| Error::GossipSubPublish(e.to_string()))
+                    .map_err(map_publish_error)
             });
         if response.send(result).is_err() {
             debug!(topic = ?topic, "Publish command response dropped - caller cancelled");
@@ -90,7 +99,7 @@ impl<S: Store> P2PHost<S> {
             .swarm
             .behaviour_mut()
             .publish(ident_topic, data)
-            .map_err(|e| Error::GossipSubPublish(e.to_string()));
+            .map_err(map_publish_error);
         if response.send(result).is_err() {
             debug!(topic = %topic, "PublishRaw command response dropped - caller cancelled");
         }
@@ -121,5 +130,19 @@ impl<S: Store> P2PHost<S> {
         if response.send(topics).is_err() {
             debug!("SubscribedTopics command response dropped - caller cancelled");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_subscribers_preserves_retry_signal() {
+        let error = map_publish_error(gossipsub::PublishError::NoPeersSubscribedToTopic);
+        assert_eq!(
+            error.to_string(),
+            "gossipsub publish error: InsufficientPeers"
+        );
     }
 }

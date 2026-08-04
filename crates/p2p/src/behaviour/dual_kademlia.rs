@@ -5,7 +5,7 @@ use std::ops::{Deref, DerefMut};
 use std::task::{Context, Poll};
 
 use libp2p::{
-    core::Endpoint,
+    core::{transport::PortUse, Endpoint},
     identity::PublicKey,
     kad::{self, store::MemoryStore},
     swarm::{
@@ -83,11 +83,10 @@ pub struct DefraKademlia {
 impl DefraKademlia {
     fn new(local_peer_id: PeerId, network: KademliaNetwork) -> Self {
         let kad_store = MemoryStore::new(local_peer_id);
-        let mut kad_config = kad::Config::default();
+        let mut kad_config = kad::Config::new(StreamProtocol::new(network.protocol()));
         // Match Go DefraDB's `dht.Concurrency(10)` (`go-p2p/host.go:44`).
         // rust-libp2p defaults to ALPHA_VALUE = 3.
         kad_config.set_parallelism(KAD_PARALLELISM);
-        kad_config.set_protocol_names(vec![StreamProtocol::new(network.protocol())]);
         // rust-libp2p has no pluggable record validator. FilterBoth emits
         // inbound records so the host can apply the pk namespace validator
         // before explicitly storing accepted records.
@@ -169,9 +168,15 @@ impl NetworkBehaviour for DefraKademlia {
         peer: PeerId,
         addr: &Multiaddr,
         role_override: Endpoint,
+        port_use: PortUse,
     ) -> Result<THandler<Self>, ConnectionDenied> {
-        self.inner
-            .handle_established_outbound_connection(connection_id, peer, addr, role_override)
+        self.inner.handle_established_outbound_connection(
+            connection_id,
+            peer,
+            addr,
+            role_override,
+            port_use,
+        )
     }
 
     fn on_swarm_event(&mut self, event: FromSwarm) {
@@ -204,7 +209,7 @@ impl NetworkBehaviour for DefraKademlia {
 /// Separate LAN and WAN Kademlia routing tables.
 ///
 /// This emulates go-libp2p's `dualdht.DHT` shape with two concrete DHTs.
-/// rust-libp2p 0.53 does not expose Go's public/private routing-table or
+/// rust-libp2p does not expose Go's public/private routing-table or
 /// query filters, so this split is limited to independent routing tables and
 /// protocol IDs. Addresses are inserted into both tables, which means the LAN
 /// table can contain WAN-only peers and the WAN table can contain LAN/private
