@@ -443,7 +443,13 @@ mod tests {
         let commit_guard = gate.write().await;
 
         let commit_task = tokio::spawn(async move { txn.commit().await });
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.db.get(&key).unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("commit never reached its physical write");
 
         // Drop the caller's future while publication is still parked.
         commit_task.abort();
