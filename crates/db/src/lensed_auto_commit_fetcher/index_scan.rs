@@ -45,7 +45,8 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
 
         let short_id = collection.resolved_root_id();
         let index_manager =
-            IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
+            IndexManager::from_indexes(short_id, collection.schema(), collection.write_indexes())
+                .map_err(|e| {
                 query::error::QueryError::execution(format!(
                     "failed to create index manager for collection '{}': {}",
                     collection_name, e

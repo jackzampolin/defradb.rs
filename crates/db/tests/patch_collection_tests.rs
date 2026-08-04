@@ -1,5 +1,5 @@
 use db::database::DB;
-use schema::FieldKind;
+use schema::{FieldKind, ScalarArrayKind};
 use storage::backends::MemoryStore;
 
 async fn agent_response_db() -> DB<MemoryStore> {
@@ -62,28 +62,8 @@ async fn patch_collection_preserves_runtime_root_id() {
 }
 
 #[tokio::test]
-async fn patch_collection_rejects_numeric_kind_before_it_decodes_as_int_array() {
+async fn patch_collection_accepts_numeric_go_kind() {
     let db = agent_response_db().await;
-
-    let err = db
-        .patch_collection(
-            "AgentResponse",
-            r#"
-            [
-                { "op": "add", "path": "/AgentResponse/Fields/-", "value": {
-                    "Name": "reasoning_progress_seq", "Kind": 5
-                }}
-            ]
-            "#,
-            None,
-        )
-        .await
-        .unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid patch: numeric Kind values are not supported in schema patches. Field: reasoning_progress_seq, Kind: 5. It maps to \"[Int!]\"; use that string only if that type is intended, otherwise use the intended type's canonical string."
-    );
 
     let patched = db
         .patch_collection(
@@ -91,7 +71,7 @@ async fn patch_collection_rejects_numeric_kind_before_it_decodes_as_int_array() 
             r#"
             [
                 { "op": "add", "path": "/AgentResponse/Fields/-", "value": {
-                    "Name": "reasoning_progress_seq", "Kind": "Int"
+                    "Name": "reasoning_progress_seq", "Kind": 5
                 }}
             ]
             "#,
@@ -105,11 +85,107 @@ async fn patch_collection_rejects_numeric_kind_before_it_decodes_as_int_array() 
         .iter()
         .find(|field| field.name == "reasoning_progress_seq")
         .unwrap();
-    assert_eq!(reasoning_progress_seq.kind, FieldKind::int());
+    assert_eq!(
+        reasoning_progress_seq.kind,
+        FieldKind::ScalarArray(ScalarArrayKind::IntArray)
+    );
 }
 
 #[tokio::test]
-async fn patch_collection_rejects_numeric_kind_in_whole_fields_replacement() {
+async fn patch_collection_rejects_new_non_nillable_field() {
+    let db = agent_response_db().await;
+    let err = db
+        .patch_collection(
+            "AgentResponse",
+            r#"
+            [{
+                "op": "add",
+                "path": "/AgentResponse/Fields/-",
+                "value": {"Name": "score", "Kind": 23}
+            }]
+            "#,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid patch: adding a non-nillable field to an existing collection is not supported"
+    );
+}
+
+#[tokio::test]
+async fn patch_collection_reports_unknown_numeric_kind_like_go() {
+    let db = agent_response_db().await;
+    let err = db
+        .patch_collection(
+            "AgentResponse",
+            r#"
+            [{
+                "op": "add",
+                "path": "/AgentResponse/Fields/-",
+                "value": {"Name": "score", "Kind": 111}
+            }]
+            "#,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid patch: no type found for given name. Type: 111"
+    );
+}
+
+#[tokio::test]
+async fn patch_view_query_creates_new_version() {
+    let store = MemoryStore::new();
+    let db = DB::new(store).unwrap();
+
+    let users = query::parse_sdl("type Users { name: String }").unwrap();
+    db.create_collections_atomic(users).await.unwrap();
+
+    let mut views = query::parse_sdl("type UserView { name: String fullName: String }").unwrap();
+    let select = query::parse_query("query { Users { name } }").unwrap();
+    views[0].query = Some(schema::QuerySource::new(query::select_to_go_json(
+        &select[0],
+    )));
+    db.create_collections_atomic(views).await.unwrap();
+    let original = db.get_collection("UserView").unwrap().unwrap();
+
+    let patched = db
+        .patch_collection(
+            "UserView",
+            r#"
+            [{
+                "op": "replace",
+                "path": "/UserView/Query/Query",
+                "value": {"Name": "Users", "Fields": [{"Name": "name", "Alias": "fullName"}]}
+            }]
+            "#,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        patched.version_id,
+        "bafyreihekbkpnimeo5g5tkv5a3urtcalx2qd447tyhhptjunb7vvpdyvue"
+    );
+    assert_eq!(
+        patched
+            .previous_version
+            .as_ref()
+            .map(|source| source.source_collection_id.as_str()),
+        Some(original.version_id())
+    );
+    assert_eq!(db.get_all_collection_versions().await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn patch_collection_accepts_numeric_kind_in_whole_fields_replacement() {
     let db = agent_response_db().await;
     let collection = db.get_collection("AgentResponse").unwrap().unwrap();
     let mut fields = serde_json::to_value(&collection.schema().fields).unwrap();
@@ -134,14 +210,18 @@ async fn patch_collection_rejects_numeric_kind_in_whole_fields_replacement() {
         "path": "/AgentResponse/Fields",
         "value": fields
     }]);
-    let err = db
+    let patched = db
         .patch_collection("AgentResponse", &patch.to_string(), None)
         .await
-        .unwrap_err();
-
+        .unwrap();
     assert_eq!(
-        err.to_string(),
-        "invalid patch: numeric Kind values are not supported in schema patches. Field: reasoning_progress_seq, Kind: 5. It maps to \"[Int!]\"; use that string only if that type is intended, otherwise use the intended type's canonical string."
+        patched
+            .fields
+            .iter()
+            .find(|field| field.name == "reasoning_progress_seq")
+            .unwrap()
+            .kind,
+        FieldKind::ScalarArray(ScalarArrayKind::IntArray)
     );
 }
 
@@ -165,7 +245,7 @@ async fn patch_collection_rejects_numeric_kind_in_direct_kind_replacement() {
 
     assert_eq!(
         err.to_string(),
-        "invalid patch: numeric Kind values are not supported in schema patches. Field: message, Kind: 3. It maps to \"[Boolean!]\"; use that string only if that type is intended, otherwise use the intended type's canonical string."
+        "invalid patch: mutating an existing field is not supported. ProposedName: "
     );
 }
 

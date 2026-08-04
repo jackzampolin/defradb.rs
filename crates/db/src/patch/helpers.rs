@@ -3,7 +3,7 @@ use schema::{ScalarArrayKind, ScalarKind};
 
 impl<S: Store> crate::database::DB<S> {
     /// Validate a Kind value in a patch field addition or replacement.
-    /// Returns error if the Kind is numeric or an unknown string.
+    /// Returns error if the Kind is an unknown numeric or string value.
     pub(crate) fn validate_patch_field_kind(
         kind_val: &serde_json::Value,
         field_name: &str,
@@ -11,23 +11,17 @@ impl<S: Store> crate::database::DB<S> {
     ) -> Result<()> {
         match kind_val {
             serde_json::Value::Number(n) => {
-                let canonical = n.as_u64().and_then(Self::canonical_patch_field_kind_name);
-                let hint = canonical.map_or_else(
-                    || {
-                        "Use the intended type's canonical string, such as \"Int\" or \"[Int!]\"."
-                            .to_string()
-                    },
-                    |name| {
-                        format!(
-                            "It maps to \"{}\"; use that string only if that type is intended, otherwise use the intended type's canonical string.",
-                            name
-                        )
-                    },
-                );
-                Err(Error::InvalidPatch(format!(
-                    "numeric Kind values are not supported in schema patches. Field: {}, Kind: {}. {}",
-                    field_name, n, hint
-                )))
+                if n.as_u64()
+                    .and_then(Self::canonical_patch_field_kind_name)
+                    .is_some()
+                {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidPatch(format!(
+                        "no type found for given name. Type: {}",
+                        n
+                    )))
+                }
             }
             serde_json::Value::String(s) => {
                 // Known string kinds
@@ -80,23 +74,33 @@ impl<S: Store> crate::database::DB<S> {
         match kind {
             kind if kind == ScalarKind::DocID as u64 => Some("ID"),
             kind if kind == ScalarKind::Bool as u64 => Some("Boolean"),
+            kind if kind == ScalarKind::NonNillableBool as u64 => Some("Boolean!"),
             kind if kind == ScalarArrayKind::BoolArray as u64 => Some("[Boolean!]"),
             kind if kind == ScalarKind::Int as u64 => Some("Int"),
+            kind if kind == ScalarKind::NonNillableInt as u64 => Some("Int!"),
             kind if kind == ScalarArrayKind::IntArray as u64 => Some("[Int!]"),
             kind if kind == ScalarKind::Float64 as u64 => Some("Float64"),
+            kind if kind == ScalarKind::NonNillableFloat64 as u64 => Some("Float64!"),
             kind if kind == ScalarArrayKind::Float64Array as u64 => Some("[Float64!]"),
             kind if kind == ScalarKind::Float32 as u64 => Some("Float32"),
+            kind if kind == ScalarKind::NonNillableFloat32 as u64 => Some("Float32!"),
             kind if kind == ScalarArrayKind::Float32Array as u64 => Some("[Float32!]"),
             kind if kind == ScalarKind::DateTime as u64 => Some("DateTime"),
+            kind if kind == ScalarKind::NonNillableDateTime as u64 => Some("DateTime!"),
             kind if kind == ScalarKind::String as u64 => Some("String"),
+            kind if kind == ScalarKind::NonNillableString as u64 => Some("String!"),
             kind if kind == ScalarArrayKind::StringArray as u64 => Some("[String!]"),
             kind if kind == ScalarKind::Blob as u64 => Some("Blob"),
+            kind if kind == ScalarKind::NonNillableBlob as u64 => Some("Blob!"),
             kind if kind == ScalarKind::Json as u64 => Some("JSON"),
+            kind if kind == ScalarKind::NonNillableJson as u64 => Some("JSON!"),
             kind if kind == ScalarArrayKind::NillableBoolArray as u64 => Some("[Boolean]"),
             kind if kind == ScalarArrayKind::NillableIntArray as u64 => Some("[Int]"),
             kind if kind == ScalarArrayKind::NillableFloat64Array as u64 => Some("[Float64]"),
             kind if kind == ScalarArrayKind::NillableStringArray as u64 => Some("[String]"),
             kind if kind == ScalarArrayKind::NillableFloat32Array as u64 => Some("[Float32]"),
+            kind if kind == ScalarArrayKind::DateTimeArray as u64 => Some("[DateTime!]"),
+            kind if kind == ScalarArrayKind::NillableDateTimeArray as u64 => Some("[DateTime]"),
             _ => None,
         }
     }

@@ -43,7 +43,7 @@ pub(crate) fn json_to_normal_value_for_index_field(
         .find(|field| field.name == field_name)
         .map(|field| &field.kind)
     {
-        Some(FieldKind::Scalar(kind)) => match kind {
+        Some(FieldKind::Scalar(kind)) => match kind.base_kind() {
             ScalarKind::Json | ScalarKind::None => json_to_normal_value(value),
             _ => document::encoding::json_to_normal_value_for_kind(value, kind),
         },
@@ -123,19 +123,13 @@ pub(super) fn wrap_values_for_json_path(
 /// For example, a Float32 field stores values with `encode_float32_ascending`,
 /// so lookup values must also be Float32 (not Float64 or Int).
 fn normalize_value_for_field(value: NormalValue, field_kind: &FieldKind) -> NormalValue {
-    match (&value, field_kind) {
+    match (&value, field_kind.as_scalar().map(ScalarKind::base_kind)) {
         // Float64 → Float32 when schema says Float32
-        (NormalValue::Float64(f), FieldKind::Scalar(ScalarKind::Float32)) => {
-            NormalValue::Float32(*f as f32)
-        }
+        (NormalValue::Float64(f), Some(ScalarKind::Float32)) => NormalValue::Float32(*f as f32),
         // Int → Float32 when schema says Float32
-        (NormalValue::Int(i), FieldKind::Scalar(ScalarKind::Float32)) => {
-            NormalValue::Float32(*i as f32)
-        }
+        (NormalValue::Int(i), Some(ScalarKind::Float32)) => NormalValue::Float32(*i as f32),
         // Int → Float64 when schema says Float64
-        (NormalValue::Int(i), FieldKind::Scalar(ScalarKind::Float64)) => {
-            NormalValue::Float64(*i as f64)
-        }
+        (NormalValue::Int(i), Some(ScalarKind::Float64)) => NormalValue::Float64(*i as f64),
         _ => value,
     }
 }

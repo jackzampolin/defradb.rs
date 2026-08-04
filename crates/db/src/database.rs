@@ -21,7 +21,7 @@ use lens::WasmTransformStore;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use storage::corekv::Store;
 
 /// Default maximum number of lazy migrations written in one transaction.
@@ -220,6 +220,8 @@ pub struct DB<S: Store> {
     /// behind. The registry provides cancellation-safe mutual exclusion for
     /// operations running in this database instance.
     pub(crate) active_actions: Arc<crate::action::ActionRegistry>,
+    /// Per-collection locks coordinating document writes with schema changes.
+    pub(crate) collection_locks: Mutex<HashMap<String, Arc<async_lock::RwLock<()>>>>,
 }
 
 impl<S: Store> DB<S> {
@@ -254,6 +256,7 @@ impl<S: Store> DB<S> {
             nac_manager: std::sync::OnceLock::new(),
             doc_write_queue: Arc::new(crate::doc_write_queue::DocWriteQueue::new()),
             active_actions: Arc::new(crate::action::ActionRegistry::default()),
+            collection_locks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -309,6 +312,7 @@ impl<S: Store> DB<S> {
             nac_manager: std::sync::OnceLock::new(),
             doc_write_queue: Arc::new(crate::doc_write_queue::DocWriteQueue::new()),
             active_actions: Arc::new(crate::action::ActionRegistry::default()),
+            collection_locks: Mutex::new(HashMap::new()),
         })
     }
 

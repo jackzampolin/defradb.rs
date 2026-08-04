@@ -63,6 +63,7 @@ const ADAPTER_GATED: &[NodePermission] = &[
     DacRelationDelete,
     DacPolicyAdd, // ACP adapter gates via db::NodeAccessChecker
     P2pPeerConnect,
+    P2pPeerDisconnect,
     P2pPeerActive,
     P2pReplicatorAdd,
     P2pReplicatorDelete,

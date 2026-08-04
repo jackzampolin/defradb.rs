@@ -93,10 +93,12 @@ impl DefraKademlia {
         kad_config.set_record_filtering(kad::StoreInserts::FilterBoth);
 
         let mut inner = kad::Behaviour::with_config(local_peer_id, kad_store, kad_config);
-        // Auto mode mirrors Go's `dht.ModeAuto` (`go-p2p/host.go:45`):
-        // start as Client, swap to Server once an external address is
-        // confirmed. set_mode(None) is rust-libp2p's auto-mode opt-in.
-        inner.set_mode(None);
+        // Go's dual DHT forces the LAN side into server mode whenever the WAN
+        // side is not explicitly client-only.
+        match network {
+            KademliaNetwork::Lan => inner.set_mode(Some(kad::Mode::Server)),
+            KademliaNetwork::Wan => inner.set_mode(None),
+        }
 
         Self { network, inner }
     }
@@ -243,6 +245,11 @@ impl DualKademlia {
         let lan = self.lan.add_address(peer, address.clone());
         let wan = self.wan.add_address(peer, address);
         (lan, wan)
+    }
+
+    pub fn remove_peer(&mut self, peer: &PeerId) {
+        self.lan.remove_peer(peer);
+        self.wan.remove_peer(peer);
     }
 
     pub fn bootstrap(&mut self) -> [(KademliaNetwork, Result<kad::QueryId, kad::NoKnownPeers>); 2] {

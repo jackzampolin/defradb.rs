@@ -176,9 +176,10 @@ impl DocFetcher for FetcherWrapper {
         &self,
         cid: &str,
         expected_doc_id: Option<&str>,
+        caller_identity: Option<&identity::Did>,
     ) -> Result<Document> {
         self.get_fetcher()
-            .get_document_at_cid(cid, expected_doc_id)
+            .get_document_at_cid(cid, expected_doc_id, caller_identity)
             .await
     }
 
@@ -186,9 +187,10 @@ impl DocFetcher for FetcherWrapper {
         &self,
         cid: &str,
         expected_doc_id: Option<&str>,
+        caller_identity: Option<&identity::Did>,
     ) -> Result<Vec<Document>> {
         self.get_fetcher()
-            .get_documents_at_cid(cid, expected_doc_id)
+            .get_documents_at_cid(cid, expected_doc_id, caller_identity)
             .await
     }
 

@@ -38,12 +38,12 @@ impl<S: Store> crate::database::DB<S> {
         // This must happen before any systemstore writes that use version_id.
         if schema.query.is_some() {
             let (qs_bytes, qt_cid) = if let Some(ref qs) = schema.query {
-                let select_cbor = serde_cbor::to_vec(&qs.query).unwrap_or_default();
+                let select_json = schema::query_select_json_bytes(&qs.query).unwrap_or_default();
                 let transform_cid = qs
                     .transform
                     .as_ref()
                     .and_then(|t| cid::Cid::try_from(t.as_str()).ok());
-                (Some(select_cbor), transform_cid)
+                (Some(select_json), transform_cid)
             } else {
                 (None, None)
             };
@@ -190,12 +190,12 @@ impl<S: Store> crate::database::DB<S> {
         // For views, include query_select and query_transform so the stored block's
         // CID matches the version_id (which was computed with these fields).
         let (qs_bytes_for_block, qt_cid_for_block) = if let Some(ref qs) = schema.query {
-            let select_cbor = serde_cbor::to_vec(&qs.query).unwrap_or_default();
+            let select_json = schema::query_select_json_bytes(&qs.query).unwrap_or_default();
             let transform_cid = qs
                 .transform
                 .as_ref()
                 .and_then(|t| cid::Cid::try_from(t.as_str()).ok());
-            (Some(select_cbor), transform_cid)
+            (Some(select_json), transform_cid)
         } else {
             (None, None)
         };

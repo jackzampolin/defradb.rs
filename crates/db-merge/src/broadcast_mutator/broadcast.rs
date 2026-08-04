@@ -1,4 +1,4 @@
-//! Broadcast helper functions for fire-and-forget P2P propagation.
+//! Broadcast helper functions for asynchronous P2P propagation.
 
 use blockstore::Blockstore;
 use p2p::sync::{BroadcastResult, SyncCoordinator};
@@ -52,7 +52,7 @@ async fn connected_peer_count<B: Blockstore + 'static, T: P2PTransport>(
         .unwrap_or_else(|_| sync.peer_state().stats().connected_peers())
 }
 
-/// Log broadcast failures at error level for observability in fire-and-forget paths.
+/// Log broadcast failures for asynchronous propagation paths.
 pub(crate) fn log_broadcast_failure(status: &BroadcastStatus) {
     if let BroadcastStatus::Failed(err) = status {
         if is_expected_fire_and_forget_failure(err) {

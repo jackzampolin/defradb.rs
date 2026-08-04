@@ -74,6 +74,7 @@ pub extern "C" fn create_merge_complete_subscription(node_ptr: usize) -> CreateS
                 events::EventName::ReplicatorCompleted,
                 events::EventName::TopicPeerEvent,
                 events::EventName::SEArtifactReceived,
+                events::EventName::ActionExecution,
             ])
         }) {
             Some(sub) => sub,
@@ -151,6 +152,14 @@ pub(crate) fn message_to_json(message: &events::Message) -> String {
         .to_string();
     }
 
+    if let Some(execution) = message.as_action_execution() {
+        return serde_json::json!({
+            "type": "action_execution",
+            "action_execution": execution
+        })
+        .to_string();
+    }
+
     // Signal event without data
     let event_type = match message.name {
         events::EventName::Merge => "merge",
@@ -161,6 +170,7 @@ pub(crate) fn message_to_json(message: &events::Message) -> String {
         events::EventName::SEArtifactReceived => "se_artifact_received",
         events::EventName::AcpHeightAdvanced => "acp_height_advanced",
         events::EventName::AcpCacheInvalidated => "acp_cache_invalidated",
+        events::EventName::ActionExecution => "action_execution",
         events::EventName::WildCard => "wildcard",
         _ => "unknown",
     };

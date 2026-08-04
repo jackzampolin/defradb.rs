@@ -12,6 +12,24 @@ use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_entry, try_ffi, ERR_INVALID_NODE_HANDLE};
 
+async fn publish_latest_document_update(
+    database: &crate::state::FfiDatabase,
+    event_bus: &dyn events::Bus,
+    collection_id: &str,
+    doc_id: &str,
+) -> Result<(), String> {
+    let result = db::block_reader::read_latest_composite_block(database, doc_id).await?;
+    event_bus.publish(events::Message::update(events::Update::new(
+        doc_id.to_string(),
+        result.cid,
+        collection_id.to_string(),
+        result.block,
+        false,
+        false,
+    )));
+    Ok(())
+}
+
 /// Resolve managing relations for a given relation within a policy resource.
 ///
 /// Loads the policy YAML, finds the resource, validates the relation exists,
@@ -305,11 +323,12 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
             );
         }
 
-        // Validate node handle and get database, document_acp, and policy_store
-        let (database, document_acp, policy_store) = match NODES.get(node_ptr, |state| {
+        // Validate node handle and get database, document_acp, event_bus, and policy_store
+        let (database, document_acp, event_bus, policy_store) = match NODES.get(node_ptr, |state| {
             (
                 state.database.clone(),
                 state.document_acp.clone(),
+                state.event_bus.clone(),
                 state.policy_store.clone(),
             )
         }) {
@@ -318,9 +337,14 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
         };
 
         // Resolve collection name -> policy resource_name and policy_id
-        let (resource_name, policy_id) = match database.get_collection(&collection_id_str) {
+        let (resource_name, policy_id, collection_id) =
+            match database.get_collection(&collection_id_str) {
             Ok(Some(col)) => match col.schema().policy {
-                Some(ref policy) => (policy.resource_name.clone(), policy.id.clone()),
+                Some(ref policy) => (
+                    policy.resource_name.clone(),
+                    policy.id.clone(),
+                    col.collection_id().to_string(),
+                ),
                 None => {
                     return FfiResult::error("operation requires ACP, but collection has no policy");
                 }
@@ -373,6 +397,16 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
                 )
                 .await
                 .map_err(|e| e.to_string())?;
+
+            if added && doc_id_str != collection_id {
+                publish_latest_document_update(
+                    &database,
+                    event_bus.as_ref(),
+                    &collection_id,
+                    &doc_id_str,
+                )
+                .await?;
+            }
 
             // Local ACP relationships are node-local (matches Go): a grant is not
             // propagated to peers. Cross-node access control is SourceHub's role.
@@ -699,6 +733,11 @@ resources:
         let collection_id = CString::new("User").unwrap();
         let doc_id_c = CString::new(doc_id.clone()).unwrap();
         let relation = CString::new("viewer").unwrap();
+        let mut relationship_events = NODES
+            .get(node, |state| {
+                state.event_bus.subscribe(&[events::EventName::Update])
+            })
+            .unwrap();
         let add_rel_result = unsafe {
             add_dac_actor_relationship(
                 node,
@@ -712,6 +751,17 @@ resources:
         let add_rel_json = ffi_value(&add_rel_result);
         assert!(add_rel_json.contains(r#""added":true"#));
         unsafe { crate::types::defra_free_string(add_rel_result.value) };
+
+        let message = relationship_events
+            .try_recv()
+            .expect("relationship update event");
+        let update = message.as_update().expect("document update");
+        assert_eq!(update.doc_id, doc_id);
+        assert!(!update.block.is_empty());
+        assert_eq!(
+            defra_core::block::generate_cid_from_bytes(&update.block).unwrap(),
+            update.cid
+        );
 
         let allowed_read_result = unsafe {
             exec_request(

@@ -177,10 +177,10 @@ pub struct NodeInitOptions {
     /// Otherwise, a random secp256k1 key pair is generated.
     pub enable_signing: c_int,
     /// Optional: signing key type string (e.g. "secp256k1", "secp256r1", "ed25519").
-    /// Null to auto-generate secp256k1.
+    /// Only used when signing_private_key is provided.
     pub signing_key_type: *const c_char,
-    /// Optional: raw private key bytes for signing.
-    /// Null to auto-generate.
+    /// Optional: raw private key bytes used for the node identity.
+    /// Block signing remains controlled by enable_signing.
     pub signing_private_key: *const u8,
     /// Length of signing_private_key in bytes. 0 if null.
     pub signing_private_key_len: usize,

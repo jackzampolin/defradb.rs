@@ -93,22 +93,41 @@ pub fn get_directive_string_list(directive: &Directive<'_, String>, arg_name: &s
     }
 }
 
-/// Create a type mismatch error for @default directive.
-/// Error format matches Go's graphql-parser error: `Argument "name" has invalid value value`
+/// Create a Go-compatible type mismatch error for an @default directive.
 pub fn default_type_error(
-    arg_name: &str,
-    _expected: &str,
+    field_name: &str,
+    expected: &str,
     actual: &graphql_parser::schema::Value<'_, String>,
 ) -> QueryError {
-    // Format the value for display (strip enum/string wrappers)
+    let actual_type = match actual {
+        graphql_parser::schema::Value::Variable(_) => "Variable",
+        graphql_parser::schema::Value::Int(_) => "Int",
+        graphql_parser::schema::Value::Float(_) => "Float",
+        graphql_parser::schema::Value::String(_) => "String",
+        graphql_parser::schema::Value::Boolean(_) => "Boolean",
+        graphql_parser::schema::Value::Null => "Null",
+        graphql_parser::schema::Value::Enum(_) => "Enum",
+        graphql_parser::schema::Value::List(_) => "List",
+        graphql_parser::schema::Value::Object(_) => "Object",
+    };
     let value_str = match actual {
+        graphql_parser::schema::Value::Variable(value) => format!("${value}"),
+        graphql_parser::schema::Value::Int(value) => value
+            .as_i64()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| format!("{value:?}")),
+        graphql_parser::schema::Value::Float(value) => value.to_string(),
+        graphql_parser::schema::Value::String(value) => {
+            serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}"))
+        }
+        graphql_parser::schema::Value::Boolean(value) => value.to_string(),
+        graphql_parser::schema::Value::Null => "null".to_string(),
         graphql_parser::schema::Value::Enum(s) => s.clone(),
-        graphql_parser::schema::Value::String(s) => format!("\"{}\"", s),
         other => format!("{:?}", other),
     };
     QueryError::parse(format!(
-        "Argument \"{}\" has invalid value {}",
-        arg_name, value_str
+        "default value is invalid. Field: {}, Expected: {}, Actual: {}, Value: {}",
+        field_name, expected, actual_type, value_str
     ))
 }
 

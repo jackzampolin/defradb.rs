@@ -401,13 +401,13 @@ enum ShutdownKind {
     Libp2p {
         handle: Box<p2p::P2PHostHandle>,
         coordinator: p2p::sync::SyncShutdownHandle,
-        aborts: Vec<tokio::task::AbortHandle>,
+        tasks: std::sync::Mutex<Option<Vec<tokio::task::JoinHandle<()>>>>,
     },
     #[cfg(feature = "iroh")]
     Iroh {
         transport: p2p::iroh::IrohTransport,
         coordinator: p2p::sync::SyncShutdownHandle,
-        aborts: Vec<tokio::task::AbortHandle>,
+        tasks: std::sync::Mutex<Option<Vec<tokio::task::JoinHandle<()>>>>,
     },
 }
 
@@ -415,13 +415,13 @@ impl ShutdownHandle {
     pub(crate) fn libp2p(
         handle: p2p::P2PHostHandle,
         coordinator: p2p::sync::SyncShutdownHandle,
-        aborts: Vec<tokio::task::AbortHandle>,
+        tasks: Vec<tokio::task::JoinHandle<()>>,
     ) -> Self {
         Self {
             inner: ShutdownKind::Libp2p {
                 handle: Box::new(handle),
                 coordinator,
-                aborts,
+                tasks: std::sync::Mutex::new(Some(tasks)),
             },
         }
     }
@@ -430,13 +430,13 @@ impl ShutdownHandle {
     pub(crate) fn iroh(
         transport: p2p::iroh::IrohTransport,
         coordinator: p2p::sync::SyncShutdownHandle,
-        aborts: Vec<tokio::task::AbortHandle>,
+        tasks: Vec<tokio::task::JoinHandle<()>>,
     ) -> Self {
         Self {
             inner: ShutdownKind::Iroh {
                 transport,
                 coordinator,
-                aborts,
+                tasks: std::sync::Mutex::new(Some(tasks)),
             },
         }
     }
@@ -446,29 +446,39 @@ impl ShutdownHandle {
             ShutdownKind::Libp2p {
                 handle,
                 coordinator,
-                aborts,
+                tasks,
             } => {
                 coordinator.shutdown().await;
-                for abort in aborts {
-                    abort.abort();
-                }
+                abort_and_join(tasks).await;
                 let _ = handle.shutdown().await;
             }
             #[cfg(feature = "iroh")]
             ShutdownKind::Iroh {
                 transport,
                 coordinator,
-                aborts,
+                tasks,
             } => {
                 coordinator.shutdown().await;
                 let _ = transport.shutdown().await;
-                for abort in aborts {
-                    abort.abort();
-                }
+                abort_and_join(tasks).await;
             }
         }
 
         defra_core::signing::clear_identity_store();
+    }
+}
+
+async fn abort_and_join(tasks: &std::sync::Mutex<Option<Vec<tokio::task::JoinHandle<()>>>>) {
+    let tasks = tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+        .unwrap_or_default();
+    for task in &tasks {
+        task.abort();
+    }
+    for task in tasks {
+        let _ = task.await;
     }
 }
 

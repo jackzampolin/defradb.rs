@@ -265,9 +265,8 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
                 .validation_mode(ValidationMode::Strict)
                 // See `go_compatible_gossipsub_message_id`.
                 .message_id_fn(go_compatible_gossipsub_message_id)
-                // Enable peer exchange (PX) in PRUNE messages — matches Go's
-                // pubsub.WithPeerExchange(true). Allows peers sharing a topic
-                // to discover each other through mesh management.
+                // Match Go's pubsub.WithPeerExchange(true). rust-libp2p does
+                // not yet implement PX; Kademlia handles peer discovery.
                 .do_px()
                 .flood_publish(true)
                 .build()

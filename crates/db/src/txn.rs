@@ -7,7 +7,7 @@
 use crate::collection::{populate_collection_root_id, Collection};
 use crate::collection_cache::CollectionCache;
 use crate::error::{Error, Result};
-use async_lock::MutexGuardArc;
+use async_lock::{MutexGuardArc, RwLockReadGuardArc, RwLockWriteGuardArc};
 use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
 use schema::CollectionVersion;
 use std::collections::{BTreeMap, HashSet};
@@ -50,6 +50,11 @@ struct PendingCollectionAcpRegistration {
     creator: identity::Did,
     request_bearer_token: Option<String>,
     schemas: Vec<CollectionVersion>,
+}
+
+enum CollectionGuard {
+    Read { _guard: RwLockReadGuardArc<()> },
+    Write { _guard: RwLockWriteGuardArc<()> },
 }
 
 impl PendingCollectionAcpRegistration {
@@ -124,6 +129,8 @@ pub struct DbTxn<S: Store> {
     /// commit. See the finalize driver in `txn_registry.rs` and
     /// `InteractiveTxnCounter.tla`.
     doc_guards: BTreeMap<String, MutexGuardArc<()>>,
+    /// Collection locks held until this transaction commits or rolls back.
+    collection_guards: BTreeMap<String, CollectionGuard>,
     /// Counter deltas RECORDED by the interactive mutator during the txn but not
     /// yet applied to the authoritative CRDT accumulation store. Drained and
     /// RMW'd at the commit-time finalize under per-doc guards (#1044).
@@ -145,6 +152,7 @@ impl<S: Store> DbTxn<S> {
             collection_cache: CollectionCache::new(),
             locally_created_collection_ids: HashSet::new(),
             doc_guards: BTreeMap::new(),
+            collection_guards: BTreeMap::new(),
             pending_counter_ops: Vec::new(),
             pending_collection_acp_registrations: Vec::new(),
             _marker: std::marker::PhantomData,
@@ -159,6 +167,7 @@ impl<S: Store> DbTxn<S> {
             collection_cache: CollectionCache::new(),
             locally_created_collection_ids: HashSet::new(),
             doc_guards: BTreeMap::new(),
+            collection_guards: BTreeMap::new(),
             pending_counter_ops: Vec::new(),
             pending_collection_acp_registrations: Vec::new(),
             _marker: std::marker::PhantomData,
@@ -598,6 +607,40 @@ impl<S: Store> DbTxn<S> {
         self.doc_guards.entry(doc_id).or_insert(guard);
     }
 
+    pub(crate) fn has_collection_guard(&self, collection_id: &str) -> bool {
+        self.collection_guards.contains_key(collection_id)
+    }
+
+    pub(crate) fn has_collection_write_guard(&self, collection_id: &str) -> bool {
+        matches!(
+            self.collection_guards.get(collection_id),
+            Some(CollectionGuard::Write { .. })
+        )
+    }
+
+    pub(crate) fn insert_collection_read_guard(
+        &mut self,
+        collection_id: String,
+        guard: RwLockReadGuardArc<()>,
+    ) {
+        self.collection_guards
+            .entry(collection_id)
+            .or_insert(CollectionGuard::Read { _guard: guard });
+    }
+
+    pub(crate) fn insert_collection_write_guard(
+        &mut self,
+        collection_id: String,
+        guard: RwLockWriteGuardArc<()>,
+    ) {
+        self.collection_guards
+            .insert(collection_id, CollectionGuard::Write { _guard: guard });
+    }
+
+    pub(crate) fn remove_collection_guard(&mut self, collection_id: &str) {
+        self.collection_guards.remove(collection_id);
+    }
+
     // =========================================================================
     // Pending counter ops (#1044): recorded during the txn, RMW'd at finalize.
     // =========================================================================
@@ -745,12 +788,10 @@ impl<S: Store> DbTxn<S> {
         }
     }
 
-    /// Release the per-doc guards. Called only AFTER the txn is durably
-    /// committed or discarded (#1021). The guards also drop automatically when
-    /// the `DbTxn` itself is dropped (no explicit `Drop` impl is needed), but
-    /// releasing here makes the release point unambiguous.
+    /// Release mutation guards after the transaction is durably committed or discarded.
     fn release_doc_guards(&mut self) {
         self.doc_guards.clear();
+        self.collection_guards.clear();
     }
 
     fn discard_active_txn(&mut self) -> Result<()> {

@@ -72,6 +72,12 @@ impl<S: Store> crate::database::DB<S> {
     pub async fn delete_collection(&self, name: &str) -> Result<()> {
         self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
             .await?;
+        let collection = self
+            .get_collection(name)?
+            .ok_or_else(|| Error::CollectionNotFound(name.to_string()))?;
+        let _collection_guards = self
+            .collection_write_guards(std::iter::once(collection.collection_id().to_string()))
+            .await?;
         let mut txn = self.new_txn(false).await?;
 
         match self.delete_collection_with_txn(&mut txn, name).await {
@@ -119,18 +125,15 @@ impl<S: Store> crate::database::DB<S> {
                 "collection name required: pass at least one name to delete".into(),
             ));
         }
+        if names.iter().any(String::is_empty) {
+            return Err(Error::InvalidPatch("collection name can't be empty".into()));
+        }
 
         let mut seen_names = std::collections::HashSet::new();
         let unique_names: Vec<String> = names
             .into_iter()
-            .filter(|n| !n.is_empty() && seen_names.insert(n.clone()))
+            .filter(|n| seen_names.insert(n.clone()))
             .collect();
-
-        if unique_names.is_empty() {
-            return Err(Error::InvalidPatch(
-                "collection name required: every supplied name was empty".into(),
-            ));
-        }
 
         let mut version_ids: Vec<String> = Vec::new();
         let mut seen_versions = std::collections::HashSet::new();

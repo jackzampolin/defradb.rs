@@ -87,14 +87,13 @@ pub unsafe extern "C" fn create_index(
                 })
                 .collect();
 
-            // Create a transaction for the index creation
+            let collection_id = collection.collection_id().to_string();
             let txn = database
                 .new_txn(false)
                 .await
                 .map_err(|e| format!("failed to create transaction: {}", e))?;
 
-            // Do all datastore operations in a scope to drop references before commit
-            let (index_desc, _updated_schema) = {
+            let (index_desc, action_lease) = {
                 let datastore = txn
                     .datastore()
                     .map_err(|e| format!("failed to get datastore: {}", e))?;
@@ -145,50 +144,106 @@ pub unsafe extern "C" fn create_index(
                     .await
                     .map_err(|e| format!("failed to save name mapping: {}", e))?;
 
-                // Bulk index existing documents
-                let documents: Vec<(u64, document::Document)> = collection
-                    .get_all_with_datastore_short_ids(&datastore, &systemstore, false)
+                let action_lease = database
+                    .stage_action(
+                        &systemstore,
+                        &collection_id,
+                        defra_core::Action::BACKFILL_INDEX,
+                        &index_desc.id.to_string(),
+                    )
                     .await
-                    .map_err(|e| format!("failed to get documents: {}", e))?
-                    .into_iter()
-                    .map(|(doc_short_id, doc, _)| (doc_short_id, doc))
-                    .collect();
+                    .map_err(|e| format!("failed to record index backfill: {}", e))?;
 
-                if !documents.is_empty() {
-                    index_manager
-                        .bulk_index(
-                            &datastore,
-                            &index_desc.name,
-                            &documents,
-                            collection.schema(),
-                        )
-                        .await
-                        .map_err(|e| format!("failed to bulk index: {}", e))?;
-                }
-
-                (index_desc, updated_schema)
+                (index_desc, action_lease)
             };
 
-            // Commit the transaction (datastore reference is now dropped)
             txn.commit()
                 .await
                 .map_err(|e| format!("failed to commit: {}", e))?;
+            database.publish_started_action(&action_lease);
 
-            // Reload the collection cache to pick up the new index
             database
                 .reload_cache()
                 .await
                 .map_err(|e| format!("failed to reload cache: {}", e))?;
 
-            // If the collection has migrations, rebuild the index with migrated values.
-            // The initial bulk_index above uses raw document values, but if a lens migration
-            // exists, the index should contain migrated values for the active version.
-            database
-                .reindex_collection_with_migrations(&collection_name_str)
-                .await
-                .map_err(|e| format!("failed to reindex after migration: {}", e))?;
+            let backfill_result: Result<(), String> = async {
+                let collection = database
+                    .get_collection(&collection_name_str)
+                    .map_err(|e| format!("failed to get collection: {}", e))?
+                    .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
+                let txn = database
+                    .new_txn(false)
+                    .await
+                    .map_err(|e| format!("failed to create backfill transaction: {}", e))?;
 
-            // Return the created index description
+                let result: Result<(), String> = async {
+                    let datastore = txn
+                        .datastore()
+                        .map_err(|e| format!("failed to get datastore: {}", e))?;
+                    let systemstore = txn
+                        .systemstore()
+                        .map_err(|e| format!("failed to get systemstore: {}", e))?;
+                    let index_manager = db::index_manager::IndexManager::from_collection(
+                        collection.schema().resolved_root_id(),
+                        collection.schema(),
+                    )
+                    .map_err(|e| format!("failed to create index manager: {}", e))?;
+                    let documents: Vec<(u64, document::Document)> = collection
+                        .get_all_with_datastore_short_ids(&datastore, &systemstore, false)
+                        .await
+                        .map_err(|e| format!("failed to get documents: {}", e))?
+                        .into_iter()
+                        .map(|(doc_short_id, doc, _)| (doc_short_id, doc))
+                        .collect();
+
+                    if !documents.is_empty() {
+                        index_manager
+                            .bulk_index(
+                                &datastore,
+                                &index_desc.name,
+                                &documents,
+                                collection.schema(),
+                            )
+                            .await
+                            .map_err(|e| format!("{}", e))?;
+                    }
+                    Ok(())
+                }
+                .await;
+
+                if let Err(error) = result {
+                    txn.discard()
+                        .map_err(|e| format!("failed to discard backfill: {}", e))?;
+                    return Err(error);
+                }
+                txn.commit()
+                    .await
+                    .map_err(|e| format!("failed to commit backfill: {}", e))?;
+
+                database
+                    .reindex_collection_with_migrations(&collection_name_str)
+                    .await
+                    .map_err(|e| format!("failed to reindex after migration: {}", e))
+            }
+            .await;
+
+            match backfill_result {
+                Ok(()) => database
+                    .complete_action(action_lease)
+                    .await
+                    .map_err(|e| format!("failed to complete index backfill: {}", e))?,
+                Err(reason) => database
+                    .fail_action(action_lease, &reason)
+                    .await
+                    .map_err(|e| format!("failed to record index backfill failure: {}", e))?,
+            }
+
+            database
+                .reload_cache()
+                .await
+                .map_err(|e| format!("failed to reload cache: {}", e))?;
+
             let json = serde_json::to_string(&index_desc)
                 .map_err(|e| format!("failed to serialize result: {}", e))?;
 

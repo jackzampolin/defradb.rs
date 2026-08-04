@@ -1,5 +1,9 @@
 use super::utils::{decode_uvarint_ascending, encode_uvarint_ascending};
 use crate::corekv::{Error, Key, Result};
+use crate::encoding::{
+    decode_uvarint_ascending as decode_go_uvarint_ascending,
+    encode_uvarint_ascending as encode_go_uvarint_ascending,
+};
 
 /// Systemstore root prefix for the doc-ID index keyspace.
 pub const DOC_ID_INDEX: &str = "/d";
@@ -65,17 +69,23 @@ impl DocRef {
         if self.collection_short_id == 0 || self.doc_short_id == 0 {
             return Vec::new();
         }
-        let buf = encode_uvarint_ascending(Vec::new(), self.collection_short_id as u64);
-        encode_uvarint_ascending(buf, self.doc_short_id)
+        let buf = encode_go_uvarint_ascending(Vec::new(), self.collection_short_id as u64);
+        encode_go_uvarint_ascending(buf, self.doc_short_id)
     }
 
     /// Decode from the encoded form, requiring full consumption.
     pub fn decode(data: &[u8]) -> Result<Self> {
-        let (rest, collection_short_id) = decode_uvarint_ascending(data)?;
+        let (rest, collection_short_id) = decode_go_uvarint_ascending(data)?;
         if collection_short_id == 0 || collection_short_id > u32::MAX as u64 {
             return Err(Error::Other("invalid collection short ID in DocRef".into()));
         }
-        let doc_short_id = decode_doc_short_id(rest)?;
+        let (rest, doc_short_id) = decode_go_uvarint_ascending(rest)?;
+        if doc_short_id == 0 {
+            return Err(Error::Other("doc short ID cannot be 0".into()));
+        }
+        if !rest.is_empty() {
+            return Err(Error::Other("trailing bytes after DocRef".into()));
+        }
         Ok(Self {
             collection_short_id: collection_short_id as u32,
             doc_short_id,
@@ -302,6 +312,12 @@ mod tests {
         let doc_ref = DocRef::new(7, 1234);
         let encoded = doc_ref.encode();
         assert_eq!(DocRef::decode(&encoded).unwrap(), doc_ref);
+    }
+
+    #[test]
+    fn test_doc_ref_matches_go_encoding() {
+        assert_eq!(DocRef::new(1, 1).encode(), vec![0x89, 0x89]);
+        assert_eq!(DocRef::new(7, 1234).encode(), vec![0x8f, 0xf7, 0x04, 0xd2]);
     }
 
     #[test]

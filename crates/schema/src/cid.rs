@@ -116,7 +116,7 @@ pub fn generate_collection_cid_full(
 
 /// Generate a collection CID with optional name, priority, head CIDs, and query data.
 ///
-/// For view collections, `query_select` contains the CBOR-encoded query definition
+/// For view collections, `query_select` contains the JSON-encoded query definition
 /// and `query_transform` contains the lens transform CID.
 pub fn generate_collection_cid_full_with_query(
     name: Option<&str>,

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use defra_core::{Action, ActionExecution, ActionStatus};
@@ -40,6 +40,7 @@ fn decode_status(bytes: &[u8]) -> Option<ActionStatus> {
 struct ActionKey {
     collection_id: String,
     action: Action,
+    subject: String,
 }
 
 #[derive(Debug, Default)]
@@ -53,16 +54,22 @@ pub(crate) struct ActionRegistry {
 /// future is cancelled or persisting its terminal state fails. The status in
 /// the system store remains the externally visible lifecycle record and may be
 /// overwritten by the next execution after a restart or abandoned operation.
-pub(crate) struct ActionExecutionLease {
+pub struct ActionExecutionLease {
     registry: Arc<ActionRegistry>,
     key: ActionKey,
 }
 
 impl ActionExecutionLease {
-    fn acquire(registry: Arc<ActionRegistry>, collection_id: &str, action: Action) -> Result<Self> {
+    fn acquire(
+        registry: Arc<ActionRegistry>,
+        collection_id: &str,
+        action: Action,
+        subject: &str,
+    ) -> Result<Self> {
         let key = ActionKey {
             collection_id: collection_id.to_string(),
             action,
+            subject: subject.to_string(),
         };
         if !registry.active.lock().insert(key.clone()) {
             return Err(Error::ActionInProgress {
@@ -80,6 +87,10 @@ impl ActionExecutionLease {
     fn action(&self) -> Action {
         self.key.action
     }
+
+    fn subject(&self) -> &str {
+        &self.key.subject
+    }
 }
 
 impl Drop for ActionExecutionLease {
@@ -94,51 +105,80 @@ impl<S: Store> crate::database::DB<S> {
         collection_id: &str,
         action: Action,
     ) -> Result<ActionExecutionLease> {
-        let lease =
-            ActionExecutionLease::acquire(Arc::clone(&self.active_actions), collection_id, action)?;
+        self.register_action_with_subject(collection_id, action, "")
+            .await
+    }
+
+    pub async fn register_action_with_subject(
+        &self,
+        collection_id: &str,
+        action: Action,
+        subject: &str,
+    ) -> Result<ActionExecutionLease> {
         let txn = self.new_txn(false).await?;
         let systemstore = txn.systemstore()?;
-        let status_key = ActionStatusKey::new(collection_id, action).bytes();
-
-        systemstore
-            .set(&status_key, &encode_status(ActionStatus::IN_PROGRESS))
-            .await
-            .map_err(Error::Storage)?;
-        systemstore
-            .delete(&ActionReasonKey::new(collection_id, action, "").bytes())
-            .await
-            .map_err(Error::Storage)?;
+        let lease = self
+            .stage_action(&systemstore, collection_id, action, subject)
+            .await?;
         drop(systemstore);
         txn.commit().await?;
-
-        self.publish_action(ActionExecution {
-            collection_id: collection_id.to_string(),
-            action,
-            status: ActionStatus::IN_PROGRESS,
-            ..Default::default()
-        });
+        self.publish_started_action(&lease);
         Ok(lease)
     }
 
-    pub(crate) async fn fail_action(
+    pub async fn stage_action(
         &self,
-        lease: ActionExecutionLease,
-        reason: &str,
-    ) -> Result<()> {
+        systemstore: &datastore::NamespaceView,
+        collection_id: &str,
+        action: Action,
+        subject: &str,
+    ) -> Result<ActionExecutionLease> {
+        let lease = ActionExecutionLease::acquire(
+            Arc::clone(&self.active_actions),
+            collection_id,
+            action,
+            subject,
+        )?;
+        systemstore
+            .set(
+                &ActionStatusKey::with_subject(collection_id, action, subject).bytes(),
+                &encode_status(ActionStatus::IN_PROGRESS),
+            )
+            .await
+            .map_err(Error::Storage)?;
+        systemstore
+            .delete(&ActionReasonKey::new(collection_id, action, subject).bytes())
+            .await
+            .map_err(Error::Storage)?;
+        Ok(lease)
+    }
+
+    pub fn publish_started_action(&self, lease: &ActionExecutionLease) {
+        self.publish_action(ActionExecution {
+            collection_id: lease.collection_id().to_string(),
+            action: lease.action(),
+            subject: lease.subject().to_string(),
+            status: ActionStatus::IN_PROGRESS,
+            ..Default::default()
+        });
+    }
+
+    pub async fn fail_action(&self, lease: ActionExecutionLease, reason: &str) -> Result<()> {
         let collection_id = lease.collection_id();
         let action = lease.action();
+        let subject = lease.subject();
         let txn = self.new_txn(false).await?;
         let systemstore = txn.systemstore()?;
         systemstore
             .set(
-                &ActionStatusKey::new(collection_id, action).bytes(),
+                &ActionStatusKey::with_subject(collection_id, action, subject).bytes(),
                 &encode_status(ActionStatus::ERRORED),
             )
             .await
             .map_err(Error::Storage)?;
         systemstore
             .set(
-                &ActionReasonKey::new(collection_id, action, "").bytes(),
+                &ActionReasonKey::new(collection_id, action, subject).bytes(),
                 reason.as_bytes(),
             )
             .await
@@ -149,24 +189,25 @@ impl<S: Store> crate::database::DB<S> {
         self.publish_action(ActionExecution {
             collection_id: collection_id.to_string(),
             action,
+            subject: subject.to_string(),
             status: ActionStatus::ERRORED,
             reason: reason.to_string(),
-            ..Default::default()
         });
         Ok(())
     }
 
-    pub(crate) async fn complete_action(&self, lease: ActionExecutionLease) -> Result<()> {
+    pub async fn complete_action(&self, lease: ActionExecutionLease) -> Result<()> {
         let collection_id = lease.collection_id();
         let action = lease.action();
+        let subject = lease.subject();
         let txn = self.new_txn(false).await?;
         let systemstore = txn.systemstore()?;
         systemstore
-            .delete(&ActionStatusKey::new(collection_id, action).bytes())
+            .delete(&ActionStatusKey::with_subject(collection_id, action, subject).bytes())
             .await
             .map_err(Error::Storage)?;
         systemstore
-            .delete(&ActionReasonKey::new(collection_id, action, "").bytes())
+            .delete(&ActionReasonKey::new(collection_id, action, subject).bytes())
             .await
             .map_err(Error::Storage)?;
         drop(systemstore);
@@ -175,10 +216,31 @@ impl<S: Store> crate::database::DB<S> {
         self.publish_action(ActionExecution {
             collection_id: collection_id.to_string(),
             action,
+            subject: subject.to_string(),
             status: ActionStatus::COMPLETED,
             ..Default::default()
         });
         Ok(())
+    }
+
+    pub async fn clear_action(
+        &self,
+        collection_id: &str,
+        action: Action,
+        subject: &str,
+    ) -> Result<()> {
+        let txn = self.new_txn(false).await?;
+        let systemstore = txn.systemstore()?;
+        systemstore
+            .delete(&ActionStatusKey::with_subject(collection_id, action, subject).bytes())
+            .await
+            .map_err(Error::Storage)?;
+        systemstore
+            .delete(&ActionReasonKey::new(collection_id, action, subject).bytes())
+            .await
+            .map_err(Error::Storage)?;
+        drop(systemstore);
+        txn.commit().await
     }
 
     /// List actions that are in progress or ended with an error.
@@ -229,11 +291,82 @@ impl<S: Store> crate::database::DB<S> {
         Ok(executions)
     }
 
+    pub async fn list_index_actions(
+        &self,
+        collection_id: &str,
+    ) -> Result<HashMap<u32, ActionExecution>> {
+        self.check_node_access(None, acp::nac::NodePermission::IndexList)
+            .await?;
+
+        let txn = self.new_txn(true).await?;
+        let systemstore = txn.systemstore()?;
+        let executions = index_action_executions(&systemstore, collection_id).await?;
+        drop(systemstore);
+        txn.discard()?;
+        Ok(executions)
+    }
+
     fn publish_action(&self, execution: ActionExecution) {
         if let Some(bus) = self.event_bus() {
             bus.publish(events::Message::action_execution(execution));
         }
     }
+}
+
+pub(crate) async fn index_action_statuses(
+    systemstore: &datastore::NamespaceView,
+    collection_id: &str,
+) -> Result<HashMap<u32, ActionStatus>> {
+    Ok(index_action_executions(systemstore, collection_id)
+        .await?
+        .into_iter()
+        .map(|(index_id, execution)| (index_id, execution.status))
+        .collect())
+}
+
+async fn index_action_executions(
+    systemstore: &datastore::NamespaceView,
+    collection_id: &str,
+) -> Result<HashMap<u32, ActionExecution>> {
+    let mut iter = systemstore
+        .iterator(IterOptions::new().with_prefix(ActionStatusKey::collection_prefix(collection_id)))
+        .await
+        .map_err(Error::Storage)?;
+    let pairs = iter.collect_all().await.map_err(Error::Storage)?;
+    iter.close().await.map_err(Error::Storage)?;
+
+    let mut executions = HashMap::new();
+    for pair in pairs {
+        let Some(key) = ActionStatusKey::parse(&pair.key) else {
+            continue;
+        };
+        if key.action != Action::BACKFILL_INDEX {
+            continue;
+        }
+        let Some(status) = decode_status(&pair.value) else {
+            continue;
+        };
+        let Ok(index_id) = key.subject.parse() else {
+            continue;
+        };
+        let reason = systemstore
+            .get(&ActionReasonKey::new(&key.collection_id, key.action, &key.subject).bytes())
+            .await
+            .map_err(Error::Storage)?
+            .map(|value| String::from_utf8_lossy(&value).into_owned())
+            .unwrap_or_default();
+        executions.insert(
+            index_id,
+            ActionExecution {
+                collection_id: key.collection_id,
+                action: key.action,
+                subject: key.subject,
+                status,
+                reason,
+            },
+        );
+    }
+    Ok(executions)
 }
 
 #[cfg(test)]

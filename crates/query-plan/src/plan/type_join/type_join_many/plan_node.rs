@@ -167,6 +167,7 @@ impl PlanNode for TypeJoinMany {
 
             // Get children (with ordering, offset, limit applied)
             let children = self.find_child_docs(&parent_doc_id);
+            self.record_child_limit_iterations(children.len());
 
             // Simulate Go's per-parent child scan metrics.
             // In Go, fetchPrimaryDocsReferencingSecondaryDoc re-initializes the child
