@@ -8,6 +8,7 @@ use document::Document;
 use identity::Did;
 use storage::corekv::MaybeSendSync;
 
+use crate::doc_stream::{DocStream, VecStream};
 use crate::planner::index_selection::IndexScanParams;
 use query_types::error::Result;
 
@@ -136,6 +137,25 @@ pub trait DocFetcher: MaybeSendSync {
     ) -> Result<Vec<(Document, bool)>> {
         let docs = self.get_all(collection_name).await?;
         Ok(docs.into_iter().map(|d| (d, false)).collect())
+    }
+
+    /// Stream documents from a collection with their deletion status.
+    ///
+    /// Unlike [`Self::get_all_with_deleted`], the returned stream yields one
+    /// document per call, so a consumer that stops pulling stops the work.
+    ///
+    /// Default implementation delegates to `get_all_with_deleted` and wraps the
+    /// result, which is correct but still fetches eagerly. Implementations
+    /// backed by real storage should override this.
+    async fn stream_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> Result<Box<dyn DocStream>> {
+        let docs = self
+            .get_all_with_deleted(collection_name, show_deleted)
+            .await?;
+        Ok(Box::new(VecStream::new(docs)))
     }
 
     /// Get documents by their IDs.
