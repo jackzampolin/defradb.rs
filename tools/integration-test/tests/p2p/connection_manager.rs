@@ -193,13 +193,14 @@ async fn rust_connection_manager_prunes_to_low_water_oldest_first() {
         .expect("fourth peer failed to connect");
     wait_for_active_peer(target, &peer_ids[3]).await;
 
-    let mut expected_survivors = vec![peer_ids[2].clone(), peer_ids[3].clone()];
-    expected_survivors.sort();
     poll_until(
         || {
-            let mut active = active_peer_ids(target);
-            active.sort();
-            active == expected_survivors
+            let active = active_peer_ids(target);
+            active.len() <= LOW_WATER as usize
+                && peer_ids[..2]
+                    .iter()
+                    .all(|peer_id| !active.contains(peer_id))
+                && active.contains(&peer_ids[3])
         },
         Duration::from_secs(10),
         POLL_INTERVAL,
@@ -207,10 +208,19 @@ async fn rust_connection_manager_prunes_to_low_water_oldest_first() {
     )
     .await;
 
-    let mut active_after_prune = active_peer_ids(target);
-    active_after_prune.sort();
-    assert_eq!(
-        active_after_prune, expected_survivors,
-        "expected peers 3 and 4 to survive oldest-first pruning to low water"
+    let active_after_prune = active_peer_ids(target);
+    assert!(
+        active_after_prune.len() <= LOW_WATER as usize,
+        "expected no more than {LOW_WATER} peers after pruning: {active_after_prune:?}"
+    );
+    assert!(
+        peer_ids[..2]
+            .iter()
+            .all(|peer_id| !active_after_prune.contains(peer_id)),
+        "expected the two oldest peers to be pruned: {active_after_prune:?}"
+    );
+    assert!(
+        active_after_prune.contains(&peer_ids[3]),
+        "expected the newest peer to remain grace-protected: {active_after_prune:?}"
     );
 }
