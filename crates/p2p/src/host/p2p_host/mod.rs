@@ -697,7 +697,8 @@ impl<S: Store + Clone + Send + Sync + 'static> P2PHost<S> {
 
     fn prune_connections(&mut self, reason: &'static str) {
         for candidate in self.connection_manager.prune_candidates(Instant::now()) {
-            if self.swarm.close_connection(candidate.connection_id) {
+            // Abort pending duplicate dials as well as closing established connections.
+            if self.swarm.disconnect_peer_id(candidate.peer_id).is_ok() {
                 debug!(
                     peer_id = %candidate.peer_id,
                     connection_id = %candidate.connection_id,
