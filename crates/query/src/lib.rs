@@ -40,10 +40,11 @@ pub mod subscription;
 #[cfg(test)]
 pub mod test_utils;
 
-// Plan layer extracted to query-plan crate (#670). Re-export these four
-// modules verbatim so downstream consumers keep using `query::plan::*`,
-// `query::planner::*`, `query::fetcher::*`, `query::mutator::*` unchanged.
-pub use query_plan::{fetcher, mutator, plan, planner};
+// Plan layer extracted to query-plan crate (#670). Re-export these modules
+// verbatim so downstream consumers keep using `query::plan::*`,
+// `query::planner::*`, `query::fetcher::*`, `query::mutator::*`,
+// `query::doc_stream::*` unchanged.
+pub use query_plan::{doc_stream, fetcher, mutator, plan, planner};
 
 // `txn` is split: plan-layer primitives live in `query_plan::txn`, while
 // `TransactionGuard` stays in this crate because it is generic over

@@ -62,6 +62,7 @@ pub(crate) mod collection_ops;
 pub(crate) mod collection_provider;
 mod collection_retriever;
 pub(crate) mod collection_snapshot;
+pub(crate) mod collection_stream;
 mod commit_priority_index;
 pub(crate) mod commits_fetcher;
 pub mod database;
