@@ -217,8 +217,8 @@ impl Node {
                 policy.set_node_acp(Arc::new(db::DbNodeAcpRead::new(adapter.nac_manager())));
             }
 
-            // Node identity for the wire `identity` fallback on gossip-initiated
-            // fetches. Anonymous nodes use a stable placeholder DID.
+            // Node identity used for cross-peer DEK requests. Anonymous nodes
+            // use a stable placeholder DID.
             let node_did = database.node_did().unwrap_or_else(|| {
                 identity::Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK")
                     .expect("static anonymous DID parses")

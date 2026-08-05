@@ -118,12 +118,7 @@ fn decode_envelope(capability: &str) -> Result<ExplicitReplayCapabilityEnvelope>
         .map_err(|error| Error::ExplicitReplayCapability(format!("invalid payload: {error}")))
 }
 
-fn validate_claims(
-    claims: &ExplicitReplayCapabilityClaims,
-    transport_sender_peer_id: &str,
-    target_peer_id: &str,
-    collection_id: &str,
-) -> Result<()> {
+fn validate_common_claims(claims: &ExplicitReplayCapabilityClaims) -> Result<()> {
     if claims.version != CAPABILITY_VERSION {
         return Err(Error::ExplicitReplayCapability(format!(
             "unsupported version {}",
@@ -138,25 +133,10 @@ fn validate_claims(
         )));
     }
 
-    if claims.source_peer_id != transport_sender_peer_id {
-        return Err(Error::ExplicitReplayCapability(format!(
-            "source {} did not match transport sender {}",
-            claims.source_peer_id, transport_sender_peer_id
-        )));
-    }
-
-    if claims.target_peer_id != target_peer_id {
-        return Err(Error::ExplicitReplayCapability(format!(
-            "target {} did not match local peer {}",
-            claims.target_peer_id, target_peer_id
-        )));
-    }
-
-    if claims.collection_id != collection_id {
-        return Err(Error::ExplicitReplayCapability(format!(
-            "collection {} did not match request collection {}",
-            claims.collection_id, collection_id
-        )));
+    if claims.collection_id.is_empty() {
+        return Err(Error::ExplicitReplayCapability(
+            "collection was empty".to_string(),
+        ));
     }
 
     if claims.authorizer_did.is_empty() {
@@ -178,6 +158,46 @@ fn validate_claims(
             "expires_at {} exceeds max ttl of {} seconds",
             claims.expires_at,
             MAX_CAPABILITY_TTL.as_secs()
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_peer_binding(
+    claims: &ExplicitReplayCapabilityClaims,
+    source_peer_id: &str,
+    target_peer_id: &str,
+) -> Result<()> {
+    if claims.source_peer_id != source_peer_id {
+        return Err(Error::ExplicitReplayCapability(format!(
+            "source {} did not match expected peer {}",
+            claims.source_peer_id, source_peer_id
+        )));
+    }
+
+    if claims.target_peer_id != target_peer_id {
+        return Err(Error::ExplicitReplayCapability(format!(
+            "target {} did not match expected peer {}",
+            claims.target_peer_id, target_peer_id
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_claims(
+    claims: &ExplicitReplayCapabilityClaims,
+    transport_sender_peer_id: &str,
+    target_peer_id: &str,
+    collection_id: &str,
+) -> Result<()> {
+    validate_common_claims(claims)?;
+    validate_peer_binding(claims, transport_sender_peer_id, target_peer_id)?;
+    if claims.collection_id != collection_id {
+        return Err(Error::ExplicitReplayCapability(format!(
+            "collection {} did not match request collection {}",
+            claims.collection_id, collection_id
         )));
     }
 
@@ -273,6 +293,34 @@ pub fn verify_capability_with_revocations(
         collection_id,
     )?;
 
+    verify_envelope(&envelope, revocations)?;
+
+    Ok(authorization_from_envelope(envelope, capability))
+}
+
+/// Verify a capability presented by its target peer when requesting replay keys
+/// from the source peer that originally sent the encrypted blocks.
+pub fn verify_capability_for_key_request(
+    capability: &str,
+    source_peer_id: &str,
+    transport_requester_peer_id: &str,
+) -> Result<ExplicitReplayAuthorization> {
+    let envelope = decode_envelope(capability)?;
+    validate_common_claims(&envelope.claims)?;
+    validate_peer_binding(
+        &envelope.claims,
+        source_peer_id,
+        transport_requester_peer_id,
+    )?;
+    verify_envelope(&envelope, &PROCESS_REVOCATIONS)?;
+
+    Ok(authorization_from_envelope(envelope, capability))
+}
+
+fn verify_envelope(
+    envelope: &ExplicitReplayCapabilityEnvelope,
+    revocations: &ExplicitReplayRevocationRegistry,
+) -> Result<()> {
     let public_key = decode_authorizer_public_key(&envelope.claims.authorizer_did)?;
     let claims_bytes = encode_claims(&envelope.claims)?;
     if !public_key
@@ -286,19 +334,27 @@ pub fn verify_capability_with_revocations(
         ));
     }
 
-    if revocations.is_envelope_revoked(&envelope)? {
+    if revocations.is_envelope_revoked(envelope)? {
         return Err(Error::ExplicitReplayCapability(
             "capability has been revoked".to_string(),
         ));
     }
 
-    Ok(ExplicitReplayAuthorization {
+    Ok(())
+}
+
+fn authorization_from_envelope(
+    envelope: ExplicitReplayCapabilityEnvelope,
+    capability: &str,
+) -> ExplicitReplayAuthorization {
+    ExplicitReplayAuthorization {
         source_peer_id: envelope.claims.source_peer_id,
         target_peer_id: envelope.claims.target_peer_id,
         collection_id: envelope.claims.collection_id,
         authorizer_did: envelope.claims.authorizer_did,
         expires_at: envelope.claims.expires_at,
-    })
+        capability: Some(capability.to_string()),
+    }
 }
 
 pub fn revoke_capability(capability: &str) -> Result<bool> {
@@ -351,6 +407,33 @@ mod tests {
         assert_eq!(
             authorization.authorizer_did,
             authorizer.did().unwrap().to_string()
+        );
+        assert_eq!(
+            authorization.capability.as_deref(),
+            Some(capability.as_str())
+        );
+    }
+
+    #[test]
+    fn verify_capability_for_key_request_reverses_source_and_target() {
+        let authorizer = authorizer();
+        let capability = generate_capability(
+            &authorizer,
+            "source-peer",
+            "target-peer",
+            "collection-a",
+            Duration::from_secs(60),
+        )
+        .unwrap();
+
+        let authorization =
+            verify_capability_for_key_request(&capability, "source-peer", "target-peer").unwrap();
+        assert_eq!(authorization.collection_id, "collection-a");
+        assert!(
+            verify_capability_for_key_request(&capability, "other-source", "target-peer").is_err()
+        );
+        assert!(
+            verify_capability_for_key_request(&capability, "source-peer", "other-target").is_err()
         );
     }
 

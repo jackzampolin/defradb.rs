@@ -7,6 +7,7 @@ use crate::keys::peerstore::{
     ReplicatorKey, ReplicatorRetryCommitKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
 };
 use crate::namespace::{Namespace, NamespacedStore};
+use async_lock::{RwLock, RwLockReadGuardArc};
 use async_trait::async_trait;
 use cid::Cid;
 use std::cmp::Ordering;
@@ -17,7 +18,7 @@ use tracing;
 
 const PUSH_RETRY_TXN_MAX_ATTEMPTS: usize = 4;
 
-type RetryPeerLock = tokio::sync::RwLock<()>;
+type RetryPeerLock = RwLock<()>;
 
 fn retry_peer_lock(peer_id: &str) -> Arc<RetryPeerLock> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Weak<RetryPeerLock>>>> = OnceLock::new();
@@ -26,6 +27,7 @@ fn retry_peer_lock(peer_id: &str) -> Arc<RetryPeerLock> {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.upgrade().is_some());
     if let Some(lock) = locks.get(peer_id).and_then(Weak::upgrade) {
         return lock;
     }
@@ -37,7 +39,7 @@ fn retry_peer_lock(peer_id: &str) -> Arc<RetryPeerLock> {
 
 /// Keeps a retry pass or failure-recording operation coordinated with forget.
 pub struct ReplicatorRetryGuard {
-    _guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    _guard: RwLockReadGuardArc<()>,
 }
 
 async fn retry_push_txn_conflicts<T, F, Fut>(mut operation: F) -> Result<T>
@@ -45,12 +47,25 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
+    let mut retried = false;
     for attempt in 1..=PUSH_RETRY_TXN_MAX_ATTEMPTS {
         match operation().await {
             Err(error) if error.is_retriable() && attempt < PUSH_RETRY_TXN_MAX_ATTEMPTS => {
+                telemetry::record_retry_attempt(telemetry::RetryLayer::PushLedger);
+                retried = true;
                 tracing::debug!(attempt, "retrying push-ledger transaction conflict");
             }
-            result => return result,
+            Err(error) if error.is_retriable() => {
+                telemetry::record_retry_exhaustion(telemetry::RetryLayer::PushLedger);
+                return Err(error);
+            }
+            Ok(value) => {
+                if retried {
+                    telemetry::record_retry_success(telemetry::RetryLayer::PushLedger);
+                }
+                return Ok(value);
+            }
+            Err(error) => return Err(error),
         }
     }
     unreachable!("bounded transaction retry loop always returns")
@@ -113,7 +128,7 @@ impl<S: Store> Peerstore<S> {
         &self,
         peer_id: &str,
     ) -> Result<Option<ReplicatorRetryGuard>> {
-        let guard = retry_peer_lock(peer_id).read_owned().await;
+        let guard = retry_peer_lock(peer_id).read_arc().await;
         if self.has_replicator(peer_id).await? {
             Ok(Some(ReplicatorRetryGuard { _guard: guard }))
         } else {
@@ -123,7 +138,7 @@ impl<S: Store> Peerstore<S> {
 
     /// Delete a replicator and all of its persisted push-retry state.
     pub async fn delete_replicator(&self, peer_id: &str) -> Result<()> {
-        let _retry_guard = retry_peer_lock(peer_id).write_owned().await;
+        let _retry_guard = retry_peer_lock(peer_id).write_arc().await;
         retry_push_txn_conflicts(|| self.delete_replicator_once(peer_id)).await
     }
 
@@ -849,6 +864,11 @@ impl<S: Store> crate::corekv::private::Sealed for Peerstore<S> {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for Peerstore<S> {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
+        self.store.transaction_stats_handle()
+    }
+
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         self.store.new_txn(readonly).await
     }

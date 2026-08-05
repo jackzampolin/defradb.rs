@@ -400,18 +400,12 @@ impl Txn for RocksDbTxn {
         if !pending.is_empty() {
             let pending_changes = pending.len();
 
-            // Keep the logical conflict version and physical RocksDB commit
-            // atomic with respect to new transaction snapshots. The gate is
-            // acquired inside spawn_blocking (redb precedent): the blocking
-            // thread owns the guard, so cancelling the commit future cannot
-            // release the gate while the write is still in flight, and the
-            // fsync (WriteOptions::set_sync) no longer blocks a tokio worker.
-            // The conflict snapshot moves into the closure with it: if the
-            // future is dropped mid-await, the snapshot must keep pinning the
-            // records this commit conflict-checks against, or prune() could
-            // empty the history before check_and_record runs. The callbacks
-            // move in for the same reason — a dropped future must not skip
-            // the events for a write that still lands (#1185).
+            // The blocking task owns the reservation and callbacks, so
+            // cancelling the commit future cannot abandon an in-flight write
+            // or its events. Conflicting committers see the reservation before
+            // this task writes, while disjoint physical writes can proceed in
+            // parallel. The gate only pairs successful version publication
+            // with new write-transaction snapshots.
             let db = Arc::clone(&self.db);
             let conflict_tracker = Arc::clone(&self.conflict_tracker);
             let commit_gate = Arc::clone(&self.commit_gate);
@@ -424,50 +418,34 @@ impl Txn for RocksDbTxn {
             let write_result = tokio::task::spawn_blocking(
                 move || -> (Result<()>, tokio::task::JoinHandle<()>) {
                     let _conflict_snapshot = conflict_snapshot;
-                    // The gate covers only the write. Callbacks start after it
-                    // is released: one that opens a transaction would otherwise
-                    // deadlock against this thread's write lock, and holding it
-                    // across callback work would stall every new writer.
-                    let outcome = {
+                    let outcome = (|| -> Result<()> {
+                        let reservation =
+                            conflict_tracker.reserve(read_version, pending.keys(), &read_set)?;
+
+                        let mut batch = rocksdb::WriteBatchWithTransaction::<true>::default();
+                        for (key, value) in &pending {
+                            match value {
+                                Some(v) => batch.put(key, v),
+                                None => batch.delete(key),
+                            }
+                        }
+
+                        let mut write_opts = rocksdb::WriteOptions::default();
+                        match durability {
+                            DurabilityMode::Immediate => write_opts.set_sync(true),
+                            DurabilityMode::Eventual => write_opts.set_sync(false),
+                        }
+
+                        db.write_opt(batch, &write_opts)?;
+
                         let wait_started = std::time::Instant::now();
-                        let _commit_guard = commit_gate.blocking_write();
-                        metrics.record_commit_gate_wait(wait_started.elapsed());
-                        (|| -> Result<()> {
-                            let version = conflict_tracker.check_and_record(
-                                read_version,
-                                pending.keys(),
-                                &read_set,
-                            )?;
-                            // Unrecords on error or panic before the write
-                            // lands, so no phantom write-set survives.
-                            let record_guard = crate::backends::shared::RecordGuard::new(
-                                &conflict_tracker,
-                                version,
-                            );
-
-                            let mut batch = rocksdb::WriteBatchWithTransaction::<true>::default();
-                            for (key, value) in &pending {
-                                match value {
-                                    Some(v) => batch.put(key, v),
-                                    None => batch.delete(key),
-                                }
-                            }
-
-                            let mut write_opts = rocksdb::WriteOptions::default();
-                            match durability {
-                                DurabilityMode::Immediate => {
-                                    write_opts.set_sync(true);
-                                }
-                                DurabilityMode::Eventual => {
-                                    write_opts.set_sync(false);
-                                }
-                            }
-
-                            db.write_opt(batch, &write_opts)?;
-                            record_guard.defuse();
-                            Ok(())
-                        })()
-                    };
+                        let _publication_guard = commit_gate.blocking_write();
+                        let wait = wait_started.elapsed();
+                        metrics.record_commit_gate_wait(wait);
+                        conflict_tracker.record_commit_gate_wait(wait);
+                        reservation.publish();
+                        Ok(())
+                    })();
                     if matches!(outcome, Err(Error::TxnConflict)) {
                         metrics.record_conflict();
                     }

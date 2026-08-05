@@ -52,9 +52,12 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> MergeHandler
         let mut result = self
             .merge_block_attempt(cid, block_data, metadata.clone())
             .await;
+        let mut retry_count = 0;
         for attempt in 1..MAX_TXN_RETRIES {
             match &result {
                 Err(e) if e.is_txn_conflict() => {
+                    telemetry::record_retry_attempt(telemetry::RetryLayer::Merge);
+                    retry_count += 1;
                     tracing::debug!(cid = %cid, attempt, "Merge txn conflict, retrying");
                     result = self
                         .merge_block_attempt(cid, block_data, metadata.clone())
@@ -63,8 +66,12 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> MergeHandler
                 _ => break,
             }
         }
+        if retry_count > 0 && !result.as_ref().is_err_and(|error| error.is_txn_conflict()) {
+            telemetry::record_retry_success(telemetry::RetryLayer::Merge);
+        }
         if let Err(e) = &result {
             if e.is_txn_conflict() {
+                telemetry::record_retry_exhaustion(telemetry::RetryLayer::Merge);
                 tracing::warn!(
                     cid = %cid,
                     max_retries = MAX_TXN_RETRIES,

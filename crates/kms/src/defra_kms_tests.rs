@@ -55,6 +55,69 @@ impl crate::policy::AccessPolicy for DenyAll {
     }
 }
 
+struct AllowActor(identity::Did);
+#[async_trait::async_trait]
+impl crate::policy::AccessPolicy for AllowActor {
+    async fn check_release(
+        &self,
+        actor: Option<&identity::Did>,
+        _: &KeyScope,
+    ) -> crate::Result<crate::PolicyDecision> {
+        Ok(if actor == Some(&self.0) {
+            crate::PolicyDecision::Allow
+        } else {
+            crate::PolicyDecision::Deny
+        })
+    }
+
+    async fn check_node_release(
+        &self,
+        actor: Option<&identity::Did>,
+        scope: &KeyScope,
+    ) -> crate::Result<crate::PolicyDecision> {
+        self.check_release(actor, scope).await
+    }
+}
+
+struct AllowDelegatedActor {
+    actor: identity::Did,
+    collection_id: String,
+}
+
+#[async_trait::async_trait]
+impl crate::policy::AccessPolicy for AllowDelegatedActor {
+    async fn check_release(
+        &self,
+        _: Option<&identity::Did>,
+        _: &KeyScope,
+    ) -> crate::Result<crate::PolicyDecision> {
+        Ok(crate::PolicyDecision::Deny)
+    }
+
+    async fn check_delegated_release(
+        &self,
+        actor: &identity::Did,
+        _: &KeyScope,
+        collection_id: &str,
+    ) -> crate::Result<crate::PolicyDecision> {
+        Ok(
+            if actor == &self.actor && collection_id == self.collection_id {
+                crate::PolicyDecision::Allow
+            } else {
+                crate::PolicyDecision::Deny
+            },
+        )
+    }
+
+    async fn check_node_release(
+        &self,
+        _: Option<&identity::Did>,
+        _: &KeyScope,
+    ) -> crate::Result<crate::PolicyDecision> {
+        Ok(crate::PolicyDecision::Deny)
+    }
+}
+
 fn node_did() -> identity::Did {
     "did:key:znode".parse().unwrap()
 }
@@ -154,9 +217,12 @@ async fn serve_request_returns_ecies_wrapped_block_bytes() {
         identity: b"did:key:zalice".to_vec(),
         links: vec![cid.to_bytes()],
         ephemeral_public_key: req_pub.clone(),
+        explicit_replay_capability: None,
     };
     let from = crate::service::PeerIdentity {
         peer_id: "peer-1".into(),
+        authenticated_did: Some("did:key:zalice".parse().unwrap()),
+        explicit_replay_authorization: None,
     };
     let reply = kms.serve_request(from, req).await.unwrap();
     assert_eq!(reply.links.len(), 1);
@@ -175,6 +241,141 @@ async fn serve_request_returns_ecies_wrapped_block_bytes() {
 }
 
 #[tokio::test]
+async fn serve_request_authorizes_authenticated_peer_not_claimed_identity() {
+    let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+    let generator = DefraKms::new(
+        store.clone(),
+        vec![],
+        Arc::new(AllowAll),
+        any_doc_resolver(),
+        node_did(),
+    );
+    let (cid, _) = generator
+        .generate_key(
+            &RequestContext::anonymous(),
+            KeyScope::Document {
+                doc_id: "d1".into(),
+                field: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let allowed_did: identity::Did = "did:key:zallowed".parse().unwrap();
+    let kms = DefraKms::new(
+        store,
+        vec![],
+        Arc::new(AllowActor(allowed_did.clone())),
+        any_doc_resolver(),
+        node_did(),
+    );
+    let requester = crypto::generate_x25519().unwrap();
+    let request = crate::wire::FetchEncryptionKeyRequest {
+        identity: allowed_did.to_string().into_bytes(),
+        links: vec![cid.to_bytes()],
+        ephemeral_public_key: x25519_dalek::PublicKey::from(&requester)
+            .as_bytes()
+            .to_vec(),
+        explicit_replay_capability: None,
+    };
+
+    let denied = kms
+        .serve_request(
+            crate::service::PeerIdentity {
+                peer_id: "attacker-peer".into(),
+                authenticated_did: Some("did:key:zattacker".parse().unwrap()),
+                explicit_replay_authorization: None,
+            },
+            request.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(denied.links.is_empty());
+    assert!(denied.blocks.is_empty());
+
+    let allowed = kms
+        .serve_request(
+            crate::service::PeerIdentity {
+                peer_id: "allowed-peer".into(),
+                authenticated_did: Some(allowed_did),
+                explicit_replay_authorization: None,
+            },
+            request,
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed.links, vec![cid.to_bytes()]);
+    assert_eq!(allowed.blocks.len(), 1);
+}
+
+#[tokio::test]
+async fn serve_request_accepts_collection_bound_replay_delegation() {
+    let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
+    let generator = DefraKms::new(
+        store.clone(),
+        vec![],
+        Arc::new(AllowAll),
+        any_doc_resolver(),
+        node_did(),
+    );
+    let (cid, _) = generator
+        .generate_key(
+            &RequestContext::anonymous(),
+            KeyScope::Document {
+                doc_id: "d1".into(),
+                field: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let authorizer: identity::Did = "did:key:zauthorizer".parse().unwrap();
+    let kms = DefraKms::new(
+        store,
+        vec![],
+        Arc::new(AllowDelegatedActor {
+            actor: authorizer.clone(),
+            collection_id: "collection-a".into(),
+        }),
+        any_doc_resolver(),
+        node_did(),
+    );
+    let requester = crypto::generate_x25519().unwrap();
+    let request = crate::wire::FetchEncryptionKeyRequest {
+        identity: b"did:key:zrequester-node".to_vec(),
+        links: vec![cid.to_bytes()],
+        ephemeral_public_key: x25519_dalek::PublicKey::from(&requester)
+            .as_bytes()
+            .to_vec(),
+        explicit_replay_capability: Some("signed-capability".into()),
+    };
+    let peer = |collection_id: &str| crate::service::PeerIdentity {
+        peer_id: "target-peer".into(),
+        authenticated_did: Some("did:key:zrequester-node".parse().unwrap()),
+        explicit_replay_authorization: Some(defra_core::merge::ExplicitReplayAuthorization {
+            source_peer_id: "source-peer".into(),
+            target_peer_id: "target-peer".into(),
+            collection_id: collection_id.into(),
+            authorizer_did: authorizer.to_string(),
+            expires_at: u64::MAX,
+            capability: Some("signed-capability".into()),
+        }),
+    };
+
+    let denied = kms
+        .serve_request(peer("collection-b"), request.clone())
+        .await
+        .unwrap();
+    assert!(denied.links.is_empty());
+
+    let allowed = kms
+        .serve_request(peer("collection-a"), request)
+        .await
+        .unwrap();
+    assert_eq!(allowed.links, vec![cid.to_bytes()]);
+}
+
+#[tokio::test]
 async fn serve_request_skips_unknown_cids() {
     let store: Arc<dyn crate::KeyStore> = Arc::new(MemoryKeyStore::new());
     let policy: Arc<dyn crate::policy::AccessPolicy> = Arc::new(AllowAll);
@@ -190,9 +391,12 @@ async fn serve_request_skips_unknown_cids() {
         ephemeral_public_key: x25519_dalek::PublicKey::from(&requester)
             .as_bytes()
             .to_vec(),
+        explicit_replay_capability: None,
     };
     let from = crate::service::PeerIdentity {
         peer_id: "peer-1".into(),
+        authenticated_did: Some("did:key:zalice".parse().unwrap()),
+        explicit_replay_authorization: None,
     };
     let reply = kms.serve_request(from, req).await.unwrap();
     assert!(reply.links.is_empty());
@@ -216,6 +420,63 @@ impl KeyTransport for FakeTransport {
         Ok(rx)
     }
     fn install_handler(&self, _: Arc<dyn IncomingHandler>) {}
+}
+
+struct RecordingTransport {
+    payload: tokio::sync::Mutex<Option<Vec<u8>>>,
+}
+
+#[async_trait::async_trait]
+impl KeyTransport for RecordingTransport {
+    fn name(&self) -> &'static str {
+        "recording"
+    }
+
+    async fn send_request(
+        &self,
+        request: EncodedFetchRequest,
+    ) -> crate::Result<TransportReplyStream> {
+        *self.payload.lock().await = Some(request.payload);
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        Ok(rx)
+    }
+
+    fn install_handler(&self, _: Arc<dyn IncomingHandler>) {}
+}
+
+#[tokio::test]
+async fn get_keys_identifies_the_requesting_node_on_the_wire() {
+    let transport = Arc::new(RecordingTransport {
+        payload: tokio::sync::Mutex::new(None),
+    });
+    let node = node_did();
+    let kms = DefraKms::new(
+        Arc::new(MemoryKeyStore::new()),
+        vec![transport.clone()],
+        Arc::new(AllowAll),
+        any_doc_resolver(),
+        node.clone(),
+    );
+    let cid: crate::EncryptionCid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        .parse()
+        .unwrap();
+    let user: identity::Did = "did:key:zuser".parse().unwrap();
+
+    let results = kms
+        .get_keys(&RequestContext::with_user(user.clone()), &[cid])
+        .await
+        .unwrap();
+    drop(results);
+
+    let payload = transport
+        .payload
+        .lock()
+        .await
+        .clone()
+        .expect("transport must receive a request");
+    let request: crate::FetchEncryptionKeyRequest = serde_cbor::from_slice(&payload).unwrap();
+    assert_eq!(request.identity, node.to_string().into_bytes());
+    assert_ne!(request.identity, user.to_string().into_bytes());
 }
 
 #[tokio::test]
@@ -250,11 +511,14 @@ async fn get_keys_fans_out_when_local_miss() {
         ephemeral_public_key: x25519_dalek::PublicKey::from(&requester)
             .as_bytes()
             .to_vec(),
+        explicit_replay_capability: None,
     };
     let reply = peer_kms
         .serve_request(
             crate::service::PeerIdentity {
                 peer_id: "peer".into(),
+                authenticated_did: Some("did:key:znode".parse().unwrap()),
+                explicit_replay_authorization: None,
             },
             req,
         )
@@ -314,11 +578,14 @@ async fn get_keys_ignores_failed_transport_when_another_resolves_key() {
         ephemeral_public_key: x25519_dalek::PublicKey::from(&requester)
             .as_bytes()
             .to_vec(),
+        explicit_replay_capability: None,
     };
     let reply = peer_kms
         .serve_request(
             crate::service::PeerIdentity {
                 peer_id: "peer".into(),
+                authenticated_did: Some("did:key:znode".parse().unwrap()),
+                explicit_replay_authorization: None,
             },
             req,
         )

@@ -1,14 +1,16 @@
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(not(target_arch = "wasm32"))]
-use std::collections::HashSet;
+use std::ops::Bound;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::corekv::IterOptions;
@@ -312,15 +314,112 @@ impl ReadRange {
 type CommittedTxnRecord = (u64, HashSet<Vec<u8>>, ReadSet);
 
 #[cfg(not(target_arch = "wasm32"))]
+type PendingTxnRecord = (HashSet<Vec<u8>>, ReadSet);
+
+/// Cumulative storage conflicts classified by the dependency that aborted the transaction.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct TransactionConflictStats {
+    /// This transaction wrote a key written by a newer transaction.
+    pub write_write: u64,
+    /// This transaction wrote a key read by a newer transaction.
+    pub write_read: u64,
+    /// This transaction read a key written by a newer transaction.
+    pub read_write: u64,
+}
+
+/// Current conflict-tracker state retained for active write snapshots.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ConflictTrackerStats {
+    /// Latest published storage version.
+    pub current_version: u64,
+    /// Committed transactions retained for active snapshots.
+    pub committed_transactions: u64,
+    /// Conflict-checked writes awaiting physical commit.
+    pub pending_reservations: u64,
+    /// Write transaction snapshots currently alive.
+    pub active_snapshots: u64,
+    /// Distinct retained keys indexed as writes.
+    pub indexed_write_keys: u64,
+    /// Distinct retained keys indexed as point reads.
+    pub indexed_read_keys: u64,
+    /// Retained iterator read ranges.
+    pub indexed_read_ranges: u64,
+}
+
+/// Backend-neutral, process-lifetime transaction diagnostics for one store.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct TransactionStatsSnapshot {
+    /// Storage backend that owns these diagnostics.
+    pub backend: &'static str,
+    /// Cumulative transaction aborts for the store lifetime.
+    pub conflicts: TransactionConflictStats,
+    /// Number of successful commits that acquired the publication gate.
+    pub commit_gate_waits: u64,
+    /// Cumulative publication-gate wait time in microseconds.
+    pub commit_gate_wait_micros: u64,
+    /// Longest publication-gate wait in microseconds.
+    pub commit_gate_wait_max_micros: u64,
+    /// Current retained conflict-tracker state.
+    pub tracker: ConflictTrackerStats,
+}
+
+/// Cloneable handle for capturing transaction diagnostics from a live store.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct TransactionStatsHandle {
+    tracker: Arc<ConflictTracker>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+enum ConflictRule {
+    WriteWrite,
+    WriteRead,
+    ReadWrite,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ConflictRule {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::WriteWrite => "write_write",
+            Self::WriteRead => "write_read",
+            Self::ReadWrite => "read_write",
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct TransactionMetrics {
+    write_write_conflicts: AtomicU64,
+    write_read_conflicts: AtomicU64,
+    read_write_conflicts: AtomicU64,
+    commit_gate_waits: AtomicU64,
+    commit_gate_wait_micros: AtomicU64,
+    commit_gate_wait_max_micros: AtomicU64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct ConflictTracker {
+    backend: &'static str,
     version: AtomicU64,
     state: Mutex<ConflictTrackerState>,
+    metrics: TransactionMetrics,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
 struct ConflictTrackerState {
     committed: Vec<CommittedTxnRecord>,
+    write_versions: BTreeMap<Vec<u8>, Vec<u64>>,
+    read_key_versions: HashMap<Vec<u8>, Vec<u64>>,
+    read_ranges: Vec<(u64, ReadRange)>,
+    pending: BTreeMap<u64, PendingTxnRecord>,
+    next_reservation_id: u64,
     active_snapshots: BTreeMap<u64, usize>,
 }
 
@@ -328,6 +427,19 @@ struct ConflictTrackerState {
 pub(crate) struct ConflictSnapshot {
     tracker: Arc<ConflictTracker>,
     version: u64,
+}
+
+/// A conflict-checked write set waiting for its physical backend commit.
+///
+/// Pending reservations participate in conflict checks but do not advance the
+/// snapshot version. Publishing after the physical write preserves the rule
+/// that every published version is visible to subsequently paired snapshots.
+/// Dropping a reservation cancels it.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use = "publish the reservation after the physical write succeeds"]
+pub(crate) struct ConflictReservation {
+    tracker: Arc<ConflictTracker>,
+    id: Option<u64>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -346,6 +458,7 @@ impl Drop for ConflictSnapshot {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ConflictTrackerState {
+    #[cfg(test)]
     fn committed_after(&self, version: u64) -> &[CommittedTxnRecord] {
         let first = self
             .committed
@@ -361,16 +474,239 @@ impl ConflictTrackerState {
         let drain_count = self
             .committed
             .partition_point(|(version, _, _)| *version <= oldest_active);
-        self.committed.drain(..drain_count);
+        for (version, writes, reads) in self.committed.drain(..drain_count) {
+            for key in writes {
+                let remove_key = self.write_versions.get_mut(&key).is_some_and(|versions| {
+                    if let Ok(index) = versions.binary_search(&version) {
+                        versions.remove(index);
+                    }
+                    versions.is_empty()
+                });
+                if remove_key {
+                    self.write_versions.remove(&key);
+                }
+            }
+            for key in reads.keys {
+                let remove_key = self
+                    .read_key_versions
+                    .get_mut(&key)
+                    .is_some_and(|versions| {
+                        if let Ok(index) = versions.binary_search(&version) {
+                            versions.remove(index);
+                        }
+                        versions.is_empty()
+                    });
+                if remove_key {
+                    self.read_key_versions.remove(&key);
+                }
+            }
+        }
+
+        let range_drain_count = self
+            .read_ranges
+            .partition_point(|(version, _)| *version <= oldest_active);
+        self.read_ranges.drain(..range_drain_count);
+    }
+
+    fn record(&mut self, version: u64, writes: HashSet<Vec<u8>>, reads: ReadSet) {
+        for key in &writes {
+            self.write_versions
+                .entry(key.clone())
+                .or_default()
+                .push(version);
+        }
+        for key in &reads.keys {
+            self.read_key_versions
+                .entry(key.clone())
+                .or_default()
+                .push(version);
+        }
+        self.read_ranges
+            .extend(reads.ranges.iter().cloned().map(|range| (version, range)));
+        self.committed.push((version, writes, reads));
+    }
+
+    fn committed_record(&self, version: u64) -> Option<&CommittedTxnRecord> {
+        self.committed
+            .binary_search_by_key(&version, |(version, _, _)| *version)
+            .ok()
+            .map(|index| &self.committed[index])
+    }
+
+    fn conflicts_committed(
+        &self,
+        read_version: u64,
+        write_keys: &[&Vec<u8>],
+        read_set: &ReadSet,
+    ) -> Option<ConflictRule> {
+        for write_key in write_keys {
+            if !is_content_addressed_block_key(write_key) {
+                if let Some(versions) = self.write_versions.get(*write_key) {
+                    let first = versions.partition_point(|version| *version <= read_version);
+                    for version in &versions[first..] {
+                        let Some((_, _, committed_reads)) = self.committed_record(*version) else {
+                            continue;
+                        };
+                        let commutative_overlap = read_set.has_commutative_range(write_key)
+                            && committed_reads.has_commutative_range(write_key);
+                        if !commutative_overlap {
+                            return Some(ConflictRule::WriteWrite);
+                        }
+                    }
+                }
+            }
+
+            if self
+                .read_key_versions
+                .get(*write_key)
+                .and_then(|versions| versions.last())
+                .is_some_and(|version| *version > read_version)
+            {
+                return Some(ConflictRule::WriteRead);
+            }
+
+            let first = self
+                .read_ranges
+                .partition_point(|(version, _)| *version <= read_version);
+            if self.read_ranges[first..].iter().any(|(_, range)| {
+                range.contains(write_key)
+                    && (!range.commutative_set() || !read_set.has_commutative_range(write_key))
+            }) {
+                return Some(ConflictRule::WriteRead);
+            }
+        }
+
+        for read_key in &read_set.keys {
+            if self
+                .write_versions
+                .get(read_key)
+                .and_then(|versions| versions.last())
+                .is_some_and(|version| *version > read_version)
+            {
+                return Some(ConflictRule::ReadWrite);
+            }
+        }
+
+        if read_set
+            .ranges
+            .iter()
+            .any(|range| self.write_range_conflicts(read_version, range))
+        {
+            Some(ConflictRule::ReadWrite)
+        } else {
+            None
+        }
+    }
+
+    fn write_range_conflicts(&self, read_version: u64, range: &ReadRange) -> bool {
+        if let ReadRange::Range {
+            start: Some(start),
+            end: Some(end),
+        } = range
+        {
+            if start >= end {
+                return false;
+            }
+        }
+
+        let (start, end) = match range {
+            ReadRange::Prefix { prefix, .. } => (
+                Bound::Included(prefix.clone()),
+                prefix_end(prefix).map_or(Bound::Unbounded, Bound::Excluded),
+            ),
+            ReadRange::Range { start, end } => (
+                start.clone().map_or(Bound::Unbounded, Bound::Included),
+                end.clone().map_or(Bound::Unbounded, Bound::Excluded),
+            ),
+        };
+
+        self.write_versions
+            .range((start, end))
+            .any(|(key, versions)| {
+                let first = versions.partition_point(|version| *version <= read_version);
+                versions[first..].iter().any(|version| {
+                    let Some((_, _, committed_reads)) = self.committed_record(*version) else {
+                        return false;
+                    };
+                    !range.commutative_set() || !committed_reads.has_commutative_range(key)
+                })
+            })
+    }
+
+    fn conflicts_pending(
+        &self,
+        write_keys: &[&Vec<u8>],
+        read_set: &ReadSet,
+    ) -> Option<ConflictRule> {
+        self.pending
+            .values()
+            .find_map(|(writes, reads)| transaction_conflict(write_keys, read_set, writes, reads))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    while let Some(last) = end.last_mut() {
+        if *last != u8::MAX {
+            *last += 1;
+            return Some(end);
+        }
+        end.pop();
+    }
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn transaction_conflict(
+    write_keys: &[&Vec<u8>],
+    read_set: &ReadSet,
+    other_writes: &HashSet<Vec<u8>>,
+    other_reads: &ReadSet,
+) -> Option<ConflictRule> {
+    for write_key in write_keys {
+        let commutative_overlap = read_set.has_commutative_range(write_key)
+            && other_reads.has_commutative_range(write_key);
+        if other_writes.contains(*write_key)
+            && !is_content_addressed_block_key(write_key)
+            && !commutative_overlap
+        {
+            return Some(ConflictRule::WriteWrite);
+        }
+        if other_reads.conflicts_key(write_key, read_set) {
+            return Some(ConflictRule::WriteRead);
+        }
+    }
+
+    if other_writes
+        .iter()
+        .any(|other_write| read_set.conflicts_key(other_write, other_reads))
+    {
+        Some(ConflictRule::ReadWrite)
+    } else {
+        None
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ConflictTracker {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::for_backend("test")
+    }
+
+    pub(crate) fn for_backend(backend: &'static str) -> Self {
         Self {
+            backend,
             version: AtomicU64::new(0),
             state: Mutex::new(ConflictTrackerState::default()),
+            metrics: TransactionMetrics::default(),
+        }
+    }
+
+    pub(crate) fn stats_handle(self: &Arc<Self>) -> TransactionStatsHandle {
+        TransactionStatsHandle {
+            tracker: Arc::clone(self),
         }
     }
 
@@ -381,16 +717,60 @@ impl ConflictTracker {
 
     /// Register a write transaction snapshot until its transaction is finalized.
     pub(crate) fn begin_snapshot(self: &Arc<Self>) -> ConflictSnapshot {
-        let version = {
+        let (version, sizes) = {
             let mut state = self.state.lock();
             let version = self.current_version();
             *state.active_snapshots.entry(version).or_default() += 1;
-            version
+            (version, tracker_sizes(&state))
         };
+        self.record_tracker_sizes(sizes);
         ConflictSnapshot {
             tracker: Arc::clone(self),
             version,
         }
+    }
+
+    /// Reserve a conflict-checked write set before its physical backend write.
+    pub(crate) fn reserve<'a>(
+        self: &Arc<Self>,
+        read_version: u64,
+        write_keys: impl Iterator<Item = &'a Vec<u8>>,
+        read_set: &ReadSet,
+    ) -> std::result::Result<ConflictReservation, crate::corekv::Error> {
+        let write_keys: Vec<&Vec<u8>> = write_keys.collect();
+        if write_keys.is_empty() {
+            return Ok(ConflictReservation {
+                tracker: Arc::clone(self),
+                id: None,
+            });
+        }
+
+        let mut state = self.state.lock();
+        if let Some(rule) = state
+            .conflicts_committed(read_version, &write_keys, read_set)
+            .or_else(|| state.conflicts_pending(&write_keys, read_set))
+        {
+            drop(state);
+            self.record_conflict(rule);
+            return Err(crate::corekv::Error::TxnConflict);
+        }
+
+        state.next_reservation_id = state
+            .next_reservation_id
+            .checked_add(1)
+            .expect("conflict reservation ID overflow");
+        let id = state.next_reservation_id;
+        state.pending.insert(
+            id,
+            (write_keys.into_iter().cloned().collect(), read_set.clone()),
+        );
+        let sizes = tracker_sizes(&state);
+        drop(state);
+        self.record_tracker_sizes(sizes);
+        Ok(ConflictReservation {
+            tracker: Arc::clone(self),
+            id: Some(id),
+        })
     }
 
     fn release_snapshot(&self, version: u64) {
@@ -404,90 +784,125 @@ impl ConflictTracker {
             state.active_snapshots.remove(&version);
         }
         state.prune(self.current_version());
+        let sizes = tracker_sizes(&state);
+        drop(state);
+        self.record_tracker_sizes(sizes);
     }
 
-    /// Check for conflicts and record the read/write set if no conflict.
-    /// Returns Err(TxnConflict) if the transaction conflicts with any
-    /// transaction that committed after `read_version`; otherwise returns the
-    /// recorded commit version (0 when the write set is empty and nothing was
-    /// recorded). If the physical write backing this record subsequently
-    /// fails, the caller must `unrecord` the returned version while still
-    /// holding the store's commit gate.
+    pub(crate) fn record_commit_gate_wait(&self, elapsed: Duration) {
+        let micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+        self.metrics
+            .commit_gate_waits
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .commit_gate_wait_micros
+            .fetch_add(micros, Ordering::Relaxed);
+        self.metrics
+            .commit_gate_wait_max_micros
+            .fetch_max(micros, Ordering::Relaxed);
+        telemetry::record_commit_gate_wait(self.backend, elapsed.as_secs_f64());
+    }
+
+    fn record_conflict(&self, rule: ConflictRule) {
+        let counter = match rule {
+            ConflictRule::WriteWrite => &self.metrics.write_write_conflicts,
+            ConflictRule::WriteRead => &self.metrics.write_read_conflicts,
+            ConflictRule::ReadWrite => &self.metrics.read_write_conflicts,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        telemetry::record_storage_conflict(self.backend, rule.as_str());
+    }
+
+    fn record_tracker_sizes(&self, sizes: (u64, u64, u64)) {
+        telemetry::record_conflict_tracker_size(self.backend, sizes.0, sizes.1, sizes.2);
+    }
+
+    fn stats(&self) -> TransactionStatsSnapshot {
+        let state = self.state.lock();
+        TransactionStatsSnapshot {
+            backend: self.backend,
+            conflicts: TransactionConflictStats {
+                write_write: self.metrics.write_write_conflicts.load(Ordering::Relaxed),
+                write_read: self.metrics.write_read_conflicts.load(Ordering::Relaxed),
+                read_write: self.metrics.read_write_conflicts.load(Ordering::Relaxed),
+            },
+            commit_gate_waits: self.metrics.commit_gate_waits.load(Ordering::Relaxed),
+            commit_gate_wait_micros: self.metrics.commit_gate_wait_micros.load(Ordering::Relaxed),
+            commit_gate_wait_max_micros: self
+                .metrics
+                .commit_gate_wait_max_micros
+                .load(Ordering::Relaxed),
+            tracker: ConflictTrackerStats {
+                current_version: self.current_version(),
+                committed_transactions: state.committed.len() as u64,
+                pending_reservations: state.pending.len() as u64,
+                active_snapshots: state.active_snapshots.values().sum::<usize>() as u64,
+                indexed_write_keys: state.write_versions.len() as u64,
+                indexed_read_keys: state.read_key_versions.len() as u64,
+                indexed_read_ranges: state.read_ranges.len() as u64,
+            },
+        }
+    }
+
+    /// Reserve and immediately publish a record for conflict-tracker tests.
+    #[cfg(test)]
     pub(crate) fn check_and_record<'a>(
-        &self,
+        self: &Arc<Self>,
         read_version: u64,
         write_keys: impl Iterator<Item = &'a Vec<u8>>,
         read_set: &ReadSet,
     ) -> std::result::Result<u64, crate::corekv::Error> {
-        let write_keys: Vec<&Vec<u8>> = write_keys.collect();
-        if write_keys.is_empty() {
-            return Ok(0);
-        }
-
-        let mut state = self.state.lock();
-
-        // Check for conflicts against transactions committed after our snapshot.
-        for (_, committed_writes, committed_reads) in state.committed_after(read_version) {
-            for write_key in &write_keys {
-                let commutative_overlap = read_set.has_commutative_range(write_key)
-                    && committed_reads.has_commutative_range(write_key);
-                if (committed_writes.contains(*write_key)
-                    && !is_content_addressed_block_key(write_key)
-                    && !commutative_overlap)
-                    || committed_reads.conflicts_key(write_key, read_set)
-                {
-                    return Err(crate::corekv::Error::TxnConflict);
-                }
-            }
-
-            if committed_writes
-                .iter()
-                .any(|committed_write| read_set.conflicts_key(committed_write, committed_reads))
-            {
-                return Err(crate::corekv::Error::TxnConflict);
-            }
-        }
-
-        // No conflict - clone keys into storage (single clone per key)
-        let new_version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
-        let write_set = write_keys.into_iter().cloned().collect();
-        state
-            .committed
-            .push((new_version, write_set, read_set.clone()));
-        state.prune(new_version);
-
-        Ok(new_version)
+        Ok(self.reserve(read_version, write_keys, read_set)?.publish())
     }
+}
 
-    /// Remove the record for `version` after its physical write failed.
-    ///
-    /// Without this, the recorded write-set describes data that never landed
-    /// and later writers get phantom `TxnConflict` errors against it. Must be
-    /// called while still holding the commit gate that covered the failed
-    /// `check_and_record`, so no other committer can observe the phantom
-    /// record. A version already pruned (or 0) is a no-op; the version
-    /// counter keeps its gap, which `committed_after` tolerates.
-    /// Prefer [`RecordGuard`], which also covers unwinds.
-    ///
-    /// Only compiled for backends with fallible physical writes; the
-    /// memory backend's writes cannot fail after the conflict check.
-    #[cfg(any(
-        test,
-        feature = "redb",
-        feature = "fjall",
-        feature = "rocksdb",
-        feature = "lark"
-    ))]
-    pub(crate) fn unrecord(&self, version: u64) {
-        if version == 0 {
-            return;
-        }
-        let mut state = self.state.lock();
-        if let Ok(index) = state
-            .committed
-            .binary_search_by_key(&version, |(v, _, _)| *v)
-        {
-            state.committed.remove(index);
+#[cfg(not(target_arch = "wasm32"))]
+impl TransactionStatsHandle {
+    pub fn snapshot(&self) -> TransactionStatsSnapshot {
+        self.tracker.stats()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn tracker_sizes(state: &ConflictTrackerState) -> (u64, u64, u64) {
+    (
+        state.committed.len() as u64,
+        state.pending.len() as u64,
+        state.active_snapshots.values().sum::<usize>() as u64,
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ConflictReservation {
+    /// Publish the reservation after the physical write succeeds.
+    pub(crate) fn publish(mut self) -> u64 {
+        let Some(id) = self.id.take() else {
+            return 0;
+        };
+        let mut state = self.tracker.state.lock();
+        let (writes, reads) = state
+            .pending
+            .remove(&id)
+            .expect("active conflict reservation");
+        let version = self.tracker.version.fetch_add(1, Ordering::SeqCst) + 1;
+        state.record(version, writes, reads);
+        state.prune(version);
+        let sizes = tracker_sizes(&state);
+        drop(state);
+        self.tracker.record_tracker_sizes(sizes);
+        version
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for ConflictReservation {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            let mut state = self.tracker.state.lock();
+            state.pending.remove(&id);
+            let sizes = tracker_sizes(&state);
+            drop(state);
+            self.tracker.record_tracker_sizes(sizes);
         }
     }
 }
@@ -586,72 +1001,6 @@ impl CommitCallbacks {
                 CallbackManager::execute_async_callbacks(error_async).await;
             }
         })
-    }
-}
-
-/// Rolls back a `check_and_record` entry unless defused.
-///
-/// Armed right after a successful `check_and_record` and defused only once
-/// the physical write has succeeded, it converts BOTH error returns and
-/// panics during the write into an `unrecord`, so no phantom write-set can
-/// survive a failed commit. Hold it (and drop/defuse it) while the commit
-/// gate is still held.
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(
-        test,
-        feature = "redb",
-        feature = "fjall",
-        feature = "rocksdb",
-        feature = "lark"
-    )
-))]
-pub(crate) struct RecordGuard<'t> {
-    tracker: &'t ConflictTracker,
-    version: u64,
-    defused: bool,
-}
-
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(
-        test,
-        feature = "redb",
-        feature = "fjall",
-        feature = "rocksdb",
-        feature = "lark"
-    )
-))]
-impl<'t> RecordGuard<'t> {
-    pub(crate) fn new(tracker: &'t ConflictTracker, version: u64) -> Self {
-        Self {
-            tracker,
-            version,
-            defused: false,
-        }
-    }
-
-    /// The physical write succeeded; keep the record.
-    pub(crate) fn defuse(mut self) {
-        self.defused = true;
-    }
-}
-
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(
-        test,
-        feature = "redb",
-        feature = "fjall",
-        feature = "rocksdb",
-        feature = "lark"
-    )
-))]
-impl Drop for RecordGuard<'_> {
-    fn drop(&mut self) {
-        if !self.defused {
-            self.tracker.unrecord(self.version);
-        }
     }
 }
 

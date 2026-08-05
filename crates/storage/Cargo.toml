@@ -16,6 +16,7 @@ zeroize = "1.8"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Async runtime
+async-lock.workspace = true
 async-trait.workspace = true
 
 # Serialization
@@ -32,6 +33,7 @@ thiserror.workspace = true
 
 # Logging
 tracing.workspace = true
+telemetry = { path = "../telemetry" }
 
 # Full-text search
 bm25.workspace = true

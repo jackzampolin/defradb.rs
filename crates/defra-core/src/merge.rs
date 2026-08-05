@@ -16,6 +16,7 @@ pub struct ExplicitReplayAuthorization {
     pub collection_id: String,
     pub authorizer_did: String,
     pub expires_at: u64,
+    pub capability: Option<String>,
 }
 
 /// Owned block data for batch processing.
@@ -286,14 +287,21 @@ impl<'a> BlockMetadata<'a> {
         self.verified_creator.as_deref().or(self.creator)
     }
 
-    pub fn explicit_replay_authorizer_for(&self, collection_id: &str) -> Option<&str> {
+    pub fn explicit_replay_authorization_for(
+        &self,
+        collection_id: &str,
+    ) -> Option<&ExplicitReplayAuthorization> {
         self.explicit_replay_authorization
             .as_ref()
             .filter(|authorization| authorization.collection_id == collection_id)
-            .and_then(|authorization| {
-                (self.effective_creator() == Some(authorization.authorizer_did.as_str()))
-                    .then_some(authorization.authorizer_did.as_str())
+            .filter(|authorization| {
+                self.effective_creator() == Some(authorization.authorizer_did.as_str())
             })
+    }
+
+    pub fn explicit_replay_authorizer_for(&self, collection_id: &str) -> Option<&str> {
+        self.explicit_replay_authorization_for(collection_id)
+            .map(|authorization| authorization.authorizer_did.as_str())
     }
 
     pub fn allows_explicit_replay_for(&self, collection_id: &str) -> bool {
@@ -486,6 +494,7 @@ mod tests {
                 collection_id: "col1".to_string(),
                 authorizer_did: "did:key:OWNER".to_string(),
                 expires_at: 1,
+                capability: None,
             }));
 
         assert_eq!(
@@ -505,6 +514,7 @@ mod tests {
             collection_id: "col1".to_string(),
             authorizer_did: "did:key:OWNER".to_string(),
             expires_at: 1,
+            capability: None,
         }));
 
         assert_eq!(
@@ -523,6 +533,7 @@ mod tests {
                 collection_id: "col1".to_string(),
                 authorizer_did: "did:key:OWNER".to_string(),
                 expires_at: 1,
+                capability: None,
             }));
 
         assert_eq!(meta.explicit_replay_authorizer_for("col1"), None);

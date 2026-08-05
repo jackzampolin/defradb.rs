@@ -24,7 +24,9 @@ async fn register_test_block_owner(
     let txn = handler.db.new_txn(false).await.unwrap();
     {
         let systemstore = txn.systemstore().unwrap();
-        db::doc_id_map::resolve_or_allocate_doc_short_id(&systemstore, collection_short_id, doc_id)
+        handler
+            .db
+            .resolve_or_allocate_doc_short_id(&systemstore, collection_short_id, doc_id)
             .await
             .unwrap();
         db::doc_id_map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), doc_id)
@@ -48,9 +50,7 @@ async fn create_doc_locally(
         let headstore = txn.headstore().unwrap();
         let raw_blockstore = txn.blockstore().unwrap();
         let systemstore = txn.systemstore().unwrap();
-        let short_id = db::doc_id_map::next_doc_short_id(&systemstore)
-            .await
-            .unwrap();
+        let short_id = handler.db.next_doc_short_id().await.unwrap();
         let identity = db_blocks::DocStorageIdentity::new(collection.resolved_root_id(), short_id);
         let result = db_blocks::write_document_blocks(
             &raw_blockstore,
@@ -378,6 +378,7 @@ async fn validate_explicit_replay_authorization_checks_collection_and_creator() 
         collection_id: "v1".to_string(),
         authorizer_did: did.clone(),
         expires_at: u64::MAX,
+        capability: None,
     };
 
     handler

@@ -39,6 +39,16 @@ use crate::router::{AppState, NodePermission};
 
 use super::TX_HEADER_NAME;
 
+fn record_response_metrics(response: &QueryResponse) {
+    if let Some(surface) = escaped_conflict_surface(response) {
+        telemetry::record_escaped_conflict(surface);
+    }
+}
+
+fn escaped_conflict_surface(response: &QueryResponse) -> Option<&'static str> {
+    response.is_transaction_conflict().then_some("graphql")
+}
+
 /// Check if a query references `encrypted_` fields and P2P is disabled.
 ///
 /// Go DefraDB only generates `encrypted_<Collection>` GraphQL fields when P2P
@@ -147,6 +157,7 @@ pub async fn graphql(
     // Wire identity from Authorization header into the request
     request.identity = identity.did().cloned();
     let response = execute_with_context(&state, &identity, request).await;
+    record_response_metrics(&response);
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL POST query returned errors");
     }
@@ -201,6 +212,7 @@ pub async fn graphql_get(
     };
 
     let response = execute_with_context(&state, &identity, request).await;
+    record_response_metrics(&response);
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL GET query returned errors");
     }
@@ -311,6 +323,7 @@ pub async fn graphql_transactional(
         None => execute_with_context(&state, &identity, query_request).await,
     };
 
+    record_response_metrics(&response);
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL query returned errors");
     }
@@ -476,5 +489,17 @@ mod tests {
             }
             other => panic!("expected encrypted field validation error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn response_metrics_count_only_typed_conflicts() {
+        assert_eq!(
+            escaped_conflict_surface(&QueryResponse::error("validation failed")),
+            None
+        );
+        assert_eq!(
+            escaped_conflict_surface(&QueryResponse::transaction_conflict("conflict")),
+            Some("graphql")
+        );
     }
 }

@@ -380,76 +380,67 @@ impl Txn for RedbTxn {
 
             let write_result = tokio::task::spawn_blocking(
                 move || -> (Result<()>, tokio::task::JoinHandle<()>) {
-                let _conflict_snapshot = conflict_snapshot;
-                // The gate covers only the write. Callbacks start after it is
-                // released: one that opens a transaction would otherwise
-                // deadlock against this thread's write lock, and holding it
-                // across callback work would stall every new writer.
-                let outcome = {
-                let _commit_guard = commit_gate.blocking_write();
-                (|| -> Result<()> {
-                let version =
-                    conflict_tracker.check_and_record(read_version, pending.keys(), &read_set)?;
-                // Unrecords on error or panic before the write lands, so no
-                // phantom write-set survives a failed commit.
-                let record_guard =
-                    crate::backends::shared::RecordGuard::new(&conflict_tracker, version);
+                    let _conflict_snapshot = conflict_snapshot;
+                    let outcome = (|| -> Result<()> {
+                        let reservation = conflict_tracker.reserve(
+                            read_version,
+                            pending.keys(),
+                            &read_set,
+                        )?;
 
-                let write = || -> Result<()> {
-                    let mut write_txn = db.begin_write().map_err(|e| {
-                        tracing::error!(error = %e, pending_changes = pending.len(),
-                            "Failed to begin write transaction during commit");
-                        Error::from(e)
-                    })?;
-
-                    write_txn.set_durability(match durability {
-                        DurabilityMode::Immediate => redb::Durability::Immediate,
-                        DurabilityMode::Eventual => redb::Durability::Eventual,
-                    });
-
-                    {
-                        let mut table = write_txn.open_table(KV_TABLE).map_err(|e| {
-                            tracing::error!(error = %e, "Failed to open KV table during commit");
+                        let mut write_txn = db.begin_write().map_err(|e| {
+                            tracing::error!(error = %e, pending_changes = pending.len(),
+                                "Failed to begin write transaction during commit");
                             Error::from(e)
                         })?;
 
-                        for (key, value) in pending.iter() {
-                            match value {
-                                Some(v) => {
-                                    if let Err(e) = table.insert(key.as_slice(), v.as_slice()) {
-                                        tracing::error!(error = %e, key_len = key.len(),
-                                            value_len = v.len(), "Failed to insert key during commit");
-                                        return Err(e.into());
+                        write_txn.set_durability(match durability {
+                            DurabilityMode::Immediate => redb::Durability::Immediate,
+                            DurabilityMode::Eventual => redb::Durability::Eventual,
+                        });
+
+                        {
+                            let mut table = write_txn.open_table(KV_TABLE).map_err(|e| {
+                                tracing::error!(error = %e, "Failed to open KV table during commit");
+                                Error::from(e)
+                            })?;
+
+                            for (key, value) in &pending {
+                                match value {
+                                    Some(v) => {
+                                        if let Err(e) = table.insert(key.as_slice(), v.as_slice()) {
+                                            tracing::error!(error = %e, key_len = key.len(),
+                                                value_len = v.len(), "Failed to insert key during commit");
+                                            return Err(e.into());
+                                        }
                                     }
-                                }
-                                None => {
-                                    if let Err(e) = table.remove(key.as_slice()) {
-                                        tracing::error!(error = %e, key_len = key.len(),
-                                            "Failed to delete key during commit");
-                                        return Err(e.into());
+                                    None => {
+                                        if let Err(e) = table.remove(key.as_slice()) {
+                                            tracing::error!(error = %e, key_len = key.len(),
+                                                "Failed to delete key during commit");
+                                            return Err(e.into());
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    if let Err(e) = write_txn.commit() {
-                        tracing::error!(error = %e, pending_changes = pending.len(),
-                            "Failed to finalize commit");
-                        return Err(e.into());
-                    }
+                        if let Err(e) = write_txn.commit() {
+                            tracing::error!(error = %e, pending_changes = pending.len(),
+                                "Failed to finalize commit");
+                            return Err(e.into());
+                        }
 
-                    Ok(())
-                };
-
-                write()?;
-                record_guard.defuse();
-                Ok(())
-                })()
-                };
-                let callbacks = callbacks.spawn(outcome.is_ok());
-                (outcome, callbacks)
-            })
+                        let wait_started = std::time::Instant::now();
+                        let _publication_guard = commit_gate.blocking_write();
+                        conflict_tracker.record_commit_gate_wait(wait_started.elapsed());
+                        reservation.publish();
+                        Ok(())
+                    })();
+                    let callbacks = callbacks.spawn(outcome.is_ok());
+                    (outcome, callbacks)
+                },
+            )
             .await;
 
             match write_result {

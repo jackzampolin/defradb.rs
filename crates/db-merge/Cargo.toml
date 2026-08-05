@@ -38,6 +38,7 @@ thiserror.workspace = true
 
 # Logging
 tracing.workspace = true
+telemetry = { path = "../telemetry" }
 
 # IPLD
 cid.workspace = true

@@ -23,14 +23,18 @@ use crate::provider::{AcpLightClientStatus, ProviderError, SourceHubProvider, Su
 /// DefraDB's mutation path.
 pub struct SourceHubDocumentACP {
     provider: Arc<dyn SourceHubProvider>,
-    access_cache: Option<AccessCache>,
+    access_cache: Option<Arc<AccessCache>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    event_subscriber: Option<super::event_subscriber::CosmosEventSubscriber>,
 }
 
 impl SourceHubDocumentACP {
     pub fn new(provider: Arc<dyn SourceHubProvider>, cache_ttl: Duration) -> Self {
         Self {
             provider,
-            access_cache: Some(AccessCache::new(cache_ttl)),
+            access_cache: Some(Arc::new(AccessCache::new(cache_ttl))),
+            #[cfg(not(target_arch = "wasm32"))]
+            event_subscriber: None,
         }
     }
 
@@ -38,7 +42,26 @@ impl SourceHubDocumentACP {
         Self {
             provider,
             access_cache: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            event_subscriber: None,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_cosmos_event_invalidation(
+        mut self,
+        websocket_url: impl Into<String>,
+    ) -> std::result::Result<Self, ProviderError> {
+        let cache = self.access_cache.as_ref().ok_or_else(|| {
+            ProviderError::Config(
+                "Cosmos event invalidation requires the access cache to be enabled".into(),
+            )
+        })?;
+        self.event_subscriber = Some(super::event_subscriber::CosmosEventSubscriber::start(
+            websocket_url.into(),
+            Arc::clone(cache),
+        )?);
+        Ok(self)
     }
 
     fn invalidate_cached_access(&self, policy_id: &str, resource_name: &str, doc_id: &str) {

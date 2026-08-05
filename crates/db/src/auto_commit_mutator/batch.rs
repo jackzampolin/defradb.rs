@@ -212,7 +212,9 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let enc_config = get_encryption_config();
         let sign_config = get_signing_config();
 
-        let doc_short_id = crate::doc_id_map::next_doc_short_id(&systemstore)
+        let doc_short_id = self
+            .db
+            .next_doc_short_id()
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
         let identity = DocStorageIdentity::new(short_id, doc_short_id);

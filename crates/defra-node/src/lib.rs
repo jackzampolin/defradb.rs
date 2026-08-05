@@ -44,6 +44,7 @@ pub use lens::{LensConfig, LensModule, TransformId};
 pub use query::QueryLimits;
 pub use query::{QueryExecutor, QueryRequest, QueryResponse};
 pub use schema::CollectionVersion;
+pub use telemetry::{ConflictMetricsSnapshot, RetryLayerSnapshot};
 #[cfg(feature = "otel")]
 pub use telemetry::{TelemetryConfig, TelemetryHandle};
 
@@ -108,6 +109,8 @@ pub struct EmbeddedNode {
     schema_ops: Arc<dyn SchemaOps>,
     embedding_config: db::EmbeddingClientConfig,
     node_identity_did: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
+    transaction_stats: Option<storage::TransactionStatsHandle>,
     #[cfg(feature = "rocksdb")]
     rocksdb_stats: Option<storage::RocksDbStatsHandle>,
     #[cfg(feature = "http")]
@@ -316,6 +319,19 @@ impl EmbeddedNode {
         &self.embedding_config
     }
 
+    /// Capture backend-neutral transaction conflict and commit-gate diagnostics.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn transaction_stats(&self) -> Option<storage::TransactionStatsSnapshot> {
+        self.transaction_stats
+            .as_ref()
+            .map(storage::TransactionStatsHandle::snapshot)
+    }
+
+    /// Capture process-lifetime transaction retry and client escape counters.
+    pub fn conflict_metrics(&self) -> ConflictMetricsSnapshot {
+        telemetry::conflict_metrics_snapshot()
+    }
+
     /// Capture RocksDB diagnostics when this node uses the RocksDB backend.
     ///
     /// Gauges are sampled at call time. Cumulative RocksDB counters are present
@@ -394,10 +410,18 @@ where
 
     loop {
         let response = execute_once(request.clone()).await;
-        if !is_transaction_conflict_response(&response) || retry_count >= policy.max_retries {
+        if !is_transaction_conflict_response(&response) {
+            if retry_count > 0 {
+                telemetry::record_retry_success(telemetry::RetryLayer::EmbeddedExecute);
+            }
+            return response;
+        }
+        if retry_count >= policy.max_retries {
+            telemetry::record_retry_exhaustion(telemetry::RetryLayer::EmbeddedExecute);
             return response;
         }
 
+        telemetry::record_retry_attempt(telemetry::RetryLayer::EmbeddedExecute);
         retry_count += 1;
         let delay = jittered_backoff(backoff);
         tracing::warn!(
@@ -1095,6 +1119,8 @@ impl NodeBuilder {
         } = args;
 
         let embedding_config = db_options.embedding_config();
+        #[cfg(not(target_arch = "wasm32"))]
+        let transaction_stats = store.transaction_stats_handle();
 
         // Open database
         let mut database = db::DB::open_from_arc_with_options(store.clone(), db_options)
@@ -1233,6 +1259,8 @@ impl NodeBuilder {
             schema_ops,
             embedding_config,
             node_identity_did,
+            #[cfg(not(target_arch = "wasm32"))]
+            transaction_stats,
             #[cfg(feature = "rocksdb")]
             rocksdb_stats: None,
             #[cfg(feature = "http")]
@@ -1424,6 +1452,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_retry_loop_retries_conflicts_until_success() {
+        let metrics_before = telemetry::conflict_metrics_snapshot().embedded_execute;
         let attempts = Arc::new(AtomicUsize::new(0));
         let policy =
             ExecuteRetryPolicy::new(3, std::time::Duration::ZERO, std::time::Duration::ZERO);
@@ -1453,6 +1482,9 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
         assert!(!response.has_errors());
         assert_eq!(response.data, Some(serde_json::json!({"ok": true})));
+        let metrics_after = telemetry::conflict_metrics_snapshot().embedded_execute;
+        assert_eq!(metrics_after.attempts - metrics_before.attempts, 2);
+        assert_eq!(metrics_after.successes - metrics_before.successes, 1);
     }
 
     #[tokio::test]

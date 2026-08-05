@@ -88,6 +88,16 @@ pub struct Cli {
     #[arg(long, global = true, env = "DEFRA_SOURCE_HUB_COMET_ADDRESS")]
     pub source_hub_comet_address: Option<String>,
 
+    /// SourceHub CometBFT WebSocket endpoint for ACP cache invalidation
+    #[cfg(feature = "sourcehub")]
+    #[arg(
+        long,
+        visible_alias = "sourcehub-events-ws",
+        global = true,
+        env = "DEFRA_SOURCE_HUB_EVENTS_WS"
+    )]
+    pub source_hub_events_ws: Option<String>,
+
     /// SourceHub chain ID (e.g., "sourcehub-test")
     #[cfg(feature = "sourcehub")]
     #[arg(long, global = true, env = "DEFRA_SOURCE_HUB_CHAIN_ID")]
@@ -178,5 +188,29 @@ impl Cli {
             Command::Sdl(args) => args.execute(),
             Command::ServerDump(args) => args.execute(&config).await,
         }
+    }
+}
+
+#[cfg(all(test, feature = "sourcehub"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sourcehub_events_endpoint_flows_into_config() {
+        let cli = Cli::try_parse_from([
+            "defra",
+            "--sourcehub-events-ws",
+            "ws://127.0.0.1:26657/websocket",
+            "version",
+        ])
+        .unwrap();
+        let mut config = Config::default();
+
+        config.apply_cli_flags(&cli).unwrap();
+
+        assert_eq!(
+            config.acp.sourcehub_events_ws,
+            "ws://127.0.0.1:26657/websocket"
+        );
     }
 }
