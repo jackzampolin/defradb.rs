@@ -26,7 +26,7 @@ p2p = { path = "../p2p", features = ["libp2p-transport"] }
 query = { path = "../query" }
 replication-filter = { path = "../replication-filter" }
 schema = { path = "../schema" }
-sourcehub = { path = "../sourcehub" }
+sourcehub = { path = "../sourcehub", optional = true }
 storage = { path = "../storage" }
 
 anyhow.workspace = true
@@ -54,6 +54,8 @@ wasmtime-runtime = [
 ]
 lark = ["storage/lark"]
 redb = ["db/redb", "storage/redb"]
+# SourceHub on-chain document ACP.
+sourcehub = ["dep:sourcehub"]
 iroh = ["p2p/iroh-transport", "defra-p2p-adapter/iroh"]
 
 [dev-dependencies]
