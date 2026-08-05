@@ -195,6 +195,7 @@ async fn rust_connection_manager_prunes_to_low_water() {
 
     // The endpoint reports unique peers while watermarks count physical connections.
     // Exact oldest-first selection is covered by the connection manager unit tests.
+    // A pruned peer may reconnect after the trim, so only require observing low water.
     poll_until(
         || active_peer_ids(target).len() <= LOW_WATER as usize,
         Duration::from_secs(10),
@@ -202,10 +203,4 @@ async fn rust_connection_manager_prunes_to_low_water() {
         "connection manager did not prune to low water",
     )
     .await;
-
-    let active_after_prune = active_peer_ids(target);
-    assert!(
-        active_after_prune.len() <= LOW_WATER as usize,
-        "expected no more than {LOW_WATER} peers after pruning: {active_after_prune:?}"
-    );
 }
