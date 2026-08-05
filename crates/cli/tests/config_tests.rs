@@ -28,6 +28,8 @@ fn cli_with_defaults() -> Cli {
         #[cfg(feature = "sourcehub")]
         source_hub_comet_address: None,
         #[cfg(feature = "sourcehub")]
+        source_hub_events_ws: None,
+        #[cfg(feature = "sourcehub")]
         source_hub_chain_id: None,
         #[cfg(feature = "sourcehub")]
         hub_rs_address: None,

@@ -30,7 +30,7 @@ impl MemoryStore {
         Self {
             data: Arc::new(RwLock::new(BTreeMap::new())),
             closed: Arc::new(AtomicBool::new(false)),
-            conflict_tracker: Arc::new(ConflictTracker::new()),
+            conflict_tracker: Arc::new(ConflictTracker::for_backend("memory")),
             commit_gate: Arc::new(RwLock::new(())),
         }
     }
@@ -51,6 +51,10 @@ impl crate::corekv::private::Sealed for MemoryStore {}
 
 #[async_trait]
 impl Store for MemoryStore {
+    fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
+        Some(self.conflict_tracker.stats_handle())
+    }
+
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         if self.is_closed() {
             return Err(Error::DBClosed);
@@ -116,21 +120,23 @@ mod pairing_tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn snapshot_waits_for_physical_write_after_conflict_version_advances() {
+    async fn snapshot_waits_while_successful_commit_is_published() {
         let store = Arc::new(MemoryStore::new());
         let key = b"paired-snapshot".to_vec();
         let value = b"committed".to_vec();
 
         let gate = Arc::clone(&store.commit_gate);
         let commit_guard = gate.write().await;
-        store
+        let reservation = store
             .conflict_tracker
-            .check_and_record(
+            .reserve(
                 store.conflict_tracker.current_version(),
                 std::slice::from_ref(&key).iter(),
                 &ReadSet::default(),
             )
             .unwrap();
+        store.data.write().await.insert(key.clone(), value.clone());
+        reservation.publish();
 
         let snapshot_store = Arc::clone(&store);
         let mut snapshot_task = tokio::spawn(async move { snapshot_store.new_txn(false).await });
@@ -138,10 +144,9 @@ mod pairing_tests {
             tokio::time::timeout(Duration::from_millis(25), &mut snapshot_task)
                 .await
                 .is_err(),
-            "new transaction took a snapshot during an in-flight physical commit"
+            "new transaction took a snapshot during version publication"
         );
 
-        store.data.write().await.insert(key.clone(), value.clone());
         drop(commit_guard);
 
         let snapshot = tokio::time::timeout(Duration::from_secs(1), snapshot_task)
@@ -217,6 +222,20 @@ mod pairing_tests {
             .expect("write transaction remained blocked after gate release")
             .expect("writer task panicked")
             .expect("write transaction failed");
+    }
+
+    #[tokio::test]
+    async fn transaction_stats_capture_commit_gate_waits() {
+        let store = MemoryStore::new();
+        let handle = store.transaction_stats_handle().unwrap();
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"key", b"value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let stats = handle.snapshot();
+        assert_eq!(stats.backend, "memory");
+        assert_eq!(stats.commit_gate_waits, 1);
+        assert_eq!(stats.tracker.current_version, 1);
     }
 
     #[tokio::test]

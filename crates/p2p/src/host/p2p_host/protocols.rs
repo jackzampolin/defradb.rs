@@ -71,7 +71,7 @@ impl<S: Store> P2PHost<S> {
         event: request_response::Event<PushLogRequest, PushLogReply>,
     ) {
         match event {
-            request_response::Event::Message { peer, message } => match message {
+            request_response::Event::Message { peer, message, .. } => match message {
                 request_response::Message::Request {
                     request, channel, ..
                 } => {
@@ -285,6 +285,17 @@ impl<S: Store> P2PHost<S> {
 
             gossipsub::Event::GossipsubNotSupported { peer_id } => {
                 debug!("Peer {} does not support gossipsub", peer_id);
+            }
+
+            gossipsub::Event::SlowPeer {
+                peer_id,
+                failed_messages,
+            } => {
+                warn!(
+                    peer_id = %peer_id,
+                    ?failed_messages,
+                    "Peer is not consuming gossipsub messages fast enough"
+                );
             }
         }
     }

@@ -26,6 +26,7 @@
 //! IPFS block exchange protocol (1.0.0, 1.1.0, 1.2.0), enabling
 //! interoperability with Go DefraDB.
 
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -122,7 +123,7 @@ pub struct DefraBehaviour<S: Store> {
 
     /// Process-memory guard approximating Go's ResourceManager system scope.
     ///
-    /// rust-libp2p 0.53 does not expose go-libp2p ResourceManager scopes for
+    /// rust-libp2p does not expose go-libp2p ResourceManager scopes for
     /// transient, per-peer, service, or protocol memory/FD accounting. This
     /// behaviour can only refuse new connections once process physical memory
     /// exceeds the Go-compatible system budget. Existing connection count
@@ -193,17 +194,13 @@ impl From<relay::client::Event> for DefraEvent {
 
 impl From<()> for DefraEvent {
     fn from(_: ()) -> Self {
-        // stream::Behaviour emits () events which we ignore
-        // Stream handling happens through Control, not events
         unreachable!("stream::Behaviour should not emit events")
     }
 }
 
-impl From<void::Void> for DefraEvent {
-    fn from(v: void::Void) -> Self {
-        // Resource-limit behaviours emit Void — they never actually fire events,
-        // they only enforce limits by refusing connections at the transport layer.
-        void::unreachable(v)
+impl From<Infallible> for DefraEvent {
+    fn from(event: Infallible) -> Self {
+        match event {}
     }
 }
 
@@ -458,14 +455,14 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
         topic: &gossipsub::IdentTopic,
     ) -> Result<bool, gossipsub::PublishError> {
         match self.gossipsub.as_mut() {
-            Some(gs) => gs.unsubscribe(topic),
+            Some(gs) => Ok(gs.unsubscribe(topic)),
             None => Ok(false),
         }
     }
 
     /// Publish a message to a GossipSub topic.
     ///
-    /// Returns the message ID on success, or `InsufficientPeers` if pubsub is disabled.
+    /// Returns the message ID on success, or `NoPeersSubscribedToTopic` if pubsub is disabled.
     pub fn publish(
         &mut self,
         topic: gossipsub::IdentTopic,
@@ -473,7 +470,7 @@ impl<S: Store + Clone + Send + Sync + 'static> DefraBehaviour<S> {
     ) -> Result<gossipsub::MessageId, gossipsub::PublishError> {
         match self.gossipsub.as_mut() {
             Some(gs) => gs.publish(topic, data),
-            None => Err(gossipsub::PublishError::InsufficientPeers),
+            None => Err(gossipsub::PublishError::NoPeersSubscribedToTopic),
         }
     }
 

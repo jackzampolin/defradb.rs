@@ -1862,6 +1862,7 @@ async fn test_batch_validates_explicit_replay_before_merge() {
             collection_id: "col1".to_string(),
             authorizer_did: "did:key:authorizer".to_string(),
             expires_at: u64::MAX,
+            capability: None,
         }),
     }];
 

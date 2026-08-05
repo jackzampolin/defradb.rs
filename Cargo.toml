@@ -89,10 +89,10 @@ serde_bytes = "0.11"
 ciborium = "0.2"
 
 # P2P networking
-# Note: Using 0.53 to match iroh-bitswap's dependency
-libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "relay", "dns", "quic", "websocket", "secp256k1"] }
-iroh-bitswap = { git = "https://github.com/sourcenetwork/beetle", rev = "6c8ed7a6d0616a9dd87cc2f0c6bf51cd2f289ed7" }
-libp2p-stream = "0.1.0-alpha.1"
+# Keep these on the same libp2p-swarm release line.
+libp2p = { version = "0.56", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "relay", "dns", "quic", "websocket", "secp256k1"] }
+iroh-bitswap = { git = "https://github.com/sourcenetwork/beetle", rev = "d1e12c7cf6dc653d8f0abeb9f804824656fb3621" }
+libp2p-stream = "0.4.0-alpha"
 multiaddr = "0.18"
 
 # Iroh P2P transport (alternative to libp2p)

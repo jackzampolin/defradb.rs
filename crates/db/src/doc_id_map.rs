@@ -5,22 +5,120 @@
 //! holds the bidirectional mapping between short IDs and the public
 //! genesis-CID-derived DocIDs, plus a block-CID -> DocID ownership index.
 
+use async_lock::Mutex;
 use datastore::NamespaceView;
-use storage::corekv::Key;
+use std::sync::Arc;
+use storage::corekv::{Key, Store};
 use storage::keys::doc_id_index::{
     BlockCIDToDocIDKey, DocIDToDocRefKey, DocRef, DocShortIDSequenceKey, DocShortIDToDocIDAliasKey,
     DocShortIDToDocIDKey,
 };
+use storage::stores::Systemstore;
 
 use crate::error::{Error, Result};
 
-/// Allocate the next document short ID from the systemstore sequence.
+const DOC_SHORT_ID_RESERVATION_SIZE: u64 = 1024;
+const MAX_RESERVATION_CONFLICT_RETRIES: u32 = 16;
+
+#[derive(Default)]
+struct ReservedRange {
+    next: u64,
+    remaining: u64,
+}
+
+/// Allocates document short IDs from persisted ranges.
+///
+/// The sequence stores the end of the latest reserved range. A crash can leave
+/// gaps, but every returned ID remains unique across restarts and DB instances.
+pub(crate) struct DocShortIdAllocator<S: Store> {
+    systemstore: Systemstore<S>,
+    range: Mutex<ReservedRange>,
+    reservation_size: u64,
+}
+
+impl<S: Store> DocShortIdAllocator<S> {
+    pub(crate) fn new(store: Arc<S>) -> Self {
+        Self::with_reservation_size(store, DOC_SHORT_ID_RESERVATION_SIZE)
+    }
+
+    fn with_reservation_size(store: Arc<S>, reservation_size: u64) -> Self {
+        assert!(reservation_size > 0, "reservation size must be non-zero");
+        Self {
+            systemstore: Systemstore::new(store),
+            range: Mutex::new(ReservedRange::default()),
+            reservation_size,
+        }
+    }
+
+    pub(crate) async fn next(&self) -> Result<u64> {
+        let mut range = self.range.lock().await;
+        if range.remaining == 0 {
+            range.next = self.reserve_range().await?;
+            range.remaining = self.reservation_size;
+        }
+
+        let id = range.next;
+        range.remaining -= 1;
+        if range.remaining > 0 {
+            range.next = id
+                .checked_add(1)
+                .ok_or_else(|| Error::Other("document short-ID sequence exhausted".into()))?;
+        }
+        Ok(id)
+    }
+
+    async fn reserve_range(&self) -> Result<u64> {
+        let key = DocShortIDSequenceKey::new().bytes();
+        let mut conflicts = 0;
+        loop {
+            let mut txn = self
+                .systemstore
+                .new_txn(false)
+                .await
+                .map_err(Error::Storage)?;
+            let current = decode_sequence(txn.get(&key).await.map_err(Error::Storage)?)?;
+            let start = current
+                .checked_add(1)
+                .ok_or_else(|| Error::Other("document short-ID sequence exhausted".into()))?;
+            let end = current
+                .checked_add(self.reservation_size)
+                .ok_or_else(|| Error::Other("document short-ID sequence exhausted".into()))?;
+            txn.set(&key, &end.to_be_bytes())
+                .await
+                .map_err(Error::Storage)?;
+
+            match txn.commit().await {
+                Ok(()) => return Ok(start),
+                Err(error)
+                    if error.is_txn_conflict() && conflicts < MAX_RESERVATION_CONFLICT_RETRIES =>
+                {
+                    conflicts += 1;
+                }
+                Err(error) => return Err(Error::Storage(error)),
+            }
+        }
+    }
+}
+
+fn decode_sequence(value: Option<Vec<u8>>) -> Result<u64> {
+    match value {
+        None => Ok(0),
+        Some(bytes) => {
+            let bytes: [u8; 8] = bytes
+                .try_into()
+                .map_err(|_| Error::Other("invalid persisted document short-ID sequence".into()))?;
+            Ok(u64::from_be_bytes(bytes))
+        }
+    }
+}
+
+/// Allocate the next document short ID within a migration transaction.
+///
+/// Runtime writes must use [`crate::DB::next_doc_short_id`] so the global
+/// sequence is not part of the caller's conflict set.
 pub async fn next_doc_short_id(systemstore: &NamespaceView) -> Result<u64> {
     let key = DocShortIDSequenceKey::new().bytes();
-    let current: u64 = match systemstore.get(&key).await.map_err(Error::Storage)? {
-        Some(bytes) if bytes.len() == 8 => u64::from_be_bytes(bytes.as_slice().try_into().unwrap()),
-        _ => 0,
-    };
+    let current = decode_sequence(systemstore.get(&key).await.map_err(Error::Storage)?)?;
     let next = current + 1;
     systemstore
         .set(&key, &next.to_be_bytes())
@@ -39,10 +137,7 @@ pub async fn ensure_doc_short_id_sequence_at_least(
     minimum: u64,
 ) -> Result<()> {
     let key = DocShortIDSequenceKey::new().bytes();
-    let current: u64 = match systemstore.get(&key).await.map_err(Error::Storage)? {
-        Some(bytes) if bytes.len() == 8 => u64::from_be_bytes(bytes.as_slice().try_into().unwrap()),
-        _ => 0,
-    };
+    let current = decode_sequence(systemstore.get(&key).await.map_err(Error::Storage)?)?;
     if current < minimum {
         systemstore
             .set(&key, &minimum.to_be_bytes())
@@ -159,22 +254,6 @@ pub async fn get_doc_short_id(
         }
         _ => Ok(None),
     }
-}
-
-/// Resolve a short ID for a DocID, allocating and persisting a new mapping
-/// if none exists (merge/ingest path, mirrors Go's
-/// `resolveOrAllocateDocShortID`).
-pub async fn resolve_or_allocate_doc_short_id(
-    systemstore: &NamespaceView,
-    collection_short_id: u32,
-    doc_id: &str,
-) -> Result<u64> {
-    if let Some(short_id) = get_doc_short_id(systemstore, collection_short_id, doc_id).await? {
-        return Ok(short_id);
-    }
-    let short_id = next_doc_short_id(systemstore).await?;
-    set_doc_id_mapping(systemstore, collection_short_id, short_id, doc_id).await?;
-    Ok(short_id)
 }
 
 /// Register an additional public DocID for an existing document (backup
@@ -368,6 +447,7 @@ pub async fn delete_doc_id_mappings(systemstore: &NamespaceView, doc_short_id: u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DB;
     use datastore::SharedTxn;
     use storage::backends::MemoryStore;
     use storage::corekv::Store;
@@ -379,11 +459,43 @@ mod tests {
         NamespaceView::new(SharedTxn::new(txn), Namespace::Systemstore)
     }
 
+    async fn persisted_sequence(store: Arc<MemoryStore>) -> u64 {
+        let systemstore = Systemstore::new(store);
+        let txn = systemstore.new_txn(true).await.unwrap();
+        decode_sequence(
+            txn.get(&DocShortIDSequenceKey::new().bytes())
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn short_ids_allocate_from_one() {
         let store = systemstore().await;
         assert_eq!(next_doc_short_id(&store).await.unwrap(), 1);
         assert_eq!(next_doc_short_id(&store).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn malformed_sequence_is_rejected() {
+        let store = Arc::new(MemoryStore::new());
+        let systemstore = Systemstore::new(store.clone());
+        let mut txn = systemstore.new_txn(false).await.unwrap();
+        txn.set(&DocShortIDSequenceKey::new().bytes(), b"invalid")
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        let error = DocShortIdAllocator::with_reservation_size(store, 4)
+            .next()
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Other(message)
+                if message == "invalid persisted document short-ID sequence"
+        ));
     }
 
     #[tokio::test]
@@ -420,12 +532,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_or_allocate_is_idempotent() {
-        let store = systemstore().await;
-        let a = resolve_or_allocate_doc_short_id(&store, 3, "bae-y")
+    async fn allocator_reserves_ranges_across_instances_and_restarts() {
+        let store = Arc::new(MemoryStore::new());
+        let allocator_a = DocShortIdAllocator::with_reservation_size(store.clone(), 4);
+        let allocator_b = DocShortIdAllocator::with_reservation_size(store.clone(), 4);
+
+        let (a, b) = tokio::join!(allocator_a.next(), allocator_b.next());
+        let mut first_ids = vec![a.unwrap(), b.unwrap()];
+        first_ids.sort_unstable();
+        assert_eq!(first_ids, vec![1, 5]);
+        assert_eq!(persisted_sequence(store.clone()).await, 8);
+
+        drop((allocator_a, allocator_b));
+        let restarted = DocShortIdAllocator::with_reservation_size(store, 4);
+        assert_eq!(restarted.next().await.unwrap(), 9);
+    }
+
+    #[tokio::test]
+    async fn allocator_keeps_ids_unique_across_many_database_instances() {
+        const DATABASES: usize = 8;
+        const IDS_PER_DATABASE: usize = 128;
+
+        let store = Arc::new(MemoryStore::new());
+        let mut tasks = Vec::with_capacity(DATABASES);
+        for _ in 0..DATABASES {
+            let db = DB::from_arc(store.clone()).unwrap();
+            tasks.push(tokio::spawn(async move {
+                let mut ids = Vec::with_capacity(IDS_PER_DATABASE);
+                for _ in 0..IDS_PER_DATABASE {
+                    ids.push(db.next_doc_short_id().await.unwrap());
+                }
+                ids
+            }));
+        }
+
+        let mut ids = Vec::with_capacity(DATABASES * IDS_PER_DATABASE);
+        for task in tasks {
+            ids.extend(task.await.unwrap());
+        }
+        ids.sort_unstable();
+        ids.dedup();
+
+        assert_eq!(ids.len(), DATABASES * IDS_PER_DATABASE);
+        assert_eq!(persisted_sequence(store).await, 8192);
+    }
+
+    #[tokio::test]
+    async fn allocations_do_not_conflict_unrelated_caller_transactions() {
+        let store = Arc::new(MemoryStore::new());
+        let db = DB::from_arc(store).unwrap();
+        let txn_a = db.new_txn(false).await.unwrap();
+        let txn_b = db.new_txn(false).await.unwrap();
+
+        let a = db.next_doc_short_id().await.unwrap();
+        let b = db.next_doc_short_id().await.unwrap();
+        set_doc_id_mapping(&txn_a.systemstore().unwrap(), 1, a, "bae-a")
             .await
             .unwrap();
-        let b = resolve_or_allocate_doc_short_id(&store, 3, "bae-y")
+        set_doc_id_mapping(&txn_b.systemstore().unwrap(), 2, b, "bae-b")
+            .await
+            .unwrap();
+
+        txn_a.commit().await.unwrap();
+        txn_b.commit().await.unwrap();
+
+        let txn = db.new_txn(true).await.unwrap();
+        let systemstore = txn.systemstore().unwrap();
+        assert_eq!(
+            get_doc_short_id(&systemstore, 1, "bae-a").await.unwrap(),
+            Some(a)
+        );
+        assert_eq!(
+            get_doc_short_id(&systemstore, 2, "bae-b").await.unwrap(),
+            Some(b)
+        );
+    }
+
+    #[tokio::test]
+    async fn database_resolve_or_allocate_is_idempotent() {
+        let store = Arc::new(MemoryStore::new());
+        let db = DB::from_arc(store).unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+        let systemstore = txn.systemstore().unwrap();
+        let a = db
+            .resolve_or_allocate_doc_short_id(&systemstore, 3, "bae-y")
+            .await
+            .unwrap();
+        let b = db
+            .resolve_or_allocate_doc_short_id(&systemstore, 3, "bae-y")
             .await
             .unwrap();
         assert_eq!(a, b);

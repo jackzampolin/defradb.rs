@@ -82,6 +82,12 @@ pub mod test_suite;
 pub use shared::{CallbackCounts, DurabilityMode};
 
 #[cfg(not(target_arch = "wasm32"))]
+pub use shared::{
+    ConflictTrackerStats, TransactionConflictStats, TransactionStatsHandle,
+    TransactionStatsSnapshot,
+};
+
+#[cfg(not(target_arch = "wasm32"))]
 pub use memory::MemoryStore;
 
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]

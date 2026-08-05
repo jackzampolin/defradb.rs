@@ -78,35 +78,43 @@ impl ActiveConnectionManager {
             return Vec::new();
         }
 
-        let mut eligible = self
-            .connections
-            .iter()
-            .filter_map(|(connection_id, connection)| {
-                let age = now.duration_since(connection.established_at);
-                (!connection.closing && age >= self.grace_period).then_some((
-                    *connection_id,
-                    connection.peer_id,
-                    connection.established_at,
-                    age,
-                ))
+        let mut peers = HashMap::<PeerId, (Instant, Vec<ConnectionId>)>::new();
+        for (connection_id, connection) in &self.connections {
+            let peer = peers
+                .entry(connection.peer_id)
+                .or_insert_with(|| (connection.established_at, Vec::new()));
+            peer.0 = peer.0.min(connection.established_at);
+            if !connection.closing {
+                peer.1.push(*connection_id);
+            }
+        }
+
+        let mut eligible = peers
+            .into_iter()
+            .filter(|(_, (first_seen, connections))| {
+                !connections.is_empty() && now.duration_since(*first_seen) >= self.grace_period
             })
             .collect::<Vec<_>>();
+        eligible.sort_by_key(|(_, (first_seen, _))| *first_seen);
 
-        eligible.sort_by_key(|(_, _, established_at, _)| *established_at);
-
-        eligible
-            .into_iter()
-            .take(needed)
-            .filter_map(|(connection_id, peer_id, _, age)| {
-                let connection = self.connections.get_mut(&connection_id)?;
+        let mut selected = Vec::with_capacity(needed);
+        for (peer_id, (_, connection_ids)) in eligible {
+            if selected.len() >= needed {
+                break;
+            }
+            for connection_id in connection_ids {
+                let Some(connection) = self.connections.get_mut(&connection_id) else {
+                    continue;
+                };
                 connection.closing = true;
-                Some(PruneCandidate {
+                selected.push(PruneCandidate {
                     connection_id,
                     peer_id,
-                    age,
-                })
-            })
-            .collect()
+                    age: now.duration_since(connection.established_at),
+                });
+            }
+        }
+        selected
     }
 }
 
@@ -168,6 +176,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![connection_id(0), connection_id(1), connection_id(2)]
         );
+    }
+
+    #[test]
+    fn prunes_all_connections_for_oldest_peer() {
+        let mut manager = ActiveConnectionManager::new(2, 3, Duration::from_secs(20));
+        let now = Instant::now();
+        let oldest_peer = PeerId::random();
+
+        manager.on_established(connection_id(0), oldest_peer, now);
+        manager.on_established(connection_id(1), oldest_peer, now + Duration::from_secs(25));
+        manager.on_established(
+            connection_id(2),
+            PeerId::random(),
+            now + Duration::from_secs(1),
+        );
+        manager.on_established(
+            connection_id(3),
+            PeerId::random(),
+            now + Duration::from_secs(2),
+        );
+
+        let mut candidates = manager
+            .prune_candidates(now + Duration::from_secs(30))
+            .into_iter()
+            .map(|candidate| candidate.connection_id)
+            .collect::<Vec<_>>();
+        candidates.sort();
+
+        assert_eq!(candidates, vec![connection_id(0), connection_id(1)]);
     }
 
     #[test]

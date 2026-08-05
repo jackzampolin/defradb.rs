@@ -827,6 +827,7 @@ mod tests {
             collection_id: "collection1".to_string(),
             authorizer_did: "creator1".to_string(),
             expires_at: u64::MAX,
+            capability: None,
         };
 
         manager

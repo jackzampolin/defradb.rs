@@ -470,6 +470,17 @@ fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
             }
 
             let peerstore = storage::stores::Peerstore::new(store.clone());
+            let _retry_guard = match peerstore
+                .acquire_replicator_retry_guard(&failure.peer_id)
+                .await
+            {
+                Ok(Some(guard)) => guard,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(target: "defra_node", error = %error, "failed to coordinate push failure recording");
+                    continue;
+                }
+            };
             let result = if failure.create_retry {
                 let info_bytes = match storage::stores::RetryInfo::new_initial().to_bytes() {
                     Ok(bytes) => bytes,
@@ -532,7 +543,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
         loop {
             tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
             let peerstore = storage::stores::Peerstore::new(store.clone());
-            let peers = match peerstore.get_all_retry_peers().await {
+            let peers = match peerstore.get_replicator_retry_peers().await {
                 Ok(peers) => peers,
                 Err(error) => {
                     tracing::debug!(target: "defra_node", error = %error, "failed to load retry peers");
@@ -541,6 +552,11 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
             };
 
             for (peer_id_str, info_bytes) in peers {
+                let _retry_guard =
+                    match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
+                        Ok(Some(guard)) => guard,
+                        Ok(None) | Err(_) => continue,
+                    };
                 let _legacy_retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
                     Ok(info) => info,
                     Err(error) => {

@@ -104,9 +104,10 @@ impl Node {
         // raw gossip on the encryption topic is routed to it (mirrors
         // crates/embedded/src/node_p2p.rs::setup_iroh).
         let local_peer_id = transport.local_peer_id().to_string();
-        let kms_transport = p2p::kms::PubsubKeyTransport::new(transport.clone())
-            .await
-            .map_err(|e| Error::Server(format!("failed to create KMS transport: {e}")))?;
+        let kms_transport =
+            p2p::kms::PubsubKeyTransport::new(transport.clone(), Arc::new(p2p::AnonymousResolver))
+                .await
+                .map_err(|e| Error::Server(format!("failed to create KMS transport: {e}")))?;
         coordinator.install_kms_transport(kms_transport.clone());
 
         match db_merge::load_persisted_collections(&coordinator).await {
@@ -333,6 +334,17 @@ impl Node {
             let mut rx = failure_rx;
             while let Some(failure) = rx.recv().await {
                 let peerstore = storage::stores::Peerstore::new(recorder_store.clone());
+                let _retry_guard = match peerstore
+                    .acquire_replicator_retry_guard(&failure.peer_id)
+                    .await
+                {
+                    Ok(Some(guard)) => guard,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        warn!(error = %error, "Failed to coordinate push failure recording");
+                        continue;
+                    }
+                };
                 let result = if failure.create_retry {
                     let info_bytes = match storage::stores::RetryInfo::new_initial().to_bytes() {
                         Ok(bytes) => bytes,
@@ -391,11 +403,16 @@ impl Node {
             loop {
                 tokio::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
                 let peerstore = storage::stores::Peerstore::new(retry_store.clone());
-                let peers = match peerstore.get_all_retry_peers().await {
+                let peers = match peerstore.get_replicator_retry_peers().await {
                     Ok(p) => p,
                     Err(_) => continue,
                 };
                 for (peer_id_str, info_bytes) in peers {
+                    let _retry_guard =
+                        match peerstore.acquire_replicator_retry_guard(&peer_id_str).await {
+                            Ok(Some(guard)) => guard,
+                            Ok(None) | Err(_) => continue,
+                        };
                     let _legacy_retry_info =
                         match storage::stores::RetryInfo::from_bytes(&info_bytes) {
                             Ok(i) => i,

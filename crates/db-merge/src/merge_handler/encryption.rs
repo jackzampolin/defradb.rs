@@ -70,11 +70,16 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         let Some(collection_id) = metadata.collection_id else {
             return kms::RequestContext::anonymous();
         };
-        let Some(authorizer) = metadata.explicit_replay_authorizer_for(collection_id) else {
+        let Some(authorization) = metadata.explicit_replay_authorization_for(collection_id) else {
             return kms::RequestContext::anonymous();
         };
-        match identity::Did::new(authorizer) {
-            Ok(did) => kms::RequestContext::with_user(did),
+        match identity::Did::new(&authorization.authorizer_did) {
+            Ok(did) => match &authorization.capability {
+                Some(capability) => {
+                    kms::RequestContext::with_explicit_replay(did, capability.clone())
+                }
+                None => kms::RequestContext::with_user(did),
+            },
             Err(_) => kms::RequestContext::anonymous(),
         }
     }

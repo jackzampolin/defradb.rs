@@ -213,6 +213,8 @@ pub struct DB<S: Store> {
     /// local writes and P2P merges that touch the same document never interleave
     /// their CRDT read-modify-write (#1021 counter convergence).
     doc_write_queue: Arc<crate::doc_write_queue::DocWriteQueue>,
+    /// Process-local document short-ID range allocator.
+    doc_short_id_allocator: crate::doc_id_map::DocShortIdAllocator<S>,
     /// Process-local claims for collection-wide actions.
     ///
     /// Persisted action statuses are observable lifecycle state, not locks: a
@@ -239,8 +241,10 @@ impl<S: Store> DB<S> {
     /// to load existing collections from the store.
     pub fn with_options(store: S, options: DbOptions) -> Result<Self> {
         let lens_store: Arc<dyn TransformStore> = Self::create_lens_store()?;
+        let store = Arc::new(store);
         Ok(Self {
-            store: Arc::new(store),
+            doc_short_id_allocator: crate::doc_id_map::DocShortIdAllocator::new(store.clone()),
+            store,
             options,
             txn_id_counter: AtomicU64::new(0),
             migration_generation: AtomicU64::new(0),
@@ -296,6 +300,7 @@ impl<S: Store> DB<S> {
     pub fn from_arc_with_options(store: Arc<S>, options: DbOptions) -> Result<Self> {
         let lens_store: Arc<dyn TransformStore> = Self::create_lens_store()?;
         Ok(Self {
+            doc_short_id_allocator: crate::doc_id_map::DocShortIdAllocator::new(store.clone()),
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
@@ -351,6 +356,30 @@ impl<S: Store> DB<S> {
     /// document are mutually serialized (#1021).
     pub fn doc_write_queue(&self) -> Arc<crate::doc_write_queue::DocWriteQueue> {
         self.doc_write_queue.clone()
+    }
+
+    /// Allocate a globally unique document short ID.
+    pub async fn next_doc_short_id(&self) -> Result<u64> {
+        self.doc_short_id_allocator.next().await
+    }
+
+    /// Resolve a document short ID or allocate and stage a new mapping.
+    pub async fn resolve_or_allocate_doc_short_id(
+        &self,
+        systemstore: &datastore::NamespaceView,
+        collection_short_id: u32,
+        doc_id: &str,
+    ) -> Result<u64> {
+        if let Some(short_id) =
+            crate::doc_id_map::get_doc_short_id(systemstore, collection_short_id, doc_id).await?
+        {
+            return Ok(short_id);
+        }
+
+        let short_id = self.next_doc_short_id().await?;
+        crate::doc_id_map::set_doc_id_mapping(systemstore, collection_short_id, short_id, doc_id)
+            .await?;
+        Ok(short_id)
     }
 
     /// Return the generation of the committed migration graph.

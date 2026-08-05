@@ -68,9 +68,6 @@ unsigned-varint = "0.8"
 # Synchronization (non-poisoning locks)
 parking_lot = { workspace = true }
 
-# Void type used by libp2p connection-limits behaviour (never emits events)
-void = { version = "1.0.2", optional = true }
-
 # Iroh transport (optional)
 iroh = { workspace = true, optional = true }
 iroh-gossip = { workspace = true, optional = true }
@@ -91,7 +88,6 @@ libp2p-transport = [
     "dep:multiaddr",
     "dep:rlimit",
     "dep:sysinfo",
-    "dep:void",
 ]
 iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-tickets", "dep:noq", "dep:rand", "dep:blake3"]
 

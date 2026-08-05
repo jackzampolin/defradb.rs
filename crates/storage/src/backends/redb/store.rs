@@ -147,7 +147,7 @@ impl RedbStore {
         }
 
         let db = Arc::new(db);
-        let conflict_tracker = Arc::new(ConflictTracker::new());
+        let conflict_tracker = Arc::new(ConflictTracker::for_backend("redb"));
         let commit_gate = Arc::new(tokio::sync::RwLock::new(()));
 
         // Create group commit buffer if a tokio runtime is available.
@@ -283,6 +283,10 @@ impl crate::corekv::private::Sealed for RedbStore {}
 
 #[async_trait]
 impl Store for RedbStore {
+    fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
+        Some(self.conflict_tracker.stats_handle())
+    }
+
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         // CAS-based TOCTOU protection: increment count, then verify not closed.
         if self.closed.load(Ordering::Acquire) {
@@ -307,11 +311,10 @@ impl Store for RedbStore {
         let mut guard = NewTxnGuard(&self.active_txn_count, false);
 
         let (read_version, read_txn, conflict_snapshot) = {
-            // Pair the conflict version and Redb snapshot without a commit
-            // between them. Read-only transactions skip the gate: they never
-            // conflict-check, and commit() only returns after the physical
-            // write, so read-your-committed-writes holds without serializing
-            // readers behind in-flight commits.
+            // Pair the published conflict version with the redb snapshot. A
+            // pending physical write may already be visible, but its
+            // reservation remains a conservative conflict until publication.
+            // Read-only transactions never conflict-check and skip this gate.
             let _commit_guard = if readonly {
                 None
             } else {
@@ -486,6 +489,58 @@ mod pairing_tests {
 
         let reader = store.new_txn(true).await.unwrap();
         assert_eq!(reader.get(&key).await.unwrap(), Some(b"winner".to_vec()));
+    }
+
+    async fn assert_physical_write_precedes_publication(store: Arc<RedbStore>, key: Vec<u8>) {
+        let mut writer = store.new_txn(false).await.unwrap();
+        writer.set(&key, b"committed").await.unwrap();
+
+        let gate = Arc::clone(&store.commit_gate);
+        let snapshot_guard = gate.read().await;
+        let mut commit_task = tokio::spawn(async move { writer.commit().await });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let reader = store.new_txn(true).await.unwrap();
+                if reader.get(&key).await.unwrap().is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("physical write remained blocked by snapshot pairing");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut commit_task)
+                .await
+                .is_err(),
+            "commit completed before its conflict version was published"
+        );
+
+        drop(snapshot_guard);
+        tokio::time::timeout(Duration::from_secs(1), commit_task)
+            .await
+            .expect("commit remained blocked after publication gate release")
+            .expect("commit task panicked")
+            .expect("commit failed");
+    }
+
+    #[tokio::test]
+    async fn direct_physical_write_does_not_wait_for_snapshot_pairing() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(open_without_group_commit(
+            temp_dir.path().join("direct-pairing.redb"),
+        ));
+        assert!(store.group_commit.is_none(), "expected direct commit path");
+        assert_physical_write_precedes_publication(store, b"direct-pairing".to_vec()).await;
+    }
+
+    #[tokio::test]
+    async fn group_physical_write_does_not_wait_for_snapshot_pairing() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(RedbStore::open(temp_dir.path().join("group-pairing.redb")).unwrap());
+        assert!(store.group_commit.is_some(), "expected group commit path");
+        assert_physical_write_precedes_publication(store, b"group-pairing".to_vec()).await;
     }
 
     #[tokio::test]

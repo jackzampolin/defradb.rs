@@ -77,19 +77,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
         })?;
 
-        let identities: Vec<DocStorageIdentity> = {
-            let systemstore = txn.systemstore().map_err(|e| {
-                query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
-            })?;
-            let mut identities = Vec::with_capacity(prepared_docs.len());
-            for _ in &prepared_docs {
-                let doc_short_id = crate::doc_id_map::next_doc_short_id(&systemstore)
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-                identities.push(DocStorageIdentity::new(short_id, doc_short_id));
-            }
-            identities
-        };
+        let mut identities = Vec::with_capacity(prepared_docs.len());
+        for _ in &prepared_docs {
+            let doc_short_id = self
+                .db
+                .next_doc_short_id()
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+            identities.push(DocStorageIdentity::new(short_id, doc_short_id));
+        }
 
         // Compute blocks (parallel on native, sequential on WASM). A failure
         // aborts the batch: without blocks there is no derived DocID.

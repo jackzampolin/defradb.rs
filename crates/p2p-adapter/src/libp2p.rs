@@ -660,6 +660,12 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 .remove_replicator_collections(&transport_peer_id, collections)
                 .await
                 .map_err(|error| P2PError::transport(error.to_string()))?
+        } else if collections.is_empty() {
+            self.handle
+                .delete_replicator(peer_id)
+                .await
+                .map_err(|error| P2PError::transport(error.to_string()))?;
+            true
         } else {
             self.handle
                 .remove_replicator_collections(peer_id, collections)
@@ -669,16 +675,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
         if let Some(ref pusher) = self.doc_pusher {
             if fully_deleted {
-                if let Err(error) = pusher
+                pusher
                     .delete_persisted_replicator(&peer_id.to_string())
-                    .await
-                {
-                    tracing::warn!(
-                        peer_id = %peer_id,
-                        error = %error,
-                        "failed to delete replicator from storage"
-                    );
-                }
+                    .await?;
             } else {
                 let remaining = self
                     .handle

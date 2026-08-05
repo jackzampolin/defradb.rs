@@ -185,9 +185,12 @@ where
         use p2p::transport::P2PTransport;
         kms_libp2p_transport.local_peer_id().to_string()
     };
-    let kms_transport = p2p::kms::PubsubKeyTransport::new(kms_libp2p_transport)
-        .await
-        .map_err(|e| anyhow!("failed to create KMS transport: {e}"))?;
+    let kms_transport = p2p::kms::PubsubKeyTransport::new(
+        kms_libp2p_transport,
+        Arc::new(p2p::HandlePeerIdentityResolver::new(handle.clone())),
+    )
+    .await
+    .map_err(|e| anyhow!("failed to create KMS transport: {e}"))?;
     coordinator.install_kms_transport(kms_transport.clone());
     let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
 
@@ -480,9 +483,10 @@ where
         use p2p::transport::P2PTransport;
         transport.local_peer_id().to_string()
     };
-    let kms_transport = p2p::kms::PubsubKeyTransport::new(transport.clone())
-        .await
-        .map_err(|e| anyhow!("failed to create KMS transport: {e}"))?;
+    let kms_transport =
+        p2p::kms::PubsubKeyTransport::new(transport.clone(), Arc::new(p2p::AnonymousResolver))
+            .await
+            .map_err(|e| anyhow!("failed to create KMS transport: {e}"))?;
     coordinator.install_kms_transport(kms_transport.clone());
     let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
 

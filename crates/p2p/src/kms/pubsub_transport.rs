@@ -32,9 +32,10 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::peer_identity::PeerIdentityResolver;
 use crate::pubsub_rpc::{response_topic, Correlator, InternalResponse, PublishOptions};
 use crate::topics::{DefraTopic, ENCRYPTION_TOPIC};
-use crate::transport::P2PTransport;
+use crate::transport::{P2PTransport, PeerId};
 
 /// Upper bound on how long `send_request` waits for at least one peer to be
 /// known as an encryption-topic subscriber before publishing. gossipsub
@@ -69,6 +70,7 @@ const REPUBLISH_INTERVAL: Duration = Duration::from_secs(1);
 /// by publishing an envelope on the caller's `_response` sub-topic.
 pub struct PubsubKeyTransport<T: P2PTransport> {
     transport: T,
+    identity_resolver: Arc<dyn PeerIdentityResolver>,
     handler: RwLock<Option<Arc<dyn IncomingHandler>>>,
     correlator: Correlator,
     /// This node's libp2p peer id (gossip source string form).
@@ -81,7 +83,10 @@ pub struct PubsubKeyTransport<T: P2PTransport> {
 impl<T: P2PTransport> PubsubKeyTransport<T> {
     /// Construct, subscribe to ENCRYPTION_TOPIC and the local `_response`
     /// sub-topic, and register both for raw routing.
-    pub async fn new(transport: T) -> KmsResult<Arc<Self>> {
+    pub async fn new(
+        transport: T,
+        identity_resolver: Arc<dyn PeerIdentityResolver>,
+    ) -> KmsResult<Arc<Self>> {
         let local_peer_id = transport.local_peer_id().to_string();
         let self_response_topic = match local_peer_id.parse::<libp2p::PeerId>() {
             Ok(pid) => response_topic(ENCRYPTION_TOPIC, &pid),
@@ -112,6 +117,7 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
 
         Ok(Arc::new(Self {
             transport,
+            identity_resolver,
             handler: RwLock::new(None),
             correlator: Correlator::new(),
             local_peer_id,
@@ -195,10 +201,36 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
             }
         };
         let request_id = crate::pubsub_rpc::derive_request_id(&payload);
+        let authenticated_did = self
+            .identity_resolver
+            .resolve(&PeerId::new(from.clone()))
+            .await;
+        let explicit_replay_authorization =
+            req.explicit_replay_capability
+                .as_deref()
+                .and_then(|capability| {
+                    match crate::verify_explicit_replay_capability_for_key_request(
+                        capability,
+                        &self.local_peer_id,
+                        &from,
+                    ) {
+                        Ok(authorization) => Some(authorization),
+                        Err(error) => {
+                            warn!(
+                                peer_id = %from,
+                                error = %error,
+                                "KMS request carried an invalid explicit-replay capability"
+                            );
+                            None
+                        }
+                    }
+                });
         let (reply_bytes, err) = match handler
             .handle(
                 kms::PeerIdentity {
                     peer_id: from.clone(),
+                    authenticated_did,
+                    explicit_replay_authorization,
                 },
                 req,
             )
@@ -662,7 +694,9 @@ mod tests {
         let transport = RacyTransport::new(3);
         let publish_attempts = transport.publish_attempts.clone();
         let published = transport.published.clone();
-        let kt = PubsubKeyTransport::new(transport).await.unwrap();
+        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
+            .await
+            .unwrap();
 
         let req = EncodedFetchRequest {
             payload: b"fetch".to_vec(),
@@ -690,7 +724,9 @@ mod tests {
     #[tokio::test]
     async fn response_envelope_routes_to_waiting_request() {
         let transport = RacyTransport::new(1);
-        let kt = PubsubKeyTransport::new(transport).await.unwrap();
+        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
+            .await
+            .unwrap();
 
         let payload = b"the-request-bytes".to_vec();
         let req = EncodedFetchRequest {
@@ -738,7 +774,9 @@ mod tests {
     #[tokio::test]
     async fn empty_reply_does_not_hide_later_key_reply() {
         let transport = RacyTransport::new(1);
-        let kt = PubsubKeyTransport::new(transport).await.unwrap();
+        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
+            .await
+            .unwrap();
 
         let payload = b"multi-peer-key-request".to_vec();
         let req = EncodedFetchRequest {
@@ -797,7 +835,9 @@ mod tests {
     #[tokio::test]
     async fn partial_replies_are_collected_until_all_requested_links_arrive() {
         let transport = RacyTransport::new(1);
-        let kt = PubsubKeyTransport::new(transport).await.unwrap();
+        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
+            .await
+            .unwrap();
 
         let first_link = vec![1, 2, 3];
         let second_link = vec![4, 5, 6];
@@ -805,6 +845,7 @@ mod tests {
             identity: b"did:key:zrequester".to_vec(),
             links: vec![first_link.clone(), second_link.clone()],
             ephemeral_public_key: vec![9; 32],
+            explicit_replay_capability: None,
         };
         let payload = serde_cbor::to_vec(&request).unwrap();
         let req = EncodedFetchRequest {
@@ -862,13 +903,16 @@ mod tests {
     #[tokio::test]
     async fn claimed_complete_reply_does_not_hide_later_verified_candidate() {
         let transport = RacyTransport::new(1);
-        let kt = PubsubKeyTransport::new(transport).await.unwrap();
+        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
+            .await
+            .unwrap();
 
         let requested_link = vec![1, 2, 3];
         let request = FetchEncryptionKeyRequest {
             identity: b"did:key:zrequester".to_vec(),
             links: vec![requested_link.clone()],
             ephemeral_public_key: vec![9; 32],
+            explicit_replay_capability: None,
         };
         let payload = serde_cbor::to_vec(&request).unwrap();
         let mut rx = kt
@@ -923,7 +967,9 @@ mod tests {
     async fn request_republishes_until_reply_arrives() {
         let transport = RacyTransport::new(0);
         let published = transport.published.clone();
-        let kt = PubsubKeyTransport::new(transport).await.unwrap();
+        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
+            .await
+            .unwrap();
 
         let payload = b"retry-me".to_vec();
         let req = EncodedFetchRequest {
@@ -981,7 +1027,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn request_with_no_reply_reports_unavailable() {
         let transport = RacyTransport::new(0);
-        let kt = PubsubKeyTransport::new(transport).await.unwrap();
+        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
+            .await
+            .unwrap();
 
         let req = EncodedFetchRequest {
             payload: b"never-answered".to_vec(),
@@ -1002,14 +1050,25 @@ mod tests {
     /// internalResponse envelope on the caller's `_response` sub-topic.
     #[tokio::test]
     async fn inbound_request_publishes_reply_on_caller_response_topic() {
-        struct EchoHandler;
+        struct FixedIdentityResolver(identity::Did);
+        #[async_trait]
+        impl PeerIdentityResolver for FixedIdentityResolver {
+            async fn resolve(&self, _peer_id: &PeerId) -> Option<identity::Did> {
+                Some(self.0.clone())
+            }
+        }
+
+        struct EchoHandler {
+            seen: Arc<Mutex<Option<kms::PeerIdentity>>>,
+        }
         #[async_trait]
         impl IncomingHandler for EchoHandler {
             async fn handle(
                 &self,
-                _from: kms::PeerIdentity,
+                from: kms::PeerIdentity,
                 _req: FetchEncryptionKeyRequest,
             ) -> KmsResult<FetchEncryptionKeyReply> {
+                *self.seen.lock() = Some(from);
                 Ok(FetchEncryptionKeyReply {
                     links: vec![vec![9]],
                     blocks: vec![vec![8]],
@@ -1023,14 +1082,33 @@ mod tests {
         // wait_for_subscriber).
         let transport = RacyTransport::new(0);
         let published = transport.published.clone();
-        let kt = PubsubKeyTransport::new(transport).await.unwrap();
-        kt.install_handler(Arc::new(EchoHandler));
-
+        let source_peer_id = transport.local_peer_id().to_string();
         let caller = a_libp2p_peer();
+        let authorizer =
+            identity::RawIdentity::from_private_key(crypto::generate_ed25519().unwrap()).unwrap();
+        let capability = crate::generate_explicit_replay_capability(
+            &authorizer,
+            &source_peer_id,
+            &caller.to_string(),
+            "collection-a",
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let resolved_did: identity::Did = "did:key:zalice".parse().unwrap();
+        let seen = Arc::new(Mutex::new(None));
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(FixedIdentityResolver(resolved_did.clone())),
+        )
+        .await
+        .unwrap();
+        kt.install_handler(Arc::new(EchoHandler { seen: seen.clone() }));
+
         let req = FetchEncryptionKeyRequest {
             identity: b"did:key:zalice".to_vec(),
             links: vec![vec![1]],
             ephemeral_public_key: vec![2; 32],
+            explicit_replay_capability: Some(capability),
         };
         let req_bytes = serde_cbor::to_vec(&req).unwrap();
 
@@ -1047,5 +1125,14 @@ mod tests {
         let reply: FetchEncryptionKeyReply =
             serde_cbor::from_slice(&env.data).expect("decode reply");
         assert_eq!(reply.blocks, vec![vec![8]]);
+        let from = seen.lock().clone().expect("handler must see peer identity");
+        assert_eq!(from.peer_id, caller.to_string());
+        assert_eq!(from.authenticated_did, Some(resolved_did));
+        let authorization = from
+            .explicit_replay_authorization
+            .expect("handler must receive verified replay authorization");
+        assert_eq!(authorization.source_peer_id, source_peer_id);
+        assert_eq!(authorization.target_peer_id, caller.to_string());
+        assert_eq!(authorization.collection_id, "collection-a");
     }
 }

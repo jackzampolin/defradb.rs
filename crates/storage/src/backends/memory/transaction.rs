@@ -209,19 +209,24 @@ impl Txn for MemoryTxn {
         let read_set = self.read_set.lock().clone();
 
         if !pending.is_empty() {
+            let reservation =
+                match self
+                    .conflict_tracker
+                    .reserve(self.read_version, pending.keys(), &read_set)
+                {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        CallbackManager::execute_callbacks(self.callbacks.take_error());
+                        CallbackManager::execute_async_callbacks(self.callbacks.take_error_async())
+                            .await;
+                        return Err(error);
+                    }
+                };
+            let wait_started = std::time::Instant::now();
             let commit_guard = self.commit_gate.write().await;
+            self.conflict_tracker
+                .record_commit_gate_wait(wait_started.elapsed());
             let mut store = self.store.write().await;
-
-            if let Err(e) =
-                self.conflict_tracker
-                    .check_and_record(self.read_version, pending.keys(), &read_set)
-            {
-                drop(store);
-                drop(commit_guard);
-                CallbackManager::execute_callbacks(self.callbacks.take_error());
-                CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
-                return Err(e);
-            }
 
             for (key, value) in pending.iter() {
                 match value {
@@ -233,6 +238,9 @@ impl Txn for MemoryTxn {
                     }
                 }
             }
+            reservation.publish();
+            drop(store);
+            drop(commit_guard);
         }
 
         // Mark as committed
