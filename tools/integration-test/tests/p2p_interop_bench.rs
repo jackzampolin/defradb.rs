@@ -160,14 +160,17 @@ async fn measure(
     let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
     loop {
         let count = user_count(cluster, receiver);
-        if count >= expected {
-            break;
-        }
+        // Check the deadline before accepting the count: convergence that lands
+        // after the timeout is an outlier, not a sample, and recording it would
+        // report a latency the benchmark had already given up waiting for.
         assert!(
             Instant::now() < deadline,
             "node{receiver} reached only {count} of {expected} documents \
              within {CONVERGENCE_TIMEOUT:?}"
         );
+        if count >= expected {
+            break;
+        }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
     let visible = start.elapsed();
