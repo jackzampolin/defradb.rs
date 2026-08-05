@@ -8,11 +8,13 @@
 use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use document::Document;
+use query::doc_stream::DocStream;
 use query::runner::{DocFetcher, FetchByIdsResult};
 use std::sync::Arc;
-use storage::corekv::Store;
+use storage::corekv::{IterOptions, Store};
 use tracing::warn;
 
+use crate::collection_stream::CollectionDocStream;
 use crate::database::DB;
 use crate::txn::DbTxn;
 use crate::versioned_fetcher::VersionedFetcher;
@@ -122,6 +124,58 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         }
 
         result
+    }
+
+    async fn stream_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> query::error::Result<Box<dyn DocStream>> {
+        // Get collection from DB cache
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+        // Create a read-only transaction. Unlike the other methods here, this
+        // one must stay open for the stream's lifetime, so it is handed to
+        // AutoCommitDocStream instead of being discarded before returning.
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
+
+        let prefix = collection.collection_key_prefix();
+        let prefix_len = prefix.len();
+        let opts = IterOptions::new().with_prefix(prefix);
+        let iter = datastore
+            .iterator(opts)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
+
+        let inner = CollectionDocStream::new(
+            collection,
+            datastore,
+            systemstore,
+            iter,
+            prefix_len,
+            show_deleted,
+        );
+
+        Ok(Box::new(AutoCommitDocStream {
+            inner: Some(Box::new(inner)),
+            txn: std::sync::Mutex::new(Some(txn)),
+        }))
     }
 
     async fn get_by_ids(
@@ -350,5 +404,140 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         let _ = txn.discard();
 
         Ok(items)
+    }
+}
+
+/// Pulls documents from storage, owning the read-only transaction opened for
+/// it (auto-commit fetchers open one per operation instead of reusing a
+/// caller-managed one).
+///
+/// `release_read_txn` drops the inner stream first so its `NamespaceView`s
+/// give up their `Arc<SharedTxn>` clones, then discards the transaction -
+/// `BasicTxn::discard` requires sole ownership of that Arc. `txn` is wrapped
+/// in a `std::sync::Mutex` purely so `DbTxn`'s non-`Sync` callback storage
+/// doesn't stop this struct satisfying `DocStream`'s `MaybeSendSync` bound;
+/// every access goes through `&mut self` via `get_mut`, so it never actually
+/// locks.
+struct AutoCommitDocStream<S: Store + 'static> {
+    inner: Option<Box<dyn DocStream>>,
+    txn: std::sync::Mutex<Option<DbTxn<S>>>,
+}
+
+impl<S: Store + 'static> AutoCommitDocStream<S> {
+    fn release_read_txn(&mut self) {
+        self.inner = None;
+        let slot = self
+            .txn
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(txn) = slot.take() {
+            if let Err(e) = txn.discard() {
+                warn!(error = %e, "failed to discard auto-commit stream transaction");
+            }
+        }
+    }
+}
+
+impl<S: Store + 'static> Drop for AutoCommitDocStream<S> {
+    fn drop(&mut self) {
+        self.release_read_txn();
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S: Store + 'static> DocStream for AutoCommitDocStream<S> {
+    async fn next(&mut self) -> query::error::Result<Option<(Document, bool)>> {
+        let pulled = match self.inner.as_mut() {
+            Some(inner) => inner.next().await?,
+            None => None,
+        };
+        if pulled.is_none() {
+            self.release_read_txn();
+        }
+        Ok(pulled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use document::NormalValue;
+    use query::mutator::DocMutator;
+    use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use storage::backends::MemoryStore;
+
+    use crate::doc_mutator::DbDocMutator;
+
+    fn test_schema() -> CollectionVersion {
+        CollectionVersion::new(
+            "Users",
+            "v1",
+            "col-users",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+            ],
+        )
+    }
+
+    async fn fixture_with_docs(n: usize) -> Arc<DB<MemoryStore>> {
+        let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
+        db.create_collection(test_schema()).await.unwrap();
+
+        for i in 0..n {
+            let txn = db.new_txn(false).await.unwrap();
+            let mutator = DbDocMutator::new(db.clone(), txn);
+            let mut doc = Document::new();
+            doc.set("name", NormalValue::String(format!("user-{i}")));
+            mutator.create("Users", doc).await.unwrap();
+            let txn = mutator.take_txn().await.unwrap();
+            txn.commit().await.unwrap();
+        }
+
+        db
+    }
+
+    /// The stream must be observationally identical to the eager path.
+    #[tokio::test]
+    async fn stream_matches_get_all_with_deleted_ordering_and_content() {
+        let db = fixture_with_docs(5).await;
+        let fetcher = AutoCommitFetcher::new(db);
+
+        let eager = fetcher.get_all_with_deleted("Users", false).await.unwrap();
+
+        let mut streamed = Vec::new();
+        let mut stream = fetcher
+            .stream_all_with_deleted("Users", false)
+            .await
+            .unwrap();
+        while let Some(pair) = stream.next().await.unwrap() {
+            streamed.push(pair);
+        }
+
+        assert_eq!(streamed.len(), eager.len());
+        for (s, e) in streamed.iter().zip(eager.iter()) {
+            assert_eq!(s.0.id(), e.0.id());
+            assert_eq!(s.1, e.1);
+        }
+    }
+
+    /// Partial consumption must not error and must not require draining -
+    /// `AutoCommitDocStream` owns its read transaction, unlike
+    /// `CollectionDocStream`'s own tests where the transaction outlives the
+    /// stream, so this exercises the `Drop` discard path specifically.
+    #[tokio::test]
+    async fn stream_may_be_dropped_after_partial_consumption() {
+        let db = fixture_with_docs(20).await;
+        let fetcher = AutoCommitFetcher::new(db);
+
+        let mut stream = fetcher
+            .stream_all_with_deleted("Users", false)
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            assert!(stream.next().await.unwrap().is_some());
+        }
+        drop(stream);
     }
 }
