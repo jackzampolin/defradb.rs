@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use redb::{Database, ReadTransaction};
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tracing::instrument;
@@ -13,6 +14,7 @@ use super::{bound_as_ref, compute_range_bounds, KV_TABLE};
 use crate::backends::shared::{
     CallbackCounts, CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet,
 };
+use crate::chunked::{ChunkedSnapshot, DEFAULT_CHUNK_SIZE};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
@@ -214,12 +216,20 @@ impl Reader for RedbTxn {
         let matches_prefix =
             |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
 
-        // Read matching items from the redb ReadTransaction (only matching range)
-        let snapshot_items: Vec<(Vec<u8>, Vec<u8>)> = match self.read_txn.open_table(KV_TABLE) {
-            Ok(table) => {
+        let table = match self.read_txn.open_table(KV_TABLE) {
+            Ok(table) => Some(table),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(e.into()),
+        };
+
+        let snapshot = if opts.reverse() {
+            // Chunked forward reads cannot be reversed after the fact, and
+            // reverse scans are not on the limit hot path: read everything
+            // matching eagerly, exactly as before.
+            let mut items = Vec::new();
+            if let Some(table) = &table {
                 let range =
                     table.range::<&[u8]>((bound_as_ref(&start_bound), bound_as_ref(&end_bound)))?;
-                let mut items = Vec::new();
                 for result in range {
                     let (key, value) = result?;
                     let key_bytes = key.value();
@@ -234,10 +244,66 @@ impl Reader for RedbTxn {
                         ));
                     }
                 }
-                items
             }
-            Err(redb::TableError::TableDoesNotExist(_)) => Vec::new(),
-            Err(e) => return Err(e.into()),
+            items.reverse();
+            let chunk_size = items.len().max(1);
+            ChunkedSnapshot::new(chunk_size, move |after| {
+                // Already fully materialized: the whole (reversed) result is
+                // one window, and any later refill is the empty terminator.
+                let batch = if after.is_none() {
+                    items.clone()
+                } else {
+                    Vec::new()
+                };
+                async move { Ok(batch) }
+            })
+        } else {
+            let start_bound_for_chunk = start_bound.clone();
+            let end_bound_for_chunk = end_bound.clone();
+            let prefix = opts.prefix().map(|p| p.to_vec());
+            match table {
+                Some(table) => {
+                    ChunkedSnapshot::new(DEFAULT_CHUNK_SIZE, move |after: Option<Vec<u8>>| {
+                        // Resume strictly after the last key yielded: `last_key + 0x00`
+                        // is its exclusive successor, so nothing sorts between them.
+                        let lower_bound = match &after {
+                            Some(k) => {
+                                let mut succ = k.clone();
+                                succ.push(0);
+                                Bound::Included(succ)
+                            }
+                            None => start_bound_for_chunk.clone(),
+                        };
+                        let result = (|| -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+                            let range = table.range::<&[u8]>((
+                                bound_as_ref(&lower_bound),
+                                bound_as_ref(&end_bound_for_chunk),
+                            ))?;
+                            let mut items = Vec::new();
+                            for r in range {
+                                let (key, value) = r?;
+                                let key_bytes = key.value();
+                                if prefix.as_deref().is_none_or(|p| key_bytes.starts_with(p)) {
+                                    items.push((
+                                        key_bytes.to_vec(),
+                                        if keys_only {
+                                            Vec::new()
+                                        } else {
+                                            value.value().to_vec()
+                                        },
+                                    ));
+                                    if items.len() >= DEFAULT_CHUNK_SIZE {
+                                        break;
+                                    }
+                                }
+                            }
+                            Ok(items)
+                        })();
+                        async move { result }
+                    })
+                }
+                None => ChunkedSnapshot::new(DEFAULT_CHUNK_SIZE, |_| async { Ok(Vec::new()) }),
+            }
         };
 
         // Extract pending items into Vec (sorted by BTreeMap, with Option for deletions)
@@ -259,7 +325,7 @@ impl Reader for RedbTxn {
         };
 
         Ok(Box::new(MergingIterator::new(
-            snapshot_items,
+            snapshot,
             pending_items,
             opts,
         )))
