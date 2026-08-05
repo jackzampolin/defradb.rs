@@ -10,6 +10,7 @@ use crate::backends::shared::DurabilityMode;
 use crate::backends::shared::{
     CallbackCounts, CallbackManager, ConflictSnapshot, ConflictTracker, ReadSet,
 };
+use crate::chunked::{ChunkedSnapshot, DEFAULT_CHUNK_SIZE};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
@@ -147,9 +148,12 @@ impl Reader for FjallTxn {
         let matches_prefix =
             |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
 
-        // Read matching items from the fjall snapshot
         use fjall::Readable;
-        let snapshot_items: Vec<(Vec<u8>, Vec<u8>)> = {
+
+        let snapshot = if opts.reverse() {
+            // Chunked forward reads cannot be reversed after the fact, and
+            // reverse scans are not on the limit hot path: read everything
+            // matching eagerly, exactly as before.
             let iter = match (&start_bound, &end_bound) {
                 (std::ops::Bound::Unbounded, std::ops::Bound::Unbounded) => {
                     self.snapshot.iter(&self.keyspace)
@@ -178,7 +182,72 @@ impl Reader for FjallTxn {
                     }
                 }
             }
-            items
+            items.reverse();
+            let chunk_size = items.len().max(1);
+            ChunkedSnapshot::new(chunk_size, move |after| {
+                // Already fully materialized: the whole (reversed) result is
+                // one window, and any later refill is the empty terminator.
+                let batch = if after.is_none() {
+                    items.clone()
+                } else {
+                    Vec::new()
+                };
+                async move { Ok(batch) }
+            })
+        } else {
+            let start_bound_for_chunk = start_bound.clone();
+            let end_bound_for_chunk = end_bound.clone();
+            let prefix = opts.prefix().map(|p| p.to_vec());
+            let snapshot = self.snapshot.clone();
+            let keyspace = self.keyspace.clone();
+            ChunkedSnapshot::new(DEFAULT_CHUNK_SIZE, move |after: Option<Vec<u8>>| {
+                // Resume strictly after the last key yielded: `last_key + 0x00`
+                // is its exclusive successor, so nothing sorts between them.
+                let lower_bound = match &after {
+                    Some(k) => {
+                        let mut succ = k.clone();
+                        succ.push(0);
+                        std::ops::Bound::Included(succ)
+                    }
+                    None => start_bound_for_chunk.clone(),
+                };
+                let result = (|| -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+                    let iter = match (&lower_bound, &end_bound_for_chunk) {
+                        (std::ops::Bound::Unbounded, std::ops::Bound::Unbounded) => {
+                            snapshot.iter(&keyspace)
+                        }
+                        _ => snapshot.range::<&[u8], _>(
+                            &keyspace,
+                            (
+                                bound_as_ref(&lower_bound),
+                                bound_as_ref(&end_bound_for_chunk),
+                            ),
+                        ),
+                    };
+                    let mut items = Vec::new();
+                    for guard in iter {
+                        match guard.into_inner() {
+                            Ok((k, v)) => {
+                                let key_bytes = k.as_ref();
+                                if prefix.as_deref().is_none_or(|p| key_bytes.starts_with(p)) {
+                                    items.push((
+                                        key_bytes.to_vec(),
+                                        if keys_only { Vec::new() } else { v.to_vec() },
+                                    ));
+                                    if items.len() >= DEFAULT_CHUNK_SIZE {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                return Err(Error::Backend(format!("fjall iterator error: {}", e)));
+                            }
+                        }
+                    }
+                    Ok(items)
+                })();
+                async move { result }
+            })
         };
 
         // Extract pending items in range
@@ -196,7 +265,7 @@ impl Reader for FjallTxn {
             .collect();
 
         Ok(Box::new(MergingIterator::new(
-            snapshot_items,
+            snapshot,
             pending_items,
             opts,
         )))
