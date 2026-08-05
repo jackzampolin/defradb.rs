@@ -77,7 +77,7 @@ sourcehub = { path = "../sourcehub" }
 lens = { path = "../lens", default-features = false }
 p2p = { path = "../p2p", features = ["libp2p-transport"] }
 blockstore = { path = "../blockstore" }
-embedded = { path = "../embedded", default-features = false }
+embedded = { path = "../embedded", default-features = false, features = ["sourcehub"] }
 
 # IPLD
 cid.workspace = true
