@@ -134,11 +134,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .await?;
             doc.set_id(doc_id.clone());
 
-            // Store encryption config per-document so updates re-apply it
-            if let Some(ref config) = enc_config {
-                store_doc_encryption(&doc_id.to_string(), config.clone());
-            }
-
             // Bundle the doc blob + index write with the counter-store seeding so
             // the authoritative CRDT accumulation store is always seeded on create
             // (#1021 single-store invariant) — enforced by construction in

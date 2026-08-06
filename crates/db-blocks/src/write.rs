@@ -1,5 +1,88 @@
 use super::*;
 
+/// The `Encryption` link a new block should carry forward, read off the
+/// previous block, when the write brings no config of its own.
+///
+/// Mirrors the fallback half of Go's `determineBlockEncryption`
+/// (internal/core/block/store.go): the DAG, not any process-local state, is
+/// what records that a document is encrypted, and the existing link is reused
+/// so no new encryption block is written.
+///
+/// A head whose block cannot be read is an error rather than a miss: guessing
+/// "not encrypted" is exactly the silent downgrade this derivation exists to
+/// prevent. Matches Go, which returns `ErrCouldNotFindBlock` here.
+///
+/// Heads with no encryption are skipped rather than ending the search, but an
+/// empty `heads` yields `None` — so a field first written by an update inherits
+/// nothing and is stored in plaintext. That is Go's behaviour too (its head set
+/// is per-field, `store.go:82-86`); see
+/// `field_added_by_update_is_written_plaintext_matching_go`.
+async fn inherited_encryption_cid(
+    blockstore: &NamespaceView,
+    heads: &[Cid],
+) -> Result<Option<Cid>, String> {
+    for head in heads {
+        let block_bytes = blockstore
+            .get(&head.to_bytes())
+            .await
+            .map_err(|e| format!("Failed to read previous block {}: {}", head, e))?
+            .ok_or_else(|| format!("Previous block {} not found", head))?;
+        let prev = Block::from_dag_cbor(&block_bytes)
+            .map_err(|e| format!("Failed to decode previous block {}: {}", head, e))?;
+
+        if prev.encryption.is_some() {
+            return Ok(prev.encryption);
+        }
+    }
+
+    Ok(None)
+}
+
+/// The inherited encryption link together with the key it points at, for the
+/// field deltas that actually need to encrypt with it.
+///
+/// Reusing one key across a field's whole history is safe only because every
+/// delta is sealed with a fresh random nonce (see `encrypt_delta`). Do not make
+/// that nonce deterministic or counter-based without revisiting this.
+async fn inherited_encryption(
+    blockstore: &NamespaceView,
+    heads: &[Cid],
+) -> Result<Option<([u8; 32], Cid)>, String> {
+    let Some(enc_cid) = inherited_encryption_cid(blockstore, heads).await? else {
+        return Ok(None);
+    };
+
+    // Encstore first, then blockstore: blocks arriving over P2P land in the
+    // encstore while locally-written ones go to the blockstore. Mirrors the
+    // merge decrypt path (`db-merge/src/merge_handler/encryption.rs`) and
+    // `versioned_fetcher`.
+    let enc_key = enc_cid.to_bytes();
+    let enc_bytes = match blockstore
+        .sibling(storage::namespace::Namespace::Encstore)
+        .get(&enc_key)
+        .await
+        .map_err(|e| format!("Failed to read encryption block {}: {}", enc_cid, e))?
+    {
+        Some(bytes) => bytes,
+        None => blockstore
+            .get(&enc_key)
+            .await
+            .map_err(|e| format!("Failed to read encryption block {}: {}", enc_cid, e))?
+            .ok_or_else(|| format!("Encryption block {} not found", enc_cid))?,
+    };
+    let enc_block = Encryption::from_dag_cbor(&enc_bytes)
+        .map_err(|e| format!("Failed to decode encryption block {}: {}", enc_cid, e))?;
+    let key: [u8; 32] = enc_block.key.as_slice().try_into().map_err(|_| {
+        format!(
+            "Encryption block {} has a {}-byte key, expected 32",
+            enc_cid,
+            enc_block.key.len()
+        )
+    })?;
+
+    Ok(Some((key, enc_cid)))
+}
+
 /// Write document blocks to blockstore and heads to headstore.
 ///
 /// This function creates CRDT blocks for a document and writes:
@@ -86,73 +169,78 @@ pub async fn write_document_blocks(
 
             let value_bytes = encode_value_as_cbor(cbor_value)?;
 
-            let (value_bytes, encryption_cid) = if let Some(enc) = encryption_config {
-                if enc.should_encrypt_field(field_name) {
-                    let key_field_name = if enc.should_encrypt_individual_field(field_name) {
-                        Some(field_name.as_str())
-                    } else {
-                        None
-                    };
-
-                    if let Some(kms_svc) = kms {
-                        // KMS path: the KMS generates + persists the Encryption
-                        // block (in its KeyStore) and returns the CID + plain key
-                        // for us to encrypt the field delta with. The scope is
-                        // keyed by the node-local DocRef: the public DocID is
-                        // not yet known on the create path.
-                        let scope = kms::KeyScope::Document {
-                            doc_id: hex::encode(&doc_ref_bytes),
-                            field: key_field_name.map(str::to_owned),
-                        };
-                        let ctx = kms::RequestContext::anonymous();
-                        let (enc_cid, key) = kms_svc
-                            .generate_key(&ctx, scope)
-                            .await
-                            .map_err(|e| format!("kms generate_key: {e}"))?;
-                        let encrypted = encrypt_delta(&value_bytes, &key)?;
-                        tracing::debug!(
-                            field = %field_name,
-                            ciphertext_len = encrypted.len(),
-                            "Encrypted field delta via KMS"
-                        );
-                        (encrypted, Some(enc_cid))
-                    } else {
-                        // Legacy path (unchanged): inline key generation + direct block store.
-                        let key = defra_core::encryption::generate_encryption_key_for(
-                            &doc_ref_bytes,
-                            key_field_name,
-                        );
-                        let encrypted = encrypt_delta(&value_bytes, &key)?;
-
-                        tracing::debug!(
-                            field = %field_name,
-                            ciphertext_len = encrypted.len(),
-                            "Encrypted field delta"
-                        );
-
-                        let enc_block = Encryption { key: key.to_vec() };
-                        let enc_bytes = enc_block
-                            .to_dag_cbor()
-                            .map_err(|e| format!("Failed to encode encryption block: {}", e))?;
-                        let enc_cid = generate_cid_from_bytes(&enc_bytes)
-                            .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
-                        blockstore
-                            .set(&enc_cid.to_bytes(), &enc_bytes)
-                            .await
-                            .map_err(|e| format!("Failed to store encryption block: {}", e))?;
-
-                        (encrypted, Some(enc_cid))
-                    }
+            let explicit = encryption_config.filter(|enc| enc.should_encrypt_field(field_name));
+            let (value_bytes, encryption_cid) = if let Some(enc) = explicit {
+                let key_field_name = if enc.should_encrypt_individual_field(field_name) {
+                    Some(field_name.as_str())
                 } else {
-                    (value_bytes, None)
+                    None
+                };
+
+                if let Some(kms_svc) = kms {
+                    // KMS path: the KMS generates + persists the Encryption
+                    // block (in its KeyStore) and returns the CID + plain key
+                    // for us to encrypt the field delta with. The scope is
+                    // keyed by the node-local DocRef: the public DocID is
+                    // not yet known on the create path.
+                    let scope = kms::KeyScope::Document {
+                        doc_id: hex::encode(&doc_ref_bytes),
+                        field: key_field_name.map(str::to_owned),
+                    };
+                    let ctx = kms::RequestContext::anonymous();
+                    let (enc_cid, key) = kms_svc
+                        .generate_key(&ctx, scope)
+                        .await
+                        .map_err(|e| format!("kms generate_key: {e}"))?;
+                    let encrypted = encrypt_delta(&value_bytes, &key)?;
+                    tracing::debug!(
+                        field = %field_name,
+                        ciphertext_len = encrypted.len(),
+                        "Encrypted field delta via KMS"
+                    );
+                    encryption_cids.push(enc_cid);
+                    (encrypted, Some(enc_cid))
+                } else {
+                    // Legacy path (unchanged): inline key generation + direct block store.
+                    let key = defra_core::encryption::generate_encryption_key_for(
+                        &doc_ref_bytes,
+                        key_field_name,
+                    );
+                    let encrypted = encrypt_delta(&value_bytes, &key)?;
+
+                    tracing::debug!(
+                        field = %field_name,
+                        ciphertext_len = encrypted.len(),
+                        "Encrypted field delta"
+                    );
+
+                    let enc_block = Encryption { key: key.to_vec() };
+                    let enc_bytes = enc_block
+                        .to_dag_cbor()
+                        .map_err(|e| format!("Failed to encode encryption block: {}", e))?;
+                    let enc_cid = generate_cid_from_bytes(&enc_bytes)
+                        .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
+                    blockstore
+                        .set(&enc_cid.to_bytes(), &enc_bytes)
+                        .await
+                        .map_err(|e| format!("Failed to store encryption block: {}", e))?;
+
+                    encryption_cids.push(enc_cid);
+                    (encrypted, Some(enc_cid))
                 }
+            } else if let Some((key, enc_cid)) = inherited_encryption(blockstore, &heads).await? {
+                let encrypted = encrypt_delta(&value_bytes, &key)?;
+
+                tracing::debug!(
+                    field = %field_name,
+                    ciphertext_len = encrypted.len(),
+                    "Encrypted field delta with the previous block's key"
+                );
+
+                (encrypted, Some(enc_cid))
             } else {
                 (value_bytes, None)
             };
-
-            if let Some(enc_cid) = encryption_cid {
-                encryption_cids.push(enc_cid);
-            }
 
             let is_counter = doc
                 .fields()
@@ -282,30 +370,25 @@ pub async fn write_document_blocks(
         status: 1,
     };
 
-    let composite_encryption_cid = if let Some(enc) = encryption_config {
-        if enc.encrypt_doc {
-            let key = defra_core::encryption::generate_encryption_key_for(&doc_ref_bytes, None);
-            let enc_block = Encryption { key: key.to_vec() };
-            let enc_bytes = enc_block
-                .to_dag_cbor()
-                .map_err(|e| format!("Failed to encode composite encryption block: {}", e))?;
-            let enc_cid = generate_cid_from_bytes(&enc_bytes)
-                .map_err(|e| format!("Failed to generate composite encryption CID: {}", e))?;
-            blockstore
-                .set(&enc_cid.to_bytes(), &enc_bytes)
-                .await
-                .map_err(|e| format!("Failed to store composite encryption block: {}", e))?;
-            Some(enc_cid)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    if let Some(enc_cid) = composite_encryption_cid {
+    let composite_encryption_cid = if encryption_config.is_some_and(|enc| enc.encrypt_doc) {
+        let key = defra_core::encryption::generate_encryption_key_for(&doc_ref_bytes, None);
+        let enc_block = Encryption { key: key.to_vec() };
+        let enc_bytes = enc_block
+            .to_dag_cbor()
+            .map_err(|e| format!("Failed to encode composite encryption block: {}", e))?;
+        let enc_cid = generate_cid_from_bytes(&enc_bytes)
+            .map_err(|e| format!("Failed to generate composite encryption CID: {}", e))?;
+        blockstore
+            .set(&enc_cid.to_bytes(), &enc_bytes)
+            .await
+            .map_err(|e| format!("Failed to store composite encryption block: {}", e))?;
         encryption_cids.push(enc_cid);
-    }
+        Some(enc_cid)
+    } else {
+        // The composite payload is never encrypted with the key, only linked,
+        // so the CID alone is enough here.
+        inherited_encryption_cid(blockstore, &composite_heads).await?
+    };
 
     let mut composite_block = Block::new_with_options(
         CrdtDelta::Composite(composite_payload),
@@ -408,10 +491,14 @@ pub async fn write_delete_block(
         status: 2,
     };
 
-    let mut composite_block = Block::new(
+    let composite_encryption_cid = inherited_encryption_cid(blockstore, &composite_heads).await?;
+
+    let mut composite_block = Block::new_with_options(
         CrdtDelta::Composite(composite_payload),
         composite_heads,
         vec![],
+        composite_encryption_cid,
+        None,
     );
 
     if let Some(signer) = signing_config {
@@ -582,3 +669,7 @@ mod kms_write_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "write_encryption_tests.rs"]
+mod encryption_derivation_tests;

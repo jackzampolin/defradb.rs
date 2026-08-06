@@ -21,7 +21,7 @@ use crate::database::DB;
 use crate::event_emission::register_update_event_callback;
 use crate::txn::DbTxn;
 use db_blocks::DocStorageIdentity;
-use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
+use defra_core::encryption::get_encryption_config;
 use defra_core::signing::get_signing_config;
 
 pub struct BatchMutator<S: Store> {
@@ -251,10 +251,6 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .await?;
             doc.set_id(doc_id.clone());
 
-            if let Some(ref config) = enc_config {
-                store_doc_encryption(&doc_id.to_string(), config.clone());
-            }
-
             write_local_create(&datastore, &collection, &doc, doc_short_id, &index_manager).await?;
 
             let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
@@ -375,8 +371,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
-        let enc_config =
-            get_encryption_config().or_else(|| get_doc_encryption(&canonical_doc_id.to_string()));
+        let enc_config = get_encryption_config();
         let sign_config = get_signing_config();
 
         let (doc_cid, doc_block, col_block_data) = {

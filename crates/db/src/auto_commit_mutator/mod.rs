@@ -32,7 +32,7 @@ use crate::lensed_fetcher::LensedDocFetcher;
 /// Captured per-mutation commit data: the document block (cid + bytes) plus,
 /// for branchable collections, the collection block (cid + bytes).
 pub(super) type CommitArtifacts = (Cid, Vec<u8>, Option<(Cid, Vec<u8>)>);
-use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
+use defra_core::encryption::get_encryption_config;
 use defra_core::signing::get_signing_config;
 
 pub use batch::BatchMutator;

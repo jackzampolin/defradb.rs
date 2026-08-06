@@ -118,6 +118,17 @@ impl NamespaceView {
         Self { txn, namespace }
     }
 
+    /// View a different namespace of the same transaction.
+    ///
+    /// Lets a caller holding one view reach a sibling namespace without
+    /// threading the transaction (or a second view) through its signature.
+    pub fn sibling(&self, namespace: Namespace) -> Self {
+        Self {
+            txn: self.txn.clone(),
+            namespace,
+        }
+    }
+
     /// Get a value.
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         self.txn.get(self.namespace, key).await
