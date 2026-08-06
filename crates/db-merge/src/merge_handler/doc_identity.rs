@@ -56,17 +56,20 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         // first-head-first resolution, error propagation, and visited
         // insertion order.
         enum IdentityFrame {
-            /// The entry composite, already decoded by the caller.
-            Loaded(Cid, Block),
+            /// The entry composite, already decoded by the caller. Boxed:
+            /// the worklist is Pending-dominated and this variant occurs
+            /// exactly once (the seed).
+            Loaded(Cid, Box<Block>),
             /// A discovered head; nothing has been probed yet.
             Pending(Cid),
         }
 
-        let mut worklist: Vec<IdentityFrame> = vec![IdentityFrame::Loaded(*cid, block.clone())];
+        let mut worklist: Vec<IdentityFrame> =
+            vec![IdentityFrame::Loaded(*cid, Box::new(block.clone()))];
 
         while let Some(frame) = worklist.pop() {
             let (node_cid, node_block) = match frame {
-                IdentityFrame::Loaded(node_cid, node_block) => (node_cid, node_block),
+                IdentityFrame::Loaded(node_cid, node_block) => (node_cid, *node_block),
                 IdentityFrame::Pending(head_cid) => {
                     if !visited.insert(head_cid) {
                         continue;
