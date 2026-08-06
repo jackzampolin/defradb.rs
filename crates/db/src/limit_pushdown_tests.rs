@@ -202,3 +202,39 @@ async fn limit_query_reads_documents_proportional_to_the_limit() {
          it must read a number proportional to the limit, not to the collection"
     );
 }
+
+/// `explain(execute)` must not materialize the collection either.
+///
+/// `docFetches` cannot show this: it counts documents yielded by `ScanNode`,
+/// which `LimitNode` already capped, so it reads the same whether the source
+/// streams or was pre-materialized. The counter here sits between the plan
+/// and the storage-backed fetcher, so it observes what explain actually
+/// pulled out of the store.
+#[tokio::test]
+async fn explain_execute_reads_documents_proportional_to_the_limit() {
+    let db = seeded_db().await;
+    let documents_read = Arc::new(AtomicUsize::new(0));
+
+    let runner = query::QueryRunner::with_provider(
+        CountingFetcher {
+            inner: LensedAutoCommitFetcher::new(db.clone()),
+            documents_read: documents_read.clone(),
+        },
+        crate::DbCollectionProvider::new_arc(db.clone()),
+    );
+
+    let response = runner
+        .execute(QueryRequest::new(format!(
+            "query @explain(type: execute) {{ Users(limit: {LIMIT}) {{ name }} }}"
+        )))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+
+    let read = documents_read.load(Ordering::SeqCst);
+    assert!(
+        read <= LIMIT * 2,
+        "explain(execute) on a limit-{LIMIT} query read {read} of {COLLECTION_SIZE} \
+         documents; it must read a number proportional to the limit, not to the \
+         collection"
+    );
+}

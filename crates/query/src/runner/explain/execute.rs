@@ -316,11 +316,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
             // When show_deleted is true, we need to use get_all_with_deleted to include
             // logically deleted documents. The doc_ids filter will be applied by the SelectNode.
-            let plan_docs = if select.show_deleted {
+            let source = if select.show_deleted {
                 let docs_with_status = fetcher
                     .get_all_with_deleted(&select.collection_name, true)
                     .await?;
-                documents_with_status_to_plan_docs(&docs_with_status, &mapping)?
+                plan::ScanSource::Docs(documents_with_status_to_plan_docs(
+                    &docs_with_status,
+                    &mapping,
+                )?)
             } else if let Some(ref doc_ids) = select.doc_ids {
                 // Deduplicate doc_ids while preserving order (Go compatibility)
                 let mut seen = HashSet::new();
@@ -332,12 +335,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let result = fetcher
                     .get_by_ids(&select.collection_name, &unique_ids)
                     .await?;
-                documents_to_plan_docs(&result.into_docs(), &mapping)?
+                plan::ScanSource::Docs(documents_to_plan_docs(&result.into_docs(), &mapping)?)
             } else {
-                let docs = fetcher.get_all(&select.collection_name).await?;
-                documents_to_plan_docs(&docs, &mapping)?
+                plan::ScanSource::Fetcher(Arc::new(FetcherWrapper::new(fetcher)))
             };
-            let _doc_count = plan_docs.len();
 
             // Build ACP filter config if collection has policy and ACP is configured
             let acp_filter = collection.policy.as_ref().map(|policy| plan::AcpFilter {
@@ -350,7 +351,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // Build the plan (ACP filter is inserted inside, after Select but before aggregates)
             let mut plan = plan::build_plan(
                 select,
-                plan::ScanSource::Docs(plan_docs.clone()),
+                source,
                 mapping.clone(),
                 &collection,
                 acp_filter,
