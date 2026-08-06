@@ -42,6 +42,10 @@ impl<S: Store + 'static> DocStream for LensedDocStream<S> {
             .await?;
         Ok(Some((processed, is_deleted)))
     }
+
+    async fn close(&mut self) -> query::error::Result<()> {
+        self.inner.close().await
+    }
 }
 
 impl<S: Store + 'static> LensedDocFetcher<S> {

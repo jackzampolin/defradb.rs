@@ -119,10 +119,10 @@ impl DocFetcher for FetcherWrapper {
         collection_name: &str,
         show_deleted: bool,
     ) -> Result<Box<dyn DocStream>> {
-        // Without this override, the trait's default implementation would call
-        // get_all_with_deleted (eager) instead of forwarding to the wrapped
-        // fetcher's own streaming override, silently reintroducing the full
-        // materialization this wrapper is meant to pass through.
+        // Forwards to the wrapped fetcher's own streaming override, so a
+        // bounded downstream consumer still short-circuits the underlying
+        // scan through this wrapper instead of paying for the whole
+        // collection.
         self.get_fetcher()
             .stream_all_with_deleted(collection_name, show_deleted)
             .await

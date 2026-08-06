@@ -5,7 +5,7 @@ use serde_json::{Map, Value as JsonValue};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::document::{documents_to_plan_docs, documents_with_status_to_plan_docs};
+use crate::document::documents_to_plan_docs;
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
 use crate::plan::PermissionFilterNode;
@@ -314,16 +314,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // Standard path: fetch all docs and build scan-based plan
             let mapping = plan::build_mapping(select, &collection)?;
 
-            // When show_deleted is true, we need to use get_all_with_deleted to include
-            // logically deleted documents. The doc_ids filter will be applied by the SelectNode.
+            // A fetcher-backed scan streams documents one at a time, so it honours
+            // show_deleted, the scan filter, and a downstream limit without ever
+            // materializing the collection. doc_ids fetches specific documents
+            // rather than scanning, so it stays materialized.
             let source = if select.show_deleted {
-                let docs_with_status = fetcher
-                    .get_all_with_deleted(&select.collection_name, true)
-                    .await?;
-                plan::ScanSource::Docs(documents_with_status_to_plan_docs(
-                    &docs_with_status,
-                    &mapping,
-                )?)
+                plan::ScanSource::Fetcher(Arc::new(FetcherWrapper::new(fetcher)))
             } else if let Some(ref doc_ids) = select.doc_ids {
                 // Deduplicate doc_ids while preserving order (Go compatibility)
                 let mut seen = HashSet::new();
