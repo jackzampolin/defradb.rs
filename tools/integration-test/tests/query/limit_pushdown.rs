@@ -34,10 +34,12 @@ fn seed_users(
     doc_ids
 }
 
-/// A limit query must not cost what a full scan costs.
-/// Seeds well past any plausible buffer so a materializing implementation cannot pass.
+/// A limit query over a large collection must return exactly the requested
+/// page. This asserts correctness only: the harness runs a real node over
+/// HTTP, so it cannot observe how many documents storage was asked for. The
+/// read count is asserted in `db`'s `limit_pushdown_tests`.
 #[tokio::test]
-async fn limit_query_does_not_materialize_collection() {
+async fn limit_query_returns_exact_page_from_large_collection() {
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
     let client = cluster.client(0);
     client.schema_add(USER_SCHEMA).expect("add schema");

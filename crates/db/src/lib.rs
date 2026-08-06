@@ -88,6 +88,8 @@ pub mod kms_adapters;
 pub(crate) mod lens_utils;
 pub(crate) mod lensed_auto_commit_fetcher;
 pub(crate) mod lensed_fetcher;
+#[cfg(test)]
+mod limit_pushdown_tests;
 pub(crate) mod migration;
 // NAC extracted to standalone db-nac crate.
 pub(crate) use db_nac as nac;
