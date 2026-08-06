@@ -3150,3 +3150,74 @@ async fn batch_merge_unique_violation_first_still_merges_valid_sibling() {
         "valid sibling must be committed"
     );
 }
+
+/// Regression: resolving a composite's DocID walks its full ancestry, and
+/// that ancestry is as deep as the document's update history. The recursive
+/// predecessor of `resolve_composite_doc_id_inner` burned one async frame
+/// per ancestor and overflowed small thread stacks (iOS FFI workers
+/// crash-looped on launch merging long-lived documents). This drives the
+/// resolver over a 4096-deep ownerless chain on a deliberately small
+/// (512 KiB) stack: the iterative walk succeeds where recursion dies.
+#[test]
+fn resolve_composite_doc_id_walks_deep_ancestry_on_a_small_stack() {
+    std::thread::Builder::new()
+        .name("small-stack-resolver".to_string())
+        .stack_size(512 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let (handler, blockstore) = make_handler();
+
+                const DEPTH: usize = 4096;
+                let genesis = Block::new(
+                    CrdtDelta::Composite(CompositeDeltaPayload {
+                        schema_version_id: "v1".to_string(),
+                        priority: 1,
+                        status: 1,
+                    }),
+                    vec![],
+                    vec![],
+                );
+                let genesis_cid = genesis.generate_cid().unwrap();
+                blockstore
+                    .put(&genesis_cid, &genesis.to_dag_cbor().unwrap())
+                    .await
+                    .unwrap();
+
+                let mut parent_cid = genesis_cid;
+                let mut tip_block = genesis;
+                for priority in 2..(DEPTH as u64 + 2) {
+                    let block = Block::new(
+                        CrdtDelta::Composite(CompositeDeltaPayload {
+                            schema_version_id: "v1".to_string(),
+                            priority,
+                            status: 1,
+                        }),
+                        vec![parent_cid],
+                        vec![],
+                    );
+                    let cid = block.generate_cid().unwrap();
+                    blockstore
+                        .put(&cid, &block.to_dag_cbor().unwrap())
+                        .await
+                        .unwrap();
+                    parent_cid = cid;
+                    tip_block = block;
+                }
+
+                // No owner-index entries anywhere: the resolver must walk
+                // the entire chain to the genesis and derive from its CID.
+                let resolved = handler
+                    .resolve_composite_doc_id(&parent_cid, &tip_block)
+                    .await
+                    .expect("deep ancestry must resolve without overflowing the stack");
+                assert_eq!(resolved, db_blocks::derive_doc_id(&genesis_cid));
+            });
+        })
+        .unwrap()
+        .join()
+        .expect("small-stack resolver thread must not crash");
+}

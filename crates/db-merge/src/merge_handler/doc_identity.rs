@@ -29,6 +29,19 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             .await
     }
 
+    /// Iterative DFS over the composite ancestry with an explicit worklist.
+    ///
+    /// This walk MUST NOT recurse: composite ancestry is as deep as a
+    /// document's update history (thousands of blocks for long-lived docs),
+    /// and one async frame per ancestor overflows small thread stacks — iOS
+    /// FFI workers crash-looped on exactly this path before the merge
+    /// walkers in `composite.rs`/`collection.rs` got the same explicit-frame
+    /// treatment. Heads are pushed in reverse so the first head is explored
+    /// first, preserving the recursive predecessor's DFS order; `visited`
+    /// bounds the walk to each unique ancestor once. A subtree that dead-ends
+    /// (missing/undecodable/non-composite blocks) simply leaves more of the
+    /// worklist to drain — the "no reachable genesis" error only fires once
+    /// every reachable path is exhausted, matching the recursive semantics.
     async fn resolve_composite_doc_id_inner(
         &self,
         systemstore: &NamespaceView,
@@ -36,62 +49,54 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         block: &Block,
         visited: &mut HashSet<Cid>,
     ) -> std::result::Result<String, MergeError> {
-        // Genesis composite: identity is derived from the CID itself, so no
-        // ownership lookup is needed (see `resolve_composite_doc_id`).
-        let heads = block.heads.as_deref().unwrap_or(&[]);
-        if heads.is_empty() {
-            return Ok(db_blocks::derive_doc_id(cid));
-        }
+        let mut worklist: Vec<(Cid, Block)> = vec![(*cid, block.clone())];
 
-        let owners = db::doc_id_map::get_doc_ids_for_block(systemstore, &cid.to_string())
-            .await
-            .map_err(MergeError::Database)?;
-        // Field blocks can be co-owned, so the owner index is only
-        // authoritative for a composite when it names exactly one document.
-        if owners.len() == 1 {
-            return Ok(owners.into_iter().next().expect("len checked"));
-        }
-
-        for head_cid in heads {
-            if !visited.insert(*head_cid) {
-                continue;
+        while let Some((node_cid, node_block)) = worklist.pop() {
+            // Genesis composite: identity is derived from the CID itself, so
+            // no ownership lookup is needed (see `resolve_composite_doc_id`).
+            let heads = node_block.heads.as_deref().unwrap_or(&[]);
+            if heads.is_empty() {
+                return Ok(db_blocks::derive_doc_id(&node_cid));
             }
 
-            let head_owners =
-                db::doc_id_map::get_doc_ids_for_block(systemstore, &head_cid.to_string())
-                    .await
-                    .map_err(MergeError::Database)?;
-            if head_owners.len() == 1 {
-                return Ok(head_owners.into_iter().next().expect("len checked"));
+            let owners = db::doc_id_map::get_doc_ids_for_block(systemstore, &node_cid.to_string())
+                .await
+                .map_err(MergeError::Database)?;
+            // Field blocks can be co-owned, so the owner index is only
+            // authoritative for a composite when it names exactly one
+            // document.
+            if owners.len() == 1 {
+                return Ok(owners.into_iter().next().expect("len checked"));
             }
 
-            let head_data = match self.blockstore.get(head_cid).await {
-                Ok(Some(data)) => data,
-                // A genuinely absent head can't help resolve identity; a
-                // blockstore failure is infrastructure and must not be
-                // silently treated as "head missing".
-                Ok(None) => continue,
-                Err(e) => return Err(MergeError::Storage(e.to_string())),
-            };
-            let Ok(head_block) = Block::from_dag_cbor(&head_data) else {
-                continue;
-            };
-            if !matches!(head_block.delta, CrdtDelta::Composite(_)) {
-                continue;
-            }
-            match Box::pin(self.resolve_composite_doc_id_inner(
-                systemstore,
-                head_cid,
-                &head_block,
-                visited,
-            ))
-            .await
-            {
-                Ok(doc_id) => return Ok(doc_id),
-                // Only a genuine "could not resolve" is worth trying the next
-                // head for; propagate infrastructure errors.
-                Err(MergeError::MergeFailed(_)) => continue,
-                Err(e) => return Err(e),
+            for head_cid in heads.iter().rev() {
+                if !visited.insert(*head_cid) {
+                    continue;
+                }
+
+                let head_owners =
+                    db::doc_id_map::get_doc_ids_for_block(systemstore, &head_cid.to_string())
+                        .await
+                        .map_err(MergeError::Database)?;
+                if head_owners.len() == 1 {
+                    return Ok(head_owners.into_iter().next().expect("len checked"));
+                }
+
+                let head_data = match self.blockstore.get(head_cid).await {
+                    Ok(Some(data)) => data,
+                    // A genuinely absent head can't help resolve identity; a
+                    // blockstore failure is infrastructure and must not be
+                    // silently treated as "head missing".
+                    Ok(None) => continue,
+                    Err(e) => return Err(MergeError::Storage(e.to_string())),
+                };
+                let Ok(head_block) = Block::from_dag_cbor(&head_data) else {
+                    continue;
+                };
+                if !matches!(head_block.delta, CrdtDelta::Composite(_)) {
+                    continue;
+                }
+                worklist.push((*head_cid, head_block));
             }
         }
 
