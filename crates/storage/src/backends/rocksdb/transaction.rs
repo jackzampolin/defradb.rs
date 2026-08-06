@@ -261,17 +261,9 @@ impl Reader for RocksDbTxn {
                 }
             }
             items.reverse();
-            let chunk_size = items.len().max(1);
-            ChunkedSnapshot::new(chunk_size, move |after| {
-                // Already fully materialized: the whole (reversed) result is
-                // one window, and any later refill is the empty terminator.
-                let batch = if after.is_none() {
-                    items.clone()
-                } else {
-                    Vec::new()
-                };
-                async move { Ok(batch) }
-            })
+            // Already fully materialized: the whole (reversed) result is
+            // handed over as the one and only window.
+            ChunkedSnapshot::from_window(items)
         } else {
             // `set_iterate_lower_bound` is inclusive, so an `Excluded` start
             // needs its key's successor (`+ 0x00`) — the same adjustment the

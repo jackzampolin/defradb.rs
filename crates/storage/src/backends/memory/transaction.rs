@@ -151,17 +151,9 @@ impl Reader for MemoryTxn {
                 .map(|(k, v)| (k.clone(), if keys_only { Vec::new() } else { v.clone() }))
                 .collect();
             items.reverse();
-            let chunk_size = items.len().max(1);
-            ChunkedSnapshot::new(chunk_size, move |after| {
-                // Already fully materialized: the whole (reversed) result is
-                // one window, and any later refill is the empty terminator.
-                let batch = if after.is_none() {
-                    items.clone()
-                } else {
-                    Vec::new()
-                };
-                async move { Ok(batch) }
-            })
+            // Already fully materialized: the whole (reversed) result is
+            // handed over as the one and only window.
+            ChunkedSnapshot::from_window(items)
         } else {
             let end_bound_for_chunk = end_bound.clone();
             let start_bound_for_chunk = start_bound.clone();

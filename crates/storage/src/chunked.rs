@@ -42,7 +42,10 @@ pub(crate) struct ChunkedSnapshot {
     /// Set once a refill has returned no pairs at all.
     exhausted: bool,
     /// Refill closure: called with `None`, then with the last key yielded.
-    read: ReadFn,
+    ///
+    /// `None` when the whole range is already in `window` (see
+    /// `from_window`): there is nothing left to read from.
+    read: Option<ReadFn>,
 }
 
 impl ChunkedSnapshot {
@@ -60,7 +63,23 @@ impl ChunkedSnapshot {
             last_key: None,
             chunk_size,
             exhausted: false,
-            read: Box::new(move |after| Box::pin(read(after))),
+            read: Some(Box::new(move |after| Box::pin(read(after)))),
+        }
+    }
+
+    /// Wrap a window that already holds the entire range.
+    ///
+    /// The eager paths (reverse scans) materialize their whole result before
+    /// building a reader. Taking ownership of that Vec keeps exactly one copy
+    /// alive, and lets `reset` rewind in place instead of re-reading.
+    pub(crate) fn from_window(window: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
+        Self {
+            chunk_size: window.len().max(1),
+            window,
+            pos: 0,
+            last_key: None,
+            exhausted: true,
+            read: None,
         }
     }
 
@@ -70,7 +89,10 @@ impl ChunkedSnapshot {
             return Ok(());
         }
 
-        let next_window = (self.read)(self.last_key.clone()).await?;
+        let Some(read) = self.read.as_mut() else {
+            return Ok(());
+        };
+        let next_window = read(self.last_key.clone()).await?;
         debug_assert!(
             next_window.len() <= self.chunk_size,
             "read closure returned more pairs than chunk_size"
@@ -111,10 +133,16 @@ impl ChunkedSnapshot {
     ///
     /// The closure itself is untouched (still holds its table/range handle),
     /// so this is cheap: it does not reopen anything until actually polled.
+    ///
+    /// A `from_window` reader has no closure to re-read through, and its
+    /// window is already the whole range, so it rewinds in place.
     pub(crate) fn reset(&mut self) {
-        self.window.clear();
         self.pos = 0;
         self.last_key = None;
+        if self.read.is_none() {
+            return;
+        }
+        self.window.clear();
         self.exhausted = false;
     }
 
@@ -304,6 +332,27 @@ mod tests {
             1,
             "in-window seek must not read"
         );
+        assert_eq!(s.next().await.unwrap(), Some(pair(3)));
+    }
+
+    /// A materialized window must survive `reset` — the reverse paths seek
+    /// and reset through it, and it has no closure to re-read from.
+    #[tokio::test]
+    async fn from_window_rewinds_in_place() {
+        let all: Vec<_> = (0u8..5).map(pair).collect();
+        let mut s = ChunkedSnapshot::from_window(all.clone());
+
+        let mut seen = Vec::new();
+        while let Some(p) = s.next().await.unwrap() {
+            seen.push(p);
+        }
+        assert_eq!(seen, all);
+
+        s.reset();
+        assert_eq!(s.next().await.unwrap(), Some(pair(0)), "reset must rewind");
+
+        // And the in-window seek fast path still applies to it.
+        assert!(s.seek_within_window(&[3], false));
         assert_eq!(s.next().await.unwrap(), Some(pair(3)));
     }
 
